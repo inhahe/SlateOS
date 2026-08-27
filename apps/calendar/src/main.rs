@@ -2,6 +2,11 @@
 //!
 //! Provides month/week/day/year views, event creation with recurrence,
 //! categories, reminders, ICS import/export, and a mini-calendar sidebar.
+//!
+//! Opens as a real window, 1280x720 to start with and resizable from there.
+//! The whole calendar is drawn as a [`Frame`]: every clickable thing records
+//! the box it was painted in, as it is painted, and the hit test reads those
+//! boxes back. Nothing here answers "where is that day" twice.
 
 use guitk::color::Color;
 // The shared civil-date arithmetic. This app used to carry its own: a Zeller's
@@ -11,8 +16,16 @@ use guitk::color::Color;
 // 38.5% of the days between 1900 and 2100. See `known-issues.md`
 // C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC.
 use guitk::date::{self, Weekday};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::wheel;
+use oswindow::app::{self, App, Response};
+
+use std::process::ExitCode;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -247,7 +260,7 @@ impl Time {
     }
 
     pub fn to_minutes(self) -> u32 {
-        self.hour * 60 + self.minute
+        self.hour.saturating_mul(60).saturating_add(self.minute)
     }
 
     pub fn format_24h(self) -> String {
@@ -262,14 +275,14 @@ impl Time {
         } else if self.hour == 12 {
             (12, "PM")
         } else {
-            (self.hour - 12, "PM")
+            (self.hour.saturating_sub(12), "PM")
         };
         format!("{h}:{:02} {ampm}", self.minute)
     }
 
     /// Minutes between two times (self - other).
     pub fn minutes_since(self, other: Self) -> i32 {
-        self.to_minutes() as i32 - other.to_minutes() as i32
+        (self.to_minutes() as i32).saturating_sub(other.to_minutes() as i32)
     }
 }
 
@@ -512,7 +525,7 @@ impl RecurrenceRule {
                     return false;
                 }
                 let diff = check.days_since(origin);
-                diff >= 0 && diff % (*interval_days as i64) == 0
+                diff >= 0 && diff.checked_rem(i64::from(*interval_days)) == Some(0)
             }
         }
     }
@@ -592,9 +605,11 @@ impl CalendarEvent {
         let start_min = self.start.time.to_minutes();
         let end_min = self.end.time.to_minutes();
         if end_min >= start_min {
-            end_min - start_min
+            end_min.saturating_sub(start_min)
         } else {
-            (24 * 60 - start_min) + end_min
+            (24 * 60u32)
+                .saturating_sub(start_min)
+                .saturating_add(end_min)
         }
     }
 
@@ -679,7 +694,7 @@ impl CalendarEvent {
             RecurrenceRule::Yearly => lines.push("RRULE:FREQ=YEARLY".to_string()),
             RecurrenceRule::BiWeekly => lines.push("RRULE:FREQ=WEEKLY;INTERVAL=2".to_string()),
             RecurrenceRule::Custom { interval_days } => {
-                lines.push(format!("RRULE:FREQ=DAILY;INTERVAL={interval_days}"))
+                lines.push(format!("RRULE:FREQ=DAILY;INTERVAL={interval_days}"));
             }
             RecurrenceRule::None => {}
         }
@@ -735,7 +750,7 @@ pub fn parse_ics(content: &str) -> Vec<CalendarEvent> {
                     location: location.as_deref().map(ics_unescape),
                     color_override: None,
                 });
-                next_id += 1;
+                next_id = next_id.saturating_add(1);
             }
             in_event = false;
         } else if in_event {
@@ -854,7 +869,7 @@ impl EventStore {
 
     pub fn add(&mut self, mut event: CalendarEvent) -> u64 {
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
         event.id = id;
         self.events.push(event);
         id
@@ -941,7 +956,7 @@ impl EventStore {
         let count = imported.len();
         for mut event in imported {
             event.id = self.next_id;
-            self.next_id += 1;
+            self.next_id = self.next_id.saturating_add(1);
             self.events.push(event);
         }
         count
@@ -989,6 +1004,232 @@ impl CalendarView {
 }
 
 // ============================================================================
+// Layout
+// ============================================================================
+//
+// Every number deciding *where* something is drawn is worked out here, once
+// per frame, from the size the window actually has. Nothing remembers it: a
+// `Layout` is built, drawn from, hit-tested through, and dropped.
+//
+// The chrome is allocated right to left, because the view selector is the only
+// way to change view and so must survive any width, while the header text is
+// merely a caption for a view that is already on screen. So the tabs are
+// placed first (shrinking their pitch rather than running off the edge), then
+// the search box if what is left can spare it, and the header gets the
+// remainder or is dropped.
+
+/// A clickable thing in the calendar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// Step the view one month/week/day/year backwards.
+    NavBack,
+    /// Step the view one month/week/day/year forwards.
+    NavForward,
+    /// Jump back to the real today.
+    TodayButton,
+    /// One of the five view selector tabs, indexing [`CalendarView::all`].
+    ViewTab(usize),
+    /// The search box in the top bar.
+    SearchField,
+    /// The mini calendar's month header: back a month, forward a month.
+    MiniPrevMonth,
+    MiniNextMonth,
+    /// A day cell in the sidebar's mini calendar.
+    MiniDay(Date),
+    /// One of the sidebar's category swatches, indexing [`EventCategory::all`].
+    CategoryFilter(usize),
+    /// A day cell in the month, week or year view.
+    Day(Date),
+    /// A painted event, by its store id.
+    Event(u64),
+}
+
+/// One frame of this app's drawing, carrying the boxes it recorded.
+pub type Frame = guitk::frame::Frame<Target>;
+
+/// Height of the top chrome bar.
+const TOP_BAR_H: f32 = 48.0;
+/// Where the content area begins: the bar, plus the separator line under it.
+const CONTENT_Y: f32 = 50.0;
+/// Width of the sidebar when it is shown.
+const SIDEBAR_W: f32 = 220.0;
+/// The narrowest content area worth keeping. Below this the sidebar goes: a
+/// month grid squeezed into 200px is seven columns of nothing.
+const MIN_CONTENT_W: f32 = 320.0;
+/// Full pitch of a view selector tab, and the gap inside it.
+const VIEW_TAB_PITCH: f32 = 68.0;
+const VIEW_TAB_GAP: f32 = 4.0;
+/// The narrowest a tab may be squeezed to before it stops being a target.
+const MIN_VIEW_TAB_PITCH: f32 = 26.0;
+/// Width of the search box, and the least header worth painting.
+const SEARCH_W: f32 = 160.0;
+const MIN_HEADER_W: f32 = 60.0;
+/// Left edge of the header text, immediately right of the Today button.
+const HEADER_X: f32 = 160.0;
+/// Right edge of the Today button, which nothing may be placed left of.
+const CHROME_LEFT: f32 = 152.0;
+/// Height of a control in the top bar, and its top edge.
+const CHROME_Y: f32 = 10.0;
+const CHROME_H: f32 = 28.0;
+
+/// The size the window opens at.
+const DEFAULT_WIDTH: f32 = 1280.0;
+const DEFAULT_HEIGHT: f32 = 720.0;
+
+// Geometry of the five views. Each view's content has an intrinsic height,
+// which is what decides whether it scrolls: a month grid stretches to fill the
+// area it is given and normally does not, while a day view is twenty-four
+// hours of grid and in a 720px window always does.
+/// The day-of-week strip above the month grid.
+const MONTH_HEADER_H: f32 = 24.0;
+/// The shortest a month-grid row may be before the grid starts to scroll
+/// instead. Below this a day number and one event stop fitting together.
+const MONTH_MIN_ROW_H: f32 = 56.0;
+/// Week view: the day header strip, one hour of grid, the time gutter.
+const WEEK_HEADER_H: f32 = 40.0;
+const WEEK_HOUR_H: f32 = 48.0;
+const WEEK_TIME_COL_W: f32 = 50.0;
+/// Day view: the date header, one hour of grid, the time gutter, and the
+/// height of one all-day event's row in the band under the header.
+const DAY_HEADER_H: f32 = 36.0;
+const DAY_HOUR_H: f32 = 60.0;
+const DAY_TIME_COL_W: f32 = 60.0;
+const DAY_ALL_DAY_ROW_H: f32 = 28.0;
+/// Year view: twelve months in a fixed 4x3 arrangement, each no shorter than
+/// six rows of day numbers plus its name.
+const YEAR_COLS: usize = 4;
+const YEAR_ROWS: usize = 3;
+const YEAR_MIN_MONTH_H: f32 = 120.0;
+/// Agenda: where the list starts under its own caption, and the vertical
+/// advance of a date header, an event card, and the gap between date groups.
+const AGENDA_TOP: f32 = 36.0;
+const AGENDA_HEADER_H: f32 = 26.0;
+const AGENDA_EVENT_H: f32 = 46.0;
+const AGENDA_GROUP_GAP: f32 = 8.0;
+
+/// Where everything in the window is, for one particular window size.
+pub struct Layout {
+    pub window: Rect,
+    pub top_bar: Rect,
+    pub nav_back: Rect,
+    pub nav_forward: Rect,
+    pub today_button: Rect,
+    /// The header caption, or `None` in a window too narrow to spare the room.
+    pub header: Option<Rect>,
+    /// The search box, or `None` in a window too narrow to spare the room.
+    pub search: Option<Rect>,
+    /// Left edge of the view selector, and the pitch its tabs are spaced at.
+    pub view_tabs_x: f32,
+    pub view_tab_pitch: f32,
+    /// The sidebar, or `None` when hidden or when the content could not spare it.
+    pub sidebar: Option<Rect>,
+    /// Everything below the top bar and right of the sidebar.
+    pub content: Rect,
+}
+
+impl Layout {
+    /// Work out where everything goes in a `width` x `height` window.
+    pub fn new(width: f32, height: f32, sidebar_wanted: bool) -> Self {
+        let window = Rect::new(0.0, 0.0, width, height);
+        let top_bar = Rect::new(0.0, 0.0, width, TOP_BAR_H.min(height));
+
+        // The view selector, from the right edge inwards. It never wraps and
+        // never runs off the window: when the room is short the tabs get
+        // narrower, because a tab that is off-screen cannot be pressed and
+        // there is no other way to change view.
+        let count = CalendarView::all().len() as f32;
+        let room = (width - 8.0 - CHROME_LEFT).max(0.0);
+        let view_tab_pitch = (room / count).clamp(MIN_VIEW_TAB_PITCH, VIEW_TAB_PITCH);
+        let tabs_run = view_tab_pitch * count;
+        let view_tabs_x = (width - 8.0 - tabs_run).max(CHROME_LEFT);
+
+        // What is left between the Today button and the tabs, spent on the
+        // search box first and the caption second.
+        let mut right = view_tabs_x - 8.0;
+        let search = if right - HEADER_X - MIN_HEADER_W >= SEARCH_W {
+            let rect = Rect::new(right - SEARCH_W, CHROME_Y, SEARCH_W, CHROME_H);
+            right = rect.x - 8.0;
+            Some(rect)
+        } else {
+            None
+        };
+        let header_w = right - HEADER_X;
+        let header = if header_w >= MIN_HEADER_W {
+            Some(Rect::new(HEADER_X, CHROME_Y, header_w, CHROME_H))
+        } else {
+            None
+        };
+
+        let content_top = CONTENT_Y.min(height);
+        let sidebar = if sidebar_wanted && width - SIDEBAR_W >= MIN_CONTENT_W {
+            Some(Rect::new(
+                0.0,
+                content_top,
+                SIDEBAR_W,
+                (height - content_top).max(0.0),
+            ))
+        } else {
+            None
+        };
+        let content_x = sidebar.map_or(0.0, Rect::right);
+        let content = Rect::new(
+            content_x,
+            content_top,
+            (width - content_x).max(0.0),
+            (height - content_top).max(0.0),
+        );
+
+        Self {
+            window,
+            top_bar,
+            nav_back: Rect::new(8.0, 8.0, 32.0, 32.0),
+            nav_forward: Rect::new(44.0, 8.0, 32.0, 32.0),
+            today_button: Rect::new(84.0, CHROME_Y, 60.0, CHROME_H),
+            header,
+            search,
+            view_tabs_x,
+            view_tab_pitch,
+            sidebar,
+            content,
+        }
+    }
+
+    /// The box for view selector tab `index`.
+    pub fn view_tab(&self, index: usize) -> Rect {
+        Rect::new(
+            self.view_tabs_x + index as f32 * self.view_tab_pitch,
+            CHROME_Y,
+            (self.view_tab_pitch - VIEW_TAB_GAP).max(1.0),
+            CHROME_H,
+        )
+    }
+
+    /// The mini calendar's box inside the sidebar, if there is a sidebar.
+    ///
+    /// 142 tall: an 18px month header, a 16px day-of-week strip, and six 18px
+    /// rows of days — the most any month needs.
+    pub fn mini_calendar(&self) -> Option<Rect> {
+        self.sidebar
+            .map(|bar| Rect::new(bar.x + 10.0, bar.y + 10.0, 200.0, 142.0))
+    }
+
+    /// The box for category swatch `index` in the sidebar, if there is one.
+    ///
+    /// A short window leaves the last rows hanging below the sidebar. They are
+    /// not special-cased here: the sidebar is drawn inside a clip, which drops
+    /// both the ink and the hit box, so the rule lives in exactly one place.
+    pub fn category_row(&self, index: usize) -> Option<Rect> {
+        let bar = self.sidebar?;
+        Some(Rect::new(
+            bar.x + 8.0,
+            bar.y + 210.0 + 22.0 + index as f32 * 24.0 - 2.0,
+            bar.w - 16.0,
+            20.0,
+        ))
+    }
+}
+
+// ============================================================================
 // Main calendar application
 // ============================================================================
 
@@ -1019,6 +1260,18 @@ pub struct CalendarApp {
     // Time format
     pub use_24h: bool,
     pub week_starts_monday: bool,
+
+    /// How far the content area is scrolled down, in pixels.
+    ///
+    /// The week and day views draw a full twenty-four hours — 1152px and
+    /// 1440px of grid. In a 720px window that put everything after early
+    /// afternoon below the bottom edge with no way to reach it, which nobody
+    /// noticed because there was no window and no wheel.
+    pub content_scroll: f32,
+    /// Whether typing goes to the search box.
+    pub search_focused: bool,
+    /// Cleared when the window is closed, which is what stops the loop.
+    pub running: bool,
 }
 
 impl CalendarApp {
@@ -1040,6 +1293,9 @@ impl CalendarApp {
             mini_cal_year: today.year,
             use_24h: false,
             week_starts_monday: true,
+            content_scroll: 0.0,
+            search_focused: false,
+            running: true,
         }
     }
 
@@ -1094,6 +1350,11 @@ impl CalendarApp {
     pub fn select_date(&mut self, date: Date) {
         self.selected_date = date;
         self.view_date = date;
+        // The mini calendar follows the selection. Without this, clicking into
+        // next month from the month grid left the sidebar showing the old one,
+        // with the selection highlight nowhere in it.
+        self.mini_cal_month = date.month;
+        self.mini_cal_year = date.year;
     }
 
     pub fn search(&mut self) {
@@ -1110,93 +1371,180 @@ impl CalendarApp {
     }
 
     // ========================================================================
-    // Rendering
+    // Geometry
     // ========================================================================
 
-    pub fn render(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::with_capacity(512);
-
-        // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height: self.height,
-            color: BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Top bar
-        self.render_top_bar(&mut cmds);
-
-        let content_y = 50.0;
-        let sidebar_w = if self.sidebar_visible { 220.0 } else { 0.0 };
-        let main_x = sidebar_w;
-        let main_w = self.width - sidebar_w;
-
-        // Sidebar (mini calendar + categories)
-        if self.sidebar_visible {
-            self.render_sidebar(&mut cmds, content_y);
-        }
-
-        // Main content area
-        cmds.push(RenderCommand::PushClip {
-            x: main_x,
-            y: content_y,
-            width: main_w,
-            height: self.height - content_y,
-        });
-
-        match self.view {
-            CalendarView::Month => self.render_month_view(&mut cmds, main_x, content_y, main_w),
-            CalendarView::Week => self.render_week_view(&mut cmds, main_x, content_y, main_w),
-            CalendarView::Day => self.render_day_view(&mut cmds, main_x, content_y, main_w),
-            CalendarView::Year => self.render_year_view(&mut cmds, main_x, content_y, main_w),
-            CalendarView::Agenda => self.render_agenda_view(&mut cmds, main_x, content_y, main_w),
-        }
-
-        cmds.push(RenderCommand::PopClip);
-
-        cmds
+    /// Adopt a new window size.
+    ///
+    /// The scroll offset is re-clamped here rather than at the next wheel
+    /// event: growing the window can make the content fit, and a stale offset
+    /// would leave a gap at the bottom that nothing could scroll back up.
+    pub fn resize(&mut self, width: f32, height: f32) {
+        self.width = width;
+        self.height = height;
+        self.clamp_scroll();
     }
 
-    fn render_top_bar(&self, cmds: &mut Vec<RenderCommand>) {
-        // Bar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height: 48.0,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
+    /// Where everything goes at the current window size.
+    pub fn layout(&self) -> Layout {
+        Layout::new(self.width, self.height, self.sidebar_visible)
+    }
 
-        // Navigation buttons
-        self.render_nav_button(cmds, 8.0, 8.0, 32.0, 32.0, "<");
-        self.render_nav_button(cmds, 44.0, 8.0, 32.0, 32.0, ">");
+    fn week_start(&self, date: Date) -> Date {
+        let dow = date.day_of_week();
+        let offset = if self.week_starts_monday {
+            dow.checked_sub(1).unwrap_or(6)
+        } else {
+            dow
+        };
+        // `offset` is 0..=6, so the negation is exact; spelled `wrapping_neg`
+        // because a bare `-` on a signed value is an overflow the lint counts.
+        date.add_days((offset as i32).wrapping_neg())
+    }
 
-        // Today button
-        cmds.push(RenderCommand::FillRect {
-            x: 84.0,
-            y: 10.0,
-            width: 60.0,
-            height: 28.0,
-            color: BLUE,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: 96.0,
-            y: 18.0,
-            text: "Today".to_string(),
-            font_size: 12.0,
-            color: CRUST,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(52.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+    /// How many blank cells precede the 1st of a month in a day grid.
+    ///
+    /// This used to be written out three times — mini calendar, month view,
+    /// year view — as the same `if first_dow == 0 { 6 } else { first_dow - 1 }`.
+    fn start_offset(&self, first_dow: u32) -> u32 {
+        if self.week_starts_monday {
+            first_dow.checked_sub(1).unwrap_or(6)
+        } else {
+            first_dow
+        }
+    }
 
-        // Current view date header
-        let header = match self.view {
+    /// Step the sidebar's mini calendar one month forwards or backwards.
+    pub fn step_mini_month(&mut self, delta: i32) {
+        // Counted as months since year zero, so a step across December is
+        // a division rather than a loop that has to be got right twice.
+        let months = i64::from(self.mini_cal_year)
+            .saturating_mul(12)
+            .saturating_add(i64::from(self.mini_cal_month))
+            .saturating_sub(1)
+            .saturating_add(i64::from(delta));
+        self.mini_cal_year = i32::try_from(months.div_euclid(12)).unwrap_or(self.mini_cal_year);
+        self.mini_cal_month = u32::try_from(months.rem_euclid(12).saturating_add(1)).unwrap_or(1);
+    }
+
+    /// The events on `date` that the category filter lets through.
+    ///
+    /// Every view used to call `store.events_on` directly, so picking a
+    /// category greyed out the other swatches in the sidebar and changed
+    /// nothing else on screen. Nobody noticed because nothing could set the
+    /// filter: there was no click handling at all.
+    pub fn visible_events_on(&self, date: Date) -> Vec<&CalendarEvent> {
+        self.store
+            .events_on(date)
+            .into_iter()
+            .filter(|e| self.category_filter.is_none_or(|c| e.category == c))
+            .collect()
+    }
+
+    /// What the agenda lists: the search results when a query is typed, the
+    /// next thirty upcoming events otherwise, category-filtered either way.
+    ///
+    /// `search_results` was computed and then never read by anything.
+    pub fn agenda_events(&self) -> Vec<&CalendarEvent> {
+        let base: Vec<&CalendarEvent> = if self.search_query.is_empty() {
+            self.store.upcoming(self.view_date, 30)
+        } else {
+            self.search_results
+                .iter()
+                .filter_map(|id| self.store.get(*id))
+                .collect()
+        };
+        base.into_iter()
+            .filter(|e| self.category_filter.is_none_or(|c| e.category == c))
+            .collect()
+    }
+
+    /// How tall the agenda list is, walked exactly the way it is drawn so the
+    /// scroll extent and the ink cannot drift apart.
+    fn agenda_height(&self, events: &[&CalendarEvent]) -> f32 {
+        let mut y = AGENDA_TOP;
+        let mut last: Option<Date> = Option::None;
+        for ev in events {
+            if last != Some(ev.start.date) {
+                if last.is_some() {
+                    y += AGENDA_GROUP_GAP;
+                }
+                y += AGENDA_HEADER_H;
+                last = Some(ev.start.date);
+            }
+            y += AGENDA_EVENT_H;
+        }
+        y + 8.0
+    }
+
+    /// Rows in the month grid: five at minimum, six or seven when the month
+    /// spills.
+    fn month_rows(&self) -> u32 {
+        let first_dow = first_dow_of_month(self.view_date.year, self.view_date.month);
+        let cells = self
+            .start_offset(first_dow)
+            .saturating_add(days_in_month(self.view_date.year, self.view_date.month));
+        cells.div_ceil(7).max(5)
+    }
+
+    /// Height of one month-grid row: the area shared out, but never squeezed
+    /// below the point where a day number and one event stop fitting.
+    fn month_row_h(&self, area: Rect) -> f32 {
+        ((area.h - MONTH_HEADER_H) / self.month_rows() as f32).max(MONTH_MIN_ROW_H)
+    }
+
+    /// Height of one month block in the year view, floored the same way.
+    fn year_month_h(&self, area: Rect) -> f32 {
+        ((area.h - 10.0) / YEAR_ROWS as f32).max(YEAR_MIN_MONTH_H)
+    }
+
+    /// Height of the day view's all-day band, which is zero when empty.
+    fn all_day_band_h(&self) -> f32 {
+        let count = self
+            .visible_events_on(self.view_date)
+            .iter()
+            .filter(|e| e.all_day)
+            .count();
+        if count == 0 {
+            0.0
+        } else {
+            DAY_ALL_DAY_ROW_H * count as f32 + 8.0
+        }
+    }
+
+    /// How tall the current view's content is, which is what makes it
+    /// scrollable when it exceeds `area.h`.
+    fn content_height(&self, area: Rect) -> f32 {
+        match self.view {
+            CalendarView::Month => {
+                MONTH_HEADER_H + self.month_row_h(area) * self.month_rows() as f32
+            }
+            CalendarView::Week => WEEK_HEADER_H + 24.0 * WEEK_HOUR_H,
+            CalendarView::Day => DAY_HEADER_H + self.all_day_band_h() + 24.0 * DAY_HOUR_H,
+            CalendarView::Year => 10.0 + self.year_month_h(area) * YEAR_ROWS as f32,
+            CalendarView::Agenda => self.agenda_height(&self.agenda_events()),
+        }
+    }
+
+    /// The furthest the content can be scrolled: zero when it already fits.
+    pub fn max_content_scroll(&self) -> f32 {
+        let area = self.layout().content;
+        (self.content_height(area) - area.h).max(0.0)
+    }
+
+    fn clamp_scroll(&mut self) {
+        self.content_scroll = self.content_scroll.clamp(0.0, self.max_content_scroll());
+    }
+
+    /// What is under the pointer, according to the boxes the last frame
+    /// recorded as it painted them.
+    pub fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        self.frame(self.width, self.height).hit_test(x, y)
+    }
+
+    /// The caption in the top bar, naming whatever the current view shows.
+    fn header_text(&self) -> String {
+        match self.view {
             CalendarView::Month | CalendarView::Year => self.view_date.format_header(),
             CalendarView::Week => {
                 let start = self.week_start(self.view_date);
@@ -1221,230 +1569,302 @@ impl CalendarApp {
                 }
             }
             CalendarView::Day => self.view_date.format_long(),
-            CalendarView::Agenda => format!("Agenda from {}", self.view_date.format_short()),
-        };
+            CalendarView::Agenda => {
+                if self.search_query.is_empty() {
+                    format!("Agenda from {}", self.view_date.format_short())
+                } else {
+                    format!("Search: {}", self.search_query)
+                }
+            }
+        }
+    }
 
-        cmds.push(RenderCommand::Text {
-            x: 160.0,
-            y: 16.0,
-            text: header,
-            font_size: 16.0,
-            color: TEXT,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(300.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+    fn day_headers_short(&self) -> [&'static str; 7] {
+        if self.week_starts_monday {
+            ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
+        } else {
+            ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"]
+        }
+    }
 
-        // View selector buttons
-        let views = CalendarView::all();
-        let view_x = self.width - (views.len() as f32 * 68.0) - 8.0;
-        for (i, v) in views.iter().enumerate() {
-            let bx = view_x + i as f32 * 68.0;
-            let active = *v == self.view;
-            let bg = if active { SURFACE0 } else { MANTLE };
-            let fg = if active { BLUE } else { SUBTEXT0 };
+    fn day_headers_long(&self) -> [&'static str; 7] {
+        if self.week_starts_monday {
+            [
+                "Monday",
+                "Tuesday",
+                "Wednesday",
+                "Thursday",
+                "Friday",
+                "Saturday",
+                "Sunday",
+            ]
+        } else {
+            [
+                "Sunday",
+                "Monday",
+                "Tuesday",
+                "Wednesday",
+                "Thursday",
+                "Friday",
+                "Saturday",
+            ]
+        }
+    }
 
-            cmds.push(RenderCommand::FillRect {
-                x: bx,
-                y: 10.0,
-                width: 64.0,
-                height: 28.0,
-                color: bg,
-                corner_radii: CornerRadii::all(4.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: bx + 8.0,
-                y: 18.0,
-                text: v.label().to_string(),
-                font_size: 11.0,
-                color: fg,
-                font_weight: if active {
+    // ========================================================================
+    // Rendering
+    // ========================================================================
+
+    /// Draw the whole calendar, recording a hit box for everything clickable
+    /// at the moment it is painted.
+    pub fn frame(&self, width: f32, height: f32) -> Frame {
+        let mut frame = Frame::new(width, height);
+        let layout = Layout::new(width, height, self.sidebar_visible);
+
+        fill(&mut frame, layout.window, BASE, 0.0);
+        self.draw_top_bar(&mut frame, &layout);
+
+        if let Some(bar) = layout.sidebar {
+            // Clipped, so a category row pushed below a short sidebar is
+            // neither painted nor clickable. The rule lives here once instead
+            // of being re-derived by whatever wants to know.
+            frame.clip(bar);
+            self.draw_sidebar(&mut frame, &layout, bar);
+            frame.unclip();
+        }
+
+        let area = layout.content;
+        let scroll = self
+            .content_scroll
+            .clamp(0.0, (self.content_height(area) - area.h).max(0.0));
+        frame.clip(area);
+        frame.translate(0.0, -scroll);
+        match self.view {
+            CalendarView::Month => self.draw_month_view(&mut frame, area),
+            CalendarView::Week => self.draw_week_view(&mut frame, area),
+            CalendarView::Day => self.draw_day_view(&mut frame, area),
+            CalendarView::Year => self.draw_year_view(&mut frame, area),
+            CalendarView::Agenda => self.draw_agenda_view(&mut frame, area),
+        }
+        frame.untranslate();
+        frame.unclip();
+
+        frame
+    }
+
+    fn draw_top_bar(&self, frame: &mut Frame, layout: &Layout) {
+        fill(frame, layout.top_bar, MANTLE, 0.0);
+
+        draw_nav_button(frame, layout.nav_back, "<", Target::NavBack);
+        draw_nav_button(frame, layout.nav_forward, ">", Target::NavForward);
+
+        let today = layout.today_button;
+        fill(frame, today, BLUE, 4.0);
+        label(
+            frame,
+            today.x + 12.0,
+            today.y + 8.0,
+            "Today",
+            12.0,
+            CRUST,
+            FontWeightHint::Bold,
+            Some(today.w - 8.0),
+        );
+        frame.hit(Target::TodayButton, today);
+
+        if let Some(header) = layout.header {
+            label(
+                frame,
+                header.x,
+                header.y + 6.0,
+                self.header_text(),
+                16.0,
+                TEXT,
+                FontWeightHint::Bold,
+                Some(header.w),
+            );
+        }
+
+        if let Some(search) = layout.search {
+            fill(frame, search, SURFACE0, 4.0);
+            if self.search_focused {
+                stroke(frame, search, BLUE, 4.0, 1.5);
+            }
+            let empty = self.search_query.is_empty();
+            label(
+                frame,
+                search.x + 8.0,
+                search.y + 8.0,
+                if empty {
+                    String::from("Search events")
+                } else {
+                    self.search_query.clone()
+                },
+                11.0,
+                if empty { OVERLAY0 } else { TEXT },
+                FontWeightHint::Regular,
+                Some(search.w - 16.0),
+            );
+            frame.hit(Target::SearchField, search);
+        }
+
+        for (i, view) in CalendarView::all().iter().enumerate() {
+            let tab = layout.view_tab(i);
+            let active = *view == self.view;
+            fill(frame, tab, if active { SURFACE0 } else { MANTLE }, 4.0);
+            label(
+                frame,
+                tab.x + 8.0,
+                tab.y + 8.0,
+                view.label(),
+                11.0,
+                if active { BLUE } else { SUBTEXT0 },
+                if active {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(52.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+                Some((tab.w - 12.0).max(1.0)),
+            );
+            frame.hit(Target::ViewTab(i), tab);
         }
 
-        // Separator
-        cmds.push(RenderCommand::Line {
-            x1: 0.0,
-            y1: 48.0,
-            x2: self.width,
-            y2: 48.0,
-            color: SURFACE0,
-            width: 1.0,
-        });
+        let sep = layout.top_bar.bottom();
+        line(frame, 0.0, sep, layout.window.w, sep, SURFACE0, 1.0);
     }
 
-    fn render_nav_button(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        label: &str,
-    ) {
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: x + w / 2.0 - 4.0,
-            y: y + h / 2.0 - 6.0,
-            text: label.to_string(),
-            font_size: 14.0,
-            color: TEXT,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
+    fn draw_sidebar(&self, frame: &mut Frame, layout: &Layout, bar: Rect) {
+        fill(frame, bar, MANTLE, 0.0);
 
-    fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>, top_y: f32) {
-        let sidebar_w = 220.0;
+        if let Some(mini) = layout.mini_calendar() {
+            self.draw_mini_calendar(frame, mini);
+        }
 
-        // Sidebar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: top_y,
-            width: sidebar_w,
-            height: self.height - top_y,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Mini calendar
-        self.render_mini_calendar(cmds, 10.0, top_y + 10.0, 200.0);
-
-        // Category filters
-        let cat_y = top_y + 210.0;
-        cmds.push(RenderCommand::Text {
-            x: 12.0,
-            y: cat_y,
-            text: "Categories".to_string(),
-            font_size: 12.0,
-            color: SUBTEXT0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        label(
+            frame,
+            bar.x + 12.0,
+            bar.y + 210.0,
+            "Categories",
+            12.0,
+            SUBTEXT0,
+            FontWeightHint::Bold,
+            Some(bar.w - 20.0),
+        );
 
         for (i, cat) in EventCategory::all().iter().enumerate() {
-            let cy = cat_y + 22.0 + i as f32 * 24.0;
+            let Some(row) = layout.category_row(i) else {
+                continue;
+            };
             let active = self.category_filter.is_none() || self.category_filter == Some(*cat);
-
-            cmds.push(RenderCommand::FillRect {
-                x: 12.0,
-                y: cy,
-                width: 12.0,
-                height: 12.0,
-                color: if active { cat.color() } else { SURFACE0 },
-                corner_radii: CornerRadii::all(2.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: 30.0,
-                y: cy,
-                text: cat.label().to_string(),
-                font_size: 11.0,
-                color: if active { TEXT } else { OVERLAY0 },
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(160.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Event count
+            fill(
+                frame,
+                Rect::new(row.x + 4.0, row.y + 4.0, 12.0, 12.0),
+                if active { cat.color() } else { SURFACE0 },
+                2.0,
+            );
+            label(
+                frame,
+                row.x + 22.0,
+                row.y + 4.0,
+                cat.label(),
+                11.0,
+                if active { TEXT } else { OVERLAY0 },
+                FontWeightHint::Regular,
+                Some((row.w - 60.0).max(1.0)),
+            );
             let count = self.store.events_by_category(*cat).len();
             if count > 0 {
-                cmds.push(RenderCommand::Text {
-                    x: 180.0,
-                    y: cy,
-                    text: count.to_string(),
-                    font_size: 10.0,
-                    color: OVERLAY0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
+                label(
+                    frame,
+                    row.right() - 28.0,
+                    row.y + 4.0,
+                    count.to_string(),
+                    10.0,
+                    OVERLAY0,
+                    FontWeightHint::Regular,
+                    Option::None,
+                );
             }
+            frame.hit(Target::CategoryFilter(i), row);
         }
 
-        // Separator
-        cmds.push(RenderCommand::Line {
-            x1: sidebar_w,
-            y1: top_y,
-            x2: sidebar_w,
-            y2: self.height,
-            color: SURFACE0,
-            width: 1.0,
-        });
+        let edge = bar.right() - 0.5;
+        line(frame, edge, bar.y, edge, bar.bottom(), SURFACE0, 1.0);
     }
 
-    fn render_mini_calendar(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32) {
-        let cell_w = w / 7.0;
+    fn draw_mini_calendar(&self, frame: &mut Frame, area: Rect) {
+        let cell_w = area.w / 7.0;
         let cell_h = 18.0;
 
-        // Month/year header
-        let header = format!(
-            "{} {}",
-            month_short(self.mini_cal_month),
-            self.mini_cal_year
+        // The two month-step arrows, which is what makes the mini calendar a
+        // way to reach another month rather than a picture of this one.
+        let prev = Rect::new(area.x, area.y - 2.0, 18.0, 18.0);
+        let next = Rect::new(area.right() - 18.0, area.y - 2.0, 18.0, 18.0);
+        label(
+            frame,
+            prev.x + 5.0,
+            area.y,
+            "<",
+            11.0,
+            SUBTEXT0,
+            FontWeightHint::Bold,
+            Option::None,
         );
-        cmds.push(RenderCommand::Text {
-            x: x + w / 2.0 - 30.0,
-            y,
-            text: header,
-            font_size: 11.0,
-            color: TEXT,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(w),
-            overflow: TextOverflow::Ellipsis,
-        });
+        label(
+            frame,
+            next.x + 5.0,
+            area.y,
+            ">",
+            11.0,
+            SUBTEXT0,
+            FontWeightHint::Bold,
+            Option::None,
+        );
+        frame.hit(Target::MiniPrevMonth, prev);
+        frame.hit(Target::MiniNextMonth, next);
 
-        // Day-of-week headers
-        let day_headers = if self.week_starts_monday {
-            ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
-        } else {
-            ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"]
-        };
+        label(
+            frame,
+            area.x + area.w / 2.0 - 30.0,
+            area.y,
+            format!(
+                "{} {}",
+                month_short(self.mini_cal_month),
+                self.mini_cal_year
+            ),
+            11.0,
+            TEXT,
+            FontWeightHint::Bold,
+            Some(area.w - 40.0),
+        );
 
-        let header_y = y + 18.0;
-        for (i, dh) in day_headers.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: x + i as f32 * cell_w + 2.0,
-                y: header_y,
-                text: dh.to_string(),
-                font_size: 9.0,
-                color: OVERLAY0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(cell_w),
-                overflow: TextOverflow::Ellipsis,
-            });
+        let header_y = area.y + 18.0;
+        for (i, dh) in self.day_headers_short().iter().enumerate() {
+            label(
+                frame,
+                area.x + i as f32 * cell_w + 2.0,
+                header_y,
+                *dh,
+                9.0,
+                OVERLAY0,
+                FontWeightHint::Regular,
+                Some(cell_w),
+            );
         }
 
-        // Days grid
         let first_dow = first_dow_of_month(self.mini_cal_year, self.mini_cal_month);
-        let start_offset = if self.week_starts_monday {
-            if first_dow == 0 { 6 } else { first_dow - 1 }
-        } else {
-            first_dow
-        };
+        let start_offset = self.start_offset(first_dow);
         let total_days = days_in_month(self.mini_cal_year, self.mini_cal_month);
-
         let grid_y = header_y + 16.0;
+
         for day in 1..=total_days {
-            let pos = (day - 1 + start_offset) as usize;
-            let row = pos / 7;
-            let col = pos % 7;
-            let dx = x + col as f32 * cell_w;
-            let dy = grid_y + row as f32 * cell_h;
+            let pos = day.saturating_sub(1).saturating_add(start_offset) as usize;
+            let cell = Rect::new(
+                area.x + (pos % 7) as f32 * cell_w,
+                grid_y + (pos / 7) as f32 * cell_h,
+                cell_w,
+                cell_h,
+            );
 
             let date = Date {
                 year: self.mini_cal_year,
@@ -1453,26 +1873,15 @@ impl CalendarApp {
             };
             let is_today = date.is_today(self.today);
             let is_selected = date == self.selected_date;
-            let has_events = !self.store.events_on(date).is_empty();
+            let has_events = !self.visible_events_on(date).is_empty();
 
-            if is_today {
-                cmds.push(RenderCommand::FillRect {
-                    x: dx,
-                    y: dy - 1.0,
-                    width: cell_w - 1.0,
-                    height: cell_h - 2.0,
-                    color: BLUE,
-                    corner_radii: CornerRadii::all(3.0),
-                });
-            } else if is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: dx,
-                    y: dy - 1.0,
-                    width: cell_w - 1.0,
-                    height: cell_h - 2.0,
-                    color: SURFACE0,
-                    corner_radii: CornerRadii::all(3.0),
-                });
+            if is_today || is_selected {
+                fill(
+                    frame,
+                    Rect::new(cell.x, cell.y - 1.0, cell_w - 1.0, cell_h - 2.0),
+                    if is_today { BLUE } else { SURFACE0 },
+                    3.0,
+                );
             }
 
             let fg = if is_today {
@@ -1484,106 +1893,64 @@ impl CalendarApp {
             } else {
                 TEXT
             };
-
-            cmds.push(RenderCommand::Text {
-                x: dx + 4.0,
-                y: dy + 1.0,
-                text: day.to_string(),
-                font_size: 10.0,
-                color: fg,
-                font_weight: if is_today {
+            label(
+                frame,
+                cell.x + 4.0,
+                cell.y + 1.0,
+                day.to_string(),
+                10.0,
+                fg,
+                if is_today {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(cell_w - 4.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+                Some(cell_w - 4.0),
+            );
 
-            // Event dot
             if has_events && !is_today {
-                cmds.push(RenderCommand::FillRect {
-                    x: dx + cell_w / 2.0 - 2.0,
-                    y: dy + cell_h - 5.0,
-                    width: 4.0,
-                    height: 3.0,
-                    color: PEACH,
-                    corner_radii: CornerRadii::all(1.5),
-                });
+                fill(
+                    frame,
+                    Rect::new(cell.x + cell_w / 2.0 - 2.0, cell.bottom() - 5.0, 4.0, 3.0),
+                    PEACH,
+                    1.5,
+                );
             }
+
+            frame.hit(Target::MiniDay(date), cell);
         }
     }
 
-    fn week_start(&self, date: Date) -> Date {
-        let dow = date.day_of_week();
-        let offset = if self.week_starts_monday {
-            if dow == 0 { 6 } else { dow - 1 }
-        } else {
-            dow
-        };
-        date.add_days(-(offset as i32))
-    }
+    fn draw_month_view(&self, frame: &mut Frame, area: Rect) {
+        let col_w = area.w / 7.0;
 
-    fn render_month_view(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32) {
-        let col_w = w / 7.0;
-        let header_h = 24.0;
-
-        // Day-of-week headers
-        let day_headers = if self.week_starts_monday {
-            [
-                "Monday",
-                "Tuesday",
-                "Wednesday",
-                "Thursday",
-                "Friday",
-                "Saturday",
-                "Sunday",
-            ]
-        } else {
-            [
-                "Sunday",
-                "Monday",
-                "Tuesday",
-                "Wednesday",
-                "Thursday",
-                "Friday",
-                "Saturday",
-            ]
-        };
-
-        for (i, dh) in day_headers.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: x + i as f32 * col_w + 8.0,
-                y: y + 6.0,
-                text: dh.to_string(),
-                font_size: 11.0,
-                color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(col_w - 12.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        for (i, dh) in self.day_headers_long().iter().enumerate() {
+            label(
+                frame,
+                area.x + i as f32 * col_w + 8.0,
+                area.y + 6.0,
+                *dh,
+                11.0,
+                SUBTEXT0,
+                FontWeightHint::Regular,
+                Some((col_w - 12.0).max(1.0)),
+            );
         }
 
-        // Grid
-        let grid_y = y + header_h;
-        let available_h = self.height - grid_y;
+        let grid_y = area.y + MONTH_HEADER_H;
+        let row_h = self.month_row_h(area);
         let first_dow = first_dow_of_month(self.view_date.year, self.view_date.month);
-        let start_offset = if self.week_starts_monday {
-            if first_dow == 0 { 6 } else { first_dow - 1 }
-        } else {
-            first_dow
-        };
+        let start_offset = self.start_offset(first_dow);
         let total_days = days_in_month(self.view_date.year, self.view_date.month);
-        let total_cells = start_offset + total_days;
-        let num_rows = total_cells.div_ceil(7).max(5);
-        let row_h = available_h / num_rows as f32;
 
         for day in 1..=total_days {
-            let pos = (day - 1 + start_offset) as usize;
-            let row = pos / 7;
-            let col = pos % 7;
-            let cx = x + col as f32 * col_w;
-            let cy = grid_y + row as f32 * row_h;
+            let pos = day.saturating_sub(1).saturating_add(start_offset) as usize;
+            let cell = Rect::new(
+                area.x + (pos % 7) as f32 * col_w,
+                grid_y + (pos / 7) as f32 * row_h,
+                col_w,
+                row_h,
+            );
 
             let date = Date {
                 year: self.view_date.year,
@@ -1593,453 +1960,375 @@ impl CalendarApp {
             let is_today = date.is_today(self.today);
             let is_selected = date == self.selected_date;
 
-            // Cell border
-            cmds.push(RenderCommand::StrokeRect {
-                x: cx,
-                y: cy,
-                width: col_w,
-                height: row_h,
-                color: SURFACE0,
-                corner_radii: CornerRadii::ZERO,
-                line_width: 0.5,
-            });
+            stroke(frame, cell, SURFACE0, 0.0, 0.5);
 
-            // Day number
-            let day_bg_color = if is_today {
-                BLUE
-            } else if is_selected {
-                SURFACE1
-            } else {
-                Color::rgba(0, 0, 0, 0)
-            };
             if is_today || is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: cx + 4.0,
-                    y: cy + 2.0,
-                    width: 22.0,
-                    height: 18.0,
-                    color: day_bg_color,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                fill(
+                    frame,
+                    Rect::new(cell.x + 4.0, cell.y + 2.0, 22.0, 18.0),
+                    if is_today { BLUE } else { SURFACE1 },
+                    4.0,
+                );
             }
 
-            let day_fg = if is_today {
-                CRUST
-            } else if date.is_weekend() {
-                SUBTEXT0
-            } else {
-                TEXT
-            };
-            cmds.push(RenderCommand::Text {
-                x: cx + 8.0,
-                y: cy + 4.0,
-                text: day.to_string(),
-                font_size: 12.0,
-                color: day_fg,
-                font_weight: if is_today {
+            label(
+                frame,
+                cell.x + 8.0,
+                cell.y + 4.0,
+                day.to_string(),
+                12.0,
+                if is_today {
+                    CRUST
+                } else if date.is_weekend() {
+                    SUBTEXT0
+                } else {
+                    TEXT
+                },
+                if is_today {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(20.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+                Some(20.0),
+            );
 
-            // Events for this day
-            let events = self.store.events_on(date);
-            let max_visible = ((row_h - 24.0) / 16.0) as usize;
+            // The day cell first, so an event drawn on top of it also wins the
+            // hit test: `hit_test` reads the recorded boxes back to front.
+            frame.hit(Target::Day(date), cell);
+
+            let events = self.visible_events_on(date);
+            let max_visible = ((row_h - 24.0) / 16.0).max(0.0) as usize;
             for (ei, ev) in events.iter().enumerate().take(max_visible) {
-                let ey = cy + 22.0 + ei as f32 * 16.0;
-
-                cmds.push(RenderCommand::FillRect {
-                    x: cx + 4.0,
-                    y: ey,
-                    width: col_w - 8.0,
-                    height: 14.0,
-                    color: ev.effective_color(),
-                    corner_radii: CornerRadii::all(2.0),
-                });
-
-                let time_prefix = if ev.all_day {
+                let chip = Rect::new(
+                    cell.x + 4.0,
+                    cell.y + 22.0 + ei as f32 * 16.0,
+                    (col_w - 8.0).max(1.0),
+                    14.0,
+                );
+                fill(frame, chip, ev.effective_color(), 2.0);
+                let prefix = if ev.all_day {
                     String::new()
                 } else {
                     format!("{} ", ev.start.time.format_12h())
                 };
-
-                cmds.push(RenderCommand::Text {
-                    x: cx + 7.0,
-                    y: ey + 2.0,
-                    text: format!("{time_prefix}{}", ev.title),
-                    font_size: 9.0,
-                    color: CRUST,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(col_w - 14.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
+                label(
+                    frame,
+                    chip.x + 3.0,
+                    chip.y + 2.0,
+                    format!("{prefix}{}", ev.title),
+                    9.0,
+                    CRUST,
+                    FontWeightHint::Bold,
+                    Some((chip.w - 6.0).max(1.0)),
+                );
+                if self.selected_event_id == Some(ev.id) {
+                    stroke(frame, chip, TEXT, 2.0, 1.5);
+                }
+                frame.hit(Target::Event(ev.id), chip);
             }
 
             if events.len() > max_visible {
-                cmds.push(RenderCommand::Text {
-                    x: cx + 8.0,
-                    y: cy + 22.0 + max_visible as f32 * 16.0,
-                    text: format!("+{} more", events.len() - max_visible),
-                    font_size: 9.0,
-                    color: OVERLAY0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(col_w - 16.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
+                label(
+                    frame,
+                    cell.x + 8.0,
+                    cell.y + 22.0 + max_visible as f32 * 16.0,
+                    format!("+{} more", events.len().saturating_sub(max_visible)),
+                    9.0,
+                    OVERLAY0,
+                    FontWeightHint::Regular,
+                    Some((col_w - 16.0).max(1.0)),
+                );
             }
         }
     }
 
-    fn render_week_view(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32) {
+    fn draw_week_view(&self, frame: &mut Frame, area: Rect) {
         let week_start = self.week_start(self.view_date);
-        let time_col_w = 50.0;
-        let day_w = (w - time_col_w) / 7.0;
-        let hour_h = 48.0;
-        let header_h = 40.0;
+        let day_w = (area.w - WEEK_TIME_COL_W) / 7.0;
 
-        // Day headers
         for i in 0..7 {
             let date = week_start.add_days(i);
-            let dx = x + time_col_w + i as f32 * day_w;
+            let header = Rect::new(
+                area.x + WEEK_TIME_COL_W + i as f32 * day_w,
+                area.y,
+                day_w,
+                WEEK_HEADER_H,
+            );
             let is_today = date.is_today(self.today);
-
-            cmds.push(RenderCommand::FillRect {
-                x: dx,
-                y,
-                width: day_w,
-                height: header_h,
-                color: if is_today { SURFACE0 } else { MANTLE },
-                corner_radii: CornerRadii::ZERO,
-            });
-
-            cmds.push(RenderCommand::Text {
-                x: dx + 4.0,
-                y: y + 4.0,
-                text: date.day_of_week_short().to_string(),
-                font_size: 10.0,
-                color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(day_w - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            let day_color = if is_today { BLUE } else { TEXT };
-            cmds.push(RenderCommand::Text {
-                x: dx + 4.0,
-                y: y + 18.0,
-                text: date.day.to_string(),
-                font_size: 16.0,
-                color: day_color,
-                font_weight: if is_today {
+            fill(frame, header, if is_today { SURFACE0 } else { MANTLE }, 0.0);
+            label(
+                frame,
+                header.x + 4.0,
+                header.y + 4.0,
+                date.day_of_week_short(),
+                10.0,
+                SUBTEXT0,
+                FontWeightHint::Regular,
+                Some((day_w - 8.0).max(1.0)),
+            );
+            label(
+                frame,
+                header.x + 4.0,
+                header.y + 18.0,
+                date.day.to_string(),
+                16.0,
+                if is_today { BLUE } else { TEXT },
+                if is_today {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(day_w - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+                Some((day_w - 8.0).max(1.0)),
+            );
+            frame.hit(Target::Day(date), header);
         }
 
-        // Time grid
-        let grid_y = y + header_h;
+        let grid_y = area.y + WEEK_HEADER_H;
         for hour in 0..24 {
-            let hy = grid_y + hour as f32 * hour_h;
-
-            // Time label
+            let hy = grid_y + hour as f32 * WEEK_HOUR_H;
             let time = Time { hour, minute: 0 };
-            cmds.push(RenderCommand::Text {
-                x: x + 4.0,
-                y: hy + 2.0,
-                text: if self.use_24h {
+            label(
+                frame,
+                area.x + 4.0,
+                hy + 2.0,
+                if self.use_24h {
                     time.format_24h()
                 } else {
                     time.format_12h()
                 },
-                font_size: 10.0,
-                color: OVERLAY0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(time_col_w - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Hour line
-            cmds.push(RenderCommand::Line {
-                x1: x + time_col_w,
-                y1: hy,
-                x2: x + w,
-                y2: hy,
-                color: SURFACE0,
-                width: 0.5,
-            });
-
-            // Half-hour line
-            cmds.push(RenderCommand::Line {
-                x1: x + time_col_w,
-                y1: hy + hour_h / 2.0,
-                x2: x + w,
-                y2: hy + hour_h / 2.0,
-                color: Color::rgba(49, 50, 68, 128),
-                width: 0.5,
-            });
+                10.0,
+                OVERLAY0,
+                FontWeightHint::Regular,
+                Some(WEEK_TIME_COL_W - 8.0),
+            );
+            line(
+                frame,
+                area.x + WEEK_TIME_COL_W,
+                hy,
+                area.right(),
+                hy,
+                SURFACE0,
+                0.5,
+            );
+            line(
+                frame,
+                area.x + WEEK_TIME_COL_W,
+                hy + WEEK_HOUR_H / 2.0,
+                area.right(),
+                hy + WEEK_HOUR_H / 2.0,
+                Color::rgba(49, 50, 68, 128),
+                0.5,
+            );
         }
 
-        // Events on the grid
         for i in 0..7 {
             let date = week_start.add_days(i);
-            let dx = x + time_col_w + i as f32 * day_w;
-            let events = self.store.events_on(date);
-
-            for ev in &events {
+            let dx = area.x + WEEK_TIME_COL_W + i as f32 * day_w;
+            for ev in &self.visible_events_on(date) {
                 if ev.all_day {
                     continue;
                 }
                 let start_min = ev.start.time.to_minutes() as f32;
                 let end_min = ev.end.time.to_minutes() as f32;
-                let ey = grid_y + (start_min / 60.0) * hour_h;
-                let eh = ((end_min - start_min) / 60.0) * hour_h;
-
-                cmds.push(RenderCommand::FillRect {
-                    x: dx + 2.0,
-                    y: ey,
-                    width: day_w - 4.0,
-                    height: eh.max(16.0),
-                    color: ev.effective_color(),
-                    corner_radii: CornerRadii::all(3.0),
-                });
-
-                cmds.push(RenderCommand::Text {
-                    x: dx + 5.0,
-                    y: ey + 2.0,
-                    text: ev.title.clone(),
-                    font_size: 10.0,
-                    color: CRUST,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(day_w - 10.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-
-                if eh > 20.0 {
-                    cmds.push(RenderCommand::Text {
-                        x: dx + 5.0,
-                        y: ey + 14.0,
-                        text: ev.time_range_label(),
-                        font_size: 9.0,
-                        color: CRUST,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(day_w - 10.0),
-                        overflow: TextOverflow::Ellipsis,
-                    });
+                let block = Rect::new(
+                    dx + 2.0,
+                    grid_y + (start_min / 60.0) * WEEK_HOUR_H,
+                    (day_w - 4.0).max(1.0),
+                    (((end_min - start_min) / 60.0) * WEEK_HOUR_H).max(16.0),
+                );
+                fill(frame, block, ev.effective_color(), 3.0);
+                label(
+                    frame,
+                    block.x + 3.0,
+                    block.y + 2.0,
+                    ev.title.clone(),
+                    10.0,
+                    CRUST,
+                    FontWeightHint::Bold,
+                    Some((block.w - 6.0).max(1.0)),
+                );
+                if block.h > 20.0 {
+                    label(
+                        frame,
+                        block.x + 3.0,
+                        block.y + 14.0,
+                        ev.time_range_label(),
+                        9.0,
+                        CRUST,
+                        FontWeightHint::Regular,
+                        Some((block.w - 6.0).max(1.0)),
+                    );
                 }
+                if self.selected_event_id == Some(ev.id) {
+                    stroke(frame, block, TEXT, 3.0, 1.5);
+                }
+                frame.hit(Target::Event(ev.id), block);
             }
         }
     }
 
-    fn render_day_view(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32) {
-        let time_col_w = 60.0;
-        let hour_h = 60.0;
-        let header_h = 36.0;
-
-        // Day header
+    fn draw_day_view(&self, frame: &mut Frame, area: Rect) {
         let is_today = self.view_date.is_today(self.today);
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: header_h,
-            color: if is_today { SURFACE0 } else { MANTLE },
-            corner_radii: CornerRadii::ZERO,
-        });
+        let header = Rect::new(area.x, area.y, area.w, DAY_HEADER_H);
+        fill(frame, header, if is_today { SURFACE0 } else { MANTLE }, 0.0);
+        label(
+            frame,
+            header.x + 16.0,
+            header.y + 10.0,
+            self.view_date.format_long(),
+            14.0,
+            if is_today { BLUE } else { TEXT },
+            FontWeightHint::Bold,
+            Some((area.w - 32.0).max(1.0)),
+        );
+        frame.hit(Target::Day(self.view_date), header);
 
-        cmds.push(RenderCommand::Text {
-            x: x + 16.0,
-            y: y + 10.0,
-            text: self.view_date.format_long(),
-            font_size: 14.0,
-            color: if is_today { BLUE } else { TEXT },
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(w - 32.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        let day_events = self.visible_events_on(self.view_date);
+        let event_w = (area.w - DAY_TIME_COL_W - 16.0).max(1.0);
 
-        // All-day events
-        let all_day_events: Vec<_> = self
-            .store
-            .events_on(self.view_date)
-            .into_iter()
-            .filter(|e| e.all_day)
-            .collect();
-        let all_day_h = if all_day_events.is_empty() {
-            0.0
-        } else {
-            28.0 * all_day_events.len() as f32 + 8.0
-        };
-
-        for (i, ev) in all_day_events.iter().enumerate() {
-            let ey = y + header_h + 4.0 + i as f32 * 28.0;
-            cmds.push(RenderCommand::FillRect {
-                x: x + time_col_w,
-                y: ey,
-                width: w - time_col_w - 16.0,
-                height: 24.0,
-                color: ev.effective_color(),
-                corner_radii: CornerRadii::all(4.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: x + time_col_w + 8.0,
-                y: ey + 5.0,
-                text: format!("All day: {}", ev.title),
-                font_size: 11.0,
-                color: CRUST,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(w - time_col_w - 32.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        for (i, ev) in day_events.iter().filter(|e| e.all_day).enumerate() {
+            let block = Rect::new(
+                area.x + DAY_TIME_COL_W,
+                area.y + DAY_HEADER_H + 4.0 + i as f32 * DAY_ALL_DAY_ROW_H,
+                event_w,
+                24.0,
+            );
+            fill(frame, block, ev.effective_color(), 4.0);
+            label(
+                frame,
+                block.x + 8.0,
+                block.y + 5.0,
+                format!("All day: {}", ev.title),
+                11.0,
+                CRUST,
+                FontWeightHint::Bold,
+                Some((block.w - 16.0).max(1.0)),
+            );
+            if self.selected_event_id == Some(ev.id) {
+                stroke(frame, block, TEXT, 4.0, 1.5);
+            }
+            frame.hit(Target::Event(ev.id), block);
         }
 
-        // Time grid
-        let grid_y = y + header_h + all_day_h;
+        let grid_y = area.y + DAY_HEADER_H + self.all_day_band_h();
         for hour in 0..24 {
-            let hy = grid_y + hour as f32 * hour_h;
-
+            let hy = grid_y + hour as f32 * DAY_HOUR_H;
             let time = Time { hour, minute: 0 };
-            cmds.push(RenderCommand::Text {
-                x: x + 4.0,
-                y: hy + 2.0,
-                text: if self.use_24h {
+            label(
+                frame,
+                area.x + 4.0,
+                hy + 2.0,
+                if self.use_24h {
                     time.format_24h()
                 } else {
                     time.format_12h()
                 },
-                font_size: 11.0,
-                color: OVERLAY0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(time_col_w - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            cmds.push(RenderCommand::Line {
-                x1: x + time_col_w,
-                y1: hy,
-                x2: x + w,
-                y2: hy,
-                color: SURFACE0,
-                width: 0.5,
-            });
+                11.0,
+                OVERLAY0,
+                FontWeightHint::Regular,
+                Some(DAY_TIME_COL_W - 8.0),
+            );
+            line(
+                frame,
+                area.x + DAY_TIME_COL_W,
+                hy,
+                area.right(),
+                hy,
+                SURFACE0,
+                0.5,
+            );
         }
 
-        // Timed events
-        let timed_events: Vec<_> = self
-            .store
-            .events_on(self.view_date)
-            .into_iter()
-            .filter(|e| !e.all_day)
-            .collect();
-        let event_w = w - time_col_w - 16.0;
-
-        for ev in &timed_events {
+        for ev in day_events.iter().filter(|e| !e.all_day) {
             let start_min = ev.start.time.to_minutes() as f32;
             let end_min = ev.end.time.to_minutes() as f32;
-            let ey = grid_y + (start_min / 60.0) * hour_h;
-            let eh = ((end_min - start_min) / 60.0) * hour_h;
-
-            cmds.push(RenderCommand::FillRect {
-                x: x + time_col_w + 4.0,
-                y: ey,
-                width: event_w,
-                height: eh.max(20.0),
-                color: ev.effective_color(),
-                corner_radii: CornerRadii::all(4.0),
-            });
-
-            cmds.push(RenderCommand::Text {
-                x: x + time_col_w + 10.0,
-                y: ey + 4.0,
-                text: ev.title.clone(),
-                font_size: 12.0,
-                color: CRUST,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(event_w - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            if eh > 24.0 {
-                cmds.push(RenderCommand::Text {
-                    x: x + time_col_w + 10.0,
-                    y: ey + 18.0,
-                    text: ev.time_range_label(),
-                    font_size: 10.0,
-                    color: CRUST,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(event_w - 16.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
+            let block = Rect::new(
+                area.x + DAY_TIME_COL_W + 4.0,
+                grid_y + (start_min / 60.0) * DAY_HOUR_H,
+                event_w,
+                (((end_min - start_min) / 60.0) * DAY_HOUR_H).max(20.0),
+            );
+            fill(frame, block, ev.effective_color(), 4.0);
+            label(
+                frame,
+                block.x + 6.0,
+                block.y + 4.0,
+                ev.title.clone(),
+                12.0,
+                CRUST,
+                FontWeightHint::Bold,
+                Some((block.w - 16.0).max(1.0)),
+            );
+            if block.h > 24.0 {
+                label(
+                    frame,
+                    block.x + 6.0,
+                    block.y + 18.0,
+                    ev.time_range_label(),
+                    10.0,
+                    CRUST,
+                    FontWeightHint::Regular,
+                    Some((block.w - 16.0).max(1.0)),
+                );
             }
-
-            if eh > 40.0
-                && let Some(loc) = &ev.location {
-                    cmds.push(RenderCommand::Text {
-                        x: x + time_col_w + 10.0,
-                        y: ey + 32.0,
-                        text: loc.clone(),
-                        font_size: 10.0,
-                        color: CRUST,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(event_w - 16.0),
-                        overflow: TextOverflow::Ellipsis,
-                    });
-                }
+            if block.h > 40.0
+                && let Some(loc) = &ev.location
+            {
+                label(
+                    frame,
+                    block.x + 6.0,
+                    block.y + 32.0,
+                    loc.clone(),
+                    10.0,
+                    CRUST,
+                    FontWeightHint::Regular,
+                    Some((block.w - 16.0).max(1.0)),
+                );
+            }
+            if self.selected_event_id == Some(ev.id) {
+                stroke(frame, block, TEXT, 4.0, 1.5);
+            }
+            frame.hit(Target::Event(ev.id), block);
         }
     }
 
-    fn render_year_view(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32) {
-        let cols = 4;
-        let rows = 3;
-        let month_w = w / cols as f32;
-        let month_h = (self.height - y - 10.0) / rows as f32;
+    fn draw_year_view(&self, frame: &mut Frame, area: Rect) {
+        let month_w = area.w / YEAR_COLS as f32;
+        let month_h = self.year_month_h(area);
 
         for month in 1..=12u32 {
-            let col = ((month - 1) % cols as u32) as f32;
-            let row = ((month - 1) / cols as u32) as f32;
-            let mx = x + col * month_w;
-            let my = y + row * month_h;
+            let index = month.saturating_sub(1) as usize;
+            let mx = area.x + (index % YEAR_COLS) as f32 * month_w;
+            let my = area.y + (index / YEAR_COLS) as f32 * month_h;
 
-            // Month name
             let is_current_month =
                 self.view_date.year == self.today.year && month == self.today.month;
+            label(
+                frame,
+                mx + 8.0,
+                my + 4.0,
+                month_name(month),
+                12.0,
+                if is_current_month { BLUE } else { TEXT },
+                FontWeightHint::Bold,
+                Some((month_w - 16.0).max(1.0)),
+            );
 
-            cmds.push(RenderCommand::Text {
-                x: mx + 8.0,
-                y: my + 4.0,
-                text: month_name(month).to_string(),
-                font_size: 12.0,
-                color: if is_current_month { BLUE } else { TEXT },
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(month_w - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Mini day grid
             let cell_w = (month_w - 16.0) / 7.0;
             let cell_h = 14.0;
             let grid_y = my + 22.0;
-
             let first_dow = first_dow_of_month(self.view_date.year, month);
-            let start_offset = if self.week_starts_monday {
-                if first_dow == 0 { 6 } else { first_dow - 1 }
-            } else {
-                first_dow
-            };
+            let start_offset = self.start_offset(first_dow);
             let total = days_in_month(self.view_date.year, month);
 
             for day in 1..=total {
-                let pos = (day - 1 + start_offset) as usize;
-                let r = pos / 7;
-                let c = pos % 7;
-                let dx = mx + 8.0 + c as f32 * cell_w;
-                let dy = grid_y + r as f32 * cell_h;
+                let pos = day.saturating_sub(1).saturating_add(start_offset) as usize;
+                let cell = Rect::new(
+                    mx + 8.0 + (pos % 7) as f32 * cell_w,
+                    grid_y + (pos / 7) as f32 * cell_h,
+                    cell_w,
+                    cell_h,
+                );
 
                 let date = Date {
                     year: self.view_date.year,
@@ -2047,160 +2336,552 @@ impl CalendarApp {
                     day,
                 };
                 let is_today = date.is_today(self.today);
-                let has_events = !self.store.events_on(date).is_empty();
+                let has_events = !self.visible_events_on(date).is_empty();
 
                 if is_today {
-                    cmds.push(RenderCommand::FillRect {
-                        x: dx - 1.0,
-                        y: dy - 1.0,
-                        width: cell_w,
-                        height: cell_h - 1.0,
-                        color: BLUE,
-                        corner_radii: CornerRadii::all(2.0),
-                    });
+                    fill(
+                        frame,
+                        Rect::new(cell.x - 1.0, cell.y - 1.0, cell_w, cell_h - 1.0),
+                        BLUE,
+                        2.0,
+                    );
                 }
 
-                let fg = if is_today {
-                    CRUST
-                } else if has_events {
-                    PEACH
-                } else if date.is_weekend() {
-                    OVERLAY0
-                } else {
-                    SUBTEXT0
-                };
+                label(
+                    frame,
+                    cell.x,
+                    cell.y,
+                    day.to_string(),
+                    8.0,
+                    if is_today {
+                        CRUST
+                    } else if has_events {
+                        PEACH
+                    } else if date.is_weekend() {
+                        OVERLAY0
+                    } else {
+                        SUBTEXT0
+                    },
+                    FontWeightHint::Regular,
+                    Some(cell_w.max(1.0)),
+                );
 
-                cmds.push(RenderCommand::Text {
-                    x: dx,
-                    y: dy,
-                    text: day.to_string(),
-                    font_size: 8.0,
-                    color: fg,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(cell_w),
-                    overflow: TextOverflow::Ellipsis,
-                });
+                frame.hit(Target::Day(date), cell);
             }
         }
     }
 
-    fn render_agenda_view(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32) {
-        let upcoming = self.store.upcoming(self.view_date, 30);
+    fn draw_agenda_view(&self, frame: &mut Frame, area: Rect) {
+        let events = self.agenda_events();
 
-        cmds.push(RenderCommand::Text {
-            x: x + 16.0,
-            y: y + 8.0,
-            text: format!("Upcoming Events ({})", upcoming.len()),
-            font_size: 14.0,
-            color: TEXT,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(w - 32.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        label(
+            frame,
+            area.x + 16.0,
+            area.y + 8.0,
+            if self.search_query.is_empty() {
+                format!("Upcoming Events ({})", events.len())
+            } else {
+                format!("{} matching \"{}\"", events.len(), self.search_query)
+            },
+            14.0,
+            TEXT,
+            FontWeightHint::Bold,
+            Some((area.w - 32.0).max(1.0)),
+        );
 
-        let mut row_y = y + 36.0;
-        let mut last_date: Option<Date> = None;
+        let mut row_y = area.y + AGENDA_TOP;
+        let mut last_date: Option<Date> = Option::None;
 
-        for ev in &upcoming {
-            // Date header if different from last
+        for ev in &events {
             if last_date != Some(ev.start.date) {
                 if last_date.is_some() {
-                    row_y += 8.0;
+                    row_y += AGENDA_GROUP_GAP;
                 }
-
                 let is_today = ev.start.date.is_today(self.today);
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 8.0,
-                    y: row_y,
-                    width: w - 16.0,
-                    height: 22.0,
-                    color: if is_today { SURFACE0 } else { MANTLE },
-                    corner_radii: CornerRadii::all(4.0),
-                });
-                cmds.push(RenderCommand::Text {
-                    x: x + 16.0,
-                    y: row_y + 4.0,
-                    text: if is_today {
+                let head = Rect::new(area.x + 8.0, row_y, (area.w - 16.0).max(1.0), 22.0);
+                fill(frame, head, if is_today { SURFACE0 } else { MANTLE }, 4.0);
+                label(
+                    frame,
+                    head.x + 8.0,
+                    head.y + 4.0,
+                    if is_today {
                         format!("Today - {}", ev.start.date.format_long())
                     } else {
                         ev.start.date.format_long()
                     },
-                    font_size: 12.0,
-                    color: if is_today { BLUE } else { TEXT },
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(w - 40.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                row_y += 26.0;
+                    12.0,
+                    if is_today { BLUE } else { TEXT },
+                    FontWeightHint::Bold,
+                    Some((head.w - 24.0).max(1.0)),
+                );
+                frame.hit(Target::Day(ev.start.date), head);
+                row_y += AGENDA_HEADER_H;
                 last_date = Some(ev.start.date);
             }
 
-            // Event card
-            cmds.push(RenderCommand::FillRect {
-                x: x + 16.0,
-                y: row_y,
-                width: 4.0,
-                height: 40.0,
-                color: ev.effective_color(),
-                corner_radii: CornerRadii::all(2.0),
-            });
-
-            cmds.push(RenderCommand::Text {
-                x: x + 28.0,
-                y: row_y + 2.0,
-                text: ev.title.clone(),
-                font_size: 13.0,
-                color: TEXT,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(w - 100.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            cmds.push(RenderCommand::Text {
-                x: x + 28.0,
-                y: row_y + 18.0,
-                text: format!(
+            let card = Rect::new(area.x + 16.0, row_y, (area.w - 32.0).max(1.0), 40.0);
+            fill(
+                frame,
+                Rect::new(card.x, card.y, 4.0, card.h),
+                ev.effective_color(),
+                2.0,
+            );
+            label(
+                frame,
+                card.x + 12.0,
+                card.y + 2.0,
+                ev.title.clone(),
+                13.0,
+                TEXT,
+                FontWeightHint::Bold,
+                Some((card.w - 84.0).max(1.0)),
+            );
+            label(
+                frame,
+                card.x + 12.0,
+                card.y + 18.0,
+                format!(
                     "{} | {} | {}",
                     ev.time_range_label(),
                     ev.duration_label(),
                     ev.category.label()
                 ),
-                font_size: 10.0,
-                color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w - 60.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
+                10.0,
+                SUBTEXT0,
+                FontWeightHint::Regular,
+                Some((card.w - 44.0).max(1.0)),
+            );
             if let Some(loc) = &ev.location {
-                cmds.push(RenderCommand::Text {
-                    x: x + 28.0,
-                    y: row_y + 30.0,
-                    text: loc.clone(),
-                    font_size: 10.0,
-                    color: OVERLAY0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(w - 60.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
+                label(
+                    frame,
+                    card.x + 12.0,
+                    card.y + 30.0,
+                    loc.clone(),
+                    10.0,
+                    OVERLAY0,
+                    FontWeightHint::Regular,
+                    Some((card.w - 44.0).max(1.0)),
+                );
             }
+            if self.selected_event_id == Some(ev.id) {
+                stroke(frame, card, TEXT, 4.0, 1.5);
+            }
+            frame.hit(Target::Event(ev.id), card);
 
-            row_y += 46.0;
+            row_y += AGENDA_EVENT_H;
         }
 
-        if upcoming.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 60.0,
-                y: y + 100.0,
-                text: "No upcoming events".to_string(),
-                font_size: 14.0,
-                color: OVERLAY0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(200.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        if events.is_empty() {
+            label(
+                frame,
+                area.x + area.w / 2.0 - 60.0,
+                area.y + 100.0,
+                if self.search_query.is_empty() {
+                    "No upcoming events"
+                } else {
+                    "Nothing matches that search"
+                },
+                14.0,
+                OVERLAY0,
+                FontWeightHint::Regular,
+                Some(220.0),
+            );
         }
     }
+}
+
+// ============================================================================
+// Drawing helpers
+// ============================================================================
+//
+// Four shapes cover everything this app paints. They exist so the drawing code
+// reads as a description of the calendar rather than as a wall of struct
+// literals with eight fields each.
+
+fn fill(frame: &mut Frame, rect: Rect, color: Color, radius: f32) {
+    frame.push(RenderCommand::FillRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.w,
+        height: rect.h,
+        color,
+        corner_radii: if radius > 0.0 {
+            CornerRadii::all(radius)
+        } else {
+            CornerRadii::ZERO
+        },
+    });
+}
+
+fn stroke(frame: &mut Frame, rect: Rect, color: Color, radius: f32, line_width: f32) {
+    frame.push(RenderCommand::StrokeRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.w,
+        height: rect.h,
+        color,
+        corner_radii: if radius > 0.0 {
+            CornerRadii::all(radius)
+        } else {
+            CornerRadii::ZERO
+        },
+        line_width,
+    });
+}
+
+fn label(
+    frame: &mut Frame,
+    x: f32,
+    y: f32,
+    text: impl Into<String>,
+    font_size: f32,
+    color: Color,
+    font_weight: FontWeightHint,
+    max_width: Option<f32>,
+) {
+    frame.push(RenderCommand::Text {
+        x,
+        y,
+        text: text.into(),
+        font_size,
+        color,
+        font_weight,
+        max_width,
+        overflow: if max_width.is_some() {
+            TextOverflow::Ellipsis
+        } else {
+            TextOverflow::Clip
+        },
+    });
+}
+
+fn line(frame: &mut Frame, x1: f32, y1: f32, x2: f32, y2: f32, color: Color, width: f32) {
+    frame.push(RenderCommand::Line {
+        x1,
+        y1,
+        x2,
+        y2,
+        color,
+        width,
+    });
+}
+
+fn draw_nav_button(frame: &mut Frame, rect: Rect, glyph: &str, target: Target) {
+    fill(frame, rect, SURFACE0, 4.0);
+    label(
+        frame,
+        rect.x + rect.w / 2.0 - 4.0,
+        rect.y + rect.h / 2.0 - 6.0,
+        glyph,
+        14.0,
+        TEXT,
+        FontWeightHint::Bold,
+        Option::None,
+    );
+    frame.hit(target, rect);
+}
+
+// ============================================================================
+// Input
+// ============================================================================
+
+/// The one body both the window and the test probe drive the calendar through.
+pub fn handle_event(state: &mut CalendarApp, event: &Event) -> EventResult {
+    match event {
+        Event::Key(key) if key.pressed => handle_key(state, key),
+        Event::Mouse(mouse) => handle_mouse(state, mouse),
+        Event::Resize { width, height } => {
+            state.resize(*width as f32, *height as f32);
+            EventResult::Consumed
+        }
+        Event::Tick { .. } => {
+            // Midnight. "Today" is drawn in blue in five different places, and
+            // without this it would stay on yesterday until something else
+            // happened to cause a repaint.
+            match today_from_clock() {
+                Some(now) if now != state.today => {
+                    state.today = now;
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+        Event::CloseRequested => {
+            state.running = false;
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+/// The view a digit key selects, by its index in [`CalendarView::all`].
+fn view_for_digit(key: Key) -> Option<usize> {
+    match key {
+        Key::Num1 => Some(0),
+        Key::Num2 => Some(1),
+        Key::Num3 => Some(2),
+        Key::Num4 => Some(3),
+        Key::Num5 => Some(4),
+        _ => Option::None,
+    }
+}
+
+fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
+    if key.modifiers.ctrl {
+        return match key.key {
+            Key::F => {
+                state.search_focused = true;
+                EventResult::Consumed
+            }
+            Key::B => {
+                state.sidebar_visible = !state.sidebar_visible;
+                state.clamp_scroll();
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        };
+    }
+
+    if state.search_focused {
+        match key.key {
+            Key::Escape => {
+                state.search_query.clear();
+                state.search();
+                state.search_focused = false;
+                state.clamp_scroll();
+                return EventResult::Consumed;
+            }
+            Key::Backspace => {
+                state.search_query.pop();
+                state.search();
+                state.content_scroll = 0.0;
+                return EventResult::Consumed;
+            }
+            Key::Enter => {
+                state.search_focused = false;
+                return EventResult::Consumed;
+            }
+            _ if key.types_text() => {
+                state.search_query.extend(key.typed());
+                state.search();
+                // The agenda is the only view that shows results, so a search
+                // that leaves you looking at a month grid has found nothing as
+                // far as the user can tell.
+                state.view = CalendarView::Agenda;
+                state.content_scroll = 0.0;
+                return EventResult::Consumed;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(index) = view_for_digit(key.key)
+        && let Some(view) = CalendarView::all().get(index)
+    {
+        state.view = *view;
+        state.content_scroll = 0.0;
+        return EventResult::Consumed;
+    }
+
+    match key.key {
+        Key::Left | Key::PageUp => {
+            state.navigate_backward();
+            state.content_scroll = 0.0;
+            EventResult::Consumed
+        }
+        Key::Right | Key::PageDown => {
+            state.navigate_forward();
+            state.content_scroll = 0.0;
+            EventResult::Consumed
+        }
+        Key::Home => {
+            state.go_to_today();
+            state.content_scroll = 0.0;
+            EventResult::Consumed
+        }
+        Key::Up => {
+            state.content_scroll -= WEEK_HOUR_H;
+            state.clamp_scroll();
+            EventResult::Consumed
+        }
+        Key::Down => {
+            state.content_scroll += WEEK_HOUR_H;
+            state.clamp_scroll();
+            EventResult::Consumed
+        }
+        Key::Escape => {
+            state.selected_event_id = Option::None;
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+fn handle_mouse(state: &mut CalendarApp, mouse: &MouseEvent) -> EventResult {
+    let (x, y) = (mouse.x, mouse.y);
+
+    match &mouse.kind {
+        MouseEventKind::Press(MouseButton::Left) => {
+            let hit = state.target_at(x, y);
+            state.search_focused = matches!(hit, Some(Target::SearchField));
+
+            match hit {
+                Some(Target::NavBack) => {
+                    state.navigate_backward();
+                    state.content_scroll = 0.0;
+                }
+                Some(Target::NavForward) => {
+                    state.navigate_forward();
+                    state.content_scroll = 0.0;
+                }
+                Some(Target::TodayButton) => {
+                    state.go_to_today();
+                    state.content_scroll = 0.0;
+                }
+                Some(Target::ViewTab(index)) => {
+                    if let Some(view) = CalendarView::all().get(index) {
+                        state.view = *view;
+                        state.content_scroll = 0.0;
+                    }
+                }
+                Some(Target::MiniPrevMonth) => state.step_mini_month(-1),
+                Some(Target::MiniNextMonth) => state.step_mini_month(1),
+                Some(Target::MiniDay(date)) => state.select_date(date),
+                Some(Target::Day(date)) => {
+                    state.select_date(date);
+                    // In the year view a day is eight pixels of nothing much.
+                    // Clicking one means "show me that month".
+                    if state.view == CalendarView::Year {
+                        state.view = CalendarView::Month;
+                        state.content_scroll = 0.0;
+                    }
+                }
+                Some(Target::CategoryFilter(index)) => {
+                    if let Some(cat) = EventCategory::all().get(index) {
+                        state.category_filter = if state.category_filter == Some(*cat) {
+                            Option::None
+                        } else {
+                            Some(*cat)
+                        };
+                    }
+                }
+                Some(Target::Event(id)) => state.selected_event_id = Some(id),
+                // Consumed either way: the click landed on this window.
+                Some(Target::SearchField) | Option::None => {}
+            }
+
+            state.clamp_scroll();
+            EventResult::Consumed
+        }
+
+        MouseEventKind::Scroll { dy, .. } => {
+            // `dy` is a notch count, not a distance.
+            let step = wheel::pixels(*dy, WEEK_HOUR_H);
+            let layout = state.layout();
+
+            if let Some(bar) = layout.sidebar
+                && bar.contains(x, y)
+            {
+                // Nothing in the sidebar scrolls, so the wheel does there what
+                // the two arrows above the mini calendar do.
+                if step > 0.0 {
+                    state.step_mini_month(1);
+                } else if step < 0.0 {
+                    state.step_mini_month(-1);
+                }
+                return EventResult::Consumed;
+            }
+
+            if layout.content.contains(x, y) {
+                state.content_scroll += step;
+                state.clamp_scroll();
+                return EventResult::Consumed;
+            }
+
+            EventResult::Ignored
+        }
+
+        _ => EventResult::Ignored,
+    }
+}
+
+// ============================================================================
+// Window
+// ============================================================================
+
+impl App for CalendarApp {
+    fn title(&self) -> String {
+        String::from("Calendar")
+    }
+
+    fn app_id(&self) -> String {
+        String::from("calendar")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (DEFAULT_WIDTH as u32, DEFAULT_HEIGHT as u32)
+    }
+
+    /// A minute. Long enough to be free, short enough that "today" moves to the
+    /// new day within a minute of midnight rather than whenever the user next
+    /// happens to click something.
+    fn tick_interval(&self) -> Option<Duration> {
+        Some(Duration::from_mins(1))
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        let result = handle_event(self, event);
+        if !self.running {
+            return Response::Exit;
+        }
+        match result {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for CalendarApp {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (DEFAULT_WIDTH, DEFAULT_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
+    }
+}
+
+/// Today's civil date from the system clock, or `None` before the epoch.
+///
+/// `main` used to open on a hardcoded 2026-05-18, so every "today" highlight in
+/// the app pointed at a day in the past.
+fn today_from_clock() -> Option<Date> {
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    Some(Date::from_civil(date::Date::from_unix_utc(
+        i64::try_from(secs).ok()?,
+    )))
 }
 
 // ============================================================================
@@ -2391,31 +3072,22 @@ fn sample_events(store: &mut EventStore, today: Date) {
     });
 }
 
-fn main() {
-    let today = Date {
-        year: 2026,
-        month: 5,
-        day: 18,
-    };
-    let mut app = CalendarApp::new(1280.0, 720.0, today);
+// ============================================================================
+// Entry point
+// ============================================================================
 
+fn main() -> ExitCode {
+    // A clock that cannot be read at all is a broken machine, not a reason to
+    // refuse to open a calendar; fall back to the epoch's own new year so the
+    // failure is visible rather than plausible.
+    let today = today_from_clock().unwrap_or(Date {
+        year: 1970,
+        month: 1,
+        day: 1,
+    });
+    let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, today);
     sample_events(&mut app.store, today);
-
-    // Verify all views render
-    for view in CalendarView::all() {
-        app.view = *view;
-        let cmds = app.render();
-        let _ = cmds.len();
-    }
-
-    // Test navigation
-    app.navigate_forward();
-    app.navigate_backward();
-    app.go_to_today();
-
-    // Test ICS export
-    let ics = app.store.export_ics("My Calendar");
-    let _ = ics.len();
+    app::launch("calendar", &mut app)
 }
 
 // ============================================================================
@@ -2424,7 +3096,40 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
+    use guitk::probe;
+
+    /// The draw commands of one frame at the app's current size.
+    fn render(app: &CalendarApp) -> Vec<RenderCommand> {
+        app.frame(app.width, app.height).commands().to_vec()
+    }
+
+    /// A calendar with the sample events, opened at the default window size.
+    fn sample_app(today: Date) -> CalendarApp {
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, today);
+        sample_events(&mut app.store, today);
+        app
+    }
+
+    fn june_2024() -> Date {
+        Date {
+            year: 2024,
+            month: 6,
+            day: 15,
+        }
+    }
 
     // Date tests
     #[test]
@@ -3240,7 +3945,7 @@ mod tests {
 
         for view in CalendarView::all() {
             app.view = *view;
-            let cmds = app.render();
+            let cmds = render(&app);
             assert!(!cmds.is_empty(), "View {:?} produced no commands", view);
         }
     }
@@ -3254,7 +3959,7 @@ mod tests {
         };
         let mut app = CalendarApp::new(800.0, 600.0, today);
         app.sidebar_visible = false;
-        let cmds = app.render();
+        let cmds = render(&app);
         assert!(!cmds.is_empty());
     }
 
@@ -3573,5 +4278,496 @@ mod tests {
         assert_eq!(upcoming.len(), 2);
         assert_eq!(upcoming[0].title, "Sooner");
         assert_eq!(upcoming[1].title, "Later");
+    }
+
+    // ========================================================================
+    // Window, layout and input
+    //
+    // Everything below exercises the app through the same two doors the
+    // compositor uses: a frame that records where it painted, and an event.
+    // ========================================================================
+
+    /// An event at `hour` on `date`, added to `app`, returning its id.
+    fn add_event_at(app: &mut CalendarApp, date: Date, hour: u32, title: &str) -> u64 {
+        app.store.add(CalendarEvent {
+            id: 0,
+            title: title.to_string(),
+            description: String::new(),
+            category: EventCategory::Personal,
+            start: DateTime::new(date, Time { hour, minute: 0 }),
+            end: DateTime::new(
+                date,
+                Time {
+                    hour: hour + 1,
+                    minute: 0,
+                },
+            ),
+            all_day: false,
+            recurrence: RecurrenceRule::None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
+        })
+    }
+
+    #[test]
+    fn the_window_declares_the_size_the_probe_draws_at() {
+        let app = sample_app(june_2024());
+        assert_eq!(
+            app.initial_size(),
+            (DEFAULT_WIDTH as u32, DEFAULT_HEIGHT as u32)
+        );
+        assert_eq!(CalendarApp::SIZE, (DEFAULT_WIDTH, DEFAULT_HEIGHT));
+        assert_eq!(app.title(), "Calendar");
+        assert!(app.tick_interval().is_some());
+    }
+
+    #[test]
+    fn every_view_draws_a_balanced_frame_at_every_reasonable_size() {
+        for (w, h) in [
+            (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+            (1920.0, 1080.0),
+            (800.0, 600.0),
+            (480.0, 360.0),
+            (320.0, 240.0),
+        ] {
+            let mut app = sample_app(june_2024());
+            app.resize(w, h);
+            for view in CalendarView::all() {
+                app.view = *view;
+                let frame = app.frame(w, h);
+                assert!(
+                    frame.is_balanced(),
+                    "{view:?} at {w}x{h} left a clip or translate open"
+                );
+                assert!(
+                    !frame.commands().is_empty(),
+                    "{view:?} at {w}x{h} painted nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_layout_follows_the_window_instead_of_a_constant() {
+        // The old renderer hardcoded a 220px sidebar and took the rest, at
+        // whatever size the window happened to be. The content area is the
+        // thing that has to grow.
+        let wide = Layout::new(1920.0, 1080.0, true);
+        let narrow = Layout::new(900.0, 600.0, true);
+        assert!(wide.content.w > narrow.content.w);
+        assert_eq!(wide.content.right(), 1920.0);
+        assert_eq!(narrow.content.right(), 900.0);
+        assert_eq!(wide.content.bottom(), 1080.0);
+    }
+
+    #[test]
+    fn the_view_tabs_never_run_off_the_right_edge() {
+        // They are the only way to change view, so they shrink rather than
+        // leave the window. Everything else in the bar gives way to them.
+        for width in [320.0, 400.0, 520.0, 640.0, 900.0, 1280.0, 1920.0] {
+            let layout = Layout::new(width, 720.0, true);
+            let last = layout.view_tab(CalendarView::all().len() - 1);
+            assert!(
+                last.right() <= width + 0.01,
+                "at width {width} the last tab ended at {}",
+                last.right()
+            );
+            assert!(layout.view_tab(0).x >= CHROME_LEFT - 0.01);
+            assert!(last.w >= 1.0);
+        }
+    }
+
+    #[test]
+    fn a_narrow_window_drops_the_caption_before_the_search_box() {
+        // Both are droppable; the caption goes first because it only names a
+        // view that is already on screen, while the search box is the only way
+        // to reach an event by name.
+        let mut caption_only_widths = 0;
+        for width in [320.0, 500.0, 700.0, 900.0, 1100.0, 1400.0] {
+            let layout = Layout::new(width, 720.0, true);
+            if layout.search.is_some() {
+                // Whenever there is room for the search box there is room for
+                // the caption too, by construction.
+                assert!(
+                    layout.header.is_some(),
+                    "at width {width} the search box survived but the caption did not"
+                );
+            } else if layout.header.is_some() {
+                caption_only_widths += 1;
+            }
+        }
+        assert!(
+            caption_only_widths > 0,
+            "no width dropped the search box while keeping the caption"
+        );
+    }
+
+    #[test]
+    fn the_sidebar_goes_when_the_content_cannot_spare_it() {
+        assert!(Layout::new(1280.0, 720.0, true).sidebar.is_some());
+        assert!(Layout::new(400.0, 720.0, true).sidebar.is_none());
+        // …and the content then starts at the left edge rather than at 220.
+        assert_eq!(Layout::new(400.0, 720.0, true).content.x, 0.0);
+        // Asking for no sidebar is honoured at any width.
+        assert!(Layout::new(1920.0, 1080.0, false).sidebar.is_none());
+    }
+
+    #[test]
+    fn a_category_row_below_a_short_sidebar_is_not_clickable() {
+        // It is drawn inside the sidebar's clip, so both the ink and the box
+        // are dropped. The renderer decides this once; nothing re-derives it.
+        let mut app = sample_app(june_2024());
+        app.resize(1280.0, 280.0);
+        let last = EventCategory::all().len() - 1;
+        assert!(
+            probe::rect_of_sized(&app, Target::CategoryFilter(last), (1280.0, 280.0)).is_none(),
+            "the bottom category row survived a 280px window"
+        );
+        app.resize(1280.0, 720.0);
+        assert!(probe::rect_of(&app, Target::CategoryFilter(last)).is_some());
+    }
+
+    #[test]
+    fn clicking_a_day_selects_it_and_the_mini_calendar_follows() {
+        let mut app = sample_app(june_2024());
+        let target = Date {
+            year: 2024,
+            month: 6,
+            day: 20,
+        };
+        assert_eq!(
+            probe::click(&mut app, Target::Day(target)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.selected_date, target);
+        assert_eq!(app.mini_cal_month, 6);
+        assert_eq!(app.mini_cal_year, 2024);
+
+        // A day in another month drags the sidebar with it.
+        app.view_date = Date {
+            year: 2024,
+            month: 7,
+            day: 1,
+        };
+        app.select_date(Date {
+            year: 2024,
+            month: 7,
+            day: 4,
+        });
+        assert_eq!(app.mini_cal_month, 7);
+    }
+
+    #[test]
+    fn the_day_a_click_lands_on_is_the_day_that_was_drawn() {
+        // This is the whole point of recording hit boxes while painting: there
+        // is no second expression to keep in step with the first.
+        let app = sample_app(june_2024());
+        for day in [1u32, 9, 17, 30] {
+            let date = Date {
+                year: 2024,
+                month: 6,
+                day,
+            };
+            let rect = probe::rect_of(&app, Target::Day(date))
+                .unwrap_or_else(|| panic!("June {day} was not drawn"));
+            // The lower part of the cell, below where event chips stack: those
+            // deliberately take the click off the cell they sit on.
+            let (cx, _) = rect.centre();
+            assert_eq!(
+                app.target_at(cx, rect.bottom() - 4.0),
+                Some(Target::Day(date))
+            );
+        }
+    }
+
+    #[test]
+    fn an_event_chip_takes_the_click_off_the_day_it_sits_on() {
+        // Both boxes cover the point; the one recorded later wins, and the
+        // event is drawn on top of the cell.
+        let today = june_2024();
+        let mut app = sample_app(today);
+        let id = add_event_at(&mut app, today, 9, "Standup");
+        let chip = probe::rect_of(&app, Target::Event(id)).expect("the chip was drawn");
+        let cell = probe::rect_of(&app, Target::Day(today)).expect("the cell was drawn");
+        let (cx, cy) = chip.centre();
+        assert!(cell.contains(cx, cy), "the chip is not inside its own cell");
+        assert_eq!(app.target_at(cx, cy), Some(Target::Event(id)));
+    }
+
+    #[test]
+    fn the_view_tabs_and_nav_buttons_do_what_they_say() {
+        let mut app = sample_app(june_2024());
+        for (i, view) in CalendarView::all().iter().enumerate() {
+            probe::click(&mut app, Target::ViewTab(i));
+            assert_eq!(app.view, *view);
+        }
+
+        app.view = CalendarView::Month;
+        app.view_date = june_2024();
+        probe::click(&mut app, Target::NavForward);
+        assert_eq!(app.view_date.month, 7);
+        probe::click(&mut app, Target::NavBack);
+        assert_eq!(app.view_date.month, 6);
+
+        app.view_date = Date {
+            year: 2020,
+            month: 1,
+            day: 1,
+        };
+        probe::click(&mut app, Target::TodayButton);
+        assert_eq!(app.view_date, app.today);
+    }
+
+    #[test]
+    fn the_category_filter_actually_filters() {
+        // It used to change the colour of its own swatch and nothing else:
+        // every view called `store.events_on` directly.
+        let today = june_2024();
+        let mut app = sample_app(today);
+        let unfiltered = app.visible_events_on(today).len();
+        assert!(unfiltered > 0, "the sample data has nothing on the day");
+
+        let index = EventCategory::all()
+            .iter()
+            .position(|c| *c == EventCategory::Meeting)
+            .expect("Meeting is a category");
+        probe::click(&mut app, Target::CategoryFilter(index));
+        assert_eq!(app.category_filter, Some(EventCategory::Meeting));
+        assert!(
+            app.visible_events_on(today)
+                .iter()
+                .all(|e| e.category == EventCategory::Meeting)
+        );
+
+        // Clicking the same swatch again clears the filter.
+        probe::click(&mut app, Target::CategoryFilter(index));
+        assert_eq!(app.category_filter, None);
+        assert_eq!(app.visible_events_on(today).len(), unfiltered);
+    }
+
+    #[test]
+    fn the_late_evening_is_reachable_in_the_day_view() {
+        // 24 hours at 60px is 1440px of grid in a 720px window. Before there
+        // was a window there was no wheel, and everything after early
+        // afternoon was simply unreachable.
+        let today = june_2024();
+        let mut app = sample_app(today);
+        app.view = CalendarView::Day;
+        app.view_date = today;
+        let id = add_event_at(&mut app, today, 22, "Late film");
+
+        assert!(
+            app.max_content_scroll() > 0.0,
+            "the day view did not scroll"
+        );
+        assert!(
+            probe::rect_of(&app, Target::Event(id)).is_none(),
+            "a 22:00 event was clickable before scrolling to it"
+        );
+
+        app.content_scroll = app.max_content_scroll();
+        let rect = probe::rect_of(&app, Target::Event(id))
+            .expect("scrolling to the bottom should reach a 22:00 event");
+        let content = app.layout().content;
+        assert!(rect.y >= content.y - 0.01 && rect.bottom() <= content.bottom() + 0.01);
+
+        // And the click resolves to it where it is now drawn.
+        let (cx, cy) = rect.centre();
+        assert_eq!(app.target_at(cx, cy), Some(Target::Event(id)));
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_week_view_and_stops_at_both_ends() {
+        let mut app = sample_app(june_2024());
+        app.view = CalendarView::Week;
+        let content = app.layout().content;
+        let (x, y) = content.centre();
+
+        let scroll = |app: &mut CalendarApp, dy: f32| {
+            handle_event(
+                app,
+                &Event::Mouse(MouseEvent {
+                    x,
+                    y,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy },
+                }),
+            )
+        };
+
+        for _ in 0..100 {
+            scroll(&mut app, -1.0);
+        }
+        let bottom = app.content_scroll;
+        assert!(bottom > 0.0, "the wheel did not move the week view");
+        assert_eq!(bottom, app.max_content_scroll());
+
+        for _ in 0..200 {
+            scroll(&mut app, 1.0);
+        }
+        assert_eq!(app.content_scroll, 0.0);
+    }
+
+    #[test]
+    fn the_wheel_over_the_sidebar_steps_the_mini_calendar() {
+        let mut app = sample_app(june_2024());
+        let bar = app.layout().sidebar.expect("the sidebar fits at 1280x720");
+        let (x, y) = bar.centre();
+        let start = app.mini_cal_month;
+
+        handle_event(
+            &mut app,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+            }),
+        );
+        assert_ne!(app.mini_cal_month, start);
+        assert_eq!(app.content_scroll, 0.0, "the content moved too");
+    }
+
+    #[test]
+    fn a_search_puts_its_results_where_they_can_be_seen() {
+        // `search_results` was computed by `search()` and then read by nothing
+        // at all — there was no search UI.
+        let mut app = sample_app(june_2024());
+        probe::click(&mut app, Target::SearchField);
+        assert!(app.search_focused);
+
+        probe::type_str(&mut app, "Lunch");
+        assert_eq!(app.search_query, "Lunch");
+        assert_eq!(app.view, CalendarView::Agenda);
+        assert!(!app.search_results.is_empty());
+        let listed = app.agenda_events();
+        assert!(!listed.is_empty());
+        assert!(listed.iter().all(|e| e.title.contains("Lunch")));
+
+        // Escape empties the box and hands the keyboard back.
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(app.search_query.is_empty());
+        assert!(!app.search_focused);
+    }
+
+    #[test]
+    fn a_selected_event_is_outlined_where_it_is_drawn() {
+        let today = june_2024();
+        let mut app = sample_app(today);
+        app.view = CalendarView::Day;
+        app.view_date = today;
+        let id = add_event_at(&mut app, today, 9, "Standup");
+
+        let before = render(&app)
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::StrokeRect { .. }))
+            .count();
+        probe::click(&mut app, Target::Event(id));
+        assert_eq!(app.selected_event_id, Some(id));
+        let after = render(&app)
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::StrokeRect { .. }))
+            .count();
+        assert!(
+            after > before,
+            "selecting an event drew no outline ({before} -> {after})"
+        );
+
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert_eq!(app.selected_event_id, None);
+    }
+
+    #[test]
+    fn a_year_view_day_click_opens_that_month() {
+        let mut app = sample_app(june_2024());
+        app.view = CalendarView::Year;
+        let target = Date {
+            year: 2024,
+            month: 11,
+            day: 5,
+        };
+        probe::click(&mut app, Target::Day(target));
+        assert_eq!(app.view, CalendarView::Month);
+        assert_eq!(app.view_date.month, 11);
+        assert_eq!(app.selected_date, target);
+    }
+
+    #[test]
+    fn the_keyboard_navigates_switches_view_and_scrolls() {
+        let mut app = sample_app(june_2024());
+        app.view = CalendarView::Month;
+
+        probe::key(&mut app, &probe::press(Key::Right));
+        assert_eq!(app.view_date.month, 7);
+        probe::key(&mut app, &probe::press(Key::Left));
+        assert_eq!(app.view_date.month, 6);
+        probe::key(&mut app, &probe::press(Key::Home));
+        assert_eq!(app.view_date, app.today);
+
+        probe::key(&mut app, &probe::press(Key::Num3));
+        assert_eq!(app.view, CalendarView::Day);
+        probe::key(&mut app, &probe::press(Key::Down));
+        assert!(app.content_scroll > 0.0);
+        probe::key(&mut app, &probe::press(Key::Up));
+        assert_eq!(app.content_scroll, 0.0);
+
+        probe::key(&mut app, &probe::ctrl(Key::B));
+        assert!(!app.sidebar_visible);
+        assert_eq!(app.layout().content.x, 0.0);
+        probe::key(&mut app, &probe::ctrl(Key::F));
+        assert!(app.search_focused);
+    }
+
+    #[test]
+    fn growing_the_window_gives_back_the_scroll_it_no_longer_needs() {
+        let mut app = sample_app(june_2024());
+        app.view = CalendarView::Week;
+        app.content_scroll = app.max_content_scroll();
+        assert!(app.content_scroll > 0.0);
+
+        // Tall enough that the whole 24-hour grid fits with room to spare.
+        app.resize(1280.0, 2400.0);
+        assert_eq!(app.max_content_scroll(), 0.0);
+        assert_eq!(
+            app.content_scroll, 0.0,
+            "a stale offset left a gap nothing could scroll back"
+        );
+    }
+
+    #[test]
+    fn closing_the_window_stops_the_app() {
+        let mut app = sample_app(june_2024());
+        assert!(app.running);
+        assert!(matches!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn a_resize_event_is_what_moves_the_layout() {
+        let mut app = sample_app(june_2024());
+        assert!(matches!(
+            app.on_event(&Event::Resize {
+                width: 900,
+                height: 500
+            }),
+            Response::Redraw
+        ));
+        assert_eq!(app.width, 900.0);
+        assert_eq!(app.layout().window.h, 500.0);
+    }
+
+    #[test]
+    fn today_comes_from_the_clock_rather_than_a_literal() {
+        // `main` opened on a hardcoded 2026-05-18, so every "today" highlight
+        // in the app pointed at a fixed day.
+        let today = today_from_clock().expect("the system clock is after 1970");
+        assert!(
+            today.year >= 2024 && today.year < 2200,
+            "the clock read {today:?}"
+        );
+        assert!(today.month >= 1 && today.month <= 12);
+        assert!(today.day >= 1 && today.day <= 31);
     }
 }

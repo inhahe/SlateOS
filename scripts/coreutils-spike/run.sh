@@ -54,7 +54,9 @@ set -uo pipefail
 
 VER="$SLATE_COREUTILS_VERSION"
 SYSROOT="$SLATE_SYSROOT"
-WORK="/tmp/coreutils-spike-$SLATE_LANE"
+# Durable, not /tmp — see worktree.sh ($SLATE_WORK).
+WORK="$SLATE_WORK/coreutils-spike"
+slate_adopt_legacy_work "/tmp/coreutils-spike-$SLATE_LANE" "$WORK"
 SPIKE_LIBS="/tmp/slate-sysroot2-$SLATE_LANE"
 OUT="$WORK/slateos-bin"
 

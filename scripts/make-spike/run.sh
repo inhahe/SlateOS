@@ -33,7 +33,9 @@ set -x
 
 VER="$SLATE_MAKE_VERSION"
 SYSROOT="$SLATE_SYSROOT"
-WORK="/tmp/make-spike-$SLATE_LANE"
+# Durable, not /tmp — see worktree.sh ($SLATE_WORK).
+WORK="$SLATE_WORK/make-spike"
+slate_adopt_legacy_work "/tmp/make-spike-$SLATE_LANE" "$WORK"
 SPIKE_LIBS="/tmp/slate-sysroot2-$SLATE_LANE"
 
 slate_make_zig_wrappers || exit 1

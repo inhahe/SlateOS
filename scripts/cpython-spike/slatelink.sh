@@ -15,7 +15,8 @@ set -uo pipefail
 
 VER="${CPYTHON_VER:-3.12.3}"
 MINOR="${VER%.*}"
-WORK="/tmp/cpython-spike-$SLATE_LANE"
+WORK="$SLATE_WORK/cpython-spike"
+slate_adopt_legacy_work "/tmp/cpython-spike-$SLATE_LANE" "$WORK"
 BUILD="$WORK/Python-$VER"
 SYSCOPY="/tmp/slate-sysroot-cpython-$SLATE_LANE"
 

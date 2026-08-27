@@ -26,13 +26,20 @@
 //! probe that silently dropped it would shift every later answer up by one and
 //! report the whole file as different.
 
+use std::ffi::OsString;
 use std::io::{Read, Write};
 
 use coreutils::extfloat::{self, Spec};
+use coreutils::quote::os_bytes;
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let mode = args.next().unwrap_or_default();
+    // `args_os`, not `args`: the iterator that yields `String` unwraps, so it
+    // aborts the probe on an argument that is not UTF-8 before the mode is
+    // even looked at -- and a harness invoking it wrongly deserves the
+    // "expected 'read' or 'write'" line, not a panic message.
+    let mut args = std::env::args_os().skip(1);
+    let mode: OsString = args.next().unwrap_or_default();
+    let mode = os_bytes(&mode);
 
     let mut input = Vec::new();
     if std::io::stdin().read_to_end(&mut input).is_err() {
@@ -51,9 +58,9 @@ fn main() {
         .take(if input.is_empty() { 0 } else { usize::MAX })
     {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let rendered = match mode.as_str() {
-            "read" => read_case(line),
-            "write" => write_case(line),
+        let rendered = match &*mode {
+            b"read" => read_case(line),
+            b"write" => write_case(line),
             _ => {
                 eprintln!("extfloat-probe: expected 'read' or 'write'");
                 std::process::exit(2);

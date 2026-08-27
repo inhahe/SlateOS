@@ -89511,7 +89511,39 @@ latter needs `-Zbuild-std` and is far slower; for `cfg(unix)` coverage the two
 are equivalent. Worth raising with the other lanes — `kernel/**` and `gui/**`
 have their own `#[cfg(unix)]` arms and the same blind spot.
 
-## `B-POSIX-SEVENTEEN-TESTS-ASSERT-THE-SLATEOS-KERNEL-AND-GET-THE-HOST-KERNEL` (lane B, 2026-08-26) — **open**
+## `B-POSIX-SEVENTEEN-TESTS-ASSERT-THE-SLATEOS-KERNEL-AND-GET-THE-HOST-KERNEL` (lane B, 2026-08-26) — **CLOSED 2026-08-26, and the diagnosis below was wrong**
+
+**Resolution.** Fixed, but not as this entry proposed — the diagnosis under
+"Why it fails" is incorrect and is kept below only so the mistake is legible.
+The seventeen were not seventeen target-behaviour assertions. They were
+seventeen tests that call `pipe()` *as setup* and assert it returns 0, and
+`pipe2` was issuing a raw, ungated `SYSCALL` instruction on host builds. One
+defect, one line, seventeen symptoms. Gating it — as this entry recommended —
+would have hidden a live host-safety bug behind seventeen `#[cfg]`s and
+deleted the coverage rather than fixing anything.
+
+The tell was in the entry's own evidence and went unread: the sample failure
+is `assert_eq!(…, 0)` at `posix/src/file.rs:9106`, and line 9106 is the
+`pipe()` call, not the `sync_file_range()` call the test is named for.
+
+Full write-up: `B-POSIX-PIPE2-ISSUES-AN-UNGATED-RAW-SYSCALL-ON-HOST-BUILDS`
+below. `cargo test -p posix` is now 20552 passed / 0 failed on both
+`x86_64-unknown-linux-gnu` and `x86_64-pc-windows-gnu`, with all seventeen
+passing on their own merits and four new tests covering `pipe2`'s success
+path.
+
+**Lesson worth keeping.** "These tests assert target behaviour and the host
+answers differently" is a *comfortable* diagnosis — it explains a red suite
+without implicating any shipping code, and it prescribes a fix (`#[cfg]`)
+that is easy and makes the red go away. That is exactly why it deserves more
+suspicion than it got here. Before gating a test as host-conditional, read
+the line the assertion actually fails on and confirm it is the line the test
+is *about*. Seventeen failures sharing one setup call is a single root cause
+wearing a costume, not seventeen instances of a pattern.
+
+---
+
+### Original entry (diagnosis incorrect — retained for the record)
 
 **In short:** `cargo test -p posix` on a Linux host reports 20531 passed and 17
 failed. None of the seventeen is a bug in `posix`: they assert what the *SlateOS*
@@ -89556,6 +89588,132 @@ implemented) keeps the assertion meaningful where it is true and stops it lying
 where it is not. Deleting them would lose real cover on the SlateOS side;
 `#[ignore]` would lose it on both. Same shape as
 `BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY` above, and worth doing in one pass with it.
+
+---
+
+## `B-POSIX-PIPE2-ISSUES-AN-UNGATED-RAW-SYSCALL-ON-HOST-BUILDS` (lane B, 2026-08-26) — **FIXED**
+
+**In short:** A `SYSCALL` instruction is the CPU instruction that asks the
+kernel to do something; which kernel, and which "something", depends entirely
+on the machine it runs on. `posix::pipe::pipe2` executed one directly, with
+the number 220 — SlateOS's "create a pipe" — and nothing stopped it from
+running when the test suite is built for the developer's own PC. So every
+`cargo test -p posix` on Windows or Linux asked the *host* kernel to perform
+whatever its own syscall number 220 happens to be, with the argument registers
+never loaded (whatever values happened to be lying in them). The rest of the
+crate had a guard against exactly this, documented at length; `pipe2` was the
+one function that hand-rolled the instruction itself and so bypassed it.
+
+**What each host actually did.** Measured, not inferred:
+
+| host | number 220 means | returned | `pipe2`'s verdict |
+|---|---|---|---|
+| Linux x86-64 | `semtimedop` | a genuine negative `-errno` | error → `-1`, honest |
+| Windows x64 | an NT system service | `0xC000_0008` (`STATUS_INVALID_HANDLE`) | **success** |
+
+Windows is the damaging one. NTSTATUS comes back in **EAX**, 32 bits, so
+widened to 64 bits `0xC000_0008` is `3221225480` — *positive*. `pipe2`'s only
+error check is `if ret < 0`, so an NT failure code was read as a valid handle.
+Every pipe on the dev host was registered in the fd table as the pair
+`(0xC000_0008, 0)`: the same two fabricated handles, over and over, one of
+them an error code and the other zero.
+
+**Why this hid for so long.** The two hosts disagreed, and the quiet one was
+the one everybody uses:
+
+- On **Windows** — the host all three lanes actually run `cargo test` on — the
+  seventeen affected tests *passed*. They needed only "an fd of kind `Pipe`",
+  and the fabricated pair supplied one. Green, for entirely the wrong reason.
+- On **Linux** they failed, which is what got reported — and got mis-diagnosed
+  as the tests being wrong rather than the code (see the entry above).
+- `pipe.rs`'s own tests never caught it because *every one of them passes a
+  NULL `pipefd`*, deliberately, so the call returns `EFAULT` before reaching
+  the syscall. The module's error paths were thoroughly covered and its
+  success path — the half that talks to the kernel and fills in the fd table —
+  had no host coverage at all. A test file can have twenty tests and still
+  leave the only dangerous line unexecuted.
+
+**The fix** (`posix/src/pipe.rs`, `posix/src/syscall.rs`, `posix/src/file.rs`):
+
+1. `syscall0_ok2(nr) -> (i64, u64)` in `syscall.rs`, carrying the kernel's
+   `ok2` two-return-value convention (RAX + RDX). It sits with the other raw
+   asm behind the one documented `target_os = "none"` gate, and its host arm
+   returns the same `HOST_ENOSYS` sentinel as its siblings. `syscall0` could
+   not be reused because it declares RDX nowhere.
+2. `host_pipe_sim` in `pipe.rs` — the same shape as the existing
+   `host_eventfd_sim` in `epoll.rs` — hands out real, distinct, tracked
+   handles on host builds. It deliberately does **not** simulate data
+   transfer: nothing needs a host pipe to carry bytes, and `SYS_PIPE_READ`/
+   `SYS_PIPE_WRITE` already fail honestly through the gated `syscall3`.
+3. Both `file.rs` close sites route through the shared `pipe_kernel_close`, so
+   a pipe closed via the fd table and one closed on `pipe2`'s own error path
+   release the same simulated handle.
+
+This keeps the seventeen tests *running and meaningful on every host* rather
+than gating them off. All four new `pipe2` success-path tests were verified to
+be load-bearing by making the simulator return the fabricated Windows pair —
+three of the four fail, with the handle-collision test reporting exactly the
+condition it was written for.
+
+**Verified:** `cargo test -p posix` 20552 passed / 0 failed on
+`x86_64-unknown-linux-gnu` **and** `x86_64-pc-windows-gnu` (was 20531/17 and
+20548/0 respectively). Clippy and `rustfmt --check` clean on both plus the
+bare-metal `x86_64-unknown-none`. The OS-target arm — which no test can reach
+— was checked by reading the generated assembly: `mov eax, 220` / `syscall`,
+capturing both RAX and RDX, identical to the code it replaced.
+
+---
+
+## `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST` (lane B, 2026-08-26) — **open**
+
+**In short:** The bug fixed directly above was one instance of a pattern, and
+an audit of lane B's tree found 101 more places where a raw `SYSCALL`
+instruction is not prevented from running on the developer's own machine.
+Unlike the `pipe2` case, none of these appears to be reachable from a test
+today, so nothing is currently executing them — but the guard is missing, so
+the day someone writes a test that calls one of these functions, it silently
+starts issuing real Linux or Windows system calls with SlateOS numbers.
+
+**The audit.** 115 raw `syscall` instruction sites in `posix/**`,
+`userspace/**`, `services/**`, `init/**`; 14 correctly gated on
+`target_os = "none"`; **101 not**, across **46 crates**:
+
+> `arp`, `at`, `chown`, `curl`, `date`, `df`, `dhcpcd`, `dig`, `diskutil`,
+> `fsck`, `ftp`, `ftpd`, `fw`, `htop`, `hwclock`, `ifconfig`, `inetd`, `ip`,
+> `kill`, `libservicebus`, `mkfs`, `mount`, `nc`, `netstat`, `nmap`, `ntpd`,
+> `pgrep`, `ping`, `powerctl`, `route`, `rsync`, `scp`, `screen`, `service`,
+> `services`, `sftp`, `ss`, `ssh`, `sshd`, `strace`, `tcpdump`, `telnet`,
+> `timeout`, `traceroute`, `wget`, `whois`
+
+**The specific trap, and it is a good one.** Most of these *look* gated —
+they carry `#[cfg(target_arch = "x86_64")]`. That gate is about the
+instruction set, and it is **true on both dev hosts**, so it prevents nothing
+that matters here. The gate that works is one that is false on every host
+build: `target_os = "none"` (our bare-metal target) or `target_os = "slateos"`.
+A handful (`at`, `date`, `hwclock`) have no cfg at all. `date`'s
+`clock_settime` is the one to look at first: it passes an attacker-irrelevant
+but arbitrary scalar in RDI to whatever the host's `SYS_CLOCK_SETTIME` number
+means.
+
+**Current reachability: latent, not live.** For all 101 sites, the enclosing
+function is not called from that file's own `#[cfg(test)]` module — which is
+why `cargo test --workspace` is green on Windows rather than doing something
+alarming. This is a static check and therefore weaker than the `pipe2` result,
+which was measured; treat it as "no evidence of a live path" rather than
+"proven unreachable".
+
+**Proper fix.** Give each crate the same treatment `posix` already has and
+`pipe2` has now: raw asm behind `#[cfg(target_os = "none")]`, and a host arm
+that returns a documented sentinel (or a small simulator where tests need the
+call to succeed). The mechanical part is uniform; the judgement per crate is
+only "does anything need this to *work* on host, or merely to fail cleanly?"
+
+**Worth telling lanes A and C.** The `target_arch`-instead-of-`target_os`
+confusion is not a lane-B idiom — it is the obvious-looking wrong answer, and
+`kernel/**`, `gui/**` and `net*/**` have their own raw-syscall and
+`#[cfg]`-gated arms. This is the third time in two days that a `#[cfg]`
+predicate has been wrong in a way that only shows up on one host (see
+`B-BACKUP-CFG-UNIX` and `BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY` above).
 
 ---
 

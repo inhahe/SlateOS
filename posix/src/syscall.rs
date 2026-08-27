@@ -735,6 +735,55 @@ pub fn syscall0(nr: u64) -> i64 {
     }
 }
 
+/// Issue a syscall with 0 arguments that answers with *two* values.
+///
+/// A handful of our syscalls use the kernel's `ok2` convention: the
+/// first value comes back in RAX and the second in RDX.  `SYS_PIPE_CREATE`
+/// is the only current user (read handle, write handle).  `syscall0`
+/// cannot express this because it declares RDX nowhere and would let the
+/// compiler treat it as untouched across the instruction.
+///
+/// Returns `(rax, rdx)`.  As everywhere else in this module, a negative
+/// `rax` is an error and `rdx` is then meaningless.
+///
+/// The host arm returns the same `HOST_ENOSYS` sentinel as its siblings —
+/// see the host-build safety gate above.  This is the arm that matters
+/// most here: until 2026-08-26 `pipe2` open-coded this asm *without* the
+/// gate, so `cargo test -p posix` on a Linux host executed a real
+/// `syscall` with RAX=220, which is Linux's `semtimedop`, and with
+/// RDI/RSI/RDX never loaded — a live kernel call with whatever the
+/// compiler had left in the argument registers.  See known-issues
+/// `B-POSIX-PIPE2-ISSUES-AN-UNGATED-RAW-SYSCALL-ON-HOST-BUILDS`.
+#[inline(always)]
+#[must_use]
+pub fn syscall0_ok2(nr: u64) -> (i64, u64) {
+    #[cfg(target_os = "none")]
+    {
+        let ret: i64;
+        let second: u64;
+        // SAFETY: SYSCALL is the OS-target kernel entry; RCX/R11 are
+        // clobbered by the instruction itself.  RDX is an output here
+        // rather than a clobber because this is the `ok2` convention.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                lateout("rax") ret,
+                lateout("rdx") second,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        (ret, second)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = nr;
+        (HOST_ENOSYS, 0)
+    }
+}
+
 /// Issue a syscall with 1 argument.
 #[inline(always)]
 #[must_use]

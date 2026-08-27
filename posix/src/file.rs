@@ -212,7 +212,7 @@ pub extern "C" fn close(fd: Fd) -> i32 {
 
     let ret = match entry.kind {
         HandleKind::File => syscall1(SYS_FS_CLOSE, entry.handle),
-        HandleKind::Pipe => syscall1(SYS_PIPE_CLOSE, entry.handle),
+        HandleKind::Pipe => crate::pipe::pipe_kernel_close(entry.handle),
         HandleKind::UnixStream => syscall1(SYS_SOCKETPAIR_CLOSE, entry.handle),
         HandleKind::Console => return 0, // Console fds don't need kernel close.
         HandleKind::TcpStream => {
@@ -2290,7 +2290,7 @@ pub(crate) fn resolve_or_err(
 fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
     match kind {
         HandleKind::File => syscall1(SYS_FS_CLOSE, handle),
-        HandleKind::Pipe => syscall1(SYS_PIPE_CLOSE, handle),
+        HandleKind::Pipe => crate::pipe::pipe_kernel_close(handle),
         HandleKind::UnixStream => syscall1(SYS_SOCKETPAIR_CLOSE, handle),
         HandleKind::Console => 0, // Console handles are not closeable.
         HandleKind::TcpStream => syscall1(SYS_TCP_CLOSE, handle),

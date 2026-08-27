@@ -90183,7 +90183,7 @@ Same shape as `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW`,
 fixed hours earlier the same day: an assertion against a freshly-read value
 where the correct operand was the value the code had actually used.
 
-### C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT — 2026-08-26 — LANE C, OPEN
+### C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT — 2026-08-26 — LANE C, **FIXED 2026-08-27**
 
 **In short:** The archive manager's Encrypted column says "no" for every member
 of every archive, including members that really are encrypted. It is not
@@ -90229,6 +90229,37 @@ a `!= 0` test instead of a `& 1` test), and `strong_encryption_still_sets_bit_ze
 Not done, and deliberately left to lane C because it is app-side: `parse_zip`'s
 hardcoded `encrypted: false`, and the "this member is encrypted" refusal in
 `extract`. This entry stays OPEN until those land.
+
+**Lane C, 2026-08-27 — the app half has landed; FIXED.** `parse_zip` reads
+`member.is_encrypted()`, so the padlock icon the row renderer already drew for
+`entry.encrypted` is reachable for the first time.
+
+Both places that could have contradicted the column now read the same bit:
+
+- **`extract` refuses an encrypted member before the inflater is asked**, with a
+  new `SkipReason::Encrypted` reading "it is encrypted and this build cannot
+  decrypt". The old path was not merely unhelpful but actively wrong: the
+  inflater expands ciphertext into whatever it happens to expand to, and the
+  size/CRC check at the end rejects it — so the program blamed an intact archive
+  for being damaged and sent a user who needed a password to look for another
+  copy.
+- **`verify` (the Test button) returns `TestResult::DecryptionFailed`** rather
+  than `Corrupted`. It still counts against the pass rate, which is right — the
+  button cannot vouch for data it cannot read — but it names the actual problem.
+
+Three tests: `an_encrypted_member_is_shown_as_encrypted` (and the plain case
+still reads false, now from the bit rather than from a constant),
+`an_encrypted_member_is_refused_by_name_rather_than_called_corrupt` (asserts the
+reason is `Encrypted`, that the message names encryption, and that no ciphertext
+is left on disk under the member's own name), and
+`testing_an_encrypted_member_reports_a_password_not_damage`. The fixture patches
+bit 0 into the central header of a real archive and leaves the *data* as real
+deflate on purpose — that is what makes the test able to tell "refused because
+the bit is set" from "failed because ciphertext does not inflate", which are the
+old behaviour and the new one.
+
+What is still missing is decryption itself, which is a feature and not a bug:
+SlateOS cannot read a password-protected member at all, and now says so.
 
 ### C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY — benchmark struck off — 2026-08-26 — LANE C
 

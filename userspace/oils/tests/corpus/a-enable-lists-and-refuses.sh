@@ -7,13 +7,25 @@
 # has. Given names instead, `-s` is only a filter: a name that is not special
 # is silently skipped, and only a name that is no builtin at all is an error.
 #
-# Two option letters are refused outright rather than being read as names.
-# `-f filename` would load a builtin from a shared object: it is
-# `enable: dynamic loading not available` at status 2, with no usage line — but
-# an `-f` with nothing left to take is the ordinary
-# `enable: -f: option requires an argument` *with* one. `-d` unloads such a
-# builtin, and is the usage line alone, with no "invalid option" before it.
-# Letters are scanned left to right across words and within bundles, so `-nf`
+# `-f filename` loads a builtin from a shared object and `-d` unloads one, so
+# what they do depends on whether the shell has dynamic loading at all — and
+# that is a property of the *build*, not of bash. A bash configured without
+# `dlopen` refuses both outright; the glibc bash this corpus runs against has
+# it, and so really tries: `-f /nosuch` is `cannot open shared object …` at
+# status 1, and `-d echo` is `echo: not dynamically loaded`, also at 1.
+#
+# osh follows the no-`dlopen` build, because that is the only honest answer it
+# has: SlateOS has no dynamic linker, so there is no shared object for osh to
+# load on the machine it is the shell for. (That osh "needs no dynamic linker"
+# is one of the stated reasons it ships as the shell — design-decisions §305.)
+# The probes whose answers hinge on that difference are therefore left out
+# rather than waived, and the gap is recorded in known-issues as out of scope.
+# See TD-OILS-ENABLE-F-AND-D-FOLLOW-THE-NO-DLOPEN-BUILD.
+#
+# What *is* probed here is the part both builds share, because it happens in
+# the option parser before either letter is acted on: an `-f` with nothing left
+# to take is `enable: -f: option requires an argument` *with* a usage line, and
+# letters are scanned left to right across words and within bundles, so `-nf`
 # is refused for `f` and `-sz` for `z`, each on the first letter that objects.
 #
 # The *full* listing is here too, and it is the count that matters: both shells
@@ -61,14 +73,9 @@ echo "=== -s with names is only a filter"
 echo "=== -p asks for the form the listing already has"
 ( enable -n echo; enable -p -n; echo "  -p -n     rc=$?" )
 
-echo "=== -f and -d are refused, not read as names"
-( enable -f /nosuch/lib.so foo; echo "  -f file   rc=$?" )
+echo "=== an option letter is not read as a name, and the scan is left to right"
 ( enable -f; echo "  -f alone  rc=$?" )
 ( enable -nf; echo "  -nf       rc=$?" )
-( enable -fn x; echo "  -fn x     rc=$?" )
-( enable -d echo; echo "  -d        rc=$?" )
-( enable -nd echo; echo "  -nd       rc=$?" )
-( enable -dn echo; echo "  -dn       rc=$?" )
 ( enable -z; echo "  -z        rc=$?" )
 ( enable -sz; echo "  -sz       rc=$?" )
 

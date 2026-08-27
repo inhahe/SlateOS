@@ -43758,6 +43758,15 @@ impl Shell {
                         // message with no usage line after it. A *missing*
                         // argument is caught before that, by the option parser,
                         // and does print one.
+                        //
+                        // A bash that *does* have `dlopen` — including the one
+                        // the corpus diffs against — answers quite differently,
+                        // by trying and failing: `cannot open shared object …`
+                        // at status 1. Following the other build is deliberate
+                        // and is not going to change, because SlateOS has no
+                        // dynamic linker for a loadable builtin to arrive
+                        // through. See known-issues
+                        // `TD-OILS-ENABLE-F-AND-D-FOLLOW-THE-NO-DLOPEN-BUILD`.
                         b'f' => {
                             if j + 1 == flags.len() && i + 1 == args.len() {
                                 self.perrln("enable: -f: option requires an argument");
@@ -43772,6 +43781,12 @@ impl Shell {
                         // with its usage line and nothing else — not with the
                         // `invalid option` an unlisted letter gets, since `-d`
                         // is still in the synopsis that line would print.
+                        //
+                        // With `dlopen` it is a real option instead, and reports
+                        // per name (`echo: not dynamically loaded`, or
+                        // `…: not a shell builtin`) at status 1, falling through
+                        // to the ordinary listing when given no names at all.
+                        // Same deliberate divergence as `-f` above.
                         b'd' => {
                             self.emit_stderr(usage_line.as_bytes());
                             return 2;
@@ -103199,7 +103214,12 @@ st=1
     #[test]
     fn enable_refuses_the_dynamic_loading_options() {
         // `-f` and `-d` load and unload a builtin from a shared object. osh has
-        // no way to, and answers as a bash built without `dlopen` does.
+        // no way to, and answers as a bash built without `dlopen` does — which
+        // is *not* what the glibc bash the corpus diffs against answers, and is
+        // meant not to be. See known-issues
+        // `TD-OILS-ENABLE-F-AND-D-FOLLOW-THE-NO-DLOPEN-BUILD`; the corpus case
+        // leaves the probes that would show the difference out for that reason,
+        // so these assertions are the only thing pinning this behaviour.
         // Regression: osh accepted both silently and took their arguments as
         // builtin names, so `enable -f /x foo` said `/x: not a shell builtin`.
         let (o, s) = run("enable -f /nosuch/so foo 2>&1");

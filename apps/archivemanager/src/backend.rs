@@ -550,6 +550,10 @@ mod tests {
             name: name.as_bytes().to_vec(),
             data: data.to_vec(),
             store_only: false,
+            // Left unrecorded on purpose: this helper backs
+            // `an_archive_we_wrote_ourselves_reports_no_time_rather_than_1980`,
+            // whose whole point is that an absent time reads as absent.
+            dos_datetime: 0,
         }
     }
 
@@ -729,6 +733,7 @@ mod tests {
                 name: b"docs/".to_vec(),
                 data: Vec::new(),
                 store_only: true,
+                dos_datetime: 0,
             },
             member("docs/guide.md", b"# Guide\n"),
             member("LICENSE", b"do what you like\n"),

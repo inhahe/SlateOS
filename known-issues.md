@@ -90036,17 +90036,85 @@ yields `(1980, 0, 0, 0, 0, 0)` and only breaks if that is passed to
 an absent date oddly is a visible problem, whereas a tool that renders a
 fabricated date cleanly is an invisible one.
 
-**What is still missing.** `create()` cannot record the *real* mtime, because
-`ZipWriteEntry` has no field to carry one — and this is not an unknown value:
-`kernel/src/fs/archive.rs` and `apps/archivemanager` both hold a real mtime for
-every file they add and drop it at the crate boundary. Adding
-`ZipWriteEntry::dos_datetime` would break every struct literal in lane C's tree
-(`apps/archivemanager/src/main.rs`, `apps/archivemanager/src/backend.rs`), so it
-is theirs to schedule rather than lane A's to impose. Filed as
-`requests/a-c-ziparchive-has-your-mtime-field-and-a-question-about-the-writer.md`;
-lane A would update its three call sites (`kernel/src/fs/zip.rs`,
-`kernel/src/fs/archive.rs`, `kernel/src/kshell.rs`) in the same merge. Until
-then archives SlateOS writes carry no time, and say so.
+**What is still missing.** ~~`create()` cannot record the *real* mtime, because
+`ZipWriteEntry` has no field to carry one.~~ **Resolved 2026-08-27:** lane C
+approved the field in
+`requests/c-a-yes-put-dos-datetime-on-zipwriteentry.md` and
+`ZipWriteEntry::dos_datetime` now exists; `create()` writes it into both the
+local and central headers, and all nine construction sites across the three
+lanes were updated in the same commit (lane C pre-authorised their three).
+
+What remains is one rung further out and is **lane A's**, not lane C's: the
+callers still pass `0` even where they are holding a real mtime. Split out as
+`A-KERNEL-ZIP-WRITERS-DISCARD-THE-MTIME-THEY-ALREADY-HAVE` below, because it is
+a different defect from this one — this entry was about the writer *fabricating*
+a time it never had, which is fixed; that one is about the writer *discarding*
+a time it does have. Until it is done, archives SlateOS writes still carry no
+time, and still say so.
+
+---
+
+## `A-KERNEL-ZIP-WRITERS-DISCARD-THE-MTIME-THEY-ALREADY-HAVE` (lane A, 2026-08-27)
+
+**Status:** OPEN.
+
+**In short:** SlateOS can now record, for each file it puts into a ZIP archive,
+when that file was last changed — the slot in the file format exists and the
+writer fills it in. But the two places in the kernel that actually create
+archives still pass "not recorded", even though one of them has already looked
+up the real time and is throwing it away. So a `zip` command run on the shell
+produces an archive whose Date column is empty, and it does not have to be.
+
+**Where it lives.**
+
+| Site | Has an mtime? | Passes |
+|---|---|---|
+| `kernel/src/kshell.rs` (`zip` command, ~line 131500) | **yes** — calls `Vfs::lstat`, whose `FileMeta::modified_ns` is a real wall-clock time | `dos_datetime: 0` |
+| `kernel/src/fs/archive.rs` `create_zip` (~line 696) | no — `CreateEntry` has no time field at all | `dos_datetime: 0` |
+
+The two are not the same problem. `kshell` is discarding a value it holds:
+`Vfs::lstat(&abs)` is called for every top-level argument, and the `Ok(meta)`
+arm looks only at `meta.entry_type`. `archive.rs` genuinely has nothing to pass
+— `CreateEntry` is `{ name, data, kind }` — so fixing it means widening that
+struct, which the tar and cpio writers alongside it would also want to honour.
+
+**Why it is not already fixed.** The missing piece is an *encoder*: something
+that turns nanoseconds-since-the-Unix-epoch into the packed MS-DOS date/time
+pair the format wants. That needs a calendar, and the decision recorded in
+design-decisions.md §621 is that `ziparchive` must not own one — it is `no_std`
+and linked into the kernel. The right home is `tzrules`, the shared
+dependency-free calendar crate that already backs the taskbar clock,
+`guitk::datetime` and lane C's ZIP *decoder*, and which the kernel already
+depends on (`kernel/Cargo.toml:26`).
+
+**What the proper fix looks like.**
+
+1. Add `tzrules::dos_datetime_from_unix(secs: i64) -> u32` (and its inverse, if
+   a second caller wants one), built on the existing `civil_from_days`. It must
+   return `0` for anything before 1980-01-01 or after 2107-12-31, because those
+   are unrepresentable in the DOS pair and `0` is the "not recorded" encoding —
+   clamping to the minimum would re-create the exact fabrication that
+   `A-ZIPARCHIVE-CREATE-STAMPED-EVERY-MEMBER-1980-01-01` was about. Seconds are
+   stored halved, so an odd second must round consistently; round *down*, so a
+   recorded time is never later than the real one.
+2. In `kshell.rs`, keep the `FileMeta` from the `lstat` that already happens,
+   carry `modified_ns` alongside the path in `input_files`, and convert at the
+   `ZipWriteEntry` construction. Note the recursive arm: `zip_collect_files`
+   does not currently stat what it collects, so it needs the same treatment or
+   it will silently keep passing `0` for everything under `-r`.
+3. Decide separately whether `CreateEntry` grows a `modified_ns`; that is a
+   wider change touching tar/cpio/ar and is worth its own task.
+
+**Note on timezone.** DOS timestamps are *local* time with no zone recorded.
+The kernel has no user timezone, so a kernel-side encoder will be writing UTC
+into a slot that readers interpret as local. That is a real, known inaccuracy
+of the format rather than of this fix, and every OS writing ZIPs has it; it is
+worth a comment at the conversion site so the next reader does not "fix" it.
+
+**How it was found.** Not by looking for it. While adding
+`ZipWriteEntry::dos_datetime` for lane C, the mechanical step of putting
+`dos_datetime: 0` at each construction site meant reading each one — and
+`kshell.rs` turned out to have an `lstat` result in scope three lines up.
 
 ---
 
@@ -90141,6 +90209,26 @@ exactly the one that got `dos_datetime` landed
 (`requests/c-a-ziparchive-drops-the-one-field-a-date-column-needs.md`). Worth
 doing together with a real "this member is encrypted" refusal in `extract`, so
 the column and the error message agree.
+
+**Lane A note, 2026-08-27 — the crate half is done; this is unblocked.**
+`ziparchive::ZipEntry` now carries **both** shapes you offered: the raw
+`flags: u16` (parsed from central+8) and a decoded `is_encrypted()` that tests
+bit 0. Reasoning for exposing both rather than picking one is in
+design-decisions.md §621 — briefly, sixteen independent bits means a `pub` field
+per bit breaks every construction site each time one is decoded, so `flags` is
+the field and `is_encrypted()` is the one accessor anybody has needed so far.
+Ask for another and it is a one-line addition, not a breaking change.
+
+Four tests pin it: `what_we_write_is_not_encrypted_and_says_so`,
+`an_encrypted_member_is_reported_as_encrypted`,
+`other_general_purpose_bits_are_not_mistaken_for_encryption` (sets bit 11, the
+UTF-8 name flag, and asserts it does not read as encrypted — the failure mode of
+a `!= 0` test instead of a `& 1` test), and `strong_encryption_still_sets_bit_zero`
+(bits 6 + 0, which the spec requires together).
+
+Not done, and deliberately left to lane C because it is app-side: `parse_zip`'s
+hardcoded `encrypted: false`, and the "this member is encrypted" refusal in
+`extract`. This entry stays OPEN until those land.
 
 ### C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY — benchmark struck off — 2026-08-26 — LANE C
 

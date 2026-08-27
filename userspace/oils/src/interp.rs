@@ -106512,6 +106512,13 @@ st=1
         );
     }
 
+    /// Note this test does **not** distinguish a re-open from a dup, and is not
+    /// meant to: writing through `/dev/fd/3` reaches fd 3's file either way,
+    /// and the here-string is read from position 0 either way. It therefore
+    /// passes on every host, which is why it stayed green while
+    /// [`a_reopened_descriptor_starts_at_zero_and_does_not_move_the_shells_cursor`]
+    /// was failing on the dev host. Only a *cursor* observation separates the
+    /// two resolutions; that one test carries it.
     #[test]
     fn dev_fd_n_opens_that_descriptors_file() {
         assert_eq!(
@@ -106524,30 +106531,70 @@ st=1
         );
     }
 
+    /// Whether this host resolves `/dev/fd/N` by re-opening the file or by
+    /// duplicating the descriptor.
+    ///
+    /// This asks [`host_reopen_path`] itself rather than re-deriving the
+    /// condition, because the condition is not simply "unix": it is unix *and*
+    /// a mounted procfs. A test that spelled it `cfg!(unix)` would claim the
+    /// re-open on a unix host with no `/proc`, and would silently stop tracking
+    /// the implementation the moment that rule changed.
+    fn host_reopens_descriptors() -> bool {
+        // The argument only has to be a non-negative fd number; the function
+        // tests for procfs, not for that descriptor.
+        host_reopen_path(0).is_some()
+    }
+
     /// The half a dup cannot reproduce: the re-open is an independent
     /// description, so it starts at 0 *and* leaves the shell's own cursor where
     /// it was. Checked against a file the shell itself made, never the
     /// harness's fd 0 — see
     /// [`dev_stdin_names_fd0s_file_and_may_fail_to_open_it`].
+    ///
+    /// This is the one test in the file that can tell the two resolutions
+    /// apart, so it is the one that has to state which host it is on. It
+    /// asserts the *documented fallback* off procfs rather than skipping:
+    /// Windows is the host all three lanes actually run `cargo test` on, and a
+    /// test that excuses itself there leaves osh's real behaviour on that host
+    /// uncovered. Reported by lane C as
+    /// `requests/c-b-the-reopen-test-is-red-on-the-windows-dev-host.md`.
     #[test]
     fn a_reopened_descriptor_starts_at_zero_and_does_not_move_the_shells_cursor() {
-        // `a` and `c` come from the shell's own fd 3, `b` from the re-open.
-        // Under `<&3` the re-open would carry the cursor and give `b` = `two`;
-        // it rewinds instead, and `c` is still `two` afterwards. Measured,
-        // bash 5.2.21. The last line overwrites the data file with the result,
-        // which is what `run_exec_redirect` reads back.
-        assert_eq!(
-            run_exec_redirect(
-                "printf 'one\\ntwo\\n' > \"{FILE}\"\n\
-                 exec 3< \"{FILE}\"; read -u 3 a\n\
-                 read b </dev/fd/3\n\
-                 read -u 3 c; exec 3<&-\n\
-                 printf '[%s][%s][%s]\\n' \"$a\" \"$b\" \"$c\" > \"{FILE}\""
-            ),
-            "[one][one][two]\n"
+        // `a` and `c` come from the shell's own fd 3, `b` from `/dev/fd/3`.
+        // The last line overwrites the data file with the result, which is
+        // what `run_exec_redirect` reads back.
+        let got = run_exec_redirect(
+            "printf 'one\\ntwo\\n' > \"{FILE}\"\n\
+             exec 3< \"{FILE}\"; read -u 3 a\n\
+             read b </dev/fd/3\n\
+             read -u 3 c; exec 3<&-\n\
+             printf '[%s][%s][%s]\\n' \"$a\" \"$b\" \"$c\" > \"{FILE}\"",
         );
+
+        if host_reopens_descriptors() {
+            // The real semantics, and what SlateOS ships: an independent
+            // description. `b` rewinds to `one`, and the shell's own fd 3 has
+            // not moved, so `c` is still `two`. Measured, bash 5.2.21.
+            assert_eq!(got, "[one][one][two]\n", "re-open host");
+        } else {
+            // No procfs, so `host_reopen_path` returns `None`, the redirect
+            // degrades to `<&3`, and the consequences follow from that alone:
+            // sharing fd 3's cursor makes `b` the *second* line, which also
+            // leaves fd 3 at EOF, so `c` reads nothing. This is a worse answer
+            // than bash's and it is deliberate — see `host_reopen_path` — but
+            // it is what osh does here, and pinning it means a change to the
+            // fallback shows up as a failing test rather than as nothing.
+            assert_eq!(got, "[one][two][]\n", "dup-fallback host");
+        }
     }
 
+    /// Host-independent for the same reason as
+    /// [`dev_fd_n_opens_that_descriptors_file`], and here it is a stronger
+    /// statement than it looks: the middle case asserts that the re-open
+    /// *continues* rather than rewinding, because fd 0 is a pipe — so on a
+    /// procfs host it is the re-open producing `two`, and off one it is the dup
+    /// fallback producing `two`. The two resolutions agree on a pipe, which is
+    /// precisely why the discriminating test above had to use a regular file.
     #[test]
     fn dev_stdin_names_fd0s_file_and_may_fail_to_open_it() {
         // Keep fd 0 on something the shell itself made. The ambient fd 0 is the

@@ -5229,7 +5229,10 @@ mod tests {
         // Running parent/child with no registered handlers does nothing.
         atfork_run_parent();
         atfork_run_child();
-        assert!(atfork_seq_take().is_empty());
+        assert!(
+            atfork_seq_take().is_empty(),
+            "parent/child atfork handlers must run nothing when none are registered"
+        );
 
         atfork_reset();
     }

@@ -67,9 +67,7 @@ pub fn fd_isset(fd: i32, set: &FdSet) -> bool {
 
 /// Clear all file descriptors from the set.
 pub fn fd_zero(set: &mut FdSet) {
-    for slot in &mut set.fds_bits {
-        *slot = 0;
-    }
+    set.fds_bits.fill(0);
 }
 
 // ---------------------------------------------------------------------------

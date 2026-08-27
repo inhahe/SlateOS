@@ -106,7 +106,7 @@ mod tests {
             BACKLIGHT_TYPE_FIRMWARE,
         ];
         for &s in &t {
-            assert!(!s.is_empty());
+            assert!(!s.is_empty(), "a backlight type string is empty");
             assert!(s.bytes().all(|b| b.is_ascii_lowercase()));
         }
     }

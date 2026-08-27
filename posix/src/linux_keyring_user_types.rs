@@ -76,7 +76,7 @@ mod tests {
         // None of the names contain spaces — the kernel parser is strict.
         for x in m {
             assert!(!x.contains(' '));
-            assert!(!x.is_empty());
+            assert!(!x.is_empty(), "a keyring special-name constant is empty");
         }
     }
 

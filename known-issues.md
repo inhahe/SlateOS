@@ -88787,7 +88787,131 @@ registrant.
 
 ---
 
-## `A-DEVFS-NULL-AND-ZERO-STAT-AS-REGULAR-FILES` (lane A, 2026-08-26)
+## `A-DEVFS-READ-FILE-AND-READ-AT-SERVE-DIFFERENT-NODES` (lane A, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**Fixed** in `f43685b4a`, by the first of the two options below — but not by
+extending the second table to match the first. `read_file` no longer *has* a
+table: it looks the node up in `DEV_NODES` and hands the read to `read_at`.
+That is the substance of the fix. Two hand-written dispatch tables over one
+node set will drift again no matter how carefully they are reconciled today;
+one table cannot drift from itself.
+
+Three things worth carrying forward:
+
+* **The guard is `parent().is_empty()`, not `CharDevice`.** Two refusals had
+  to survive the delegation, and only the root-only test preserves both: block
+  devices stay whole-file-refused (so a recursive walk cannot become a 500 GB
+  read), and the syscall-layer nodes under `input/`, `dri/` and `snd/` are
+  intercepted at `open`, so devfs must keep answering "not that way". A plain
+  `CharDevice` test would have quietly served both.
+* **The mount root had to be special-cased back in.** `find_node("")` is
+  `None`, so the delegating version reported `NotFound` for a directory that
+  plainly exists — a regression I wrote and caught before the boot test. It
+  now returns `IsADirectory` via an explicit early return, matching every
+  other path in the file.
+* **One observable length changed.** A whole-file read of `/dev/random` or
+  `/dev/urandom` yields 4096 bytes rather than 256. Any bound on an endless
+  stream is arbitrary; no caller in the tree reads either node whole, and none
+  could depend on a particular count of random bytes being the last ones.
+
+The self-test now drives **both** paths across all eleven root nodes rather
+than `read_at` alone, plus the two refusals as explicit checks. Asserting only
+the surviving path is what let the split live undetected in the first place.
+
+---
+
+**Original report.**
+
+**In short:** There are two ways to read a file in this kernel — ask for the
+whole thing (`read_file`), or ask for a byte range (`read_at`). For `/dev`,
+those two answer differently about *which devices exist*. Reading all of
+`/dev/kmsg` is refused; reading the first 64 bytes of it works. Nothing is
+corrupted and nothing crashes — a caller that gets the refusal is told
+`NotSupported`, which is a coherent "use the other path" — but the split is
+undocumented and a caller has no way to know which nodes are on which side.
+
+`kernel/src/fs/devfs.rs`. `read_file` (`match rel`) serves `null`, `zero`,
+`full`, `random`, `urandom`, `console`, `tty` and nothing else at the root;
+`stdin`, `stdout`, `stderr`, `kmsg` and `uptime` fall to `_ => unserved(rel)`,
+which returns `NotSupported` for a node that exists. `read_at` serves **all**
+of them, including `kmsg` (drains the klog ring) and `uptime` (formats elapsed
+time).
+
+**Why it is not simply a bug.** `unserved`'s doc comment makes the case for the
+split deliberately, for block devices: `NotFound` "for a device `stat` just
+described would send the caller hunting for an absent node instead of using
+`read_at`". A whole-file read of an endless stream is meaningless, so refusing
+it is defensible. What is *not* defensible is that the line between the two
+sets looks arbitrary: `/dev/zero` is just as endless as `/dev/kmsg`, and it is
+served by both.
+
+**The proper fix** is to decide the rule and apply it uniformly. Two coherent
+choices:
+
+* **Every root character device serves both**, with `read_file` returning a
+  bounded chunk — which is what `zero`/`random` already do (4096 and 256 bytes
+  respectively). Cheapest, and makes `cat /dev/kmsg` work through the VFS.
+* **No root character device serves `read_file`**, all of them answering
+  `NotSupported` so a caller must use `read_at`. More honest about the fact
+  that these are streams, but it breaks any existing caller reading `/dev/zero`
+  whole, and the devfs self-test does exactly that.
+
+The first is recommended: it matches the majority of the current behaviour and
+breaks nothing.
+
+**How it was found.** Writing the regression rung for
+`A-DEVFS-NULL-AND-ZERO-STAT-AS-REGULAR-FILES`. The rung's first draft asserted
+the eleven retyped nodes were readable via `read_file` and would have failed on
+four of them. It was rewritten to use `read_at`.
+
+**Not a regression.** `read_file` dispatches on the node's path and never on
+its `EntryType`, so retyping the nodes to `CharDevice` did not change which
+side of the split any of them is on. True since the nodes were added.
+
+---
+
+## `A-DEVFS-NULL-AND-ZERO-STAT-AS-REGULAR-FILES` (lane A, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**Fixed.** The eleven root nodes are now `DevNode::chr_served(path, mode)` — a
+new constructor, not a reuse of `chr`. That distinction is the substance of the
+fix: `chr` documents itself as "served by the syscall layer, not by devfs" and
+hardcodes `0o660`, whereas these eleven are served by devfs's own read/write
+and carry conventional modes (`/dev/null` is `crw-rw-rw-`, `/dev/console` is
+`crw-------`). Retyping them to `chr` would have made `cat /dev/zero` an error.
+`uptime` stays `file`; it is the one node here that genuinely is one.
+
+All four blast-radius sites listed below were walked. Three findings:
+
+1. **The retype fixes a second bug that was never filed.** `container.rs`'s
+   `CharDevice | BlockDevice` arm skips device nodes when archiving, arguing
+   that writing one as an empty regular file "would be worse than skipping it:
+   extracting the archive would replace a device with a plain file of the same
+   name." That is exactly what a `tar` of `/dev` did until now, because `null`
+   was typed `File`. The walk now skips it.
+2. **`/dev/random` was escaping the page cache only by accident.**
+   `read_file_routed` skips the cache when `entry_type != File` **or**
+   `ino == 0`; devfs reports `ino: 0` from `FileMeta::minimal`, so it was the
+   second clause doing all the work. Had devfs ever gained stable inodes,
+   `/dev/random` would have silently begun serving the same bytes forever, and
+   nothing would have caught it. The exclusion is now structural, by type.
+3. **`read_file` and `read_at` serve different sets of nodes**, which the new
+   rung had to be written around. `read_file` handles null/zero/full/random/
+   urandom/console/tty; `stdin`, `stdout`, `stderr` and `kmsg` fall through to
+   `unserved` → `NotSupported` ("served here, just not by the whole-file
+   path"). Not a regression — `read_file` dispatches on path, never on
+   `EntryType`, so the retype did not change it — but it means a whole-file
+   read of `/dev/kmsg` through the VFS is refused while `read_at` works. Filed
+   below as its own entry.
+
+**Regression test.** A new rung asserts the pairing that nothing else did:
+these eleven are `CharDevice` **and** readable via `read_at`. The two halves
+catch opposite regressions — typed `file`, `[ -c ]` is false; typed `chr`, the
+syscall layer intercepts and devfs refuses the read. The existing
+`/input`,`/dri`,`/snd` loop pins the opposite pairing (CharDevice, read refused
+with `NotSupported`). `/uptime` is asserted to remain `File`, so a careless
+"make everything in here a device" fails.
+
+**Original report follows.**
 
 **In short:** `stat("/dev/null")` reports `S_IFREG` — a regular file — instead
 of `S_IFCHR`, a character device. Eleven of the twelve nodes at the devfs root
@@ -89035,6 +89159,8 @@ reach it; whether it has the same hole has not been checked. Filed as
 `requests/a-b-userspace-zip-carries-a-third-deflate-and-a-second-zip-parser.md`.
 That is the concrete cost of duplicated parsers of untrusted input, and it is
 why §610 exists.
+
+---
 
 ## `TD-B-OSH-ANNOUNCES-EVERY-STAGE-OF-A-BACKGROUND-PIPELINE-BEFORE-STARTING-ANY` (lane B, 2026-08-26) — **open**, tech debt
 
@@ -89390,3 +89516,70 @@ implemented) keeps the assertion meaningful where it is true and stops it lying
 where it is not. Deleting them would lose real cover on the SlateOS side;
 `#[ignore]` would lose it on both. Same shape as
 `BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY` above, and worth doing in one pass with it.
+
+---
+
+## `A-PROC-NUMASTAT-REPORTS-ZERO-NODES-ON-A-MACHINE-THAT-HAS-SOME` (lane A, 2026-08-26)
+
+**Status:** OPEN
+
+**In short:** NUMA is the fact that on a big machine, memory is divided into
+banks ("nodes") and each CPU is nearer to some banks than others. The kernel
+*does* work out that layout at boot — it reads it from a firmware table, and
+falls back to "one node holding all the RAM" when there is no such table.
+`/proc/numastat`, the file that is supposed to report that layout, says
+`nodes: 0` on every machine anyway. Zero nodes is not a possible state: a
+machine with memory has at least one. The file is not empty-because-unknown,
+it is wrong.
+
+**Where.** Two modules that never met:
+
+| | `kernel/src/numa.rs` | `kernel/src/fs/numastat.rs` |
+|---|---|---|
+| What it is | the real topology | the reporting face |
+| Fed by | `numa::init()` at `main.rs:6325` — parses the ACPI SRAT, else `init_uma()` | `register_node()` / `set_distance()` |
+| Called by | boot | **nothing** |
+
+`grep` for callers of `numastat::register_node`, `set_distance`,
+`record_local_alloc`, `record_remote_alloc`, `record_access`,
+`record_migration` outside the module itself returns nothing. The table is
+therefore permanently empty, and `gen_numastat` (`procfs.rs:11387`) renders
+that emptiness as `nodes: 0` followed by no rows.
+
+**It is documented as wired.** `init_defaults`'s doc comment says the rows are
+"populated from the ACPI SRAT at bring-up" and that "the memory subsystem is
+expected to call `register_node`/`set_distance`". That expectation was never
+met. A doc comment asserting a wiring that does not exist is worse than no
+comment: it is the reason nobody looked.
+
+**What is genuinely unknowable, and must stay zero.** Only the *topology* is
+available today. The allocation, access-latency and migration counters have no
+producer — the frame allocator does not record which node a page came from —
+so they must keep reading zero. The fix must populate what is known without
+inventing what is not.
+
+**Distances must stay empty too, and this is the subtle part.** It is tempting
+to fill the distance matrix from `numa::distance()`, which is right there. But
+that function's own doc says "We don't parse SLIT yet, so we assume uniform
+remote access cost" — it returns 10 for same-node and 20 for everything else,
+a model, not a measurement. `numastat::NodeDistance` has no field
+distinguishing modelled from measured, so writing those numbers into
+`/proc/numastat` would launder a guess into a reading. That is the same
+failure as the seed data removed from this module earlier, arriving by a
+longer route.
+
+**The proper fix.** A `numastat::adopt_topology()` called from `main.rs` right
+after `numa::init()`, registering one row per present node with its real
+memory size and the CPU set taken from `numa::cpu_node(cpu)` for each online
+CPU — the same map the scheduler places threads by, so the two instruments
+agree by construction rather than by coincidence. It must no-op when `numa`
+has not initialised yet (detectable: no node reports `present`), so that
+running `numastat test` from kshell can call it again to restore the real
+topology the self-test wipes, instead of leaving the table empty for the rest
+of the boot.
+
+**How it was found.** Auditing the modules whose fabricated seed data had been
+removed, to check whether removing the seed had left them reporting nothing
+where something real was available. For `signalq` the emptiness was correct —
+no signals had been sent. For `numastat` it was not: the data existed one
+module away.

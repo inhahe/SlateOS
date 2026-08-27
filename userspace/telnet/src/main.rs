@@ -1604,7 +1604,7 @@ mod tests {
         assert_eq!(&net_out[..4], &[IAC, SB, OPT_TTYPE, TTYPE_IS]);
         assert!(net_out.ends_with(&[IAC, SE]));
         let term = b"xterm-256color";
-        assert!(net_out[4..net_out.len() - 2] == *term);
+        assert_eq!(net_out[4..net_out.len() - 2], *term);
     }
 
     // -------------------------------------------------------------------------

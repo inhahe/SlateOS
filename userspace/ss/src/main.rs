@@ -337,7 +337,7 @@ fn parse_hex_ip(hex: &str) -> String {
         // IPv6
         return format!(
             "::{}",
-            &hex.chars()
+            hex.chars()
                 .collect::<Vec<_>>()
                 .chunks(4)
                 .map(|chunk| chunk.iter().collect::<String>())

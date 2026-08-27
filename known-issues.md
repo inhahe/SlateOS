@@ -89521,7 +89521,32 @@ where it is not. Deleting them would lose real cover on the SlateOS side;
 
 ## `A-PROC-NUMASTAT-REPORTS-ZERO-NODES-ON-A-MACHINE-THAT-HAS-SOME` (lane A, 2026-08-26)
 
-**Status:** OPEN
+**Status:** ✅ FIXED 2026-08-26 (`266ba1ea5`) — `numastat::adopt_topology()` now
+runs from `main.rs` right after `numa::init()`, exactly as the proper fix below
+described, and `/proc/numastat` reports the real node count, per-node memory and
+per-node CPU sets. Verified in QEMU: `[numastat] adopted 1 of 1 node(s) from
+numa topology (UMA fallback), 1 CPU(s) placed`.
+
+Three things worth carrying forward:
+
+* **The distances are still empty, on purpose**, for the reason argued below —
+  `numa::distance()` is a uniform-remote-cost model, not the SLIT, and
+  `NodeDistance` cannot say which it is holding. The refusal is documented at
+  all three places a future reader might try to "fix" it. design-decisions.md
+  §618 records the general form of this argument.
+* **A second self-test, `self_test_adoption()`, was added** rather than putting
+  assertions in `adopt_topology()` — production code, where the project's
+  `unwrap_used`/`panic` lints and `scan-unwrap.py` both apply. Its sharpest rung
+  is the CPU tally: node counts and memory sizes are copied straight across and
+  would have to be corrupted to differ, but the CPU sets are *derived*, so a CPU
+  whose node reports itself absent vanishes silently while every other number
+  stays right.
+* **The CPU count is threaded from `adopt_topology` into `self_test_adoption`
+  rather than re-read.** See the follow-up entry
+  `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW` — a fresh
+  `smp::cpu_count()` in the check would have been a genuine boot-failing flake.
+
+**Original report.**
 
 **In short:** NUMA is the fact that on a big machine, memory is divided into
 banks ("nodes") and each CPU is nearer to some banks than others. The kernel
@@ -89583,3 +89608,53 @@ removed, to check whether removing the seed had left them reporting nothing
 where something real was available. For `signalq` the emptiness was correct —
 no signals had been sent. For `numastat` it was not: the data existed one
 module away.
+
+---
+
+## `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW` (lane A, 2026-08-26)
+
+**Status:** OPEN — low severity, correct-at-boot, documented in code.
+
+**In short:** `/proc/numastat` lists, for each memory node, which CPUs are
+attached to it. That list is built once during boot and never rebuilt. If a CPU
+starts up after that moment, it is missing from the file for the rest of the
+boot — not reported as belonging elsewhere, just absent. Today that is a very
+narrow window and nothing user-visible depends on it, but the file's CPU lists
+are strictly a boot-time snapshot rather than a live view, and it is worth
+knowing that before anything is built on top of them.
+
+**Where.** `kernel/src/fs/numastat.rs` → `adopt_topology()`, called once from
+`kernel/src/main.rs` just after `numa::init()`. The per-node sets come from
+querying `numa::cpu_node(cpu)` for `cpu` in `0..smp::cpu_count()`, and nothing
+re-runs on a CPU coming online.
+
+**The window is real, not theoretical.** `smp::init()` brings up application
+processors and then waits for them on a *bounded* spin — `kernel/src/smp.rs`
+around line 1231, ~50 ms — before returning. An AP bumps `NUM_CPUS_ONLINE`
+itself (`smp.rs:958`) once its GDT/IDT/APIC are up. So an AP that misses that
+window increments the online count *after* `smp::init()` has returned, which is
+after adoption has already enumerated the CPU set.
+
+**What this cost, and what it nearly cost.** The verification self-test
+`self_test_adoption()` asserts that the CPUs adoption enumerated each land on
+exactly one node — a sharp check, because the sets are derived rather than
+copied. It originally re-read `smp::cpu_count()` for the expected value. That
+would have panicked the boot whenever a late AP appeared between the two calls:
+a self-test failure on a table that is entirely correct and merely one CPU out
+of date. Fixed by having `adopt_topology()` return the count it enumerated and
+`self_test_adoption(cpus_at_adoption)` take it — so the assertion tests the
+*derivation* (the actual bug class it exists for) and not the *recency* (a
+property one-shot adoption never promised). This is the same flake shape
+rejected earlier in the irqbalance cross-check.
+
+**The proper fix**, when something needs it: re-run adoption on a CPU
+online/offline event. `kernel/src/cpu_hotplug.rs` is the natural hook.
+`register_node` returns `AlreadyExists` on a second call for the same id, so
+refreshing an existing node's CPU set needs either an update path on the node
+row or a clear-and-re-adopt — the former is preferable, since the latter would
+briefly empty `/proc/numastat` for a concurrent reader.
+
+**What happens if it is never fixed.** Nothing degrades over time and nothing is
+blocked. The file is correct on every boot observed so far (QEMU brings up its
+CPUs well inside the window). The risk is only that a future feature reads those
+CPU lists as authoritative and inherits the staleness silently.

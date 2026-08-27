@@ -190,7 +190,22 @@ pub fn init_defaults() {
 /// registered.  That is what lets [`self_test`] — which wipes the table and
 /// runs long before `numa::init()` at boot — end by calling this to restore
 /// real data when it is invoked manually from kshell afterwards.
-pub fn adopt_topology() {
+///
+/// **Adoption is one-shot: the CPU sets are a snapshot.** A CPU that comes
+/// online after this returns is not in `/proc/numastat`, because nothing
+/// re-runs adoption on a hotplug event.  That is not merely theoretical —
+/// `smp::init()` waits for APs with a *bounded* spin, so an AP that misses the
+/// window bumps the online count on its own afterwards.  The returned count is
+/// the snapshot this call enumerated, so a caller that needs to check the
+/// result can compare against what was actually placed rather than against a
+/// number that may have moved since.  Tracked in `known-issues.md` →
+/// `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW`.
+///
+/// # Returns
+///
+/// The number of online CPUs enumerated while building the per-node sets, or
+/// `0` if the topology was not available yet and nothing was registered.
+pub fn adopt_topology() -> usize {
     init_defaults();
 
     let topo = crate::numa::topology_info();
@@ -202,9 +217,13 @@ pub fn adopt_topology() {
     // Return silently instead: the boot-time call from `self_test` lands here,
     // and `main` calls again for real once the topology exists.
     if !topo.nodes.iter().take(topo.node_count).any(|n| n.present) {
-        return;
+        return 0;
     }
 
+    // Read once and reuse.  Every per-node loop below must enumerate the *same*
+    // set of CPUs, or a CPU appearing mid-scan would be placed on some nodes'
+    // lists and not others; and it is this value, not a later re-read, that
+    // callers are told to check against.
     let cpu_count = crate::smp::cpu_count();
 
     let mut adopted = 0usize;
@@ -248,6 +267,8 @@ pub fn adopt_topology() {
         if topo.is_numa { "SRAT" } else { "UMA fallback" },
         cpu_count,
     );
+
+    cpu_count
 }
 
 /// Verify that what `/proc/numastat` will report matches the machine
@@ -272,8 +293,25 @@ pub fn adopt_topology() {
 /// but the CPU sets are *derived* — one `numa::cpu_node` query per online CPU
 /// — so a CPU whose node is absent from the present set vanishes silently from
 /// every node's list while every other number stays right.  Summing them and
-/// demanding the online count is what makes that visible.
-pub fn self_test_adoption() {
+/// demanding the enumerated count is what makes that visible.
+///
+/// **`cpus_at_adoption` must be [`adopt_topology`]'s return value, not a fresh
+/// `smp::cpu_count()`.** Those differ exactly when a CPU comes online between
+/// the two calls, which `smp::init()` permits: it waits for APs with a bounded
+/// spin, so a late AP bumps the online count itself after `init` returns.
+/// Re-reading would then fail the boot over a table that is entirely correct —
+/// merely one CPU out of date — which is a flake, not a bug report.  What this
+/// check is *for* is the derivation: every CPU adoption looked at must land on
+/// exactly one node.  Staleness is a known property of one-shot adoption and is
+/// documented on [`adopt_topology`], not asserted against here.
+///
+/// # Panics
+///
+/// Panics if `/proc/numastat` would not describe the machine `numa` found.
+/// That is the intent: this runs only from the boot self-test path, where a
+/// panic is the failure channel, and a procfs file that misdescribes the
+/// hardware is worse than not booting.
+pub fn self_test_adoption(cpus_at_adoption: usize) {
     crate::serial_println!("numastat::self_test_adoption() — running tests...");
 
     let topo = crate::numa::topology_info();
@@ -319,14 +357,15 @@ pub fn self_test_adoption() {
     }
     crate::serial_println!("  [2/3] per-node memory matches numa: OK");
 
-    // 3: every online CPU is placed on exactly one node.
-    let cpu_count = crate::smp::cpu_count();
+    // 3: every CPU adoption enumerated is placed on exactly one node.
     let mapped: usize = rows.iter().map(|n| n.cpus.len()).sum();
     assert_eq!(
-        mapped, cpu_count,
-        "numastat placed {mapped} CPU(s) across its nodes but {cpu_count} are online; numa::cpu_node names a node that reports itself absent"
+        mapped, cpus_at_adoption,
+        "numastat placed {mapped} CPU(s) across its nodes but adoption enumerated {cpus_at_adoption}; numa::cpu_node names a node that reports itself absent"
     );
-    crate::serial_println!("  [3/3] all {cpu_count} online CPU(s) placed exactly once: OK");
+    crate::serial_println!(
+        "  [3/3] all {cpus_at_adoption} enumerated CPU(s) placed exactly once: OK"
+    );
 
     crate::serial_println!("numastat::self_test_adoption() — all 3 tests passed");
 }
@@ -634,6 +673,10 @@ pub fn self_test() {
     // the literal `init_defaults()` after a clear and cannot see through a
     // call, which is the right tradeoff -- a gate that chased callees would
     // pass on any function that merely might re-open the table.
+    //
+    // The CPU count it returns is discarded on purpose: this call is here to
+    // *restore* the table, not to check it.  Only `main`'s call feeds
+    // `self_test_adoption`, which is the one that verifies the placement.
     *STATE.lock() = None;
     init_defaults();
     adopt_topology();

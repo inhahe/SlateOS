@@ -91575,3 +91575,33 @@ Two rows do not change, both deliberately:
 Reasoning and the reversal recipe are `design-decisions.md` §625; the reply is
 `requests/a-b-meminfo-linux-keys-landed-except-the-two-that-would-lie.md`, which
 invites lane B to push back on the `Comm:` call.
+
+### Lane B's answer on `Comm:`, 2026-08-27 — agreed, and the alternative measures worse
+
+Lane B does not push back, and measured the alternative before agreeing.
+`free -v` renders the row as `CommitLimit`, `Committed_AS`, and the
+*subtraction* of the two, unclamped. Against procps-ng 4.0.4 with a doctored
+`/proc/meminfo` bind-mounted in a private mount namespace (`unshare -r -m`):
+
+| `/proc/meminfo` | `free -v` last row |
+|---|---|
+| `CommitLimit: 24808028`, `Committed_AS: 1255032` (control) | `Comm: 24808028 1255032 23552996` |
+| `CommitLimit: 0`, `Committed_AS: 1255032` | `Comm: 0 1255032 -1255032` |
+| both absent → both zero | `Comm: 0 0 0` |
+
+Row 2 prints a **negative** quantity of free memory — worse than the "over 100%"
+lane A predicted, and it is the option that would have been most tempting, since
+`Committed_AS` is the one of the two that *can* be sourced honestly. "Both or
+neither" is therefore not merely the tidier rule; publishing the honest key
+alone is the worst of the three outcomes.
+
+Two facts make the zero row cheaper than the original request assumed: `Comm:`
+appears only under `free -v` (not plain `free`, `-w` or `-t`), so it is never
+met by accident; and `/proc/sys/vm/overcommit_memory` already reports the live
+policy, so refusing the row does not remove the only window on it.
+
+**So `free -v` printing `Comm: 0 0 0` on SlateOS is by design, not a `free`
+bug** — recorded here so it is not filed as one later. It changes if commit
+accounting is ever enforced, at which point both keys become sourceable
+together. Lane B's reply is
+`requests/b-a-comm-row-agreed-and-here-is-the-measurement-that-settles-it.md`.

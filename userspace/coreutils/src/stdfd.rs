@@ -363,6 +363,21 @@ pub fn was_closed_at_startup(fd: i32) -> bool {
     imp::was_closed_at_startup(fd)
 }
 
+/// Whether `fd` is a terminal — `isatty(3)`.
+///
+/// The module already asks this to choose stdout's buffering, and several
+/// utilities have to ask it for their own reasons: `ls` colours only a
+/// terminal, `which --tty-only` obeys its display options only on one. Sharing
+/// the answer keeps them from each declaring their own `isatty` — and keeps
+/// them all honest off Linux, where there is no `isatty` to call and the answer
+/// is `false`.
+///
+/// Not to be confused with [`probe`]: a pipe is usable and is not a terminal.
+#[must_use]
+pub fn is_tty(fd: i32) -> bool {
+    imp::is_tty(fd)
+}
+
 /// Ask whether a standard descriptor is usable, without writing to it.
 ///
 /// `fstat(2)`, which is how several GNU utilities find out — `cat` opens with

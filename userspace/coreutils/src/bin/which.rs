@@ -117,13 +117,18 @@ const WHICH: Program = Program::new("which", 255);
 /// GNU which's `getopt_long` string, exactly.
 const SHORT_OPTIONS: &str = "aivV";
 
-/// GNU which's `longopts[]`, in its own order -- which matters, because our
-/// parser reports an ambiguous prefix by listing the candidates in table
-/// order, and `which --s` lists them as `--skip-dot --skip-tilde --show-dot
-/// --show-tilde --skip-alias --skip-functions`.
+/// GNU which's `longopts[]`, in its own order -- which matters, because glibc
+/// reports an ambiguous prefix by listing the candidates in table order, and
+/// `which --s` lists them as `--skip-dot --skip-tilde --show-dot --show-tilde
+/// --skip-alias --skip-functions`.
+///
+/// The order is the *table's*, not the help text's: the help prints
+/// `--version` above `--help` and the table declares them the other way round.
+/// Measured with `which --=x`, where the empty prefix matches every entry and
+/// so prints the whole table in declaration order.
 const LONG_OPTIONS: &[(&str, Takes)] = &[
-    ("version", Takes::Nothing),
     ("help", Takes::Nothing),
+    ("version", Takes::Nothing),
     ("skip-dot", Takes::Nothing),
     ("skip-tilde", Takes::Nothing),
     ("show-dot", Takes::Nothing),
@@ -938,6 +943,28 @@ mod tests {
             e.sentence.starts_with(
                 "option '--s' is ambiguous; possibilities: '--skip-dot' '--skip-tilde' \
                  '--show-dot' '--show-tilde' '--skip-alias' '--skip-functions'"
+            ),
+            "got {:?}",
+            e.sentence
+        );
+    }
+
+    /// The empty prefix matches every entry, so this is the whole table in
+    /// declaration order -- the measurement `which --=x` makes upstream
+    /// perform on itself, pinned here so a reordering is caught by the test
+    /// suite and not only by the pre-push table check.
+    ///
+    /// Note `--help` before `--version`: the help *text* prints them the other
+    /// way round, and transcribing from it is the mistake this pins against.
+    #[test]
+    fn the_empty_prefix_prints_the_whole_table_in_upstreams_order() {
+        let e = parse_args(&argv(&["--=x", "ls"]), false).unwrap_err();
+        assert!(
+            e.sentence.starts_with(
+                "option '--=x' is ambiguous; possibilities: '--help' '--version' \
+                 '--skip-dot' '--skip-tilde' '--show-dot' '--show-tilde' '--tty-only' \
+                 '--all' '--read-alias' '--skip-alias' '--read-functions' \
+                 '--skip-functions'"
             ),
             "got {:?}",
             e.sentence

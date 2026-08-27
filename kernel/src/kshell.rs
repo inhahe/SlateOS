@@ -18782,7 +18782,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     serial_println!(
         "  kshell::self_test 91: one command answered two identical typos in opposite ways, and \
-         the guess it accepted went into a total with no inverse"
+         the guess it accepted went into a total that now has an inverse"
     );
     // Every earlier rung could point at a single guessed operand. `ipcns shm`
     // has two, and before this batch they behaved as opposites:
@@ -18794,10 +18794,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //   ipcns shm 10 1O24   →  size guessed 4096, and it *succeeded*.
     //
     // One character apart, one caught (for the wrong reason) and one not. The
-    // uncaught one is the one that lasts: `record_shm` is `+=` into a running
-    // total and the subsystem publishes no inverse, so noticing the typo and
-    // re-running the line correctly does not replace the guessed 4096 -- it
-    // adds the right number underneath it.
+    // uncaught one was the one that lasted: `record_shm` is `+=` into a running
+    // total, and the subsystem published no inverse, so noticing the typo and
+    // re-running the line correctly did not replace the guessed 4096 -- it
+    // added the right number underneath it. The repair for one mistyped
+    // character was to destroy the namespace and re-enter every other row.
+    //
+    // Both halves are covered here now. The refusals below are the first half
+    // and are unchanged in substance; what is new is that the guess is no
+    // longer permanent even when a caller does record a wrong number
+    // deliberately. `ipcns shm|sem|msg` take an `add`/`del` verb, `del` reaches
+    // `ipcns::release_*`, and the sequence a person would actually type to fix
+    // a typo -- del the wrong number, add the right one -- is asserted to leave
+    // exactly one segment of exactly the corrected size.
     {
         // `init` is idempotent (`init_defaults` returns early once state
         // exists), and the id is read back rather than assumed: the boot
@@ -18823,7 +18832,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // The first direction: the id. It used to reach the subsystem as 0 and
         // come back `NotFound`, which sends the reader to `ipcns list` to look
         // for a namespace that was never in question.
-        let out = capture_command("ipcns shm 1O 1024");
+        let out = capture_command("ipcns shm add 1O 1024");
         assert_output_contains(
             "an unreadable namespace id is named rather than misreported as NotFound",
             &out,
@@ -18832,7 +18841,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "an unreadable namespace id errors");
 
         // The second direction, and the one with a lasting effect: the size.
-        let out = capture_command(&alloc::format!("ipcns shm {ns_id} 1O24"));
+        let out = capture_command(&alloc::format!("ipcns shm add {ns_id} 1O24"));
         assert_output_contains(
             "and an unreadable size is refused instead of being recorded as 4096",
             &out,
@@ -18844,17 +18853,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // assertion that pins the severity: the total must read exactly one
         // segment of 7777 bytes. Before the fix the refused line above had
         // already banked 4096, so this same sequence left `shm=2(11873 B)` --
-        // the guess and the correction, added together, with no way back short
-        // of destroying the namespace and rebuilding everything else in it.
-        let out = capture_command(&alloc::format!("ipcns shm {ns_id} 7777"));
+        // the guess and the correction, added together.
+        let out = capture_command(&alloc::format!("ipcns shm add {ns_id} 7777"));
         assert_eq!(last_exit(), 0, "a readable size is recorded");
-        assert_output_contains("the corrected size is recorded", &out, b"7777B");
+        assert_output_contains("the corrected size is recorded", &out, b"+7777B");
 
         // The sibling accumulators refuse on the same terms. `sem`'s guess was
         // 1, which is worse than 4096 in one specific way: 1 is also the
         // likeliest true value, so an inflated `sem_total` looks exactly like a
         // correct one and nothing in the output invites a second look.
-        let out = capture_command(&alloc::format!("ipcns sem {ns_id} 1O"));
+        let out = capture_command(&alloc::format!("ipcns sem add {ns_id} 1O"));
         assert_output_contains(
             "an unreadable semaphore count is refused rather than counted as one",
             &out,
@@ -18862,7 +18870,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
         assert_eq!(last_exit(), 1, "an unreadable semaphore count errors");
 
-        let out = capture_command(&alloc::format!("ipcns msg {ns_id} 2O6"));
+        let out = capture_command(&alloc::format!("ipcns msg add {ns_id} 2O6"));
         assert_output_contains(
             "and the message-queue size is refused on the same terms",
             &out,
@@ -18873,12 +18881,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // The §607 control: `[bytes]` is bracketed in the synopsis, so an
         // *omitted* word still means 256. The refusals above cannot be passing
         // by having quietly made the optional operand mandatory.
-        let out = capture_command(&alloc::format!("ipcns msg {ns_id}"));
+        let out = capture_command(&alloc::format!("ipcns msg add {ns_id}"));
         assert_eq!(last_exit(), 0, "an omitted optional size still succeeds");
         assert_output_contains(
             "an omitted size keeps its documented default",
             &out,
-            b"256B",
+            b"+256B",
         );
 
         // One line proving all three at once, anchored by the distinctive 7777:
@@ -18889,6 +18897,76 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "the refusals recorded nothing and the totals hold exactly what was asked for",
             &out,
             b" shm=1(7777 B) sem=0(0) msg=1(256 B)",
+        );
+
+        // ---- the second half: the guess is no longer permanent ----
+
+        // The verb is required, and neither absence nor an unrecognised word is
+        // read as `add`. This is the one grammar change, and it has to be a
+        // refusal rather than a default for the same reason every operand above
+        // is: `add` and `del` are opposites, so choosing between them from no
+        // information is not a convenience.
+        let out = capture_command(&alloc::format!("ipcns shm {ns_id} 7777"));
+        assert_output_contains(
+            "the old verbless form is refused rather than assumed to mean add",
+            &out,
+            b"is not a verb; use add or del",
+        );
+        assert_eq!(last_exit(), 1, "a missing verb errors");
+        let out = capture_command("ipcns shm");
+        assert_output_contains(
+            "and an absent verb says so instead of defaulting",
+            &out,
+            b"ipcns: shm: missing verb; use add or del",
+        );
+        assert_eq!(last_exit(), 1, "an absent verb errors");
+
+        // `del`'s size is mandatory where `add`'s is not, and this is the
+        // assertion that pins the asymmetry as deliberate. A default here would
+        // be a guess at *what to remove* -- the same defect as every guess this
+        // rung is about, except that it destroys a record instead of inventing
+        // one.
+        let out = capture_command(&alloc::format!("ipcns shm del {ns_id}"));
+        assert_output_contains(
+            "a `del' with no size is refused rather than given `add's default",
+            &out,
+            b"ipcns: shm del: missing size in bytes",
+        );
+        assert_eq!(last_exit(), 1, "an omitted `del' size errors");
+
+        // A `del` that does not fit changes nothing. 7778 is one byte more than
+        // the namespace holds, so the subsystem refuses it whole; the list line
+        // afterwards is byte-for-byte the one asserted above. An implementation
+        // that clamped instead would pass the error check and fail here, having
+        // left a namespace with no segments and 7777 bytes inside them.
+        let out = capture_command(&alloc::format!("ipcns shm del {ns_id} 7778"));
+        assert_eq!(last_exit(), 1, "a `del' larger than the total errors");
+        assert_output_contains("and it says which way it failed", &out, b"InvalidArgument");
+        let out = capture_command("ipcns list");
+        assert_output_contains(
+            "a refused release leaves both columns exactly as they were",
+            &out,
+            b" shm=1(7777 B) sem=0(0) msg=1(256 B)",
+        );
+
+        // And the sequence a person would actually type to fix a mistyped size:
+        // take the wrong number back out, put the right one in. Before the
+        // inverse existed this line was unreachable and the only repair was to
+        // destroy the namespace and re-enter every other row in it.
+        let out = capture_command(&alloc::format!("ipcns shm del {ns_id} 7777"));
+        assert_eq!(last_exit(), 0, "an exact release succeeds");
+        assert_output_contains("a release reports what it took out", &out, b"-7777B");
+        let out = capture_command(&alloc::format!("ipcns shm add {ns_id} 1024"));
+        assert_eq!(last_exit(), 0, "and the correction is recorded");
+        assert_output_contains("the corrected value goes in", &out, b"+1024B");
+
+        // The whole point, on one line: one segment of 1024 bytes. Not two
+        // segments of 8801, which is what `del`-less correction left behind.
+        let out = capture_command("ipcns list");
+        assert_output_contains(
+            "the correction replaced the wrong number instead of adding to it",
+            &out,
+            b" shm=1(1024 B) sem=0(0) msg=1(256 B)",
         );
 
         // `destroy` guessed the same 0, and was safe only by accident.
@@ -100837,6 +100915,35 @@ fn cmd_cputhr(args: &str) {
     }
 }
 
+/// Read the `add`/`del` verb of `ipcns <shm|sem|msg> <verb> …`.
+///
+/// Returns `Some(true)` for `add`, `Some(false)` for `del`, and `None` — having
+/// already printed the reason and set the exit status — for a missing or
+/// unrecognised word.
+///
+/// It is deliberately not an `unwrap_or("add")`. Each of those three
+/// subcommands has an inverse now, so this word is the difference between
+/// recording a resource and destroying the record of one, and a default would
+/// choose between them on the user's behalf from no information at all. That is
+/// the same defect the numeric operands in these arms were fixed for, one level
+/// up in the grammar.
+fn ipcns_verb(parts: &[&str], sub: &str) -> Option<bool> {
+    match parts.get(1).copied() {
+        Some("add") => Some(true),
+        Some("del") => Some(false),
+        Some(other) => {
+            shell_println!("ipcns: {}: `{}' is not a verb; use add or del", sub, other);
+            set_exit(1);
+            None
+        }
+        None => {
+            shell_println!("ipcns: {}: missing verb; use add or del", sub);
+            set_exit(1);
+            None
+        }
+    }
+}
+
 /// `ipcns` / `ipcn` — IPC namespace monitoring.
 fn cmd_ipcns(args: &str) {
     use crate::fs::ipcns;
@@ -100889,35 +100996,72 @@ fn cmd_ipcns(args: &str) {
                 }
             }
         }
+        // ------------------------------------------------------------------
+        // `shm` / `sem` / `msg` — each takes a verb, `add` or `del`.
+        //
+        // The two operands of this one command used to answer the same mistake
+        // in opposite ways, and which one you got depended only on which word
+        // you fumbled:
+        //
+        //   ipcns shm 1O 1024   →  id guessed 0, unreachable, NotFound.
+        //                          Wrong reason, but nothing changed.
+        //   ipcns shm 10 1O24   →  size guessed 4096, and it *worked*:
+        //                          "ipcns: shm ns=10 4096B", a success.
+        //
+        // Refusing the unreadable word fixes the first half of that. The second
+        // half was that the damage could not be undone at all: `record_shm` is
+        // `shm_segments += 1; shm_bytes += bytes`, and the subsystem published
+        // no inverse, so the obvious correction — notice the typo, run it again
+        // with 1024 — did not *replace* the guess, it added underneath it,
+        // leaving two segments and 5120 bytes where one segment of 1024 was
+        // meant. The only way back was to destroy the namespace and re-enter
+        // every other record in it.
+        //
+        // `ipcns::release_shm/_sem/_msg` are that inverse, and these arms are
+        // how a person reaches them. Three notes on the grammar:
+        //
+        //  - **The verb is required.** `ipcns shm 1 4096` no longer records a
+        //    segment; it says it wanted `add` or `del`. Reading a bare form as
+        //    one of the two things it could now mean is precisely the kind of
+        //    guess the rest of this arm exists to stop making.
+        //  - **The amount is bracketed for `add` and mandatory for `del`.**
+        //    `add`'s default is a documented size (§607). `del`'s would be a
+        //    guess at *what to take away* — the same defect as a guessed
+        //    operand, except that it silently destroys a record rather than
+        //    silently inventing one, and it is unrecoverable in the same way
+        //    the accumulator was.
+        //  - **`del` names the amount, not just the row**, because the module
+        //    stores column totals rather than individual segments: taking a row
+        //    out means subtracting the size it went in with. A `del` whose
+        //    amount does not fit is refused whole by the subsystem, so a wrong
+        //    number here costs an error message and nothing else.
+        // ------------------------------------------------------------------
         "shm" => {
-            // The two operands of this one command answered the same mistake
-            // in opposite ways, and which one you got depended only on which
-            // word you fumbled:
-            //
-            //   ipcns shm 1O 1024   →  id guessed 0, unreachable, NotFound.
-            //                          Wrong reason, but nothing changed.
-            //   ipcns shm 10 1O24   →  size guessed 4096, and it *worked*:
-            //                          "ipcns: shm ns=10 4096B", a success.
-            //
-            // The second is the one that lasts. `record_shm` is `shm_segments
-            // += 1; shm_bytes += bytes` — an accumulator, and the subsystem
-            // exposes no inverse: there is no `unrecord`, no setter, nothing
-            // between `record_*` and `destroy_ns`. So the obvious correction
-            // — notice the typo, run it again with 1024 — does not replace the
-            // guess, it *adds to* it, leaving two segments and 5120 bytes
-            // where one segment of 1024 was meant. Recovering means destroying
-            // the namespace and rebuilding every other record in it.
-            let Some(id) = required_num::<u32>(&parts, 1, "ipcns", sub, "namespace id") else {
+            let Some(add) = ipcns_verb(&parts, sub) else {
                 return;
             };
-            // `[bytes]` is bracketed in the synopsis, so an absent word still
-            // means 4096 (§607). Only an unreadable one is refused.
-            let Some(bytes) = optional_num::<u64>(&parts, 2, "ipcns", sub, "size in bytes", 4096)
-            else {
+            let label = if add { "shm add" } else { "shm del" };
+            let Some(id) = required_num::<u32>(&parts, 2, "ipcns", label, "namespace id") else {
                 return;
             };
-            match ipcns::record_shm(id, bytes) {
-                Ok(()) => shell_println!("ipcns: shm ns={} {}B", id, bytes),
+            let bytes = if add {
+                match optional_num::<u64>(&parts, 3, "ipcns", label, "size in bytes", 4096) {
+                    Some(v) => v,
+                    None => return,
+                }
+            } else {
+                match required_num::<u64>(&parts, 3, "ipcns", label, "size in bytes") {
+                    Some(v) => v,
+                    None => return,
+                }
+            };
+            let (res, sign) = if add {
+                (ipcns::record_shm(id, bytes), '+')
+            } else {
+                (ipcns::release_shm(id, bytes), '-')
+            };
+            match res {
+                Ok(()) => shell_println!("ipcns: shm ns={} {}{}B", id, sign, bytes),
                 Err(e) => {
                     shell_println!("ipcns: error: {:?}", e);
                     set_exit(1);
@@ -100925,21 +101069,37 @@ fn cmd_ipcns(args: &str) {
             }
         }
         "sem" => {
-            let Some(id) = required_num::<u32>(&parts, 1, "ipcns", sub, "namespace id") else {
-                return;
-            };
             // Same accumulator as `shm` (`sem_sets += 1; sem_total += count`),
-            // and the same absence of an inverse. The guess here was 1, which
-            // is worse than 4096 in one specific way: 1 is the *likeliest true
-            // value*, so a `sem_total` inflated by a guessed 1 looks exactly
-            // like a `sem_total` that was correctly told 1. There is nothing
+            // and the same inverse. The guess here was 1, which was worse than
+            // 4096 in one specific way: 1 is the *likeliest true value*, so a
+            // `sem_total` inflated by a guessed 1 looks exactly like a
+            // `sem_total` that was correctly told 1. There is nothing
             // odd-looking in the output to make anyone go back and check.
-            let Some(count) = optional_num::<u32>(&parts, 2, "ipcns", sub, "semaphore count", 1)
-            else {
+            let Some(add) = ipcns_verb(&parts, sub) else {
                 return;
             };
-            match ipcns::record_sem(id, count) {
-                Ok(()) => shell_println!("ipcns: sem ns={} count={}", id, count),
+            let label = if add { "sem add" } else { "sem del" };
+            let Some(id) = required_num::<u32>(&parts, 2, "ipcns", label, "namespace id") else {
+                return;
+            };
+            let count = if add {
+                match optional_num::<u32>(&parts, 3, "ipcns", label, "semaphore count", 1) {
+                    Some(v) => v,
+                    None => return,
+                }
+            } else {
+                match required_num::<u32>(&parts, 3, "ipcns", label, "semaphore count") {
+                    Some(v) => v,
+                    None => return,
+                }
+            };
+            let (res, sign) = if add {
+                (ipcns::record_sem(id, count), '+')
+            } else {
+                (ipcns::release_sem(id, count), '-')
+            };
+            match res {
+                Ok(()) => shell_println!("ipcns: sem ns={} count={}{}", id, sign, count),
                 Err(e) => {
                     shell_println!("ipcns: error: {:?}", e);
                     set_exit(1);
@@ -100947,15 +101107,31 @@ fn cmd_ipcns(args: &str) {
             }
         }
         "msg" => {
-            let Some(id) = required_num::<u32>(&parts, 1, "ipcns", sub, "namespace id") else {
+            let Some(add) = ipcns_verb(&parts, sub) else {
                 return;
             };
-            let Some(bytes) = optional_num::<u64>(&parts, 2, "ipcns", sub, "size in bytes", 256)
-            else {
+            let label = if add { "msg add" } else { "msg del" };
+            let Some(id) = required_num::<u32>(&parts, 2, "ipcns", label, "namespace id") else {
                 return;
             };
-            match ipcns::record_msg(id, bytes) {
-                Ok(()) => shell_println!("ipcns: msg ns={} {}B", id, bytes),
+            let bytes = if add {
+                match optional_num::<u64>(&parts, 3, "ipcns", label, "size in bytes", 256) {
+                    Some(v) => v,
+                    None => return,
+                }
+            } else {
+                match required_num::<u64>(&parts, 3, "ipcns", label, "size in bytes") {
+                    Some(v) => v,
+                    None => return,
+                }
+            };
+            let (res, sign) = if add {
+                (ipcns::record_msg(id, bytes), '+')
+            } else {
+                (ipcns::release_msg(id, bytes), '-')
+            };
+            match res {
+                Ok(()) => shell_println!("ipcns: msg ns={} {}{}B", id, sign, bytes),
                 Err(e) => {
                     shell_println!("ipcns: error: {:?}", e);
                     set_exit(1);
@@ -100992,9 +101168,13 @@ fn cmd_ipcns(args: &str) {
         _ => {
             shell_println!("Usage: ipcns <init|create|destroy|shm|sem|msg|list|stats|test>");
             shell_println!("  create <name>                  — create IPC namespace");
-            shell_println!("  shm <ns_id> [bytes]            — record shm segment");
-            shell_println!("  sem <ns_id> [count]            — record semaphore set");
-            shell_println!("  msg <ns_id> [bytes]            — record message queue");
+            shell_println!("  shm add <ns_id> [bytes]        — record shm segment (default 4096)");
+            shell_println!("  shm del <ns_id> <bytes>        — release one, of exactly that size");
+            shell_println!("  sem add <ns_id> [count]        — record semaphore set (default 1)");
+            shell_println!("  sem del <ns_id> <count>        — release one, of exactly that size");
+            shell_println!("  msg add <ns_id> [bytes]        — record message queue (default 256)");
+            shell_println!("  msg del <ns_id> <bytes>        — release one, of exactly that size");
+            shell_println!("  (a `del' size is mandatory: guessing what to remove is not an undo)");
             set_exit(1);
         }
     }

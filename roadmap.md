@@ -6432,7 +6432,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Archive manager (apps/archivemanager: ZIP/TAR/GZ/BZ2/7Z formats, tree-view browser, extract/create/add/remove, compression levels, password, split archives)
 - [x] Sound recorder (apps/soundrecorder: WAV output, waveform visualization, VU meter, markers, trim, quality presets, noise gate, playback, auto-save, 122 tests)
 - [x] Sticky notes (apps/stickynotes: 8 colors, drag/resize, rich text, search, pin/archive, categories, auto-save, export)
-- [x] PDF viewer (apps/pdfviewer: multi-tab, bookmarks, search, annotations, zoom modes, page rotation, print settings, dark mode, 102 tests)
+- [x] PDF viewer (apps/pdfviewer: **windowed** — `app::launch`, `Frame` hit boxes, `Layout` from the live size; multi-tab, bookmarks, search, annotations, zoom modes, page rotation, print settings, dark mode, 183 tests. No PDF parser and no print spooler yet — held open by `OpenFn`/`PrintFn` seams, see `known-issues.md` → `C-PDFVIEWER-HAS-NO-PDF-PARSER-AND-NO-PRINT-SPOOLER`)
 - [x] Device manager (apps/devicemanager: device tree with 8 categories, driver info, resource view, search/filter, hardware report export, 105 tests)
 - [x] Alarm clock (apps/alarmclock: alarms with repeat/snooze, multiple timers, stopwatch with laps and stats, progress ring, AM/PM+24h, 135 tests)
 - [x] Unit converter (apps/unitconverter: 12 categories, conversions through base unit, affine temperature handling, history, favorites)

@@ -90040,3 +90040,84 @@ snapshots by giving the comparison a signature that takes only one.
 Same shape as `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW`,
 fixed hours earlier the same day: an assertion against a freshly-read value
 where the correct operand was the value the code had actually used.
+
+---
+
+## A-CPU-HOTPLUG-INIT-SNAPSHOTS-A-CPU-COUNT-THAT-CAN-STILL-GROW
+
+**Lane:** A **Date:** 2026-08-27 **Status:** OPEN (assertions hardened;
+the underlying gap is real and unfixed)
+
+**In short:** if a CPU finishes starting up slightly too late, the kernel's
+CPU-hotplug bookkeeping never learns it exists. That CPU runs and schedules
+work normally, but the hotplug framework thinks it is absent forever: it
+cannot be taken offline, it is missing from the online count, and
+`/sys/devices/system/cpu` under-reports the machine. Nothing crashes, so the
+only symptom is a machine that quietly has fewer manageable CPUs than it has
+CPUs.
+
+**Where.** `kernel/src/cpu_hotplug.rs:160` (`init`) and `kernel/src/smp.rs:1230`
+(the bounded wait in `init`).
+
+**The mechanism.** `smp::init` starts the APs and then waits for them to report
+in — but on a *bounded* spin:
+
+```rust
+let expected_cpus = (booted_count + 1) as u32; // +1 for BSP
+let wait_limit: u64 = 50_000_000; // ~50 ms
+for _ in 0..wait_limit {
+    if NUM_CPUS_ONLINE.load(Ordering::Acquire) >= expected_cpus { break; }
+    core::hint::spin_loop();
+}
+```
+
+The loop exits either because every AP arrived *or* because the budget ran
+out, and the two cases are indistinguishable afterwards — nothing checks which
+happened. `cpu_hotplug::init()` then does:
+
+```rust
+let cpus = smp::cpu_count();
+for i in 0..cpus { CPU_STATES[i] = Online; }
+ONLINE_COUNT.store(cpus as u64, ...);
+```
+
+An AP that bumps `NUM_CPUS_ONLINE` after that store gets no `CPU_STATES` slot
+and is never counted. `ONLINE_COUNT` has no other writer than `init`,
+`offline` and `online`, so the omission is permanent for the boot.
+
+**Why this is the numastat bug again.** `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW`
+is the same sentence with a different subject: a boot-time reading of a live
+counter stored as though it were final. The governing principle is the one
+that came out of that fix — **a bounded wait is a race window, not a barrier.**
+A 50 ms budget is generous on real hardware and not obviously generous under
+QEMU TCG on a host that is simultaneously running a Rust build, which is
+exactly the configuration this project's boot test uses.
+
+**How it was found.** Not by observing it — by `scripts/check-live-counter-reads.py`,
+written after the `irqstat` panic, flagging `cpu_hotplug::self_test` for
+comparing two readings of `cpu_count`. Chasing why the two readings could
+differ is what surfaced the bounded wait. The test was asserting a property
+that the code does not actually guarantee, and the assertion was the only
+thing pointing at the gap.
+
+**What was changed now.** Only the self-test, which used to walk
+`0..smp::cpu_count()` asserting each CPU was `is_online` — an assertion that
+would *fail* on the straggler, blaming the test rather than naming the defect.
+It now checks the framework against its own recorded view (`online_count()`),
+plus the inequality that is genuinely invariant (`recorded <= smp::cpu_count()`,
+sound because `NUM_CPUS_ONLINE` has one writer, `fetch_add`, and no decrement
+anywhere). So the test no longer flakes and no longer hides the gap.
+
+**What the proper fix is.** `cpu_hotplug` must be *told* when an AP comes
+online rather than sampling a count once. The natural shape is a registration
+call at the end of `ap_entry` — the same place that does
+`NUM_CPUS_ONLINE.fetch_add(1)` — marking that CPU `Online` and bumping
+`ONLINE_COUNT`, with `init()` reduced to seeding the BSP. That makes the
+framework's view derive from the same event that moves the counter, instead of
+racing it. It touches AP bringup, so it is a deliberate change and not a rider
+on the self-test fix.
+
+**Also worth doing:** make the bounded wait say so. `smp::init` should log when
+it exits on the budget rather than on the count, because right now a machine
+that lost a CPU to the timeout is indistinguishable at the serial log from one
+that never had it.

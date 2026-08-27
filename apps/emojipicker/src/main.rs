@@ -8,20 +8,26 @@
 //! - Skin tone modifier selector (Fitzpatrick scale)
 //! - Recently-used emoji tracking (up to 32 entries)
 //!
-//! Renders via guitk into a 360x480 popup window. Uses the Catppuccin Mocha
-//! dark theme for all colors.
+//! Opens as a real window, 360x480 to start with and resizable from there.
+//! Uses the Catppuccin Mocha dark theme for all colors.
+//!
+//! The picker is drawn as a [`Frame`]: every clickable thing records the box it
+//! was painted in, as it is painted, and the hit test reads those boxes back.
+//! That matters here because the picker used to answer "where is this cell"
+//! twice -- once in `render_grid` and once in `grid_hit_test` -- from the same
+//! constants, which is agreement by coincidence rather than by construction.
 
-#[allow(unused_imports)]
 use guitk::color::Color;
-#[allow(unused_imports)]
-use guitk::event::{
-    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
-};
-#[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderTree, TextOverflow};
-#[allow(unused_imports)]
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
-use guitk::wheel;
+use guitk::{grid, wheel};
+use oswindow::app::{self, App, Response};
+
+use std::num::NonZeroUsize;
+use std::process::ExitCode;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -63,12 +69,11 @@ mod mocha {
 // Constants
 // ============================================================================
 
-/// Popup window width in pixels.
+/// Width the popup opens at. Not the width it stays: the column count and
+/// every band's position are derived from the size the window actually has.
 const WINDOW_WIDTH: f32 = 360.0;
-/// Popup window height in pixels.
+/// Height the popup opens at.
 const WINDOW_HEIGHT: f32 = 480.0;
-/// Number of emoji columns in the grid.
-const GRID_COLUMNS: usize = 6;
 /// Size of each emoji cell in the grid (square).
 const CELL_SIZE: f32 = 48.0;
 /// Padding inside each emoji cell.
@@ -946,68 +951,47 @@ impl Tab {
 // Layout
 // ============================================================================
 //
-// Every number deciding *where* something is drawn lives here, because every
-// one of them is asked twice: once by the renderer, and once by the hit test
-// that has to agree with it. They used to be written out separately at each
-// site -- `grid_left` five times, the bottom edge of the grid six times, the
-// tab list twice in full -- so nothing but care kept the rectangle a user sees
-// and the rectangle a click resolves to in the same place.
+// Every number deciding *where* something is drawn is worked out here, once per
+// frame, from the size the window actually has. Nothing remembers it: a
+// `Layout` is built, drawn from, hit-tested through, and dropped.
+//
+// Two things used to be wrong with that.
+//
+// The geometry was fixed. `WINDOW_WIDTH` and `WINDOW_HEIGHT` appeared in
+// nineteen expressions between them, so the picker drew a 360x480 popup into
+// whatever window it was given. Nothing caught it, because there was no window:
+// `main` rendered one tree, took its length, and exited.
+//
+// And it was written down twice. `grid_hit_test` re-derived the cell grid from
+// the same constants `render_grid` used, so the two agreed for exactly as long
+// as somebody kept them equal by hand. [`Frame`] removes the second copy: the
+// renderer records the box it painted for each control as it paints it, and the
+// hit test reads those boxes back. A cell scrolled out of the viewport is
+// dropped from the record rather than staying clickable, which the arithmetic
+// version had no way to express at all.
 
-/// Left edge of the emoji grid: the columns are centred in the window.
-fn grid_left() -> f32 {
-    #[allow(clippy::cast_precision_loss)]
-    let columns = GRID_COLUMNS as f32;
-    (WINDOW_WIDTH - columns * CELL_SIZE) / 2.0
+/// A clickable thing in the picker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// Tab `index` of the bar, numbered as [`tabs`] orders them.
+    Tab(usize),
+    /// The search field.
+    SearchField,
+    /// Grid cell `index`, into the current [`EmojiPickerState::visible_emoji`].
+    Cell(usize),
+    /// Skin-tone swatch `index`, into [`SkinToneModifier::ALL`].
+    Swatch(usize),
 }
 
-/// Top edge of the skin-tone strip.
-fn skin_tone_bar_y() -> f32 {
-    WINDOW_HEIGHT - PREVIEW_HEIGHT - SKIN_TONE_HEIGHT
-}
-
-/// Bottom edge of the scrollable grid area.
-///
-/// The grid ends exactly where the skin-tone strip begins. Deriving one from
-/// the other is what keeps that true: written separately, a change to the
-/// strip's height would leave the grid either overlapping it or short of it.
-fn grid_bottom() -> f32 {
-    skin_tone_bar_y()
-}
+/// One frame of this app's drawing, carrying the boxes it recorded.
+pub type Frame = guitk::frame::Frame<Target>;
 
 /// Distance between one skin-tone swatch's left edge and the next one's.
 const SKIN_TONE_PITCH: f32 = SKIN_TONE_CIRCLE + SKIN_TONE_SPACING;
 
-/// Left edge of the first skin-tone swatch, clear of the "Skin tone:" label.
+/// Left edge of the first skin-tone swatch when the window is wide enough for
+/// it, clear of the "Skin tone:" label.
 const SKIN_TONE_FIRST_X: f32 = 80.0;
-
-/// Left edge of skin-tone swatch `index`.
-fn skin_tone_swatch_x(index: usize) -> f32 {
-    #[allow(clippy::cast_precision_loss)]
-    let index = index as f32;
-    SKIN_TONE_FIRST_X + index * SKIN_TONE_PITCH
-}
-
-/// The skin-tone swatch a click at `x` within the strip selects, if any.
-///
-/// A swatch's click cell is its whole pitch, not just the 18px circle it draws
-/// inside. The six-pixel gaps between the circles used to belong to nobody, so
-/// a click three pixels to the right of a swatch did nothing at all -- a dead
-/// strip a quarter as wide as the swatches themselves.
-fn skin_tone_swatch_at(x: f32) -> Option<usize> {
-    let strip_left = SKIN_TONE_FIRST_X - SKIN_TONE_SPACING / 2.0;
-    if x < strip_left {
-        return Option::None;
-    }
-    // A float-to-integer cast saturates rather than wrapping, so a very large
-    // `x` gives a very large index, which the bound below rejects.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let index = ((x - strip_left) / SKIN_TONE_PITCH) as usize;
-    if index < SkinToneModifier::ALL.len() {
-        Some(index)
-    } else {
-        Option::None
-    }
-}
 
 /// How many tabs the bar holds: recently-used, every category, and search.
 const TAB_COUNT: usize = EmojiCategory::ALL.len() + 2;
@@ -1021,34 +1005,186 @@ fn tabs() -> Vec<Tab> {
     v
 }
 
-/// Width of one tab: the bar divides the window evenly.
-fn tab_width() -> f32 {
-    #[allow(clippy::cast_precision_loss)]
-    let count = TAB_COUNT as f32;
-    WINDOW_WIDTH / count
+/// Whether a band `want` tall can be taken out of `top..bottom` and still leave
+/// a row of emoji behind.
+///
+/// This is the whole shrinking policy. The grid is what the picker *is*, so it
+/// is never the band that gives way: a strip or a preview that would squeeze it
+/// below one clickable row is dropped outright instead, hit box and all. A
+/// picker with a two-pixel grid is not a smaller picker, it is a broken one.
+fn band_fits(top: f32, bottom: f32, want: f32) -> bool {
+    bottom - top - want >= CELL_SIZE
 }
 
-/// Left edge of tab `index`.
-fn tab_x(index: usize) -> f32 {
-    #[allow(clippy::cast_precision_loss)]
-    let index = index as f32;
-    index * tab_width()
+/// Where everything goes, for one window size.
+///
+/// Built fresh on every frame and never stored. A layout kept in a field is a
+/// second opinion about the window that is right until the window is resized.
+pub struct Layout {
+    /// The whole window.
+    pub window: Rect,
+    /// The tab bar across the top.
+    pub tab_bar: Rect,
+    /// The band the search field sits in, or `None` in a window too short.
+    pub search_row: Option<Rect>,
+    /// The scrolling grid's viewport.
+    pub grid: Rect,
+    /// Left edge of the first column, in window coordinates.
+    pub grid_left: f32,
+    /// How many columns of emoji the grid's width holds.
+    pub columns: NonZeroUsize,
+    /// The skin-tone strip, or `None` in a window too short.
+    pub strip: Option<Rect>,
+    /// The preview band, or `None` in a window too short.
+    pub preview: Option<Rect>,
 }
 
-/// The tab a click at `x` within the tab bar selects, if any.
-fn tab_at(x: f32) -> Option<usize> {
-    if x < 0.0 {
-        // A float-to-integer cast saturates at zero, so a negative `x` would
-        // otherwise land on tab 0 -- a click off the left edge of the window
-        // silently switching to recently-used.
-        return Option::None;
+impl Layout {
+    /// Work out where everything goes in a window of `width` by `height`.
+    pub fn new(width: f32, height: f32) -> Self {
+        let width = width.max(0.0);
+        let height = height.max(0.0);
+        let window = Rect::new(0.0, 0.0, width, height);
+
+        let tab_bar = Rect::new(0.0, 0.0, width, TAB_BAR_HEIGHT.min(height));
+        let mut top = tab_bar.bottom();
+        let mut bottom = height;
+
+        let search_row = if band_fits(top, bottom, SEARCH_HEIGHT) {
+            let row = Rect::new(0.0, top, width, SEARCH_HEIGHT);
+            top = row.bottom();
+            Some(row)
+        } else {
+            Option::None
+        };
+
+        // The bottom two bands, in the order they are drawn: the preview sits
+        // under the skin-tone strip. When only one of them fits, the preview is
+        // the one that goes -- it names an emoji that is already on screen a row
+        // above, whereas the strip is the only place a skin tone can be chosen
+        // at all.
+        let (strip, preview) = if band_fits(top, bottom, SKIN_TONE_HEIGHT + PREVIEW_HEIGHT) {
+            let preview = Rect::new(0.0, bottom - PREVIEW_HEIGHT, width, PREVIEW_HEIGHT);
+            let strip = Rect::new(0.0, preview.y - SKIN_TONE_HEIGHT, width, SKIN_TONE_HEIGHT);
+            bottom = strip.y;
+            (Some(strip), Some(preview))
+        } else if band_fits(top, bottom, SKIN_TONE_HEIGHT) {
+            let strip = Rect::new(0.0, bottom - SKIN_TONE_HEIGHT, width, SKIN_TONE_HEIGHT);
+            bottom = strip.y;
+            (Some(strip), Option::None)
+        } else {
+            (Option::None, Option::None)
+        };
+
+        let grid = Rect::new(0.0, top, width, (bottom - top).max(0.0));
+        // No gap: the cells are 48px boxes drawn edge to edge, and the padding
+        // that separates the glyphs is inside them.
+        let columns = grid::columns_across(grid.w, CELL_SIZE, 0.0);
+        let span = columns.get() as f32 * CELL_SIZE;
+        let grid_left = ((grid.w - span) / 2.0).max(0.0);
+
+        Self {
+            window,
+            tab_bar,
+            search_row,
+            grid,
+            grid_left,
+            columns,
+            strip,
+            preview,
+        }
     }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let index = (x / tab_width()) as usize;
-    if index < TAB_COUNT {
-        Some(index)
-    } else {
-        Option::None
+
+    /// Width of one tab: the bar divides the window evenly.
+    pub fn tab_width(&self) -> f32 {
+        self.window.w / TAB_COUNT as f32
+    }
+
+    /// Left edge of tab `index`.
+    pub fn tab_x(&self, index: usize) -> f32 {
+        index as f32 * self.tab_width()
+    }
+
+    /// The box a click on tab `index` falls in.
+    pub fn tab_cell(&self, index: usize) -> Rect {
+        Rect::new(
+            self.tab_x(index),
+            self.tab_bar.y,
+            self.tab_width(),
+            self.tab_bar.h,
+        )
+    }
+
+    /// The rounded box drawn inside the search row, inset from it.
+    pub fn search_field(&self) -> Option<Rect> {
+        let row = self.search_row?;
+        let margin = 8.0;
+        Some(Rect::new(
+            row.x + margin,
+            row.y + 4.0,
+            (row.w - margin * 2.0).max(0.0),
+            (row.h - 8.0).max(0.0),
+        ))
+    }
+
+    /// Left edge of the first skin-tone swatch.
+    ///
+    /// Normally clear of the "Skin tone:" label. In a window too narrow for
+    /// both, the swatches win and the label is what gets covered: a label you
+    /// could read on a wider window is worth less than six controls you can
+    /// press on this one.
+    fn swatch_first_x(&self) -> f32 {
+        let run = SKIN_TONE_PITCH * SkinToneModifier::ALL.len() as f32 - SKIN_TONE_SPACING;
+        let latest = (self.window.w - run - 4.0).max(4.0);
+        SKIN_TONE_FIRST_X.min(latest)
+    }
+
+    /// The circle drawn for swatch `index`.
+    pub fn swatch(&self, index: usize) -> Option<Rect> {
+        let strip = self.strip?;
+        Some(Rect::new(
+            self.swatch_first_x() + index as f32 * SKIN_TONE_PITCH,
+            strip.y + (strip.h - SKIN_TONE_CIRCLE) / 2.0,
+            SKIN_TONE_CIRCLE,
+            SKIN_TONE_CIRCLE,
+        ))
+    }
+
+    /// The box a click selecting swatch `index` may fall in.
+    ///
+    /// The whole pitch and the whole height of the strip, not just the 18px
+    /// circle. The six-pixel gaps between the circles used to belong to nobody,
+    /// so a click three pixels right of a swatch did nothing at all -- a dead
+    /// band a quarter as wide as the swatches themselves.
+    pub fn swatch_cell(&self, index: usize) -> Option<Rect> {
+        let strip = self.strip?;
+        let circle = self.swatch(index)?;
+        Some(Rect::new(
+            circle.x - SKIN_TONE_SPACING / 2.0,
+            strip.y,
+            SKIN_TONE_PITCH,
+            strip.h,
+        ))
+    }
+
+    /// The cell for grid entry `index`, in the grid's own unscrolled space --
+    /// which is what both the draw commands and [`Frame::hit`] take.
+    pub fn cell(&self, index: usize) -> Rect {
+        let cols = self.columns.get();
+        let col = index.checked_rem(cols).unwrap_or(0);
+        let row = index.checked_div(cols).unwrap_or(0);
+        Rect::new(
+            self.grid_left + col as f32 * CELL_SIZE,
+            self.grid.y + GRID_PADDING + row as f32 * CELL_SIZE,
+            CELL_SIZE,
+            CELL_SIZE,
+        )
+    }
+
+    /// How tall `count` emoji are when laid out across this grid's columns.
+    pub fn content_height(&self, count: usize) -> f32 {
+        let rows = count.div_ceil(self.columns.get());
+        rows as f32 * CELL_SIZE + GRID_PADDING * 2.0
     }
 }
 
@@ -1078,6 +1214,10 @@ pub struct EmojiPickerState {
     pub last_selected: Option<String>,
     /// Whether the search field is focused.
     pub search_focused: bool,
+    /// Width of the window being drawn into.
+    pub width: f32,
+    /// Height of the window being drawn into.
+    pub height: f32,
 }
 
 impl EmojiPickerState {
@@ -1094,7 +1234,25 @@ impl EmojiPickerState {
             is_open: true,
             last_selected: Option::None,
             search_focused: false,
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
         }
+    }
+
+    /// Adopt a new window size.
+    ///
+    /// The scroll is re-clamped rather than left alone: growing the window
+    /// shortens the scrollable range, and an offset from the old range would
+    /// leave the grid parked past its own last row.
+    pub fn resize(&mut self, width: f32, height: f32) {
+        self.width = width;
+        self.height = height;
+        self.clamp_scroll();
+    }
+
+    /// Where everything goes at the current window size.
+    pub fn layout(&self) -> Layout {
+        Layout::new(self.width, self.height)
     }
 
     /// The list of emoji currently visible in the grid based on the active tab
@@ -1109,30 +1267,17 @@ impl EmojiPickerState {
 
     /// Total content height of the grid for the current visible emoji set.
     pub fn grid_content_height(&self) -> f32 {
-        let count = self.visible_emoji().len();
-        let rows = count.div_ceil(GRID_COLUMNS);
-        rows as f32 * CELL_SIZE + GRID_PADDING * 2.0
-    }
-
-    /// The Y position where the scrollable grid area starts.
-    pub fn grid_top(&self) -> f32 {
-        TAB_BAR_HEIGHT + SEARCH_HEIGHT
+        self.layout().content_height(self.visible_emoji().len())
     }
 
     /// The height available for the scrollable grid area.
     pub fn grid_area_height(&self) -> f32 {
-        grid_bottom() - self.grid_top()
+        self.layout().grid.h
     }
 
-    /// Maximum scroll offset (clamped to zero if content fits).
+    /// Maximum scroll offset (zero when the content fits).
     pub fn max_scroll(&self) -> f32 {
-        let content = self.grid_content_height();
-        let visible = self.grid_area_height();
-        if content > visible {
-            content - visible
-        } else {
-            0.0
-        }
+        (self.grid_content_height() - self.grid_area_height()).max(0.0)
     }
 
     /// Clamp the current scroll offset to valid bounds.
@@ -1145,6 +1290,309 @@ impl EmojiPickerState {
             self.scroll_offset = max;
         }
     }
+
+    /// Record a pick of the visible entry at `index`.
+    ///
+    /// The database remembers the *untinted* emoji and `last_selected` carries
+    /// the tinted one: recently-used should re-tint when the tone changes
+    /// rather than freeze a row at whatever tone was active when it was picked,
+    /// but what leaves the picker is what the grid showed.
+    fn pick(&mut self, index: usize) {
+        let Some(base) = self.visible_emoji().get(index).map(|e| e.emoji.clone()) else {
+            return;
+        };
+        let modified = self.skin_tone.apply(&base);
+        self.database.record_use(&base);
+        self.last_selected = Some(modified);
+    }
+
+    /// Switch to tab `index` of the bar.
+    fn select_tab(&mut self, index: usize) {
+        let Some(&tab) = tabs().get(index) else {
+            return;
+        };
+        self.active_tab = tab;
+        self.scroll_offset = 0.0;
+        if let Tab::Category(cat) = tab {
+            self.selected_category = cat;
+        }
+        self.search_focused = tab == Tab::Search;
+    }
+
+    /// The control under `(x, y)`, or `None` for bare background.
+    ///
+    /// Answered by drawing the frame and reading its boxes back, so there is no
+    /// arithmetic here that could disagree with the arithmetic in the renderer.
+    pub fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        self.frame(self.width, self.height).hit_test(x, y)
+    }
+
+    /// Draw the picker, recording a hit box for every control as it is painted.
+    pub fn frame(&self, width: f32, height: f32) -> Frame {
+        let mut frame = Frame::new(width, height);
+        if !self.is_open {
+            return frame;
+        }
+        let layout = Layout::new(width, height);
+
+        fill(&mut frame, layout.window, mocha::BASE, CORNER_RADIUS);
+        self.draw_tab_bar(&mut frame, &layout);
+        self.draw_search_field(&mut frame, &layout);
+        self.draw_grid(&mut frame, &layout);
+        self.draw_skin_tone_bar(&mut frame, &layout);
+        self.draw_preview(&mut frame, &layout);
+        frame
+    }
+
+    /// The category tab bar.
+    fn draw_tab_bar(&self, frame: &mut Frame, layout: &Layout) {
+        fill(frame, layout.tab_bar, mocha::MANTLE, 0.0);
+        let tab_w = layout.tab_width();
+
+        for (i, &tab) in tabs().iter().enumerate() {
+            let cell = layout.tab_cell(i);
+            let is_active = tab == self.active_tab;
+
+            if is_active {
+                fill(
+                    frame,
+                    Rect::new(
+                        cell.x + 2.0,
+                        cell.y + 2.0,
+                        (cell.w - 4.0).max(0.0),
+                        (cell.h - 4.0).max(0.0),
+                    ),
+                    mocha::SURFACE0,
+                    6.0,
+                );
+            }
+
+            label(
+                frame,
+                cell.x + (tab_w - TAB_ICON_SIZE) / 2.0,
+                cell.y + (cell.h - TAB_ICON_SIZE) / 2.0,
+                tab.icon(),
+                TAB_ICON_SIZE,
+                if is_active {
+                    mocha::BLUE
+                } else {
+                    mocha::OVERLAY0
+                },
+                FontWeightHint::Regular,
+                Some(tab_w),
+            );
+            frame.hit(Target::Tab(i), cell);
+        }
+
+        frame.push(RenderCommand::Line {
+            x1: 0.0,
+            y1: layout.tab_bar.bottom(),
+            x2: layout.window.w,
+            y2: layout.tab_bar.bottom(),
+            color: mocha::SURFACE0,
+            width: 1.0,
+        });
+    }
+
+    /// The search input field.
+    fn draw_search_field(&self, frame: &mut Frame, layout: &Layout) {
+        let (Some(row), Some(field)) = (layout.search_row, layout.search_field()) else {
+            return;
+        };
+
+        fill(frame, field, mocha::SURFACE0, 6.0);
+        if self.search_focused {
+            stroke(frame, field, mocha::BLUE, 1.5, 6.0);
+        }
+
+        let text_y = field.y + (field.h - LABEL_FONT_SIZE) / 2.0;
+        label(
+            frame,
+            field.x + 8.0,
+            text_y,
+            "\u{1F50D}",
+            LABEL_FONT_SIZE,
+            mocha::OVERLAY0,
+            FontWeightHint::Regular,
+            Option::None,
+        );
+
+        let avail = (field.w - 36.0).max(0.0);
+        let (text, color) = if self.search_query.is_empty() {
+            ("Search emoji...", mocha::OVERLAY0)
+        } else {
+            (self.search_query.as_str(), mocha::TEXT)
+        };
+        label(
+            frame,
+            field.x + 28.0,
+            text_y,
+            text,
+            LABEL_FONT_SIZE,
+            color,
+            FontWeightHint::Regular,
+            Some(avail),
+        );
+
+        // The whole band, not the rounded box drawn inside it: the eight pixels
+        // of margin around the field look like part of it, and a click there
+        // that un-focused the field instead of focusing it would read as the
+        // field refusing to take focus.
+        frame.hit(Target::SearchField, row);
+    }
+
+    /// The scrollable emoji grid.
+    fn draw_grid(&self, frame: &mut Frame, layout: &Layout) {
+        let list = self.visible_emoji();
+
+        frame.clip(layout.grid);
+        frame.translate(0.0, -self.scroll_offset);
+
+        for (i, entry) in list.iter().enumerate() {
+            let cell = layout.cell(i);
+
+            if self.hovered_emoji == Some(i) {
+                fill(
+                    frame,
+                    Rect::new(cell.x + 1.0, cell.y + 1.0, cell.w - 2.0, cell.h - 2.0),
+                    mocha::SURFACE1,
+                    6.0,
+                );
+            }
+
+            // The glyph wears the chosen skin tone if it can take one. Drawing
+            // the untinted emoji here and the tinted one only in the preview
+            // would make the grid disagree with what a click actually yields.
+            label(
+                frame,
+                cell.x + CELL_PADDING,
+                cell.y + CELL_PADDING,
+                &self.skin_tone.apply(&entry.emoji),
+                EMOJI_FONT_SIZE,
+                mocha::TEXT,
+                FontWeightHint::Regular,
+                Some(CELL_SIZE - CELL_PADDING * 2.0),
+            );
+
+            // Recorded inside the clip and the translation, so a cell scrolled
+            // out of the viewport is dropped rather than left clickable behind
+            // the tab bar.
+            frame.hit(Target::Cell(i), cell);
+        }
+
+        frame.untranslate();
+        frame.unclip();
+    }
+
+    /// The skin tone selector strip.
+    fn draw_skin_tone_bar(&self, frame: &mut Frame, layout: &Layout) {
+        let Some(strip) = layout.strip else {
+            return;
+        };
+        fill(frame, strip, mocha::MANTLE, 0.0);
+        label(
+            frame,
+            strip.x + 8.0,
+            strip.y + (strip.h - LABEL_FONT_SIZE) / 2.0,
+            "Skin tone:",
+            LABEL_FONT_SIZE - 1.0,
+            mocha::SUBTEXT0,
+            FontWeightHint::Regular,
+            Option::None,
+        );
+
+        for (i, &tone) in SkinToneModifier::ALL.iter().enumerate() {
+            let Some(circle) = layout.swatch(i) else {
+                continue;
+            };
+            fill(frame, circle, tone.swatch_color(), SKIN_TONE_CIRCLE / 2.0);
+
+            // Selection ring: the swatch outset by 2px on every side, with a
+            // corner radius of half its own width so it draws as a circle.
+            if self.skin_tone == tone {
+                let ring = Rect::new(
+                    circle.x - 2.0,
+                    circle.y - 2.0,
+                    circle.w + 4.0,
+                    circle.h + 4.0,
+                );
+                stroke(frame, ring, mocha::BLUE, 2.0, ring.w / 2.0);
+            }
+
+            if let Some(cell) = layout.swatch_cell(i) {
+                frame.hit(Target::Swatch(i), cell);
+            }
+        }
+    }
+
+    /// The preview area at the bottom of the popup.
+    fn draw_preview(&self, frame: &mut Frame, layout: &Layout) {
+        let Some(preview) = layout.preview else {
+            return;
+        };
+        fill_radii(
+            frame,
+            preview,
+            mocha::CRUST,
+            CornerRadii {
+                top_left: 0.0,
+                top_right: 0.0,
+                bottom_left: CORNER_RADIUS,
+                bottom_right: CORNER_RADIUS,
+            },
+        );
+
+        let list = self.visible_emoji();
+        let hovered = self.hovered_emoji.and_then(|idx| list.get(idx).copied());
+        let text_width = (preview.w - 64.0).max(0.0);
+
+        match hovered {
+            Some(entry) => {
+                label(
+                    frame,
+                    preview.x + 12.0,
+                    preview.y + 10.0,
+                    &self.skin_tone.apply(&entry.emoji),
+                    PREVIEW_EMOJI_SIZE,
+                    mocha::TEXT,
+                    FontWeightHint::Regular,
+                    Option::None,
+                );
+                label(
+                    frame,
+                    preview.x + 56.0,
+                    preview.y + 12.0,
+                    &entry.name,
+                    LABEL_FONT_SIZE,
+                    mocha::SUBTEXT1,
+                    FontWeightHint::Bold,
+                    Some(text_width),
+                );
+                label(
+                    frame,
+                    preview.x + 56.0,
+                    preview.y + 30.0,
+                    entry.category.label(),
+                    LABEL_FONT_SIZE - 2.0,
+                    mocha::OVERLAY0,
+                    FontWeightHint::Regular,
+                    Some(text_width),
+                );
+            }
+            Option::None => {
+                label(
+                    frame,
+                    preview.x + 12.0,
+                    preview.y + (preview.h - LABEL_FONT_SIZE) / 2.0,
+                    "Hover over an emoji to preview",
+                    LABEL_FONT_SIZE,
+                    mocha::OVERLAY0,
+                    FontWeightHint::Regular,
+                    Some((preview.w - 24.0).max(0.0)),
+                );
+            }
+        }
+    }
 }
 
 impl Default for EmojiPickerState {
@@ -1154,338 +1602,73 @@ impl Default for EmojiPickerState {
 }
 
 // ============================================================================
-// Rendering
+// Drawing helpers
 // ============================================================================
 
-/// Render the complete emoji picker popup into a `RenderTree`.
-pub fn render(state: &EmojiPickerState) -> RenderTree {
-    let mut tree = RenderTree::new();
-    if !state.is_open {
-        return tree;
+/// A filled rectangle with per-corner radii.
+fn fill_radii(frame: &mut Frame, rect: Rect, color: Color, corner_radii: CornerRadii) {
+    if rect.is_empty() {
+        return;
     }
-
-    // Window background with rounded corners.
-    tree.fill_rounded_rect(
-        0.0,
-        0.0,
-        WINDOW_WIDTH,
-        WINDOW_HEIGHT,
-        mocha::BASE,
-        CornerRadii::all(CORNER_RADIUS),
-    );
-
-    render_tab_bar(state, &mut tree);
-    render_search_field(state, &mut tree);
-    render_grid(state, &mut tree);
-    render_skin_tone_bar(state, &mut tree);
-    render_preview(state, &mut tree);
-
-    tree
+    frame.push(RenderCommand::FillRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.w,
+        height: rect.h,
+        color,
+        corner_radii,
+    });
 }
 
-/// Render the category tab bar.
-fn render_tab_bar(state: &EmojiPickerState, tree: &mut RenderTree) {
-    // Tab bar background.
-    tree.fill_rect(0.0, 0.0, WINDOW_WIDTH, TAB_BAR_HEIGHT, mocha::MANTLE);
+/// A filled rectangle with the same radius on every corner.
+fn fill(frame: &mut Frame, rect: Rect, color: Color, radius: f32) {
+    fill_radii(frame, rect, color, CornerRadii::all(radius));
+}
 
-    let tab_width = tab_width();
+/// An outlined rectangle.
+fn stroke(frame: &mut Frame, rect: Rect, color: Color, line_width: f32, radius: f32) {
+    if rect.is_empty() {
+        return;
+    }
+    frame.push(RenderCommand::StrokeRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.w,
+        height: rect.h,
+        color,
+        line_width,
+        corner_radii: CornerRadii::all(radius),
+    });
+}
 
-    for (i, &tab) in tabs().iter().enumerate() {
-        let x = tab_x(i);
-        let is_active = tab == state.active_tab;
-
-        // Highlight active tab.
-        if is_active {
-            tree.fill_rounded_rect(
-                x + 2.0,
-                2.0,
-                tab_width - 4.0,
-                TAB_BAR_HEIGHT - 4.0,
-                mocha::SURFACE0,
-                CornerRadii::all(6.0),
-            );
-        }
-
-        // Tab icon (emoji text).
-        let icon_x = x + (tab_width - TAB_ICON_SIZE) / 2.0;
-        let icon_y = (TAB_BAR_HEIGHT - TAB_ICON_SIZE) / 2.0;
-        let color = if is_active {
-            mocha::BLUE
+/// A line of text, elided rather than overrun when a width is given.
+fn label(
+    frame: &mut Frame,
+    x: f32,
+    y: f32,
+    text: &str,
+    font_size: f32,
+    color: Color,
+    font_weight: FontWeightHint,
+    max_width: Option<f32>,
+) {
+    if max_width.is_some_and(|w| w <= 0.0) {
+        return;
+    }
+    frame.push(RenderCommand::Text {
+        x,
+        y,
+        text: text.to_string(),
+        color,
+        font_size,
+        font_weight,
+        max_width,
+        overflow: if max_width.is_some() {
+            TextOverflow::Ellipsis
         } else {
-            mocha::OVERLAY0
-        };
-        tree.push(guitk::render::RenderCommand::Text {
-            x: icon_x,
-            y: icon_y,
-            text: tab.icon().to_string(),
-            color,
-            font_size: TAB_ICON_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(tab_width),
-            overflow: TextOverflow::Ellipsis,
-        });
-    }
-
-    // Bottom divider line.
-    tree.push(guitk::render::RenderCommand::Line {
-        x1: 0.0,
-        y1: TAB_BAR_HEIGHT,
-        x2: WINDOW_WIDTH,
-        y2: TAB_BAR_HEIGHT,
-        color: mocha::SURFACE0,
-        width: 1.0,
-    });
-}
-
-/// Render the search input field.
-fn render_search_field(state: &EmojiPickerState, tree: &mut RenderTree) {
-    let y = TAB_BAR_HEIGHT;
-    let field_margin = 8.0;
-    let field_x = field_margin;
-    let field_y = y + 4.0;
-    let field_w = WINDOW_WIDTH - field_margin * 2.0;
-    let field_h = SEARCH_HEIGHT - 8.0;
-
-    // Field background.
-    tree.fill_rounded_rect(
-        field_x,
-        field_y,
-        field_w,
-        field_h,
-        mocha::SURFACE0,
-        CornerRadii::all(6.0),
-    );
-
-    // Focus border.
-    if state.search_focused {
-        tree.push(guitk::render::RenderCommand::StrokeRect {
-            x: field_x,
-            y: field_y,
-            width: field_w,
-            height: field_h,
-            color: mocha::BLUE,
-            line_width: 1.5,
-            corner_radii: CornerRadii::all(6.0),
-        });
-    }
-
-    // Search icon.
-    tree.push(guitk::render::RenderCommand::Text {
-        x: field_x + 8.0,
-        y: field_y + (field_h - LABEL_FONT_SIZE) / 2.0,
-        text: "\u{1F50D}".to_string(),
-        color: mocha::OVERLAY0,
-        font_size: LABEL_FONT_SIZE,
-        font_weight: FontWeightHint::Regular,
-        max_width: Option::None,
-        overflow: TextOverflow::Clip,
-    });
-
-    // Query text or placeholder.
-    let text_x = field_x + 28.0;
-    let text_y = field_y + (field_h - LABEL_FONT_SIZE) / 2.0;
-    if state.search_query.is_empty() {
-        tree.push(guitk::render::RenderCommand::Text {
-            x: text_x,
-            y: text_y,
-            text: "Search emoji...".to_string(),
-            color: mocha::OVERLAY0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(field_w - 36.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-    } else {
-        tree.push(guitk::render::RenderCommand::Text {
-            x: text_x,
-            y: text_y,
-            text: state.search_query.clone(),
-            color: mocha::TEXT,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(field_w - 36.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-    }
-}
-
-/// Render the scrollable emoji grid.
-fn render_grid(state: &EmojiPickerState, tree: &mut RenderTree) {
-    let grid_top = state.grid_top();
-    let grid_height = state.grid_area_height();
-    let emoji_list = state.visible_emoji();
-
-    // Clip to the grid area.
-    tree.clip(0.0, grid_top, WINDOW_WIDTH, grid_height);
-    tree.translate(0.0, -state.scroll_offset);
-
-    let grid_left = grid_left();
-
-    for (i, entry) in emoji_list.iter().enumerate() {
-        let col = i % GRID_COLUMNS;
-        let row = i / GRID_COLUMNS;
-        let x = grid_left + col as f32 * CELL_SIZE;
-        let y = grid_top + GRID_PADDING + row as f32 * CELL_SIZE;
-
-        // Hover highlight.
-        if state.hovered_emoji == Some(i) {
-            tree.fill_rounded_rect(
-                x + 1.0,
-                y + 1.0,
-                CELL_SIZE - 2.0,
-                CELL_SIZE - 2.0,
-                mocha::SURFACE1,
-                CornerRadii::all(6.0),
-            );
-        }
-
-        // Emoji glyph, wearing the chosen skin tone if it can. Showing the
-        // untinted emoji here and the tinted one only in the preview would
-        // make the grid disagree with what a click actually yields.
-        let text_x = x + CELL_PADDING;
-        let text_y = y + CELL_PADDING;
-        tree.push(guitk::render::RenderCommand::Text {
-            x: text_x,
-            y: text_y,
-            text: state.skin_tone.apply(&entry.emoji),
-            color: mocha::TEXT,
-            font_size: EMOJI_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(CELL_SIZE - CELL_PADDING * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-    }
-
-    tree.untranslate();
-    tree.unclip();
-}
-
-/// Render the skin tone selector strip.
-fn render_skin_tone_bar(state: &EmojiPickerState, tree: &mut RenderTree) {
-    let bar_y = skin_tone_bar_y();
-
-    // Background.
-    tree.fill_rect(0.0, bar_y, WINDOW_WIDTH, SKIN_TONE_HEIGHT, mocha::MANTLE);
-
-    // Label.
-    tree.push(guitk::render::RenderCommand::Text {
-        x: 8.0,
-        y: bar_y + (SKIN_TONE_HEIGHT - LABEL_FONT_SIZE) / 2.0,
-        text: "Skin tone:".to_string(),
-        color: mocha::SUBTEXT0,
-        font_size: LABEL_FONT_SIZE - 1.0,
-        font_weight: FontWeightHint::Regular,
-        max_width: Option::None,
-        overflow: TextOverflow::Clip,
-    });
-
-    // Skin tone circles.
-    for (i, &tone) in SkinToneModifier::ALL.iter().enumerate() {
-        let cx = skin_tone_swatch_x(i);
-        let cy = bar_y + (SKIN_TONE_HEIGHT - SKIN_TONE_CIRCLE) / 2.0;
-
-        // Circle background.
-        tree.fill_rounded_rect(
-            cx,
-            cy,
-            SKIN_TONE_CIRCLE,
-            SKIN_TONE_CIRCLE,
-            tone.swatch_color(),
-            CornerRadii::all(SKIN_TONE_CIRCLE / 2.0),
-        );
-
-        // Selection ring: the swatch outset by 2px on every side, with a
-        // corner radius of half its own width so it draws as a circle.
-        if state.skin_tone == tone {
-            let ring = SKIN_TONE_CIRCLE + 4.0;
-            tree.push(guitk::render::RenderCommand::StrokeRect {
-                x: cx - 2.0,
-                y: cy - 2.0,
-                width: ring,
-                height: ring,
-                color: mocha::BLUE,
-                line_width: 2.0,
-                corner_radii: CornerRadii::all(ring / 2.0),
-            });
-        }
-    }
-}
-
-/// Render the preview area at the bottom of the popup.
-fn render_preview(state: &EmojiPickerState, tree: &mut RenderTree) {
-    let preview_y = WINDOW_HEIGHT - PREVIEW_HEIGHT;
-
-    // Background.
-    tree.fill_rounded_rect(
-        0.0,
-        preview_y,
-        WINDOW_WIDTH,
-        PREVIEW_HEIGHT,
-        mocha::CRUST,
-        CornerRadii {
-            top_left: 0.0,
-            top_right: 0.0,
-            bottom_left: CORNER_RADIUS,
-            bottom_right: CORNER_RADIUS,
+            TextOverflow::Clip
         },
-    );
-
-    // Show the hovered emoji preview, or a hint.
-    let emoji_list = state.visible_emoji();
-    let hovered = state
-        .hovered_emoji
-        .and_then(|idx| emoji_list.get(idx).copied());
-
-    match hovered {
-        Some(entry) => {
-            let modified = state.skin_tone.apply(&entry.emoji);
-            // Large emoji.
-            tree.push(guitk::render::RenderCommand::Text {
-                x: 12.0,
-                y: preview_y + 10.0,
-                text: modified,
-                color: mocha::TEXT,
-                font_size: PREVIEW_EMOJI_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Option::None,
-                overflow: TextOverflow::Clip,
-            });
-            // Name.
-            tree.push(guitk::render::RenderCommand::Text {
-                x: 56.0,
-                y: preview_y + 12.0,
-                text: entry.name.clone(),
-                color: mocha::SUBTEXT1,
-                font_size: LABEL_FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(WINDOW_WIDTH - 64.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            // Category.
-            tree.push(guitk::render::RenderCommand::Text {
-                x: 56.0,
-                y: preview_y + 30.0,
-                text: entry.category.label().to_string(),
-                color: mocha::OVERLAY0,
-                font_size: LABEL_FONT_SIZE - 2.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(WINDOW_WIDTH - 64.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-        Option::None => {
-            tree.push(guitk::render::RenderCommand::Text {
-                x: 12.0,
-                y: preview_y + (PREVIEW_HEIGHT - LABEL_FONT_SIZE) / 2.0,
-                text: "Hover over an emoji to preview".to_string(),
-                color: mocha::OVERLAY0,
-                font_size: LABEL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(WINDOW_WIDTH - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-    }
+    });
 }
 
 // ============================================================================
@@ -1493,10 +1676,19 @@ fn render_preview(state: &EmojiPickerState, tree: &mut RenderTree) {
 // ============================================================================
 
 /// Handle an input event, returning whether it was consumed.
+///
+/// A free function so that [`App::on_event`] and [`Probe::click_at`] are both
+/// thin adapters over the same body rather than two dispatchers that have to be
+/// kept in step -- which is the arrangement where a test passes against a code
+/// path the window never takes.
 pub fn handle_event(state: &mut EmojiPickerState, event: &Event) -> EventResult {
     match event {
         Event::Key(key_ev) if key_ev.pressed => handle_key(state, key_ev),
         Event::Mouse(mouse_ev) => handle_mouse(state, mouse_ev),
+        Event::Resize { width, height } => {
+            state.resize(*width as f32, *height as f32);
+            EventResult::Consumed
+        }
         _ => EventResult::Ignored,
     }
 }
@@ -1531,68 +1723,42 @@ fn handle_key(state: &mut EmojiPickerState, key: &KeyEvent) -> EventResult {
 
 /// Process a mouse event.
 fn handle_mouse(state: &mut EmojiPickerState, mouse: &MouseEvent) -> EventResult {
-    let x = mouse.x;
-    let y = mouse.y;
+    let (x, y) = (mouse.x, mouse.y);
 
     match &mouse.kind {
         MouseEventKind::Press(MouseButton::Left) => {
-            // Tab bar click.
-            if y < TAB_BAR_HEIGHT {
-                return handle_tab_click(state, x);
-            }
-
-            // Search field click — focus it.
-            if (TAB_BAR_HEIGHT..TAB_BAR_HEIGHT + SEARCH_HEIGHT).contains(&y) {
-                state.search_focused = true;
-                return EventResult::Consumed;
-            }
-
-            // Grid click — select emoji.
-            let grid_top = state.grid_top();
-            let grid_bottom = grid_bottom();
-            if y >= grid_top && y < grid_bottom {
-                state.search_focused = false;
-                if let Some(idx) = grid_hit_test(state, x, y) {
-                    let emoji_list = state.visible_emoji();
-                    if let Some(entry) = emoji_list.get(idx) {
-                        let base_emoji = entry.emoji.clone();
-                        let modified = state.skin_tone.apply(&base_emoji);
-                        state.database.record_use(&base_emoji);
-                        state.last_selected = Some(modified);
+            match state.target_at(x, y) {
+                Some(Target::Tab(i)) => state.select_tab(i),
+                Some(Target::SearchField) => state.search_focused = true,
+                Some(Target::Cell(i)) => {
+                    state.search_focused = false;
+                    state.pick(i);
+                }
+                Some(Target::Swatch(i)) => {
+                    if let Some(&tone) = SkinToneModifier::ALL.get(i) {
+                        state.skin_tone = tone;
                     }
                 }
-                return EventResult::Consumed;
+                // Consumed either way: the click landed on the popup, and
+                // reporting it as ignored would offer it to whatever is behind.
+                Option::None => state.search_focused = false,
             }
-
-            // Skin tone bar click.
-            let skin_bar_y = skin_tone_bar_y();
-            if y >= skin_bar_y && y < skin_bar_y + SKIN_TONE_HEIGHT {
-                return handle_skin_tone_click(state, x);
-            }
-
-            state.search_focused = false;
             EventResult::Consumed
         }
 
         MouseEventKind::Move => {
-            // Update hover in grid area.
-            let grid_top = state.grid_top();
-            let grid_bottom = grid_bottom();
-            if y >= grid_top && y < grid_bottom {
-                state.hovered_emoji = grid_hit_test(state, x, y);
-            } else {
-                state.hovered_emoji = Option::None;
-            }
+            state.hovered_emoji = match state.target_at(x, y) {
+                Some(Target::Cell(i)) => Some(i),
+                _ => Option::None,
+            };
             EventResult::Consumed
         }
 
         MouseEventKind::Scroll { dy, .. } => {
-            let grid_top = state.grid_top();
-            let grid_bottom = grid_bottom();
-            if y >= grid_top && y < grid_bottom {
-                // `dy` is a notch count, not a distance. Subtracting it
-                // raw moved the grid one pixel per notch — a 48px cell
-                // took 48 notches to clear, so the wheel looked broken.
+            if state.layout().grid.contains(x, y) {
+                // `dy` is a notch count, not a distance. Subtracting it raw
+                // moved the grid one pixel per notch -- a 48px cell took 48
+                // notches to clear, so the wheel looked broken.
                 state.scroll_offset += wheel::pixels(*dy, CELL_SIZE);
                 state.clamp_scroll();
                 return EventResult::Consumed;
@@ -1604,77 +1770,85 @@ fn handle_mouse(state: &mut EmojiPickerState, mouse: &MouseEvent) -> EventResult
     }
 }
 
-/// Handle a click on the tab bar, selecting the corresponding tab.
-fn handle_tab_click(state: &mut EmojiPickerState, x: f32) -> EventResult {
-    let tabs = tabs();
-    if let Some(&tab) = tab_at(x).and_then(|idx| tabs.get(idx)) {
-        state.active_tab = tab;
-        state.scroll_offset = 0.0;
-        if let Tab::Category(cat) = tab {
-            state.selected_category = cat;
+// ============================================================================
+// Window
+// ============================================================================
+
+impl App for EmojiPickerState {
+    fn title(&self) -> String {
+        String::from("Emoji Picker")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// No tick.
+    ///
+    /// Nothing here moves on its own: the emoji set is a compiled-in table.
+    /// A timer would repaint an identical picture forever and keep the machine
+    /// awake to do it.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        Option::None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
         }
-        state.search_focused = tab == Tab::Search;
+        let result = handle_event(self, event);
+        // Escape closes the picker, and for a popup that is the window closing
+        // rather than a state to sit in: a picker that has stopped drawing
+        // anything is an empty rectangle nailed over the desktop.
+        if !self.is_open {
+            return Response::Exit;
+        }
+        match result {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
     }
-    EventResult::Consumed
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
 }
 
-/// Handle a click on the skin tone selector bar.
-///
-/// The caller has already established that the click is inside the strip, so
-/// only `x` decides which swatch. Consumed either way: a click that lands on
-/// the strip's label rather than a swatch is still a click on the popup, and
-/// reporting it as ignored would offer it to whatever is behind.
-fn handle_skin_tone_click(state: &mut EmojiPickerState, x: f32) -> EventResult {
-    if let Some(&tone) = skin_tone_swatch_at(x).and_then(|i| SkinToneModifier::ALL.get(i)) {
-        state.skin_tone = tone;
-    }
-    EventResult::Consumed
-}
+impl Probe for EmojiPickerState {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
 
-/// Given a mouse position within the grid area, return the index of the emoji
-/// under the cursor, if any.
-fn grid_hit_test(state: &EmojiPickerState, x: f32, y: f32) -> Option<usize> {
-    let grid_top = state.grid_top();
-    let grid_left = grid_left();
-
-    // Adjust for scroll.
-    let adjusted_y = y - grid_top + state.scroll_offset - GRID_PADDING;
-    let adjusted_x = x - grid_left;
-
-    if adjusted_x < 0.0 || adjusted_y < 0.0 {
-        return Option::None;
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        self.frame(size.0, size.1)
     }
 
-    let col = (adjusted_x / CELL_SIZE) as usize;
-    let row = (adjusted_y / CELL_SIZE) as usize;
-
-    if col >= GRID_COLUMNS {
-        return Option::None;
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
     }
 
-    // A float-to-integer cast saturates, so a pointer far below the grid —
-    // or a scroll offset that has grown large — gives a row near
-    // `usize::MAX`. Multiplying that out overflows and panics in a debug
-    // build, so a row that cannot be indexed is reported as a miss instead
-    // of being computed.
-    let idx = row
-        .checked_mul(GRID_COLUMNS)
-        .and_then(|i| i.checked_add(col))?;
-    let count = state.visible_emoji().len();
-    if idx < count { Some(idx) } else { Option::None }
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
+    }
 }
 
 // ============================================================================
 // Entry point
 // ============================================================================
 
-fn main() {
+fn main() -> ExitCode {
     let mut state = EmojiPickerState::new();
-
-    // Initial render to verify everything works.
-    let tree = render(&state);
-    let _ = tree.len();
-    let _ = &mut state;
+    app::launch("emojipicker", &mut state)
 }
 
 // ============================================================================
@@ -1695,6 +1869,33 @@ mod tests {
     )]
 
     use super::*;
+    use guitk::probe;
+
+    /// The tree the picker would hand the compositor at its current size.
+    ///
+    /// Production code no longer builds one of these: [`App::render`] goes
+    /// straight from the frame to the tree. The tests keep the step named
+    /// because what most of them ask is what was *painted*, and a tree is the
+    /// form that question is asked in.
+    fn render(state: &EmojiPickerState) -> RenderTree {
+        state.frame(state.width, state.height).into_tree()
+    }
+
+    /// The layout of a picker at the size it opens at.
+    fn default_layout() -> Layout {
+        EmojiPickerState::new().layout()
+    }
+
+    /// The skin-tone strip of a picker at the size it opens at.
+    ///
+    /// It is an `Option` in the layout because a window short enough to leave
+    /// no room for a row of emoji drops the strip rather than squeezing the
+    /// grid. 480px is not that window.
+    fn default_strip() -> Rect {
+        default_layout()
+            .strip
+            .expect("the strip fits at the opening size")
+    }
 
     // --- Database population ---
 
@@ -2282,13 +2483,7 @@ mod tests {
     fn escape_closes_picker() {
         let mut state = EmojiPickerState::new();
         assert!(state.is_open);
-        let event = Event::Key(KeyEvent {
-            key: Key::Escape,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        let result = handle_event(&mut state, &event);
+        let result = probe::key(&mut state, &probe::press(Key::Escape));
         assert_eq!(result, EventResult::Consumed);
         assert!(!state.is_open);
     }
@@ -2298,8 +2493,9 @@ mod tests {
         let mut state = EmojiPickerState::new();
         // Tab order: Recent, SmileysAndPeople, AnimalsAndNature, ...
         // so the middle of tab 2 is AnimalsAndNature.
+        let layout = state.layout();
         let event = Event::Mouse(MouseEvent {
-            x: tab_x(2) + tab_width() / 2.0,
+            x: layout.tab_x(2) + layout.tab_width() / 2.0,
             y: TAB_BAR_HEIGHT / 2.0,
             kind: MouseEventKind::Press(MouseButton::Left),
         });
@@ -2315,13 +2511,7 @@ mod tests {
     fn search_text_input_updates_query() {
         let mut state = EmojiPickerState::new();
         state.search_focused = true;
-        let event = Event::Key(KeyEvent {
-            key: Key::A,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: "a".to_string(),
-        });
-        handle_event(&mut state, &event);
+        probe::key(&mut state, &probe::typing("a"));
         assert_eq!(state.search_query, "a");
         assert_eq!(state.active_tab, Tab::Search);
     }
@@ -2331,22 +2521,17 @@ mod tests {
         let mut state = EmojiPickerState::new();
         state.search_focused = true;
         state.search_query = "ab".to_string();
-        let event = Event::Key(KeyEvent {
-            key: Key::Backspace,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        handle_event(&mut state, &event);
+        probe::key(&mut state, &probe::press(Key::Backspace));
         assert_eq!(state.search_query, "a");
     }
 
     /// A picker whose grid is genuinely taller than the panel it draws into.
     ///
     /// It has to be the *search* tab: the shipped database holds 82 emoji
-    /// across eight categories, and the largest of them (16) fills 160px of a
-    /// 320px panel, so no category tab can scroll at all. Searching "a"
-    /// matches 73 of them, which overflows. A scroll test on a grid that fits
+    /// across eight categories, and at the default size — seven 48px columns
+    /// in a 320px panel — the largest category (16) needs three rows, 160px,
+    /// so no category tab can scroll at all. Searching "a" matches 73, which
+    /// needs eleven rows and overflows. A scroll test on a grid that fits
     /// would assert nothing.
     fn scrollable_picker() -> EmojiPickerState {
         let mut state = EmojiPickerState::new();
@@ -2363,8 +2548,8 @@ mod tests {
     /// notch *count*, not a pixel distance.
     fn wheel_over_grid(state: &EmojiPickerState, dy: f32) -> Event {
         Event::Mouse(MouseEvent {
-            x: WINDOW_WIDTH / 2.0,
-            y: state.grid_top() + 10.0,
+            x: state.width / 2.0,
+            y: state.layout().grid.y + 10.0,
             kind: MouseEventKind::Scroll { dx: 0.0, dy },
         })
     }
@@ -2451,17 +2636,23 @@ mod tests {
 
     /// A pointer far below the grid must miss, not overflow.
     ///
-    /// `grid_hit_test` derives its row with `(adjusted_y / CELL_SIZE) as
-    /// usize`, and a float-to-integer cast *saturates* rather than wrapping —
-    /// so a large `y` produces a row near `usize::MAX`, and the row-major
-    /// `row * GRID_COLUMNS` that follows overflowed and panicked in a debug
-    /// build. Nothing bounds `y`: it arrives from the event.
+    /// The arithmetic this guarded against is gone: the old `grid_hit_test`
+    /// derived its row with `(adjusted_y / CELL_SIZE) as usize`, and a
+    /// float-to-integer cast *saturates* rather than wrapping — so a large
+    /// `y` produced a row near `usize::MAX`, and the row-major `row *
+    /// GRID_COLUMNS` that followed overflowed and panicked in a debug build.
+    /// Nothing bounds `y`: it arrives from the event.
+    ///
+    /// A hit test that reads back painted rectangles cannot express that bug —
+    /// there is no row number to overflow, only a list of boxes none of which
+    /// contains the point. The test stays because the input is still
+    /// unbounded, and a miss is still the required answer.
     #[test]
     fn a_pointer_far_below_the_grid_misses_instead_of_overflowing() {
         let state = scrollable_picker();
         for y in [1.0e9_f32, 1.0e30, f32::MAX, f32::INFINITY] {
             assert_eq!(
-                grid_hit_test(&state, WINDOW_WIDTH / 2.0, y),
+                state.target_at(state.width / 2.0, y),
                 Option::None,
                 "y={y} should miss the grid"
             );
@@ -2471,10 +2662,10 @@ mod tests {
     #[test]
     fn mouse_move_updates_hover() {
         let mut state = EmojiPickerState::new();
-        let grid_top = state.grid_top();
+        let layout = state.layout();
         let event = Event::Mouse(MouseEvent {
-            x: grid_left() + CELL_SIZE / 2.0,
-            y: grid_top + GRID_PADDING + CELL_SIZE / 2.0,
+            x: layout.grid_left + CELL_SIZE / 2.0,
+            y: layout.grid.y + GRID_PADDING + CELL_SIZE / 2.0,
             kind: MouseEventKind::Move,
         });
         handle_event(&mut state, &event);
@@ -2484,10 +2675,10 @@ mod tests {
     #[test]
     fn click_emoji_records_selection() {
         let mut state = EmojiPickerState::new();
-        let grid_top = state.grid_top();
+        let layout = state.layout();
         let event = Event::Mouse(MouseEvent {
-            x: grid_left() + CELL_SIZE / 2.0,
-            y: grid_top + GRID_PADDING + CELL_SIZE / 2.0,
+            x: layout.grid_left + CELL_SIZE / 2.0,
+            y: layout.grid.y + GRID_PADDING + CELL_SIZE / 2.0,
             kind: MouseEventKind::Press(MouseButton::Left),
         });
         handle_event(&mut state, &event);
@@ -2501,9 +2692,10 @@ mod tests {
     fn skin_tone_click_changes_tone() {
         let mut state = EmojiPickerState::new();
         // The centre of the second circle, which is the Light skin tone.
+        let circle = state.layout().swatch(1).expect("the strip fits at 360x480");
         let event = Event::Mouse(MouseEvent {
-            x: skin_tone_swatch_x(1) + SKIN_TONE_CIRCLE / 2.0,
-            y: skin_tone_bar_y() + SKIN_TONE_HEIGHT / 2.0,
+            x: circle.centre().0,
+            y: circle.centre().1,
             kind: MouseEventKind::Press(MouseButton::Left),
         });
         handle_event(&mut state, &event);
@@ -2575,19 +2767,19 @@ mod tests {
         let swatches = painted_swatches(&EmojiPickerState::new());
         assert_eq!(swatches.len(), SkinToneModifier::ALL.len());
 
-        let bar_mid = skin_tone_bar_y() + SKIN_TONE_HEIGHT / 2.0;
+        let bar_mid = default_strip().centre().1;
         for (i, &(x, _)) in swatches.iter().enumerate() {
-            for probe in [
+            for at in [
                 x + 0.5,
                 x + SKIN_TONE_CIRCLE / 2.0,
                 x + SKIN_TONE_CIRCLE - 0.5,
             ] {
                 let mut state = EmojiPickerState::new();
-                click_at(&mut state, probe, bar_mid);
+                click_at(&mut state, at, bar_mid);
                 assert_eq!(
                     Some(state.skin_tone),
                     SkinToneModifier::ALL.get(i).copied(),
-                    "a click at x={probe} did not select swatch {i}"
+                    "a click at x={at} did not select swatch {i}"
                 );
             }
         }
@@ -2603,7 +2795,7 @@ mod tests {
     #[test]
     fn the_swatch_strip_selects_the_nearest_swatch_and_nothing_beyond_them() {
         let swatches = painted_swatches(&EmojiPickerState::new());
-        let bar_mid = skin_tone_bar_y() + SKIN_TONE_HEIGHT / 2.0;
+        let bar_mid = default_strip().centre().1;
 
         let mut x = 0.0;
         while x < WINDOW_WIDTH {
@@ -2641,7 +2833,7 @@ mod tests {
     fn a_click_on_the_strip_label_is_consumed_without_changing_the_tone() {
         let mut state = EmojiPickerState::new();
         state.skin_tone = SkinToneModifier::Medium;
-        let result = click_at(&mut state, 4.0, skin_tone_bar_y() + SKIN_TONE_HEIGHT / 2.0);
+        let result = click_at(&mut state, 4.0, default_strip().centre().1);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(state.skin_tone, SkinToneModifier::Medium);
     }
@@ -2652,7 +2844,7 @@ mod tests {
     #[test]
     fn the_swatches_stand_apart_inside_the_strip() {
         let swatches = painted_swatches(&EmojiPickerState::new());
-        let bar_y = skin_tone_bar_y();
+        let bar_y = default_strip().y;
         for pair in swatches.windows(2) {
             assert!(
                 pair[1].0 >= pair[0].0 + SKIN_TONE_CIRCLE,
@@ -2702,7 +2894,7 @@ mod tests {
 
         assert_eq!(
             columns.len(),
-            GRID_COLUMNS,
+            default_layout().columns.get(),
             "the grid painted {} distinct columns",
             columns.len()
         );
@@ -2741,14 +2933,19 @@ mod tests {
         );
 
         let expected = tabs();
+        let layout = default_layout();
         for (i, &(icon_x, _)) in icons.iter().enumerate() {
-            for probe in [icon_x, tab_x(i) + 0.5, tab_x(i) + tab_width() - 0.5] {
+            for at in [
+                icon_x,
+                layout.tab_x(i) + 0.5,
+                layout.tab_x(i) + layout.tab_width() - 0.5,
+            ] {
                 let mut state = EmojiPickerState::new();
-                click_at(&mut state, probe, TAB_BAR_HEIGHT / 2.0);
+                click_at(&mut state, at, TAB_BAR_HEIGHT / 2.0);
                 assert_eq!(
                     Some(state.active_tab),
                     expected.get(i).copied(),
-                    "a click at x={probe} did not select tab {i}"
+                    "a click at x={at} did not select tab {i}"
                 );
             }
         }
@@ -2837,7 +3034,7 @@ mod tests {
     #[test]
     fn the_tab_count_matches_the_tab_list() {
         assert_eq!(tabs().len(), TAB_COUNT);
-        assert!((tab_width() * TAB_COUNT as f32 - WINDOW_WIDTH).abs() < 0.01);
+        assert!((default_layout().tab_width() * TAB_COUNT as f32 - WINDOW_WIDTH).abs() < 0.01);
     }
 
     // --- Picker state ---
@@ -2914,5 +3111,259 @@ mod tests {
         });
         handle_event(&mut state, &event);
         assert!(state.search_focused);
+    }
+    // --- The window -------------------------------------------------------
+    //
+    // The picker used to be a function that built a render tree. `main` called
+    // it once, took the length of the result, and returned; nothing opened,
+    // nothing was clickable, and the fixed 360x480 geometry was never
+    // contradicted because there was no other size for it to be wrong at.
+
+    /// The size the picker asks the compositor to open at is the size its
+    /// layout was measured for.
+    #[test]
+    fn the_window_opens_at_the_size_the_layout_expects() {
+        let state = EmojiPickerState::new();
+        let (w, h) = state.initial_size();
+        assert_eq!((w as f32, h as f32), (WINDOW_WIDTH, WINDOW_HEIGHT));
+        assert_eq!(
+            <EmojiPickerState as Probe>::SIZE,
+            (WINDOW_WIDTH, WINDOW_HEIGHT)
+        );
+        assert!(!state.title().is_empty());
+    }
+
+    /// Rendering at a size adopts it: the next hit test answers for the window
+    /// that was drawn, not for the one the picker was built at.
+    #[test]
+    fn rendering_at_a_size_is_what_teaches_the_picker_that_size() {
+        let mut state = EmojiPickerState::new();
+        let narrow = 240.0;
+        let tree = state.render(narrow, 400.0);
+        assert!(!tree.commands.is_empty());
+        assert!((state.width - narrow).abs() < 0.01);
+        assert_eq!(
+            state.layout().columns.get(),
+            5,
+            "240px holds five 48px columns"
+        );
+    }
+
+    /// A wider window is more columns, not a wider gutter. This is the whole
+    /// point of deriving the layout per frame: the old code multiplied a
+    /// `GRID_COLUMNS` constant by `CELL_SIZE` and centred the result in
+    /// `WINDOW_WIDTH`, so a resized window grew its margins and nothing else.
+    #[test]
+    fn a_wider_window_fits_more_columns() {
+        let narrow = Layout::new(240.0, WINDOW_HEIGHT).columns.get();
+        let wide = Layout::new(720.0, WINDOW_HEIGHT).columns.get();
+        assert!(
+            wide > narrow,
+            "720px gave {wide} columns and 240px gave {narrow}"
+        );
+        assert_eq!(narrow, 5);
+        assert_eq!(wide, 15);
+    }
+
+    /// However narrow the window, at least one column is offered: a zero-column
+    /// grid would divide by zero when turning an index into a row.
+    #[test]
+    fn even_an_impossibly_narrow_window_keeps_one_column() {
+        for width in [0.0_f32, 1.0, 10.0, CELL_SIZE - 0.5] {
+            let layout = Layout::new(width, WINDOW_HEIGHT);
+            assert_eq!(layout.columns.get(), 1, "at width={width}");
+            // And the cell arithmetic that divides by it stays finite.
+            assert!(layout.cell(3).y.is_finite());
+        }
+    }
+
+    /// A window too short for everything drops bands rather than squeezing the
+    /// grid: the grid is the picker, and a picker with no room to show an
+    /// emoji is not a smaller picker but a broken one.
+    #[test]
+    fn a_short_window_drops_bands_instead_of_crushing_the_grid() {
+        // Tall enough for all four bands.
+        let full = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(full.search_row.is_some());
+        assert!(full.strip.is_some());
+        assert!(full.preview.is_some());
+        assert!(full.grid.h >= CELL_SIZE);
+
+        // Short enough that something has to give, at every height down to
+        // nothing. Two things hold the whole way down: the bands never claim
+        // more than the window has, and no optional band is kept at the price
+        // of a row of emoji. Below the height where even a bare grid can show
+        // a row, everything else is already gone and the grid keeps whatever
+        // is left -- a clipped row being more use than an empty window.
+        let mut height = WINDOW_HEIGHT;
+        while height >= 0.0 {
+            let layout = Layout::new(WINDOW_WIDTH, height);
+            let bands = layout.tab_bar.h
+                + layout.search_row.map_or(0.0, |r| r.h)
+                + layout.grid.h
+                + layout.strip.map_or(0.0, |r| r.h)
+                + layout.preview.map_or(0.0, |r| r.h);
+            assert!(
+                bands <= height + 0.01,
+                "at height={height} the bands total {bands}"
+            );
+            if layout.grid.h < CELL_SIZE {
+                assert!(
+                    layout.search_row.is_none()
+                        && layout.strip.is_none()
+                        && layout.preview.is_none(),
+                    "at height={height} the grid is only {}px, yet a band was kept",
+                    layout.grid.h
+                );
+            }
+            height -= 1.0;
+        }
+    }
+
+    /// The preview goes before the strip does. It names an emoji that is
+    /// already on screen a row above; the strip is the only place a skin tone
+    /// can be chosen at all.
+    #[test]
+    fn the_preview_is_the_first_band_sacrificed() {
+        let mut saw_strip_without_preview = false;
+        let mut height = WINDOW_HEIGHT;
+        while height >= 0.0 {
+            let layout = Layout::new(WINDOW_WIDTH, height);
+            if layout.preview.is_some() {
+                assert!(
+                    layout.strip.is_some(),
+                    "at height={height} the preview survived but the strip did not"
+                );
+            } else if layout.strip.is_some() {
+                saw_strip_without_preview = true;
+            }
+            height -= 1.0;
+        }
+        assert!(
+            saw_strip_without_preview,
+            "no height dropped only the preview, so the ordering is untested"
+        );
+    }
+
+    /// When the strip is gone, so is the target it carried: a click where it
+    /// used to be must not select a skin tone.
+    #[test]
+    fn a_dropped_band_takes_its_clickable_targets_with_it() {
+        let mut state = EmojiPickerState::new();
+        state.resize(WINDOW_WIDTH, TAB_BAR_HEIGHT + CELL_SIZE + 4.0);
+        let layout = state.layout();
+        assert!(layout.strip.is_none(), "this height must drop the strip");
+        assert!(layout.preview.is_none());
+
+        let frame = state.frame(state.width, state.height);
+        assert!(
+            !frame
+                .hits()
+                .iter()
+                .any(|&(t, _)| matches!(t, Target::Swatch(_))),
+            "a swatch is still clickable in a window with no strip"
+        );
+    }
+
+    /// A cell scrolled up behind the tab bar is not clickable.
+    ///
+    /// This is the bug the arithmetic hit test could not have avoided. It
+    /// subtracted the scroll offset from `y` and divided, so a point that had
+    /// scrolled out of the viewport still resolved to whatever row the
+    /// subtraction landed on: nothing in the calculation knew about the
+    /// viewport. Recording hit boxes as they are painted, inside the clip,
+    /// drops them instead.
+    #[test]
+    fn an_emoji_scrolled_out_of_the_viewport_is_not_clickable() {
+        let mut state = scrollable_picker();
+        let (x, y) = state.layout().cell(0).centre();
+
+        assert_eq!(state.target_at(x, y), Some(Target::Cell(0)));
+
+        state.scroll_offset = state.max_scroll();
+        assert!(state.scroll_offset > CELL_SIZE);
+        assert_ne!(
+            state.target_at(x, y),
+            Some(Target::Cell(0)),
+            "the first cell is scrolled away but still answers at its old place"
+        );
+    }
+
+    /// Nothing outside the window is clickable, and nothing anywhere panics.
+    #[test]
+    fn a_hit_test_anywhere_at_any_size_is_answerable() {
+        for (w, h) in [
+            (WINDOW_WIDTH, WINDOW_HEIGHT),
+            (120.0, 90.0),
+            (1200.0, 200.0),
+            (48.0, 48.0),
+        ] {
+            let mut state = scrollable_picker();
+            state.resize(w, h);
+            let mut y = -20.0;
+            while y < h + 20.0 {
+                let mut x = -20.0;
+                while x < w + 20.0 {
+                    let hit = state.target_at(x, y);
+                    if x < 0.0 || y < 0.0 || x >= w || y >= h {
+                        assert_eq!(hit, Option::None, "a hit at ({x}, {y}) outside {w}x{h}");
+                    }
+                    x += 7.0;
+                }
+                y += 7.0;
+            }
+        }
+    }
+
+    /// A closed picker draws nothing and asks the window to go away.
+    #[test]
+    fn closing_the_picker_ends_the_program() {
+        let mut state = EmojiPickerState::new();
+        let response = state.on_event(&Event::Key(probe::press(Key::Escape)));
+        assert_eq!(response, Response::Exit);
+        assert!(state.frame(state.width, state.height).commands().is_empty());
+    }
+
+    /// The compositor asking to close is also an exit, without the picker
+    /// having had to be closed from the inside first.
+    #[test]
+    fn the_close_button_ends_the_program() {
+        let mut state = EmojiPickerState::new();
+        assert_eq!(state.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    /// A resize arriving as an event has the same effect as one arriving as a
+    /// render size -- the picker must not hold two ideas of how big it is.
+    #[test]
+    fn a_resize_event_and_a_render_size_agree() {
+        let mut by_event = EmojiPickerState::new();
+        handle_event(
+            &mut by_event,
+            &Event::Resize {
+                width: 500,
+                height: 300,
+            },
+        );
+
+        let mut by_render = EmojiPickerState::new();
+        let _ = by_render.render(500.0, 300.0);
+
+        assert_eq!(by_event.layout().columns, by_render.layout().columns);
+        assert!((by_event.layout().grid.h - by_render.layout().grid.h).abs() < 0.01);
+    }
+
+    /// Scrolling to the end, then making the window taller, must not leave the
+    /// grid scrolled past its own content.
+    #[test]
+    fn growing_the_window_pulls_the_scroll_back_into_range() {
+        let mut state = scrollable_picker();
+        state.scroll_offset = state.max_scroll();
+        state.resize(WINDOW_WIDTH, 1200.0);
+        assert!(
+            state.scroll_offset <= state.max_scroll() + 0.01,
+            "offset {} exceeds the new maximum {}",
+            state.scroll_offset,
+            state.max_scroll()
+        );
     }
 }

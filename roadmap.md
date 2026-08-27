@@ -6376,13 +6376,17 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Keyboard translation (special keys → escape sequences, Ctrl+letter)
   - [x] Selection support, visual bell, configurable tab stops, color scheme
   - [x] PTY integration with child process (pty.rs: PtyPair, ByteChannel, cooked/raw mode, line discipline, PtyManager, ChildProcess)
-- [x] Calculator:
+- [x] Calculator (apps/calculator: **windowed** — app::launch, Frame hit boxes, Layout from the live window size):
   - [x] Standard and Scientific modes
   - [x] Recursive descent expression parser (proper operator precedence)
   - [x] Trig functions (sin/cos/tan/asin/acos/atan) with degree/radian toggle
   - [x] ln, log10, sqrt, pow, factorial, pi, e, abs, floor, ceil, mod
   - [x] History (last 20), memory operations (MS/MR/M+/M-/MC)
   - [x] Keyboard shortcuts, error handling (div by zero, overflow, domain errors)
+  - [x] Every key is identified by the label it draws, which is the same string the click dispatcher matches on, so a key's picture, its clickable area and its meaning are one fact rather than three that can drift apart
+  - [x] History panel scrolls by the wheel, and a row can be clicked to bring its answer back into the expression (a row recording an error is not recallable)
+  - [x] Memory readout in the status strip, so MR is not a guess; unclosed-paren count in the display
+  - [x] 94 tests, including no-two-keys-overlap, a window too small to draw in offering nothing to press, and a NaN window size laid out rather than propagated
 - [x] Settings/configuration UI (comprehensive, centralized):
   - [x] 8 category sidebar (System/Network/Personalization/Apps/Accounts/Privacy/Accessibility/Update)
   - [x] Display page: resolution, refresh rate, scaling, night light
@@ -6421,7 +6425,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Disk cleanup utility (apps/diskcleanup: 9 cleanup categories, scanner, executor with dry-run, scheduled cleanup, history, progress UI)
 - [x] Emoji picker (apps/emojipicker: category tabs, search, 6-column grid, skin tone selector, 82 emoji, recent tracking)
 - [x] Font manager (apps/fontmanager: category sidebar, font list, preview panel, install/uninstall, rendering settings, 19 default fonts)
-- [x] Task scheduler (apps/taskscheduler: cron expression parsing, retry policies, execution history, task CRUD, config persistence, 99 tests)
+- [x] Task scheduler (apps/taskscheduler: **windowed** — `app::launch`, `Frame` hit boxes, `Layout` from the live size, a once-a-second tick that runs whatever became due; cron expression parsing, retry policies, execution history, task CRUD, config persistence, 128 tests. No way to start a process yet — held open by a `RunFn` seam that leaves a due task overdue rather than rescheduling one it could not run, see `known-issues.md` → `C-TASKSCHEDULER-HAS-NO-EXECUTOR`)
 - [x] Network speed test (apps/speedtest: speedometer arc gauge, latency/download/upload phases, throughput graph, history, server selection, 59 tests)
 - [x] Startup apps manager (apps/startupmanager: enable/disable, impact assessment, import/export, sortable table, 82 tests)
 - [x] Disk usage analyzer (apps/diskanalyzer: WinDirStat-style treemap, extension breakdown, squarified layout, drill-down, 77 tests)
@@ -6479,7 +6483,12 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Desktop Reminders (apps/reminders: task management with Date/Time/DateTime types, 4 priority levels, categories with color coding, recurrence patterns (daily/weekly/biweekly/monthly/yearly), subtasks, due date tracking, notification system with snooze/dismiss, overdue detection, task filtering and sorting, JSON import/export, search, statistics dashboard, 86 tests)
 - [x] Batch File Renamer (apps/renamer: 10 rename operation types — find/replace, regex, case change, insert text, delete range, trim whitespace, sequential numbering, date stamp, extension change, custom template — operation chaining with reorder, live preview, conflict detection, undo/redo history, file filtering by extension, select all/none/invert, multi-panel UI, 60+ tests)
 - [x] File Recovery / Undelete (apps/undelete: disk scanning with ext4 inode table simulation, file signature detection for 30+ formats (JPEG/PNG/PDF/ZIP/MP3/FLAC/MP4/SQLite/etc.), recycle bin integration, recovery confidence scoring (High/Medium/Low/Unlikely), deep scan mode with sector-by-sector scanning, batch recovery, scan progress with ETA, multi-panel UI with category sidebar and detail preview, 100 tests)
-- [x] Unicode Character Map (apps/charmap: browse 47 Unicode blocks from Basic Latin through Emoticons, character grid with cell display, search by name/codepoint/literal character, category filtering (Letters/Numbers/Symbols/Punctuation), favorites and recently used lists, character detail with UTF-8 bytes and HTML/CSS/Rust escapes, preview sizing (Small/Medium/Large/Jumbo), 70 tests)
+- [x] Unicode Character Map (apps/charmap: **windowed** — browse 47 Unicode blocks from Basic Latin through Emoticons, character grid with cell display, search by name/codepoint/literal character, category filtering (Letters/Numbers/Symbols/Punctuation), favorites and recently used lists, character detail with UTF-8 bytes and HTML/CSS/Rust escapes, preview sizing (Small/Medium/Large/Jumbo), 98 tests)
+  - Opens a real window via `oswindow::app::launch`; every clickable thing is a `Target` whose box is recorded by the renderer as it paints, so a click and the eye read one frame rather than two expressions that can disagree.
+  - Fixed a navigation bug the wiring exposed: the app kept a `grid_columns: 16` while the renderer derived its own column count from the window width, so arrow-Down moved by 16 while the eye followed a row of a different length, and Page Up/Down jumped through a grid that did not exist. Both now come from one `Layout` computed from the live window size and never remembered.
+  - Fixed a scroll bug of the same shape: `render_grid` worked out a scroll row under `&self`, used it for one frame and threw it away, so `grid_scroll` was never what the screen showed and the wheel could not move it. The wheel now scrolls whichever list the pointer is over — block list or grid — with a separate fraction accumulator each.
+  - A narrow window drops the sidebar and detail panels rather than squeezing them into unreadable slivers, and their hit boxes vanish with them.
+  - Enclosing marks (Me) are now classified, so the category label the detail panel could always print is finally reachable by some codepoint.
 - [x] Camera / Webcam Viewer (apps/camera: camera device management with 3 simulated devices, video frame capture, photo gallery with grid/list/filmstrip views, video recording with duration/bitrate tracking, camera settings (brightness/contrast/saturation/exposure/white balance/zoom), 8 image filters (grayscale/sepia/negative/blur/warm/cool/high-contrast), self-timer (3s/5s/10s), multi-camera switching, histogram overlay, 100 tests)
 - [x] Pomodoro Focus Timer (apps/pomodoro: classic Pomodoro technique with customizable work/break durations, round tracking per set, daily statistics with goal tracking, streak counting, task labeling, 7 ambient sound options, auto-start configurable, focus log with timestamped entries, settings editor, notification overlay, 4-screen UI (Timer/Stats/Log/Settings), 65 tests)
 - [x] Network Scanner (apps/netscan: IP scanning with CIDR/range/individual parsing, port scanning with 115 service mappings, host discovery with ping/ARP/TCP connect methods, 4 scan profiles (Quick/Full/Custom/Stealth), network topology visualization, scan history with host diff detection, Wake-on-LAN magic packets, WHOIS lookup, traceroute simulation, CSV/JSON export, bandwidth estimation, 82 tests)

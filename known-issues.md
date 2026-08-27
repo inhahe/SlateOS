@@ -90300,7 +90300,7 @@ Same shape as `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW`,
 fixed hours earlier the same day: an assertion against a freshly-read value
 where the correct operand was the value the code had actually used.
 
-### C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT — 2026-08-26 — LANE C, OPEN
+### C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT — 2026-08-26 — LANE C, **FIXED 2026-08-27**
 
 **In short:** The archive manager's Encrypted column says "no" for every member
 of every archive, including members that really are encrypted. It is not
@@ -90346,6 +90346,37 @@ a `!= 0` test instead of a `& 1` test), and `strong_encryption_still_sets_bit_ze
 Not done, and deliberately left to lane C because it is app-side: `parse_zip`'s
 hardcoded `encrypted: false`, and the "this member is encrypted" refusal in
 `extract`. This entry stays OPEN until those land.
+
+**Lane C, 2026-08-27 — the app half has landed; FIXED.** `parse_zip` reads
+`member.is_encrypted()`, so the padlock icon the row renderer already drew for
+`entry.encrypted` is reachable for the first time.
+
+Both places that could have contradicted the column now read the same bit:
+
+- **`extract` refuses an encrypted member before the inflater is asked**, with a
+  new `SkipReason::Encrypted` reading "it is encrypted and this build cannot
+  decrypt". The old path was not merely unhelpful but actively wrong: the
+  inflater expands ciphertext into whatever it happens to expand to, and the
+  size/CRC check at the end rejects it — so the program blamed an intact archive
+  for being damaged and sent a user who needed a password to look for another
+  copy.
+- **`verify` (the Test button) returns `TestResult::DecryptionFailed`** rather
+  than `Corrupted`. It still counts against the pass rate, which is right — the
+  button cannot vouch for data it cannot read — but it names the actual problem.
+
+Three tests: `an_encrypted_member_is_shown_as_encrypted` (and the plain case
+still reads false, now from the bit rather than from a constant),
+`an_encrypted_member_is_refused_by_name_rather_than_called_corrupt` (asserts the
+reason is `Encrypted`, that the message names encryption, and that no ciphertext
+is left on disk under the member's own name), and
+`testing_an_encrypted_member_reports_a_password_not_damage`. The fixture patches
+bit 0 into the central header of a real archive and leaves the *data* as real
+deflate on purpose — that is what makes the test able to tell "refused because
+the bit is set" from "failed because ciphertext does not inflate", which are the
+old behaviour and the new one.
+
+What is still missing is decryption itself, which is a feature and not a bug:
+SlateOS cannot read a password-protected member at all, and now says so.
 
 ### C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY — benchmark struck off — 2026-08-26 — LANE C
 
@@ -90973,3 +91004,60 @@ which is self-contained and could be done without the reader.
 **Where it lives:** `userspace/coreutils/src/bin/strings.rs` — "Where this
 deliberately diverges" in the module doc, `unsupported()`, and the test
 `the_object_file_options_are_refused_rather_than_ignored`.
+
+---
+
+## `C-TASKSCHEDULER-HAS-NO-EXECUTOR` (lane C, 2026-08-27) — **open**, missing backend
+
+**In short:** The Task Scheduler now opens as a real window and everything in
+it works — the task list, the add/edit form, the delete confirmation, the
+history tab, keyboard and wheel — and it correctly computes *when* every task
+is next due, including full cron expressions. What it cannot do is **run** one.
+Nothing in SlateOS can yet start a process on another program's behalf, so a
+task's command is a string the scheduler stores, displays and schedules, but
+never executes. A user can build a perfectly correct schedule and nothing will
+ever happen at the appointed time.
+
+**What is missing, precisely.** A way to spawn a process and wait for its exit
+status. That is a kernel/userland facility (lane A/B), not a graphics one: the
+`posix` layer has the syscalls, but nothing exposes a "run this command line
+and tell me how it went" service to an application in `apps/`.
+
+**How the gap is held open rather than papered over.** A function-pointer seam
+on `TaskScheduler`, following the precedent set by defrag's `ScanFn` (see
+`C-DEFRAG-HAS-NO-WAY-TO-SCAN-A-DRIVE`) and pdfviewer's `OpenFn`/`PrintFn`:
+
+| Seam | Type | Gate |
+|---|---|---|
+| `runner` | `RunFn = fn(&str) -> Result<u64, TaskRunError>` | `can_run()` |
+
+`Ok(duration_ms)` records a success in the history and reschedules; `Err` goes
+through the existing retry policy. The seam is `None` in the shipping binary.
+
+**The policy that matters: with no runner, a due task stays overdue.**
+`run_due_tasks` returns early when `runner` is `None` and — this is the part
+worth reading twice — does *not* advance any task's `next_run_timestamp`. A
+scheduler that could not execute a command but rescheduled the task anyway
+would have moved a nightly backup's "next run" to tomorrow without ever having
+run it, and the history would show nothing amiss. Leaving the task overdue is
+the honest state, and it is the state the window shows.
+
+**Alternatives rejected.** Fabricating a success so the history tab has
+something in it would put a lie on screen and, worse, a lie about a backup
+having run. A `runner` that always returns `Err` would fill the history with
+failures the user cannot act on and would burn through each task's retry
+budget. Both were rejected for the same reason as their equivalents in defrag
+and pdfviewer.
+
+**Proper fix.** When a process-spawning service exists, write the real `RunFn`
+against it and call `scheduler.set_runner(...)` in `main`. Nothing in the UI
+needs to change: the tick handler already calls `run_due_tasks` once a second,
+so the window becomes live on the day the backend arrives. At that point
+`can_run()` should also gate a user-visible hint — a scheduler that cannot run
+anything ought to say so in its status bar — which is deliberately *not* done
+now, because there is no second state to contrast it with.
+
+**Where it bites:** `apps/taskscheduler/src/main.rs` — `RunFn`, `TaskRunError`,
+`TaskScheduler::runner`, `TaskScheduler::run_due_tasks`,
+`TaskScheduler::set_runner`, `TaskScheduler::can_run`, and
+`SchedulerUI::refresh_clock`, which is the only caller.

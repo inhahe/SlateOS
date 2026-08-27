@@ -9,25 +9,26 @@
 //! - Keyboard shortcuts (numpad, Enter=equals, Escape=clear)
 //! - Comprehensive error handling (division by zero, overflow, invalid input)
 //!
-//! Uses the guitk library for UI rendering.
+//! The window is drawn as a [`Frame`] rather than assembled from widgets. A
+//! keypad is nothing but hit boxes: every button here is identified by the
+//! label it draws, which is also the string [`handle_button`] dispatches on, so
+//! a key's picture, its clickable area and its meaning are one fact instead of
+//! three that could drift apart.
 
-#[allow(unused_imports)]
 use guitk::color::Color;
-#[allow(unused_imports)]
-use guitk::event::{
-    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
-};
-#[allow(unused_imports)]
-use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstraint};
-#[allow(unused_imports)]
-use guitk::render::RenderTree;
-#[allow(unused_imports)]
-use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
-#[allow(unused_imports)]
-use guitk::widget::{Widget, WidgetId, WidgetTree};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::scroll_window;
+use guitk::style::CornerRadii;
+use guitk::text;
+use guitk::wheel;
+use oswindow::app::{self, App, Response};
 
 use std::collections::VecDeque;
 use std::f64::consts::{E, PI};
+use std::process::ExitCode;
 
 // ============================================================================
 // Calculator modes
@@ -95,104 +96,91 @@ enum MathFunc {
 /// malformed numbers.
 fn tokenize(input: &str) -> Option<Vec<Token>> {
     let mut tokens = Vec::new();
-    let chars: Vec<char> = input.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
+    // A peekable scanner rather than an index into a `Vec<char>`. The two
+    // multi-character tokens below -- numbers and identifiers -- are where an
+    // index walk goes wrong: every branch has to remember to advance the cursor
+    // by exactly the right amount, and one that advances twice silently eats a
+    // character while one that forgets loops forever. `peek` lets each token
+    // consume precisely what belongs to it and leave the rest where it is.
+    let mut chars = input.chars().peekable();
 
-    while i < len {
-        let ch = *chars.get(i)?;
-
+    while let Some(ch) = chars.peek().copied() {
         // Skip whitespace.
         if ch.is_ascii_whitespace() {
-            i += 1;
+            chars.next();
             continue;
         }
 
-        // Numbers (including decimals).
+        // Numbers (including decimals). Built up character by character rather
+        // than sliced out afterwards, so there are no offsets to get wrong.
         if ch.is_ascii_digit() || ch == '.' {
-            let start = i;
-            let mut has_dot = ch == '.';
-            i += 1;
-            while i < len {
-                let c = *chars.get(i)?;
+            let mut number = String::new();
+            let mut has_dot = false;
+            while let Some(c) = chars.peek().copied() {
                 if c.is_ascii_digit() {
-                    i += 1;
+                    number.push(c);
                 } else if c == '.' && !has_dot {
+                    // A second dot ends the number rather than joining it:
+                    // `1.2.3` is two numbers, not one unparseable one.
                     has_dot = true;
-                    i += 1;
+                    number.push(c);
                 } else {
                     break;
                 }
+                chars.next();
             }
-            let num_str: String = chars[start..i].iter().collect();
-            let value = num_str.parse::<f64>().ok()?;
-            tokens.push(Token::Number(value));
+            // A bare `.` reaches here and fails to parse, which is the right
+            // answer: it is not a number.
+            tokens.push(Token::Number(number.parse::<f64>().ok()?));
             continue;
         }
 
-        // Operators and parentheses.
-        match ch {
-            '+' => {
-                tokens.push(Token::Plus);
-                i += 1;
-            }
-            '-' => {
-                tokens.push(Token::Minus);
-                i += 1;
-            }
-            '*' => {
-                tokens.push(Token::Multiply);
-                i += 1;
-            }
-            '/' => {
-                tokens.push(Token::Divide);
-                i += 1;
-            }
-            '%' => {
-                tokens.push(Token::Modulo);
-                i += 1;
-            }
-            '^' => {
-                tokens.push(Token::Power);
-                i += 1;
-            }
-            '(' => {
-                tokens.push(Token::LeftParen);
-                i += 1;
-            }
-            ')' => {
-                tokens.push(Token::RightParen);
-                i += 1;
-            }
-            _ if ch.is_ascii_alphabetic() => {
-                // Parse identifiers (function names, constants).
-                let start = i;
-                while i < len && chars.get(i).is_some_and(|c| c.is_ascii_alphabetic()) {
-                    i += 1;
+        // Identifiers: function names and constants.
+        if ch.is_ascii_alphabetic() {
+            let mut word = String::new();
+            while let Some(c) = chars.peek().copied() {
+                if !c.is_ascii_alphabetic() {
+                    break;
                 }
-                let word: String = chars[start..i].iter().collect();
-                match word.as_str() {
-                    "sin" => tokens.push(Token::Func(MathFunc::Sin)),
-                    "cos" => tokens.push(Token::Func(MathFunc::Cos)),
-                    "tan" => tokens.push(Token::Func(MathFunc::Tan)),
-                    "asin" => tokens.push(Token::Func(MathFunc::Asin)),
-                    "acos" => tokens.push(Token::Func(MathFunc::Acos)),
-                    "atan" => tokens.push(Token::Func(MathFunc::Atan)),
-                    "ln" => tokens.push(Token::Func(MathFunc::Ln)),
-                    "log" => tokens.push(Token::Func(MathFunc::Log10)),
-                    "sqrt" => tokens.push(Token::Func(MathFunc::Sqrt)),
-                    "abs" => tokens.push(Token::Func(MathFunc::Abs)),
-                    "floor" => tokens.push(Token::Func(MathFunc::Floor)),
-                    "ceil" => tokens.push(Token::Func(MathFunc::Ceil)),
-                    "exp" => tokens.push(Token::Func(MathFunc::Exp)),
-                    "fact" => tokens.push(Token::Func(MathFunc::Factorial)),
-                    "pi" => tokens.push(Token::Number(PI)),
-                    "e" => tokens.push(Token::Number(E)),
-                    _ => return None, // Unknown identifier.
-                }
+                word.push(c);
+                chars.next();
             }
-            _ => return None, // Unrecognized character.
+            tokens.push(match word.as_str() {
+                "sin" => Token::Func(MathFunc::Sin),
+                "cos" => Token::Func(MathFunc::Cos),
+                "tan" => Token::Func(MathFunc::Tan),
+                "asin" => Token::Func(MathFunc::Asin),
+                "acos" => Token::Func(MathFunc::Acos),
+                "atan" => Token::Func(MathFunc::Atan),
+                "ln" => Token::Func(MathFunc::Ln),
+                "log" => Token::Func(MathFunc::Log10),
+                "sqrt" => Token::Func(MathFunc::Sqrt),
+                "abs" => Token::Func(MathFunc::Abs),
+                "floor" => Token::Func(MathFunc::Floor),
+                "ceil" => Token::Func(MathFunc::Ceil),
+                "exp" => Token::Func(MathFunc::Exp),
+                "fact" => Token::Func(MathFunc::Factorial),
+                "pi" => Token::Number(PI),
+                "e" => Token::Number(E),
+                _ => return None, // Unknown identifier.
+            });
+            continue;
         }
+
+        // Operators and parentheses: one character each.
+        let token = match ch {
+            '+' => Token::Plus,
+            '-' => Token::Minus,
+            '*' => Token::Multiply,
+            '/' => Token::Divide,
+            '%' => Token::Modulo,
+            '^' => Token::Power,
+            '(' => Token::LeftParen,
+            ')' => Token::RightParen,
+            _ => return None, // Unrecognized character.
+        };
+        chars.next();
+        tokens.push(token);
     }
 
     Some(tokens)
@@ -215,38 +203,41 @@ fn tokenize(input: &str) -> Option<Vec<Token>> {
 /// primary  = NUMBER | '(' expr ')'
 /// ```
 struct Parser {
-    tokens: Vec<Token>,
-    pos: usize,
+    /// The token stream, consumed left to right.
+    ///
+    /// A cursor rather than a `Vec` plus an index: a position that can be read
+    /// without being advanced, or advanced twice, is the one bug a recursive
+    /// descent parser cannot survive -- and with the index gone there is
+    /// nowhere for it to happen.
+    tokens: std::iter::Peekable<std::vec::IntoIter<Token>>,
     angle_unit: AngleUnit,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>, angle_unit: AngleUnit) -> Self {
         Self {
-            tokens,
-            pos: 0,
+            tokens: tokens.into_iter().peekable(),
             angle_unit,
         }
     }
 
     /// Peek at the current token without consuming it.
-    fn peek(&self) -> Option<&Token> {
-        self.tokens.get(self.pos)
+    fn peek(&mut self) -> Option<&Token> {
+        self.tokens.peek()
     }
 
     /// Consume the current token and advance.
     fn advance(&mut self) -> Option<Token> {
-        let tok = self.tokens.get(self.pos).cloned();
-        if tok.is_some() {
-            self.pos += 1;
-        }
-        tok
+        self.tokens.next()
     }
 
     /// Evaluate the entire expression, returning the result or an error string.
     fn parse(&mut self) -> Result<f64, &'static str> {
         let result = self.expr()?;
-        if self.pos < self.tokens.len() {
+        // Anything left over means the grammar stopped early -- `2 + 3 )` --
+        // and reporting the value found so far would be answering a question
+        // the user did not ask.
+        if self.tokens.peek().is_some() {
             return Err("Unexpected token");
         }
         Ok(result)
@@ -547,8 +538,15 @@ pub struct Calculator {
     pub history: VecDeque<HistoryEntry>,
     /// Whether the history panel is visible.
     pub show_history: bool,
-    /// Parenthesis nesting depth (for display feedback).
-    pub paren_depth: i32,
+    /// How many parentheses are open and not yet closed.
+    ///
+    /// Unsigned, and every change to it saturates. A depth is a count of things
+    /// on a stack, and there is no such thing as minus one of them: the signed
+    /// version let [`Calculator::input_backspace`] drive it negative by deleting
+    /// a `(` that nothing had counted -- the one [`Calculator::input_negate`]
+    /// writes -- after which `calculate` would stop auto-closing the
+    /// parentheses that really were open.
+    pub paren_depth: u32,
 }
 
 impl Default for Calculator {
@@ -614,7 +612,11 @@ impl Calculator {
             && op != '-'
         {
             // Replace the last operator (but allow unary minus after another op).
-            let end = trimmed.len() - last.len_utf8();
+            // `saturating_sub` rather than `-`: the length of a string is
+            // never less than the length of its own last character, but a
+            // subtraction that says so out loud cannot underflow if that ever
+            // stops being true.
+            let end = trimmed.len().saturating_sub(last.len_utf8());
             self.expression.truncate(end);
         }
         self.expression.push(' ');
@@ -637,7 +639,7 @@ impl Calculator {
             self.expression.push_str(name);
             self.expression.push('(');
         }
-        self.paren_depth += 1;
+        self.paren_depth = self.paren_depth.saturating_add(1);
         self.update_display();
     }
 
@@ -658,7 +660,7 @@ impl Calculator {
             self.showing_result = false;
         }
         self.expression.push('(');
-        self.paren_depth += 1;
+        self.paren_depth = self.paren_depth.saturating_add(1);
         self.update_display();
     }
 
@@ -666,7 +668,7 @@ impl Calculator {
     pub fn input_close_paren(&mut self) {
         if self.paren_depth > 0 {
             self.expression.push(')');
-            self.paren_depth -= 1;
+            self.paren_depth = self.paren_depth.saturating_sub(1);
             self.update_display();
         }
     }
@@ -719,9 +721,11 @@ impl Calculator {
         }
         if let Some(ch) = self.expression.pop() {
             if ch == '(' {
-                self.paren_depth -= 1;
+                // Saturating, not wrapping: the `(` may be one of the pair
+                // `input_negate` writes, which was never counted.
+                self.paren_depth = self.paren_depth.saturating_sub(1);
             } else if ch == ')' {
-                self.paren_depth += 1;
+                self.paren_depth = self.paren_depth.saturating_add(1);
             }
             // Also trim trailing whitespace left by operator spacing.
             while self.expression.ends_with(' ') {
@@ -753,7 +757,7 @@ impl Calculator {
         // Auto-close any open parentheses.
         while self.paren_depth > 0 {
             self.expression.push(')');
-            self.paren_depth -= 1;
+            self.paren_depth = self.paren_depth.saturating_sub(1);
         }
 
         let expr_display = self.expression.clone();
@@ -852,6 +856,40 @@ impl Calculator {
         self.show_history = !self.show_history;
     }
 
+    /// Bring the result of history entry `index` back into the expression.
+    ///
+    /// The *result*, not the expression that produced it: the panel shows both,
+    /// but what a user reaches back for is the number, to carry on calculating
+    /// with it. Recalling the expression instead would re-open a calculation
+    /// they had already finished, and the two are only interchangeable when the
+    /// expression happens to be a bare literal.
+    ///
+    /// Modelled on [`Calculator::memory_recall`], down to clearing a displayed
+    /// result first: appending to a result would silently concatenate digits
+    /// onto the last answer.
+    ///
+    /// Returns `false` when there is no such entry, so a caller can tell a
+    /// click that did nothing from one that changed the expression.
+    pub fn recall_history(&mut self, index: usize) -> bool {
+        let Some(entry) = self.history.get(index) else {
+            return false;
+        };
+        let value = entry.result.clone();
+        // An error is kept in history so the user can see what went wrong, but
+        // it is not a number and pasting "Error: Division by zero" into the
+        // expression would produce a second, more confusing error.
+        if value.starts_with("Error:") {
+            return false;
+        }
+        if self.showing_result {
+            self.expression.clear();
+            self.showing_result = false;
+        }
+        self.expression.push_str(&value);
+        self.update_display();
+        true
+    }
+
     // ======================================================================
     // Helpers
     // ======================================================================
@@ -909,415 +947,698 @@ fn format_result(value: f64) -> String {
 }
 
 // ============================================================================
-// UI building
+// Catppuccin Mocha palette
 // ============================================================================
 
-/// Color palette for the calculator UI.
-struct Colors;
+const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
+const COLOR_MANTLE: Color = Color::from_hex(0x181825);
+const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
+const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
+const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
+const COLOR_SUBTEXT: Color = Color::from_hex(0xA6ADC8);
+const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
+const COLOR_GREEN: Color = Color::from_hex(0xA6E3A1);
+const COLOR_RED: Color = Color::from_hex(0xF38BA8);
+const COLOR_PEACH: Color = Color::from_hex(0xFAB387);
+const COLOR_MAUVE: Color = Color::from_hex(0xCBA6F7);
+const COLOR_TEAL: Color = Color::from_hex(0x94E2D5);
 
-#[allow(dead_code)]
-impl Colors {
-    const WINDOW_BG: Color = Color::rgba(240, 240, 240, 255);
-    const DISPLAY_BG: Color = Color::rgba(255, 255, 255, 255);
-    const DISPLAY_BORDER: Color = Color::rgba(180, 180, 180, 255);
-    const DISPLAY_TEXT: Color = Color::rgba(20, 20, 20, 255);
-    const EXPR_TEXT: Color = Color::rgba(120, 120, 120, 255);
-    const BTN_NUM_BG: Color = Color::rgba(250, 250, 250, 255);
-    const BTN_OP_BG: Color = Color::rgba(230, 230, 240, 255);
-    const BTN_EQUALS_BG: Color = Color::rgba(0, 120, 215, 255);
-    const BTN_EQUALS_FG: Color = Color::WHITE;
-    const BTN_FUNC_BG: Color = Color::rgba(220, 230, 245, 255);
-    const BTN_CLEAR_BG: Color = Color::rgba(255, 230, 230, 255);
-    const BTN_MEMORY_BG: Color = Color::rgba(230, 245, 230, 255);
-    const BTN_MODE_BG: Color = Color::rgba(200, 220, 255, 255);
-    const HISTORY_BG: Color = Color::rgba(248, 248, 252, 255);
-    const HISTORY_EXPR: Color = Color::rgba(100, 100, 100, 255);
-    const HISTORY_RESULT: Color = Color::rgba(20, 20, 20, 255);
-    const MEMORY_INDICATOR: Color = Color::rgba(0, 150, 0, 255);
-}
+// ============================================================================
+// Layout constants
+// ============================================================================
 
-/// Create a styled button widget with the given label and background color.
-fn calc_button(label: &str, bg: Color) -> Widget {
-    let fg = if bg.r < 100 && bg.g < 100 {
-        Color::WHITE
-    } else {
-        Color::BLACK
-    };
+/// The window the calculator asks for.
+///
+/// Tall enough for the *most* it can ever show -- Scientific mode with the
+/// history panel open -- rather than for the Standard keypad it opens with.
+/// There is no way for a window to ask to be resized once it is open, so a
+/// window sized to the opening state would crowd ten rows of keys into the
+/// space made for six the instant the user pressed "Scientific". Opening
+/// larger costs a roomier Standard keypad; opening smaller costs a Scientific
+/// keypad the user has to resize the window to use.
+const WINDOW_WIDTH: f32 = 340.0;
+const WINDOW_HEIGHT: f32 = 600.0;
 
-    Widget::button(label)
-        .with_style(Style {
-            background: bg,
-            foreground: fg,
-            padding: Edges::symmetric(8.0, 4.0),
-            border: Borders::all(1.0, Color::from_hex(0xBBBBBB)),
-            border_radius: CornerRadii::all(4.0),
-            font_size: 14.0,
-            font_weight: FontWeight::Regular,
-            min_width: Some(48.0),
-            min_height: Some(36.0),
-            ..Style::default()
-        })
-        .with_flex_grow(1.0)
-}
+/// Margin between the window edge and everything in it.
+const PADDING: f32 = 6.0;
+/// Space between two adjacent keys, and between two stacked bands.
+const GAP: f32 = 3.0;
+const STATUS_HEIGHT: f32 = 24.0;
+const DISPLAY_HEIGHT: f32 = 70.0;
+const HISTORY_HEIGHT: f32 = 150.0;
+const HISTORY_TITLE_HEIGHT: f32 = 18.0;
+const HISTORY_ROW_HEIGHT: f32 = 30.0;
+const CORNER_RADIUS: f32 = 4.0;
 
-/// Create a small-label button (for scientific mode functions).
-fn func_button(label: &str) -> Widget {
-    calc_button(label, Colors::BTN_FUNC_BG).with_style(Style {
-        background: Colors::BTN_FUNC_BG,
-        foreground: Color::BLACK,
-        padding: Edges::symmetric(6.0, 2.0),
-        border: Borders::all(1.0, Color::from_hex(0xBBBBBB)),
-        border_radius: CornerRadii::all(4.0),
-        font_size: 11.0,
-        font_weight: FontWeight::Regular,
-        min_width: Some(42.0),
-        min_height: Some(32.0),
-        ..Style::default()
-    })
-}
+const FONT_SIZE_KEY: f32 = 16.0;
+const FONT_SIZE_SMALL_KEY: f32 = 11.0;
+const FONT_SIZE_RESULT: f32 = 26.0;
+const FONT_SIZE_EXPR: f32 = 12.0;
+const FONT_SIZE_STATUS: f32 = 11.0;
+const FONT_SIZE_HISTORY_EXPR: f32 = 10.0;
+const FONT_SIZE_HISTORY_RESULT: f32 = 13.0;
 
-/// Build the display area showing the expression and current result.
-fn build_display(calc: &Calculator) -> Widget {
-    let expr_label = Widget::label(&calc.expression).with_style(Style {
-        foreground: Colors::EXPR_TEXT,
-        font_size: 12.0,
-        padding: Edges::symmetric(2.0, 8.0),
-        text_align: TextAlign::Right,
-        ..Style::default()
-    });
+// ============================================================================
+// The keys
+// ============================================================================
 
-    let result_label = Widget::label(&calc.display).with_style(Style {
-        foreground: Colors::DISPLAY_TEXT,
-        font_size: 24.0,
-        font_weight: FontWeight::Bold,
-        padding: Edges::symmetric(4.0, 8.0),
-        text_align: TextAlign::Right,
-        ..Style::default()
-    });
+/// The memory row, present in both modes.
+const MEMORY_ROW: [&str; 5] = ["MC", "MR", "M+", "M-", "MS"];
 
-    Widget::container()
-        .with_flex_direction(FlexDirection::Column)
-        .with_style(Style {
-            background: Colors::DISPLAY_BG,
-            border: Borders::all(1.0, Colors::DISPLAY_BORDER),
-            border_radius: CornerRadii::all(6.0),
-            padding: Edges::all(4.0),
-            margin: Edges::symmetric(4.0, 4.0),
-            min_height: Some(70.0),
-            ..Style::default()
-        })
-        .with_child(expr_label)
-        .with_child(result_label)
-}
+/// The four rows Scientific mode adds above the keypad.
+const SCIENTIFIC_ROWS: [[&str; 5]; 4] = [
+    ["sin", "cos", "tan", "(", ")"],
+    ["asin", "acos", "atan", "x^y", "mod"],
+    ["ln", "log", "sqrt", "exp", "n!"],
+    ["abs", "floor", "ceil", "pi", "e"],
+];
 
-/// Build the mode/status bar showing current mode, angle unit, and memory status.
-fn build_status_bar(calc: &Calculator) -> Widget {
-    let mode_text = match calc.mode {
-        CalcMode::Standard => "Standard",
-        CalcMode::Scientific => "Scientific",
-    };
-    let angle_text = match calc.angle_unit {
-        AngleUnit::Degrees => "DEG",
-        AngleUnit::Radians => "RAD",
-    };
+/// The numeric keypad, present in both modes.
+const KEYPAD_ROWS: [[&str; 4]; 5] = [
+    ["CE", "C", "\u{232B}", "/"],
+    ["7", "8", "9", "*"],
+    ["4", "5", "6", "-"],
+    ["1", "2", "3", "+"],
+    ["\u{00B1}", "0", ".", "="],
+];
 
-    let mode_btn = calc_button(mode_text, Colors::BTN_MODE_BG).with_style(Style {
-        background: Colors::BTN_MODE_BG,
-        font_size: 11.0,
-        padding: Edges::symmetric(4.0, 8.0),
-        border: Borders::all(1.0, Color::from_hex(0xBBBBBB)),
-        border_radius: CornerRadii::all(4.0),
-        min_width: Some(72.0),
-        min_height: Some(24.0),
-        ..Style::default()
-    });
-
-    let angle_btn = calc_button(angle_text, Colors::BTN_MODE_BG).with_style(Style {
-        background: Colors::BTN_MODE_BG,
-        font_size: 11.0,
-        padding: Edges::symmetric(4.0, 8.0),
-        border: Borders::all(1.0, Color::from_hex(0xBBBBBB)),
-        border_radius: CornerRadii::all(4.0),
-        min_width: Some(42.0),
-        min_height: Some(24.0),
-        ..Style::default()
-    });
-
-    let mut status = Widget::container()
-        .with_flex_direction(FlexDirection::Row)
-        .with_gap(4.0)
-        .with_style(Style {
-            padding: Edges::symmetric(2.0, 4.0),
-            ..Style::default()
-        })
-        .with_child(mode_btn)
-        .with_child(angle_btn);
-
-    if calc.memory_set {
-        let mem_label = Widget::label("M").with_style(Style {
-            foreground: Colors::MEMORY_INDICATOR,
-            font_size: 11.0,
-            font_weight: FontWeight::Bold,
-            padding: Edges::symmetric(4.0, 6.0),
-            ..Style::default()
-        });
-        status = status.with_child(mem_label);
+/// Every key row, top to bottom, for the given mode.
+///
+/// One function rather than a count in the layout and a list in the renderer:
+/// those are the two things that must agree about how many rows there are, and
+/// making them the same call means they cannot disagree.
+fn key_rows(mode: CalcMode) -> Vec<&'static [&'static str]> {
+    let mut rows: Vec<&'static [&'static str]> = vec![&MEMORY_ROW];
+    if mode == CalcMode::Scientific {
+        rows.extend(SCIENTIFIC_ROWS.iter().map(<[&str; 5]>::as_slice));
     }
-
-    let history_btn = calc_button("Hist", Colors::BTN_MODE_BG).with_style(Style {
-        background: Colors::BTN_MODE_BG,
-        font_size: 11.0,
-        padding: Edges::symmetric(4.0, 8.0),
-        border: Borders::all(1.0, Color::from_hex(0xBBBBBB)),
-        border_radius: CornerRadii::all(4.0),
-        min_width: Some(42.0),
-        min_height: Some(24.0),
-        ..Style::default()
-    });
-
-    status.with_child(history_btn)
+    rows.extend(KEYPAD_ROWS.iter().map(<[&str; 4]>::as_slice));
+    rows
 }
 
-/// Build the memory button row (MC, MR, M+, M-, MS).
-fn build_memory_row() -> Widget {
-    Widget::container()
-        .with_flex_direction(FlexDirection::Row)
-        .with_gap(2.0)
-        .with_style(Style {
-            padding: Edges::symmetric(1.0, 4.0),
-            ..Style::default()
-        })
-        .with_child(calc_button("MC", Colors::BTN_MEMORY_BG))
-        .with_child(calc_button("MR", Colors::BTN_MEMORY_BG))
-        .with_child(calc_button("M+", Colors::BTN_MEMORY_BG))
-        .with_child(calc_button("M-", Colors::BTN_MEMORY_BG))
-        .with_child(calc_button("MS", Colors::BTN_MEMORY_BG))
+/// The background and label colours for a key, chosen by what it does.
+///
+/// Keyed on the label because the label *is* the key's identity here -- the
+/// same string [`Target::Key`] carries and [`handle_button`] dispatches on.
+fn key_colors(label: &str) -> (Color, Color) {
+    match label {
+        "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "." => {
+            (COLOR_SURFACE0, COLOR_TEXT)
+        }
+        "=" => (COLOR_BLUE, COLOR_BASE),
+        "C" | "CE" => (COLOR_SURFACE1, COLOR_RED),
+        "MC" | "MR" | "M+" | "M-" | "MS" => (COLOR_SURFACE1, COLOR_GREEN),
+        "pi" | "e" => (COLOR_SURFACE1, COLOR_MAUVE),
+        "+" | "-" | "*" | "/" | "mod" | "x^y" | "%" | "(" | ")" | "\u{232B}" | "\u{00B1}" => {
+            (COLOR_SURFACE1, COLOR_PEACH)
+        }
+        // Everything else on a key row is a function: sin, log, n! and friends.
+        _ => (COLOR_SURFACE1, COLOR_TEAL),
+    }
 }
 
-/// Build the scientific function rows (trig, log, etc.).
-fn build_scientific_rows() -> Vec<Widget> {
-    let row1 = Widget::container()
-        .with_flex_direction(FlexDirection::Row)
-        .with_gap(2.0)
-        .with_style(Style {
-            padding: Edges::symmetric(1.0, 4.0),
-            ..Style::default()
-        })
-        .with_child(func_button("sin"))
-        .with_child(func_button("cos"))
-        .with_child(func_button("tan"))
-        .with_child(func_button("("))
-        .with_child(func_button(")"));
-
-    let row2 = Widget::container()
-        .with_flex_direction(FlexDirection::Row)
-        .with_gap(2.0)
-        .with_style(Style {
-            padding: Edges::symmetric(1.0, 4.0),
-            ..Style::default()
-        })
-        .with_child(func_button("asin"))
-        .with_child(func_button("acos"))
-        .with_child(func_button("atan"))
-        .with_child(func_button("x^y"))
-        .with_child(func_button("mod"));
-
-    let row3 = Widget::container()
-        .with_flex_direction(FlexDirection::Row)
-        .with_gap(2.0)
-        .with_style(Style {
-            padding: Edges::symmetric(1.0, 4.0),
-            ..Style::default()
-        })
-        .with_child(func_button("ln"))
-        .with_child(func_button("log"))
-        .with_child(func_button("sqrt"))
-        .with_child(func_button("exp"))
-        .with_child(func_button("n!"));
-
-    let row4 = Widget::container()
-        .with_flex_direction(FlexDirection::Row)
-        .with_gap(2.0)
-        .with_style(Style {
-            padding: Edges::symmetric(1.0, 4.0),
-            ..Style::default()
-        })
-        .with_child(func_button("abs"))
-        .with_child(func_button("floor"))
-        .with_child(func_button("ceil"))
-        .with_child(func_button("pi"))
-        .with_child(func_button("e"));
-
-    vec![row1, row2, row3, row4]
-}
-
-/// Build the standard numeric/operator keypad.
-fn build_standard_keypad() -> Vec<Widget> {
-    let row1 = Widget::container()
-        .with_flex_direction(FlexDirection::Row)
-        .with_gap(2.0)
-        .with_style(Style {
-            padding: Edges::symmetric(1.0, 4.0),
-            ..Style::default()
-        })
-        .with_child(calc_button("CE", Colors::BTN_CLEAR_BG))
-        .with_child(calc_button("C", Colors::BTN_CLEAR_BG))
-        .with_child(calc_button("\u{232B}", Colors::BTN_OP_BG)) // Backspace symbol
-        .with_child(calc_button("/", Colors::BTN_OP_BG));
-
-    let row2 = Widget::container()
-        .with_flex_direction(FlexDirection::Row)
-        .with_gap(2.0)
-        .with_style(Style {
-            padding: Edges::symmetric(1.0, 4.0),
-            ..Style::default()
-        })
-        .with_child(calc_button("7", Colors::BTN_NUM_BG))
-        .with_child(calc_button("8", Colors::BTN_NUM_BG))
-        .with_child(calc_button("9", Colors::BTN_NUM_BG))
-        .with_child(calc_button("*", Colors::BTN_OP_BG));
-
-    let row3 = Widget::container()
-        .with_flex_direction(FlexDirection::Row)
-        .with_gap(2.0)
-        .with_style(Style {
-            padding: Edges::symmetric(1.0, 4.0),
-            ..Style::default()
-        })
-        .with_child(calc_button("4", Colors::BTN_NUM_BG))
-        .with_child(calc_button("5", Colors::BTN_NUM_BG))
-        .with_child(calc_button("6", Colors::BTN_NUM_BG))
-        .with_child(calc_button("-", Colors::BTN_OP_BG));
-
-    let row4 = Widget::container()
-        .with_flex_direction(FlexDirection::Row)
-        .with_gap(2.0)
-        .with_style(Style {
-            padding: Edges::symmetric(1.0, 4.0),
-            ..Style::default()
-        })
-        .with_child(calc_button("1", Colors::BTN_NUM_BG))
-        .with_child(calc_button("2", Colors::BTN_NUM_BG))
-        .with_child(calc_button("3", Colors::BTN_NUM_BG))
-        .with_child(calc_button("+", Colors::BTN_OP_BG));
-
-    let row5 = Widget::container()
-        .with_flex_direction(FlexDirection::Row)
-        .with_gap(2.0)
-        .with_style(Style {
-            padding: Edges::symmetric(1.0, 4.0),
-            ..Style::default()
-        })
-        .with_child(calc_button("\u{00B1}", Colors::BTN_OP_BG)) // Plus-minus sign
-        .with_child(calc_button("0", Colors::BTN_NUM_BG))
-        .with_child(calc_button(".", Colors::BTN_NUM_BG))
-        .with_child(calc_button("=", Colors::BTN_EQUALS_BG));
-
-    vec![row1, row2, row3, row4, row5]
-}
-
-/// Build the history panel showing recent calculations.
-fn build_history_panel(calc: &Calculator) -> Widget {
-    let title = Widget::label("History").with_style(Style {
-        font_size: 13.0,
-        font_weight: FontWeight::Bold,
-        foreground: Color::from_hex(0x333333),
-        padding: Edges::symmetric(4.0, 8.0),
-        ..Style::default()
-    });
-
-    let mut panel = Widget::container()
-        .with_flex_direction(FlexDirection::Column)
-        .with_gap(2.0)
-        .with_style(Style {
-            background: Colors::HISTORY_BG,
-            border: Borders::all(1.0, Color::from_hex(0xCCCCCC)),
-            border_radius: CornerRadii::all(4.0),
-            padding: Edges::all(4.0),
-            margin: Edges::symmetric(2.0, 4.0),
-            min_height: Some(100.0),
-            max_height: Some(200.0),
-            ..Style::default()
-        })
-        .with_child(title);
-
-    if calc.history.is_empty() {
-        let empty_msg = Widget::label("No history yet").with_style(Style {
-            foreground: Color::GRAY,
-            font_size: 11.0,
-            padding: Edges::symmetric(4.0, 8.0),
-            ..Style::default()
-        });
-        panel = panel.with_child(empty_msg);
+/// How big to draw a key's label.
+///
+/// Long names -- `floor`, `asin` -- get the smaller size so they fit a cell
+/// sized for `7`. Measured in characters rather than pixels because the cell
+/// width is not known until the window size is, and a key whose font changed
+/// as the window resized would be worse than one that is merely small.
+fn key_font_size(label: &str) -> f32 {
+    if label.chars().count() <= 2 {
+        FONT_SIZE_KEY
     } else {
-        for entry in calc.history.iter().take(10) {
-            let expr_label = Widget::label(&entry.expression).with_style(Style {
-                foreground: Colors::HISTORY_EXPR,
-                font_size: 10.0,
-                padding: Edges::symmetric(1.0, 8.0),
-                ..Style::default()
-            });
-            let result_label = Widget::label(&format!("= {}", entry.result)).with_style(Style {
-                foreground: Colors::HISTORY_RESULT,
-                font_size: 12.0,
-                font_weight: FontWeight::SemiBold,
-                padding: Edges::symmetric(1.0, 8.0),
-                ..Style::default()
-            });
-            let row = Widget::container()
-                .with_flex_direction(FlexDirection::Column)
-                .with_style(Style {
-                    padding: Edges::symmetric(2.0, 0.0),
-                    ..Style::default()
-                })
-                .with_child(expr_label)
-                .with_child(result_label);
+        FONT_SIZE_SMALL_KEY
+    }
+}
 
-            panel = panel.with_child(row);
+// ============================================================================
+// Targets
+// ============================================================================
+
+/// Everything in the window that answers a click.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// A key, named by the label it draws.
+    ///
+    /// The label is the identity rather than a separate enum variant per key,
+    /// because [`handle_button`] already dispatches on the label: a second name
+    /// would be a second thing to keep in step with the first, and a key whose
+    /// two names disagreed would be a key that lit up and did nothing.
+    Key(&'static str),
+    /// A row of the history panel, by its index into [`Calculator::history`].
+    HistoryRow(usize),
+}
+
+/// The frame this window draws into, with its hit boxes.
+pub type Frame = guitk::frame::Frame<Target>;
+
+// ============================================================================
+// Layout
+// ============================================================================
+
+/// A window size that can be laid out against: never negative, never NaN.
+fn sane(v: f32) -> f32 {
+    if v.is_finite() { v.max(0.0) } else { 0.0 }
+}
+
+/// Divide `span` into `count` cells separated by [`GAP`], and return the size
+/// of one cell.
+///
+/// Never negative. A window too narrow for the gaps alone yields zero-sized
+/// cells, and a zero-sized cell records a hit box that no point is inside --
+/// which is the right answer for a key that cannot be seen.
+#[allow(clippy::cast_precision_loss)]
+fn cell_size(span: f32, count: usize) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    let n = count as f32;
+    ((span - GAP * (n - 1.0)) / n).max(0.0)
+}
+
+/// The `index`th of `count` cells laid across `span` starting at `origin`.
+#[allow(clippy::cast_precision_loss)]
+fn cell_at(origin: f32, span: f32, count: usize, index: usize) -> (f32, f32) {
+    let size = cell_size(span, count);
+    (origin + (index as f32) * (size + GAP), size)
+}
+
+/// Take a band `want` tall off the top of what is left below `y`, and advance
+/// `y` past it and the gap that follows it.
+///
+/// The band **shrinks** to what remains rather than being clamped to a minimum.
+/// [`Frame`] does not clip to the window, so a band held at a minimum height in
+/// a window too short for it would record hit boxes below the bottom edge --
+/// controls that cannot be seen but can be pressed.
+fn take_band(y: &mut f32, limit: f32, x: f32, width: f32, want: f32) -> Rect {
+    let h = want.min((limit - *y).max(0.0));
+    let band = Rect::new(x, *y, width, h);
+    *y += h + GAP;
+    band
+}
+
+/// Where every band goes, derived from the live window size.
+///
+/// Built fresh on every frame and never stored. The size a window *is* and the
+/// size it was last told to be are two different things for exactly one frame
+/// -- the first one, which arrives before any `Event::Resize` -- and that is
+/// the frame in which a remembered layout is wrong.
+#[derive(Clone, Debug)]
+struct Layout {
+    /// The whole window.
+    window: Rect,
+    /// The mode / angle / memory / history strip along the top.
+    status: Rect,
+    /// The expression-and-result panel below it.
+    display: Rect,
+    /// One rect per row of keys, in the order [`key_rows`] gives them.
+    rows: Vec<Rect>,
+    /// The history panel along the bottom, when it is showing.
+    history: Option<Rect>,
+}
+
+impl Layout {
+    fn new(width: f32, height: f32, mode: CalcMode, show_history: bool) -> Self {
+        let width = sane(width);
+        let height = sane(height);
+        let window = Rect::new(0.0, 0.0, width, height);
+
+        // Padding shrinks with the window rather than being subtracted from it,
+        // so a 4px-wide window gets a 4px-wide content area instead of a
+        // negative one.
+        let pad = PADDING.min(width / 2.0).min(height / 2.0);
+        let content_w = (width - pad * 2.0).max(0.0);
+        let content_bottom = (height - pad).max(pad);
+
+        let mut y = pad;
+        let status = take_band(&mut y, content_bottom, pad, content_w, STATUS_HEIGHT);
+        let display = take_band(&mut y, content_bottom, pad, content_w, DISPLAY_HEIGHT);
+
+        // The history panel is taken off the *bottom* before the key rows share
+        // what is left, so opening it shrinks the keypad rather than pushing it
+        // off the window -- where, since the frame does not clip to the window,
+        // the keys would still be clickable.
+        let (history, rows_bottom) = if show_history {
+            let h = HISTORY_HEIGHT.min((content_bottom - y).max(0.0));
+            let top = content_bottom - h;
+            (Some(Rect::new(pad, top, content_w, h)), (top - GAP).max(y))
+        } else {
+            (None, content_bottom)
+        };
+
+        let count = key_rows(mode).len();
+        let span = (rows_bottom - y).max(0.0);
+        let rows = (0..count)
+            .map(|i| {
+                let (top, h) = cell_at(y, span, count, i);
+                Rect::new(pad, top, content_w, h)
+            })
+            .collect();
+
+        Self {
+            window,
+            status,
+            display,
+            rows,
+            history,
+        }
+    }
+}
+
+// ============================================================================
+// The window
+// ============================================================================
+
+/// The calculator plus the window it is drawn in.
+///
+/// The window size lives here and nowhere else, and is only ever *recorded* --
+/// every rectangle is recomputed from it on each frame, so there is no cached
+/// geometry that a resize could leave stale.
+pub struct CalculatorUi {
+    /// The calculator proper: expression, history, memory, mode.
+    pub calc: Calculator,
+    window_width: f32,
+    window_height: f32,
+    /// Index of the first history row drawn, for the wheel.
+    history_scroll: usize,
+    /// Banks fractions of a wheel notch so a trackpad's small deltas add up.
+    wheel: wheel::Accumulator,
+}
+
+impl Default for CalculatorUi {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CalculatorUi {
+    /// A new calculator window, at the size it will ask the desktop for.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            calc: Calculator::new(),
+            window_width: WINDOW_WIDTH,
+            window_height: WINDOW_HEIGHT,
+            history_scroll: 0,
+            wheel: wheel::Accumulator::default(),
         }
     }
 
-    panel
-}
+    /// Record a new window size.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.window_width = sane(width);
+        self.window_height = sane(height);
+    }
 
-/// Build the full calculator widget tree.
-pub fn build_ui(calc: &Calculator) -> Widget {
-    let mut root = Widget::container()
-        .with_flex_direction(FlexDirection::Column)
-        .with_gap(2.0)
-        .with_style(Style {
-            background: Colors::WINDOW_BG,
-            padding: Edges::all(4.0),
-            ..Style::default()
+    /// Draw the whole window at `width` x `height`.
+    ///
+    /// The size is passed in and never stored, so a resize cannot leave a stale
+    /// rectangle behind for the hit test to consult. Hit boxes are recorded by
+    /// the same code that paints, which is what keeps a key's clickable area
+    /// and its visible area from drifting apart.
+    #[must_use]
+    pub fn frame(&self, width: f32, height: f32) -> Frame {
+        let layout = Layout::new(width, height, self.calc.mode, self.calc.show_history);
+        let mut frame = Frame::new(layout.window.w, layout.window.h);
+
+        frame.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: layout.window.w,
+            height: layout.window.h,
+            color: COLOR_BASE,
+            corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
-    // Status bar (mode toggle, angle unit, memory indicator).
-    root = root.with_child(build_status_bar(calc));
+        self.render_status(&mut frame, layout.status);
+        self.render_display(&mut frame, layout.display);
+        self.render_keys(&mut frame, &layout);
+        if let Some(panel) = layout.history {
+            self.render_history(&mut frame, panel);
+        }
 
-    // Display area.
-    root = root.with_child(build_display(calc));
+        frame
+    }
 
-    // Memory row.
-    root = root.with_child(build_memory_row());
+    /// What a click at `(x, y)` would land on, given the current window size.
+    ///
+    /// Answered by drawing the frame and asking it, rather than by a parallel
+    /// set of rectangles: one geometry, so a key that moves takes its clickable
+    /// area with it.
+    #[must_use]
+    pub fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        self.frame(self.window_width, self.window_height)
+            .hit_test(x, y)
+    }
 
-    // Scientific function rows (only in Scientific mode).
-    if calc.mode == CalcMode::Scientific {
-        for row in build_scientific_rows() {
-            root = root.with_child(row);
+    /// Draw one key: its background, its centred label, and its hit box.
+    fn render_key(frame: &mut Frame, cell: Rect, label: &'static str, font_size: f32) {
+        if cell.w <= 0.0 || cell.h <= 0.0 {
+            return;
+        }
+        let (bg, fg) = key_colors(label);
+        frame.push(RenderCommand::FillRect {
+            x: cell.x,
+            y: cell.y,
+            width: cell.w,
+            height: cell.h,
+            color: bg,
+            corner_radii: CornerRadii::all(CORNER_RADIUS),
+        });
+        let (centre_x, _) = cell.centre();
+        frame.push(RenderCommand::Text {
+            x: text::center_x(label, centre_x, font_size, FontWeightHint::Regular).max(cell.x),
+            y: cell.y + (cell.h - font_size) / 2.0,
+            text: String::from(label),
+            color: fg,
+            font_size,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(cell.w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        frame.hit(Target::Key(label), cell);
+    }
+
+    /// The mode / angle / memory / history strip.
+    ///
+    /// Four equal cells rather than four intrinsic widths: a strip whose
+    /// buttons were as wide as their labels would have "Scientific" and "Hist"
+    /// overlap in a narrow window, and two hit boxes on the same pixel mean the
+    /// user presses whichever was drawn last.
+    fn render_status(&self, frame: &mut Frame, band: Rect) {
+        if band.h <= 0.0 {
+            return;
+        }
+        let mode_label = match self.calc.mode {
+            CalcMode::Standard => "Standard",
+            CalcMode::Scientific => "Scientific",
+        };
+        let angle_label = match self.calc.angle_unit {
+            AngleUnit::Degrees => "DEG",
+            AngleUnit::Radians => "RAD",
+        };
+
+        for (index, label) in [mode_label, angle_label].into_iter().enumerate() {
+            let (x, w) = cell_at(band.x, band.w, 4, index);
+            Self::render_status_button(frame, Rect::new(x, band.y, w, band.h), label);
+        }
+
+        // The memory cell is a readout, not a button: it names what is stored
+        // so that MR is not a guess, and it records no hit box because there is
+        // nothing for a click on it to do.
+        let (mem_x, mem_w) = cell_at(band.x, band.w, 4, 2);
+        if self.calc.memory_set {
+            frame.push(RenderCommand::Text {
+                x: mem_x,
+                y: band.y + (band.h - FONT_SIZE_STATUS) / 2.0,
+                text: format!("M {}", format_result(self.calc.memory)),
+                color: COLOR_GREEN,
+                font_size: FONT_SIZE_STATUS,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(mem_w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
+        let (hist_x, hist_w) = cell_at(band.x, band.w, 4, 3);
+        Self::render_status_button(frame, Rect::new(hist_x, band.y, hist_w, band.h), "Hist");
+    }
+
+    fn render_status_button(frame: &mut Frame, cell: Rect, label: &'static str) {
+        if cell.w <= 0.0 || cell.h <= 0.0 {
+            return;
+        }
+        frame.push(RenderCommand::FillRect {
+            x: cell.x,
+            y: cell.y,
+            width: cell.w,
+            height: cell.h,
+            color: COLOR_SURFACE0,
+            corner_radii: CornerRadii::all(CORNER_RADIUS),
+        });
+        let (centre_x, _) = cell.centre();
+        frame.push(RenderCommand::Text {
+            x: text::center_x(label, centre_x, FONT_SIZE_STATUS, FontWeightHint::Regular)
+                .max(cell.x),
+            y: cell.y + (cell.h - FONT_SIZE_STATUS) / 2.0,
+            text: String::from(label),
+            color: COLOR_BLUE,
+            font_size: FONT_SIZE_STATUS,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(cell.w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        frame.hit(Target::Key(label), cell);
+    }
+
+    /// The expression above, the result below, both right-aligned.
+    fn render_display(&self, frame: &mut Frame, band: Rect) {
+        if band.h <= 0.0 {
+            return;
+        }
+        frame.push(RenderCommand::FillRect {
+            x: band.x,
+            y: band.y,
+            width: band.w,
+            height: band.h,
+            color: COLOR_MANTLE,
+            corner_radii: CornerRadii::all(CORNER_RADIUS),
+        });
+        frame.push(RenderCommand::StrokeRect {
+            x: band.x,
+            y: band.y,
+            width: band.w,
+            height: band.h,
+            color: COLOR_SURFACE1,
+            line_width: 1.0,
+            corner_radii: CornerRadii::all(CORNER_RADIUS),
+        });
+
+        let right = band.right() - PADDING;
+        let inner_w = (band.w - PADDING * 2.0).max(0.0);
+
+        // Unclosed parentheses are shown as a count on the left. Without it the
+        // only sign that a `(` is still open is the expression itself, which is
+        // exactly what a user who has lost count is already staring at.
+        if self.calc.paren_depth > 0 {
+            frame.push(RenderCommand::Text {
+                x: band.x + PADDING,
+                y: band.y + PADDING,
+                text: format!("({}", self.calc.paren_depth),
+                color: COLOR_PEACH,
+                font_size: FONT_SIZE_EXPR,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(inner_w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
+        frame.push(RenderCommand::Text {
+            x: text::right_x(
+                &self.calc.expression,
+                right,
+                FONT_SIZE_EXPR,
+                FontWeightHint::Regular,
+            )
+            .max(band.x + PADDING),
+            y: band.y + PADDING,
+            text: self.calc.expression.clone(),
+            color: COLOR_SUBTEXT,
+            font_size: FONT_SIZE_EXPR,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(inner_w),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        // An error is red. It is the one thing in the display that is not a
+        // number, and reading it in the same colour as one is how a user comes
+        // to believe the calculator answered.
+        let result_color = if self.calc.display.starts_with("Error:") {
+            COLOR_RED
+        } else {
+            COLOR_TEXT
+        };
+        frame.push(RenderCommand::Text {
+            x: text::right_x(
+                &self.calc.display,
+                right,
+                FONT_SIZE_RESULT,
+                FontWeightHint::Bold,
+            )
+            .max(band.x + PADDING),
+            y: band.bottom() - PADDING - FONT_SIZE_RESULT,
+            text: self.calc.display.clone(),
+            color: result_color,
+            font_size: FONT_SIZE_RESULT,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(inner_w),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    fn render_keys(&self, frame: &mut Frame, layout: &Layout) {
+        for (labels, band) in key_rows(self.calc.mode).into_iter().zip(&layout.rows) {
+            for (index, label) in labels.iter().enumerate() {
+                let (x, w) = cell_at(band.x, band.w, labels.len(), index);
+                Self::render_key(
+                    frame,
+                    Rect::new(x, band.y, w, band.h),
+                    label,
+                    key_font_size(label),
+                );
+            }
         }
     }
 
-    // Standard keypad.
-    for row in build_standard_keypad() {
-        root = root.with_child(row);
+    /// How many history rows fit in the panel at this window size.
+    fn history_capacity(&self) -> usize {
+        let Some(panel) = Layout::new(
+            self.window_width,
+            self.window_height,
+            self.calc.mode,
+            self.calc.show_history,
+        )
+        .history
+        else {
+            return 0;
+        };
+        scroll_window::capacity(HISTORY_ROW_HEIGHT, panel.h - HISTORY_TITLE_HEIGHT)
     }
 
-    // History panel (toggled).
-    if calc.show_history {
-        root = root.with_child(build_history_panel(calc));
+    fn render_history(&self, frame: &mut Frame, panel: Rect) {
+        if panel.h <= 0.0 {
+            return;
+        }
+        frame.push(RenderCommand::FillRect {
+            x: panel.x,
+            y: panel.y,
+            width: panel.w,
+            height: panel.h,
+            color: COLOR_MANTLE,
+            corner_radii: CornerRadii::all(CORNER_RADIUS),
+        });
+        frame.push(RenderCommand::Text {
+            x: panel.x + PADDING,
+            y: panel.y + 2.0,
+            text: String::from("History"),
+            color: COLOR_SUBTEXT,
+            font_size: FONT_SIZE_STATUS,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(panel.w),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        let list = Rect::new(
+            panel.x,
+            panel.y + HISTORY_TITLE_HEIGHT,
+            panel.w,
+            (panel.h - HISTORY_TITLE_HEIGHT).max(0.0),
+        );
+
+        if self.calc.history.is_empty() {
+            frame.push(RenderCommand::Text {
+                x: list.x + PADDING,
+                y: list.y + 2.0,
+                text: String::from("No history yet"),
+                color: COLOR_SURFACE1,
+                font_size: FONT_SIZE_HISTORY_EXPR,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(list.w),
+                overflow: TextOverflow::Ellipsis,
+            });
+            return;
+        }
+
+        // Clipping the list also clips its hit boxes: `Frame::hit` trims to the
+        // innermost clip and drops a box left with no area, so a row scrolled
+        // past the bottom stops being clickable without the click handler
+        // needing a bounds check of its own.
+        frame.clip(list);
+        let rows = scroll_window::visible(
+            self.calc.history.len(),
+            HISTORY_ROW_HEIGHT,
+            list.h,
+            self.history_scroll,
+        );
+        for offset in 0..rows.count {
+            let index = rows.start.saturating_add(offset);
+            let Some(entry) = self.calc.history.get(index) else {
+                break;
+            };
+            #[allow(clippy::cast_precision_loss)]
+            let top = list.y + (offset as f32) * HISTORY_ROW_HEIGHT;
+            let row = Rect::new(list.x, top, list.w, HISTORY_ROW_HEIGHT);
+            frame.push(RenderCommand::Text {
+                x: row.x + PADDING,
+                y: row.y + 1.0,
+                text: entry.expression.clone(),
+                color: COLOR_SUBTEXT,
+                font_size: FONT_SIZE_HISTORY_EXPR,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((row.w - PADDING * 2.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            frame.push(RenderCommand::Text {
+                x: row.x + PADDING,
+                y: row.y + 13.0,
+                text: format!("= {}", entry.result),
+                color: COLOR_TEXT,
+                font_size: FONT_SIZE_HISTORY_RESULT,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some((row.w - PADDING * 2.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            frame.hit(Target::HistoryRow(index), row);
+        }
+        frame.unclip();
     }
 
-    root
+    // ======================================================================
+    // Input
+    // ======================================================================
+
+    /// Act on a left click. Returns `true` when something changed.
+    fn handle_click(&mut self, x: f32, y: f32) -> bool {
+        match self.target_at(x, y) {
+            Some(Target::Key(label)) => {
+                let was_showing = self.calc.show_history;
+                handle_button(&mut self.calc, label);
+                // A history panel that has just been opened shows the newest
+                // entries; one re-opened at yesterday's scroll position would
+                // show whatever the user happened to be looking at last time.
+                if self.calc.show_history != was_showing {
+                    self.history_scroll = 0;
+                }
+                true
+            }
+            Some(Target::HistoryRow(index)) => self.calc.recall_history(index),
+            None => false,
+        }
+    }
+
+    /// Act on a key press. Returns `true` when something changed.
+    fn handle_key_event(&mut self, key: &KeyEvent) -> bool {
+        handle_key(&mut self.calc, key)
+    }
+
+    /// Scroll the history panel. Returns `true` when it actually moved.
+    fn handle_scroll(&mut self, dy: f32) -> bool {
+        if !self.calc.show_history {
+            return false;
+        }
+        let rows = self.wheel.rows(dy);
+        if rows == 0 {
+            return false;
+        }
+        let capacity = self.history_capacity();
+        let max_start = self.calc.history.len().saturating_sub(capacity);
+        let moved = scroll_window::shift(self.history_scroll, rows).min(max_start);
+        if moved == self.history_scroll {
+            return false;
+        }
+        self.history_scroll = moved;
+        true
+    }
 }
 
 // ============================================================================
@@ -1455,52 +1776,114 @@ pub fn handle_key(calc: &mut Calculator, key: &KeyEvent) -> bool {
 }
 
 // ============================================================================
+// The window
+// ============================================================================
+
+/// Turn a window event into a change of state.
+///
+/// Free rather than a method so the whole event vocabulary can be read in one
+/// place, and so the `App` impl below is the thin adapter it should be.
+fn handle_event(ui: &mut CalculatorUi, event: &Event) -> EventResult {
+    /// `true` means the state changed and the window needs repainting.
+    fn result(changed: bool) -> EventResult {
+        if changed {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    match event {
+        Event::Mouse(m) => match m.kind {
+            MouseEventKind::Press(MouseButton::Left) => result(ui.handle_click(m.x, m.y)),
+            MouseEventKind::Scroll { dy, .. } => result(ui.handle_scroll(dy)),
+            _ => EventResult::Ignored,
+        },
+        Event::Key(k) => result(ui.handle_key_event(k)),
+        Event::Resize { width, height } => {
+            // Consumed unconditionally: the size was recorded, which is a
+            // change even when nothing visible moved.
+            #[allow(clippy::cast_precision_loss)]
+            ui.resize(*width as f32, *height as f32);
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+impl App for CalculatorUi {
+    fn title(&self) -> String {
+        String::from("Calculator")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// No tick.
+    ///
+    /// Nothing here changes on its own: a calculator showing `7` shows `7`
+    /// until someone presses something. A timer would repaint an identical
+    /// picture forever and keep the machine awake to do it.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The renderer draws at the size it is given, but `target_at` has only
+        // what it was last told. Recording it here means the two agree even if
+        // the platform ever draws at a size it did not send a Resize for.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for CalculatorUi {
+    type Target = Target;
+    type Outcome = EventResult;
+
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
+    }
+}
+
+// ============================================================================
 // Entry point
 // ============================================================================
 
-/// Application window dimensions.
-const WINDOW_WIDTH: f32 = 320.0;
-const WINDOW_HEIGHT_STANDARD: f32 = 400.0;
-const WINDOW_HEIGHT_SCIENTIFIC: f32 = 560.0;
-
-fn main() {
-    let calc = Calculator::new();
-
-    // Build initial UI.
-    let root = build_ui(&calc);
-    let height = match calc.mode {
-        CalcMode::Standard => WINDOW_HEIGHT_STANDARD,
-        CalcMode::Scientific => WINDOW_HEIGHT_SCIENTIFIC,
-    };
-    let mut tree = WidgetTree::new(root, WINDOW_WIDTH, height);
-    tree.layout();
-
-    // In a real Slate OS environment this would enter the compositor event loop.
-    // For now, demonstrate that the UI builds and the expression evaluator works.
-    //
-    // The calculator is ready for integration with the Slate OS compositor once
-    // the window-management and event-dispatch infrastructure is in place.
-    // The event loop would look like:
-    //
-    // ```
-    // loop {
-    //     let event = compositor.wait_event();
-    //     match event {
-    //         Event::CloseRequested => break,
-    //         Event::Key(key) => { handle_key(&mut calc, &key); }
-    //         Event::Mouse(mouse) => {
-    //             // Hit-test buttons and dispatch via handle_button()
-    //         }
-    //         Event::Resize { width, height } => { tree.resize(width as f32, height as f32); }
-    //         _ => {}
-    //     }
-    //     let root = build_ui(&calc);
-    //     tree = WidgetTree::new(root, WINDOW_WIDTH, height);
-    //     tree.layout();
-    //     let render_tree = tree.render();
-    //     compositor.submit(render_tree);
-    // }
-    // ```
+fn main() -> ExitCode {
+    let mut ui = CalculatorUi::new();
+    app::launch("calculator", &mut ui)
 }
 
 // ============================================================================
@@ -1509,7 +1892,21 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
+    use guitk::event::Modifiers;
+    use guitk::probe;
 
     // ----------------------------------------------------------------
     // Expression evaluator tests
@@ -1933,38 +2330,402 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // UI building test
+    // Window tests
     // ----------------------------------------------------------------
 
-    #[test]
-    fn test_ui_builds_standard() {
-        let calc = Calculator::new();
-        let root = build_ui(&calc);
-        // Should have children (status bar, display, memory, keypad rows).
-        assert!(!root.children.is_empty());
+    /// Every key on screen, in the order it was drawn.
+    fn keys_on_screen(ui: &CalculatorUi) -> Vec<&'static str> {
+        let (w, h) = <CalculatorUi as Probe>::SIZE;
+        ui.frame(w, h)
+            .hits()
+            .iter()
+            .filter_map(|(target, _)| match target {
+                Target::Key(label) => Some(*label),
+                Target::HistoryRow(_) => None,
+            })
+            .collect()
     }
 
     #[test]
-    fn test_ui_builds_scientific() {
-        let mut calc = Calculator::new();
-        calc.mode = CalcMode::Scientific;
-        let root = build_ui(&calc);
-        // Scientific mode should have more children than standard.
-        let standard_calc = Calculator::new();
-        let standard_root = build_ui(&standard_calc);
-        assert!(root.children.len() > standard_root.children.len());
+    fn the_standard_keypad_offers_every_key_it_names() {
+        let ui = CalculatorUi::new();
+        let keys = keys_on_screen(&ui);
+        // The digits and the four operators are the whole point of the window;
+        // naming them here means a row silently dropped from the layout fails
+        // the test rather than merely looking wrong.
+        for expected in [
+            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "+", "-", "*", "/", "=", "C",
+            "CE", "MC", "MR", "M+", "M-", "MS", "Standard", "DEG", "Hist",
+        ] {
+            assert!(keys.contains(&expected), "no key for {expected}");
+        }
+        // Scientific keys must not be reachable in Standard mode: a hit box for
+        // a key nobody can see is a key the user presses by accident.
+        for absent in ["sin", "log", "n!", "pi"] {
+            assert!(!keys.contains(&absent), "{absent} should not be on screen");
+        }
     }
 
     #[test]
-    fn test_ui_builds_with_history() {
-        let mut calc = Calculator::new();
-        calc.show_history = true;
-        calc.history.push_front(HistoryEntry {
-            expression: String::from("2 + 2"),
-            result: String::from("4"),
+    fn switching_to_scientific_mode_brings_the_extra_rows_with_it() {
+        let mut ui = CalculatorUi::new();
+        assert_eq!(ui.calc.mode, CalcMode::Standard);
+        assert_eq!(
+            probe::click(&mut ui, Target::Key("Standard")),
+            EventResult::Consumed
+        );
+        assert_eq!(ui.calc.mode, CalcMode::Scientific);
+
+        let keys = keys_on_screen(&ui);
+        for expected in [
+            "sin", "cos", "tan", "asin", "acos", "atan", "ln", "log", "sqrt", "exp", "abs",
+            "floor", "ceil", "n!", "x^y", "mod", "pi", "e", "(", ")",
+        ] {
+            assert!(keys.contains(&expected), "no key for {expected}");
+        }
+        // The digits did not go anywhere.
+        assert!(keys.contains(&"7"));
+        // The button now names the mode it would switch back to.
+        assert!(keys.contains(&"Scientific"));
+        assert!(!keys.contains(&"Standard"));
+    }
+
+    #[test]
+    fn no_two_keys_share_a_pixel() {
+        // A keypad is nothing but hit boxes, so two that overlap mean a key
+        // that quietly presses its neighbour. Checked in the roomier of the two
+        // modes, which is where the cells are tightest.
+        let mut ui = CalculatorUi::new();
+        ui.calc.mode = CalcMode::Scientific;
+        ui.calc.show_history = true;
+        let (w, h) = <CalculatorUi as Probe>::SIZE;
+        let frame = ui.frame(w, h);
+        let boxes: Vec<_> = frame.hits().to_vec();
+        for (i, (a_target, a)) in boxes.iter().enumerate() {
+            for (b_target, b) in boxes.iter().skip(i + 1) {
+                assert!(
+                    a.intersect(*b).is_none(),
+                    "{a_target:?} at {a:?} overlaps {b_target:?} at {b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_number_can_be_added_up_entirely_by_clicking() {
+        let mut ui = CalculatorUi::new();
+        for label in ["1", "2", "+", "3", "0", "="] {
+            assert_eq!(
+                probe::click(&mut ui, Target::Key(label)),
+                EventResult::Consumed,
+                "no key for {label}"
+            );
+        }
+        assert_eq!(ui.calc.display, "42");
+    }
+
+    #[test]
+    fn a_click_on_no_key_at_all_changes_nothing() {
+        let mut ui = CalculatorUi::new();
+        ui.calc.expression = String::from("99");
+        // The gap between the display panel and the first key row belongs to
+        // nothing, and a window that treated it as a key press would insert
+        // digits the user never asked for.
+        let (w, h) = <CalculatorUi as Probe>::SIZE;
+        assert_eq!(
+            ui.click_at(1.0, 1.0, MouseButton::Left, (w, h)),
+            EventResult::Ignored
+        );
+        assert_eq!(ui.calc.expression, "99");
+    }
+
+    #[test]
+    fn the_display_shows_the_memory_only_once_something_is_in_it() {
+        let mut ui = CalculatorUi::new();
+        let (w, h) = <CalculatorUi as Probe>::SIZE;
+        let quiet = ui.frame(w, h);
+        assert!(
+            !quiet
+                .commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.starts_with("M "))),
+            "an empty memory should not be announced"
+        );
+
+        ui.calc.expression = String::from("7");
+        probe::click(&mut ui, Target::Key("MS"));
+        let loaded = ui.frame(w, h);
+        assert!(
+            loaded
+                .commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "M 7")),
+            "a stored 7 should be readable without pressing MR"
+        );
+    }
+
+    #[test]
+    fn the_history_panel_takes_its_space_from_the_keypad_not_from_the_window() {
+        let mut ui = CalculatorUi::new();
+        let (w, h) = <CalculatorUi as Probe>::SIZE;
+        let closed = Layout::new(w, h, CalcMode::Standard, false);
+        let open = Layout::new(w, h, CalcMode::Standard, true);
+
+        assert_eq!(closed.rows.len(), open.rows.len());
+        let closed_last = closed.rows.last().copied().unwrap();
+        let open_last = open.rows.last().copied().unwrap();
+        assert!(
+            open_last.h < closed_last.h,
+            "opening history should shrink the keys, not move them off the window"
+        );
+        assert!(
+            open_last.bottom() <= h,
+            "the last key row ran off the bottom edge"
+        );
+
+        // And the keys stay clickable at their new size.
+        ui.calc.show_history = true;
+        assert!(probe::rect_of(&ui, Target::Key("=")).is_some());
+    }
+
+    #[test]
+    fn a_history_row_can_be_clicked_to_get_its_answer_back() {
+        let mut ui = CalculatorUi::new();
+        for label in ["6", "*", "7", "="] {
+            probe::click(&mut ui, Target::Key(label));
+        }
+        assert_eq!(ui.calc.display, "42");
+
+        probe::click(&mut ui, Target::Key("Hist"));
+        assert!(ui.calc.show_history);
+        assert_eq!(
+            probe::click(&mut ui, Target::HistoryRow(0)),
+            EventResult::Consumed
+        );
+        assert_eq!(ui.calc.expression, "42");
+    }
+
+    #[test]
+    fn a_history_row_that_records_an_error_is_not_worth_recalling() {
+        let mut ui = CalculatorUi::new();
+        ui.calc.show_history = true;
+        ui.calc.history.push_front(HistoryEntry {
+            expression: String::from("1 / 0"),
+            result: String::from("Error: Division by zero"),
         });
-        let root = build_ui(&calc);
-        assert!(!root.children.is_empty());
+        ui.calc.expression = String::from("5");
+        // The click lands -- the row is there -- but pasting the words of an
+        // error into the expression would only produce a second one.
+        assert_eq!(
+            probe::click(&mut ui, Target::HistoryRow(0)),
+            EventResult::Ignored
+        );
+        assert_eq!(ui.calc.expression, "5");
+    }
+
+    #[test]
+    fn an_empty_history_says_so_rather_than_showing_nothing() {
+        let mut ui = CalculatorUi::new();
+        ui.calc.show_history = true;
+        let (w, h) = <CalculatorUi as Probe>::SIZE;
+        let frame = ui.frame(w, h);
+        assert!(
+            frame
+                .commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "No history yet"))
+        );
+        assert!(
+            frame
+                .hits()
+                .iter()
+                .all(|(t, _)| !matches!(t, Target::HistoryRow(_)))
+        );
+    }
+
+    #[test]
+    fn a_scrolled_history_clicks_the_row_the_user_can_see() {
+        let mut ui = CalculatorUi::new();
+        ui.calc.show_history = true;
+        for n in 0..20 {
+            ui.calc.history.push_back(HistoryEntry {
+                expression: format!("{n} + 0"),
+                result: n.to_string(),
+            });
+        }
+        let capacity = ui.history_capacity();
+        assert!(capacity > 0 && capacity < 20, "capacity was {capacity}");
+
+        // Nothing below the fold is clickable to begin with: the clip drops the
+        // hit box along with the picture.
+        assert!(probe::rect_of(&ui, Target::HistoryRow(19)).is_none());
+
+        // One notch is three rows.
+        assert!(ui.handle_scroll(-1.0));
+        assert_eq!(ui.history_scroll, wheel::ROWS_PER_NOTCH as usize);
+        assert!(probe::rect_of(&ui, Target::HistoryRow(0)).is_none());
+        assert!(probe::rect_of(&ui, Target::HistoryRow(3)).is_some());
+
+        // And the wheel stops at the last full page rather than scrolling the
+        // list off the top of its own panel.
+        for _ in 0..20 {
+            ui.handle_scroll(-1.0);
+        }
+        assert_eq!(ui.history_scroll, 20 - capacity);
+    }
+
+    #[test]
+    fn the_wheel_does_nothing_when_there_is_no_history_panel_to_scroll() {
+        let mut ui = CalculatorUi::new();
+        assert!(!ui.calc.show_history);
+        assert!(!ui.handle_scroll(-3.0));
+        assert_eq!(ui.history_scroll, 0);
+    }
+
+    #[test]
+    fn reopening_the_history_panel_shows_the_newest_entries() {
+        let mut ui = CalculatorUi::new();
+        ui.calc.show_history = true;
+        for n in 0..20 {
+            ui.calc.history.push_back(HistoryEntry {
+                expression: format!("{n} + 0"),
+                result: n.to_string(),
+            });
+        }
+        ui.handle_scroll(-2.0);
+        assert!(ui.history_scroll > 0);
+
+        probe::click(&mut ui, Target::Key("Hist"));
+        assert!(!ui.calc.show_history);
+        probe::click(&mut ui, Target::Key("Hist"));
+        assert!(ui.calc.show_history);
+        assert_eq!(ui.history_scroll, 0, "the panel reopened where it was left");
+    }
+
+    #[test]
+    fn a_taller_window_gives_its_extra_room_to_the_keys() {
+        let ui = CalculatorUi::new();
+        let (w, h) = <CalculatorUi as Probe>::SIZE;
+        let short = Layout::new(w, h, CalcMode::Standard, false);
+        let tall = Layout::new(w, h * 2.0, CalcMode::Standard, false);
+
+        // The display is a fixed band; the keys absorb the difference.
+        assert_eq!(short.display.h, tall.display.h);
+        assert!(tall.rows[0].h > short.rows[0].h);
+
+        // And the hit boxes follow, which is the part `Probe::SIZE` cannot see:
+        // `probe::rect_of` always draws at the declared size, so the frame is
+        // asked directly here.
+        let equals = ui
+            .frame(w, h * 2.0)
+            .rect_of(|t| *t == Target::Key("="))
+            .expect("the equals key");
+        assert!(equals.bottom() <= h * 2.0);
+        assert!(equals.h > short.rows[0].h);
+    }
+
+    #[test]
+    fn a_window_too_small_to_draw_in_offers_nothing_to_press() {
+        // The frame does not clip to the window, so a layout that clamped its
+        // bands to a minimum height would record keys below the bottom edge --
+        // invisible, and pressable.
+        let ui = CalculatorUi::new();
+        let frame = ui.frame(4.0, 4.0);
+        for (target, rect) in frame.hits() {
+            assert!(
+                rect.bottom() <= 4.0 + f32::EPSILON,
+                "{target:?} at {rect:?} is outside a 4x4 window"
+            );
+        }
+        assert!(frame.is_balanced(), "a clip was left open");
+    }
+
+    #[test]
+    fn a_nonsense_window_size_is_laid_out_rather_than_propagated() {
+        // A NaN width would otherwise flow into every rectangle, and NaN
+        // compares false against everything -- so every hit test would miss and
+        // the window would look dead rather than small.
+        let ui = CalculatorUi::new();
+        let frame = ui.frame(f32::NAN, -10.0);
+        assert!(
+            frame
+                .hits()
+                .iter()
+                .all(|(_, r)| r.x.is_finite() && r.y.is_finite())
+        );
+        assert!(frame.is_balanced());
+    }
+
+    #[test]
+    fn the_keyboard_reaches_what_the_keypad_does() {
+        let mut ui = CalculatorUi::new();
+        probe::type_str(&mut ui, "6*7");
+        assert_eq!(ui.calc.expression, "6 * 7");
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Enter)),
+            EventResult::Consumed
+        );
+        assert_eq!(ui.calc.display, "42");
+
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Escape)),
+            EventResult::Consumed
+        );
+        assert_eq!(ui.calc.display, "0");
+    }
+
+    #[test]
+    fn a_keystroke_that_names_no_key_is_left_for_someone_else() {
+        let mut ui = CalculatorUi::new();
+        // Not a calculator key: reporting it consumed would stop the desktop
+        // from ever seeing it.
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::F1)),
+            EventResult::Ignored
+        );
+        assert_eq!(ui.calc.expression, "");
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut ui = CalculatorUi::new();
+        let mut release = probe::press(Key::Num5);
+        release.pressed = false;
+        assert_eq!(probe::key(&mut ui, &release), EventResult::Ignored);
+        assert_eq!(ui.calc.expression, "");
+    }
+
+    #[test]
+    fn the_window_redraws_when_it_is_resized() {
+        let mut ui = CalculatorUi::new();
+        assert_eq!(
+            ui.on_event(&Event::Resize {
+                width: 500,
+                height: 700
+            }),
+            Response::Redraw
+        );
+        // The recorded size is what `target_at` consults while the frame is
+        // drawn at the size it is handed. Finding the equals key in a frame
+        // drawn at the new size and then pressing its centre through
+        // `target_at` is what proves the two agree -- before the resize that
+        // point is well below the window and hits nothing.
+        let equals = ui
+            .frame(500.0, 700.0)
+            .rect_of(|t| *t == Target::Key("="))
+            .expect("the equals key");
+        let (cx, cy) = equals.centre();
+        assert!(
+            cy > WINDOW_HEIGHT,
+            "the key did not move down with the window"
+        );
+        assert_eq!(ui.target_at(cx, cy), Some(Target::Key("=")));
+    }
+
+    #[test]
+    fn closing_the_window_exits() {
+        let mut ui = CalculatorUi::new();
+        assert_eq!(ui.on_event(&Event::CloseRequested), Response::Exit);
     }
 
     // ----------------------------------------------------------------

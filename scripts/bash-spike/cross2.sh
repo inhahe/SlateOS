@@ -10,10 +10,14 @@
 set -x
 SPIKE="$SLATE_SPIKE"
 # Lane-keyed: cross2.sh writes this tree and slatelink.sh reads it, so two lanes
-# sharing one /tmp/bash-cross would relink one lane's objects into the other's
-# shipped bash-slateos.elf. Keep this name in step with cross3.sh and
+# sharing one bash-cross directory would relink one lane's objects into the
+# other's shipped bash-slateos.elf. Keep this name in step with cross3.sh and
 # slatelink.sh, which must agree on it.
-BUILD="/tmp/bash-cross-$SLATE_LANE"
+#
+# Under $SLATE_WORK, not /tmp: WSL wipes /tmp on every restart, which silently
+# broke the automatic relink in create-ext4-rootfs.sh (see worktree.sh).
+BUILD="$SLATE_WORK/bash-cross"
+slate_adopt_legacy_work "/tmp/bash-cross-$SLATE_LANE" "$BUILD"
 
 # The toolchain comes from slate_make_zig_wrappers, which resolves the pinned,
 # hash-verified zig (per-worktree copy, else the shared cache, else download).

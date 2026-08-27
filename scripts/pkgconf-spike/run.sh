@@ -25,9 +25,11 @@ set -x
 # looks harmless.
 VER="$SLATE_PKGCONF_VERSION"
 SYSROOT="$SLATE_SYSROOT"
-# Scratch dirs are keyed by worktree so two lanes building at once cannot write
-# each other's objects or sysroot copy.
-WORK="/tmp/pkgconf-spike-$SLATE_LANE"
+# Keyed by worktree so two lanes building at once cannot write each other's
+# objects. Durable ($SLATE_WORK), not /tmp: WSL wipes /tmp on restart, which
+# broke create-ext4-rootfs.sh's automatic relink. See worktree.sh.
+WORK="$SLATE_WORK/pkgconf-spike"
+slate_adopt_legacy_work "/tmp/pkgconf-spike-$SLATE_LANE" "$WORK"
 SPIKE_LIBS="/tmp/slate-sysroot2-$SLATE_LANE"
 
 # zig cc as the cross compiler, exactly as the bash spike and fastpy's own

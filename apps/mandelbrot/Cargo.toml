@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window. Without it the explorer computed one fractal, dropped it, and
+# exited before anything reached a screen.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

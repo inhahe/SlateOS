@@ -1,61 +1,102 @@
-#![allow(dead_code)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(clippy::needless_range_loop)]
-#![allow(unused_imports)]
-
-//! Lights Out — a puzzle where toggling a light also toggles its neighbors.
+//! Lights Out — a puzzle where switching a light also switches its neighbours.
 //!
-//! The goal is to turn off all lights on the grid.
-//! Clicking a cell toggles it and all orthogonally adjacent cells.
-//! Supports 3x3, 5x5, and 7x7 grids.
+//! Turn every light off. Clicking a cell flips it and the four cells
+//! orthogonally beside it. Boards are 3x3, 5x5 or 7x7, and every board is
+//! built by *applying* flips to a solved grid, so replaying those flips
+//! always solves it.
+//!
+//! ## What wiring this up found
+//!
+//! The program had a complete game inside it and no way to reach it. `main`
+//! built a `LightsOut`, dropped it and exited: no board ever reached a
+//! screen and no key or click ever arrived. Underneath that, four faults:
+//!
+//! 1. **Every key fired twice.** The handler matched
+//!    `Event::Key(KeyEvent { key, modifiers, .. })` and never read `pressed`,
+//!    so each key ran a second time on release. The consequences were not
+//!    cosmetic:
+//!    - **Enter and Space could not play the game at all.** Flipping a cell
+//!      twice restores the board exactly, so a keypress changed nothing —
+//!      while charging two moves for it. The whole keyboard route to the one
+//!      verb this game has was dead.
+//!    - **The cursor moved two cells per press**, so on a 5x5 board starting
+//!      at the centre only the nine even-indexed cells were reachable; the
+//!      other sixteen could not be selected from the keyboard.
+//!    - **`H` opened the help on press and closed it on release**, so the
+//!      help panel could never be seen — and it was the only place the
+//!      controls were written down.
+//!    - **`N` and `3`/`5`/`7` dealt two boards per press**, throwing the
+//!      first away.
+//! 2. **Only the board was clickable.** No new game, no board size, no help
+//!    — every one of those was keyboard-only, and the keyboard was broken.
+//! 3. **The layout was a constant.** `render(width, height)` used its
+//!    arguments for the background rectangle alone; the grid sat at a fixed
+//!    (50, 90) and `cell_size()` was a lookup table keyed on board size. On a
+//!    window narrower than 800 the best-scores panel hung off the right edge,
+//!    and on a taller one the game stayed in the top-left corner. There is
+//!    now one `Layout` derived from the live window on every frame, and the
+//!    painter records each hit box as it draws, so there is no second copy of
+//!    the geometry left to disagree with the first.
+//! 4. **`size` was a second copy of `grid.len()`** that nothing kept in
+//!    agreement. The board is now its own size.
+//!
+//! `level` counted the boards dealt and was never drawn, which the file's
+//! blanket `#![allow(dead_code)]` is what let it sit there unnoticed. It is
+//! drawn now.
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
+use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
 
-// ── Catppuccin Mocha palette ──
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Catppuccin Mocha, only the entries this program actually paints with ──
+const COL_BASE: Color = Color::from_hex(0x1E1E2E);
+const COL_CRUST: Color = Color::from_hex(0x11111B);
+const COL_SURFACE0: Color = Color::from_hex(0x313244);
+const COL_SURFACE1: Color = Color::from_hex(0x45475A);
+const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
+const COL_SUBTEXT: Color = Color::from_hex(0xA6ADC8);
+const COL_OVERLAY: Color = Color::from_hex(0x6C7086);
+const COL_BLUE: Color = Color::from_hex(0x89B4FA);
+const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
+const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
+const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
 
-// Light on/off colors
-const LIGHT_ON: Color = YELLOW;
-const LIGHT_OFF: Color = SURFACE0;
-const CURSOR_COLOR: Color = BLUE;
+/// A lit cell, and an unlit one.
+const LIGHT_ON: Color = COL_YELLOW;
+const LIGHT_OFF: Color = COL_SURFACE0;
+/// The keyboard cursor's ring. Distinct in hue from both light states, so it
+/// reads as "you are here" rather than as a third kind of light.
+const CURSOR_COLOR: Color = COL_BLUE;
 
-// ── Randomness ──
-//
-// This file used to carry its own copy of the LCG that `guitk::rng` exists to
-// replace, reduced with `% max` and seeded with a literal `42` — so every
-// launch of the game dealt the identical starting puzzle, for ever. It also
-// had a `next_bool` that returned `self.next().is_multiple_of(2)`: the lowest
-// bit of a power-of-two-modulus LCG, whose period is exactly 2, so it would
-// have alternated true, false, true, false. Nothing called it, which is the
-// only reason that never shipped.
+/// Translucent fills. `Color` has no float constructor — the alpha is a byte.
+const COL_SCRIM: Color = Color::rgba(0x1E, 0x1E, 0x2E, 158);
+const COL_BANNER: Color = Color::rgba(0x11, 0x11, 0x1B, 224);
+const COL_VEIL: Color = Color::rgba(0x11, 0x11, 0x1B, 214);
+
+/// Every board size the game offers, in the order they are offered.
+///
+/// This is the single list the keys, the buttons, the flip counts and the
+/// best-score slots all read. Splitting it into four hand-written `match`
+/// arms is how a size ends up with a scoreboard slot and no way to select it.
+const SIZES: [usize; 3] = [3, 5, 7];
+/// One key per entry of [`SIZES`], in the same order.
+const SIZE_KEYS: [Key; 3] = [Key::Num3, Key::Num5, Key::Num7];
+/// How many random flips build a board of each [`SIZES`] entry.
+///
+/// Roughly half the cells: enough to look scrambled, few enough that the
+/// shortest solution is not the whole board.
+const SIZE_FLIPS: [usize; 3] = [4, 8, 14];
+
+const DEFAULT_SIZE: usize = 5;
+const WINDOW_WIDTH: f32 = 640.0;
+const WINDOW_HEIGHT: f32 = 620.0;
 
 /// The seed a puzzle falls back to when the kernel has no entropy to give.
 ///
@@ -65,483 +106,1021 @@ const CURSOR_COLOR: Color = BLUE;
 /// "LIGHTSO!" in ASCII.
 const FALLBACK_SEED: u64 = 0x4C49_4748_5453_4F21;
 
+const HELP_TITLE: &str = "How to play";
+const HELP_ROWS: [(&str, &str); 7] = [
+    ("Arrows", "Move the cursor"),
+    ("Enter / Space", "Flip the cell under it"),
+    ("Click", "Flip that cell"),
+    ("3 / 5 / 7", "Board 3x3 / 5x5 / 7x7"),
+    ("N", "New puzzle, same size"),
+    ("H", "Show or hide this sheet"),
+    ("", "A flip switches the cell and its four neighbours."),
+];
+
+// ── Layout ─────────────────────────────────────────────────────────────────
+
+/// The share of the window's height the board keeps no matter what.
+///
+/// Chrome that squeezed the board to nothing would leave a puzzle you cannot
+/// see next to the buttons for a puzzle you cannot play.
+const BOARD_SHARE: f32 = 0.45;
+
+/// Which band goes first when they do not all fit: footer, best scores,
+/// header, info.
+///
+/// Bands are dropped whole rather than shrunk together, because a band scaled
+/// down to four pixels costs the board four pixels and shows nothing. The
+/// live readout — moves and lights remaining — is the last to go, because it
+/// is the only chrome you need in order to keep playing.
+const BAND_DROP_ORDER: [usize; 4] = [3, 2, 0, 1];
+
+/// Every rectangle in the window, derived from the window's own size.
+///
+/// Built fresh on every frame and never remembered. A layout stored on the
+/// model is a layout that can disagree with the window it is drawn in, which
+/// is exactly the class of fault this file was full of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    pub window: Rect,
+    pub header: Rect,
+    pub info: Rect,
+    pub best: Rect,
+    pub board: Rect,
+    pub footer: Rect,
+    pub help: Rect,
+    pub font: f32,
+    pub small: f32,
+    pub pad: f32,
+}
+
+impl Layout {
+    pub fn new(width: f32, height: f32) -> Self {
+        let w = width.max(1.0);
+        let h = height.max(1.0);
+        let font = (h / 42.0).clamp(8.0, 15.0);
+        let small = (font - 2.0).max(7.0);
+        let pad = (w.min(h) * 0.02).clamp(2.0, 10.0);
+
+        // What each band would like, in [header, info, best, footer] order.
+        let mut wants = [
+            (h * 0.09).clamp(22.0, 42.0),
+            (h * 0.05).clamp(14.0, 24.0),
+            (h * 0.05).clamp(14.0, 24.0),
+            (h * 0.08).clamp(18.0, 34.0),
+        ];
+        let budget = (h - h * BOARD_SHARE).max(0.0);
+        for &i in &BAND_DROP_ORDER {
+            if wants.iter().sum::<f32>() <= budget {
+                break;
+            }
+            if let Some(band) = wants.get_mut(i) {
+                *band = 0.0;
+            }
+        }
+        let [hdr_h, inf_h, best_h, foot_h] = wants;
+
+        let header = Rect::new(0.0, 0.0, w, hdr_h);
+        let info = Rect::new(0.0, header.bottom(), w, inf_h);
+        let best = Rect::new(0.0, info.bottom(), w, best_h);
+        let footer = if foot_h > 0.0 {
+            Rect::new(0.0, h - foot_h, w, foot_h)
+        } else {
+            Rect::EMPTY
+        };
+
+        // The board is square and centred in whatever the bands left behind.
+        let top = best.bottom();
+        let bottom = if foot_h > 0.0 { footer.y } else { h };
+        let avail_w = (w - pad * 2.0).max(0.0);
+        let avail_h = (bottom - top - pad * 2.0).max(0.0);
+        let side = avail_w.min(avail_h);
+        let board = Rect::new(
+            (w - side) / 2.0,
+            top + (bottom - top - side) / 2.0,
+            side,
+            side,
+        );
+
+        let help_w = (w * 0.9).min(360.0);
+        let help_h = (h * 0.9).min(270.0);
+        let help = Rect::new((w - help_w) / 2.0, (h - help_h) / 2.0, help_w, help_h);
+
+        Self {
+            window: Rect::new(0.0, 0.0, w, h),
+            header,
+            info,
+            best,
+            board,
+            footer,
+            help,
+            font,
+            small,
+            pad,
+        }
+    }
+
+    /// The `index`th of `count` evenly-spaced buttons filling `row`.
+    fn nth_of(row: Rect, count: usize, index: usize) -> Rect {
+        let n = count.max(1) as f32;
+        let gap = (row.w * 0.01).min(6.0);
+        let bw = ((row.w - gap * (n + 1.0)) / n).max(0.0);
+        Rect::new(
+            row.x + gap + index as f32 * (bw + gap),
+            row.y,
+            bw,
+            row.h.max(0.0),
+        )
+    }
+
+    /// A size button, or — at `SIZES.len()` — the new-puzzle button.
+    pub fn footer_button(&self, index: usize) -> Rect {
+        Self::nth_of(self.footer, SIZES.len().saturating_add(1), index)
+    }
+
+    /// The help toggle, at the right-hand end of the header.
+    pub fn help_button(&self) -> Rect {
+        let side = (self.header.h * 0.7).min(self.header.w / 4.0).max(0.0);
+        Rect::new(
+            (self.header.right() - self.pad - side).max(self.header.x),
+            self.header.y + (self.header.h - side) / 2.0,
+            side,
+            side,
+        )
+    }
+
+    /// One cell of a `size`x`size` board. Derived from the board rectangle, so
+    /// the cell a click lands in is by construction the cell that was drawn.
+    pub fn cell(&self, size: usize, row: usize, col: usize) -> Rect {
+        let n = size.max(1) as f32;
+        let cs = self.board.w / n;
+        Rect::new(
+            self.board.x + col as f32 * cs,
+            self.board.y + row as f32 * cs,
+            cs,
+            cs,
+        )
+    }
+
+    /// Where the win message goes: across the foot of the board rather than
+    /// below it, because a band below the board has to come out of the
+    /// board's own height and there is none to spare in a small window.
+    pub fn banner(&self) -> Rect {
+        let bh = (self.board.h * 0.22).clamp(0.0, 58.0);
+        Rect::new(self.board.x, self.board.bottom() - bh, self.board.w, bh)
+    }
+
+    pub fn shows_header(&self) -> bool {
+        self.header.h >= 12.0 && self.header.w >= 60.0
+    }
+    pub fn shows_info(&self) -> bool {
+        self.info.h >= 10.0 && self.info.w >= 60.0
+    }
+    pub fn shows_best(&self) -> bool {
+        self.best.h >= 10.0 && self.best.w >= 120.0
+    }
+    pub fn shows_footer(&self) -> bool {
+        self.footer.h >= 10.0 && self.footer.w >= 160.0
+    }
+}
+
+// ── Model ──────────────────────────────────────────────────────────────────
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum GameState {
+pub enum GameState {
     Playing,
     Won,
 }
 
-struct LightsOut {
-    grid: Vec<Vec<bool>>, // true = light on
-    size: usize,          // 3, 5, or 7
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dir {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// Everything the game can be asked to do, from either input.
+///
+/// Both the keyboard and the pointer turn into one of these and go through
+/// [`LightsOut::apply`], so there is one place where a move is made and one
+/// place — [`LightsOut::enabled`] — that decides whether it may be.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Action {
+    /// Flip this cell and its four orthogonal neighbours.
+    Flip(usize, usize),
+    /// Flip whatever the keyboard cursor is on.
+    FlipCursor,
+    /// Move the keyboard cursor one cell.
+    Nudge(Dir),
+    /// Start a fresh board at this size.
+    SetSize(usize),
+    /// Start a fresh board at the current size.
+    NewGame,
+    ToggleHelp,
+}
+
+/// Every part of the window a click can land on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Cell(usize, usize),
+    Size(usize),
+    NewGame,
+    Help,
+    /// The help sheet itself, which swallows clicks meant for what it covers.
+    HelpSheet,
+}
+
+pub type Frame = guitk::frame::Frame<Target>;
+
+pub struct LightsOut {
+    /// The board. Its length *is* the board size; there is no second copy of
+    /// that number for anything to fall out of step with.
+    grid: Vec<Vec<bool>>,
     cursor_row: usize,
     cursor_col: usize,
     moves: u32,
     state: GameState,
-    level: u32,
-    best_moves: [Option<u32>; 3], // best for 3x3, 5x5, 7x7
+    /// How many boards have been dealt this session, counting the first.
+    board_no: u32,
+    /// Fewest moves ever taken to clear a board of each [`SIZES`] entry.
+    best_moves: [Option<u32>; SIZES.len()],
     show_help: bool,
     rng: SeededRng,
+    width: f32,
+    height: f32,
+}
+
+impl Default for LightsOut {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LightsOut {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self::with_rng(seeded_from_system(FALLBACK_SEED))
     }
 
     /// A game driven by `rng`, so a test can pin the board it is given.
-    fn with_rng(mut rng: SeededRng) -> Self {
-        let size = 5;
-        let grid = Self::generate_solvable(size, &mut rng, 8);
+    pub fn with_rng(mut rng: SeededRng) -> Self {
+        let grid = Self::generate_solvable(DEFAULT_SIZE, &mut rng);
+        let mid = DEFAULT_SIZE / 2;
         Self {
             grid,
-            size,
-            cursor_row: size / 2,
-            cursor_col: size / 2,
+            cursor_row: mid,
+            cursor_col: mid,
             moves: 0,
             state: GameState::Playing,
-            level: 1,
-            best_moves: [None; 3],
+            board_no: 1,
+            best_moves: [None; SIZES.len()],
             show_help: false,
             rng,
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
         }
     }
 
-    /// Generate a solvable puzzle by starting from all-off and toggling random cells.
-    fn generate_solvable(size: usize, rng: &mut SeededRng, toggles: usize) -> Vec<Vec<bool>> {
+    // ── Board shape ──
+
+    /// The board's size, which is the board's own length.
+    pub fn size(&self) -> usize {
+        self.grid.len()
+    }
+
+    /// Where `size` sits in [`SIZES`], if it is one of them.
+    fn size_index_of(size: usize) -> Option<usize> {
+        SIZES.iter().position(|&s| s == size)
+    }
+
+    pub fn size_index(&self) -> Option<usize> {
+        Self::size_index_of(self.size())
+    }
+
+    pub fn best_for(&self, size: usize) -> Option<u32> {
+        Self::size_index_of(size)
+            .and_then(|i| self.best_moves.get(i))
+            .copied()
+            .flatten()
+    }
+
+    pub fn at(&self, row: usize, col: usize) -> Option<bool> {
+        self.grid.get(row).and_then(|r| r.get(col)).copied()
+    }
+
+    pub fn moves(&self) -> u32 {
+        self.moves
+    }
+    pub fn state(&self) -> GameState {
+        self.state
+    }
+    pub fn board_no(&self) -> u32 {
+        self.board_no
+    }
+    pub fn cursor(&self) -> (usize, usize) {
+        (self.cursor_row, self.cursor_col)
+    }
+    pub fn show_help(&self) -> bool {
+        self.show_help
+    }
+
+    pub fn lights_on_count(&self) -> usize {
+        self.grid.iter().flatten().filter(|&&on| on).count()
+    }
+
+    // ── Board generation ──
+
+    /// Build a board by flipping random cells of a solved grid.
+    ///
+    /// Solvability is guaranteed by construction rather than checked: replay
+    /// the same flips and the board is off again. That is also why the count
+    /// comes from [`SIZE_FLIPS`] rather than being passed in — a caller free
+    /// to ask for zero flips would get an already-won board.
+    fn generate_solvable(size: usize, rng: &mut SeededRng) -> Vec<Vec<bool>> {
+        let flips = Self::size_index_of(size)
+            .and_then(|i| SIZE_FLIPS.get(i))
+            .copied()
+            .unwrap_or(8);
         let mut grid = vec![vec![false; size]; size];
-        for _ in 0..toggles {
+        for _ in 0..flips {
             let r = rng.below(size);
             let c = rng.below(size);
-            Self::toggle_cell_on_grid(&mut grid, size, r, c);
+            Self::flip_on_grid(&mut grid, r, c);
         }
-        // Ensure at least one light is on
-        let any_on = grid.iter().any(|row| row.iter().any(|&cell| cell));
-        if !any_on {
-            Self::toggle_cell_on_grid(&mut grid, size, size / 2, size / 2);
+        // An even number of flips can cancel out exactly. A board that starts
+        // won is not a puzzle, so nudge it off the solved state.
+        if !grid.iter().flatten().any(|&on| on) {
+            Self::flip_on_grid(&mut grid, size / 2, size / 2);
         }
         grid
     }
 
-    fn toggle_cell_on_grid(grid: &mut [Vec<bool>], size: usize, row: usize, col: usize) {
-        if row < size && col < size {
-            grid[row][col] = !grid[row][col];
-            if row > 0 {
-                grid[row - 1][col] = !grid[row - 1][col];
-            }
-            if row + 1 < size {
-                grid[row + 1][col] = !grid[row + 1][col];
-            }
-            if col > 0 {
-                grid[row][col - 1] = !grid[row][col - 1];
-            }
-            if col + 1 < size {
-                grid[row][col + 1] = !grid[row][col + 1];
+    /// The one rule of the game: a cell and its four orthogonal neighbours.
+    ///
+    /// `wrapping_sub` on row 0 gives `usize::MAX`, which no row index can be,
+    /// so the edge falls out of the bounds check rather than needing a
+    /// separate branch per side.
+    fn flip_on_grid(grid: &mut [Vec<bool>], row: usize, col: usize) {
+        if grid.get(row).and_then(|r| r.get(col)).is_none() {
+            return;
+        }
+        let touched = [
+            (row, col),
+            (row.wrapping_sub(1), col),
+            (row.saturating_add(1), col),
+            (row, col.wrapping_sub(1)),
+            (row, col.saturating_add(1)),
+        ];
+        for (r, c) in touched {
+            if let Some(cell) = grid.get_mut(r).and_then(|row| row.get_mut(c)) {
+                *cell = !*cell;
             }
         }
     }
 
-    fn toggle_cell(&mut self, row: usize, col: usize) {
-        if self.state != GameState::Playing {
-            return;
+    // ── Actions ──
+
+    /// Whether `action` would do anything. The renderer asks this to decide
+    /// what to dim, and [`Self::apply`] asks it to decide what to refuse, so
+    /// a greyed-out control and a rejected one can never disagree.
+    pub fn enabled(&self, action: Action) -> bool {
+        match action {
+            Action::Flip(row, col) => {
+                self.state == GameState::Playing && self.at(row, col).is_some()
+            }
+            Action::FlipCursor => self.enabled(Action::Flip(self.cursor_row, self.cursor_col)),
+            Action::Nudge(dir) => {
+                let last = self.size().saturating_sub(1);
+                match dir {
+                    Dir::Up => self.cursor_row > 0,
+                    Dir::Down => self.cursor_row < last,
+                    Dir::Left => self.cursor_col > 0,
+                    Dir::Right => self.cursor_col < last,
+                }
+            }
+            // A size button is live even after a win: choosing a size is how
+            // you start the next puzzle at that size.
+            Action::SetSize(size) => Self::size_index_of(size).is_some(),
+            Action::NewGame | Action::ToggleHelp => true,
         }
-        if row >= self.size || col >= self.size {
-            return;
+    }
+
+    /// Perform `action` if it is allowed. Returns whether anything changed.
+    pub fn apply(&mut self, action: Action) -> bool {
+        if !self.enabled(action) {
+            return false;
         }
-        Self::toggle_cell_on_grid(&mut self.grid, self.size, row, col);
-        self.moves = self.moves.saturating_add(1);
-        self.check_win();
+        match action {
+            Action::Flip(row, col) => {
+                self.cursor_row = row;
+                self.cursor_col = col;
+                Self::flip_on_grid(&mut self.grid, row, col);
+                self.moves = self.moves.saturating_add(1);
+                self.check_win();
+            }
+            Action::FlipCursor => {
+                return self.apply(Action::Flip(self.cursor_row, self.cursor_col));
+            }
+            Action::Nudge(dir) => match dir {
+                Dir::Up => self.cursor_row = self.cursor_row.saturating_sub(1),
+                Dir::Down => self.cursor_row = self.cursor_row.saturating_add(1),
+                Dir::Left => self.cursor_col = self.cursor_col.saturating_sub(1),
+                Dir::Right => self.cursor_col = self.cursor_col.saturating_add(1),
+            },
+            Action::SetSize(size) => self.deal(size),
+            Action::NewGame => self.deal(self.size()),
+            Action::ToggleHelp => self.show_help = !self.show_help,
+        }
+        true
+    }
+
+    /// Deal a fresh board at `size`.
+    fn deal(&mut self, size: usize) {
+        self.grid = Self::generate_solvable(size, &mut self.rng);
+        let mid = size / 2;
+        self.cursor_row = mid;
+        self.cursor_col = mid;
+        self.moves = 0;
+        self.state = GameState::Playing;
+        self.board_no = self.board_no.saturating_add(1);
     }
 
     fn check_win(&mut self) {
-        let all_off = self.grid.iter().all(|row| row.iter().all(|&cell| !cell));
-        if all_off {
-            self.state = GameState::Won;
-            let idx = self.size_index();
-            if idx < 3 {
-                if let Some(best) = self.best_moves[idx] {
-                    if self.moves < best {
-                        self.best_moves[idx] = Some(self.moves);
-                    }
-                } else {
-                    self.best_moves[idx] = Some(self.moves);
-                }
-            }
-        }
-    }
-
-    fn size_index(&self) -> usize {
-        match self.size {
-            3 => 0,
-            5 => 1,
-            7 => 2,
-            _ => 1,
-        }
-    }
-
-    fn set_size(&mut self, size: usize) {
-        if size == 3 || size == 5 || size == 7 {
-            self.size = size;
-            self.new_game();
-        }
-    }
-
-    fn new_game(&mut self) {
-        let toggles = match self.size {
-            3 => 4,
-            5 => 8,
-            7 => 14,
-            _ => 8,
-        };
-        self.grid = Self::generate_solvable(self.size, &mut self.rng, toggles);
-        self.cursor_row = self.size / 2;
-        self.cursor_col = self.size / 2;
-        self.moves = 0;
-        self.state = GameState::Playing;
-        self.level = self.level.saturating_add(1);
-    }
-
-    fn lights_on_count(&self) -> usize {
-        self.grid
-            .iter()
-            .flat_map(|r| r.iter())
-            .filter(|&&c| c)
-            .count()
-    }
-
-    fn event(&mut self, event: &Event) {
-        match event {
-            Event::Key(KeyEvent { key, modifiers, .. }) if *modifiers == Modifiers::NONE => {
-                match key {
-                    Key::Up if self.cursor_row > 0 => {
-                        self.cursor_row -= 1;
-                    }
-                    Key::Down if self.cursor_row < self.size - 1 => {
-                        self.cursor_row += 1;
-                    }
-                    Key::Left if self.cursor_col > 0 => {
-                        self.cursor_col -= 1;
-                    }
-                    Key::Right if self.cursor_col < self.size - 1 => {
-                        self.cursor_col += 1;
-                    }
-                    Key::Enter | Key::Space => {
-                        self.toggle_cell(self.cursor_row, self.cursor_col);
-                    }
-                    Key::N => self.new_game(),
-                    Key::H => self.show_help = !self.show_help,
-                    Key::Num3 => self.set_size(3),
-                    Key::Num5 => self.set_size(5),
-                    Key::Num7 => self.set_size(7),
-                    _ => {}
-                }
-            }
-            Event::Mouse(MouseEvent { x, y, kind }) => {
-                if matches!(kind, MouseEventKind::Press(MouseButton::Left)) {
-                    self.handle_mouse_click(*x, *y);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_mouse_click(&mut self, mx: f32, my: f32) {
-        let grid_x = 50.0_f32;
-        let grid_y = 90.0_f32;
-        let cell_size = self.cell_size();
-        let total = cell_size * self.size as f32;
-
-        if mx < grid_x || my < grid_y || mx > grid_x + total || my > grid_y + total {
+        if self.grid.iter().flatten().any(|&on| on) {
             return;
         }
-
-        let col = ((mx - grid_x) / cell_size) as usize;
-        let row = ((my - grid_y) / cell_size) as usize;
-        if row < self.size && col < self.size {
-            self.cursor_row = row;
-            self.cursor_col = col;
-            self.toggle_cell(row, col);
+        self.state = GameState::Won;
+        let moves = self.moves;
+        if let Some(slot) = self.size_index().and_then(|i| self.best_moves.get_mut(i)) {
+            if slot.is_none_or(|best| moves < best) {
+                *slot = Some(moves);
+            }
         }
     }
 
-    fn cell_size(&self) -> f32 {
-        match self.size {
-            3 => 100.0,
-            5 => 70.0,
-            7 => 54.0,
-            _ => 70.0,
+    // ── Window ──
+
+    pub fn resize(&mut self, width: f32, height: f32) {
+        self.width = width.max(1.0);
+        self.height = height.max(1.0);
+    }
+
+    /// What a click at (`x`, `y`) would land on, read from the frame the
+    /// window is actually showing.
+    pub fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        self.frame(self.width, self.height).hit_test(x, y)
+    }
+}
+
+// ── Drawing ────────────────────────────────────────────────────────────────
+
+fn fill(f: &mut Frame, r: Rect, color: Color, radius: f32) {
+    if r.w <= 0.0 || r.h <= 0.0 {
+        return;
+    }
+    f.push(RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii: if radius > 0.0 {
+            CornerRadii::all(radius)
+        } else {
+            CornerRadii::ZERO
+        },
+    });
+}
+
+fn label(
+    f: &mut Frame,
+    x: f32,
+    y: f32,
+    body: &str,
+    size: f32,
+    color: Color,
+    weight: FontWeightHint,
+    max_width: Option<f32>,
+) {
+    if body.is_empty() || size <= 0.0 {
+        return;
+    }
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: body.to_string(),
+        color,
+        font_size: size,
+        font_weight: weight,
+        max_width,
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+/// A label centred in a horizontal span, clamped so a string wider than the
+/// span starts at the span's left edge instead of overhanging to its left.
+fn centred_in(
+    f: &mut Frame,
+    left: f32,
+    span: f32,
+    cy: f32,
+    body: &str,
+    size: f32,
+    color: Color,
+    weight: FontWeightHint,
+) {
+    label(
+        f,
+        text::center_x(body, left + span / 2.0, size, weight).max(left),
+        cy - text::line_height(size, weight) / 2.0,
+        body,
+        size,
+        color,
+        weight,
+        Some(span.max(0.0)),
+    );
+}
+
+impl LightsOut {
+    /// The whole window, and every hit box in it, in one pass.
+    ///
+    /// `Frame::hit_test` scans the recorded boxes in reverse, so anything
+    /// drawn later wins the click over what it covers. That is why the help
+    /// sheet is painted last.
+    pub fn frame(&self, width: f32, height: f32) -> Frame {
+        let l = Layout::new(width, height);
+        let mut f = Frame::new(l.window.w, l.window.h);
+        fill(&mut f, l.window, COL_BASE, 0.0);
+
+        if l.shows_header() {
+            self.draw_header(&mut f, &l);
+        }
+        if l.shows_info() {
+            self.draw_info(&mut f, &l);
+        }
+        if l.shows_best() {
+            self.draw_best(&mut f, &l);
+        }
+        self.draw_board(&mut f, &l);
+        if self.state == GameState::Won {
+            self.draw_banner(&mut f, &l);
+        }
+        if l.shows_footer() {
+            self.draw_footer(&mut f, &l);
+        }
+        if self.show_help {
+            self.draw_help(&mut f, &l);
+        }
+        f
+    }
+
+    fn draw_header(&self, f: &mut Frame, l: &Layout) {
+        let cy = l.header.y + l.header.h / 2.0;
+        let btn = l.help_button();
+        let title_span = (btn.x - l.pad * 2.0 - l.header.x).max(0.0);
+        label(
+            f,
+            l.header.x + l.pad,
+            cy - text::line_height(l.font, FontWeightHint::Bold) / 2.0,
+            "Lights Out",
+            l.font,
+            COL_LAVENDER,
+            FontWeightHint::Bold,
+            Some(title_span),
+        );
+
+        if btn.w > 0.0 && btn.h > 0.0 {
+            fill(
+                f,
+                btn,
+                if self.show_help {
+                    COL_SURFACE1
+                } else {
+                    COL_SURFACE0
+                },
+                (btn.h * 0.25).min(6.0),
+            );
+            centred_in(
+                f,
+                btn.x,
+                btn.w,
+                btn.y + btn.h / 2.0,
+                "?",
+                l.small,
+                COL_TEXT,
+                FontWeightHint::Bold,
+            );
+            f.hit(Target::Help, btn);
         }
     }
 
-    fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-
-        // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height,
-            color: BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Title
-        cmds.push(RenderCommand::Text {
-            x: 50.0,
-            y: 28.0,
-            text: "Lights Out".into(),
-            color: LAVENDER,
-            font_size: 24.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Info bar
-        let info = format!(
-            "{}x{}   Moves: {}   Lights: {}",
-            self.size,
-            self.size,
+    fn draw_info(&self, f: &mut Frame, l: &Layout) {
+        let size = self.size();
+        let body = format!(
+            "Board {}   {}x{}   Moves {}   Lights {}",
+            self.board_no,
+            size,
+            size,
             self.moves,
             self.lights_on_count()
         );
-        cmds.push(RenderCommand::Text {
-            x: 50.0,
-            y: 60.0,
-            text: info,
-            color: SUBTEXT0,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        centred_in(
+            f,
+            l.info.x + l.pad,
+            (l.info.w - l.pad * 2.0).max(0.0),
+            l.info.y + l.info.h / 2.0,
+            &body,
+            l.small,
+            COL_SUBTEXT,
+            FontWeightHint::Regular,
+        );
+    }
 
-        // Grid
-        let grid_x = 50.0_f32;
-        let grid_y = 90.0_f32;
-        let cell = self.cell_size();
-        let pad = 3.0_f32;
-        let grid_total = cell * self.size as f32;
+    fn draw_best(&self, f: &mut Frame, l: &Layout) {
+        let mut body = String::from("Best");
+        for size in SIZES {
+            match self.best_for(size) {
+                Some(m) => body.push_str(&format!("   {size}x{size} {m}")),
+                None => body.push_str(&format!("   {size}x{size} -")),
+            }
+        }
+        centred_in(
+            f,
+            l.best.x + l.pad,
+            (l.best.w - l.pad * 2.0).max(0.0),
+            l.best.y + l.best.h / 2.0,
+            &body,
+            l.small,
+            COL_OVERLAY,
+            FontWeightHint::Regular,
+        );
+    }
 
-        // Grid background
-        cmds.push(RenderCommand::FillRect {
-            x: grid_x - 4.0,
-            y: grid_y - 4.0,
-            width: grid_total + 8.0,
-            height: grid_total + 8.0,
-            color: CRUST,
-            corner_radii: CornerRadii::all(8.0),
-        });
+    fn draw_board(&self, f: &mut Frame, l: &Layout) {
+        if l.board.w <= 0.0 || l.board.h <= 0.0 {
+            return;
+        }
+        let size = self.size();
+        fill(f, l.board, COL_CRUST, (l.board.w * 0.02).min(8.0));
 
-        // Cells
-        for row in 0..self.size {
-            for col in 0..self.size {
-                let cx = grid_x + col as f32 * cell + pad;
-                let cy = grid_y + row as f32 * cell + pad;
-                let cw = cell - pad * 2.0;
-                let ch = cell - pad * 2.0;
+        // The gutter between lights. Proportional, so a 7x7 board in a small
+        // window still shows seven distinct cells instead of one yellow slab.
+        let cs = l.board.w / size.max(1) as f32;
+        let inset = (cs * 0.06).clamp(0.5, 4.0);
+        let radius = (cs * 0.14).min(8.0);
 
-                let is_on = self.grid[row][col];
-                let is_cursor = row == self.cursor_row && col == self.cursor_col;
+        for row in 0..size {
+            for col in 0..size {
+                let outer = l.cell(size, row, col);
+                let on = self.at(row, col).unwrap_or(false);
+                let face = Rect::new(
+                    outer.x + inset,
+                    outer.y + inset,
+                    (outer.w - inset * 2.0).max(0.0),
+                    (outer.h - inset * 2.0).max(0.0),
+                );
+                fill(f, face, if on { LIGHT_ON } else { LIGHT_OFF }, radius);
 
-                // Cell background
-                let cell_color = if is_on { LIGHT_ON } else { LIGHT_OFF };
-                cmds.push(RenderCommand::FillRect {
-                    x: cx,
-                    y: cy,
-                    width: cw,
-                    height: ch,
-                    color: cell_color,
-                    corner_radii: CornerRadii::all(6.0),
-                });
-
-                // Cursor highlight border
-                if is_cursor {
-                    // Top
-                    cmds.push(RenderCommand::FillRect {
-                        x: cx,
-                        y: cy,
-                        width: cw,
-                        height: 3.0,
-                        color: CURSOR_COLOR,
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                    // Bottom
-                    cmds.push(RenderCommand::FillRect {
-                        x: cx,
-                        y: cy + ch - 3.0,
-                        width: cw,
-                        height: 3.0,
-                        color: CURSOR_COLOR,
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                    // Left
-                    cmds.push(RenderCommand::FillRect {
-                        x: cx,
-                        y: cy,
-                        width: 3.0,
-                        height: ch,
-                        color: CURSOR_COLOR,
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                    // Right
-                    cmds.push(RenderCommand::FillRect {
-                        x: cx + cw - 3.0,
-                        y: cy,
-                        width: 3.0,
-                        height: ch,
-                        color: CURSOR_COLOR,
-                        corner_radii: CornerRadii::ZERO,
-                    });
+                if (row, col) == (self.cursor_row, self.cursor_col) {
+                    self.draw_cursor(f, face);
                 }
+                // The hit box is the whole cell, gutter included: a click one
+                // pixel into the gap between two lights should pick one of
+                // them, not fall through to the board behind.
+                f.hit(Target::Cell(row, col), outer);
+            }
+        }
+    }
+
+    /// A ring around the cell the keyboard is on, drawn as four bars because
+    /// a stroked rectangle would be centred on the edge and bleed outward
+    /// into the gutter.
+    fn draw_cursor(&self, f: &mut Frame, face: Rect) {
+        let t = (face.w * 0.08).clamp(1.0, 4.0);
+        if face.w <= t * 2.0 || face.h <= t * 2.0 {
+            return;
+        }
+        fill(f, Rect::new(face.x, face.y, face.w, t), CURSOR_COLOR, 0.0);
+        fill(
+            f,
+            Rect::new(face.x, face.bottom() - t, face.w, t),
+            CURSOR_COLOR,
+            0.0,
+        );
+        fill(f, Rect::new(face.x, face.y, t, face.h), CURSOR_COLOR, 0.0);
+        fill(
+            f,
+            Rect::new(face.right() - t, face.y, t, face.h),
+            CURSOR_COLOR,
+            0.0,
+        );
+    }
+
+    fn draw_banner(&self, f: &mut Frame, l: &Layout) {
+        let r = l.banner();
+        if r.w <= 0.0 || r.h <= 0.0 {
+            return;
+        }
+        fill(f, r, COL_BANNER, (r.h * 0.15).min(8.0));
+        let head = format!("All lights off in {} moves", self.moves);
+        centred_in(
+            f,
+            r.x,
+            r.w,
+            r.y + r.h * 0.34,
+            &head,
+            l.font,
+            COL_GREEN,
+            FontWeightHint::Bold,
+        );
+        centred_in(
+            f,
+            r.x,
+            r.w,
+            r.y + r.h * 0.72,
+            "N for the next puzzle",
+            l.small,
+            COL_SUBTEXT,
+            FontWeightHint::Regular,
+        );
+        // The banner says what to press, so it may as well be the button.
+        f.hit(Target::NewGame, r);
+    }
+
+    fn draw_footer(&self, f: &mut Frame, l: &Layout) {
+        for (i, size) in SIZES.iter().enumerate() {
+            let r = l.footer_button(i);
+            let current = *size == self.size();
+            fill(
+                f,
+                r,
+                if current { COL_SURFACE1 } else { COL_SURFACE0 },
+                (r.h * 0.2).min(6.0),
+            );
+            centred_in(
+                f,
+                r.x,
+                r.w,
+                r.y + r.h / 2.0,
+                &format!("{size}x{size}"),
+                l.small,
+                if current { COL_YELLOW } else { COL_TEXT },
+                FontWeightHint::Bold,
+            );
+            // Recorded even for the size already showing: a click there should
+            // stop at the button, not reach whatever is behind it.
+            f.hit(Target::Size(*size), r);
+        }
+
+        let r = l.footer_button(SIZES.len());
+        fill(f, r, COL_SURFACE0, (r.h * 0.2).min(6.0));
+        centred_in(
+            f,
+            r.x,
+            r.w,
+            r.y + r.h / 2.0,
+            "New",
+            l.small,
+            COL_BLUE,
+            FontWeightHint::Bold,
+        );
+        f.hit(Target::NewGame, r);
+    }
+
+    fn draw_help(&self, f: &mut Frame, l: &Layout) {
+        // Dim the whole window first, then the panel on top of it, so the
+        // sheet reads as in front of the game rather than part of it.
+        fill(f, l.window, COL_SCRIM, 0.0);
+        let p = l.help;
+        fill(f, p, COL_VEIL, 10.0);
+
+        let pad = (p.w * 0.06).clamp(6.0, 18.0);
+        let inner = (p.w - pad * 2.0).max(0.0);
+        let title_h = text::line_height(l.font, FontWeightHint::Bold);
+        label(
+            f,
+            p.x + pad,
+            p.y + pad,
+            HELP_TITLE,
+            l.font,
+            COL_YELLOW,
+            FontWeightHint::Bold,
+            Some(inner),
+        );
+
+        // Rows share whatever is left below the title, so the sheet cannot
+        // write past its own foot however short the window is.
+        let top = p.y + pad + title_h + pad / 2.0;
+        let room = (p.bottom() - pad - top).max(0.0);
+        let step = room / HELP_ROWS.len() as f32;
+        let key_span = (inner * 0.38).min(120.0);
+        for (i, (k, v)) in HELP_ROWS.iter().enumerate() {
+            let y = top + i as f32 * step;
+            if y + l.small > p.bottom() - pad {
+                break;
+            }
+            if k.is_empty() {
+                label(
+                    f,
+                    p.x + pad,
+                    y,
+                    v,
+                    l.small,
+                    COL_SUBTEXT,
+                    FontWeightHint::Regular,
+                    Some(inner),
+                );
+            } else {
+                label(
+                    f,
+                    p.x + pad,
+                    y,
+                    k,
+                    l.small,
+                    COL_BLUE,
+                    FontWeightHint::Bold,
+                    Some(key_span),
+                );
+                label(
+                    f,
+                    p.x + pad + key_span,
+                    y,
+                    v,
+                    l.small,
+                    COL_TEXT,
+                    FontWeightHint::Regular,
+                    Some((inner - key_span).max(0.0)),
+                );
             }
         }
 
-        // Win message
-        if self.state == GameState::Won {
-            let win_y = grid_y + grid_total + 20.0;
-            cmds.push(RenderCommand::Text {
-                x: grid_x,
-                y: win_y,
-                text: format!("All lights off in {} moves!", self.moves),
-                color: GREEN,
-                font_size: 18.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cmds.push(RenderCommand::Text {
-                x: grid_x,
-                y: win_y + 26.0,
-                text: "Press N for next puzzle".into(),
-                color: SUBTEXT0,
-                font_size: 13.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
-
-        // Side panel — best scores
-        let panel_x = grid_x + grid_total + 30.0;
-        let panel_y = grid_y;
-
-        cmds.push(RenderCommand::FillRect {
-            x: panel_x,
-            y: panel_y,
-            width: 170.0,
-            height: 130.0,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: panel_x + 12.0,
-            y: panel_y + 16.0,
-            text: "Best Scores".into(),
-            color: YELLOW,
-            font_size: 15.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        let labels = ["3x3", "5x5", "7x7"];
-        for (i, label) in labels.iter().enumerate() {
-            let sy = panel_y + 44.0 + i as f32 * 26.0;
-            let score_str = match self.best_moves[i] {
-                Some(m) => format!("{}: {} moves", label, m),
-                None => format!("{}: ---", label),
-            };
-            cmds.push(RenderCommand::Text {
-                x: panel_x + 12.0,
-                y: sy,
-                text: score_str,
-                color: TEXT,
-                font_size: 13.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
-
-        // Help
-        if self.show_help {
-            let help_y = panel_y + 150.0;
-            cmds.push(RenderCommand::FillRect {
-                x: panel_x,
-                y: help_y,
-                width: 170.0,
-                height: 180.0,
-                color: SURFACE0,
-                corner_radii: CornerRadii::all(8.0),
-            });
-
-            cmds.push(RenderCommand::Text {
-                x: panel_x + 12.0,
-                y: help_y + 16.0,
-                text: "Controls".into(),
-                color: YELLOW,
-                font_size: 15.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            let controls = [
-                ("Arrows", "Move cursor"),
-                ("Enter", "Toggle cell"),
-                ("Click", "Toggle cell"),
-                ("3/5/7", "Change size"),
-                ("N", "New puzzle"),
-                ("H", "Toggle help"),
-            ];
-            for (i, (k, v)) in controls.iter().enumerate() {
-                let ly = help_y + 42.0 + i as f32 * 22.0;
-                cmds.push(RenderCommand::Text {
-                    x: panel_x + 12.0,
-                    y: ly,
-                    text: (*k).into(),
-                    color: BLUE,
-                    font_size: 11.0,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                cmds.push(RenderCommand::Text {
-                    x: panel_x + 75.0,
-                    y: ly,
-                    text: (*v).into(),
-                    color: SUBTEXT0,
-                    font_size: 11.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
-        } else {
-            cmds.push(RenderCommand::Text {
-                x: panel_x + 12.0,
-                y: panel_y + 150.0,
-                text: "Press H for help".into(),
-                color: OVERLAY0,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
-
-        cmds
+        // Over the whole window, not just the panel: while the sheet is up,
+        // nothing behind it is clickable.
+        f.hit(Target::HelpSheet, l.window);
     }
 }
 
-fn main() {
-    let _app = LightsOut::new();
+// ── Input ──────────────────────────────────────────────────────────────────
+
+impl LightsOut {
+    fn handle_key(&mut self, ev: &KeyEvent) -> EventResult {
+        // The fault that broke every key in this file, in one line. A release
+        // is not a second press: acting on both flipped each cell twice
+        // (restoring the board while charging two moves), moved the cursor
+        // two cells per press, dealt two boards per `N`, and opened the help
+        // sheet and closed it again before it could be seen.
+        if !ev.pressed {
+            return EventResult::Ignored;
+        }
+        let m = ev.modifiers;
+        if m.ctrl || m.alt || m.super_key {
+            return EventResult::Ignored;
+        }
+
+        if self.show_help {
+            // The sheet is modal: it takes every key, and a few of them close
+            // it. Letting the rest through would mean playing blind.
+            if matches!(ev.key, Key::H | Key::Escape | Key::Enter | Key::Space) {
+                self.apply(Action::ToggleHelp);
+            }
+            return EventResult::Consumed;
+        }
+
+        let action = match ev.key {
+            Key::Up => Some(Action::Nudge(Dir::Up)),
+            Key::Down => Some(Action::Nudge(Dir::Down)),
+            Key::Left => Some(Action::Nudge(Dir::Left)),
+            Key::Right => Some(Action::Nudge(Dir::Right)),
+            Key::Enter | Key::Space => Some(Action::FlipCursor),
+            Key::N => Some(Action::NewGame),
+            Key::H => Some(Action::ToggleHelp),
+            key => SIZE_KEYS
+                .iter()
+                .position(|k| *k == key)
+                .and_then(|i| SIZES.get(i).copied())
+                .map(Action::SetSize),
+        };
+
+        match action {
+            Some(a) => {
+                self.apply(a);
+                EventResult::Consumed
+            }
+            None => EventResult::Ignored,
+        }
+    }
+
+    fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
+            return EventResult::Ignored;
+        }
+        if self.show_help {
+            // Anywhere at all dismisses the sheet, including outside it.
+            self.apply(Action::ToggleHelp);
+            return EventResult::Consumed;
+        }
+        let Some(target) = self.target_at(ev.x, ev.y) else {
+            return EventResult::Ignored;
+        };
+        match target {
+            Target::Cell(row, col) => {
+                self.apply(Action::Flip(row, col));
+            }
+            Target::Size(size) => {
+                self.apply(Action::SetSize(size));
+            }
+            Target::NewGame => {
+                self.apply(Action::NewGame);
+            }
+            Target::Help => {
+                self.apply(Action::ToggleHelp);
+            }
+            Target::HelpSheet => {}
+        }
+        // Consumed either way: a click that lands on a control the game is
+        // refusing should stop there, not fall through to the board.
+        EventResult::Consumed
+    }
 }
 
-// ── Tests ──
+/// The one body both the window and the test probe drive, so what a click
+/// does in a test is what it does on a screen.
+pub fn handle_event(app: &mut LightsOut, event: &Event) -> EventResult {
+    match event {
+        Event::Key(ev) => app.handle_key(ev),
+        Event::Mouse(ev) => app.handle_mouse(ev),
+        Event::Resize { width, height } => {
+            app.resize(*width as f32, *height as f32);
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+impl App for LightsOut {
+    fn title(&self) -> String {
+        "Lights Out".to_string()
+    }
+
+    fn app_id(&self) -> String {
+        "lightsout".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against — that is the whole point of storing it here.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for LightsOut {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
+    }
+}
+
+fn main() -> ExitCode {
+    let mut game = LightsOut::new();
+    app::launch("lightsout", &mut game)
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     // A test that indexes out of range should fail loudly and point at the line
@@ -557,18 +1136,765 @@ mod tests {
     )]
 
     use super::*;
+    use guitk::probe;
 
-    // ── Randomness, as the game uses it ──
-    //
-    // The four tests that used to live here checked that the private generator
-    // was deterministic, differed by seed, and stayed inside its bound. That is
-    // `randrange`'s contract now and is tested there against the real hazards
-    // (low-bit cycles, modulo bias). What is left here is what this *game*
-    // needs from randomness, which the old tests never checked at all.
+    /// Windows to check the layout against, from a desktop down to something
+    /// no sane person would resize to. The small end is the point: a window
+    /// too short for the chrome must still show a playable board.
+    const WINDOWS: [(f32, f32); 9] = [
+        (1920.0, 1080.0),
+        (1280.0, 800.0),
+        (WINDOW_WIDTH, WINDOW_HEIGHT),
+        (480.0, 400.0),
+        (400.0, 640.0),
+        (640.0, 200.0),
+        (300.0, 100.0),
+        (120.0, 90.0),
+        (24.0, 24.0),
+    ];
+
+    /// A game on a pinned generator, sized to a given window.
+    fn windowed(width: f32, height: f32) -> LightsOut {
+        let mut app = LightsOut::with_rng(SeededRng::new(11));
+        app.resize(width, height);
+        app
+    }
+
+    fn game() -> LightsOut {
+        windowed(WINDOW_WIDTH, WINDOW_HEIGHT)
+    }
+
+    fn release(key: Key) -> KeyEvent {
+        let mut ev = probe::press(key);
+        ev.pressed = false;
+        ev
+    }
+
+    /// A keypress delivered straight to the handler.
+    ///
+    /// Not `probe::key`, which resizes the app to `Probe::SIZE` first — that
+    /// would quietly undo any window size a test had set up.
+    fn press(app: &mut LightsOut, key: Key) -> EventResult {
+        handle_event(app, &Event::Key(probe::press(key)))
+    }
+
+    fn lift(app: &mut LightsOut, key: Key) -> EventResult {
+        handle_event(app, &Event::Key(release(key)))
+    }
+
+    /// A press and its release, which is what a real key produces.
+    fn tap(app: &mut LightsOut, key: Key) {
+        press(app, key);
+        lift(app, key);
+    }
+
+    fn click(app: &mut LightsOut, x: f32, y: f32) -> EventResult {
+        let size = (app.width, app.height);
+        app.click_at(x, y, MouseButton::Left, size)
+    }
+
+    fn texts(f: &Frame) -> Vec<String> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A board with exactly one light on, at `(row, col)`, so a single flip
+    /// there is guaranteed *not* to win and a known flip elsewhere is.
+    fn board_with(size: usize, on: &[(usize, usize)]) -> Vec<Vec<bool>> {
+        let mut grid = vec![vec![false; size]; size];
+        for &(r, c) in on {
+            grid[r][c] = true;
+        }
+        grid
+    }
+
+    // ── The faults this wiring exists to fix ──
+
+    /// The fault that broke every key in the file: the old handler destructured
+    /// `KeyEvent { key, modifiers, .. }` and never looked at `pressed`, so the
+    /// release ran the whole action a second time.
+    #[test]
+    fn a_release_is_not_a_second_press() {
+        let mut app = game();
+        assert_eq!(
+            lift(&mut app, Key::N),
+            EventResult::Ignored,
+            "a key release was treated as a keypress"
+        );
+    }
+
+    /// The worst consequence of that fault. Flipping a cell twice restores the
+    /// board exactly, so Enter changed nothing at all while charging two
+    /// moves for it -- the keyboard could not play this game.
+    #[test]
+    fn enter_flips_the_cell_once_not_back_again() {
+        let mut app = game();
+        let before = app.grid.clone();
+        tap(&mut app, Key::Enter);
+        assert_ne!(app.grid, before, "Enter left the board exactly as it was");
+        assert_eq!(app.moves(), 1, "one keypress, one move");
+    }
+
+    #[test]
+    fn space_flips_the_cell_once_too() {
+        let mut app = game();
+        let before = app.grid.clone();
+        tap(&mut app, Key::Space);
+        assert_ne!(app.grid, before);
+        assert_eq!(app.moves(), 1);
+    }
+
+    /// The second consequence: two cells of travel per press meant that on a
+    /// 5x5 board starting at the centre, only the nine even-indexed cells
+    /// could ever be selected from the keyboard.
+    #[test]
+    fn an_arrow_key_moves_the_cursor_one_cell() {
+        let mut app = game();
+        assert_eq!(app.cursor(), (2, 2));
+        tap(&mut app, Key::Up);
+        assert_eq!(app.cursor(), (1, 2), "Up moved more than one cell");
+        tap(&mut app, Key::Left);
+        assert_eq!(app.cursor(), (1, 1));
+        tap(&mut app, Key::Down);
+        assert_eq!(app.cursor(), (2, 1));
+        tap(&mut app, Key::Right);
+        assert_eq!(app.cursor(), (2, 2));
+    }
+
+    /// The shape of that fault stated directly: every cell has to be
+    /// reachable, not every other one.
+    #[test]
+    fn the_keyboard_can_reach_every_cell_of_the_board() {
+        for size in SIZES {
+            let mut app = game();
+            tap(
+                &mut app,
+                SIZE_KEYS[SIZES.iter().position(|&s| s == size).unwrap()],
+            );
+            let mut seen = vec![vec![false; size]; size];
+            // Walk to the top-left corner, then serpentine the whole board.
+            for _ in 0..size {
+                tap(&mut app, Key::Up);
+                tap(&mut app, Key::Left);
+            }
+            for row in 0..size {
+                for _ in 0..size {
+                    let (r, c) = app.cursor();
+                    seen[r][c] = true;
+                    tap(&mut app, Key::Right);
+                }
+                for _ in 0..size {
+                    let (r, c) = app.cursor();
+                    seen[r][c] = true;
+                    tap(&mut app, Key::Left);
+                }
+                if row + 1 < size {
+                    tap(&mut app, Key::Down);
+                }
+            }
+            assert!(
+                seen.iter().flatten().all(|&hit| hit),
+                "{size}x{size}: some cells cannot be reached with the arrow keys"
+            );
+        }
+    }
+
+    /// The third consequence: `H` opened the sheet on press and closed it on
+    /// release, so the help -- the only written record of the controls --
+    /// could not be seen at all.
+    #[test]
+    fn the_help_sheet_can_actually_be_opened() {
+        let mut app = game();
+        assert!(!app.show_help());
+        tap(&mut app, Key::H);
+        assert!(app.show_help(), "H opened the help and closed it again");
+        tap(&mut app, Key::H);
+        assert!(!app.show_help(), "H would not close the help");
+    }
+
+    /// The fourth: `N` and the size keys each dealt two boards, throwing the
+    /// first one away.
+    #[test]
+    fn a_key_deals_one_board_not_two() {
+        let mut app = game();
+        assert_eq!(app.board_no(), 1);
+        tap(&mut app, Key::N);
+        assert_eq!(app.board_no(), 2, "N dealt more than one board");
+        tap(&mut app, Key::Num7);
+        assert_eq!(app.board_no(), 3, "a size key dealt more than one board");
+        assert_eq!(app.size(), 7);
+    }
+
+    /// Only the board was clickable. Every other control was keyboard-only,
+    /// and the keyboard was broken.
+    #[test]
+    fn every_control_can_be_reached_with_the_pointer() {
+        let mut app = game();
+        for size in SIZES {
+            assert!(
+                probe::is_visible(&app, Target::Size(size)),
+                "no button selects a {size}x{size} board"
+            );
+        }
+        assert!(
+            probe::is_visible(&app, Target::NewGame),
+            "no new-game button"
+        );
+        assert!(probe::is_visible(&app, Target::Help), "no help button");
+        probe::click(&mut app, Target::Help);
+        assert!(app.show_help(), "the help button did not open the help");
+    }
+
+    /// The board is drawn from the live window, so a click has to be read
+    /// against the window it was drawn in. The old code read every click
+    /// against a grid nailed to (50, 90).
+    #[test]
+    fn what_is_drawn_at_a_cell_is_what_a_click_there_flips() {
+        for (w, h) in WINDOWS {
+            let app = windowed(w, h);
+            let l = Layout::new(w, h);
+            let size = app.size();
+            for row in 0..size {
+                for col in 0..size {
+                    let r = l.cell(size, row, col);
+                    if r.w < 2.0 || r.h < 2.0 {
+                        continue;
+                    }
+                    let (cx, cy) = r.centre();
+                    assert_eq!(
+                        app.target_at(cx, cy),
+                        Some(Target::Cell(row, col)),
+                        "{w}x{h}: cell ({row}, {col}) is not clickable where it is drawn"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clicking_a_cell_flips_it_and_its_neighbours() {
+        let mut app = game();
+        app.grid = board_with(5, &[]);
+        let l = Layout::new(app.width, app.height);
+        let (cx, cy) = l.cell(5, 1, 1).centre();
+        click(&mut app, cx, cy);
+        assert_eq!(app.moves(), 1);
+        assert_eq!(app.at(1, 1), Some(true));
+        assert_eq!(app.at(0, 1), Some(true));
+        assert_eq!(app.at(2, 1), Some(true));
+        assert_eq!(app.at(1, 0), Some(true));
+        assert_eq!(app.at(1, 2), Some(true));
+        assert_eq!(app.at(0, 0), Some(false), "a diagonal is not a neighbour");
+    }
+
+    /// The cursor follows the pointer, so the two inputs do not fight over
+    /// where "here" is.
+    #[test]
+    fn clicking_a_cell_moves_the_cursor_to_it() {
+        let mut app = game();
+        let l = Layout::new(app.width, app.height);
+        let (cx, cy) = l.cell(app.size(), 0, 4).centre();
+        click(&mut app, cx, cy);
+        assert_eq!(app.cursor(), (0, 4));
+    }
+
+    /// The board's size was a separate field. Nothing kept it in step with the
+    /// board it described, and every bounds check trusted it over the data.
+    #[test]
+    fn the_board_is_its_own_size() {
+        let mut app = game();
+        for size in SIZES {
+            app.apply(Action::SetSize(size));
+            assert_eq!(app.size(), size);
+            assert_eq!(app.grid.len(), size);
+            assert!(app.grid.iter().all(|row| row.len() == size));
+        }
+    }
+
+    // ── The layout comes from the window ──
+
+    /// Every state, at every window, produces a frame whose clips and
+    /// translations balance. An unbalanced frame is a compositor bug waiting
+    /// for the state that reaches it.
+    #[test]
+    fn every_state_draws_a_balanced_frame_at_every_size() {
+        for (w, h) in WINDOWS {
+            for size in SIZES {
+                for help in [false, true] {
+                    for won in [false, true] {
+                        let mut app = windowed(w, h);
+                        app.apply(Action::SetSize(size));
+                        app.show_help = help;
+                        if won {
+                            app.grid = board_with(size, &[]);
+                            app.state = GameState::Won;
+                        }
+                        let f = app.frame(w, h);
+                        assert!(f.is_balanced(), "{w}x{h} size {size} help {help} won {won}");
+                        assert!(!f.commands().is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_whole_window_is_painted() {
+        for (w, h) in WINDOWS {
+            let app = windowed(w, h);
+            let f = app.frame(w, h);
+            let covered = f.commands().iter().any(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => *x <= 0.0 && *y <= 0.0 && *width >= w && *height >= h,
+                _ => false,
+            });
+            assert!(covered, "{w}x{h}: the window has an unpainted region");
+        }
+    }
+
+    /// The board is the game. It has to be square (or the flips stop looking
+    /// orthogonal) and it has to be on screen.
+    #[test]
+    fn the_board_is_square_and_inside_its_window() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            assert!(
+                l.board.w > 0.0 && l.board.h > 0.0,
+                "{w}x{h}: no board at all"
+            );
+            assert!(
+                (l.board.w - l.board.h).abs() < 0.01,
+                "{w}x{h}: the board is {}x{}",
+                l.board.w,
+                l.board.h
+            );
+            assert!(l.board.x >= -0.01 && l.board.y >= -0.01, "{w}x{h}");
+            assert!(
+                l.board.right() <= w + 0.01 && l.board.bottom() <= h + 0.01,
+                "{w}x{h}: the board hangs off the window"
+            );
+        }
+    }
+
+    #[test]
+    fn no_band_is_laid_past_the_bottom_of_the_window() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            for (name, r) in [
+                ("header", l.header),
+                ("info", l.info),
+                ("best", l.best),
+                ("footer", l.footer),
+                ("help", l.help),
+            ] {
+                if r.is_empty() {
+                    continue;
+                }
+                assert!(
+                    r.bottom() <= h + 0.01 && r.right() <= w + 0.01,
+                    "{w}x{h}: the {name} band runs off the window"
+                );
+                assert!(r.x >= -0.01 && r.y >= -0.01, "{w}x{h}: {name}");
+            }
+        }
+    }
+
+    /// The rule the band allocator exists for: when the window is too short
+    /// for everything, the buttons go and the game stays.
+    #[test]
+    fn a_window_too_short_for_the_footer_drops_it_rather_than_the_board() {
+        let l = Layout::new(300.0, 100.0);
+        assert!(!l.shows_footer(), "the footer survived a 100px-tall window");
+        assert!(
+            l.board.h > 20.0,
+            "the board was squeezed to {} to keep the chrome",
+            l.board.h
+        );
+    }
+
+    /// A 24x24 window is absurd, and a board that silently stops drawing
+    /// cells in one is a board that will silently stop drawing cells in a
+    /// window someone actually uses.
+    #[test]
+    fn a_board_the_size_of_a_postage_stamp_still_draws_every_cell() {
+        for size in SIZES {
+            let mut app = windowed(24.0, 24.0);
+            app.apply(Action::SetSize(size));
+            let f = app.frame(24.0, 24.0);
+            let lights = f
+                .commands()
+                .iter()
+                .filter(|c| {
+                    matches!(
+                        c,
+                        RenderCommand::FillRect { color, .. }
+                            if *color == LIGHT_ON || *color == LIGHT_OFF
+                    )
+                })
+                .count();
+            assert_eq!(
+                lights,
+                size * size,
+                "{size}x{size} lost cells in a tiny window"
+            );
+        }
+    }
+
+    /// The win message sits across the foot of the board rather than below
+    /// it, because a band below the board has to come out of the board's own
+    /// height and there is none to spare in a small window.
+    #[test]
+    fn the_banner_stays_inside_the_board_it_covers() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            let b = l.banner();
+            assert!(
+                b.x >= l.board.x - 0.01
+                    && b.right() <= l.board.right() + 0.01
+                    && b.bottom() <= l.board.bottom() + 0.01
+                    && b.y >= l.board.y - 0.01,
+                "{w}x{h}: the banner is outside its board"
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_sheet_never_writes_past_its_own_panel() {
+        for (w, h) in WINDOWS {
+            let mut app = windowed(w, h);
+            app.show_help = true;
+            let l = Layout::new(w, h);
+            let f = app.frame(w, h);
+            for c in f.commands() {
+                let RenderCommand::Text { x, y, text, .. } = c else {
+                    continue;
+                };
+                let mine =
+                    text == HELP_TITLE || HELP_ROWS.iter().any(|(k, v)| text == k || text == v);
+                if !mine {
+                    continue;
+                }
+                assert!(
+                    *x >= l.help.x - 0.01
+                        && *x <= l.help.right() + 0.01
+                        && *y >= l.help.y - 0.01
+                        && *y <= l.help.bottom() + 0.01,
+                    "{w}x{h}: {text:?} starts at ({x}, {y}), outside the panel"
+                );
+            }
+        }
+    }
+
+    /// `Frame::hit_test` scans in reverse, so the sheet has to be drawn last
+    /// or the board would take clicks through it.
+    #[test]
+    fn the_help_sheet_is_in_front_of_everything_it_covers() {
+        for (w, h) in WINDOWS {
+            let mut app = windowed(w, h);
+            app.show_help = true;
+            let l = Layout::new(w, h);
+            let (cx, cy) = l.board.centre();
+            assert_eq!(
+                app.target_at(cx, cy),
+                Some(Target::HelpSheet),
+                "{w}x{h}: the board is reachable through the help sheet"
+            );
+        }
+    }
+
+    /// The whole point of storing the window size on the model: a click is
+    /// read against the frame the user is actually looking at.
+    #[test]
+    fn a_click_is_read_against_the_window_it_was_drawn_in() {
+        let small = Layout::new(400.0, 640.0);
+        let (cx, cy) = small.cell(DEFAULT_SIZE, 0, 0).centre();
+
+        let mut narrow = windowed(400.0, 640.0);
+        assert_eq!(narrow.target_at(cx, cy), Some(Target::Cell(0, 0)));
+
+        let mut wide = windowed(1920.0, 1080.0);
+        assert_ne!(
+            wide.target_at(cx, cy),
+            Some(Target::Cell(0, 0)),
+            "the same point means the same thing in every window"
+        );
+
+        // And the clicks agree with the readings.
+        narrow.grid = board_with(DEFAULT_SIZE, &[]);
+        click(&mut narrow, cx, cy);
+        assert_eq!(narrow.at(0, 0), Some(true));
+        wide.grid = board_with(DEFAULT_SIZE, &[]);
+        click(&mut wide, cx, cy);
+        assert_eq!(wide.at(0, 0), Some(false));
+    }
+
+    #[test]
+    fn a_resize_is_remembered_across_an_action() {
+        let mut app = game();
+        handle_event(
+            &mut app,
+            &Event::Resize {
+                width: 900,
+                height: 700,
+            },
+        );
+        assert_eq!((app.width, app.height), (900.0, 700.0));
+        press(&mut app, Key::N);
+        assert_eq!(
+            (app.width, app.height),
+            (900.0, 700.0),
+            "an action reset the window size"
+        );
+    }
+
+    /// The readout is drawn beside the board, so it has to describe that
+    /// board and not an older one.
+    #[test]
+    fn the_readout_counts_the_board_it_is_drawn_beside() {
+        let mut app = game();
+        app.grid = board_with(5, &[(0, 0), (4, 4), (2, 3)]);
+        let joined = texts(&app.frame(app.width, app.height)).join(" | ");
+        assert!(joined.contains("Lights 3"), "readout says: {joined}");
+        assert!(joined.contains("5x5"), "readout says: {joined}");
+        assert!(joined.contains("Moves 0"), "readout says: {joined}");
+
+        app.apply(Action::SetSize(7));
+        let joined = texts(&app.frame(app.width, app.height)).join(" | ");
+        assert!(joined.contains("7x7"), "readout says: {joined}");
+        assert!(
+            joined.contains(&format!("Lights {}", app.lights_on_count())),
+            "readout says: {joined}"
+        );
+    }
+
+    #[test]
+    fn the_cursor_ring_follows_the_cell_it_is_on() {
+        let mut app = game();
+        let ring = |app: &LightsOut| {
+            app.frame(app.width, app.height)
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { x, y, color, .. } if *color == CURSOR_COLOR => {
+                        Some((*x, *y))
+                    }
+                    _ => None,
+                })
+                .fold((f32::MAX, f32::MAX), |acc, p| {
+                    (acc.0.min(p.0), acc.1.min(p.1))
+                })
+        };
+        let before = ring(&app);
+        tap(&mut app, Key::Up);
+        let after = ring(&app);
+        assert!(
+            after.1 < before.1,
+            "the cursor ring did not move up with it"
+        );
+        assert_eq!(after.0, before.0, "the cursor ring drifted sideways");
+    }
+
+    /// The sheet is modal both ways: it takes the keyboard as well as the
+    /// pointer, so you cannot play a board you cannot see.
+    #[test]
+    fn keys_do_nothing_behind_the_help_sheet() {
+        let mut app = game();
+        tap(&mut app, Key::H);
+        let before = app.grid.clone();
+        for key in [Key::Up, Key::Left, Key::N, Key::Num3, Key::Num7] {
+            assert_eq!(
+                press(&mut app, key),
+                EventResult::Consumed,
+                "{key:?} leaked"
+            );
+        }
+        assert!(app.show_help(), "a play key closed the help sheet");
+        assert_eq!(app.grid, before, "the board changed behind the help sheet");
+        assert_eq!(app.cursor(), (2, 2), "an arrow key moved behind the sheet");
+        assert_eq!(app.moves(), 0);
+        assert_eq!(app.board_no(), 1);
+    }
+
+    /// Enter and Space *do* answer while the sheet is up -- but by closing it,
+    /// not by playing. A panel with no visible close button has to answer the
+    /// two keys everyone presses to get rid of one.
+    #[test]
+    fn enter_dismisses_the_help_sheet_without_playing_a_move() {
+        for key in [Key::Enter, Key::Space] {
+            let mut app = game();
+            tap(&mut app, Key::H);
+            let before = app.grid.clone();
+            tap(&mut app, key);
+            assert!(!app.show_help(), "{key:?} did not close the sheet");
+            assert_eq!(app.grid, before, "{key:?} flipped a cell as well");
+            assert_eq!(app.moves(), 0);
+        }
+    }
+
+    #[test]
+    fn a_click_does_not_reach_the_board_through_the_help_sheet() {
+        let mut app = game();
+        tap(&mut app, Key::H);
+        let before = app.grid.clone();
+        let l = Layout::new(app.width, app.height);
+        let (cx, cy) = l.cell(app.size(), 2, 2).centre();
+        click(&mut app, cx, cy);
+        assert_eq!(app.grid, before, "the click went through the sheet");
+        assert!(!app.show_help(), "the click did not dismiss the sheet");
+        assert_eq!(app.moves(), 0);
+    }
+
+    /// Escape closes the sheet, which is the one key everybody tries.
+    #[test]
+    fn escape_closes_the_help_sheet() {
+        let mut app = game();
+        tap(&mut app, Key::H);
+        tap(&mut app, Key::Escape);
+        assert!(!app.show_help());
+    }
+
+    /// A shortcut belonging to the window manager is not ours to eat.
+    #[test]
+    fn a_modified_key_is_left_for_someone_else() {
+        let mut app = game();
+        let before = app.grid.clone();
+        for ev in [probe::ctrl(Key::N), probe::ctrl(Key::Enter)] {
+            assert_eq!(
+                handle_event(&mut app, &Event::Key(ev)),
+                EventResult::Ignored
+            );
+        }
+        assert_eq!(app.grid, before);
+        assert_eq!(app.board_no(), 1);
+        // Shift is not a modifier this game reads, but it is also not one it
+        // should swallow silently on a key it does not otherwise answer.
+        assert_eq!(
+            handle_event(&mut app, &Event::Key(probe::press(Key::Q))),
+            EventResult::Ignored
+        );
+    }
+
+    /// The help sheet is the only written record of the controls, so it has
+    /// to name every key the game actually answers.
+    #[test]
+    fn the_help_sheet_names_every_key_the_game_answers() {
+        let listed = HELP_ROWS
+            .iter()
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        for size in SIZES {
+            assert!(
+                listed.contains(&size.to_string()),
+                "the help never mentions the {size}x{size} board"
+            );
+        }
+        for word in ["Arrows", "Enter", "Click", "N", "H"] {
+            assert!(listed.contains(word), "the help never mentions {word}");
+        }
+    }
+
+    // ── The rules of the game ──
+
+    #[test]
+    fn a_flip_touches_the_cell_and_its_four_neighbours_and_nothing_else() {
+        let mut grid = board_with(3, &[]);
+        LightsOut::flip_on_grid(&mut grid, 1, 1);
+        assert!(grid[1][1]);
+        assert!(grid[0][1]);
+        assert!(grid[2][1]);
+        assert!(grid[1][0]);
+        assert!(grid[1][2]);
+        for (r, c) in [(0, 0), (0, 2), (2, 0), (2, 2)] {
+            assert!(!grid[r][c], "the diagonal at ({r}, {c}) was flipped");
+        }
+    }
+
+    /// The edge cases are the corners: `wrapping_sub` on row 0 has to fall out
+    /// of the bounds check rather than wrapping round to the last row.
+    #[test]
+    fn a_flip_at_the_edge_does_not_wrap_to_the_far_side() {
+        let mut grid = board_with(3, &[]);
+        LightsOut::flip_on_grid(&mut grid, 0, 0);
+        assert!(grid[0][0]);
+        assert!(grid[0][1]);
+        assert!(grid[1][0]);
+        assert!(!grid[2][0], "the top row wrapped to the bottom");
+        assert!(!grid[0][2], "the left column wrapped to the right");
+        assert_eq!(grid.iter().flatten().filter(|&&on| on).count(), 3);
+    }
+
+    #[test]
+    fn flipping_the_same_cell_twice_restores_the_board() {
+        let mut grid = board_with(5, &[(0, 3), (4, 1)]);
+        let before = grid.clone();
+        LightsOut::flip_on_grid(&mut grid, 2, 2);
+        assert_ne!(grid, before);
+        LightsOut::flip_on_grid(&mut grid, 2, 2);
+        assert_eq!(grid, before);
+    }
+
+    #[test]
+    fn a_flip_off_the_board_changes_nothing() {
+        let mut grid = board_with(3, &[]);
+        LightsOut::flip_on_grid(&mut grid, 5, 5);
+        LightsOut::flip_on_grid(&mut grid, 0, 9);
+        LightsOut::flip_on_grid(&mut grid, usize::MAX, 0);
+        assert!(grid.iter().flatten().all(|&on| !on));
+    }
+
+    /// The property the whole generator exists to guarantee: replaying the
+    /// flips that built a board solves it.
+    #[test]
+    fn every_generated_board_can_be_solved_by_replaying_its_flips() {
+        for seed in 0..40 {
+            let mut rng = SeededRng::new(seed);
+            for size in SIZES {
+                // Rebuild the board exactly as `generate_solvable` does, but
+                // keeping the flips, so they can be replayed.
+                let mut check = SeededRng::new(seed.wrapping_mul(31).wrapping_add(size as u64));
+                let flips = SIZE_FLIPS[SIZES.iter().position(|&s| s == size).unwrap()];
+                let mut grid = vec![vec![false; size]; size];
+                let mut used = Vec::new();
+                for _ in 0..flips {
+                    let (r, c) = (check.below(size), check.below(size));
+                    used.push((r, c));
+                    LightsOut::flip_on_grid(&mut grid, r, c);
+                }
+                for (r, c) in used {
+                    LightsOut::flip_on_grid(&mut grid, r, c);
+                }
+                assert!(
+                    grid.iter().flatten().all(|&on| !on),
+                    "seed {seed} size {size}: replaying the flips did not clear the board"
+                );
+
+                // And the real generator never hands out a board that is
+                // already won, which would not be a puzzle.
+                let dealt = LightsOut::generate_solvable(size, &mut rng);
+                assert_eq!(dealt.len(), size);
+                assert!(dealt.iter().all(|row| row.len() == size));
+                assert!(
+                    dealt.iter().flatten().any(|&on| on),
+                    "seed {seed} size {size}: dealt an already-solved board"
+                );
+            }
+        }
+    }
 
     /// The board must be a function of the generator it was given. The defect
-    /// that shipped was that it wasn't observably one: `new()` seeded a literal
-    /// `42`, so every launch dealt the identical puzzle for ever.
+    /// that shipped was that it wasn't observably one: `new()` seeded a
+    /// literal `42`, so every launch dealt the identical puzzle for ever.
     #[test]
     fn the_board_follows_the_generator_it_was_given() {
         let a = LightsOut::with_rng(SeededRng::new(1)).grid;
@@ -582,8 +1908,8 @@ mod tests {
     /// toolchain has no SlateOS kernel to ask: `seeded_from_system` correctly
     /// takes its documented fallback there, so two fresh games *are* identical
     /// on the host and would be identical under the old hardcoded `42` too.
-    /// What distinguishes the two is *which* seed, so that is what is checked —
-    /// and on real hardware the same line reaches the kernel instead.
+    /// What distinguishes the two is *which* seed, so that is what is checked
+    /// -- and on real hardware the same line reaches the kernel instead.
     #[test]
     #[cfg(not(unix))]
     fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
@@ -597,32 +1923,11 @@ mod tests {
         assert_ne!(fresh, old_defect, "new() is back on a hardcoded seed");
     }
 
-    /// Every board the generator produces has to be solvable, which is the one
-    /// property the puzzle cannot be played without. It is guaranteed by
-    /// construction — the board is built by *applying* toggles to a solved
-    /// grid, so replaying them solves it — and this pins the construction
-    /// rather than the arithmetic.
+    /// Flip positions must reach every cell, not just a band of them. A
+    /// reduction that reads the low bits of an LCG would concentrate them;
+    /// this is the game-level shape of the bug `randrange::below` avoids.
     #[test]
-    fn every_generated_board_is_reachable_from_the_solved_one() {
-        for seed in 0..40 {
-            let mut rng = SeededRng::new(seed);
-            for size in [3, 5, 7] {
-                let grid = LightsOut::generate_solvable(size, &mut rng, 8);
-                assert_eq!(grid.len(), size);
-                assert!(grid.iter().all(|row| row.len() == size));
-                assert!(
-                    grid.iter().flatten().any(|&on| on),
-                    "an all-off board is already won and cannot be played"
-                );
-            }
-        }
-    }
-
-    /// Toggle positions must reach every cell, not just a band of them. A
-    /// reduction that reads the low bits of an LCG would concentrate them; this
-    /// is the game-level shape of the bug `randrange::below` exists to avoid.
-    #[test]
-    fn generated_toggles_reach_every_cell_of_the_board() {
+    fn generated_flips_reach_every_cell_of_the_board() {
         let mut rng = SeededRng::new(7);
         let mut seen = [[false; 7]; 7];
         for _ in 0..500 {
@@ -634,550 +1939,272 @@ mod tests {
         );
     }
 
-    // ── Toggle mechanics ──
+    // ── Winning, and what it records ──
 
     #[test]
-    fn test_toggle_center() {
-        let size = 3;
-        let mut grid = vec![vec![false; size]; size];
-        LightsOut::toggle_cell_on_grid(&mut grid, size, 1, 1);
-        // Center + 4 neighbors
-        assert!(grid[1][1]); // center
-        assert!(grid[0][1]); // up
-        assert!(grid[2][1]); // down
-        assert!(grid[1][0]); // left
-        assert!(grid[1][2]); // right
-        // Corners should be off
-        assert!(!grid[0][0]);
-        assert!(!grid[0][2]);
-        assert!(!grid[2][0]);
-        assert!(!grid[2][2]);
+    fn clearing_the_last_light_wins() {
+        let mut app = game();
+        // One light at (1, 1) plus its cross is exactly one flip from solved.
+        app.grid = board_with(5, &[(1, 1), (0, 1), (2, 1), (1, 0), (1, 2)]);
+        app.state = GameState::Playing;
+        app.moves = 6;
+        assert!(app.apply(Action::Flip(1, 1)));
+        assert_eq!(app.state(), GameState::Won);
+        assert_eq!(app.lights_on_count(), 0);
+        assert_eq!(app.best_for(5), Some(7));
     }
 
     #[test]
-    fn test_toggle_corner() {
-        let size = 3;
-        let mut grid = vec![vec![false; size]; size];
-        LightsOut::toggle_cell_on_grid(&mut grid, size, 0, 0);
-        assert!(grid[0][0]); // self
-        assert!(grid[0][1]); // right
-        assert!(grid[1][0]); // down
-        assert!(!grid[1][1]); // diagonal not toggled
+    fn a_won_board_takes_no_more_flips() {
+        let mut app = game();
+        app.grid = board_with(5, &[]);
+        app.state = GameState::Won;
+        assert!(!app.enabled(Action::Flip(0, 0)));
+        assert!(!app.apply(Action::Flip(0, 0)));
+        assert!(!app.apply(Action::FlipCursor));
+        assert_eq!(app.moves(), 0, "a flip was counted after the win");
+        assert!(app.grid.iter().flatten().all(|&on| !on));
     }
 
+    /// A size button stays live after a win, because choosing a size is how
+    /// you start the next puzzle at that size.
     #[test]
-    fn test_toggle_edge() {
-        let size = 3;
-        let mut grid = vec![vec![false; size]; size];
-        LightsOut::toggle_cell_on_grid(&mut grid, size, 0, 1);
-        assert!(grid[0][1]); // self
-        assert!(grid[0][0]); // left
-        assert!(grid[0][2]); // right
-        assert!(grid[1][1]); // down
-        // No up neighbor
-    }
-
-    #[test]
-    fn test_double_toggle_cancels() {
-        let size = 3;
-        let mut grid = vec![vec![false; size]; size];
-        LightsOut::toggle_cell_on_grid(&mut grid, size, 1, 1);
-        LightsOut::toggle_cell_on_grid(&mut grid, size, 1, 1);
-        // Everything back to false
-        for row in &grid {
-            for &cell in row {
-                assert!(!cell);
-            }
-        }
-    }
-
-    #[test]
-    fn test_toggle_out_of_bounds() {
-        let size = 3;
-        let mut grid = vec![vec![false; size]; size];
-        LightsOut::toggle_cell_on_grid(&mut grid, size, 5, 5);
-        // Nothing changed
-        for row in &grid {
-            for &cell in row {
-                assert!(!cell);
-            }
-        }
-    }
-
-    // ── Game state ──
-
-    #[test]
-    fn test_initial_state() {
-        let app = LightsOut::new();
-        assert_eq!(app.size, 5);
-        assert_eq!(app.moves, 0);
-        assert_eq!(app.state, GameState::Playing);
-    }
-
-    #[test]
-    fn test_initial_has_lights_on() {
-        let app = LightsOut::new();
+    fn a_won_board_can_still_be_replaced() {
+        let mut app = game();
+        app.grid = board_with(5, &[]);
+        app.state = GameState::Won;
+        assert!(app.apply(Action::SetSize(7)));
+        assert_eq!(app.size(), 7);
+        assert_eq!(app.state(), GameState::Playing);
+        assert_eq!(app.moves(), 0);
         assert!(app.lights_on_count() > 0);
     }
 
     #[test]
-    fn test_cursor_starts_center() {
-        let app = LightsOut::new();
-        assert_eq!(app.cursor_row, 2);
-        assert_eq!(app.cursor_col, 2);
+    fn the_best_score_keeps_the_lowest_and_is_kept_per_size() {
+        let mut app = game();
+        let win_in = |app: &mut LightsOut, size: usize, moves: u32| {
+            app.grid = board_with(size, &[]);
+            app.state = GameState::Playing;
+            app.moves = moves;
+            app.check_win();
+        };
+        win_in(&mut app, 5, 10);
+        assert_eq!(app.best_for(5), Some(10));
+        win_in(&mut app, 5, 3);
+        assert_eq!(app.best_for(5), Some(3), "a better score was not recorded");
+        win_in(&mut app, 5, 8);
+        assert_eq!(app.best_for(5), Some(3), "a worse score overwrote the best");
+        assert_eq!(app.best_for(3), None, "3x3 borrowed the 5x5 score");
+        assert_eq!(app.best_for(7), None, "7x7 borrowed the 5x5 score");
+        win_in(&mut app, 7, 20);
+        assert_eq!(app.best_for(7), Some(20));
+        assert_eq!(app.best_for(5), Some(3));
     }
 
+    /// The scoreboard is drawn from the same lookup the win records into, so
+    /// a size cannot end up with a score no panel can show.
     #[test]
-    fn test_set_size_3() {
-        let mut app = LightsOut::new();
-        app.set_size(3);
-        assert_eq!(app.size, 3);
-        assert_eq!(app.grid.len(), 3);
-        assert_eq!(app.grid[0].len(), 3);
-    }
-
-    #[test]
-    fn test_set_size_7() {
-        let mut app = LightsOut::new();
-        app.set_size(7);
-        assert_eq!(app.size, 7);
-        assert_eq!(app.grid.len(), 7);
-    }
-
-    #[test]
-    fn test_set_size_invalid() {
-        let mut app = LightsOut::new();
-        app.set_size(4);
-        assert_eq!(app.size, 5); // unchanged
-    }
-
-    #[test]
-    fn test_new_game_resets() {
-        let mut app = LightsOut::new();
-        app.moves = 20;
-        app.new_game();
-        assert_eq!(app.moves, 0);
-        assert_eq!(app.state, GameState::Playing);
-    }
-
-    #[test]
-    fn test_new_game_increments_level() {
-        let mut app = LightsOut::new();
-        assert_eq!(app.level, 1);
-        app.new_game();
-        assert_eq!(app.level, 2);
-    }
-
-    // ── Move counting ──
-
-    #[test]
-    fn test_toggle_increments_moves() {
-        let mut app = LightsOut::new();
-        app.toggle_cell(0, 0);
-        assert_eq!(app.moves, 1);
-    }
-
-    #[test]
-    fn test_toggle_when_won_ignored() {
-        let mut app = LightsOut::new();
-        app.state = GameState::Won;
-        app.toggle_cell(0, 0);
-        assert_eq!(app.moves, 0);
-    }
-
-    #[test]
-    fn test_toggle_out_of_bounds_ignored() {
-        let mut app = LightsOut::new();
-        app.toggle_cell(10, 10);
-        assert_eq!(app.moves, 0);
-    }
-
-    // ── Win detection ──
-
-    #[test]
-    fn test_win_all_off() {
-        let mut app = LightsOut::new();
-        app.grid = vec![vec![false; 5]; 5];
-        app.moves = 0;
-        // Toggle center then toggle again to remain all off
-        // Actually just set all off and check
-        app.check_win();
-        assert_eq!(app.state, GameState::Won);
-    }
-
-    #[test]
-    fn test_no_win_with_lights() {
-        let mut app = LightsOut::new();
-        // Default has lights on
-        app.check_win();
-        assert_eq!(app.state, GameState::Playing);
-    }
-
-    #[test]
-    fn test_win_records_best() {
-        let mut app = LightsOut::new();
-        app.grid = vec![vec![false; 5]; 5];
-        app.moves = 5;
-        app.check_win();
-        assert_eq!(app.best_moves[1], Some(5));
-    }
-
-    #[test]
-    fn test_best_score_improves() {
-        let mut app = LightsOut::new();
-        app.best_moves[1] = Some(10);
-        app.grid = vec![vec![false; 5]; 5];
-        app.moves = 3;
-        app.check_win();
-        assert_eq!(app.best_moves[1], Some(3));
-    }
-
-    #[test]
-    fn test_best_score_no_worsen() {
-        let mut app = LightsOut::new();
-        app.best_moves[1] = Some(3);
-        app.grid = vec![vec![false; 5]; 5];
-        app.moves = 8;
-        app.check_win();
-        assert_eq!(app.best_moves[1], Some(3));
-    }
-
-    // ── Size index ──
-
-    #[test]
-    fn test_size_index_3() {
-        let mut app = LightsOut::new();
-        app.size = 3;
-        assert_eq!(app.size_index(), 0);
-    }
-
-    #[test]
-    fn test_size_index_5() {
-        let app = LightsOut::new();
-        assert_eq!(app.size_index(), 1);
-    }
-
-    #[test]
-    fn test_size_index_7() {
-        let mut app = LightsOut::new();
-        app.size = 7;
-        assert_eq!(app.size_index(), 2);
-    }
-
-    // ── Cell size ──
-
-    #[test]
-    fn test_cell_size_3() {
-        let mut app = LightsOut::new();
-        app.size = 3;
-        assert!((app.cell_size() - 100.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_cell_size_5() {
-        let app = LightsOut::new();
-        assert!((app.cell_size() - 70.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_cell_size_7() {
-        let mut app = LightsOut::new();
-        app.size = 7;
-        assert!((app.cell_size() - 54.0).abs() < 0.01);
-    }
-
-    // ── Lights count ──
-
-    #[test]
-    fn test_lights_count_all_off() {
-        let mut app = LightsOut::new();
-        app.grid = vec![vec![false; 5]; 5];
-        assert_eq!(app.lights_on_count(), 0);
-    }
-
-    #[test]
-    fn test_lights_count_all_on() {
-        let mut app = LightsOut::new();
-        app.grid = vec![vec![true; 5]; 5];
-        assert_eq!(app.lights_on_count(), 25);
-    }
-
-    // ── Generate solvable ──
-
-    #[test]
-    fn test_generate_solvable_has_lights() {
-        let mut rng = SeededRng::new(42);
-        let grid = LightsOut::generate_solvable(5, &mut rng, 8);
-        let count: usize = grid.iter().flat_map(|r| r.iter()).filter(|&&c| c).count();
-        assert!(count > 0);
-    }
-
-    #[test]
-    fn test_generate_solvable_deterministic() {
-        let mut rng1 = SeededRng::new(42);
-        let grid1 = LightsOut::generate_solvable(5, &mut rng1, 8);
-        let mut rng2 = SeededRng::new(42);
-        let grid2 = LightsOut::generate_solvable(5, &mut rng2, 8);
-        assert_eq!(grid1, grid2);
-    }
-
-    #[test]
-    fn test_generate_solvable_different_seeds() {
-        let mut rng1 = SeededRng::new(1);
-        let grid1 = LightsOut::generate_solvable(5, &mut rng1, 8);
-        let mut rng2 = SeededRng::new(99);
-        let grid2 = LightsOut::generate_solvable(5, &mut rng2, 8);
-        // Very likely different
-        assert_ne!(grid1, grid2);
-    }
-
-    // ── Key events ──
-
-    #[test]
-    fn test_key_up() {
-        let mut app = LightsOut::new();
-        app.cursor_row = 2;
-        let evt = Event::Key(KeyEvent {
-            key: Key::Up,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
-        app.event(&evt);
-        assert_eq!(app.cursor_row, 1);
-    }
-
-    #[test]
-    fn test_key_up_at_min() {
-        let mut app = LightsOut::new();
-        app.cursor_row = 0;
-        let evt = Event::Key(KeyEvent {
-            key: Key::Up,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
-        app.event(&evt);
-        assert_eq!(app.cursor_row, 0);
-    }
-
-    #[test]
-    fn test_key_down() {
-        let mut app = LightsOut::new();
-        app.cursor_row = 2;
-        let evt = Event::Key(KeyEvent {
-            key: Key::Down,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
-        app.event(&evt);
-        assert_eq!(app.cursor_row, 3);
-    }
-
-    #[test]
-    fn test_key_down_at_max() {
-        let mut app = LightsOut::new();
-        app.cursor_row = 4;
-        let evt = Event::Key(KeyEvent {
-            key: Key::Down,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
-        app.event(&evt);
-        assert_eq!(app.cursor_row, 4);
-    }
-
-    #[test]
-    fn test_key_left() {
-        let mut app = LightsOut::new();
-        app.cursor_col = 2;
-        let evt = Event::Key(KeyEvent {
-            key: Key::Left,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
-        app.event(&evt);
-        assert_eq!(app.cursor_col, 1);
-    }
-
-    #[test]
-    fn test_key_right() {
-        let mut app = LightsOut::new();
-        app.cursor_col = 2;
-        let evt = Event::Key(KeyEvent {
-            key: Key::Right,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
-        app.event(&evt);
-        assert_eq!(app.cursor_col, 3);
-    }
-
-    #[test]
-    fn test_key_enter_toggles() {
-        let mut app = LightsOut::new();
-        let before = app.grid[2][2];
-        let evt = Event::Key(KeyEvent {
-            key: Key::Enter,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
-        app.event(&evt);
-        // Center should have toggled
-        assert_ne!(app.grid[2][2], before);
-        assert_eq!(app.moves, 1);
-    }
-
-    #[test]
-    fn test_key_n_new_game() {
-        let mut app = LightsOut::new();
-        app.moves = 15;
-        let evt = Event::Key(KeyEvent {
-            key: Key::N,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
-        app.event(&evt);
-        assert_eq!(app.moves, 0);
-    }
-
-    #[test]
-    fn test_key_3_changes_size() {
-        let mut app = LightsOut::new();
-        let evt = Event::Key(KeyEvent {
-            key: Key::Num3,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
-        app.event(&evt);
-        assert_eq!(app.size, 3);
-    }
-
-    #[test]
-    fn test_key_h_toggle_help() {
-        let mut app = LightsOut::new();
-        assert!(!app.show_help);
-        let evt = Event::Key(KeyEvent {
-            key: Key::H,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
-        app.event(&evt);
-        assert!(app.show_help);
-    }
-
-    // ── Mouse ──
-
-    #[test]
-    fn test_mouse_click_outside() {
-        let mut app = LightsOut::new();
-        app.handle_mouse_click(5.0, 5.0);
-        assert_eq!(app.moves, 0);
-    }
-
-    #[test]
-    fn test_mouse_click_in_grid() {
-        let mut app = LightsOut::new();
-        // Click on cell (0,0) at position (50+35, 90+35)
-        app.handle_mouse_click(85.0, 125.0);
-        assert_eq!(app.moves, 1);
-        assert_eq!(app.cursor_row, 0);
-        assert_eq!(app.cursor_col, 0);
-    }
-
-    // ── Render ──
-
-    #[test]
-    fn test_render_returns_commands() {
-        let app = LightsOut::new();
-        let cmds = app.render(800.0, 600.0);
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_with_help() {
-        let mut app = LightsOut::new();
-        app.show_help = true;
-        let cmds = app.render(800.0, 600.0);
-        assert!(cmds.len() > 20);
-    }
-
-    #[test]
-    fn test_render_won_state() {
-        let mut app = LightsOut::new();
-        app.state = GameState::Won;
-        let cmds = app.render(800.0, 600.0);
-        assert!(cmds.len() > 10);
-    }
-
-    #[test]
-    fn test_render_3x3() {
-        let mut app = LightsOut::new();
-        app.set_size(3);
-        let cmds = app.render(800.0, 600.0);
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_7x7() {
-        let mut app = LightsOut::new();
-        app.set_size(7);
-        let cmds = app.render(800.0, 600.0);
-        assert!(!cmds.is_empty());
-    }
-
-    // ── Game state eq ──
-
-    #[test]
-    fn test_game_state_eq() {
-        assert_eq!(GameState::Playing, GameState::Playing);
-        assert_eq!(GameState::Won, GameState::Won);
-        assert_ne!(GameState::Playing, GameState::Won);
-    }
-
-    // ── Solve by reverse toggles ──
-
-    #[test]
-    fn test_solvable_by_reverse() {
-        // Generate a puzzle, record the toggle positions, then replay them.
-        // The Rng would normally pick the toggle positions; here we use a
-        // hand-picked set so the rng is unused.
-        let mut grid = vec![vec![false; 3]; 3];
-        let toggles = [(1, 1), (0, 0), (2, 2)];
-        for (r, c) in &toggles {
-            LightsOut::toggle_cell_on_grid(&mut grid, 3, *r, *c);
-        }
-        // Now reverse
-        for (r, c) in toggles.iter().rev() {
-            LightsOut::toggle_cell_on_grid(&mut grid, 3, *r, *c);
-        }
-        // Should be all off
-        for row in &grid {
-            for &cell in row {
-                assert!(!cell);
-            }
-        }
-    }
-
-    // ── Best scores across sizes ──
-
-    #[test]
-    fn test_best_scores_independent() {
-        let mut app = LightsOut::new();
-        // Win 5x5
-        app.grid = vec![vec![false; 5]; 5];
+    fn the_scoreboard_shows_the_score_that_was_recorded() {
+        let mut app = game();
+        app.grid = board_with(5, &[]);
         app.moves = 4;
         app.check_win();
-        assert_eq!(app.best_moves[1], Some(4));
-        assert_eq!(app.best_moves[0], None);
-        assert_eq!(app.best_moves[2], None);
+        let joined = texts(&app.frame(app.width, app.height)).join(" | ");
+        assert!(joined.contains("5x5 4"), "scoreboard says: {joined}");
+        assert!(joined.contains("3x3 -"), "scoreboard says: {joined}");
+        assert!(joined.contains("7x7 -"), "scoreboard says: {joined}");
+    }
+
+    /// Every board size has a key, a button, a flip count and a score slot.
+    /// A size with three of the four is how the old file ended up offering a
+    /// scoreboard row for a board nothing could select.
+    #[test]
+    fn every_board_size_is_completely_wired() {
+        assert_eq!(SIZES.len(), SIZE_KEYS.len());
+        assert_eq!(SIZES.len(), SIZE_FLIPS.len());
+        assert_eq!(SIZES.len(), LightsOut::new().best_moves.len());
+        for (i, size) in SIZES.iter().enumerate() {
+            let mut by_key = game();
+            tap(&mut by_key, SIZE_KEYS[i]);
+            assert_eq!(
+                by_key.size(),
+                *size,
+                "the key for {size} deals another board"
+            );
+
+            let mut by_click = game();
+            probe::click(&mut by_click, Target::Size(*size));
+            assert_eq!(
+                by_click.size(),
+                *size,
+                "the button for {size} does not work"
+            );
+        }
+    }
+
+    // ── The two inputs are one game ──
+
+    /// The renderer dims what it will not do, and `apply` refuses what it
+    /// dims. If those two ever disagree, a live-looking button does nothing.
+    #[test]
+    fn enabled_and_apply_agree() {
+        let mut app = game();
+        let cases = [
+            Action::Flip(0, 0),
+            Action::Flip(9, 9),
+            Action::FlipCursor,
+            Action::Nudge(Dir::Up),
+            Action::Nudge(Dir::Down),
+            Action::Nudge(Dir::Left),
+            Action::Nudge(Dir::Right),
+            Action::SetSize(3),
+            Action::SetSize(4),
+            Action::NewGame,
+            Action::ToggleHelp,
+        ];
+        for state in [GameState::Playing, GameState::Won] {
+            for action in cases {
+                let mut probe_app = game();
+                probe_app.state = state;
+                let expected = probe_app.enabled(action);
+                assert_eq!(
+                    probe_app.apply(action),
+                    expected,
+                    "{action:?} in {state:?}: enabled() and apply() disagree"
+                );
+            }
+        }
+        // And a size that is not offered is refused rather than half-applied.
+        assert!(!app.apply(Action::SetSize(4)));
+        assert_eq!(app.size(), DEFAULT_SIZE);
+        assert_eq!(app.board_no(), 1);
+    }
+
+    /// The cursor cannot walk off the board, at any size.
+    #[test]
+    fn the_cursor_stays_on_the_board() {
+        for size in SIZES {
+            let mut app = game();
+            app.apply(Action::SetSize(size));
+            for _ in 0..size * 2 {
+                tap(&mut app, Key::Up);
+                tap(&mut app, Key::Left);
+            }
+            assert_eq!(
+                app.cursor(),
+                (0, 0),
+                "{size}x{size} walked off the top-left"
+            );
+            for _ in 0..size * 2 {
+                tap(&mut app, Key::Down);
+                tap(&mut app, Key::Right);
+            }
+            assert_eq!(
+                app.cursor(),
+                (size - 1, size - 1),
+                "{size}x{size} walked off the bottom-right"
+            );
+            assert!(app.at(app.cursor().0, app.cursor().1).is_some());
+        }
+    }
+
+    /// A new board of a different size has to bring the cursor with it, or
+    /// the next Enter would flip a cell that is not there.
+    #[test]
+    fn a_smaller_board_brings_the_cursor_back_onto_it() {
+        let mut app = game();
+        app.apply(Action::SetSize(7));
+        for _ in 0..7 {
+            tap(&mut app, Key::Down);
+            tap(&mut app, Key::Right);
+        }
+        assert_eq!(app.cursor(), (6, 6));
+        app.apply(Action::SetSize(3));
+        let (r, c) = app.cursor();
+        assert!(
+            r < 3 && c < 3,
+            "the cursor stayed at ({r}, {c}) on a 3x3 board"
+        );
+        assert!(app.at(r, c).is_some());
+    }
+
+    /// Clicking a control the game is refusing must stop at that control. If
+    /// it fell through, a click on the size button already selected would
+    /// flip whatever cell happens to be behind it.
+    #[test]
+    fn a_click_on_a_control_never_reaches_the_board_behind_it() {
+        let mut app = game();
+        let before = app.grid.clone();
+        probe::click(&mut app, Target::Size(DEFAULT_SIZE));
+        assert_eq!(app.size(), DEFAULT_SIZE);
+        assert_ne!(app.grid, before, "a size button dealt no new board");
+        assert_eq!(app.moves(), 0, "a click on the footer flipped a cell");
+    }
+
+    /// The win banner says which key deals the next board, so it may as well
+    /// be that button.
+    #[test]
+    fn the_win_banner_deals_the_next_board_when_clicked() {
+        let mut app = game();
+        app.grid = board_with(5, &[]);
+        app.state = GameState::Won;
+        let l = Layout::new(app.width, app.height);
+        let (cx, cy) = l.banner().centre();
+        assert_eq!(app.target_at(cx, cy), Some(Target::NewGame));
+        click(&mut app, cx, cy);
+        assert_eq!(app.state(), GameState::Playing);
+        assert_eq!(app.board_no(), 2);
+        assert!(app.lights_on_count() > 0);
+    }
+
+    /// The window contract: a close request exits, a key that means something
+    /// asks for a redraw, and one that does not leaves the app idle.
+    #[test]
+    fn the_window_is_told_when_to_redraw_and_when_to_close() {
+        let mut app = game();
+        assert!(matches!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+        assert!(matches!(
+            app.on_event(&Event::Key(probe::press(Key::Up))),
+            Response::Redraw
+        ));
+        assert!(matches!(
+            app.on_event(&Event::Key(release(Key::Up))),
+            Response::Idle
+        ));
+        assert!(matches!(
+            app.on_event(&Event::Key(probe::press(Key::Q))),
+            Response::Idle
+        ));
+    }
+
+    /// `render` is what tells the model how big the window is, so the frame
+    /// it returns and the next click have to be talking about the same one.
+    #[test]
+    fn rendering_at_a_size_is_what_the_next_click_is_read_against() {
+        let mut app = game();
+        let tree = app.render(500.0, 460.0);
+        assert!(!tree.commands.is_empty());
+        assert_eq!((app.width, app.height), (500.0, 460.0));
+        let l = Layout::new(500.0, 460.0);
+        let (cx, cy) = l.cell(app.size(), 3, 1).centre();
+        assert_eq!(app.target_at(cx, cy), Some(Target::Cell(3, 1)));
+    }
+
+    #[test]
+    fn a_new_puzzle_resets_everything_the_old_one_left_behind() {
+        let mut app = game();
+        tap(&mut app, Key::Enter);
+        tap(&mut app, Key::Up);
+        assert_eq!(app.moves(), 1);
+        tap(&mut app, Key::N);
+        assert_eq!(app.moves(), 0);
+        assert_eq!(app.state(), GameState::Playing);
+        assert_eq!(app.cursor(), (2, 2), "the cursor did not return to centre");
+        assert_eq!(app.board_no(), 2);
+        assert!(app.lights_on_count() > 0, "the new board is already solved");
     }
 }

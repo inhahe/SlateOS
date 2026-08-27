@@ -1236,6 +1236,7 @@ name = "breakout"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
  "randrange",
 ]
 
@@ -4030,6 +4031,7 @@ name = "flood"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
  "randrange",
 ]
 
@@ -6611,6 +6613,7 @@ name = "lightsout"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -7240,6 +7243,7 @@ name = "mandelbrot"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]

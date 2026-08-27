@@ -96973,66 +96973,68 @@ fn cmd_irqstat(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "lines" | "list" => {
-            irqstat::init_defaults();
-            for line in irqstat::irq_lines() {
-                shell_println!(
-                    "IRQ{}: {} ({}) count={} spurious={} affinity={:#x}",
-                    line.irq_num,
-                    line.name,
-                    line.irq_type.label(),
-                    line.count,
-                    line.spurious,
-                    line.affinity_mask
-                );
+            let lines = irqstat::irq_lines();
+            if lines.is_empty() {
+                shell_println!("No interrupt vector has fired yet.");
+                return;
             }
-        }
-        "cpus" => {
-            irqstat::init_defaults();
-            for cs in irqstat::per_cpu() {
-                shell_println!(
-                    "cpu{}: total={} ipi={} timer={} spurious={} avg_lat={}ns max_lat={}ns",
-                    cs.cpu_id,
-                    cs.total_irqs,
-                    cs.total_ipi,
-                    cs.total_timer,
-                    cs.total_spurious,
-                    cs.avg_latency_ns,
-                    cs.max_latency_ns
-                );
-            }
-        }
-        "register" => {
-            irqstat::init_defaults();
-            let num = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let name = parts.get(2).copied().unwrap_or("irqN");
-            match irqstat::register_irq(num, irqstat::IrqType::Other(num), name, 0xF) {
-                Ok(()) => shell_println!("Registered IRQ{} ({}).", num, name),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
+            for line in lines {
+                // Keyed by vector, with the IOAPIC input shown only where one
+                // exists.  The timer, the IPIs and the spurious vector are not
+                // IOAPIC inputs, and printing them as "IRQ n" is the confusion
+                // that hid an off-by-one in the balancer.
+                match line.irq_num {
+                    Some(irq) => shell_println!(
+                        "vector {:>3}: {:<20} ({:<10}) irq={:<2} count={}",
+                        line.vector,
+                        line.name,
+                        line.irq_type.label(),
+                        irq,
+                        line.count
+                    ),
+                    None => shell_println!(
+                        "vector {:>3}: {:<20} ({:<10})        count={}",
+                        line.vector,
+                        line.name,
+                        line.irq_type.label(),
+                        line.count
+                    ),
                 }
             }
         }
+        "cpus" => {
+            // Answer the question rather than printing an empty table: a blank
+            // listing here reads as "all CPUs idle", which would be a claim the
+            // kernel has no measurement to support.
+            shell_println!("Per-CPU interrupt attribution is not available.");
+            shell_println!("  The interrupt counters (idt::VECTOR_COUNTS) are one flat global");
+            shell_println!("  array, so a count carries no record of which CPU took it.");
+            shell_println!("  Making them per-CPU would also cut cross-CPU cache-line");
+            shell_println!("  contention, but it changes an interrupt hot path and needs its");
+            shell_println!("  own change and its own benchmark.");
+        }
         "stats" | "" => {
-            irqstat::init_defaults();
-            let (irqs, cpus, total, spurious, _samples, ops) = irqstat::stats();
-            shell_println!("IRQ Statistics:");
-            shell_println!("  IRQ lines:        {}", irqs);
-            shell_println!("  CPUs:             {}", cpus);
-            shell_println!("  Total IRQs:       {}", total);
-            shell_println!("  Total spurious:   {}", spurious);
-            shell_println!("  Ops:              {}", ops);
+            let t = irqstat::totals();
+            shell_println!("IRQ Statistics (projected from idt::vector_counts):");
+            shell_println!("  Live vectors:     {}", t.lines);
+            shell_println!("  Total IRQs:       {}", t.hardware);
+            shell_println!("    timer:          {}", t.timer);
+            shell_println!("    device:         {}", t.device);
+            shell_println!("    ipi:            {}", t.ipi);
+            shell_println!("    spurious:       {}", t.spurious);
+            shell_println!("    unassigned:     {}", t.unassigned);
+            if t.unassigned > 0 {
+                shell_println!(
+                    "  NOTE: {} interrupt(s) on vectors with no handler arm.",
+                    t.unassigned
+                );
+            }
         }
         "test" => {
             irqstat::self_test();
         }
         _ => {
-            shell_println!("Usage: irqstat [lines|cpus|register <num> <name>|stats|test]");
+            shell_println!("Usage: irqstat [lines|cpus|stats|test]");
             set_exit(1);
         }
     }

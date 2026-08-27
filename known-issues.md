@@ -80710,6 +80710,21 @@ all fails the gate's first condition and is therefore never reported:
 | 6 | `apps/maze` | The advertised "Timer tracking" never ticked: `elapsed_secs` was set to zero in two places, read only by `format_time`, and incremented nowhere — and `format_time` was itself never called by `render`, so even a working clock would not have reached the screen. |
 | 7 | `apps/magnifier` | No `tick_interval`, so the smoothing that `smooth_edges` promised could not have eased anything. The field was settable from the keyboard and changed nothing observable. |
 | 8 | `apps/life` | Conway's Game of Life could not advance one generation. `tick_accum`, `speed_ms` and the catch-up loop were all present and all correct; nothing ever handed them a millisecond. |
+| 9 | `apps/mixer` | The peak meters had no clock *and no notion of time*: `update_peak_meters()` took no elapsed argument at all, applying attack 0.6 / decay 0.15 / silence 0.85 **per call**. `main` called it ten times in a loop and exited. |
+
+**#9 is the mirror image of #8, and the pair is the point.** In `apps/life` the
+timekeeping was perfect and only the wire was missing; in `apps/mixer` the wire
+was missing *and* there was nothing at the far end of it to wire to — no
+elapsed-time parameter, no accumulator, no interval, so the ballistics were
+tied to whatever the frame rate happened to be. Both scored clean against
+`check-tick-wiring.py` for the same reason (no `handle_event` at all), and both
+survive a reading: nobody looking at `update_peak_meters()` asks what unit its
+`0.6` is *per*, because a rate with no denominator does not read as a rate at
+all. It reads as a smoothing constant, which is what it would have been if
+anything had been calling it at a fixed cadence. The fix is the same shape in
+both cases — `tick(&mut self, elapsed_ms: u64)` with a bank, a catch-up cap and
+a dropped (not banked) backlog — but only #8's could honestly be described as
+connecting up code that already existed.
 
 The addition to the lesson: **an unwired `main` hides an unwired clock.** The
 gate looks for an app that receives events and ignores the time one; an app

@@ -88353,6 +88353,30 @@ NIC's group; `stats_for`/`stats_total` expose the rest.
    beside that interface's IP and MAC, so the NIC's column is the correct one and
    they simply became true.
 
+4. **Renaming the projected row collided with `netdev`'s own test fixture, and
+   only a boot caught it.** `netdev::self_test` built its recorded fixtures on
+   an interface it called `"eth0"`. The moment `NIC_IFACE` became `"eth0"`,
+   `register_iface` correctly refused it and case 2 panicked the kernel —
+   `!!! KERNEL PANIC !!! register: AlreadyExists` at `netdev.rs:510`, boot test
+   60, eighteen minutes in. The reservation was doing its job; two string
+   constants in one file had simply come to agree by accident. Fixed by naming
+   the fixture for what it is (`const DEV: &str = "testnic0"`) **and** by making
+   the collision a build error rather than a boot panic:
+
+   ```rust
+   const _: () = assert!(
+       !const_str_eq(DEV, NIC_IFACE),
+       "netdev self-test fixture must not use the reserved NIC_IFACE name"
+   );
+   ```
+
+   Verified by temporarily setting `DEV` back to `"eth0"` and confirming
+   `cargo check` fails with `E0080` — a guard nobody has watched fail is a guard
+   nobody knows works. Case 1 additionally now asserts the reserved name is
+   refused on an *empty* table, which is what distinguishes a reservation from
+   ordinary duplicate detection: with a row present, `AlreadyExists` could in
+   principle have come from the row.
+
 **`netstat -s`'s IP section reads `stats_total()`, deliberately.** A frame
 drained from a veth pair is handed to `ethernet::process_frame` exactly like one
 off the wire, so it genuinely *is* a packet the IP layer received. What veth

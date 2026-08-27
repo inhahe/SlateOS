@@ -486,6 +486,54 @@ fn recorded_totals() -> (usize, u64, u64, u64, u64) {
     })
 }
 
+/// Name of the *recorded* interface this self-test builds its fixtures on.
+///
+/// It must not be [`NIC_IFACE`], which is reserved for the projected row and
+/// refused by [`register_iface`]. It was literally `"eth0"` until 2026-08-27,
+/// when the projected row took that name over from `"kernel"` — and this rung
+/// found the collision by panicking on the refusal at case 2, which is exactly
+/// what a reserved name is supposed to do. Named for what it is instead: a
+/// fixture, not a device anyone has.
+const DEV: &str = "testnic0";
+
+/// Compile-time guard on the line above.
+///
+/// If [`DEV`] is ever set to [`NIC_IFACE`], `register_iface` refuses it and
+/// every run of this self-test panics at case 2 without having tested anything.
+/// That is not hypothetical — it is exactly what happened on 2026-08-27 when the
+/// projected row was renamed `kernel` → `eth0` while the fixture was still
+/// called `"eth0"`, and the only thing that caught it was a kernel panic
+/// eighteen minutes into a boot test. Two string constants in one file agreeing
+/// by accident deserves better than that, so it is a build error here instead.
+const _: () = assert!(
+    !const_str_eq(DEV, NIC_IFACE),
+    "netdev self-test fixture must not use the reserved NIC_IFACE name"
+);
+
+/// Byte-wise `&str` equality usable in a `const` context.
+///
+/// `str`'s `PartialEq` is not `const`, and this is only ever evaluated at
+/// compile time, so the loop's cost is nil.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "const context: an out-of-range index is a compile error, not a runtime panic, \
+              and the bound is checked immediately above"
+)]
+const fn const_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 pub fn self_test() {
     crate::serial_println!("netdev::self_test() — running tests...");
     // Begin from a clean, EMPTY table and build every fixture via the real API,
@@ -503,49 +551,54 @@ pub fn self_test() {
     // non-empty here and always will be.
     assert_eq!(recorded_len(), 0);
     assert_eq!(recorded_totals(), (0, 0, 0, 0, 0));
-    assert!(record_rx("eth0", 1, 1).is_err()); // no phantom iface exists yet
+    assert!(record_rx(DEV, 1, 1).is_err()); // no phantom iface exists yet
+    // The reserved name is refused on an EMPTY table, which is what makes it a
+    // reservation rather than ordinary duplicate detection: there is no row it
+    // could be colliding with. Case 9 re-checks it with a row present.
+    assert!(register_iface(NIC_IFACE, NicType::Ethernet, 1000, 1500).is_err());
+    assert_eq!(recorded_len(), 0); // the refusal did not add a row
     crate::serial_println!("  [1/9] empty init: OK");
 
     // 2: Register — zeroed counters, link down, params preserved; dup fails.
-    register_iface("eth0", NicType::Ethernet, 1000, 1500).expect("register");
-    let d = get("eth0").expect("get");
+    register_iface(DEV, NicType::Ethernet, 1000, 1500).expect("register");
+    let d = get(DEV).expect("get");
     assert_eq!(d.nic_type, NicType::Ethernet);
     assert_eq!((d.speed_mbps, d.mtu), (1000, 1500));
     assert!(!d.link_up);
     assert_eq!((d.rx_bytes, d.tx_bytes, d.rx_packets), (0, 0, 0));
-    assert!(register_iface("eth0", NicType::Ethernet, 1000, 1500).is_err());
+    assert!(register_iface(DEV, NicType::Ethernet, 1000, 1500).is_err());
     crate::serial_println!("  [2/9] register: OK");
 
     // 3: Record RX — bytes + packets accumulate; total_rx rises.
-    record_rx("eth0", 1500, 1).expect("rx");
-    record_rx("eth0", 500, 1).expect("rx2");
-    let d = get("eth0").expect("get");
+    record_rx(DEV, 1500, 1).expect("rx");
+    record_rx(DEV, 500, 1).expect("rx2");
+    let d = get(DEV).expect("get");
     assert_eq!(d.rx_bytes, 2000);
     assert_eq!(d.rx_packets, 2);
     crate::serial_println!("  [3/9] rx: OK");
 
     // 4: Record TX — independent counters.
-    record_tx("eth0", 1000, 1).expect("tx");
-    let d = get("eth0").expect("get");
+    record_tx(DEV, 1000, 1).expect("tx");
+    let d = get(DEV).expect("get");
     assert_eq!(d.tx_bytes, 1000);
     assert_eq!(d.tx_packets, 1);
     crate::serial_println!("  [4/9] tx: OK");
 
     // 5: Error/drop direction routing — rx vs tx counters update correctly.
-    record_error("eth0", true).expect("rx error");
-    record_error("eth0", false).expect("tx error");
-    record_drop("eth0", true).expect("rx drop");
-    record_drop("eth0", false).expect("tx drop");
-    let d = get("eth0").expect("get");
+    record_error(DEV, true).expect("rx error");
+    record_error(DEV, false).expect("tx error");
+    record_drop(DEV, true).expect("rx drop");
+    record_drop(DEV, false).expect("tx drop");
+    let d = get(DEV).expect("get");
     assert_eq!((d.rx_errors, d.tx_errors), (1, 1));
     assert_eq!((d.rx_drops, d.tx_drops), (1, 1));
     crate::serial_println!("  [5/9] error/drop: OK");
 
     // 6: Link state toggles.
-    set_link_state("eth0", true).expect("link_up");
-    assert!(get("eth0").expect("get").link_up);
-    set_link_state("eth0", false).expect("link_down");
-    assert!(!get("eth0").expect("get").link_up);
+    set_link_state(DEV, true).expect("link_up");
+    assert!(get(DEV).expect("get").link_up);
+    set_link_state(DEV, false).expect("link_down");
+    assert!(!get(DEV).expect("get").link_up);
     crate::serial_println!("  [6/9] link state: OK");
 
     // 7: Unknown iface → NotFound on every record/link path.

@@ -81610,7 +81610,36 @@ turned into user signals.
 
 ---
 
-## `A-SIGNALQ-INIT-DEFAULTS-SEEDS-SEVEN-DELIVERIES-THAT-NEVER-HAPPENED` (lane A, 2026-08-26) — **open**
+## `A-SIGNALQ-INIT-DEFAULTS-SEEDS-SEVEN-DELIVERIES-THAT-NEVER-HAPPENED` (lane A, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**Fixed** exactly as the plan below prescribes: `init_defaults()` now seeds
+`processes: Vec::new()` with all four counters at zero, and carries zramstat's
+doc comment recording what the removed fixtures claimed. The self-test builds
+its own fixtures through the real API.
+
+Three notes on what the fix turned up beyond the plan:
+
+1. **The self-test's counts are now stated as absolutes, not deltas.** Tests 1,
+   6 and 8 all depended on the seed (`len() == 2`, `len() == 3`,
+   `delivered == 8`). The temptation was to rewrite them as "whatever the seed
+   left, plus what the test did". Stated that way a seed creeping back in would
+   shift every figure by a constant and still pass. They are stated absolutely
+   instead — `is_empty()`, `len() == 2`, `delivered == 1` — so a reappearing
+   seed fails on the first assertion.
+2. **Test 2 was silently load-bearing and now says so.** With no seed there is
+   no other way for pid 1 to exist, so `send(0, 1, ...)` in test 2 is what
+   creates the record that tests 4 and 5 block and unblock. Test 6's comment
+   was also wrong once the seed went: it is no longer the first auto-create,
+   it is the check that a *second* pid gets its own record.
+3. **`signalq list` printed nothing at all on an empty table.** The seed
+   guaranteed two rows, so this arm had never had to answer the empty case;
+   with the seed gone, silence is the normal fresh-boot output and reads as a
+   failed command rather than as "nothing has been signalled". It now says so
+   explicitly, matching `pending`'s existing wording. *This is the general
+   hazard in removing fabricated seed data: the seed was also suppressing every
+   empty-state code path downstream of it, and those paths have never run.*
+
+**Original report follows.**
 
 **In short:** `signalq` reports how many signals each process has been sent and
 delivered. Before anything runs, it already claims seven deliveries. They are

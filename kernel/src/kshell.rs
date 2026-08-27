@@ -96344,7 +96344,18 @@ fn cmd_signalq(args: &str) {
     match sub {
         "list" => {
             signalq::init_defaults();
-            for ps in signalq::list_processes() {
+            let processes = signalq::list_processes();
+            if processes.is_empty() {
+                // Say so explicitly.  The table used to be seeded with two
+                // fabricated processes, so it was never empty and this arm
+                // never had to answer the question; now that the seed is gone
+                // an empty table is the normal state on a fresh boot, and
+                // printing nothing at all would read as a failed command
+                // rather than as the answer "nothing has been signalled".
+                shell_println!("No process has been sent a signal yet.");
+                return;
+            }
+            for ps in processes {
                 shell_println!(
                     "pid={}: pending={} delivered={} blocked={} mask={:#x}",
                     ps.pid,

@@ -99,103 +99,164 @@ mod syscall_nr {
 // ============================================================================
 // Low-level syscall wrappers
 // ============================================================================
+//
+// Each wrapper has two arms, selected by `target_vendor = "slateos"` — true
+// only when compiling for the real OS (see toolchain/x86_64-slateos.json).
+//
+// The gate is load-bearing. A `syscall` instruction on a development host does
+// not fail cleanly: it enters whatever kernel is actually running, carrying a
+// SlateOS call number in RAX that means something entirely different there.
+// The service-bus numbers in `nr` above are low (0-13), which is the worst
+// range to get wrong — on Linux those are `read`, `write`, `open`, `close`,
+// `stat`, `mmap`, `ioctl` and friends, all of which do real work to real file
+// descriptors. The host arm returns `ENOSYS` instead.
+//
+// See known-issues.md
+// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
+
+/// The value every host arm returns: `-ENOSYS`, "function not implemented".
+///
+/// Chosen because it is what a kernel says when a syscall number is not one it
+/// knows, which is exactly the honest description of a development host.
+#[cfg(not(target_vendor = "slateos"))]
+const HOST_ENOSYS: i64 = -38;
 
 /// Raw syscall with variable argument count.
 /// On x86_64, syscall ABI: rax=nr, rdi=a0, rsi=a1, rdx=a2, r10=a3, r8=a4, r9=a5
 /// Returns: rax (result).
 #[inline(always)]
 unsafe fn syscall0(nr: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: caller guarantees nr is a valid syscall number.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
+        // SAFETY: caller guarantees nr is a valid syscall number.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = nr;
+        HOST_ENOSYS
+    }
 }
 
 #[inline(always)]
 unsafe fn syscall1(nr: u64, a0: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: caller guarantees nr and a0 are valid for the syscall.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") a0,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
+        // SAFETY: caller guarantees nr and a0 are valid for the syscall.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") a0,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = (nr, a0);
+        HOST_ENOSYS
+    }
 }
 
 #[inline(always)]
 unsafe fn syscall2(nr: u64, a0: u64, a1: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: caller guarantees all arguments are valid for the syscall.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") a0,
-            in("rsi") a1,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
+        // SAFETY: caller guarantees all arguments are valid for the syscall.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") a0,
+                in("rsi") a1,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = (nr, a0, a1);
+        HOST_ENOSYS
+    }
 }
 
 #[inline(always)]
 unsafe fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: caller guarantees all arguments are valid for the syscall.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") a0,
-            in("rsi") a1,
-            in("rdx") a2,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
+        // SAFETY: caller guarantees all arguments are valid for the syscall.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") a0,
+                in("rsi") a1,
+                in("rdx") a2,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = (nr, a0, a1, a2);
+        HOST_ENOSYS
+    }
 }
 
 #[inline(always)]
 unsafe fn syscall4(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: caller guarantees all arguments are valid for the syscall.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") a0,
-            in("rsi") a1,
-            in("rdx") a2,
-            in("r10") a3,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
+        // SAFETY: caller guarantees all arguments are valid for the syscall.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") a0,
+                in("rsi") a1,
+                in("rdx") a2,
+                in("r10") a3,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = (nr, a0, a1, a2, a3);
+        HOST_ENOSYS
+    }
 }
 
 // ============================================================================

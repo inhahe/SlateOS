@@ -39,9 +39,17 @@ use std::process;
 // ABI is arg0=path ptr, arg1=path len, arg2=output-buffer ptr.
 
 /// Query filesystem space/configuration (`SYS_FS_STATVFS`).
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const SYS_FS_STATVFS: u64 = 608;
 
 /// Size of the `SYS_FS_STATVFS` output buffer, in bytes.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const FS_STATVFS_SIZE: usize = 64;
 
 /// Parsed `SYS_FS_STATVFS` result.
@@ -72,6 +80,10 @@ struct StatVfs {
 ///   [0..8] block_size, [8..16] total_blocks, [16..24] free_blocks,
 ///   [24..32] total_inodes, [32..40] free_inodes, [40..48] max_name_len,
 ///   [48] read_only (u8). Split out for host unit testing.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 fn parse_statvfs_buffer(buf: &[u8]) -> Option<StatVfs> {
     let read_u64 = |off: usize| -> Option<u64> {
         let b = buf.get(off..off + 8)?;
@@ -92,7 +104,7 @@ fn parse_statvfs_buffer(buf: &[u8]) -> Option<StatVfs> {
 }
 
 /// Invoke a 3-argument syscall via inline x86_64 assembly.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller is responsible for passing valid pointers and lengths.
@@ -114,7 +126,7 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 
 /// Call `SYS_FS_STATVFS` on a mount point path, returning parsed statistics on
 /// success or the negative kernel error code on failure.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 fn fs_statvfs(path: &str) -> Result<StatVfs, i64> {
     let path_bytes = path.as_bytes();
     let mut buf = [0u8; FS_STATVFS_SIZE];
@@ -140,7 +152,7 @@ fn fs_statvfs(path: &str) -> Result<StatVfs, i64> {
 }
 
 /// Host fallback: the statvfs syscall cannot run on the build host.
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 fn fs_statvfs(_path: &str) -> Result<StatVfs, i64> {
     Err(-2)
 }

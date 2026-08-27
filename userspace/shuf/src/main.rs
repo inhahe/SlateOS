@@ -5,8 +5,6 @@
 //! - `factor`: Print prime factors of numbers
 //! - `numfmt`: Convert numbers from/to human-readable format
 
-#![allow(unexpected_cfgs)]
-
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};

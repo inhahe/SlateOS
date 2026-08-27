@@ -475,31 +475,55 @@ fn write_rtc(dt: &DateTime) -> Result<(), String> {
 // SYS_CLOCK_SETTIME takes the absolute target ns as its only argument.  hwclock
 // previously read and wrote the wall clock through the nonexistent, read-only
 // /proc/time provider, so it could neither read nor set the system clock.
+//
+// Both raw `syscall` sites below are gated on `target_vendor = "slateos"` (see
+// `toolchain/x86_64-slateos.json`), true only when compiling for the real OS.
+// A `syscall` on a development host does not fail cleanly — it enters whatever
+// kernel is running with our number in `rax`, and on Linux 14 is
+// `rt_sigprocmask` and 15 is `rt_sigreturn`, the latter being undefined
+// behaviour when invoked outside a signal handler.
+#[cfg(target_vendor = "slateos")]
 const SYS_CLOCK_REALTIME: u64 = 14;
+#[cfg(target_vendor = "slateos")]
 const SYS_CLOCK_SETTIME: u64 = 15;
 const NS_PER_SEC: i64 = 1_000_000_000;
 
 /// Read the wall clock as nanoseconds since the Unix epoch via
 /// `SYS_CLOCK_REALTIME`.
+///
+/// On a development host there is no SlateOS kernel, so this reads `std`'s
+/// clock — which is the host's system clock, i.e. exactly what this function is
+/// asked for, and therefore a truthful answer rather than a stub.
 fn read_realtime_ns() -> Result<i64, String> {
-    let ret: i64;
-    // SAFETY: SYS_CLOCK_REALTIME takes no arguments and writes nothing to
-    // userspace; it only reads the kernel clock into rax.  rcx/r11 are
-    // clobbered by the SYSCALL instruction per the x86_64 ABI.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") SYS_CLOCK_REALTIME,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack, nomem),
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
+        // SAFETY: SYS_CLOCK_REALTIME takes no arguments and writes nothing to
+        // userspace; it only reads the kernel clock into rax.  rcx/r11 are
+        // clobbered by the SYSCALL instruction per the x86_64 ABI.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") SYS_CLOCK_REALTIME,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack, nomem),
+            );
+        }
+        if ret < 0 {
+            return Err(format!("clock_realtime failed with error {ret}"));
+        }
+        Ok(ret)
     }
-    if ret < 0 {
-        return Err(format!("clock_realtime failed with error {ret}"));
+
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        match std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH) {
+            Ok(dur) => i64::try_from(dur.as_nanos()).map_err(|_| "clock out of range".to_string()),
+            Err(e) => Err(format!("clock_realtime failed: {e}")),
+        }
     }
-    Ok(ret)
 }
 
 /// Read the system (kernel) clock as a Unix timestamp (whole seconds).
@@ -539,28 +563,42 @@ fn read_system_time() -> Result<u64, String> {
 
 /// Set the system clock to a given Unix timestamp via `SYS_CLOCK_SETTIME`.
 /// Requires `CAP_SYS_TIME`.
+///
+/// On a development host this is an error rather than a silent success: every
+/// caller wants the side effect, and this program has no business moving the
+/// developer's own machine clock.
 fn write_system_time(unix_secs: u64) -> Result<(), String> {
-    let target_ns = (unix_secs as i64).saturating_mul(NS_PER_SEC);
-    let ret: i64;
-    // SAFETY: single scalar argument (absolute target ns); touches no userspace
-    // memory.  rcx/r11 are clobbered by SYSCALL per the x86_64 ABI.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") SYS_CLOCK_SETTIME,
-            in("rdi") target_ns as u64,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack, nomem),
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let target_ns = (unix_secs as i64).saturating_mul(NS_PER_SEC);
+        let ret: i64;
+        // SAFETY: single scalar argument (absolute target ns); touches no
+        // userspace memory.  rcx/r11 are clobbered by SYSCALL per the x86_64
+        // ABI.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") SYS_CLOCK_SETTIME,
+                in("rdi") target_ns as u64,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack, nomem),
+            );
+        }
+        if ret < 0 {
+            return Err(format!(
+                "clock_settime failed with error {ret} (need CAP_SYS_TIME?)"
+            ));
+        }
+        Ok(())
     }
-    if ret < 0 {
-        return Err(format!(
-            "clock_settime failed with error {ret} (need CAP_SYS_TIME?)"
-        ));
+
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = unix_secs;
+        Err("clock_settime: not supported on this host (no SlateOS kernel)".to_string())
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

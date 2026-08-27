@@ -8,8 +8,6 @@
 //! - `users`: Print logged-in user names
 //! - `tty`: Print the terminal name
 
-#![allow(unexpected_cfgs)]
-
 use std::env;
 use std::fs;
 use std::process;

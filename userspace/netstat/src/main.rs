@@ -626,7 +626,7 @@ const NET_STAT_SIZE: usize = 48;
 /// Upper bound on records requested in one listing call.
 const MAX_TCP_RECORDS: usize = 1024;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid for the given syscall.
@@ -646,8 +646,9 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
-// Stub for non-x86_64 hosts (e.g. running tests on a non-x86_64 build machine).
-#[cfg(not(target_arch = "x86_64"))]
+// Host stub — see the gated definition above. A development host has no
+// SlateOS kernel to ask, so answer ENOSYS rather than entering the host's.
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     -38 // ENOSYS
 }

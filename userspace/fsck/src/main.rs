@@ -58,16 +58,24 @@ const EXIT_USAGE: i32 = 8;
 /// requests repair mode.  Returns the number of *outstanding* errors (problems
 /// detected in check-only mode, or remaining after repair), or a negative
 /// `KernelError` code.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const SYS_FS_CHECK: u64 = 655;
 
 /// Repair-mode flag bit for `SYS_FS_CHECK` (arg2 bit 0).
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const FS_CHECK_REPAIR: u64 = 1 << 0;
 
 /// Invoke `SYS_FS_CHECK`.
 ///
 /// `dev_name` is the block-device registry name (no "/dev/" prefix); `repair`
 /// selects repair mode.  Returns the kernel's `i64` result.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 fn fs_check(dev_name: &str, repair: bool) -> i64 {
     let bytes = dev_name.as_bytes();
     let flags = if repair { FS_CHECK_REPAIR } else { 0 };
@@ -91,7 +99,7 @@ fn fs_check(dev_name: &str, repair: bool) -> i64 {
 }
 
 /// Host-build fallback so the tool compiles and unit-tests on the dev machine.
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 fn fs_check(_dev_name: &str, _repair: bool) -> i64 {
     -2 // NotSupported on non-target hosts.
 }

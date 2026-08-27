@@ -55,6 +55,10 @@ use userdb::UserDb;
 ///
 /// arg0 = path pointer, arg1 = path length, arg2 = output buffer pointer
 /// (`FS_META_SIZE` bytes). On success returns 0 and fills the buffer.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const SYS_FS_METADATA: u64 = 628;
 
 /// Change file owner and group (`SYS_FS_SET_OWNER`).
@@ -67,22 +71,46 @@ const SYS_FS_METADATA: u64 = 628;
 /// arg4 is what libc's `lchown` passes (`posix/src/file.rs` →
 /// `set_owner_path_ex`): clear, the kernel resolves the final symlink and
 /// chowns its target; set, it chowns the link inode itself.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const SYS_FS_SET_OWNER: u64 = 630;
 
 /// Change file permission mode bits (`SYS_FS_SET_PERMS`).
 ///
 /// arg0 = path pointer, arg1 = path length, arg2 = mode (low 12 bits used:
 /// rwx + setuid/setgid/sticky).
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const SYS_FS_SET_PERMS: u64 = 631;
 
 /// Size of the `SYS_FS_METADATA` output buffer, in bytes.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const FS_META_SIZE: usize = 64;
 
 /// Byte offset of the u32 uid field within the metadata buffer.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const META_OFF_UID: usize = 48;
 /// Byte offset of the u32 gid field within the metadata buffer.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const META_OFF_GID: usize = 52;
 /// Byte offset of the u16 permission-bits field within the metadata buffer.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const META_OFF_PERMS: usize = 56;
 
 // ============================================================================
@@ -96,7 +124,7 @@ const META_OFF_PERMS: usize = 56;
 ///   Return value in rax. rcx and r11 are clobbered by the CPU.
 ///
 /// Three-argument syscalls pass 0 for `a4`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller ensures arguments are valid for the given syscall number.
@@ -127,7 +155,7 @@ unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
 /// difference between changing a symbolic link and changing whatever it points
 /// at. Without it there is no way to express `lchown(2)`, and `chown -R` on a
 /// tree containing `link -> /etc/shadow` hands `/etc/shadow` to the new owner.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller ensures arguments are valid for the given syscall number.
@@ -151,7 +179,7 @@ unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 
 }
 
 /// Convenience wrapper for three-argument syscalls.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     // SAFETY: forwarded to syscall4 with a zero fourth argument; the safety
     // contract is identical and upheld by the caller.
@@ -166,6 +194,10 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 ///
 /// These are `KernelError` discriminants (see kernel `error.rs`), NOT Linux
 /// errnos — e.g. -2 is "operation not supported", not ENOENT.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 fn kernel_error_to_string(code: i64) -> String {
     let msg = match code {
         -1 => "internal kernel error",
@@ -294,6 +326,10 @@ struct FileMeta {
 ///
 /// Split out from [`read_metadata`] so it can be unit-tested on the host where
 /// the syscall cannot run. Returns `None` if the buffer is too small.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 fn parse_metadata_buffer(buf: &[u8]) -> Option<FileMeta> {
     let uid_bytes = buf.get(META_OFF_UID..META_OFF_UID + 4)?;
     let gid_bytes = buf.get(META_OFF_GID..META_OFF_GID + 4)?;
@@ -311,7 +347,7 @@ fn parse_metadata_buffer(buf: &[u8]) -> Option<FileMeta> {
 /// Returns the owner uid, group gid, and permission bits. Used both to
 /// implement `--reference` (copy owner/mode from another file) and to detect
 /// whether an operation actually changed anything (for `-c` / `-v`).
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 fn read_metadata(path: &str) -> Result<FileMeta, String> {
     let mut buf = [0u8; FS_META_SIZE];
 
@@ -336,7 +372,7 @@ fn read_metadata(path: &str) -> Result<FileMeta, String> {
 }
 
 /// Host fallback: the metadata syscall cannot run on the build host.
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 fn read_metadata(_path: &str) -> Result<FileMeta, String> {
     Err("metadata unavailable on this platform".to_string())
 }
@@ -350,7 +386,7 @@ fn read_metadata(_path: &str) -> Result<FileMeta, String> {
 /// `no_follow` selects `lchown(2)` semantics: the symbolic link itself is
 /// chowned rather than its target. Every caller must think about this — see
 /// [`follow_operand`] for which way round it goes and why.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 fn do_chown(path: &str, uid: u32, gid: u32, no_follow: bool) -> Result<(), String> {
     // SAFETY: SYS_FS_SET_OWNER reads `path.len()` bytes from `path.as_ptr()`
     // and takes uid in arg2, gid in arg3 and the NO_FOLLOW bit in arg4. The
@@ -373,14 +409,14 @@ fn do_chown(path: &str, uid: u32, gid: u32, no_follow: bool) -> Result<(), Strin
     }
 }
 
-/// Host fallback so the crate compiles for tests on non-x86_64 hosts.
-#[cfg(not(target_arch = "x86_64"))]
+/// Host fallback so the crate compiles for tests on development hosts.
+#[cfg(not(target_vendor = "slateos"))]
 fn do_chown(_path: &str, _uid: u32, _gid: u32, _no_follow: bool) -> Result<(), String> {
     Err("chown syscall unavailable on this platform".to_string())
 }
 
 /// Perform the chmod syscall on a single path.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 fn do_chmod(path: &str, mode: u32) -> Result<(), String> {
     // SAFETY: SYS_FS_SET_PERMS reads `path.len()` bytes from `path.as_ptr()`
     // and takes the new mode (low 12 bits) in arg2. The path slice outlives
@@ -401,8 +437,8 @@ fn do_chmod(path: &str, mode: u32) -> Result<(), String> {
     }
 }
 
-/// Host fallback so the crate compiles for tests on non-x86_64 hosts.
-#[cfg(not(target_arch = "x86_64"))]
+/// Host fallback so the crate compiles for tests on development hosts.
+#[cfg(not(target_vendor = "slateos"))]
 fn do_chmod(_path: &str, _mode: u32) -> Result<(), String> {
     Err("chmod syscall unavailable on this platform".to_string())
 }

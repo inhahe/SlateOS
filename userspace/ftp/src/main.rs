@@ -107,7 +107,7 @@ const SYS_DNS_RESOLVE: u64 = 820;
 ///
 /// The caller must ensure `nr` is a valid syscall number and `a1` is valid
 /// for that syscall.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid. The `syscall` instruction
@@ -131,7 +131,7 @@ unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
 ///
 /// The caller must ensure `nr` is a valid syscall number and all arguments
 /// are valid for that syscall.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid.
@@ -151,15 +151,16 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 }
 
 // Non-x86_64 stubs so the crate compiles for host-side `cargo test`.
-// These are never called at runtime on a non-x86_64 host because the test
-// suite avoids exercising paths that issue real syscalls.
-#[cfg(not(target_arch = "x86_64"))]
+// These are never reached on the real OS; they exist so that `cargo test`,
+// `cargo run` and clippy on a development host compile and behave honestly
+// instead of executing a `syscall` instruction against the host's own kernel.
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall1(_nr: u64, _a1: u64) -> i64 {
-    -1
+    -38 // ENOSYS
 }
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
-    -1
+    -38 // ENOSYS
 }
 
 // ============================================================================

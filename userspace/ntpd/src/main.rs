@@ -538,32 +538,58 @@ fn format_human(unix_secs: u64) -> String {
 // SYS_CLOCK_ADJTIME takes a signed ns delta.  (These tools previously used a
 // nonexistent, read-only /proc/time, so they could neither read nor set the
 // clock.)
+//
+// All three raw `syscall` sites below are gated on `target_vendor = "slateos"`
+// (see `toolchain/x86_64-slateos.json`), true only when compiling for the real
+// OS.  The gate is load-bearing: a `syscall` on a development host does not
+// fail cleanly, it enters whatever kernel is actually running with our number
+// in `rax`.  On Linux, 14 is `rt_sigprocmask`, 15 is `rt_sigreturn` (undefined
+// behaviour outside a signal handler) and 16 is `ioctl` — which would be handed
+// our signed nanosecond delta as a file descriptor.
+#[cfg(target_vendor = "slateos")]
 const SYS_CLOCK_REALTIME: u64 = 14;
+#[cfg(target_vendor = "slateos")]
 const SYS_CLOCK_SETTIME: u64 = 15;
+#[cfg(target_vendor = "slateos")]
 const SYS_CLOCK_ADJTIME: u64 = 16;
 
 const NS_PER_SEC: i64 = 1_000_000_000;
 
 /// Read the wall clock as nanoseconds since the Unix epoch.
+///
+/// On a development host there is no SlateOS kernel, so this reads `std`'s
+/// clock — the host's own system clock, which is precisely what is being asked
+/// for and so a truthful answer rather than a stub.
 fn read_system_time_ns() -> Result<i64, String> {
-    let ret: i64;
-    // SAFETY: SYS_CLOCK_REALTIME takes no arguments and writes nothing to
-    // userspace; it only reads the kernel clock into rax.  rcx/r11 are
-    // clobbered by the SYSCALL instruction per the x86_64 ABI.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") SYS_CLOCK_REALTIME,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack, nomem),
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
+        // SAFETY: SYS_CLOCK_REALTIME takes no arguments and writes nothing to
+        // userspace; it only reads the kernel clock into rax.  rcx/r11 are
+        // clobbered by the SYSCALL instruction per the x86_64 ABI.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") SYS_CLOCK_REALTIME,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack, nomem),
+            );
+        }
+        if ret < 0 {
+            return Err(format!("clock_realtime failed with error {ret}"));
+        }
+        Ok(ret)
     }
-    if ret < 0 {
-        return Err(format!("clock_realtime failed with error {ret}"));
+
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        match std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH) {
+            Ok(dur) => i64::try_from(dur.as_nanos()).map_err(|_| "clock out of range".to_string()),
+            Err(e) => Err(format!("clock_realtime failed: {e}")),
+        }
     }
-    Ok(ret)
 }
 
 /// Read the system (kernel) clock as whole Unix seconds.
@@ -575,55 +601,81 @@ fn read_system_time() -> Result<u64, String> {
 
 /// Set the wall clock to an absolute nanoseconds-since-epoch value via
 /// `SYS_CLOCK_SETTIME`.  Requires `CAP_SYS_TIME`.
+///
+/// On a development host this is an error rather than a silent success: the
+/// caller wants the side effect, and this daemon has no business stepping the
+/// developer's own machine clock.
 fn set_system_time_ns(target_ns: i64) -> Result<(), String> {
     if target_ns < 0 {
         return Err("refusing to set a negative wall-clock time".into());
     }
-    let ret: i64;
-    // SAFETY: single scalar argument (target ns); touches no userspace memory.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") SYS_CLOCK_SETTIME,
-            in("rdi") target_ns as u64,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack, nomem),
-        );
+
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
+        // SAFETY: single scalar argument (target ns); touches no userspace
+        // memory.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") SYS_CLOCK_SETTIME,
+                in("rdi") target_ns as u64,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack, nomem),
+            );
+        }
+        if ret < 0 {
+            return Err(format!(
+                "clock_settime failed with error {ret} (need CAP_SYS_TIME?)"
+            ));
+        }
+        Ok(())
     }
-    if ret < 0 {
-        return Err(format!(
-            "clock_settime failed with error {ret} (need CAP_SYS_TIME?)"
-        ));
+
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        Err("clock_settime: not supported on this host (no SlateOS kernel)".to_string())
     }
-    Ok(())
 }
 
 /// Adjust the wall clock by a signed nanosecond delta via `SYS_CLOCK_ADJTIME`
 /// (a relative, race-free step rather than an absolute write).  Requires
 /// `CAP_SYS_TIME`.
+///
+/// On a development host this is an error rather than a silent success, for the
+/// same reason as [`set_system_time_ns`].
 fn adjust_system_time_ns(delta_ns: i64) -> Result<(), String> {
-    let ret: i64;
-    // SAFETY: single scalar argument (signed delta reinterpreted as u64, the
-    // inverse of the kernel's `as i64`); touches no userspace memory.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") SYS_CLOCK_ADJTIME,
-            in("rdi") delta_ns as u64,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack, nomem),
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
+        // SAFETY: single scalar argument (signed delta reinterpreted as u64,
+        // the inverse of the kernel's `as i64`); touches no userspace memory.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") SYS_CLOCK_ADJTIME,
+                in("rdi") delta_ns as u64,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack, nomem),
+            );
+        }
+        if ret < 0 {
+            return Err(format!(
+                "clock_adjtime failed with error {ret} (need CAP_SYS_TIME?)"
+            ));
+        }
+        Ok(())
     }
-    if ret < 0 {
-        return Err(format!(
-            "clock_adjtime failed with error {ret} (need CAP_SYS_TIME?)"
-        ));
+
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = delta_ns;
+        Err("clock_adjtime: not supported on this host (no SlateOS kernel)".to_string())
     }
-    Ok(())
 }
 
 /// Read the wall clock as `(whole Unix seconds, microsecond remainder)`.

@@ -508,7 +508,7 @@ const MAX_TCP_RECORDS: usize = 1024;
 // `syscall` instruction on the host build machine is undefined — so under
 // `cargo test` we compile the ENOSYS stub instead and the fallback returns
 // empty (the pure record decoders are unit-tested directly).
-#[cfg(all(target_arch = "x86_64", not(test)))]
+#[cfg(all(target_vendor = "slateos", not(test)))]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid for the given syscall.
@@ -528,8 +528,8 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
-// Stub for non-x86_64 hosts and for host test builds (see note above).
-#[cfg(any(not(target_arch = "x86_64"), test))]
+// Stub for development hosts and for host test builds (see note above).
+#[cfg(any(not(target_vendor = "slateos"), test))]
 unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     -38 // ENOSYS
 }

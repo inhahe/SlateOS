@@ -60,9 +60,11 @@ const DEFAULT_QUEUE: char = 'a';
 /// returns nanoseconds-since-epoch in rax.  The kernel has no combined
 /// clock_gettime(clock_id, *ts) form.  (Syscall 40 is SYS_PORT_READ; the old
 /// SYS_CLOCK_GETTIME=40 was wrong.)
+#[cfg(target_vendor = "slateos")]
 const SYS_CLOCK_REALTIME: u64 = 14;
 
 /// Nanoseconds per second, to convert the kernel's ns clock value to seconds.
+#[cfg(target_vendor = "slateos")]
 const NSEC_PER_SEC: i64 = 1_000_000_000;
 
 /// Seconds per day.
@@ -80,34 +82,45 @@ const SECS_PER_MINUTE: i64 = 60;
 
 /// Read the current wall-clock time.
 ///
-/// Returns epoch seconds on success.  Uses the native no-argument
-/// `SYS_CLOCK_REALTIME` syscall, which returns nanoseconds-since-epoch in
-/// `rax`.
+/// Returns epoch seconds on success.  On SlateOS this uses the native
+/// no-argument `SYS_CLOCK_REALTIME` syscall, which returns
+/// nanoseconds-since-epoch in `rax`, and falls back to `std` if the kernel
+/// reports an error.
+///
+/// The raw `syscall` is gated on `target_vendor = "slateos"` (see
+/// `toolchain/x86_64-slateos.json`), which is true only when compiling for the
+/// real OS.  A `syscall` instruction on a development host does not fail
+/// cleanly: it enters whatever kernel is actually running with our call number
+/// in `rax`, and SlateOS number 14 is `rt_sigprocmask` on Linux.  On a host we
+/// therefore skip it entirely and use `std`, which is the *correct* answer
+/// there anyway — this function only reads a clock, so there is nothing the
+/// syscall would have told us that `std` cannot.
 fn get_current_time() -> Result<i64, String> {
-    let ret: i64;
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
 
-    // SAFETY: SYS_CLOCK_REALTIME takes no arguments and writes nothing to
-    // userspace; it only reads the kernel clock into rax.  rcx/r11 are
-    // clobbered by the SYSCALL instruction.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") SYS_CLOCK_REALTIME,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack, nomem),
-        );
+        // SAFETY: SYS_CLOCK_REALTIME takes no arguments and writes nothing to
+        // userspace; it only reads the kernel clock into rax.  rcx/r11 are
+        // clobbered by the SYSCALL instruction.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") SYS_CLOCK_REALTIME,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack, nomem),
+            );
+        }
+
+        if ret >= 0 {
+            // `ret` is nanoseconds since the epoch; return whole seconds.
+            return Ok(ret / NSEC_PER_SEC);
+        }
     }
 
-    if ret >= 0 {
-        // `ret` is nanoseconds since the epoch; return whole seconds.
-        return Ok(ret / NSEC_PER_SEC);
-    }
-
-    // Fallback: std SystemTime (currently non-functional on this OS since the
-    // target is linux/musl with no syscall-translation layer, but returns a
-    // clean error rather than panicking).
+    // Fallback (and the only path on a development host): std SystemTime.
     match std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH) {
         Ok(dur) => Ok(dur.as_secs() as i64),
         Err(e) => Err(format!("cannot get current time: {e}")),

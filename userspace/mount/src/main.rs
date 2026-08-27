@@ -46,12 +46,24 @@ use std::process;
 // native SYSCALL convention (rax=nr, rdi/rsi/rdx/r10/r8/r9 = arg0..arg5).
 
 /// `SYS_FS_MOUNT` — mount a filesystem at a target path.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const SYS_FS_MOUNT: u64 = 652;
 
 /// `SYS_FS_UMOUNT` — unmount the filesystem at a target path.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const SYS_FS_UMOUNT: u64 = 653;
 
 /// Translate a negative kernel error code into a human-readable message.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 fn kernel_errstr(code: i64) -> &'static str {
     match code {
         -2 => "operation not supported (unknown or unsupported filesystem type)",
@@ -71,7 +83,7 @@ fn kernel_errstr(code: i64) -> &'static str {
 /// Uses the SlateOS native SYSCALL convention: number in `rax`, arguments in
 /// `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. `rcx`/`r11` are clobbered by the
 /// `syscall` instruction itself.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
     let ret: i64;
     // SAFETY: the caller guarantees that any pointer arguments reference
@@ -98,6 +110,10 @@ unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64
 /// Map a kernel fstype hint to the canonical string the kernel mount
 /// dispatcher recognises. Returns `None` for "auto"/unknown — the kernel
 /// has no auto-detection, so the caller must specify a type.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 fn canonical_fstype(fstype: &str) -> Option<&'static str> {
     match fstype {
         "ext4" => Some("ext4"),
@@ -116,7 +132,7 @@ fn canonical_fstype(fstype: &str) -> Option<&'static str> {
 /// `flags`/`data` are accepted for command-line compatibility but the kernel
 /// ABI does not yet carry mount options, so unsupported flags (bind, remount)
 /// are rejected up front rather than silently ignored.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 fn do_mount(
     source: &str,
     target: &str,
@@ -178,7 +194,7 @@ fn do_mount(
 ///
 /// `flags` (force/lazy) are accepted for command-line compatibility but the
 /// kernel performs a plain unmount; force/lazy semantics are not yet wired.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 fn do_umount(target: &str, flags: u64) -> Result<(), String> {
     if flags & (MNT_FORCE | MNT_DETACH) != 0 {
         eprintln!("umount: warning: force/lazy unmount not supported; performing a normal unmount");
@@ -206,7 +222,7 @@ fn do_umount(target: &str, flags: u64) -> Result<(), String> {
 }
 
 /// Host build fallback: the native mount syscall cannot run off-target.
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 fn do_mount(
     _source: &str,
     _target: &str,
@@ -218,7 +234,7 @@ fn do_mount(
 }
 
 /// Host build fallback: the native umount syscall cannot run off-target.
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 fn do_umount(_target: &str, _flags: u64) -> Result<(), String> {
     Err("umount: native syscall unavailable on this host architecture".to_string())
 }

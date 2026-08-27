@@ -72,7 +72,7 @@ const PRIO_PROCESS: i32 = 0;
 /// Register mapping follows the Slate OS syscall ABI:
 ///   rax = syscall number, rdi = arg1, rsi = arg2, rdx = arg3
 ///   Return value in rax. rcx and r11 are clobbered by the CPU.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller ensures arguments are valid for the given syscall number.
@@ -93,10 +93,11 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
-// Fallback for non-x86_64 builds (allows type-checking on the host).
-#[cfg(not(target_arch = "x86_64"))]
+// Host stub — see the gated definition above. A development host has no
+// SlateOS kernel to ask, so answer ENOSYS rather than entering the host's.
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
-    -1
+    -38 // ENOSYS
 }
 
 // ============================================================================

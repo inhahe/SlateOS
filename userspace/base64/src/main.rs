@@ -6,8 +6,6 @@
 //! - `uuencode`: Traditional uuencoding
 //! - `uudecode`: Traditional uudecoding
 
-#![allow(unexpected_cfgs)]
-
 use quoting::quoteaf_os;
 use std::env;
 use std::fs;

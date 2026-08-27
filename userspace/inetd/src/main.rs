@@ -109,7 +109,7 @@ const SYS_UDP_RX_READY: u64 = 847;
 /// # Safety
 ///
 /// The caller must ensure `nr` is a valid syscall number.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall0(nr: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees nr is valid. The `syscall` instruction
@@ -132,7 +132,7 @@ unsafe fn syscall0(nr: u64) -> i64 {
 ///
 /// The caller must ensure `nr` is a valid syscall number and `a1` is valid
 /// for the specific syscall.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid.
@@ -155,7 +155,7 @@ unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
 ///
 /// The caller must ensure `nr` is a valid syscall number and all arguments
 /// are valid for the specific syscall.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid.
@@ -180,7 +180,7 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 ///
 /// The caller must ensure `nr` is a valid syscall number and all arguments
 /// are valid for the specific syscall.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid. r10 carries arg3 per
@@ -207,7 +207,7 @@ unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
 ///
 /// The caller must ensure `nr` is a valid syscall number and all arguments
 /// are valid for the specific syscall.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid. Uses the full 5-argument
@@ -229,26 +229,27 @@ unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 
     ret
 }
 
-// Stubs for non-x86_64 targets (keeps tests compiling on the host).
-#[cfg(not(target_arch = "x86_64"))]
+// Host stubs — see the gated definitions above. A development host has no
+// SlateOS kernel to ask, so answer ENOSYS rather than entering the host's.
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall0(_nr: u64) -> i64 {
-    -1
+    -38 // ENOSYS
 }
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall1(_nr: u64, _a1: u64) -> i64 {
-    -1
+    -38 // ENOSYS
 }
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
-    -1
+    -38 // ENOSYS
 }
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall4(_nr: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64) -> i64 {
-    -1
+    -38 // ENOSYS
 }
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall5(_nr: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64) -> i64 {
-    -1
+    -38 // ENOSYS
 }
 
 // ============================================================================

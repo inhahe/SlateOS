@@ -198,6 +198,31 @@ pub struct ZipEntry {
     pub local_header_offset: u64,
     /// True if this entry represents a directory (name ends with `/`).
     pub is_dir: bool,
+    /// Last-modified time, as the MS-DOS date/time pair the central directory
+    /// stores it in: `(date << 16) | time`.
+    ///
+    /// Raw and undecoded on purpose.  Turning this into anything
+    /// calendar-shaped means owning a calendar — leap years, the 1980 epoch,
+    /// and a local time with no zone recorded (which is a property of the ZIP
+    /// format, not a defect to paper over).  A `no_std` archive parser should
+    /// not carry that; the caller that wants a date already has a date
+    /// library.
+    ///
+    /// | field | bits | meaning |
+    /// |---|---|---|
+    /// | time | 0–4 | seconds / 2 (0–29) |
+    /// | | 5–10 | minute (0–59) |
+    /// | | 11–15 | hour (0–23) |
+    /// | date | 0–4 | day of month (1–31) |
+    /// | | 5–8 | month (1–12) |
+    /// | | 9–15 | year − 1980 |
+    ///
+    /// **`0` means the archive recorded no time**, and is distinct from any
+    /// real instant: a zero date is day 0 of month 0, which is not a date at
+    /// all.  Render it as "unknown", not as 1980-01-01 — those are different
+    /// facts.  Archives written by [`create`] carry `0`, because
+    /// [`ZipWriteEntry`] has no field to carry a real one.
+    pub dos_datetime: u32,
 }
 
 /// An entry to be written into a new ZIP archive.
@@ -337,6 +362,14 @@ pub fn parse(data: &[u8]) -> Result<Vec<ZipEntry>> {
         }
 
         let method = le_u16(data, off.wrapping_add(10));
+        // The two halves are stored as separate little-endian `u16`s, time
+        // first at +12 and date at +14, and are combined `(date << 16) | time`
+        // -- the order that makes the whole `u32` compare chronologically, and
+        // the layout MS-DOS itself used.  Not decoded here: turning this into a
+        // calendar date needs a calendar, and this crate is `no_std` and has no
+        // business acquiring one.  See `ZipEntry::dos_datetime`.
+        let dos_datetime = (u32::from(le_u16(data, off.wrapping_add(14))) << 16)
+            | u32::from(le_u16(data, off.wrapping_add(12)));
         let crc32 = le_u32(data, off.wrapping_add(16));
         let comp32 = le_u32(data, off.wrapping_add(20));
         let uncomp32 = le_u32(data, off.wrapping_add(24));
@@ -370,6 +403,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<ZipEntry>> {
             uncompressed_size,
             local_header_offset,
             is_dir,
+            dos_datetime,
         });
 
         off = off
@@ -558,8 +592,28 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
         write_u16(&mut archive, if need_zip64 { 45 } else { 20 }); // version needed
         write_u16(&mut archive, 0); // general purpose bit flag
         write_u16(&mut archive, method);
-        write_u16(&mut archive, 0); // mod time
-        write_u16(&mut archive, 0x0021); // mod date (1980-01-01)
+        // Both halves zero: "no modification time recorded".
+        //
+        // This used to write date `0x0021`, which looks like an absent value
+        // and is not one -- it is the DOS *minimum* date, year bits 0 (= 1980),
+        // month 1, day 1.  Every member of every archive SlateOS produced was
+        // therefore stamped 1980-01-01 00:00:00, a timestamp for a file whose
+        // time we never looked at.  A reader has no way to tell that apart from
+        // a file genuinely last written on that day, so it is a fabricated
+        // measurement, not a placeholder.
+        //
+        // Zero is the encoding for "none": it is day 0 of month 0, which is not
+        // a representable date, so it cannot be mistaken for one.  A UI can then
+        // render it as unknown rather than as a wrong date.  The cost is stated
+        // in design-decisions.md §618 -- a tool that converts eagerly may show
+        // garbage for it (Python's `zipfile` yields `(1980, 0, 0, 0, 0, 0)`),
+        // which is preferable to minting a time that was never measured.
+        //
+        // The real fix is to carry the file's actual mtime; `ZipWriteEntry` has
+        // no field for one yet. See
+        // requests/a-c-ziparchive-has-your-mtime-field-and-a-question-about-the-writer.md
+        write_u16(&mut archive, 0); // mod time -- not recorded
+        write_u16(&mut archive, 0); // mod date -- not recorded
         write_u32(&mut archive, crc32);
         write_u32(&mut archive, comp32);
         write_u32(&mut archive, uncomp32);
@@ -606,8 +660,12 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
         write_u16(&mut archive, if rec.need_zip64 { 45 } else { 20 }); // version needed
         write_u16(&mut archive, 0); // bit flag
         write_u16(&mut archive, rec.method);
-        write_u16(&mut archive, 0); // mod time
-        write_u16(&mut archive, 0x0021); // mod date
+        // Must match the local header written above, byte for byte -- a reader
+        // that trusts one and validates against the other would otherwise call
+        // our archives inconsistent.  See the local-header comment for why zero
+        // rather than the DOS minimum date.
+        write_u16(&mut archive, 0); // mod time -- not recorded
+        write_u16(&mut archive, 0); // mod date -- not recorded
         write_u32(&mut archive, rec.crc32);
         write_u32(&mut archive, comp32);
         write_u32(&mut archive, uncomp32);
@@ -904,5 +962,94 @@ mod tests {
                 .expect("extract")
                 .is_empty()
         );
+    }
+
+    /// Byte offset of the first central-directory header in `archive`.
+    ///
+    /// Found by scanning for the signature rather than by reading the EOCD,
+    /// so a test that patches central-header bytes does not depend on the
+    /// same offset arithmetic it is trying to check.
+    fn first_central_header(archive: &[u8]) -> usize {
+        archive
+            .windows(4)
+            .position(|w| w == CENTRAL_SIG.to_le_bytes())
+            .expect("archive must contain a central directory header")
+    }
+
+    #[test]
+    fn created_archives_record_no_time_rather_than_1980() {
+        let archive = one(b"t.txt", b"x", true);
+        let parsed = parse(&archive).expect("parse");
+
+        // The regression this guards: the writer used to emit date `0x0021`,
+        // which is not "absent" but the DOS minimum date, 1980-01-01.  Every
+        // member of every archive we produced carried that timestamp, and a
+        // reader could not distinguish it from a file genuinely written then.
+        assert_eq!(
+            parsed[0].dos_datetime, 0,
+            "create() must record no time, not a minted one"
+        );
+
+        // Specifically not the old value, so a revert is named by the failure.
+        assert_ne!(
+            parsed[0].dos_datetime,
+            0x0021 << 16,
+            "0x0021 is 1980-01-01, the DOS minimum date -- not an absent value"
+        );
+    }
+
+    #[test]
+    fn local_and_central_headers_agree_on_the_absent_time() {
+        // A reader may take the time from either header.  If they disagreed,
+        // our archives would be internally inconsistent, and which time a tool
+        // showed would depend on which header it happened to trust.
+        let archive = one(b"t.txt", b"x", true);
+        let central = first_central_header(&archive);
+
+        // Local header is at offset 0 for a single-entry archive; time at +10,
+        // date at +12.  Central header: time at +12, date at +14.
+        let local_pair = &archive[10..14];
+        let central_pair = &archive[central + 12..central + 16];
+        assert_eq!(
+            local_pair, central_pair,
+            "local and central mod-time pairs must be identical"
+        );
+        assert_eq!(local_pair, &[0, 0, 0, 0], "both halves must be zero");
+    }
+
+    #[test]
+    fn a_recorded_time_is_read_back_from_the_central_directory() {
+        // `create` writes zero, so proving the *read* path needs an archive
+        // with a real pair in it.  Patch one in: this is the only place the
+        // crate is exercised against a third-party-style timestamp, which is
+        // what every archive not written by us will carry.
+        //
+        // 2026-08-26 14:30:52, built from the fields rather than hardcoded so
+        // the test states the encoding it is checking.
+        let time: u16 = (14 << 11) | (30 << 5) | (52 / 2);
+        let date: u16 = ((2026 - 1980) << 9) | (8 << 5) | 26;
+
+        let mut archive = one(b"t.txt", b"x", true);
+        let central = first_central_header(&archive);
+        archive[central + 12..central + 14].copy_from_slice(&time.to_le_bytes());
+        archive[central + 14..central + 16].copy_from_slice(&date.to_le_bytes());
+
+        let parsed = parse(&archive).expect("parse");
+        let got = parsed[0].dos_datetime;
+
+        // The documented packing: date in the high half, time in the low.
+        assert_eq!(got, (u32::from(date) << 16) | u32::from(time));
+
+        // And it decomposes back to the calendar fields it was built from,
+        // which is what a caller doing the conversion will actually do.
+        assert_eq!((got >> 25) & 0x7F, 2026 - 1980, "year - 1980");
+        assert_eq!((got >> 21) & 0x0F, 8, "month");
+        assert_eq!((got >> 16) & 0x1F, 26, "day");
+        assert_eq!((got >> 11) & 0x1F, 14, "hour");
+        assert_eq!((got >> 5) & 0x3F, 30, "minute");
+        assert_eq!((got & 0x1F) * 2, 52, "seconds, stored halved");
+
+        // A non-zero pair must not be confusable with the absent case.
+        assert_ne!(got, 0);
     }
 }

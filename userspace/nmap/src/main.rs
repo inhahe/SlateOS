@@ -84,7 +84,7 @@ const TCP_STATUS_IN_PROGRESS: i64 = 4;
 ///
 /// The caller must ensure `nr` is a valid syscall number and `a1` is valid
 /// for the specific syscall.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees all arguments are valid for `nr`.
@@ -102,13 +102,29 @@ unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
     ret
 }
 
+/// Host stub for `syscall1` — see the gated definition above.
+///
+/// On a development host there is no SlateOS kernel to talk to, and a raw
+/// `syscall` instruction does not fail cleanly: it enters whatever kernel is
+/// actually running, with this crate's SlateOS call number in RAX. Those
+/// numbers mean unrelated things elsewhere, so the call is not a no-op — it
+/// is someone else's syscall. Returning `ENOSYS` keeps `cargo test`, `cargo
+/// run` and `clippy` on the host honest instead of dangerous.
+///
+/// See known-issues.md
+/// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
+#[cfg(not(target_vendor = "slateos"))]
+unsafe fn syscall1(_nr: u64, _a1: u64) -> i64 {
+    -38 // ENOSYS
+}
+
 /// Issue a 3-argument syscall.
 ///
 /// # Safety
 ///
 /// The caller must ensure `nr` is a valid syscall number and all arguments
 /// are valid for the specific syscall.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees all arguments are valid for `nr`.
@@ -128,6 +144,22 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
+/// Host stub for `syscall3` — see the gated definition above.
+///
+/// On a development host there is no SlateOS kernel to talk to, and a raw
+/// `syscall` instruction does not fail cleanly: it enters whatever kernel is
+/// actually running, with this crate's SlateOS call number in RAX. Those
+/// numbers mean unrelated things elsewhere, so the call is not a no-op — it
+/// is someone else's syscall. Returning `ENOSYS` keeps `cargo test`, `cargo
+/// run` and `clippy` on the host honest instead of dangerous.
+///
+/// See known-issues.md
+/// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
+#[cfg(not(target_vendor = "slateos"))]
+unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
+    -38 // ENOSYS
+}
+
 /// Issue a 4-argument syscall.
 ///
 /// # Safety
@@ -137,7 +169,7 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 /// because `syscall` clobbers rcx.
 // syscall4 is part of the complete syscall ABI; kept for future use.
 #[allow(dead_code)]
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees all arguments are valid for `nr`.
@@ -168,11 +200,7 @@ fn tcp_connect_nonblock(ip: u32, port: u16) -> Result<u64, i64> {
     // SAFETY: SYS_TCP_CONNECT takes three scalar arguments; arg3=1 requests
     // non-blocking mode. No pointer dereferences in userspace.
     let ret = unsafe { syscall3(SYS_TCP_CONNECT, u64::from(ip), u64::from(port), 1) };
-    if ret < 0 {
-        Err(ret)
-    } else {
-        Ok(ret as u64)
-    }
+    if ret < 0 { Err(ret) } else { Ok(ret as u64) }
 }
 
 /// Close a TCP connection identified by `handle`.
@@ -191,13 +219,27 @@ fn tcp_poll_status(handle: u64) -> i64 {
 /// Returns the number of bytes read, or a negative error code.
 fn tcp_recv(handle: u64, buf: &mut [u8]) -> i64 {
     // SAFETY: handle is valid, buf pointer and len come from a live Rust slice.
-    unsafe { syscall3(SYS_TCP_RECV, handle, buf.as_mut_ptr() as u64, buf.len() as u64) }
+    unsafe {
+        syscall3(
+            SYS_TCP_RECV,
+            handle,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    }
 }
 
 /// Send `data` on `handle`. Returns bytes sent or negative error code.
 fn tcp_send(handle: u64, data: &[u8]) -> i64 {
     // SAFETY: handle is valid, data pointer and len come from a live Rust slice.
-    unsafe { syscall3(SYS_TCP_SEND, handle, data.as_ptr() as u64, data.len() as u64) }
+    unsafe {
+        syscall3(
+            SYS_TCP_SEND,
+            handle,
+            data.as_ptr() as u64,
+            data.len() as u64,
+        )
+    }
 }
 
 /// Send an ICMP echo request to `ip` with sequence number `seq`.
@@ -205,11 +247,7 @@ fn tcp_send(handle: u64, data: &[u8]) -> i64 {
 fn icmp_send(ip: u32, seq: u16) -> Result<(), i64> {
     // SAFETY: SYS_ICMP_SEND takes three scalar arguments; payload_size = 32.
     let ret = unsafe { syscall3(SYS_ICMP_SEND, u64::from(ip), u64::from(seq), 32) };
-    if ret < 0 {
-        Err(ret)
-    } else {
-        Ok(())
-    }
+    if ret < 0 { Err(ret) } else { Ok(()) }
 }
 
 /// Wait up to `timeout_ms` milliseconds for an ICMP echo reply.
@@ -233,11 +271,7 @@ fn dns_resolve(hostname: &str) -> Result<u32, i64> {
             (&raw mut result) as u64,
         )
     };
-    if ret < 0 {
-        Err(ret)
-    } else {
-        Ok(result)
-    }
+    if ret < 0 { Err(ret) } else { Ok(result) }
 }
 
 /// Sleep for `ms` milliseconds.
@@ -366,11 +400,11 @@ fn default_ports() -> Vec<u16> {
         481, 497, 500, 512, 513, 514, 515, 524, 541, 543, 544, 545, 548, 554, 555, 563, 587, 593,
         616, 617, 625, 631, 636, 646, 648, 666, 667, 668, 683, 687, 691, 700, 705, 711, 714, 720,
         722, 726, 749, 765, 777, 783, 787, 800, 801, 808, 843, 873, 880, 888, 898, 900, 901, 902,
-        903, 911, 912, 981, 987, 990, 992, 993, 995, 999, 1000, 1001, 1002, 1007, 1009, 1010,
-        1011, 1021, 1022, 1023, 1024, 1025, 1026, 1027, 1028, 1029, 1030, 1110, 1194, 1234, 1433,
-        1521, 1720, 1723, 1755, 1900, 2000, 2001, 2049, 2100, 2181, 3000, 3128, 3306, 3389, 3690,
-        4000, 4444, 4500, 5000, 5432, 5900, 6379, 6667, 7001, 8000, 8080, 8443, 8888, 9000, 9090,
-        9200, 9300, 9999, 10000, 27017,
+        903, 911, 912, 981, 987, 990, 992, 993, 995, 999, 1000, 1001, 1002, 1007, 1009, 1010, 1011,
+        1021, 1022, 1023, 1024, 1025, 1026, 1027, 1028, 1029, 1030, 1110, 1194, 1234, 1433, 1521,
+        1720, 1723, 1755, 1900, 2000, 2001, 2049, 2100, 2181, 3000, 3128, 3306, 3389, 3690, 4000,
+        4444, 4500, 5000, 5432, 5900, 6379, 6667, 7001, 8000, 8080, 8443, 8888, 9000, 9090, 9200,
+        9300, 9999, 10000, 27017,
     ]
 }
 
@@ -414,8 +448,7 @@ fn expand_target(spec: &str) -> Result<(String, Vec<u32>), String> {
         if prefix > 32 {
             return Err(format!("CIDR prefix /{prefix} out of range"));
         }
-        let base_ip = parse_ipv4(ip_str)
-            .ok_or_else(|| format!("invalid IP in CIDR: {ip_str}"))?;
+        let base_ip = parse_ipv4(ip_str).ok_or_else(|| format!("invalid IP in CIDR: {ip_str}"))?;
         let mask = if prefix == 0 {
             0u32
         } else {
@@ -941,12 +974,7 @@ fn guess_os_from_ttl(rtt_raw: i64) -> Option<String> {
 
 /// Scan a list of ports on `ip` using TCP connect probes.
 /// Processes ports in batches of `timing.max_parallel`.
-fn scan_ports(
-    ip: u32,
-    ports: &[u16],
-    timing: &Timing,
-    version_detect: bool,
-) -> Vec<PortResult> {
+fn scan_ports(ip: u32, ports: &[u16], timing: &Timing, version_detect: bool) -> Vec<PortResult> {
     let mut results = Vec::with_capacity(ports.len());
 
     let chunk_size = timing.max_parallel.max(1);
@@ -967,8 +995,8 @@ fn scan_ports(
         }
 
         // Poll all handles until they resolve or timeout.
-        let deadline = clock_nanos()
-            .saturating_add(timing.connect_timeout_ms.saturating_mul(1_000_000));
+        let deadline =
+            clock_nanos().saturating_add(timing.connect_timeout_ms.saturating_mul(1_000_000));
 
         // Track which handles are still pending.
         let mut pending: Vec<(u16, u64, PortState)> = handles
@@ -1020,9 +1048,7 @@ fn scan_ports(
         }
 
         // Close any still-pending handles (timeout hit).
-        for ((_, handle, state), resolved_flag) in
-            pending.iter_mut().zip(resolved.iter())
-        {
+        for ((_, handle, state), resolved_flag) in pending.iter_mut().zip(resolved.iter()) {
             if !*resolved_flag {
                 *state = PortState::Filtered;
                 tcp_close(*handle);
@@ -1067,12 +1093,7 @@ fn fmt_header() -> String {
 fn fmt_port_row(pr: &PortResult) -> String {
     let svc = service_name(pr.port);
     let port_label = format!("{}/tcp", pr.port);
-    let base = format!(
-        "{:<10} {:<12} {}",
-        port_label,
-        pr.state.as_str(),
-        svc
-    );
+    let base = format!("{:<10} {:<12} {}", port_label, pr.state.as_str(), svc);
     if let Some(ref banner) = pr.banner {
         format!("{base}  [{banner}]\n")
     } else {
@@ -1081,11 +1102,7 @@ fn fmt_port_row(pr: &PortResult) -> String {
 }
 
 /// Format the full result for one host.
-fn fmt_host_result(
-    host: &HostResult,
-    cfg: &Config,
-    scan_type: ScanType,
-) -> String {
+fn fmt_host_result(host: &HostResult, cfg: &Config, scan_type: ScanType) -> String {
     let mut s = String::new();
 
     // Host header — show both display name and raw IP when they differ.
@@ -1623,7 +1640,12 @@ mod tests {
 
     #[test]
     fn test_parse_args_port_spec() {
-        let args: Vec<String> = vec!["nmap".into(), "-p".into(), "22,80".into(), "10.0.0.1".into()];
+        let args: Vec<String> = vec![
+            "nmap".into(),
+            "-p".into(),
+            "22,80".into(),
+            "10.0.0.1".into(),
+        ];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.ports.contains(&22));
         assert!(cfg.ports.contains(&80));

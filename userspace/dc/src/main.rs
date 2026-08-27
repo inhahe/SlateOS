@@ -36,8 +36,6 @@
 //! be discarded without owing anyone a value, which in a language of
 //! stack-machine commands is one command.
 
-#![allow(unexpected_cfgs)]
-
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};

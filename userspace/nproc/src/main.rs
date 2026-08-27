@@ -8,8 +8,6 @@
 //! - `users`: Print logged-in user names
 //! - `tty`: Print the terminal name
 
-#![allow(unexpected_cfgs)]
-
 use std::env;
 use std::fs;
 use std::process;
@@ -27,10 +25,7 @@ enum Mode {
 }
 
 fn detect_mode(argv0: &str) -> Mode {
-    let name = argv0
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(argv0);
+    let name = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
     let lower = name.to_ascii_lowercase();
     match lower.as_str() {
@@ -64,7 +59,8 @@ fn run_nproc() -> Result<(), String> {
             "--all" => all = true,
             _ if argv[i].starts_with("--ignore=") => {
                 let val = &argv[i]["--ignore=".len()..];
-                ignore = val.parse::<u32>()
+                ignore = val
+                    .parse::<u32>()
                     .map_err(|_| format!("invalid number: '{val}'"))?;
             }
             "--ignore" => {
@@ -72,7 +68,8 @@ fn run_nproc() -> Result<(), String> {
                 if i >= argv.len() {
                     return Err("option '--ignore' requires an argument".to_string());
                 }
-                ignore = argv[i].parse::<u32>()
+                ignore = argv[i]
+                    .parse::<u32>()
                     .map_err(|_| format!("invalid number: '{}'", argv[i]))?;
             }
             _ => {}
@@ -94,7 +91,8 @@ fn run_nproc() -> Result<(), String> {
 fn get_total_cpus() -> u32 {
     // Try /proc/cpuinfo
     if let Ok(content) = fs::read_to_string("/proc/cpuinfo") {
-        let count = content.lines()
+        let count = content
+            .lines()
             .filter(|line| line.starts_with("processor"))
             .count();
         if count > 0 {
@@ -104,15 +102,17 @@ fn get_total_cpus() -> u32 {
 
     // Try /sys/devices/system/cpu/present
     if let Ok(content) = fs::read_to_string("/sys/devices/system/cpu/present")
-        && let Some(count) = parse_cpu_range(content.trim()) {
-            return count;
-        }
+        && let Some(count) = parse_cpu_range(content.trim())
+    {
+        return count;
+    }
 
     // Try NPROCESSORS_CONF env var
     if let Ok(val) = env::var("NPROCESSORS_CONF")
-        && let Ok(n) = val.parse::<u32>() {
-            return n;
-        }
+        && let Ok(n) = val.parse::<u32>()
+    {
+        return n;
+    }
 
     1 // Default
 }
@@ -120,15 +120,17 @@ fn get_total_cpus() -> u32 {
 fn get_available_cpus() -> u32 {
     // Try /sys/devices/system/cpu/online
     if let Ok(content) = fs::read_to_string("/sys/devices/system/cpu/online")
-        && let Some(count) = parse_cpu_range(content.trim()) {
-            return count;
-        }
+        && let Some(count) = parse_cpu_range(content.trim())
+    {
+        return count;
+    }
 
     // Try NPROCESSORS_ONLN or OMP_NUM_THREADS env var
     if let Ok(val) = env::var("OMP_NUM_THREADS")
-        && let Ok(n) = val.parse::<u32>() {
-            return n;
-        }
+        && let Ok(n) = val.parse::<u32>()
+    {
+        return n;
+    }
 
     get_total_cpus()
 }
@@ -173,9 +175,10 @@ fn get_arch() -> String {
     if let Ok(content) = fs::read_to_string("/proc/cpuinfo") {
         for line in content.lines() {
             if (line.starts_with("model name") || line.starts_with("cpu family"))
-                && (line.contains("x86_64") || line.contains("AMD64")) {
-                    return "x86_64".to_string();
-                }
+                && (line.contains("x86_64") || line.contains("AMD64"))
+            {
+                return "x86_64".to_string();
+            }
         }
     }
 
@@ -247,10 +250,14 @@ fn check_path(path: &str, portability: bool, posix_check: bool) -> Result<(), St
 
     // POSIX limits
     let path_max = 4096usize; // Our OS PATH_MAX
-    let name_max = 255usize;  // Our OS NAME_MAX
+    let name_max = 255usize; // Our OS NAME_MAX
 
     if path.len() > path_max {
-        return Err(format!("path '{}' is too long ({} > {path_max})", path, path.len()));
+        return Err(format!(
+            "path '{}' is too long ({} > {path_max})",
+            path,
+            path.len()
+        ));
     }
 
     for component in path.split('/') {
@@ -269,21 +276,17 @@ fn check_path(path: &str, portability: bool, posix_check: bool) -> Result<(), St
         if portability {
             for c in component.chars() {
                 if !is_portable_char(c) && c != '/' {
-                    return Err(format!(
-                        "nonportable character '{}' in path '{}'",
-                        c, path
-                    ));
+                    return Err(format!("nonportable character '{}' in path '{}'", c, path));
                 }
             }
         }
 
-        if posix_check
-            && component.starts_with('-') {
-                return Err(format!(
-                    "leading dash in component '{}' of path '{}'",
-                    component, path
-                ));
-            }
+        if posix_check && component.starts_with('-') {
+            return Err(format!(
+                "leading dash in component '{}' of path '{}'",
+                component, path
+            ));
+        }
 
         // Check for null bytes
         if component.contains('\0') {
@@ -306,15 +309,17 @@ fn run_logname() -> Result<(), String> {
 
     // Try LOGNAME, then USER, then /etc/passwd lookup via uid
     if let Ok(name) = env::var("LOGNAME")
-        && !name.is_empty() {
-            println!("{name}");
-            return Ok(());
-        }
+        && !name.is_empty()
+    {
+        println!("{name}");
+        return Ok(());
+    }
     if let Ok(name) = env::var("USER")
-        && !name.is_empty() {
-            println!("{name}");
-            return Ok(());
-        }
+        && !name.is_empty()
+    {
+        println!("{name}");
+        return Ok(());
+    }
 
     Err("no login name".to_string())
 }
@@ -426,15 +431,17 @@ fn get_tty_name() -> Option<String> {
 
     // Try TTY env var
     if let Ok(tty) = env::var("TTY")
-        && !tty.is_empty() {
-            return Some(tty);
-        }
+        && !tty.is_empty()
+    {
+        return Some(tty);
+    }
 
     // Try GPG_TTY
     if let Ok(tty) = env::var("GPG_TTY")
-        && !tty.is_empty() {
-            return Some(tty);
-        }
+        && !tty.is_empty()
+    {
+        return Some(tty);
+    }
 
     None
 }
@@ -458,10 +465,7 @@ fn run() -> Result<(), String> {
 fn main() {
     if let Err(e) = run() {
         let prog = env::args().next().unwrap_or_else(|| "nproc".to_string());
-        let name = prog
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(&prog);
+        let name = prog.rsplit(['/', '\\']).next().unwrap_or(&prog);
         eprintln!("{name}: {e}");
         process::exit(1);
     }

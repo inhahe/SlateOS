@@ -68,7 +68,7 @@ mod cfg_mask {
     pub const GATEWAY: u8 = 1 << 2;
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     unsafe {
@@ -84,6 +84,22 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
         );
     }
     ret
+}
+
+/// Host stub for `syscall3` — see the gated definition above.
+///
+/// On a development host there is no SlateOS kernel to talk to, and a raw
+/// `syscall` instruction does not fail cleanly: it enters whatever kernel is
+/// actually running, with this crate's SlateOS call number in RAX. Those
+/// numbers mean unrelated things elsewhere, so the call is not a no-op — it
+/// is someone else's syscall. Returning `ENOSYS` keeps `cargo test`, `cargo
+/// run` and `clippy` on the host honest instead of dangerous.
+///
+/// See known-issues.md
+/// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
+#[cfg(not(target_vendor = "slateos"))]
+unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
+    -38 // ENOSYS
 }
 
 /// Build the 18-byte `SYS_NET_IF_CONFIG` record that sets the default gateway.
@@ -153,7 +169,14 @@ fn net_route_del(rec: &[u8; ROUTE_DEL_SIZE]) -> i64 {
 fn net_route_list(buf: &mut [u8]) -> i64 {
     // SAFETY: `buf` is a valid writable slice of `buf.len()` bytes; the kernel
     // writes at most `buf.len()` bytes (whole 16-byte records only).
-    unsafe { syscall3(SYS_NET_ROUTE_LIST, buf.as_mut_ptr() as u64, buf.len() as u64, 0) }
+    unsafe {
+        syscall3(
+            SYS_NET_ROUTE_LIST,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            0,
+        )
+    }
 }
 
 /// Decode one 16-byte route record into host-order (dest, mask, gateway,
@@ -336,7 +359,14 @@ fn query_net_if_info() -> Option<NetIfInfo> {
     let mut buf = [0u8; NET_IF_INFO_SIZE];
     // SAFETY: `buf` is exactly NET_IF_INFO_SIZE bytes, satisfying the kernel's
     // minimum-length contract; the kernel writes at most that many bytes.
-    let ret = unsafe { syscall3(SYS_NET_IF_INFO, buf.as_mut_ptr() as u64, buf.len() as u64, 0) };
+    let ret = unsafe {
+        syscall3(
+            SYS_NET_IF_INFO,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            0,
+        )
+    };
     if ret < 0 {
         return None;
     }
@@ -425,40 +455,41 @@ fn read_routes() -> Vec<RouteEntry> {
 
     // Try /sys/net/routes as fallback.
     if routes.is_empty()
-        && let Ok(content) = fs::read_to_string("/sys/net/routes") {
-            for line in content.lines() {
-                let fields: Vec<&str> = line.split_whitespace().collect();
-                if fields.len() < 5 {
-                    continue;
-                }
-                // Format: dest/prefix gateway metric flags iface
-                let dest_str = fields[0];
-                let (dest, mask) = if let Some(slash) = dest_str.find('/') {
-                    let ip = parse_ipv4(&dest_str[..slash]).unwrap_or(0);
-                    let prefix: u32 = dest_str[slash + 1..].parse().unwrap_or(0);
-                    (ip, cidr_to_mask(prefix))
-                } else if dest_str == "default" {
-                    (0, 0)
-                } else {
-                    (parse_ipv4(dest_str).unwrap_or(0), 0xFFFF_FFFF)
-                };
-                let gw = parse_ipv4(fields[1]).unwrap_or(0);
-                let metric = fields[2].parse::<u32>().unwrap_or(0);
-                let flags_val = fields[3].parse::<u16>().unwrap_or(RTF_UP);
-                let iface = fields[4].to_string();
-
-                routes.push(RouteEntry {
-                    destination: dest,
-                    gateway: gw,
-                    genmask: mask,
-                    flags: flags_val,
-                    metric,
-                    refcnt: 0,
-                    use_count: 0,
-                    iface,
-                });
+        && let Ok(content) = fs::read_to_string("/sys/net/routes")
+    {
+        for line in content.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 5 {
+                continue;
             }
+            // Format: dest/prefix gateway metric flags iface
+            let dest_str = fields[0];
+            let (dest, mask) = if let Some(slash) = dest_str.find('/') {
+                let ip = parse_ipv4(&dest_str[..slash]).unwrap_or(0);
+                let prefix: u32 = dest_str[slash + 1..].parse().unwrap_or(0);
+                (ip, cidr_to_mask(prefix))
+            } else if dest_str == "default" {
+                (0, 0)
+            } else {
+                (parse_ipv4(dest_str).unwrap_or(0), 0xFFFF_FFFF)
+            };
+            let gw = parse_ipv4(fields[1]).unwrap_or(0);
+            let metric = fields[2].parse::<u32>().unwrap_or(0);
+            let flags_val = fields[3].parse::<u16>().unwrap_or(RTF_UP);
+            let iface = fields[4].to_string();
+
+            routes.push(RouteEntry {
+                destination: dest,
+                gateway: gw,
+                genmask: mask,
+                flags: flags_val,
+                metric,
+                refcnt: 0,
+                use_count: 0,
+                iface,
+            });
         }
+    }
 
     // If we still have nothing, create a synthetic default.
     if routes.is_empty() {
@@ -606,7 +637,10 @@ fn add_route(dest: u32, mask: u32, gateway: u32, metric: u32, _is_host: bool) {
         let ret = net_if_config(&rec);
         if ret < 0 {
             config_fail(
-                &format!("SIOCADDRT: failed to add default route via {}", ip_to_string(gateway)),
+                &format!(
+                    "SIOCADDRT: failed to add default route via {}",
+                    ip_to_string(gateway)
+                ),
                 ret,
             );
         }
@@ -792,7 +826,11 @@ fn main() {
                 return;
             }
             "add" | "del" | "delete" | "flush" => {
-                action = Some(if args[idx] == "delete" { "del" } else { &args[idx] });
+                action = Some(if args[idx] == "delete" {
+                    "del"
+                } else {
+                    &args[idx]
+                });
                 idx += 1;
                 break;
             }
@@ -1112,8 +1150,8 @@ mod tests {
     #[test]
     fn test_synth_routes_connected_and_default() {
         let info = NetIfInfo {
-            ip: 0x0A00020F,     // 10.0.2.15
-            mask: 0xFFFFFF00,   // /24
+            ip: 0x0A00020F,      // 10.0.2.15
+            mask: 0xFFFFFF00,    // /24
             gateway: 0x0A000202, // 10.0.2.2
         };
         let routes = synth_routes_from_net_if_info(&info);

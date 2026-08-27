@@ -46,12 +46,24 @@ use std::process;
 // native SYSCALL convention (rax=nr, rdi/rsi/rdx/r10/r8/r9 = arg0..arg5).
 
 /// `SYS_FS_MOUNT` — mount a filesystem at a target path.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const SYS_FS_MOUNT: u64 = 652;
 
 /// `SYS_FS_UMOUNT` — unmount the filesystem at a target path.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const SYS_FS_UMOUNT: u64 = 653;
 
 /// Translate a negative kernel error code into a human-readable message.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 fn kernel_errstr(code: i64) -> &'static str {
     match code {
         -2 => "operation not supported (unknown or unsupported filesystem type)",
@@ -71,16 +83,8 @@ fn kernel_errstr(code: i64) -> &'static str {
 /// Uses the SlateOS native SYSCALL convention: number in `rax`, arguments in
 /// `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. `rcx`/`r11` are clobbered by the
 /// `syscall` instruction itself.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall6(
-    nr: u64,
-    a1: u64,
-    a2: u64,
-    a3: u64,
-    a4: u64,
-    a5: u64,
-    a6: u64,
-) -> i64 {
+#[cfg(target_vendor = "slateos")]
+unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
     let ret: i64;
     // SAFETY: the caller guarantees that any pointer arguments reference
     // live, correctly-sized buffers for the duration of the call. The kernel
@@ -106,6 +110,10 @@ unsafe fn syscall6(
 /// Map a kernel fstype hint to the canonical string the kernel mount
 /// dispatcher recognises. Returns `None` for "auto"/unknown — the kernel
 /// has no auto-detection, so the caller must specify a type.
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 fn canonical_fstype(fstype: &str) -> Option<&'static str> {
     match fstype {
         "ext4" => Some("ext4"),
@@ -124,8 +132,14 @@ fn canonical_fstype(fstype: &str) -> Option<&'static str> {
 /// `flags`/`data` are accepted for command-line compatibility but the kernel
 /// ABI does not yet carry mount options, so unsupported flags (bind, remount)
 /// are rejected up front rather than silently ignored.
-#[cfg(target_arch = "x86_64")]
-fn do_mount(source: &str, target: &str, fstype: &str, flags: u64, _data: &str) -> Result<(), String> {
+#[cfg(target_vendor = "slateos")]
+fn do_mount(
+    source: &str,
+    target: &str,
+    fstype: &str,
+    flags: u64,
+    _data: &str,
+) -> Result<(), String> {
     if flags & MS_BIND != 0 {
         return Err("mount: bind mounts are not supported by the kernel ABI".to_string());
     }
@@ -180,7 +194,7 @@ fn do_mount(source: &str, target: &str, fstype: &str, flags: u64, _data: &str) -
 ///
 /// `flags` (force/lazy) are accepted for command-line compatibility but the
 /// kernel performs a plain unmount; force/lazy semantics are not yet wired.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 fn do_umount(target: &str, flags: u64) -> Result<(), String> {
     if flags & (MNT_FORCE | MNT_DETACH) != 0 {
         eprintln!("umount: warning: force/lazy unmount not supported; performing a normal unmount");
@@ -190,7 +204,15 @@ fn do_umount(target: &str, flags: u64) -> Result<(), String> {
     // SAFETY: `tgt` stays live across the call; the kernel validates the
     // pointer+length before reading user memory.
     let ret = unsafe {
-        syscall6(SYS_FS_UMOUNT, tgt.as_ptr() as u64, tgt.len() as u64, 0, 0, 0, 0)
+        syscall6(
+            SYS_FS_UMOUNT,
+            tgt.as_ptr() as u64,
+            tgt.len() as u64,
+            0,
+            0,
+            0,
+            0,
+        )
     };
 
     if ret < 0 {
@@ -200,13 +222,19 @@ fn do_umount(target: &str, flags: u64) -> Result<(), String> {
 }
 
 /// Host build fallback: the native mount syscall cannot run off-target.
-#[cfg(not(target_arch = "x86_64"))]
-fn do_mount(_source: &str, _target: &str, _fstype: &str, _flags: u64, _data: &str) -> Result<(), String> {
+#[cfg(not(target_vendor = "slateos"))]
+fn do_mount(
+    _source: &str,
+    _target: &str,
+    _fstype: &str,
+    _flags: u64,
+    _data: &str,
+) -> Result<(), String> {
     Err("mount: native syscall unavailable on this host architecture".to_string())
 }
 
 /// Host build fallback: the native umount syscall cannot run off-target.
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 fn do_umount(_target: &str, _flags: u64) -> Result<(), String> {
     Err("umount: native syscall unavailable on this host architecture".to_string())
 }
@@ -290,7 +318,10 @@ fn list_mounts() {
     }
 
     for m in &mounts {
-        println!("{} on {} type {} ({})", m.device, m.mount_point, m.fs_type, m.options);
+        println!(
+            "{} on {} type {} ({})",
+            m.device, m.mount_point, m.fs_type, m.options
+        );
     }
 }
 
@@ -359,15 +390,27 @@ fn mount_all() {
         }
 
         // Skip if already mounted.
-        if current_mounts.iter().any(|m| m.mount_point == entry.mount_point) {
+        if current_mounts
+            .iter()
+            .any(|m| m.mount_point == entry.mount_point)
+        {
             println!("  skip:  {} (already mounted)", entry.mount_point);
             continue;
         }
 
         let (flags, data) = parse_mount_options(&entry.options);
-        print!("  mount: {} on {} ({})... ", entry.device, entry.mount_point, entry.fs_type);
+        print!(
+            "  mount: {} on {} ({})... ",
+            entry.device, entry.mount_point, entry.fs_type
+        );
 
-        match do_mount(&entry.device, &entry.mount_point, &entry.fs_type, flags, &data) {
+        match do_mount(
+            &entry.device,
+            &entry.mount_point,
+            &entry.fs_type,
+            flags,
+            &data,
+        ) {
             Ok(()) => {
                 println!("ok");
                 success += 1;
@@ -414,9 +457,7 @@ fn print_usage() {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let progname = args.first()
-        .map(|s| s.as_str())
-        .unwrap_or("mount");
+    let progname = args.first().map(|s| s.as_str()).unwrap_or("mount");
 
     // Detect if invoked as "umount".
     let is_umount = progname.ends_with("umount");
@@ -533,7 +574,10 @@ fn main() {
             println!("{:<20} {:<20} {:<10} Options", "Device", "Mount", "Type");
             println!("{:<20} {:<20} {:<10} -------", "------", "-----", "----");
             for e in &entries {
-                println!("{:<20} {:<20} {:<10} {}", e.device, e.mount_point, e.fs_type, e.options);
+                println!(
+                    "{:<20} {:<20} {:<10} {}",
+                    e.device, e.mount_point, e.fs_type, e.options
+                );
             }
         }
         return;

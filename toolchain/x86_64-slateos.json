@@ -6,7 +6,7 @@
 
     "os": "linux",
     "env": "musl",
-    "vendor": "unknown",
+    "vendor": "slateos",
     "target-family": ["unix"],
     "target-pointer-width": 64,
 

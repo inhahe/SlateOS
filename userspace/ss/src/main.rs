@@ -335,8 +335,9 @@ fn parse_hex_ip(hex: &str) -> String {
     }
     if hex.len() == 32 {
         // IPv6
-        return format!("::{}",
-            &hex.chars()
+        return format!(
+            "::{}",
+            hex.chars()
                 .collect::<Vec<_>>()
                 .chunks(4)
                 .map(|chunk| chunk.iter().collect::<String>())
@@ -392,8 +393,14 @@ fn read_proc_net(path: &str, proto: SocketProto) -> Vec<SocketEntry> {
 
         // Parse queues
         let queues: Vec<&str> = fields[4].split(':').collect();
-        let send_q = queues.first().and_then(|s| u64::from_str_radix(s, 16).ok()).unwrap_or(0);
-        let recv_q = queues.get(1).and_then(|s| u64::from_str_radix(s, 16).ok()).unwrap_or(0);
+        let send_q = queues
+            .first()
+            .and_then(|s| u64::from_str_radix(s, 16).ok())
+            .unwrap_or(0);
+        let recv_q = queues
+            .get(1)
+            .and_then(|s| u64::from_str_radix(s, 16).ok())
+            .unwrap_or(0);
 
         entries.push(SocketEntry {
             proto,
@@ -501,7 +508,7 @@ const MAX_TCP_RECORDS: usize = 1024;
 // `syscall` instruction on the host build machine is undefined — so under
 // `cargo test` we compile the ENOSYS stub instead and the fallback returns
 // empty (the pure record decoders are unit-tested directly).
-#[cfg(all(target_arch = "x86_64", not(test)))]
+#[cfg(all(target_vendor = "slateos", not(test)))]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid for the given syscall.
@@ -521,8 +528,8 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
-// Stub for non-x86_64 hosts and for host test builds (see note above).
-#[cfg(any(not(target_arch = "x86_64"), test))]
+// Stub for development hosts and for host test builds (see note above).
+#[cfg(any(not(target_vendor = "slateos"), test))]
 unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     -38 // ENOSYS
 }
@@ -621,8 +628,7 @@ fn query_tcp_connections() -> Vec<SocketEntry> {
     let mut buf = vec![0u8; MAX_TCP_RECORDS * TCP_LIST_RECORD_SIZE];
     // SAFETY: buf is a valid writable slice; the kernel writes at most buf.len()
     // bytes and returns the number of 20-byte records written.
-    let ret =
-        unsafe { syscall3(SYS_TCP_LIST, buf.as_mut_ptr() as u64, buf.len() as u64, 0) };
+    let ret = unsafe { syscall3(SYS_TCP_LIST, buf.as_mut_ptr() as u64, buf.len() as u64, 0) };
     if ret < 0 {
         return Vec::new();
     }
@@ -636,13 +642,20 @@ fn query_tcp_listeners() -> Vec<SocketEntry> {
     let mut buf = vec![0u8; MAX_TCP_RECORDS * TCP_LISTENER_RECORD_SIZE];
     // SAFETY: as above; records are 4 bytes and the return is the count.
     let ret = unsafe {
-        syscall3(SYS_TCP_LISTENER_LIST, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
+        syscall3(
+            SYS_TCP_LISTENER_LIST,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            0,
+        )
     };
     if ret < 0 {
         return Vec::new();
     }
     let count = usize::try_from(ret).unwrap_or(0);
-    let byte_len = count.saturating_mul(TCP_LISTENER_RECORD_SIZE).min(buf.len());
+    let byte_len = count
+        .saturating_mul(TCP_LISTENER_RECORD_SIZE)
+        .min(buf.len());
     parse_tcp_listener_records(buf.get(..byte_len).unwrap_or(&[]))
 }
 
@@ -727,7 +740,10 @@ fn resolve_port(port: u16, proto: &str) -> String {
 
 fn print_summary(writer: &mut dyn Write) -> io::Result<()> {
     writeln!(writer, "Total: 0")?;
-    writeln!(writer, "TCP:   0 (estab 0, closed 0, orphaned 0, timewait 0)")?;
+    writeln!(
+        writer,
+        "TCP:   0 (estab 0, closed 0, orphaned 0, timewait 0)"
+    )?;
     writeln!(writer)?;
     writeln!(writer, "Transport Total   IP   IPv6")?;
     writeln!(writer, "RAW       0       0    0")?;
@@ -797,11 +813,7 @@ fn run_ss(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
         let state = entry.state.as_str();
 
         let local = if entry.proto == SocketProto::Unix {
-            entry
-                .unix_path
-                .as_deref()
-                .unwrap_or("*")
-                .to_string()
+            entry.unix_path.as_deref().unwrap_or("*").to_string()
         } else {
             format_addr_port(
                 &entry.local_addr,
@@ -823,10 +835,7 @@ fn run_ss(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
         };
 
         if cfg.show_extended {
-            let proc_str = entry
-                .process_name
-                .as_deref()
-                .unwrap_or("-");
+            let proc_str = entry.process_name.as_deref().unwrap_or("-");
             writeln!(
                 writer,
                 "{:<6} {:<10} {:>6} {:>6}  {:<22} {:<18} {:<8} {:<5} {}",
@@ -841,9 +850,7 @@ fn run_ss(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
                 entry.inode,
             )?;
         } else if cfg.show_processes {
-            let proc_str = if let (Some(pid), Some(name)) =
-                (&entry.pid, &entry.process_name)
-            {
+            let proc_str = if let (Some(pid), Some(name)) = (&entry.pid, &entry.process_name) {
                 format!("users:((\"{name}\",pid={pid}))")
             } else {
                 "-".to_string()
@@ -1127,7 +1134,10 @@ mod tests {
 
     #[test]
     fn test_socket_state_from_str() {
-        assert_eq!(SocketState::from_str("ESTABLISHED"), SocketState::Established);
+        assert_eq!(
+            SocketState::from_str("ESTABLISHED"),
+            SocketState::Established
+        );
         assert_eq!(SocketState::from_str("ESTAB"), SocketState::Established);
         assert_eq!(SocketState::from_str("LISTEN"), SocketState::Listen);
         assert_eq!(SocketState::from_str("TIME_WAIT"), SocketState::TimeWait);
@@ -1309,7 +1319,7 @@ mod tests {
             0x01, 0xBB, // local port 443 (BE)
             10, 0, 2, 2, // remote IP
             0xD4, 0x31, // remote port 54321 (BE)
-            4, // state = Established
+            4,    // state = Established
             0x03, 0x02, 0x01, // rx_buffered u24 LE
             0x06, 0x05, 0x04, // tx_buffered u24 LE
             0x01, // flags — ignored

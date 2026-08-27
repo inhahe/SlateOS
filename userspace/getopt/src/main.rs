@@ -6,8 +6,6 @@
 //! - `sync`: Flush filesystem buffers
 //! - `printenv`: Print environment variables
 
-#![allow(unexpected_cfgs)]
-
 use quoting::quoteaf_os;
 use std::env;
 use std::fs;
@@ -458,6 +456,51 @@ fn run_cksum() -> Result<(), String> {
 
 // ── sync ───────────────────────────────────────────────────────────
 
+// Flushing goes through the posix libc `sync`/`syncfs` symbols, never a
+// hand-rolled `syscall`.  This code used to issue raw syscall 162 — Linux's
+// `sync` number, which the native Slate OS table leaves unassigned (our sync is
+// `SYS_FS_SYNC = 641`), so on the real OS it would have failed with ENOSYS while
+// happening to work on a Linux development host.  `cfg(unix)` rather than
+// `cfg(target_vendor = "slateos")` because these are C symbols with the same
+// meaning on both, so a development host flushes for real instead of pretending.
+#[cfg(unix)]
+unsafe extern "C" {
+    /// posix libc `sync` — flush every mounted filesystem.
+    fn sync();
+    /// posix libc `syncfs` — flush the filesystem containing `fd`.
+    fn syncfs(fd: i32) -> i32;
+}
+
+/// Flush every mounted filesystem.
+fn sync_all_filesystems() -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `sync` takes no arguments, returns nothing, and cannot fail.
+        unsafe { sync() };
+    }
+    Ok(())
+}
+
+/// Flush the filesystem that contains `f`.
+#[cfg(unix)]
+fn sync_containing_filesystem(f: &fs::File) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: `AsRawFd` yields a descriptor that is open for the borrow of `f`.
+    let rc = unsafe { syncfs(f.as_raw_fd()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error().to_string())
+    }
+}
+
+/// Development-host fallback: without `syncfs`, flushing the file itself is the
+/// closest honest approximation, and is a subset of what `-f` promises.
+#[cfg(not(unix))]
+fn sync_containing_filesystem(f: &fs::File) -> Result<(), String> {
+    f.sync_all().map_err(|e| e.to_string())
+}
+
 fn run_sync() -> Result<(), String> {
     let argv: Vec<String> = env::args().collect();
     let mut data_only = false;
@@ -480,34 +523,27 @@ fn run_sync() -> Result<(), String> {
         }
     }
 
+    // Both narrow the sync; asking for both at once is contradictory.  GNU
+    // coreutils rejects it, and so do we rather than silently picking one.
+    if data_only && filesystem_only {
+        return Err("cannot specify both --data and --file-system".to_string());
+    }
+
     if files.is_empty() {
-        // Sync everything
-        #[cfg(target_os = "slateos")]
-        {
-            let ret: i64;
-            unsafe {
-                core::arch::asm!(
-                    "syscall",
-                    in("rax") 162u64, // SYS_SYNC
-                    lateout("rax") ret,
-                    lateout("rcx") _,
-                    lateout("r11") _,
-                );
-            }
-            if ret < 0 {
-                return Err(format!("sync failed: error {}", -ret));
-            }
+        // `-d`/`-f` name what to sync *about a file*, so without an operand
+        // there is nothing for them to mean.  Rejecting is what keeps the flags
+        // honest: accepting them here would silently widen the request to "sync
+        // everything", which is the opposite of what the user narrowed it to.
+        if data_only || filesystem_only {
+            return Err("--data/--file-system need at least one argument".to_string());
         }
-        #[cfg(not(target_os = "slateos"))]
-        {
-            let _ = (data_only, filesystem_only);
-            // No-op on non-SlateOS
-        }
+        sync_all_filesystems()?;
     } else {
-        // Sync specific files
         for file in &files {
             let f = fs::File::open(file).map_err(|e| format!("{file}: {e}"))?;
-            if data_only {
+            if filesystem_only {
+                sync_containing_filesystem(&f).map_err(|e| format!("{file}: {e}"))?;
+            } else if data_only {
                 f.sync_data().map_err(|e| format!("{file}: {e}"))?;
             } else {
                 f.sync_all().map_err(|e| format!("{file}: {e}"))?;

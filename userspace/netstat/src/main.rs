@@ -318,10 +318,16 @@ fn parse_proc_net_file(path: &str, protocol: &str, is_v6: bool) -> Vec<Connectio
         let (tx_queue, rx_queue) = parse_queue_pair(fields[4]);
 
         // fields[7] = uid
-        let uid = fields.get(7).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+        let uid = fields
+            .get(7)
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
 
         // fields[9] = inode
-        let inode = fields.get(9).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        let inode = fields
+            .get(9)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
 
         connections.push(Connection {
             protocol: protocol.to_string(),
@@ -398,9 +404,10 @@ fn build_inode_to_pid_map() -> HashMap<u64, (u32, String)> {
             if let Some(inode_str) = link_str
                 .strip_prefix("socket:[")
                 .and_then(|s| s.strip_suffix(']'))
-                && let Ok(inode) = inode_str.parse::<u64>() {
-                    map.insert(inode, (pid, comm.clone()));
-                }
+                && let Ok(inode) = inode_str.parse::<u64>()
+            {
+                map.insert(inode, (pid, comm.clone()));
+            }
         }
     }
 
@@ -425,9 +432,10 @@ fn parse_route_table() -> Vec<RouteEntry> {
             // Also try whitespace-split as a fallback.
             let ws_fields: Vec<&str> = line.split_whitespace().collect();
             if ws_fields.len() >= 8
-                && let Some(entry) = parse_route_fields(&ws_fields) {
-                    routes.push(entry);
-                }
+                && let Some(entry) = parse_route_fields(&ws_fields)
+            {
+                routes.push(entry);
+            }
             continue;
         }
         if let Some(entry) = parse_route_fields(&fields) {
@@ -568,24 +576,18 @@ fn parse_protocol_stats() -> HashMap<String, ProtoStats> {
             let headers: Vec<&str> = header_line.split_whitespace().collect();
             let values: Vec<&str> = value_line.split_whitespace().collect();
 
-            if headers.len() >= 2
-                && values.len() >= 2
-                && headers.len() == values.len()
-            {
+            if headers.len() >= 2 && values.len() >= 2 && headers.len() == values.len() {
                 // First element is protocol name with colon, e.g. "Tcp:"
                 let proto_hdr = headers[0].trim_end_matches(':');
                 let proto_val = values[0].trim_end_matches(':');
 
                 if proto_hdr == proto_val {
-                    let stats = all_stats
-                        .entry(proto_hdr.to_string())
-                        .or_default();
+                    let stats = all_stats.entry(proto_hdr.to_string()).or_default();
 
                     for j in 1..headers.len() {
-                        stats.entries.push((
-                            headers[j].to_string(),
-                            values[j].to_string(),
-                        ));
+                        stats
+                            .entries
+                            .push((headers[j].to_string(), values[j].to_string()));
                     }
                 }
             }
@@ -624,7 +626,7 @@ const NET_STAT_SIZE: usize = 48;
 /// Upper bound on records requested in one listing call.
 const MAX_TCP_RECORDS: usize = 1024;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid for the given syscall.
@@ -644,8 +646,9 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
-// Stub for non-x86_64 hosts (e.g. running tests on a non-x86_64 build machine).
-#[cfg(not(target_arch = "x86_64"))]
+// Host stub — see the gated definition above. A development host has no
+// SlateOS kernel to ask, so answer ENOSYS rather than entering the host's.
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     -38 // ENOSYS
 }
@@ -808,9 +811,7 @@ fn query_tcp_connections() -> Vec<Connection> {
     let mut buf = vec![0u8; MAX_TCP_RECORDS * TCP_LIST_RECORD_SIZE];
     // SAFETY: buf is a valid writable slice; the kernel writes at most buf.len()
     // bytes and returns the number of 20-byte records written.
-    let ret = unsafe {
-        syscall3(SYS_TCP_LIST, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
-    };
+    let ret = unsafe { syscall3(SYS_TCP_LIST, buf.as_mut_ptr() as u64, buf.len() as u64, 0) };
     if ret < 0 {
         return Vec::new();
     }
@@ -824,13 +825,20 @@ fn query_tcp_listeners() -> Vec<Connection> {
     let mut buf = vec![0u8; MAX_TCP_RECORDS * TCP_LISTENER_RECORD_SIZE];
     // SAFETY: as above; records are 4 bytes and the return is the count.
     let ret = unsafe {
-        syscall3(SYS_TCP_LISTENER_LIST, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
+        syscall3(
+            SYS_TCP_LISTENER_LIST,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            0,
+        )
     };
     if ret < 0 {
         return Vec::new();
     }
     let count = usize::try_from(ret).unwrap_or(0);
-    let byte_len = count.saturating_mul(TCP_LISTENER_RECORD_SIZE).min(buf.len());
+    let byte_len = count
+        .saturating_mul(TCP_LISTENER_RECORD_SIZE)
+        .min(buf.len());
     parse_tcp_listener_records(buf.get(..byte_len).unwrap_or(&[]))
 }
 
@@ -839,7 +847,12 @@ fn query_net_if_info_raw() -> Option<[u8; NET_IF_INFO_SIZE]> {
     let mut buf = [0u8; NET_IF_INFO_SIZE];
     // SAFETY: buf is exactly 24 bytes, satisfying the kernel's minimum length.
     let ret = unsafe {
-        syscall3(SYS_NET_IF_INFO, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
+        syscall3(
+            SYS_NET_IF_INFO,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            0,
+        )
     };
     if ret < 0 { None } else { Some(buf) }
 }
@@ -848,9 +861,7 @@ fn query_net_if_info_raw() -> Option<[u8; NET_IF_INFO_SIZE]> {
 fn query_net_stat_raw() -> Option<[u8; NET_STAT_SIZE]> {
     let mut buf = [0u8; NET_STAT_SIZE];
     // SAFETY: buf is exactly 48 bytes, the size the kernel writes.
-    let ret = unsafe {
-        syscall3(SYS_NET_STAT, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
-    };
+    let ret = unsafe { syscall3(SYS_NET_STAT, buf.as_mut_ptr() as u64, buf.len() as u64, 0) };
     if ret < 0 { None } else { Some(buf) }
 }
 
@@ -985,14 +996,8 @@ fn connections_to_json(connections: &[Connection]) -> String {
         out.push_str(&format!("    \"rx_queue\": {},\n", c.rx_queue));
         if let Some(pid) = c.pid {
             out.push_str(&format!("    \"pid\": {pid},\n"));
-            let prog = c
-                .program
-                .as_deref()
-                .unwrap_or("-");
-            out.push_str(&format!(
-                "    \"program\": \"{}\"\n",
-                json_escape(prog)
-            ));
+            let prog = c.program.as_deref().unwrap_or("-");
+            out.push_str(&format!("    \"program\": \"{}\"\n", json_escape(prog)));
         } else {
             out.push_str("    \"pid\": null,\n");
             out.push_str("    \"program\": null\n");
@@ -1023,10 +1028,7 @@ fn routes_to_json(routes: &[RouteEntry]) -> String {
             "    \"genmask\": \"{}\",\n",
             json_escape(&r.genmask)
         ));
-        out.push_str(&format!(
-            "    \"flags\": \"{}\",\n",
-            json_escape(&r.flags)
-        ));
+        out.push_str(&format!("    \"flags\": \"{}\",\n", json_escape(&r.flags)));
         out.push_str(&format!("    \"metric\": {},\n", r.metric));
         out.push_str(&format!(
             "    \"interface\": \"{}\"\n",
@@ -1102,11 +1104,7 @@ fn stats_to_json(all_stats: &HashMap<String, ProtoStats>) -> String {
 // Display: table-formatted output
 // ---------------------------------------------------------------------------
 
-fn print_connections(
-    stdout: &mut io::StdoutLock<'_>,
-    connections: &[Connection],
-    opts: &Options,
-) {
+fn print_connections(stdout: &mut io::StdoutLock<'_>, connections: &[Connection], opts: &Options) {
     if opts.json_output {
         let _ = writeln!(stdout, "{}", connections_to_json(connections));
         return;
@@ -1130,11 +1128,7 @@ fn print_connections(
     for c in connections {
         let local = format_addr(&c.local_addr, c.local_port, opts.numeric);
         let remote = format_addr(&c.remote_addr, c.remote_port, opts.numeric);
-        let state_str = c
-            .state
-            .as_ref()
-            .map(|s| format!("{s}"))
-            .unwrap_or_default();
+        let state_str = c.state.as_ref().map(|s| format!("{s}")).unwrap_or_default();
 
         if opts.show_pid {
             let pid_prog = match (c.pid, c.program.as_deref()) {
@@ -1189,8 +1183,16 @@ fn print_iface_table(stdout: &mut io::StdoutLock<'_>, ifaces: &[IfaceEntry], jso
     let _ = writeln!(
         stdout,
         "{:<12} {:<6} {:<12} {:<12} {:<10} {:<10} {:<12} {:<12} {:<10} {:<10}",
-        "Iface", "MTU", "RX-Bytes", "RX-Pkts", "RX-Err", "RX-Drop",
-        "TX-Bytes", "TX-Pkts", "TX-Err", "TX-Drop"
+        "Iface",
+        "MTU",
+        "RX-Bytes",
+        "RX-Pkts",
+        "RX-Err",
+        "RX-Drop",
+        "TX-Bytes",
+        "TX-Pkts",
+        "TX-Err",
+        "TX-Drop"
     );
 
     for iface in ifaces {
@@ -1241,19 +1243,31 @@ fn print_protocol_stats(
 fn print_usage(stdout: &mut io::StdoutLock<'_>) {
     let _ = writeln!(stdout, "Usage: netstat [OPTIONS]");
     let _ = writeln!(stdout);
-    let _ = writeln!(stdout, "Display network connections, routing tables, interface statistics,");
+    let _ = writeln!(
+        stdout,
+        "Display network connections, routing tables, interface statistics,"
+    );
     let _ = writeln!(stdout, "and protocol statistics.");
     let _ = writeln!(stdout);
     let _ = writeln!(stdout, "Options:");
-    let _ = writeln!(stdout, "  -a, --all         Show all sockets (listening and non-listening)");
+    let _ = writeln!(
+        stdout,
+        "  -a, --all         Show all sockets (listening and non-listening)"
+    );
     let _ = writeln!(stdout, "  -t, --tcp         Show TCP connections only");
     let _ = writeln!(stdout, "  -u, --udp         Show UDP sockets only");
     let _ = writeln!(stdout, "  -l, --listening   Show only listening sockets");
-    let _ = writeln!(stdout, "  -n, --numeric     Show numeric addresses (no name resolution)");
+    let _ = writeln!(
+        stdout,
+        "  -n, --numeric     Show numeric addresses (no name resolution)"
+    );
     let _ = writeln!(stdout, "  -p, --programs    Show PID and program names");
     let _ = writeln!(stdout, "  -s, --statistics  Show protocol statistics");
     let _ = writeln!(stdout, "  -r, --route       Show the kernel routing table");
-    let _ = writeln!(stdout, "  -i, --interfaces  Show interface statistics table");
+    let _ = writeln!(
+        stdout,
+        "  -i, --interfaces  Show interface statistics table"
+    );
     let _ = writeln!(stdout, "      --json        Output in JSON format");
     let _ = writeln!(stdout, "  -h, --help        Display this help message");
     let _ = writeln!(stdout);
@@ -1441,10 +1455,7 @@ fn main() {
 
     // Filter: listening only
     if opts.listening_only {
-        connections.retain(|c| {
-            c.state == Some(TcpState::Listen)
-                || c.protocol.starts_with("udp")
-        });
+        connections.retain(|c| c.state == Some(TcpState::Listen) || c.protocol.starts_with("udp"));
     } else if !opts.show_all {
         // By default (no -a), show established + listening for TCP,
         // and all UDP sockets.
@@ -1735,7 +1746,7 @@ mod tests {
             0x01, 0xBB, // local port 443 (BE)
             10, 0, 2, 2, // remote IP
             0xD4, 0x31, // remote port 54321 (BE)
-            4, // state = Established
+            4,    // state = Established
             0x03, 0x02, 0x01, // rx_buffered u24 LE = 0x010203
             0x06, 0x05, 0x04, // tx_buffered u24 LE = 0x040506
             0x01, // flags (keepalive) — ignored by decoder

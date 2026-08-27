@@ -43,10 +43,7 @@
 // defensive `arithmetic_side_effects`, `indexing_slicing`, and
 // `slicing` lints fire on every such site (30+ warnings) with no real
 // DoS risk; buffer indices come from the kernel read() return value.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
 use std::env;
 use std::process;
@@ -84,7 +81,7 @@ const SYS_DNS_RESOLVE: u64 = 820;
 ///
 /// Caller must ensure `nr` is a valid syscall number and all arguments are
 /// valid for that syscall. The `syscall` instruction clobbers `rcx` and `r11`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: Arguments are validated by the caller. rcx/r11 are clobbered by
@@ -109,7 +106,7 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 /// # Safety
 ///
 /// Caller must ensure `nr` is a valid syscall number and `a1` is valid.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
     let ret: i64;
     // SAFETY: Same ABI as syscall3. Single-argument variant.
@@ -126,17 +123,24 @@ unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
     ret
 }
 
-/// Stub implementations for non-x86_64 (used when running `cargo test` on the
-/// host).  These are never called at runtime on a non-x86_64 host because the
-/// test suite avoids exercising paths that issue real syscalls.
-#[cfg(not(target_arch = "x86_64"))]
+/// Host stubs — see the gated definitions above. A development host has no
+/// SlateOS kernel to ask, so they answer ENOSYS rather than entering the host's:
+/// a raw `syscall` there would carry a SlateOS call number into someone else's
+/// kernel, where it means something entirely different.
+///
+/// `-ENOSYS`, "function not implemented" — the honest answer for a call that
+/// does not exist on this machine.
+#[cfg(not(target_vendor = "slateos"))]
+const HOST_ENOSYS: i64 = -38;
+
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
-    -1
+    HOST_ENOSYS
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall1(_nr: u64, _a1: u64) -> i64 {
-    -1
+    HOST_ENOSYS
 }
 
 // ============================================================================
@@ -198,12 +202,12 @@ fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<usize, i64> {
 fn tcp_recv_nonblock(handle: u64, buf: &mut [u8]) -> Result<usize, i64> {
     // arg3 = MSG_DONTWAIT flag (0x40), matching the nc client convention.
     const MSG_DONTWAIT: u64 = 0x40;
-    // SAFETY: handle is valid. buf is a valid mutable slice. arg3 is a flag.
-    let ret = unsafe {
-        // Use syscall4 inline since we only need it here.
+    // Use syscall4 inline since we only need it here.
+    #[cfg(target_vendor = "slateos")]
+    let ret = {
         let r: i64;
-        #[cfg(target_arch = "x86_64")]
-        {
+        // SAFETY: handle is valid. buf is a valid mutable slice. arg3 is a flag.
+        unsafe {
             core::arch::asm!(
                 "syscall",
                 inlateout("rax") SYS_TCP_RECV as i64 => r,
@@ -216,12 +220,13 @@ fn tcp_recv_nonblock(handle: u64, buf: &mut [u8]) -> Result<usize, i64> {
                 options(nostack),
             );
         }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            r = -1i64;
-            let _ = (handle, buf, MSG_DONTWAIT);
-        }
         r
+    };
+    // On a development host there is nothing to ask; see the module header.
+    #[cfg(not(target_vendor = "slateos"))]
+    let ret = {
+        let _ = (handle, buf, MSG_DONTWAIT);
+        HOST_ENOSYS
     };
     if ret < 0 { Err(ret) } else { Ok(ret as usize) }
 }
@@ -1599,7 +1604,7 @@ mod tests {
         assert_eq!(&net_out[..4], &[IAC, SB, OPT_TTYPE, TTYPE_IS]);
         assert!(net_out.ends_with(&[IAC, SE]));
         let term = b"xterm-256color";
-        assert!(net_out[4..net_out.len() - 2] == *term);
+        assert_eq!(net_out[4..net_out.len() - 2], *term);
     }
 
     // -------------------------------------------------------------------------

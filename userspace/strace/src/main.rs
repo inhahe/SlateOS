@@ -51,7 +51,7 @@ const SYS_TRACE_READ: u64 = 521;
 /// Issue a 3-argument syscall via inline assembly.
 ///
 /// This is the primary interface for kernel interaction from userspace.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: We are issuing a syscall with the correct ABI — nr in rax,
@@ -73,12 +73,44 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
+/// Host stub for `syscall3` — see the gated definition above.
+///
+/// On a development host there is no SlateOS kernel to talk to, and a raw
+/// `syscall` instruction does not fail cleanly: it enters whatever kernel is
+/// actually running, with this crate's SlateOS call number in RAX. Those
+/// numbers mean unrelated things elsewhere, so the call is not a no-op — it
+/// is someone else's syscall. Returning `ENOSYS` keeps `cargo test`, `cargo
+/// run` and `clippy` on the host honest instead of dangerous.
+///
+/// See known-issues.md
+/// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
+#[cfg(not(target_vendor = "slateos"))]
+unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
+    -38 // ENOSYS
+}
+
 /// Issue a 2-argument syscall.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
     // SAFETY: Same ABI guarantees as syscall3; unused arg3 register (rdx)
     // is simply not loaded.
     unsafe { syscall3(nr, a1, a2, 0) }
+}
+
+/// Host stub for `syscall2` — see the gated definition above.
+///
+/// On a development host there is no SlateOS kernel to talk to, and a raw
+/// `syscall` instruction does not fail cleanly: it enters whatever kernel is
+/// actually running, with this crate's SlateOS call number in RAX. Those
+/// numbers mean unrelated things elsewhere, so the call is not a no-op — it
+/// is someone else's syscall. Returning `ENOSYS` keeps `cargo test`, `cargo
+/// run` and `clippy` on the host honest instead of dangerous.
+///
+/// See known-issues.md
+/// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
+#[cfg(not(target_vendor = "slateos"))]
+unsafe fn syscall2(_nr: u64, _a1: u64, _a2: u64) -> i64 {
+    -38 // ENOSYS
 }
 
 // ============================================================================

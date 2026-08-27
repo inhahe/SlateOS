@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 //! timeout/nohup/nice/renice — process control utilities for Slate OS
 //!
 //! Multi-personality binary detected via argv[0]:
@@ -15,74 +14,133 @@ use std::process::{self, Command, Stdio};
 use std::time::{Duration, Instant};
 
 // ── Syscall helpers ──────────────────────────────────────────────
+//
+// Every raw `syscall` below is gated on `target_vendor = "slateos"`, which is
+// true only when compiling for the real OS (see toolchain/x86_64-slateos.json).
+//
+// This gate is not a formality. A `syscall` instruction on a development host
+// does not fail cleanly — it enters whatever kernel is actually running, with
+// our SlateOS call number sitting in RAX, and those numbers mean *other
+// things* elsewhere. This file is the worst offender in the tree: on Linux,
+// RAX=62 is `kill(2)`, 140 is `getpriority(2)` and 141 is `setpriority(2)` —
+// the very calls we intend, aimed at a real process on the developer's own
+// machine. `cargo run -p timeout` on the Linux dev host would genuinely
+// signal a process. The host arms below return `ENOSYS` instead.
+//
+// See known-issues.md
+// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
 
-/// Send a signal to a process via syscall
+/// Send a signal to a process via syscall.
 #[allow(dead_code)]
 fn sys_kill(pid: u32, signal: u32) -> i64 {
-    let result: i64;
-    unsafe {
-        std::arch::asm!(
-            "syscall",
-            in("rax") 62_u64,  // SYS_KILL
-            in("rdi") pid as u64,
-            in("rsi") signal as u64,
-            lateout("rax") result,
-            lateout("rcx") _,
-            lateout("r11") _,
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let result: i64;
+        // SAFETY: SYS_KILL takes two scalars and touches no userspace memory.
+        // rcx/r11 are clobbered by the SYSCALL instruction per the x86_64 ABI.
+        unsafe {
+            std::arch::asm!(
+                "syscall",
+                in("rax") 62_u64,  // SYS_KILL
+                in("rdi") pid as u64,
+                in("rsi") signal as u64,
+                lateout("rax") result,
+                lateout("rcx") _,
+                lateout("r11") _,
+            );
+        }
+        result
     }
-    result
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = (pid, signal);
+        -38 // ENOSYS
+    }
 }
 
-/// Get the current process priority via syscall
+/// Get the current process priority via syscall.
 fn sys_getpriority(which: u32, who: u32) -> i64 {
-    let result: i64;
-    unsafe {
-        std::arch::asm!(
-            "syscall",
-            in("rax") 140_u64,  // SYS_GETPRIORITY
-            in("rdi") which as u64,
-            in("rsi") who as u64,
-            lateout("rax") result,
-            lateout("rcx") _,
-            lateout("r11") _,
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let result: i64;
+        // SAFETY: SYS_GETPRIORITY takes two scalars and touches no userspace
+        // memory. rcx/r11 are clobbered by SYSCALL per the x86_64 ABI.
+        unsafe {
+            std::arch::asm!(
+                "syscall",
+                in("rax") 140_u64,  // SYS_GETPRIORITY
+                in("rdi") which as u64,
+                in("rsi") who as u64,
+                lateout("rax") result,
+                lateout("rcx") _,
+                lateout("r11") _,
+            );
+        }
+        result
     }
-    result
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = (which, who);
+        -38 // ENOSYS
+    }
 }
 
-/// Set process priority via syscall
+/// Set process priority via syscall.
 fn sys_setpriority(which: u32, who: u32, prio: i32) -> i64 {
-    let result: i64;
-    unsafe {
-        std::arch::asm!(
-            "syscall",
-            in("rax") 141_u64,  // SYS_SETPRIORITY
-            in("rdi") which as u64,
-            in("rsi") who as u64,
-            in("rdx") prio as u64,
-            lateout("rax") result,
-            lateout("rcx") _,
-            lateout("r11") _,
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let result: i64;
+        // SAFETY: SYS_SETPRIORITY takes three scalars and touches no userspace
+        // memory. rcx/r11 are clobbered by SYSCALL per the x86_64 ABI.
+        unsafe {
+            std::arch::asm!(
+                "syscall",
+                in("rax") 141_u64,  // SYS_SETPRIORITY
+                in("rdi") which as u64,
+                in("rsi") who as u64,
+                in("rdx") prio as u64,
+                lateout("rax") result,
+                lateout("rcx") _,
+                lateout("r11") _,
+            );
+        }
+        result
     }
-    result
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = (which, who, prio);
+        -38 // ENOSYS
+    }
 }
 
-/// Get current UID
+/// Get current UID.
+///
+/// The host arm answers `u32::MAX` rather than a plausible uid: this function
+/// gates privileged operations, so an invented "0" would be the one wrong
+/// answer that matters, and any real uid would be a lie about a machine we
+/// are not running on.
 #[allow(dead_code)]
 fn sys_getuid() -> u32 {
-    let result: u64;
-    unsafe {
-        std::arch::asm!(
-            "syscall",
-            in("rax") 102_u64,  // SYS_GETUID
-            lateout("rax") result,
-            lateout("rcx") _,
-            lateout("r11") _,
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let result: u64;
+        // SAFETY: SYS_GETUID takes no arguments and touches no userspace
+        // memory. rcx/r11 are clobbered by SYSCALL per the x86_64 ABI.
+        unsafe {
+            std::arch::asm!(
+                "syscall",
+                in("rax") 102_u64,  // SYS_GETUID
+                lateout("rax") result,
+                lateout("rcx") _,
+                lateout("r11") _,
+            );
+        }
+        result as u32
     }
-    result as u32
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        u32::MAX
+    }
 }
 
 // ── Signal constants ─────────────────────────────────────────────
@@ -358,14 +416,14 @@ fn run_timeout(args: &[String]) -> i32 {
                     }
 
                     // Use our syscall to send signal
-                    #[cfg(target_os = "slateos")]
+                    #[cfg(target_vendor = "slateos")]
                     {
                         let pid = child.id();
                         sys_kill(pid, signal);
                     }
 
                     // Fallback: try kill via Command (for non-slateos platforms in tests)
-                    #[cfg(not(target_os = "slateos"))]
+                    #[cfg(not(target_vendor = "slateos"))]
                     {
                         let _ = child.kill();
                     }
@@ -389,12 +447,12 @@ fn run_timeout(args: &[String]) -> i32 {
                                                 quoteaf_os(program)
                                             );
                                         }
-                                        #[cfg(target_os = "slateos")]
+                                        #[cfg(target_vendor = "slateos")]
                                         {
                                             let pid = child.id();
                                             sys_kill(pid, SIGKILL);
                                         }
-                                        #[cfg(not(target_os = "slateos"))]
+                                        #[cfg(not(target_vendor = "slateos"))]
                                         {
                                             let _ = child.kill();
                                         }

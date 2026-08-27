@@ -82,6 +82,10 @@ const ADLER_MOD: u32 = 65521;
 
 /// Native Slate OS monotonic clock (kernel syscall/number.rs); no-arg, returns
 /// boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
+// Only reached on the real OS — the host arm of the caller returns before it.
+// It stays compiled (and unit-tested) on a development host rather than being
+// `#[cfg]`-ed away, because the host is where its tests run.
+#[cfg_attr(not(target_vendor = "slateos"), allow(dead_code))]
 const SYS_CLOCK_MONOTONIC: u64 = 10;
 
 // ============================================================================
@@ -127,7 +131,7 @@ fn detect_personality(argv0: &[u8]) -> Personality {
 ///
 /// Caller must ensure `nr` is a valid syscall number and all arguments are
 /// valid for the specific syscall.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid. `syscall` clobbers
@@ -148,14 +152,14 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 }
 
 /// Get monotonic time in nanoseconds.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 fn clock_ns() -> u64 {
     // SAFETY: SYS_CLOCK_MONOTONIC takes no pointer arguments.
     let ret = unsafe { syscall3(SYS_CLOCK_MONOTONIC, 0, 0, 0) };
     if ret < 0 { 0 } else { ret as u64 }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 fn clock_ns() -> u64 {
     0
 }

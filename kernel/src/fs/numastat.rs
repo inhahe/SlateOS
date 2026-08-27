@@ -24,7 +24,7 @@
 
 use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -95,6 +95,20 @@ struct State {
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 static OPS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the CPU-hotplug notifier has been installed.
+///
+/// [`adopt_topology`] is documented idempotent and really is called more than
+/// once (`self_test` ends with a call, and `main` makes the real one), but
+/// `cpu_hotplug::register_notifier` appends to a fixed-size table with no
+/// duplicate check — so without this, repeated adoption would burn notifier
+/// slots and run the same refresh several times per event.
+static NOTIFIER_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// Whether [`init_defaults`] has built the table yet.
+fn is_initialized() -> bool {
+    STATE.lock().is_some()
+}
 
 fn with_state<F, R>(f: F) -> KernelResult<R>
 where
@@ -191,20 +205,20 @@ pub fn init_defaults() {
 /// runs long before `numa::init()` at boot — end by calling this to restore
 /// real data when it is invoked manually from kshell afterwards.
 ///
-/// **Adoption is one-shot: the CPU sets are a snapshot.** A CPU that comes
-/// online after this returns is not in `/proc/numastat`, because nothing
-/// re-runs adoption on a hotplug event.  That is not merely theoretical —
-/// `smp::init()` waits for APs with a *bounded* spin, so an AP that misses the
-/// window bumps the online count on its own afterwards.  The returned count is
-/// the snapshot this call enumerated, so a caller that needs to check the
-/// result can compare against what was actually placed rather than against a
-/// number that may have moved since.  Tracked in `known-issues.md` →
-/// `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW`.
+/// **Adoption is no longer one-shot.**  It used to be, and the CPU sets were a
+/// boot snapshot that a CPU coming online afterwards never joined — which is
+/// not theoretical, since `smp::init()` waits for APs on a *bounded* spin and a
+/// straggler bumps the online count on its own after this has run.  Before
+/// returning, this now registers a [`crate::cpu_hotplug`] notifier and then
+/// calls [`refresh_topology`] once, which closes the window in both directions:
+/// a CPU that arrived *during* adoption is picked up by that explicit refresh,
+/// and one that arrives *after* is picked up by the notifier.  The registration
+/// happens once however many times this function is called.
 ///
 /// # Returns
 ///
-/// The number of online CPUs enumerated while building the per-node sets, or
-/// `0` if the topology was not available yet and nothing was registered.
+/// The number of online CPUs placed across the per-node sets, or `0` if the
+/// topology was not available yet and nothing was registered.
 pub fn adopt_topology() -> usize {
     init_defaults();
 
@@ -220,11 +234,13 @@ pub fn adopt_topology() -> usize {
         return 0;
     }
 
-    // Read once and reuse.  Every per-node loop below must enumerate the *same*
-    // set of CPUs, or a CPU appearing mid-scan would be placed on some nodes'
-    // lists and not others; and it is this value, not a later re-read, that
-    // callers are told to check against.
-    let cpu_count = crate::smp::cpu_count();
+    // Snapshot the online set once, as a bitmask.  Every per-node loop below
+    // must enumerate the *same* set of CPUs, or a CPU appearing mid-scan would
+    // be placed on some nodes' lists and not others; taking the mask up front
+    // makes that structural rather than a rule to remember.  It is also this
+    // value, not a later re-read, that callers are told to check against.
+    let mask = online_cpu_mask();
+    let cpu_count = mask.count_ones() as usize;
 
     let mut adopted = 0usize;
     for (id, info) in topo.nodes.iter().enumerate().take(topo.node_count) {
@@ -232,19 +248,13 @@ pub fn adopt_topology() -> usize {
             continue;
         }
         // Ask the placement map itself which CPUs belong here.
-        let mut cpus = Vec::new();
-        for cpu in 0..cpu_count {
-            if crate::numa::cpu_node(cpu) != id {
-                continue;
-            }
-            if let Ok(n) = u32::try_from(cpu) {
-                cpus.push(n);
-            }
-        }
+        let mut scratch: CpuScratch = [0; crate::smp::MAX_CPUS];
+        let n = cpus_on_node(id, mask, &mut scratch);
+        let cpus = scratch.get(..n).unwrap_or(&[]);
         let Ok(node_id) = u32::try_from(id) else {
             continue;
         };
-        match register_node(node_id, info.total_memory, &cpus) {
+        match register_node(node_id, info.total_memory, cpus) {
             Ok(()) => adopted += 1,
             // `AlreadyExists` means this ran twice, which is fine and is why
             // the function is documented idempotent.  Anything else means the
@@ -268,7 +278,177 @@ pub fn adopt_topology() -> usize {
         cpu_count,
     );
 
-    cpu_count
+    // Subscribe, then sweep -- in that order, and never the reverse.
+    //
+    // Registering first means a CPU that changes state from here on cannot be
+    // missed; sweeping second catches anything that changed while the loop
+    // above was running off `mask`.  Doing it the other way round leaves a gap
+    // between the sweep and the subscription in which an event is lost for
+    // good, which is the exact bug this is fixing.
+    //
+    // The refresh is what this returns, so the count describes the table as it
+    // stands on return rather than as the snapshot found it.
+    if !NOTIFIER_REGISTERED.swap(true, Ordering::AcqRel) && register_hotplug_notifier().is_none() {
+        // Not fatal -- the table is correct as of this instant and only
+        // staleness is at stake -- but it silently reverts to the one-shot
+        // behaviour this function's doc comment says it no longer has.
+        crate::serial_println!(
+            "[numastat] WARN: hotplug notifier table full; per-node CPU sets will not track CPUs coming online"
+        );
+    }
+
+    refresh_topology()
+}
+
+/// Recompute every registered node's CPU set from the live view.
+///
+/// Called on every CPU online/offline event via the notifier
+/// [`adopt_topology`] installs, and once directly by [`adopt_topology`] itself.
+/// Idempotent, and cheap enough to call speculatively: it is one pass over at
+/// most [`crate::smp::MAX_CPUS`] bits per node.
+///
+/// Nodes are updated with [`set_node_cpus`] rather than being removed and
+/// re-registered — see that function for why a concurrent `/proc/numastat`
+/// reader makes the difference matter.  A node the topology reports as present
+/// but that was never adopted (adoption hit `ResourceExhausted`, say) is
+/// registered here rather than skipped, so a later refresh can recover from a
+/// transient failure instead of leaving the row missing forever.
+///
+/// # Returns
+///
+/// The number of online CPUs placed across the per-node sets, or `0` if the
+/// topology is not available yet.
+pub fn refresh_topology() -> usize {
+    let topo = crate::numa::topology_info();
+
+    // Same guard as `adopt_topology`: before `numa::init()` the static node
+    // array advertises one node that is not present, and deriving from it would
+    // replace every real CPU set with an empty one.
+    if !topo.nodes.iter().take(topo.node_count).any(|n| n.present) {
+        return 0;
+    }
+
+    // No table means nothing to refresh.  This is reachable: `self_test` takes
+    // the table down to re-run its fixtures, and a hotplug event landing in
+    // that window must be a no-op rather than a wall of warnings.  It costs
+    // nothing to miss, because `self_test` ends by calling `adopt_topology`,
+    // which rebuilds from the live view anyway.
+    if !is_initialized() {
+        return 0;
+    }
+
+    let mask = online_cpu_mask();
+
+    for (id, info) in topo.nodes.iter().enumerate().take(topo.node_count) {
+        if !info.present {
+            continue;
+        }
+        let Ok(node_id) = u32::try_from(id) else {
+            continue;
+        };
+        let mut scratch: CpuScratch = [0; crate::smp::MAX_CPUS];
+        let n = cpus_on_node(id, mask, &mut scratch);
+        let cpus = scratch.get(..n).unwrap_or(&[]);
+        match set_node_cpus(node_id, cpus) {
+            Ok(()) => {}
+            // The node exists in the topology but has no row.  Adoption must
+            // have failed for it; take the chance to put it right.
+            Err(KernelError::NotFound) => {
+                if let Err(e) = register_node(node_id, info.total_memory, cpus) {
+                    crate::serial_println!(
+                        "[numastat] WARN: node {node_id} present but unregistered, and re-registering failed: {e:?}"
+                    );
+                }
+            }
+            Err(e) => {
+                crate::serial_println!(
+                    "[numastat] WARN: could not refresh node {node_id} CPU set: {e:?} -- /proc/numastat CPU lists are stale"
+                );
+            }
+        }
+    }
+
+    mask.count_ones() as usize
+}
+
+/// Hotplug notifier: keep the per-node CPU sets tracking the online set.
+///
+/// Only the `Post*` events do anything.  A `Pre*` event is a request for
+/// permission, and this module has no grounds to veto one — a node's CPU list
+/// is a description, not a constraint — so it answers `true` unconditionally.
+/// Acting on `Pre*` would also be wrong on the merits: `PreOffline` fires while
+/// the CPU is still running, so dropping it from the list there would make
+/// `/proc/numastat` disagree with reality for the duration of the migration.
+fn hotplug_notifier(_cpu: usize, event: crate::cpu_hotplug::HotplugEvent) -> bool {
+    use crate::cpu_hotplug::HotplugEvent;
+    if matches!(event, HotplugEvent::PostOnline | HotplugEvent::PostOffline) {
+        refresh_topology();
+    }
+    true
+}
+
+/// Install [`hotplug_notifier`].  Separate only so the registration is a single
+/// expression at its one call site.
+fn register_hotplug_notifier() -> Option<usize> {
+    crate::cpu_hotplug::register_notifier(hotplug_notifier)
+}
+
+/// Snapshot the set of scheduling-eligible CPUs as a bitmask.
+///
+/// A mask rather than a `Vec` because every caller wants to ask "is CPU *n* in
+/// the set?" many times over, it needs no allocation on a path that can run
+/// from an AP's bring-up, and — the reason it exists at all — passing one value
+/// to every per-node derivation makes it impossible for two nodes in the same
+/// pass to disagree about which CPUs exist.
+///
+/// The membership test is [`crate::cpu_hotplug::is_online`], not an index below
+/// `smp::cpu_count()`.  Those coincide at boot but diverge the moment a CPU in
+/// the middle is offlined: `smp`'s counter is a high-water mark of CPUs that
+/// ever started, while this file is supposed to describe the CPUs a node
+/// currently has.  Linux's `nodeN/cpulist` reports the online set too.
+fn online_cpu_mask() -> u32 {
+    const _: () = assert!(
+        crate::smp::MAX_CPUS <= u32::BITS as usize,
+        "online_cpu_mask needs one bit per CPU; widen the mask type"
+    );
+    let mut mask = 0u32;
+    for cpu in 0..crate::smp::MAX_CPUS {
+        if crate::cpu_hotplug::is_online(cpu) {
+            mask |= 1u32 << cpu;
+        }
+    }
+    mask
+}
+
+/// Scratch buffer for one node's CPU set.  Sized for the whole machine because
+/// on a UMA box every CPU lands on node 0.
+type CpuScratch = [u32; crate::smp::MAX_CPUS];
+
+/// Write the CPUs from `mask` that [`crate::numa`] places on `node` into `out`,
+/// returning how many were written; the answer is `&out[..n]`.
+///
+/// Writes into a caller-provided array rather than returning a `Vec` because
+/// [`refresh_topology`] runs from the hotplug notifier, which a straggling AP
+/// fires from its own bring-up path — before it has registered an idle task
+/// with the scheduler.  Allocation there would very probably be fine (the same
+/// function allocates an IRQ stack a few lines later), but "probably fine" is
+/// not a good reason to put the heap on a CPU-bring-up path when a fixed
+/// 16-element array does the job.  [`set_node_cpus`] may still grow the node's
+/// own `Vec`; that is storage, not derivation, and is unavoidable without
+/// changing [`NumaNode`]'s public shape.
+fn cpus_on_node(node: usize, mask: u32, out: &mut CpuScratch) -> usize {
+    let mut n = 0usize;
+    for cpu in 0..crate::smp::MAX_CPUS {
+        if mask & (1u32 << cpu) == 0 || crate::numa::cpu_node(cpu) != node {
+            continue;
+        }
+        let (Ok(id), Some(slot)) = (u32::try_from(cpu), out.get_mut(n)) else {
+            continue;
+        };
+        *slot = id;
+        n = n.saturating_add(1);
+    }
+    n
 }
 
 /// Verify that what `/proc/numastat` will report matches the machine
@@ -288,22 +468,29 @@ pub fn adopt_topology() -> usize {
 /// the values; only a read-back through the same API `procfs` uses proves the
 /// file describes the machine.
 ///
-/// The CPU tally is the sharpest of the three checks.  Node counts and memory
-/// sizes are copied straight across and would have to be corrupted to differ,
-/// but the CPU sets are *derived* — one `numa::cpu_node` query per online CPU
-/// — so a CPU whose node is absent from the present set vanishes silently from
-/// every node's list while every other number stays right.  Summing them and
-/// demanding the enumerated count is what makes that visible.
+/// The CPU checks are the sharpest of the group.  Node counts and memory sizes
+/// are copied straight across and would have to be corrupted to differ, but the
+/// CPU sets are *derived* — one `numa::cpu_node` query per online CPU — so a
+/// CPU whose node is absent from the present set vanishes silently from every
+/// node's list while every other number stays right.
+///
+/// **The derivation is checked per CPU, not by a total**, and that is
+/// deliberate.  A count is both weaker and racier: weaker because two CPUs
+/// swapped between nodes leave it unchanged, and racier because an AP coming
+/// online mid-check moves it.  Asserting instead that every CPU on a row really
+/// belongs to that row's node, and that no CPU is on two rows, is a property of
+/// each element rather than of the whole, so a CPU arriving mid-walk cannot
+/// falsify it.  `cpus_at_adoption` is then only used as a **lower bound** —
+/// nothing that was placed may have been lost — which stays true no matter when
+/// a straggler lands.
 ///
 /// **`cpus_at_adoption` must be [`adopt_topology`]'s return value, not a fresh
 /// `smp::cpu_count()`.** Those differ exactly when a CPU comes online between
 /// the two calls, which `smp::init()` permits: it waits for APs with a bounded
-/// spin, so a late AP bumps the online count itself after `init` returns.
-/// Re-reading would then fail the boot over a table that is entirely correct —
-/// merely one CPU out of date — which is a flake, not a bug report.  What this
-/// check is *for* is the derivation: every CPU adoption looked at must land on
-/// exactly one node.  Staleness is a known property of one-shot adoption and is
-/// documented on [`adopt_topology`], not asserted against here.
+/// spin, so a late AP bumps the online count itself after `init` returns.  Such
+/// a CPU is now added to the table by the hotplug notifier rather than being
+/// missed, so the table may legitimately be *ahead* of the value passed here —
+/// which is exactly why the tally below is an inequality.
 ///
 /// # Panics
 ///
@@ -335,7 +522,7 @@ pub fn self_test_adoption(cpus_at_adoption: usize) {
         "numastat holds {} node row(s) but numa reports {present} present node(s)",
         rows.len()
     );
-    crate::serial_println!("  [1/3] {present} present node(s), one row each: OK");
+    crate::serial_println!("  [1/4] {present} present node(s), one row each: OK");
 
     // 2: each row's memory is the node's, not a placeholder.
     for row in &rows {
@@ -355,19 +542,121 @@ pub fn self_test_adoption(cpus_at_adoption: usize) {
             row.id
         );
     }
-    crate::serial_println!("  [2/3] per-node memory matches numa: OK");
+    crate::serial_println!("  [2/4] per-node memory matches numa: OK");
 
-    // 3: every CPU adoption enumerated is placed on exactly one node.
-    let mapped: usize = rows.iter().map(|n| n.cpus.len()).sum();
-    assert_eq!(
-        mapped, cpus_at_adoption,
-        "numastat placed {mapped} CPU(s) across its nodes but adoption enumerated {cpus_at_adoption}; numa::cpu_node names a node that reports itself absent"
+    // 3: every CPU on a row genuinely belongs to that row's node, and no CPU
+    //    is on two rows.  Both are per-element facts, so a straggler AP joining
+    //    mid-walk cannot make either of them false -- see the doc comment.
+    let mut seen: u32 = 0;
+    for row in &rows {
+        for &cpu in &row.cpus {
+            let idx = cpu as usize;
+            assert!(
+                idx < crate::smp::MAX_CPUS,
+                "node {} lists CPU {cpu}, beyond MAX_CPUS",
+                row.id
+            );
+            let bit = 1u32 << idx;
+            assert_eq!(
+                seen & bit,
+                0,
+                "CPU {cpu} appears on more than one node; numastat would double-count it"
+            );
+            seen |= bit;
+            assert_eq!(
+                crate::numa::cpu_node(idx) as u32,
+                row.id,
+                "numastat puts CPU {cpu} on node {} but numa::cpu_node says node {}",
+                row.id,
+                crate::numa::cpu_node(idx)
+            );
+        }
+    }
+    // Distinct CPUs, counted from the dedupe mask rather than by summing the
+    // row lengths -- the two agree only because the duplicate assert above
+    // passed, and deriving it from the mask makes that dependency explicit.
+    let mapped = seen.count_ones() as usize;
+    // 3b: nothing adoption placed has since been dropped.  An inequality, not
+    //     an equality: the hotplug notifier legitimately adds CPUs after
+    //     adoption returned its count.
+    assert!(
+        mapped >= cpus_at_adoption,
+        "numastat holds {mapped} CPU(s) but adoption placed {cpus_at_adoption}; CPUs have been lost from the per-node sets"
     );
     crate::serial_println!(
-        "  [3/3] all {cpus_at_adoption} enumerated CPU(s) placed exactly once: OK"
+        "  [3/4] {mapped} CPU(s) each on exactly one node, agreeing with numa (>= {cpus_at_adoption} placed): OK"
     );
 
-    crate::serial_println!("numastat::self_test_adoption() — all 3 tests passed");
+    // 4: `refresh_topology` is a fixed point.  The hotplug notifier calls it on
+    //    every CPU state change, so a version that drifted -- duplicating CPUs,
+    //    dropping them, or disturbing the counters -- would corrupt
+    //    /proc/numastat a little more on each event rather than failing once
+    //    and visibly.  Running it against an unchanged machine must produce
+    //    identical rows.
+    //
+    //    "Unchanged" is the precondition, and it is one this test cannot create,
+    //    only observe: a straggler AP joining between the two snapshots would
+    //    change the rows *correctly* and fail an equality that was never about
+    //    it.  So the online set is read either side of the comparison and the
+    //    result is only trusted if it held still.  Skipping is the honest
+    //    outcome there, not a swallowed failure -- the property is untestable in
+    //    that instant, and saying so beats a boot that fails one time in
+    //    hundreds for a reason nobody can reproduce.
+    let mut skips = crate::fs::selftest::Skips::new();
+    let mask_before = online_cpu_mask();
+    let before = list_nodes();
+    let again = refresh_topology();
+    let after = list_nodes();
+    if online_cpu_mask() == mask_before {
+        assert_eq!(
+            again,
+            mask_before.count_ones() as usize,
+            "refresh_topology placed {again} CPU(s) but {} are online; a CPU's numa::cpu_node names a node that reports itself absent",
+            mask_before.count_ones()
+        );
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "refresh changed the number of nodes"
+        );
+        for (a, b) in before.iter().zip(after.iter()) {
+            assert_eq!(a.id, b.id, "refresh reordered the node rows");
+            assert_eq!(a.cpus, b.cpus, "refresh changed node {}'s CPU set", a.id);
+            assert_eq!(
+                a.total_memory, b.total_memory,
+                "refresh disturbed node {}'s memory",
+                a.id
+            );
+            assert_eq!(
+                (
+                    a.local_allocs,
+                    a.remote_allocs,
+                    a.migrations_in,
+                    a.migrations_out
+                ),
+                (
+                    b.local_allocs,
+                    b.remote_allocs,
+                    b.migrations_in,
+                    b.migrations_out
+                ),
+                "refresh disturbed node {}'s counters",
+                a.id
+            );
+        }
+        crate::serial_println!("  [4/4] refresh_topology is idempotent: OK");
+    } else {
+        skips.record(
+            "refresh_topology idempotence",
+            "a CPU changed state mid-check, so 'unchanged machine' did not hold",
+        );
+    }
+
+    skips.report("numastat::self_test_adoption()");
+    crate::serial_println!(
+        "numastat::self_test_adoption() — all 4 tests passed{}",
+        skips.suffix()
+    );
 }
 
 /// Register a NUMA node.
@@ -400,6 +689,40 @@ pub fn register_node(id: u32, total_memory: u64, cpus: &[u32]) -> KernelResult<(
             migrations_out: 0,
             cpus: cpus.to_vec(),
         });
+        Ok(())
+    })
+}
+
+/// Replace a registered node's CPU set in place.
+///
+/// The counterpart to [`register_node`] for a node that already exists, which
+/// is the case [`refresh_topology`] hits on every call after the first:
+/// `register_node` answers `AlreadyExists` and refuses, by design, so that a
+/// repeat adoption cannot silently zero the counters.
+///
+/// **In place, rather than unregister-then-re-register.**  The node row is what
+/// `/proc/numastat` reads, and a reader can be walking it on another CPU at any
+/// moment.  Removing the row first would give that reader a brief, entirely
+/// fictitious view of a machine with one fewer node — and if it were the last
+/// node, of a machine with no memory at all.  Overwriting one field leaves
+/// every other value continuously valid; the worst a concurrent reader sees is
+/// the CPU set from a moment ago, which is the same staleness it would have
+/// seen by arriving a microsecond earlier.
+///
+/// The allocation/access/migration counters are deliberately untouched: a CPU
+/// joining or leaving a node does not un-count the pages already allocated
+/// there.
+///
+/// # Errors
+///
+/// [`KernelError::NotFound`] if no node with `id` is registered.
+pub fn set_node_cpus(id: u32, cpus: &[u32]) -> KernelResult<()> {
+    with_state(|state| {
+        let Some(node) = state.nodes.iter_mut().find(|n| n.id == id) else {
+            return Err(KernelError::NotFound);
+        };
+        node.cpus.clear();
+        node.cpus.extend_from_slice(cpus);
         Ok(())
     })
 }
@@ -648,7 +971,35 @@ pub fn self_test() {
     assert_eq!(migrations, 1);
     assert_eq!(pct, 50); // 1 remote / 2 allocs
     assert!(ops > 0);
-    crate::serial_println!("  [8/8] stats: OK");
+    crate::serial_println!("  [8/9] stats: OK");
+
+    // 9: `set_node_cpus` replaces a node's CPU set in place, and only that.
+    //    The counters are the point: `refresh_topology` calls this on every
+    //    hotplug event, so if it reset accounting, a CPU coming online would
+    //    silently erase the allocation history of the node it joined.
+    let before = get_node(0).expect("before set_node_cpus");
+    set_node_cpus(0, &[0, 1, 2, 3, 8]).expect("set_node_cpus");
+    let after = get_node(0).expect("after set_node_cpus");
+    assert_eq!(after.cpus, alloc::vec![0, 1, 2, 3, 8]);
+    assert_eq!(after.local_allocs, before.local_allocs);
+    assert_eq!(after.remote_allocs, before.remote_allocs);
+    assert_eq!(after.used_memory, before.used_memory);
+    assert_eq!(after.free_memory, before.free_memory);
+    assert_eq!(after.avg_latency_ns, before.avg_latency_ns);
+    assert_eq!(after.migrations_in, before.migrations_in);
+    assert_eq!(after.migrations_out, before.migrations_out);
+    // Shrinking must actually shrink -- an `extend` without the `clear` would
+    // pass the growth case above and quietly accumulate here.
+    set_node_cpus(0, &[7]).expect("set_node_cpus shrink");
+    assert_eq!(get_node(0).expect("shrunk").cpus, alloc::vec![7]);
+    // Unknown node id is refused rather than creating a row.
+    assert_eq!(set_node_cpus(99, &[0]), Err(KernelError::NotFound));
+    assert_eq!(
+        list_nodes().len(),
+        2,
+        "a refused update must not add a node"
+    );
+    crate::serial_println!("  [9/9] set_node_cpus in place: OK");
 
     // Leave the table LIVE, not DEAD and not stale: clear the fixtures, then
     // re-open it and re-adopt the real topology.
@@ -681,5 +1032,5 @@ pub fn self_test() {
     init_defaults();
     adopt_topology();
 
-    crate::serial_println!("numastat::self_test() — all 8 tests passed");
+    crate::serial_println!("numastat::self_test() — all 9 tests passed");
 }

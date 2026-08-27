@@ -1365,25 +1365,49 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // online must equal the SMP online count, formatted Linux-style.
+        //
+        // Bracketed rather than compared to a second reading. `gen_cpu_file`
+        // builds this string from `smp::cpu_count()`, which is live: an AP
+        // bumps it from `ap_entry`, and `smp::init` only waits for the APs on a
+        // *bounded* ~50 ms spin before proceeding regardless, so a straggler can
+        // land while the self-tests are running. Rebuilding the expected string
+        // from a second reading therefore compared two samples and held only if
+        // nothing arrived in between -- the shape that panicked
+        // `irqstat::self_test` over one timer tick.
+        //
+        // The counter is monotone (one writer, `NUM_CPUS_ONLINE.fetch_add`, and
+        // no decrement anywhere), so whatever `read_file` saw lies in
+        // `before..=after`. Checking membership in that range loses nothing:
+        // when no AP lands the range is a single value and this is exactly the
+        // original equality, and when one does the test reports the truth
+        // instead of a spurious failure.
+        let before = crate::smp::cpu_count();
         let online = fs.read_file(Path::new("/devices/system/cpu/online"))?;
+        let after = crate::smp::cpu_count();
         let online_txt = core::str::from_utf8(&online).map_err(|_| KernelError::InternalError)?;
-        let want_online = cpu_range(crate::smp::cpu_count());
         assert!(
-            online_txt == want_online,
-            "cpu/online = {:?}, want {:?}",
+            (before..=after).any(|n| cpu_range(n) == online_txt),
+            "cpu/online = {:?}, want cpu_range(n) for some n in {}..={}",
             online_txt,
-            want_online
+            before,
+            after
         );
 
-        // present/possible must equal the ACPI present count.
+        // present/possible must equal the ACPI present count. Bracketed for the
+        // same reason as `online` above; the MADT count does not in practice
+        // move after ACPI init, so `before == after` and this is plain equality,
+        // but that is a property of the producer rather than of this test and
+        // the range costs nothing to be right about.
+        let before = crate::acpi::processor_count();
         let present = fs.read_file(Path::new("/devices/system/cpu/present"))?;
+        let after = crate::acpi::processor_count();
         let present_txt = core::str::from_utf8(&present).map_err(|_| KernelError::InternalError)?;
-        let want_present = cpu_range(crate::acpi::processor_count());
         assert!(
-            present_txt == want_present,
-            "cpu/present = {:?}, want {:?}",
+            (before..=after).any(|n| cpu_range(n) == present_txt),
+            "cpu/present = {:?}, want cpu_range(n) for some n in {}..={}",
             present_txt,
-            want_present
+            before,
+            after
         );
 
         // kernel_max parses as a number and is >= any online index.

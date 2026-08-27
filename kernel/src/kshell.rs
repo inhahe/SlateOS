@@ -29008,10 +29008,18 @@ fn cmd_archive(args: &str) {
                 match crate::fs::Vfs::read_file(&path) {
                     Ok(data) => {
                         let entry_name = path.file_name().unwrap_or(path.as_path());
+                        // A failed stat costs the timestamp, not the member:
+                        // the content is already in hand, and refusing to
+                        // archive a readable file over a missing mtime would
+                        // lose far more than it saves. `0` is the "not
+                        // available" sentinel the writers already understand.
+                        let modified_ns =
+                            crate::fs::Vfs::metadata(&path).map_or(0, |m| m.modified_ns);
                         entries.push(archive::CreateEntry {
                             name: entry_name.to_path_buf(),
                             data,
                             kind: archive::EntryKind::File,
+                            modified_ns,
                         });
                     }
                     Err(e) => {

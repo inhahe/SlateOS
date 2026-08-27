@@ -2286,6 +2286,7 @@ dependencies = [
  "modechange",
  "pwdb",
  "quoting",
+ "scratchdir",
  "sha2",
 ]
 
@@ -3914,6 +3915,9 @@ version = "0.1.0"
 [[package]]
 name = "firejail"
 version = "0.1.0"
+dependencies = [
+ "scratchdir",
+]
 
 [[package]]
 name = "fireworks-cli"
@@ -13462,6 +13466,9 @@ version = "0.1.0"
 [[package]]
 name = "useradd"
 version = "0.1.0"
+dependencies = [
+ "scratchdir",
+]
 
 [[package]]
 name = "useradd-cli"

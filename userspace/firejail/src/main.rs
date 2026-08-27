@@ -1868,6 +1868,7 @@ fn main() {
 #[allow(clippy::field_reassign_with_default)] // Tests construct sandbox profiles by mutating defaults; clearer than functional-update.
 mod tests {
     use super::*;
+    use scratchdir::ScratchDir;
 
     // -----------------------------------------------------------------------
     // Personality extraction tests
@@ -3047,9 +3048,8 @@ mod tests {
     #[test]
     fn test_parse_sandbox_file_content() {
         // We test the parsing logic indirectly by creating a temp file.
-        let dir = env::temp_dir().join("firejail_test_parse");
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("100.sandbox");
+        let scratch = ScratchDir::new("firejail_parse");
+        let path = scratch.path("100.sandbox");
         let content = "pid=100\n\
                         name=browser\n\
                         program=firefox\n\
@@ -3074,25 +3074,22 @@ mod tests {
         assert!(info.caps_dropped);
         assert!(info.seccomp_enabled);
         assert_eq!(info.children, vec![101, 102]);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_parse_sandbox_file_missing_pid() {
-        let dir = env::temp_dir().join("firejail_test_nopid");
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("bad.sandbox");
+        let scratch = ScratchDir::new("firejail_nopid");
+        let path = scratch.path("bad.sandbox");
         let content = "name=test\nprogram=bash\n";
         let _ = fs::write(&path, content);
         let result = parse_sandbox_file(&path);
         assert!(result.is_none());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_write_and_read_sandbox_file() {
-        let dir = env::temp_dir().join("firejail_test_wr");
-        let _ = fs::create_dir_all(&dir);
+        let scratch = ScratchDir::new("firejail_wr");
+        let dir = scratch.dir();
         let info = SandboxInfo {
             pid: 999,
             name: "mybox".to_string(),
@@ -3106,45 +3103,47 @@ mod tests {
             seccomp_enabled: true,
             children: vec![1000, 1001],
         };
-        write_sandbox_file(&dir, &info).unwrap();
-        let read_info = parse_sandbox_file(&dir.join("999.sandbox")).unwrap();
+        write_sandbox_file(dir, &info).unwrap();
+        let read_info = parse_sandbox_file(&scratch.path("999.sandbox")).unwrap();
         assert_eq!(read_info.pid, 999);
         assert_eq!(read_info.name, "mybox");
         assert_eq!(read_info.program, "bash");
         assert!(read_info.seccomp_enabled);
         assert!(!read_info.caps_dropped);
         assert_eq!(read_info.children, vec![1000, 1001]);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_remove_sandbox_file() {
-        let dir = env::temp_dir().join("firejail_test_rm");
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("555.sandbox");
+        // This is the test that actually failed for lane C under two
+        // overlapping workspace runs: with a fixed directory name the other
+        // run held `555.sandbox` open, and Windows refuses to unlink an open
+        // file, so the removal came back as "Access is denied. (os error 5)"
+        // — a hard failure attributed to `remove_sandbox_file` rather than to
+        // the fixture.
+        let scratch = ScratchDir::new("firejail_rm");
+        let path = scratch.path("555.sandbox");
         let _ = fs::write(&path, "pid=555\nname=test\n");
         assert!(path.exists());
-        remove_sandbox_file(&dir, 555).unwrap();
+        remove_sandbox_file(scratch.dir(), 555).unwrap();
         assert!(!path.exists());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_remove_sandbox_file_nonexistent() {
-        let dir = env::temp_dir().join("firejail_test_rm_ne");
-        let _ = fs::create_dir_all(&dir);
+        let scratch = ScratchDir::new("firejail_rm_ne");
         // Should not error when file does not exist.
-        remove_sandbox_file(&dir, 9999).unwrap();
-        let _ = fs::remove_dir_all(&dir);
+        remove_sandbox_file(scratch.dir(), 9999).unwrap();
     }
 
     #[test]
     fn test_read_sandbox_entries_empty_dir() {
-        let dir = env::temp_dir().join("firejail_test_empty");
-        let _ = fs::create_dir_all(&dir);
-        let entries = read_sandbox_entries(&dir);
+        // A private directory is what makes "empty" mean empty: under a shared
+        // name a concurrent run's `100.sandbox` is a perfectly good entry, and
+        // this assertion fails on someone else's file.
+        let scratch = ScratchDir::new("firejail_empty");
+        let entries = read_sandbox_entries(scratch.dir());
         assert!(entries.is_empty());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3156,29 +3155,25 @@ mod tests {
 
     #[test]
     fn test_read_sandbox_entries_ignores_non_sandbox() {
-        let dir = env::temp_dir().join("firejail_test_ignore");
-        let _ = fs::create_dir_all(&dir);
-        let _ = fs::write(dir.join("100.sandbox"), "pid=100\nname=a\n");
-        let _ = fs::write(dir.join("readme.txt"), "not a sandbox file");
-        let entries = read_sandbox_entries(&dir);
+        let scratch = ScratchDir::new("firejail_ignore");
+        let _ = fs::write(scratch.path("100.sandbox"), "pid=100\nname=a\n");
+        let _ = fs::write(scratch.path("readme.txt"), "not a sandbox file");
+        let entries = read_sandbox_entries(scratch.dir());
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].pid, 100);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_read_sandbox_entries_sorted() {
-        let dir = env::temp_dir().join("firejail_test_sort");
-        let _ = fs::create_dir_all(&dir);
-        let _ = fs::write(dir.join("300.sandbox"), "pid=300\nname=c\n");
-        let _ = fs::write(dir.join("100.sandbox"), "pid=100\nname=a\n");
-        let _ = fs::write(dir.join("200.sandbox"), "pid=200\nname=b\n");
-        let entries = read_sandbox_entries(&dir);
+        let scratch = ScratchDir::new("firejail_sort");
+        let _ = fs::write(scratch.path("300.sandbox"), "pid=300\nname=c\n");
+        let _ = fs::write(scratch.path("100.sandbox"), "pid=100\nname=a\n");
+        let _ = fs::write(scratch.path("200.sandbox"), "pid=200\nname=b\n");
+        let entries = read_sandbox_entries(scratch.dir());
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].pid, 100);
         assert_eq!(entries[1].pid, 200);
         assert_eq!(entries[2].pid, 300);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------

@@ -1599,48 +1599,44 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use scratchdir::ScratchDir;
 
-    // Each test uses a unique temp directory to avoid interference.
-    static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
-
+    /// A private directory for one test, holding that test's `/etc/passwd`,
+    /// `/etc/group` and `/etc/shadow` stand-ins.
+    ///
+    /// The uniqueness comes from `ScratchDir`, which draws on the pid *and* a
+    /// process-wide counter. This used to be a counter alone, which looks
+    /// sufficient and is not: a counter distinguishes the threads within one
+    /// run, but it restarts at 0 in every run, so two concurrent runs walk
+    /// `useradd_test_0`, `_1`, `_2` … together. `new` opened by deleting the
+    /// directory, so each run wiped the other's shadow file part-way through a
+    /// test about whether a password is accepted.
     struct TestEnv {
-        dir: PathBuf,
+        dir: ScratchDir,
     }
 
     impl TestEnv {
         fn new() -> Self {
-            let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let dir = std::env::temp_dir().join(format!("useradd_test_{}", id));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).expect("create test dir");
-            TestEnv { dir }
+            TestEnv {
+                dir: ScratchDir::new("useradd_test"),
+            }
         }
 
         fn path(&self, name: &str) -> String {
-            self.dir.join(name).to_string_lossy().to_string()
+            self.dir.path(name).to_string_lossy().to_string()
         }
 
         // Reserved for use in future tests that round-trip files through
-        // useradd's read/write paths; the matching Drop impl below cleans
-        // up the directory in all current tests.
+        // useradd's read/write paths. Whatever they write is removed with the
+        // `ScratchDir` above, including on an unwind out of a failed assertion.
         #[allow(dead_code)]
         fn write_file(&self, name: &str, content: &str) {
-            let p = self.dir.join(name);
-            fs::write(p, content).expect("write test file");
+            fs::write(self.dir.path(name), content).expect("write test file");
         }
 
         #[allow(dead_code)]
         fn read_file(&self, name: &str) -> String {
-            let p = self.dir.join(name);
-            fs::read_to_string(p).unwrap_or_default()
-        }
-    }
-
-    impl Drop for TestEnv {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.dir);
+            fs::read_to_string(self.dir.path(name)).unwrap_or_default()
         }
     }
 

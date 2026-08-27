@@ -695,11 +695,42 @@ fn gen_uptime() -> Vec<u8> {
 
 /// `/proc/meminfo` — memory statistics in `key: value` format.
 ///
-/// Modelled after Linux's `/proc/meminfo` but with our own field names
-/// reflecting our memory subsystem (16 KiB frames, zero-page pool, slab heap).
+/// Two halves, both of which matter:
+///
+/// 1. **The Linux-standard keys.** Every memory-reporting program on a Unix
+///    reads this file and looks up values *by Linux key name*; a key it cannot
+///    find reads as zero. Thirteen crates under `userspace/` parse it that way
+///    (`free`, `top`, `htop`, `vmstat`, `swapon`, `sysinfo`, `sysstat`,
+///    `checkmk-cli`, …). For most fields a missing key means an honest column
+///    of zeroes, but for `SwapFree` it does not: every one of those tools
+///    derives swap-in-use as `SwapTotal - SwapFree`, so an absent `SwapFree`
+///    made them all report swap as **entirely full, always** (see the
+///    `B-FREE-COLUMNS-READ-ZERO-…` issue and `requests/b-a-proc-meminfo-…`).
+///    Publish these even when the honest value is `0` — a sourced zero and an
+///    inferred zero read the same to a tool, but only the sourced one tells a
+///    human we looked.
+/// 2. **The SlateOS-specific keys** (`MemUsed`, `Frames`, `ZeroPool*`,
+///    `Heap*`, `SwapUsed`, `SwapDevices`, `Oom*`, `Kswapd*`), which describe
+///    our memory subsystem — 16 KiB frames, zero-page pool, slab heap — in
+///    terms Linux has no name for. Nothing here replaces or renames them.
+///
+/// Deliberately **not** published:
+///
+/// - `HighTotal`/`HighFree`/`LowTotal`/`LowFree` — a 32-bit-x86 concept.
+///   procps substitutes `LowTotal = MemTotal` when they are absent, which is
+///   the correct reading on a 64-bit machine.
+/// - `CommitLimit`/`Committed_AS` — these exist only to parameterise and
+///   report Linux's *strict commit accounting* (`overcommit_memory = 2`),
+///   which we do not perform. `gen_sys_vm` refuses `overcommit_ratio` and
+///   `overcommit_kbytes` for exactly this reason (never advertise an
+///   unhonored feature, design-decisions.md §1), and the same reasoning
+///   applies here. Publishing `Committed_AS` *without* a limit would also
+///   recreate the `SwapFree` failure in a new place: `free -v` prints the two
+///   as a used/total pair, so a real numerator over a zero denominator reads
+///   as a machine committed past its limit.
 fn gen_meminfo() -> Vec<u8> {
     let info = crate::mm::memory_info();
-    let mut s = String::with_capacity(512);
+    let mut s = String::with_capacity(1024);
 
     // Total / free / used in KiB (matching Linux convention).
     let total_kib = info.total_bytes / 1024;
@@ -708,6 +739,60 @@ fn gen_meminfo() -> Vec<u8> {
 
     s.push_str(&format!("MemTotal:       {total_kib} kB\n"));
     s.push_str(&format!("MemFree:        {free_kib} kB\n"));
+
+    // MemAvailable: an estimate of what a new workload could allocate without
+    // pushing the system into swap.  We publish `MemFree` — the same value
+    // procps substitutes when the key is absent — because we have no *cheaper*
+    // estimate that is also safe in the conservative direction:
+    //
+    // - The block buffer cache (`Buffers`, below) is NOT reclaimable. Its
+    //   entry pool is allocated once at init and evicting an entry returns the
+    //   slot to a free-list, not the frame to the allocator, so those bytes
+    //   are held whatever `entries_used` says.
+    // - The file page cache (`Cached`, below) is reclaimable, but only for
+    //   entries with no live mapper (`page_cache::shrink` skips any frame with
+    //   refcount > 1). Counting those exactly means walking every entry and
+    //   taking the frame-allocator lock per entry, while holding the page-cache
+    //   lock — an unbounded loop over a hot lock, in a file `top` re-reads once
+    //   a second. Adding the cache total *unreduced* would overstate, which is
+    //   the one direction an "available" figure must never err in.
+    //
+    // So this is deliberately an underestimate rather than an invented fudge
+    // factor. Publishing it explicitly still beats leaving it absent: the value
+    // becomes sourced rather than inferred, and it moves the day we have real
+    // reclaim accounting.
+    s.push_str(&format!("MemAvailable:   {free_kib} kB\n"));
+
+    // Buffers: block-device sectors currently held by the buffer cache.  This
+    // is Linux's meaning of the key exactly — raw block I/O buffers, as
+    // distinct from the file-page cache reported as `Cached`.
+    let buffers_kib = crate::fs::cache::stats()
+        .entries_used
+        .saturating_mul(crate::blkdev::SECTOR_SIZE)
+        / 1024;
+    s.push_str(&format!("Buffers:        {buffers_kib} kB\n"));
+
+    // Cached: resident pages of the shared read-only file page cache, one
+    // 16 KiB frame each.
+    let cached_kib = (crate::mm::page_cache::stats().resident)
+        .saturating_mul(crate::mm::frame::FRAME_SIZE as u64)
+        / 1024;
+    s.push_str(&format!("Cached:         {cached_kib} kB\n"));
+
+    // Shmem: live shared-memory bytes.  This is a gauge, not a counter --
+    // `ipc::stats` adds on region create and subtracts on destroy -- so it
+    // tracks what is resident rather than what was ever allocated.
+    let shmem_kib = crate::ipc::stats::snapshot().shm_bytes_mapped / 1024;
+    s.push_str(&format!("Shmem:          {shmem_kib} kB\n"));
+
+    // SReclaimable / SUnreclaim: Linux splits slab into the reclaimable part
+    // (dentry and inode caches, which a shrinker can drop) and the rest.  Our
+    // slab allocator marks no cache reclaimable and has no shrinker, so the
+    // honest split is "none of it".  `free` sums Buffers + Cached +
+    // SReclaimable into its buff/cache column, so a wrong non-zero here would
+    // inflate that column; zero is both true and safe.
+    s.push_str("SReclaimable:   0 kB\n");
+
     s.push_str(&format!("MemUsed:        {used_kib} kB\n"));
     s.push_str(&format!(
         "Frames:         {} total, {} free\n",
@@ -726,9 +811,23 @@ fn gen_meminfo() -> Vec<u8> {
     s.push_str(&format!("HeapAllocFails: {}\n", info.heap_alloc_failures));
 
     // Swap.
+    //
+    // `SwapFree` is the key this file existed without for too long.  Every
+    // consumer computes swap-in-use as `SwapTotal - SwapFree` (this is procps'
+    // own derivation, and our transcriptions copy it), so while the key was
+    // absent it parsed as 0 and the whole of swap read as consumed -- on the
+    // very same read where `SwapUsed` two lines down said it was empty.  The
+    // two are derived from one snapshot of `memory_info()` here precisely so
+    // they cannot disagree; `self_test` asserts that they do not.
+    //
+    // saturating_sub, not `-`: used should never exceed total, but /proc is not
+    // the place to find out that it did, and an underflow here would republish
+    // the same catastrophic-looking number the missing key produced.
     let swap_total_kib = info.swap_total_bytes / 1024;
     let swap_used_kib = info.swap_used_bytes / 1024;
+    let swap_free_kib = info.swap_total_bytes.saturating_sub(info.swap_used_bytes) / 1024;
     s.push_str(&format!("SwapTotal:      {swap_total_kib} kB\n"));
+    s.push_str(&format!("SwapFree:       {swap_free_kib} kB\n"));
     s.push_str(&format!("SwapUsed:       {swap_used_kib} kB\n"));
     s.push_str(&format!("SwapDevices:    {}\n", info.swap_device_count));
 
@@ -15201,6 +15300,78 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         serial_println!("[procfs]   {name}: {} bytes OK", data.len());
+    }
+
+    // --- /proc/meminfo Linux key coverage ---
+    // Thirteen crates under `userspace/` look these up by Linux key name and
+    // read a missing key as zero.  Two things are pinned here.
+    //
+    // First, the keys exist at all.  Second -- and this is the check that
+    // matters -- `SwapUsed` and `SwapTotal - SwapFree` are read out of one
+    // snapshot of the file and must agree.  They are two spellings of one
+    // quantity, so they cannot both be right and differ; while `SwapFree` was
+    // absent they differed by the whole of swap, which is what made every tool
+    // report a full swap device on an idle machine.
+    {
+        let mem_data = fs.read_file(Path::new("/meminfo"))?;
+        let mem_text = core::str::from_utf8(&mem_data).map_err(|_| KernelError::InternalError)?;
+
+        // Parse a `Key:   <n> kB` line the way the consumers do: split on the
+        // first colon, take the leading integer of the remainder.
+        let field = |key: &str| -> Option<u64> {
+            mem_text.lines().find_map(|l| {
+                let (name, rest) = l.split_once(':')?;
+                if name.trim() != key {
+                    return None;
+                }
+                rest.split_whitespace().next()?.parse::<u64>().ok()
+            })
+        };
+
+        for key in [
+            "MemTotal",
+            "MemFree",
+            "MemAvailable",
+            "Buffers",
+            "Cached",
+            "Shmem",
+            "SReclaimable",
+            "SwapTotal",
+            "SwapFree",
+            "SwapUsed",
+        ] {
+            if field(key).is_none() {
+                serial_println!("[procfs]   FAIL: meminfo is missing the '{key}' key");
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // The decisive one.  Both sides come from the single read above, so a
+        // concurrent swap-out between them cannot manufacture a failure.
+        let (Some(swap_total), Some(swap_free), Some(swap_used)) =
+            (field("SwapTotal"), field("SwapFree"), field("SwapUsed"))
+        else {
+            serial_println!("[procfs]   FAIL: meminfo swap keys vanished between reads");
+            return Err(KernelError::InternalError);
+        };
+        let derived_used = swap_total.saturating_sub(swap_free);
+        if derived_used != swap_used {
+            serial_println!(
+                "[procfs]   FAIL: meminfo disagrees with itself about swap: \
+                 SwapTotal({swap_total}) - SwapFree({swap_free}) = {derived_used} kB, \
+                 but SwapUsed says {swap_used} kB"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if swap_free > swap_total {
+            serial_println!(
+                "[procfs]   FAIL: meminfo SwapFree({swap_free}) exceeds SwapTotal({swap_total})"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   meminfo: 10 Linux keys present, SwapUsed == SwapTotal - SwapFree OK"
+        );
     }
 
     // --- /proc/cpuinfo Linux per-processor format ---

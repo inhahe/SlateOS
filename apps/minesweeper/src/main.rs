@@ -676,7 +676,15 @@ impl MinesweeperApp {
         let Some(c) = dc.from(col) else {
             return EventResult::Ignored;
         };
-        if r >= self.rows() || c >= self.cols() || (r, c) == self.cursor {
+        // There is no `|| (r, c) == self.cursor` here, and there used to be.
+        // Every `Dir` is one `Back` or one `Fwd` and three `Stay`s, and both
+        // `Back` and `Fwd` change the coordinate they are applied to -- so an
+        // arrow key that lands where it started is not a case this function can
+        // reach, and a guard standing behind a duplicate of itself is a guard
+        // no test can fail on (`known-issues.md` lesson 51). The behaviour it
+        // named -- an arrow at the edge is `Ignored` -- is still asserted, and
+        // is now guaranteed by the two bounds checks that do the work.
+        if r >= self.rows() || c >= self.cols() {
             return EventResult::Ignored;
         }
         self.cursor = (r, c);
@@ -719,13 +727,23 @@ impl MinesweeperApp {
     }
 
     /// Uncover `(row, col)` and, while a cell touches no mine, its neighbours.
+    ///
+    /// There is no `|| cell.is_mine` in the loop below, and there used to be.
+    /// No mine can reach this stack: the seed cell is one `reveal` has already
+    /// found to be safe, and the only other cells pushed are the neighbours of
+    /// a cell whose count is *nought*, which by the definition of that count
+    /// are every one of them safe. A guard standing behind a duplicate of
+    /// itself is a guard no test can fail on (`known-issues.md` lesson 51), and
+    /// the mutation sweep proved this one exactly that. The behaviour it named
+    /// -- the flood never uncovers a mine -- is still asserted, over twenty
+    /// boards, and is now guaranteed by the count rather than re-checked.
     fn flood_reveal(&mut self, row: usize, col: usize) {
         let mut stack = vec![(row, col)];
         while let Some((r, c)) = stack.pop() {
             let Some(cell) = self.cell(r, c) else {
                 continue;
             };
-            if cell.state != CellState::Hidden || cell.is_mine {
+            if cell.state != CellState::Hidden {
                 continue;
             }
             self.set_state(r, c, CellState::Revealed);
@@ -763,8 +781,18 @@ impl MinesweeperApp {
     /// Uncover every unflagged neighbour of a number whose flags are all
     /// planted. The gesture that makes minesweeper quick, and the one that
     /// loses a game fastest when the flags are wrong.
+    ///
+    /// The first guard is `is_over`, matching [`Self::reveal`] and
+    /// [`Self::flag`], and it deliberately says nothing about `Ready`. It used
+    /// to read `self.status != GameStatus::Playing`, which also excludes
+    /// `Ready` -- but a board that is `Ready` has no revealed cell on it at
+    /// all (`deal` leaves every cell `Hidden`, `flag` never reveals, and
+    /// `reveal` moves to `Playing` before it uncovers anything), so the very
+    /// next guard refuses that case already. That made a third of this
+    /// condition a duplicate of the line below it, which is a guard no test
+    /// can fail on (`known-issues.md` lesson 51).
     fn chord(&mut self, row: usize, col: usize) -> EventResult {
-        if self.status != GameStatus::Playing {
+        if self.is_over() {
             return EventResult::Ignored;
         }
         let Some(cell) = self.cell(row, col) else {
@@ -790,11 +818,14 @@ impl MinesweeperApp {
         if hidden.is_empty() {
             return EventResult::Ignored;
         }
+        // No `break` once the game ends, and there used to be one. `reveal`
+        // opens with `is_over`, so every call after the mine that ended the
+        // game returns `Ignored` without touching a cell: the loop was already
+        // inert, and stopping it early was an optimisation wearing a rule's
+        // clothing. The sweep could not tell the two apart, which is what
+        // being inert means (`known-issues.md` lesson 51).
         for (r, c) in hidden {
             self.reveal(r, c);
-            if self.status != GameStatus::Playing {
-                break;
-            }
         }
         self.cursor = (row, col);
         EventResult::Consumed
@@ -1577,6 +1608,78 @@ mod tests {
         Layout::new(a.size().0, a.size().1, a.rows(), a.cols())
     }
 
+    /// Walk the cursor to `(row, col)` with `Action::Move`, and give up rather
+    /// than spin.
+    ///
+    /// The bound is what matters here. Written the obvious way — `while
+    /// a.cursor() != (row, col)` — this loop never returns against *any*
+    /// program whose cursor has stopped moving, and five separate mutations do
+    /// exactly that (a step that stays put, an up that goes down, a left that
+    /// goes up, a move that reports it moved without moving, and a move that
+    /// uncovers as well). Every one of them turned into the same 240-second
+    /// hang, which names no test, distinguishes no fault from any other, and
+    /// costs four minutes each to learn nothing. That is `known-issues.md`'s
+    /// maze finding — *an unbounded loop in a test helper converts every fault
+    /// it depends on into the same undiagnosable hang* — recurring in a suite
+    /// written after it was recorded, which is the argument for making the
+    /// bound a habit rather than a repair.
+    ///
+    /// Four steps per axis more than the board is wide is slack enough for any
+    /// route this walk can take, since it closes one axis at a time and each
+    /// step closes it by one.
+    fn walk_cursor(
+        a: &mut MinesweeperApp,
+        row: usize,
+        col: usize,
+        mut step: impl FnMut(&mut MinesweeperApp, Dir),
+    ) {
+        let bound = a.rows() + a.cols() + 8;
+        for _ in 0..bound {
+            let (cr, cc) = a.cursor();
+            if (cr, cc) == (row, col) {
+                return;
+            }
+            if cr < row {
+                step(a, Dir::Down);
+            } else if cr > row {
+                step(a, Dir::Up);
+            } else if cc < col {
+                step(a, Dir::Right);
+            } else {
+                step(a, Dir::Left);
+            }
+        }
+        panic!(
+            "the cursor did not reach {row},{col} in {bound} moves — it is at \
+             {:?}, so a move is not moving where it says it does",
+            a.cursor()
+        );
+    }
+
+    /// Walk the cursor with `Action::Move`, for tests whose subject is not the
+    /// keyboard.
+    fn walk_cursor_to(a: &mut MinesweeperApp, row: usize, col: usize) {
+        walk_cursor(a, row, col, |a, d| {
+            a.apply(Action::Move(d));
+        });
+    }
+
+    /// Walk the cursor with the arrow keys, through the whole event path, for
+    /// the test whose subject *is* the keyboard.
+    fn walk_cursor_with_keys(a: &mut MinesweeperApp, row: usize, col: usize) {
+        walk_cursor(a, row, col, |a, d| {
+            key(
+                a,
+                match d {
+                    Dir::Up => Key::Up,
+                    Dir::Down => Key::Down,
+                    Dir::Left => Key::Left,
+                    Dir::Right => Key::Right,
+                },
+            );
+        });
+    }
+
     fn cell_point(a: &MinesweeperApp, row: usize, col: usize) -> (f32, f32) {
         let r = layout_of(a).cell_rect(row, col);
         assert!(!r.is_empty(), "cell {row},{col} is not drawn");
@@ -1857,7 +1960,15 @@ mod tests {
 
     #[test]
     fn an_index_and_a_row_and_column_name_the_same_cell() {
-        let a = game(4);
+        // Expert, not Beginner, and that is the whole point of the test. A row
+        // is `row * cols + col`, and Beginner is nine by nine and Intermediate
+        // sixteen by sixteen -- on a square board `rows()` and `cols()` are the
+        // same number, so a version of this that multiplied by the wrong one
+        // passed every assertion below. Expert is the only board whose two
+        // dimensions differ (30 columns, 16 rows), and it is the only board on
+        // which this test means anything.
+        let a = MinesweeperApp::with_seed(Difficulty::Expert, 4);
+        assert_ne!(a.rows(), a.cols(), "a square board cannot tell them apart");
         for (r, c) in all_cells(&a) {
             let i = a.index_of(r, c).expect("on the board");
             assert_eq!(split(i, a.cols()), Some((r, c)), "index {i} split wrong");
@@ -2199,6 +2310,34 @@ mod tests {
     }
 
     #[test]
+    fn a_flag_on_a_safe_cell_is_not_the_same_as_opening_it() {
+        // "Cleared" is every safe cell *revealed*, not every safe cell merely
+        // not hidden -- and a flag is the third state that tells those two
+        // apart. A player who flags a safe square by mistake and opens
+        // everything else has not won, and must be able to take the flag back
+        // and finish.
+        let mut a = started(33);
+        let spare = safe_of(&a)
+            .into_iter()
+            .find(|&(r, c)| !a.is_revealed(r, c))
+            .expect("a safe cell still shut");
+        a.apply(Action::Flag(spare.0, spare.1));
+        assert!(a.is_flagged(spare.0, spare.1));
+        clear_the_board(&mut a);
+        assert!(
+            !a.is_cleared(),
+            "a flag on a safe cell counted as having opened it"
+        );
+        assert_ne!(a.status(), GameStatus::Won, "a flag won the game");
+
+        // Take the flag back and open it, and now it is won.
+        a.apply(Action::Flag(spare.0, spare.1));
+        a.apply(Action::Reveal(spare.0, spare.1));
+        assert!(a.is_cleared());
+        assert_eq!(a.status(), GameStatus::Won);
+    }
+
+    #[test]
     fn uncovering_every_mine_does_not_count_as_clearing_the_board() {
         // The check this replaces was `revealed_count >= cells - mines`, and the
         // losing click counted the mine it uncovered. Uncovering mines must
@@ -2307,13 +2446,45 @@ mod tests {
 
     #[test]
     fn chording_a_satisfied_number_opens_everything_else_around_it() {
-        let mut a = started(40);
-        let (r, c) = a_satisfied_number(&mut a).expect("a number beside the clearing");
+        // "Everything", and the board is chosen so that the word can be tested.
+        // A number with a single shut neighbour cannot tell a chord that opens
+        // all of them from one that opens the first and stops -- and neither
+        // can a number whose first shut neighbour is a blank, because the flood
+        // out of that blank would open the rest whatever the chord did. So this
+        // wants two shut neighbours, both of them counts rather than blanks,
+        // and it hunts across boards until it finds one.
+        let (mut a, (r, c)) = (0..80u64)
+            .find_map(|seed| {
+                let mut a = started(seed);
+                let shut = |a: &MinesweeperApp, r: usize, c: usize| {
+                    a.neighbours(r, c)
+                        .filter(|&(x, y)| !a.is_revealed(x, y) && !a.is_mine(x, y))
+                        .collect::<Vec<_>>()
+                };
+                let spot = all_cells(&a).into_iter().find(|&(r, c)| {
+                    a.is_revealed(r, c)
+                        && !a.is_mine(r, c)
+                        && a.adjacent(r, c) > 0
+                        && shut(&a, r, c).len() >= 2
+                        && shut(&a, r, c).iter().all(|&(x, y)| a.adjacent(x, y) > 0)
+                })?;
+                for (x, y) in a.neighbours(spot.0, spot.1).collect::<Vec<_>>() {
+                    if a.is_mine(x, y) {
+                        a.apply(Action::Flag(x, y));
+                    }
+                }
+                Some((a, spot))
+            })
+            .expect("a satisfied number with two shut counts around it");
+
         let hidden: Vec<(usize, usize)> = a
             .neighbours(r, c)
             .filter(|&(x, y)| !a.is_revealed(x, y) && !a.is_flagged(x, y))
             .collect();
-        assert!(!hidden.is_empty(), "nothing left to chord open");
+        assert!(
+            hidden.len() >= 2,
+            "one cell cannot tell 'all' from 'the first'"
+        );
         assert_eq!(a.apply(Action::Chord(r, c)), EventResult::Consumed);
         for (x, y) in hidden {
             assert!(a.is_revealed(x, y), "{x},{y} stayed shut after a chord");
@@ -2336,25 +2507,141 @@ mod tests {
 
     #[test]
     fn chording_a_number_with_too_many_flags_does_nothing() {
-        let mut a = started(42);
-        let (r, c) = a_satisfied_number(&mut a).expect("a number");
+        // The version this replaces flagged the *only* remaining hidden
+        // neighbour to make the count too high, so the chord was turned away
+        // by "nothing left to open" before the count was ever consulted, and a
+        // `!=` weakened to `>` walked straight through it. A cell with two
+        // hidden neighbours is what the test needs: flag one spare, and the
+        // other is still there for a wrongly-permitted chord to open.
+        let (mut a, (r, c)) = (0..60u64)
+            .find_map(|seed| {
+                let mut a = started(seed);
+                let spot = all_cells(&a).into_iter().find(|&(r, c)| {
+                    a.is_revealed(r, c)
+                        && !a.is_mine(r, c)
+                        && a.adjacent(r, c) > 0
+                        && a.neighbours(r, c)
+                            .filter(|&(x, y)| !a.is_revealed(x, y) && !a.is_mine(x, y))
+                            .count()
+                            >= 2
+                })?;
+                for (x, y) in a.neighbours(spot.0, spot.1).collect::<Vec<_>>() {
+                    if a.is_mine(x, y) {
+                        a.apply(Action::Flag(x, y));
+                    }
+                }
+                Some((a, spot))
+            })
+            .expect("a satisfied number with two safe cells still shut");
+
         let spare = a
             .neighbours(r, c)
-            .find(|&(x, y)| !a.is_revealed(x, y) && !a.is_flagged(x, y));
-        if let Some((x, y)) = spare {
+            .find(|&(x, y)| !a.is_revealed(x, y) && !a.is_flagged(x, y))
+            .expect("a spare to over-flag");
+        a.apply(Action::Flag(spare.0, spare.1));
+        let still_shut = a
+            .neighbours(r, c)
+            .find(|&(x, y)| !a.is_revealed(x, y) && !a.is_flagged(x, y))
+            .expect("something a wrong chord could open");
+
+        assert!(
+            usize::from(a.adjacent(r, c))
+                < a.neighbours(r, c)
+                    .filter(|&(x, y)| a.is_flagged(x, y))
+                    .count(),
+            "the flags do not outnumber the count"
+        );
+        assert_eq!(a.apply(Action::Chord(r, c)), EventResult::Ignored);
+        assert!(
+            !a.is_revealed(still_shut.0, still_shut.1),
+            "an over-flagged chord opened {still_shut:?}"
+        );
+    }
+
+    /// A covered cell a wrongly-permitted chord would actually open: its count
+    /// is matched by flags, and one neighbour is still shut.
+    ///
+    /// Without this the test below picks the first hidden cell in reading
+    /// order, whose count almost never equals its flag tally -- so the chord is
+    /// refused by the *count* guard and the "is it even open?" guard under test
+    /// is never reached.
+    fn a_covered_cell_a_chord_could_open(a: &mut MinesweeperApp) -> Option<(usize, usize)> {
+        let hidden = |a: &MinesweeperApp, r: usize, c: usize| {
+            a.neighbours(r, c)
+                .filter(|&(x, y)| !a.is_revealed(x, y) && !a.is_flagged(x, y))
+                .collect::<Vec<_>>()
+        };
+        let spot = all_cells(a).into_iter().find(|&(r, c)| {
+            !a.is_revealed(r, c)
+                && !a.is_mine(r, c)
+                && hidden(a, r, c).len() > usize::from(a.adjacent(r, c))
+        })?;
+        let shut = hidden(a, spot.0, spot.1);
+        for &(x, y) in shut.iter().take(usize::from(a.adjacent(spot.0, spot.1))) {
             a.apply(Action::Flag(x, y));
-            assert_eq!(a.apply(Action::Chord(r, c)), EventResult::Ignored);
         }
+        Some(spot)
     }
 
     #[test]
     fn chording_a_covered_cell_does_nothing() {
         let mut a = started(43);
-        let (r, c) = *all_cells(&a)
-            .iter()
-            .find(|&&(r, c)| !a.is_revealed(r, c))
-            .expect("a hidden cell");
+        let (r, c) = a_covered_cell_a_chord_could_open(&mut a).expect("a covered cell");
+        let shut: Vec<(usize, usize)> = a
+            .neighbours(r, c)
+            .filter(|&(x, y)| !a.is_revealed(x, y) && !a.is_flagged(x, y))
+            .collect();
+        assert!(!shut.is_empty(), "nothing a wrong chord could open");
+        assert_eq!(
+            usize::from(a.adjacent(r, c)),
+            a.neighbours(r, c)
+                .filter(|&(x, y)| a.is_flagged(x, y))
+                .count(),
+            "the flags do not satisfy the count, so the count guard would refuse it"
+        );
+
         assert_eq!(a.apply(Action::Chord(r, c)), EventResult::Ignored);
+        assert!(
+            !a.is_revealed(r, c),
+            "a chord opened the cell it was aimed at"
+        );
+        for (x, y) in shut {
+            assert!(
+                !a.is_revealed(x, y),
+                "a chord on a covered cell opened {x},{y}"
+            );
+        }
+    }
+
+    #[test]
+    fn chording_a_flag_does_nothing() {
+        // The other half of "not revealed": a flagged cell is not a number
+        // either, however well its neighbours' flags happen to add up.
+        let mut a = started(47);
+        let (r, c) = a_covered_cell_a_chord_could_open(&mut a).expect("a covered cell");
+        a.apply(Action::Flag(r, c));
+        assert!(a.is_flagged(r, c));
+        assert_eq!(a.apply(Action::Chord(r, c)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn chording_after_the_game_is_over_does_nothing() {
+        // A lost board is covered in revealed mines and revealed numbers, so
+        // this is the case the first guard in `chord` exists for -- unlike
+        // `Ready`, where there is no revealed cell for a chord to land on.
+        let mut a = started(48);
+        let (r, c) = a_satisfied_number(&mut a).expect("a number");
+        let mine = *mines_of(&a).first().expect("a mine");
+        a.apply(Action::Reveal(mine.0, mine.1));
+        assert_eq!(a.status(), GameStatus::Lost);
+
+        let before = a.revealed_count();
+        assert_eq!(a.apply(Action::Chord(r, c)), EventResult::Ignored);
+        assert_eq!(
+            a.revealed_count(),
+            before,
+            "a chord ran after the game ended"
+        );
     }
 
     #[test]
@@ -2470,25 +2757,25 @@ mod tests {
         assert_eq!(a.status(), GameStatus::Playing, "Space did not uncover");
         assert!(a.is_revealed(1, 1));
 
-        // Enter is Space's twin, and F flags where the cursor is.
+        // F flags where the cursor is.
         let (r, c) = *all_cells(&a)
             .iter()
             .find(|&&(r, c)| !a.is_revealed(r, c))
             .expect("a hidden cell");
-        while a.cursor() != (r, c) {
-            let (cr, cc) = a.cursor();
-            if cr < r {
-                key(&mut a, Key::Down);
-            } else if cr > r {
-                key(&mut a, Key::Up);
-            } else if cc < c {
-                key(&mut a, Key::Right);
-            } else {
-                key(&mut a, Key::Left);
-            }
-        }
+        walk_cursor_with_keys(&mut a, r, c);
         assert_eq!(key(&mut a, Key::F), EventResult::Consumed);
         assert!(a.is_flagged(r, c), "F did not flag under the cursor");
+    }
+
+    #[test]
+    fn enter_uncovers_the_same_cell_space_would() {
+        // Two keys, one action. Named separately because a suite that only ever
+        // presses Space cannot notice Enter being dropped from the arm they
+        // share.
+        let mut a = game(521);
+        key(&mut a, Key::Down);
+        assert_eq!(key(&mut a, Key::Enter), EventResult::Consumed);
+        assert!(a.is_revealed(1, 0), "Enter did not uncover");
     }
 
     #[test]
@@ -2512,18 +2799,7 @@ mod tests {
         let (r, c) = a_satisfied_number(&mut a).expect("a number");
         // Flagging left the cursor on the last flag; walk it back to the number.
         a.apply(Action::Move(Dir::Up));
-        while a.cursor() != (r, c) {
-            let (cr, cc) = a.cursor();
-            if cr < r {
-                a.apply(Action::Move(Dir::Down));
-            } else if cr > r {
-                a.apply(Action::Move(Dir::Up));
-            } else if cc < c {
-                a.apply(Action::Move(Dir::Right));
-            } else {
-                a.apply(Action::Move(Dir::Left));
-            }
-        }
+        walk_cursor_to(&mut a, r, c);
         let hidden = a
             .neighbours(r, c)
             .filter(|&(x, y)| !a.is_revealed(x, y) && !a.is_flagged(x, y))
@@ -2617,12 +2893,21 @@ mod tests {
     fn the_clock_counts_the_time_that_passed_not_the_times_it_was_woken() {
         // It used to add one second per call, which reports how often the
         // window happened to wake it — a fact about the window, not the game.
+        //
+        // The three amounts must not sum to a whole number of seconds, and it
+        // took the mutation sweep to notice that the first three chosen here
+        // did: 250 + 250 + 2500 is 3000, and so is one second per call three
+        // times over, so the right rule and the wrong one gave the same answer
+        // and this test could not tell them apart (`known-issues.md` lesson
+        // 54). Four ticks summing to 2825ms disagree with 4000ms in the
+        // milliseconds and, once floored, in the seconds too.
         let mut a = started(61);
         tick(&mut a, 250);
-        tick(&mut a, 250);
-        tick(&mut a, 2_500);
-        assert_eq!(a.elapsed_ms(), 3_000);
-        assert_eq!(a.elapsed_secs(), 3);
+        tick(&mut a, 75);
+        tick(&mut a, 2_000);
+        tick(&mut a, 500);
+        assert_eq!(a.elapsed_ms(), 2_825, "the clock counted its wakings");
+        assert_eq!(a.elapsed_secs(), 2, "the displayed second is not floored");
     }
 
     #[test]
@@ -2746,13 +3031,74 @@ mod tests {
 
     #[test]
     fn the_board_keeps_its_share_of_a_window_that_is_getting_shorter() {
-        for h in [200.0f32, 300.0, 480.0, 660.0, 1080.0] {
+        // Two things had to change here before this test could see the share
+        // move, and the second was not the one it looked like.
+        //
+        // The number is written out rather than read from `BOARD_SHARE`,
+        // because a test that measures the share against the constant that
+        // sets it moves with that constant (`known-issues.md` lesson 52). Half
+        // is the *claim*: whatever the constant says, at least half of any
+        // window this program is playable in must reach the board.
+        //
+        // But that alone still did not fail when the sweep dropped the share
+        // to 0.15, and the reason is worth writing down. `BOARD_SHARE` does
+        // not set the board's height -- the board gets whatever the header and
+        // footer leave. All the share decides is the *budget* those two bands
+        // must fit inside before one of them is dropped, so it has no effect
+        // whatever on a window tall enough for both. Every height this test
+        // used was such a window, so the two versions laid out identically and
+        // the assertion was exact, thorough and blind. The heights that matter
+        // are the short ones, 60 to 90 pixels here, where the real share drops
+        // a band and the mutant keeps it: at 60 the board falls from 56 pixels
+        // to 14. **A constant that only takes effect at the edge of a range
+        // can only be tested at that edge** -- and a fixture chosen from
+        // comfortable, realistic window sizes is guaranteed to miss it.
+        for h in [60.0f32, 75.0, 90.0, 200.0, 300.0, 480.0, 660.0, 1080.0] {
             let l = Layout::new(800.0, h, 9, 9);
             assert!(
-                l.board.h >= h * BOARD_SHARE - 0.01,
+                l.board.h >= h * 0.5 - 0.01,
                 "at {h} the board kept only {}",
                 l.board.h
             );
+        }
+    }
+
+    #[test]
+    fn no_cell_is_drawn_on_top_of_the_header_or_the_footer() {
+        // Staying inside the window is not the same claim as staying inside
+        // the *board's band*: a board slid up over the header is still wholly
+        // within the window, so `no_cell_is_ever_drawn_outside_the_window`
+        // cannot see it. The sweep did exactly that and only the two chip
+        // tests noticed -- and they noticed because the board had buried the
+        // chips' hit boxes, which is a symptom, not the rule being broken.
+        for (w, h) in SIZES {
+            for d in Difficulty::ALL {
+                let l = Layout::new(w, h, d.rows(), d.cols());
+                for (r, c) in [(0, 0), (d.rows() - 1, d.cols() - 1)] {
+                    let rect = l.cell_rect(r, c);
+                    if rect.is_empty() {
+                        continue;
+                    }
+                    if l.shows(l.header) {
+                        assert!(
+                            rect.y >= l.header.bottom() - 0.01,
+                            "{}x{} {}: cell {r},{c} at {rect:?} is drawn over the header",
+                            w,
+                            h,
+                            d.label()
+                        );
+                    }
+                    if l.shows(l.footer) {
+                        assert!(
+                            rect.bottom() <= l.footer.y + 0.01,
+                            "{}x{} {}: cell {r},{c} at {rect:?} is drawn over the footer",
+                            w,
+                            h,
+                            d.label()
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -2800,6 +3146,30 @@ mod tests {
             assert!(
                 l.step >= l.cell,
                 "{w}x{h}: the gap was added, not taken out"
+            );
+        }
+    }
+
+    #[test]
+    fn there_is_a_gap_between_one_cell_and_the_next() {
+        // Without it the board is one solid block of colour with no cells
+        // visible in it -- and a suite that only checks that cells do not
+        // *overlap* is satisfied by exactly that, because touching is not
+        // overlapping.
+        for (w, h) in SIZES {
+            let l = Layout::new(w, h, 9, 9);
+            if l.cell_rect(0, 0).is_empty() {
+                continue;
+            }
+            assert!(
+                l.cell < l.step,
+                "{w}x{h}: a cell of {} in a step of {} leaves no gap",
+                l.cell,
+                l.step
+            );
+            assert!(
+                l.cell_rect(0, 0).right() < l.cell_rect(0, 1).x,
+                "{w}x{h}: the cells touch"
             );
         }
     }
@@ -2869,6 +3239,34 @@ mod tests {
     }
 
     #[test]
+    fn a_chip_stops_growing_once_it_is_wide_enough_to_read() {
+        // Every assertion in the test above is true of *any* chip width: the
+        // chips are placed by subtracting their own width from the right edge,
+        // so they cannot overlap or leave the header however wide they get,
+        // and a test built out of the layout it is testing cannot fail
+        // (`known-issues.md` lesson 52). What a chip's upper clamp actually
+        // promises is this: past a certain window, a wider window does not buy
+        // a wider chip. A label that keeps pace with the monitor is a label
+        // that eventually eats the header the counter and clock live in.
+        let wide = Layout::new(1920.0, 1080.0, 9, 9);
+        let wider = Layout::new(3840.0, 2160.0, 9, 9);
+        assert!(
+            (wide.chip(0).w - wider.chip(0).w).abs() < 0.01,
+            "doubling the window doubled the chip: {} then {}",
+            wide.chip(0).w,
+            wider.chip(0).w
+        );
+        // And having stopped, the pair leaves the header overwhelmingly to the
+        // readout it exists for.
+        let pair = wider.chip(0).w + wider.chip(1).w;
+        assert!(
+            pair < wider.header.w / 4.0,
+            "the two chips take {pair} of a {} header",
+            wider.header.w
+        );
+    }
+
+    #[test]
     fn there_are_no_chips_when_there_is_no_header() {
         let l = Layout::new(600.0, 20.0, 9, 9);
         assert_eq!(l.chip(0), Rect::EMPTY);
@@ -2916,6 +3314,13 @@ mod tests {
 
     #[test]
     fn the_box_a_cell_records_is_the_box_it_was_painted_in() {
+        // This test claims the hit box and the drawn box *agree*, and both
+        // sides of that claim come from `cell_rect` -- so it cannot see
+        // `cell_rect` itself go wrong, and the mutation sweep proved it blind
+        // to a column read as a row (`known-issues.md` lesson 52). That is not
+        // a fault in this test: agreement is a real property and this is where
+        // it belongs. Where the grid *puts* a cell is a separate claim, and it
+        // is owned by the test below.
         let a = game(81);
         let l = layout_of(&a);
         for (r, c) in all_cells(&a) {
@@ -2928,11 +3333,55 @@ mod tests {
     }
 
     #[test]
+    fn a_cells_box_moves_across_with_its_column_and_down_with_its_row() {
+        let a = game(81);
+        let l = layout_of(&a);
+        for (r, c) in all_cells(&a) {
+            let here = l.cell_rect(r, c);
+            if c + 1 < a.cols() {
+                let right = l.cell_rect(r, c + 1);
+                assert!(
+                    right.x > here.x,
+                    "column {} is not to the right of column {c}",
+                    c + 1
+                );
+                assert!(
+                    (right.y - here.y).abs() < 0.01,
+                    "moving along a row moved the cell down the window"
+                );
+            }
+            if r + 1 < a.rows() {
+                let below = l.cell_rect(r + 1, c);
+                assert!(below.y > here.y, "row {} is not below row {r}", r + 1);
+                assert!(
+                    (below.x - here.x).abs() < 0.01,
+                    "moving down a column moved the cell across the window"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn clicking_a_cell_uncovers_that_cell_and_no_other() {
-        let mut a = game(82);
-        assert_eq!(reveal(&mut a, 5, 3), EventResult::Consumed);
-        assert!(a.is_revealed(5, 3));
-        assert_eq!(a.cursor(), (5, 3));
+        // Four cells, not one. A click's `x` and `y` are two numbers of the
+        // same kind, so reading them the wrong way round reflects the point
+        // across a diagonal -- and a cell that happens to straddle that
+        // diagonal is mapped onto itself, which leaves a one-cell fixture
+        // passing while every click in the program lands in the wrong place
+        // (`known-issues.md` lesson 54). Cell 5,3 is exactly such a cell here,
+        // and the mutation sweep caught this test being blind to a
+        // `hit_test(y, x)` for that reason. One reflection cannot fix four
+        // cells spread across the board, so this fixture now sees it.
+        for (r, c) in [(5_usize, 3_usize), (0, 8), (8, 0), (2, 6)] {
+            let mut a = game(82);
+            assert_eq!(
+                reveal(&mut a, r, c),
+                EventResult::Consumed,
+                "the click on {r},{c} was refused"
+            );
+            assert!(a.is_revealed(r, c), "cell {r},{c} stayed covered");
+            assert_eq!(a.cursor(), (r, c), "the click on {r},{c} landed elsewhere");
+        }
     }
 
     #[test]
@@ -3270,6 +3719,42 @@ mod tests {
     }
 
     #[test]
+    fn the_footer_lays_its_hints_out_in_a_row_rather_than_in_a_heap() {
+        // Reading the strings back proves every hint was *drawn*; it says
+        // nothing about where. With the cursor never advanced, all six are
+        // painted at the same x, one on top of the last, and the footer reads
+        // as a single unintelligible smear -- while a test that only joins the
+        // texts together passes exactly as loudly as before.
+        let a = game(111);
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT, a.rows(), a.cols());
+        let f = a.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut placed: Vec<(f32, String)> = Vec::new();
+        for cmd in f.commands() {
+            if let RenderCommand::Text { x, y, text, .. } = cmd {
+                if *y >= l.footer.y {
+                    placed.push((*x, text.clone()));
+                }
+            }
+        }
+        assert_eq!(
+            placed.len(),
+            SHORTCUTS.len(),
+            "not every hint reached the footer"
+        );
+        for pair in placed.windows(2) {
+            let Some((x0, s0)) = pair.first() else {
+                continue;
+            };
+            let Some((x1, _)) = pair.get(1) else { continue };
+            let w = text::measure(s0, l.font, FontWeightHint::Regular);
+            assert!(
+                *x1 >= x0 + w,
+                "'{s0}' runs from {x0} for {w}, and the next hint starts at {x1}"
+            );
+        }
+    }
+
+    #[test]
     fn every_key_the_footer_advertises_is_a_key_the_board_answers() {
         // The footer is a promise. A line in it naming a key that does nothing
         // is worse than no line at all.
@@ -3296,19 +3781,7 @@ mod tests {
                     .expect("a covered cell")
             };
             if matches!(k, "Space" | "F" | "C") {
-                let (r, c) = want;
-                while a.cursor() != (r, c) {
-                    let (cr, cc) = a.cursor();
-                    if cr < r {
-                        a.apply(Action::Move(Dir::Down));
-                    } else if cr > r {
-                        a.apply(Action::Move(Dir::Up));
-                    } else if cc < c {
-                        a.apply(Action::Move(Dir::Right));
-                    } else {
-                        a.apply(Action::Move(Dir::Left));
-                    }
-                }
+                walk_cursor_to(&mut a, want.0, want.1);
             }
             assert_eq!(
                 probe::key(&mut a, &event),

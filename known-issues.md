@@ -92147,3 +92147,150 @@ unconditional catch-all wearing the appearance of a complement.
 sort comparators, scroll/clamp arithmetic, "grow or shrink". Where the branches
 are "do it" / "don't", `else` is genuinely the complement and this lesson does
 not apply.
+
+### Lesson 54: a fixture in which two different quantities happen to be equal cannot tell them apart (lane C, 2026-08-27)
+
+**In short:** a test proves a program right by watching the program get an
+answer. If the *numbers you chose for the test* make the right answer and the
+wrong answer come out the same, the test watches the program get the right
+answer for the wrong reason and reports success. This is not a weak assertion —
+the assertions can be exact and exhaustive — it is a weak **fixture**, and it
+is invisible in the test's own text, because nothing in the test says "and
+these two numbers are different". Minesweeper shipped two of these, found by
+mutation, in code whose tests looked thorough.
+
+**The two faults.**
+
+1. **A square board cannot tell a row count from a column count.** The flat
+   index of a cell is `row * cols + col`. Beginner minesweeper is 9 × 9 and
+   Intermediate is 16 × 16, so on either board `rows()` and `cols()` are *the
+   same number*; a version that multiplied by `rows()` passed every assertion
+   in a test that walked all 81 cells and checked each index round-tripped.
+   Expert (30 columns, 16 rows) is the only board on which the test means
+   anything.
+2. **Three ticks of 250 ms, 250 ms and 2500 ms add up to 3000 ms — and so do
+   three ticks of a flat 1000 ms.** The clock test existed precisely to pin
+   down "count the time that passed, not the number of times you were woken",
+   which is a bug the program had once shipped. It asserted the exact final
+   reading, `3_000`. The rule it was written to forbid produces `1000 + 1000 +
+   1000`, which is *also* `3_000`. The test could not fail.
+3. **A cell on the diagonal is its own mirror image.** (Found a day later, in
+   the same suite, by the same sweep — which is the argument for reading every
+   verdict rather than only the survivors.) `hit_test(event.x, event.y)` was
+   mutated to `hit_test(event.y, event.x)`, which reflects every click across
+   the diagonal. Sixty-odd tests failed. The one test whose entire subject is
+   *where a click lands* — it clicked one cell, row 5 column 3, and checked
+   that cell opened — passed, because on that board the board's left margin
+   happens to exceed its top margin by about two cells, which puts cell 5,3 on
+   the line the reflection fixes: the swapped point landed back inside the very
+   cell it started in. A one-point fixture cannot see a transformation that has
+   fixed points, and every reflection, rotation and swap has them. Click four
+   cells spread about, and no single reflection fixes all four.
+
+**Why review does not catch it.** All three tests read as strong: they assert
+exact values, and (1) asserts them over every cell on the board. The defect is a
+relationship between two constants that the test never mentions — `9 == 9`,
+`250 + 250 + 2500 == 3 * 1000` — and there is nothing at the point of reading
+to prompt the question. A reviewer checks that the assertion follows from the
+rule; they do not usually check that it *fails* to follow from the plausible
+wrong rules.
+
+**What catches it.**
+
+- **Mutation.** This is the class of blindness mutation testing exists for, and
+  essentially the only one that finds it reliably. All three were caught by a
+  one-line substitution (`cols()` → `rows()`, `elapsed_ms` → `1_000`,
+  `hit_test(x, y)` → `hit_test(y, x)`) and by nothing else in the test that
+  owned the rule.
+- **Choose fixtures whose quantities are pairwise distinct, deliberately, and
+  say so in the test.** Prefer the non-square board, the non-uniform interval,
+  the list whose length differs from its element values, the index that differs
+  from the value stored at it. Where the distinctness is the point, assert it:
+  `assert_ne!(a.rows(), a.cols(), "a square board cannot tell them apart")`
+  turns an invisible property of the fixture into a line that fails loudly if
+  someone later "simplifies" the test onto Beginner.
+- **Ask of every constant in a fixture: what wrong rule also produces this
+  number?** For a sum, a uniform interval whose product matches is the usual
+  culprit; for an index, equal dimensions; for a scale factor, 1.0; for an
+  offset, 0.
+- **For anything that maps a point to a thing — a hit test, a projection, a
+  transform — use more than one point, and put them where a symmetry cannot
+  hold them still.** A single sample cannot distinguish a mapping from any of
+  its symmetries, and the fixed points of a swap, a reflection or a rotation
+  are exactly where a tidy fixture (the middle, the diagonal, the origin) tends
+  to land.
+
+**Where else to look.** Any test using a square grid, a power-of-two size that
+also appears as a count, a duration equal to the tick period, a scale of 1, an
+origin of 0, a single sample point, or a collection whose length coincides with
+one of its values.
+Also any test whose fixture was chosen for tidiness — round numbers and equal
+dimensions are exactly the choices that make wrong rules agree with right ones.
+
+### Lesson 55: an unbounded loop in a test helper turns every fault it depends on into the same silence (lane C, 2026-08-27)
+
+**In short:** test helpers often *drive* the program to a starting position —
+"press Right until the cursor is on cell 5,3" — before the test asserts
+anything. Written as a `while` with no step limit, such a helper never returns
+if the program has stopped moving the way it says it does. The test does not
+fail; it hangs. The runner kills it on a timeout, and every distinct fault that
+touches the helper produces the identical, contentless verdict: *timed out*.
+The suite has told you nothing about which rule broke, and it charged you the
+full timeout to say it.
+
+**What happened.** `apps/minesweeper`'s tests walked the cursor with
+
+```rust
+while a.cursor() != (r, c) {
+    if cr < r { a.apply(Action::Move(Dir::Down)); } else if …
+}
+```
+
+in three places. Five separate mutations of the movement code — a step that
+stays put, an `Up` that goes down, a `Left` that goes up, a move that reports
+it moved without moving, and a move that uncovers as well as moving — all
+produced exactly one outcome: a 240-second hang. Five different faults,
+one verdict, twenty minutes of wall-clock to learn nothing. `apps/maze` had
+already hit this once, in a helper written as `while g.moves() < moves`, where
+a program that stops counting moves spins forever; that finding was written up
+in the roadmap entry and **not** promoted to a lesson, which is part of why the
+same shape appeared again in a suite written afterwards.
+
+**Why it is worse than it looks.**
+
+- **A hang is scored as a catch, and it is a real one** — a program that hangs
+  is a program that is wrong. So the sweep stays green and nothing prompts you
+  to look. The loss is invisible in the summary line.
+- **It destroys the one thing a mutation sweep is for.** The sweep's product is
+  the *mapping* from fault to the test that owns it. A hang maps every fault to
+  the same non-answer, so the mutations become a smoke test.
+- **It is expensive in the currency that matters.** Each hang costs the full
+  runner timeout. Sweeps are already the slowest thing in the loop.
+- **It can mask a survivor.** If a mutation would otherwise have survived, and
+  a helper it touches hangs first, the survivor is reported as caught.
+
+**The rule.** *Every loop in a test that waits on the program to reach a state
+gets a step bound, and the bound's failure message names the fault.* A bound is
+one line and it converts a timeout into a sentence:
+
+```rust
+let bound = a.rows() + a.cols() + 8;
+for _ in 0..bound { … }
+panic!("the cursor did not reach {row},{col} in {bound} moves — it is at {:?}, \
+        so a move is not moving where it says it does", a.cursor());
+```
+
+Pick the bound from the geometry, not from taste: it should be comfortably
+above the longest legitimate route and far below "forever". Where two tests
+need the same walk driven differently — one through `apply`, one through the
+keyboard, because *that* test's subject is the keyboard — take the step as a
+closure rather than writing the loop twice; two copies of a loop are two places
+for the bound to be forgotten.
+
+**Where else to look.** Any test containing `while`, `loop`, or a `retry`
+helper whose exit condition is a fact about the program under test rather than
+a counter: "until it settles", "until the queue is empty", "until the animation
+finishes", "until the search finds it", "until the generator deals a solvable
+board". Also every polling helper in an integration test. The safe shapes are a
+bounded `for` with a named failure at the end, or an exit condition that
+depends only on the test's own counter.

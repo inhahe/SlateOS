@@ -156,6 +156,14 @@ const HELP_ROWS: [(&str, &str); 8] = [
     ("Two tiles alike", "merge into one of twice the value"),
 ];
 
+/// The smallest font size the renderer will honour, in pixels.
+///
+/// `guitk`'s font cache rounds a requested size to whole pixels and clamps it
+/// to at least one, so anything below this is drawn a whole pixel high however
+/// little was asked for. Text sized under it is therefore not small text but
+/// text of the wrong size, sitting where the layout put the size it asked for.
+const MIN_DRAWN_FONT: f32 = 1.0;
+
 /// The share of the window height the board is guaranteed, before any band is
 /// allowed to take a pixel. Bands are dropped whole until the rest fit.
 const BOARD_SHARE: f32 = 0.42;
@@ -688,12 +696,11 @@ impl Layout {
         }
         let bw = (b.w * 0.5).min(220.0);
         let bh = (b.h * 0.28).min(40.0);
-        Rect::new(
-            b.x + (b.w - bw) / 2.0,
-            (b.bottom() - bh - b.h * 0.08).max(b.y),
-            bw,
-            bh,
-        )
+        // No floor under the y: the button is at most 0.28 of the banner high
+        // and sits 0.08 of it up from the foot, so it can never climb past the
+        // banner's top edge. A `.max(b.y)` here would guard against nothing,
+        // and a guard no input can trip is a line no test can own.
+        Rect::new(b.x + (b.w - bw) / 2.0, b.bottom() - bh - b.h * 0.08, bw, bh)
     }
 }
 
@@ -734,7 +741,18 @@ fn label(
     // a text command that paints nothing but still counts as text drawn.
     // The check lives here, once, rather than at each call site -- a guard
     // repeated in front of the guard is a guard no test can remove.
-    if body.is_empty() || size <= 0.0 || max_width.is_some_and(|w| w <= 0.0) {
+    //
+    // The floor under the size is the renderer's, not a taste in typography.
+    // A font size is rounded to whole pixels and clamped to at least one, so
+    // a request below a pixel is not drawn small -- it is drawn a whole pixel
+    // high, *larger* than the layout asked for and larger than the band it
+    // was sized to fit. Every caller here shrinks its type to fit its box, so
+    // below this point every one of them would be silently overruled: the
+    // help sheet's rows would be written over each other and off its foot.
+    // Refusing is the honest answer. A window with no room for a legible line
+    // shows the boxes and the colours and no words, which is what it has room
+    // for.
+    if body.is_empty() || size < MIN_DRAWN_FONT || max_width.is_some_and(|w| w <= 0.0) {
         return;
     }
     f.push(RenderCommand::Text {
@@ -1454,7 +1472,11 @@ mod tests {
     /// the whole of the chrome, so the guarantee the constant makes is
     /// vacuous there and a test that only looked at those could not see the
     /// constant change.
-    const WINDOWS: [(f32, f32); 10] = [
+    /// `(4, 4)` is here for the padding alone: at every other size in this
+    /// list the padding lands on its 2px floor, so the clamp's upper bound --
+    /// a quarter of the smaller side, which stops the padding eating the
+    /// thing it pads -- never binds and cannot be seen to change.
+    const WINDOWS: [(f32, f32); 11] = [
         (1920.0, 1080.0),
         (1280.0, 800.0),
         (WINDOW_WIDTH, WINDOW_HEIGHT),
@@ -1465,6 +1487,7 @@ mod tests {
         (300.0, 110.0),
         (120.0, 90.0),
         (24.0, 24.0),
+        (4.0, 4.0),
     ];
 
     // ── Fixtures ──
@@ -1530,7 +1553,13 @@ mod tests {
     /// painted -- and would make every one of these tests a test of the
     /// string rather than of the layout.
     fn text_boxes(f: &Frame) -> Vec<(String, Rect, f32)> {
-        f.commands()
+        text_boxes_of(f.commands())
+    }
+
+    /// [`text_boxes`] over a slice of commands rather than a whole frame, so a
+    /// test can take the tail one drawing pass added and look at that alone.
+    fn text_boxes_of(commands: &[RenderCommand]) -> Vec<(String, Rect, f32)> {
+        commands
             .iter()
             .filter_map(|c| match c {
                 RenderCommand::Text {
@@ -2346,6 +2375,15 @@ mod tests {
             );
             assert!(l.board.x >= -0.01, "{w}x{h}: board off the left");
             assert!(l.board.y >= -0.01, "{w}x{h}: board off the top");
+            // Centred, which is to say: the gap to the left of the board is
+            // the gap to its right. Bounds alone cannot see the difference
+            // between a centred board and one pinned to an edge, and the
+            // board is narrower than the window at most of these sizes.
+            assert!(
+                (l.board.x - (w - l.board.right())).abs() < 0.01,
+                "{w}x{h}: the board is not centred across the window: {:?}",
+                l.board
+            );
             assert!(l.board.right() <= w + 0.01, "{w}x{h}: board off the right");
             assert!(
                 l.board.bottom() <= h + 0.01,
@@ -2845,11 +2883,31 @@ mod tests {
         app.board = bare([[2, 0, 0, 0], [0; 4], [0; 4], [0; 4]]);
         app.board.score = 12;
         app.board.best_score = 340;
-        let drawn = texts(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT));
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let drawn = texts(&f);
         assert!(drawn.iter().any(|t| t == "SCORE"));
         assert!(drawn.iter().any(|t| t == "BEST"));
         assert!(drawn.iter().any(|t| t == "12"), "the score is not shown");
         assert!(drawn.iter().any(|t| t == "340"), "the best is not shown");
+
+        // And each in its own box. Both readouts are drawn the same way from
+        // the same helper, so "both are on screen" is answered just as well
+        // by two copies of one box -- the score written twice, the best
+        // never. Only where each word landed can tell the two boxes apart.
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for (word, index) in [("SCORE", 0), ("BEST", 1)] {
+            let box_of = l.score_box(index);
+            assert!(!box_of.is_empty(), "the {word} box was not laid out");
+            let found = text_boxes(&f)
+                .into_iter()
+                .find(|(body, ..)| body == word)
+                .unwrap_or_else(|| panic!("{word} was not drawn at all"));
+            assert!(
+                box_of.contains(found.1.x, found.1.y),
+                "{word} was written at {:?}, outside its own box {box_of:?}",
+                found.1
+            );
+        }
     }
 
     #[test]
@@ -2932,13 +2990,23 @@ mod tests {
         for (target, rect) in f.hits() {
             assert!(!rect.is_empty(), "{target:?} has an empty hit box");
             let (cx, cy) = rect.centre();
+            // Flatly: the centre answers *this* target. Written as
+            // `Some(target).filter(|_| hit_test(..).is_some())` it would pass
+            // whenever nothing at all answered, which is the one outcome the
+            // test exists to catch. Nothing overlaps in this frame -- the
+            // banner sits over the board, the pad and footer below it -- so
+            // there is no honest reason for a later box to win here.
             assert_eq!(
                 f.hit_test(cx, cy).as_ref(),
-                Some(target).filter(|_| f.hit_test(cx, cy).is_some()),
+                Some(target),
                 "{target:?} does not answer a click at its own centre"
             );
         }
-        assert!(!f.hits().is_empty(), "nothing at all was clickable");
+        let clickable = f.hits().len();
+        // Four on the pad, three in the footer, and the banner's own button:
+        // a count, not just "some", so a control that stopped recording a box
+        // is a failure here and not merely a smaller loop that still passes.
+        assert_eq!(clickable, 8, "the wrong number of controls were clickable");
     }
 
     #[test]
@@ -3332,6 +3400,295 @@ mod tests {
         assert!(
             !joined.contains(HELP_TITLE),
             "the help sheet is drawn over a game nobody asked it about"
+        );
+    }
+
+    #[test]
+    fn every_line_of_the_help_sheet_is_written_on_the_sheet() {
+        // Naming the lines says they exist; it does not say they are legible.
+        // The sheet is a ladder of bands, and every way that ladder can be got
+        // wrong -- a step short of a band, a row taller than the band it is
+        // in, a column wider than the sheet -- leaves the words somewhere they
+        // cannot be read, while every one of them is still "on screen".
+        for (w, h) in WINDOWS {
+            let mut app = windowed(w, h);
+            let sheet = Layout::new(w, h).help;
+            let closed = app.frame(w, h).commands().len();
+            app.show_help = true;
+            let f = app.frame(w, h);
+            let added = text_boxes_of(f.commands().get(closed..).expect("the sheet drew nothing"));
+            // A window with no room for a line one pixel high has no room for
+            // words, and a sheet that shows none there is right to. The
+            // threshold is stated against the window rather than against the
+            // sheet's own ladder, which would be this test agreeing with the
+            // arithmetic it exists to check: 24 across is the smallest size in
+            // this list anyone would call a window.
+            assert!(
+                !added.is_empty() || w.min(h) < 24.0,
+                "{w}x{h}: an open sheet wrote nothing at all"
+            );
+            for (body, r, _) in added {
+                assert!(
+                    r.x >= sheet.x - 0.01 && r.y >= sheet.y - 0.01,
+                    "{w}x{h}: {body:?} starts at ({}, {}), above or left of the sheet {sheet:?}",
+                    r.x,
+                    r.y
+                );
+                assert!(
+                    r.right() <= sheet.right() + 0.01,
+                    "{w}x{h}: {body:?} runs off the right of the sheet to {}",
+                    r.right()
+                );
+                assert!(
+                    r.bottom() <= sheet.bottom() + 0.01,
+                    "{w}x{h}: {body:?} hangs below the sheet, to {}",
+                    r.bottom()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_help_sheet_puts_each_key_beside_its_own_meaning() {
+        // Two columns, one row per pair, read down the sheet in the order the
+        // table is written in. Containment alone would be just as happy with
+        // every row heaped on one line, or with the keys and the meanings
+        // swapped between columns.
+        let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let closed = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT).commands().len();
+        app.show_help = true;
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let added = text_boxes_of(f.commands().get(closed..).expect("the sheet drew nothing"));
+        let find = |want: &str| {
+            added
+                .iter()
+                .find(|(body, ..)| body == want)
+                .unwrap_or_else(|| panic!("{want:?} is not on the sheet"))
+                .1
+        };
+        let mut previous = f32::NEG_INFINITY;
+        for &(key, meaning) in &HELP_ROWS {
+            // The blank row is a gap between the controls and the closing
+            // remark, and a gap is drawn by drawing nothing: `label` refuses
+            // an empty body, so there is no box to find and none to compare.
+            if key.is_empty() {
+                continue;
+            }
+            let k = find(key);
+            let m = find(meaning);
+            assert!(
+                (k.y - m.y).abs() < 0.01,
+                "{key:?} and its meaning are on different lines"
+            );
+            assert!(
+                k.x < m.x,
+                "{key:?} is written to the right of what it means"
+            );
+            assert!(
+                k.right() <= m.x + 0.01,
+                "{key:?} runs into the column that says what it does"
+            );
+            assert!(
+                k.y > previous,
+                "{key:?} is not below the row before it -- the rows are heaped"
+            );
+            previous = k.y;
+        }
+        assert!(
+            find("Click anywhere to close").y > previous,
+            "the line that says how to shut the sheet is not below the last row"
+        );
+    }
+
+    #[test]
+    fn the_direction_pad_reads_left_up_down_right() {
+        // The pad's buttons are laid out in `Direction::ALL`'s order, so that
+        // order is a screen fact and not an internal one: reorder it and the
+        // arrows change places under a player's finger. Written out as glyphs
+        // rather than as `Direction::ALL`, which would move with the change.
+        let app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for (i, want) in ["<", "^", "v", ">"].into_iter().enumerate() {
+            let seat = l.dpad_button(i);
+            assert!(!seat.is_empty(), "the pad has no {i}th button");
+            let (cx, cy) = seat.centre();
+            let on_it: Vec<String> = text_boxes(&f)
+                .into_iter()
+                .filter(|(_, r, _)| seat.contains(r.x, r.y))
+                .map(|(body, ..)| body)
+                .collect();
+            assert_eq!(
+                on_it,
+                vec![want.to_string()],
+                "the {i}th button of the pad is not the {want:?} one"
+            );
+            assert_eq!(
+                f.hit_test(cx, cy),
+                Some(Target::Move(Direction::ALL[i])),
+                "the {want:?} button does not ask for the direction it shows"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tile_is_painted_in_the_cell_it_sits_in_and_not_its_mirror() {
+        // One tile, off both diagonals: row 0 column 2 and its transpose row 2
+        // column 0 are different cells, so a layout that read the row for the
+        // column would put the number in the wrong place -- and, the board
+        // being square and the cells alike, would look perfectly plausible.
+        let app = {
+            let mut a = playing([[0, 0, 8, 0], [0; 4], [0; 4], [0; 4]]);
+            a.resize(WINDOW_WIDTH, WINDOW_HEIGHT);
+            a
+        };
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let eight = text_boxes(&f)
+            .into_iter()
+            .find(|(body, ..)| body == "8")
+            .expect("the tile was not written at all");
+        let want = l.cell(0, 2);
+        assert!(
+            want.contains(eight.1.x, eight.1.y),
+            "the 8 was written at {:?}, not in its cell {want:?}",
+            eight.1
+        );
+    }
+
+    #[test]
+    fn a_pale_tile_takes_dark_ink_and_a_dark_tile_light_ink() {
+        // The low tiles are painted on cream and the high ones on colour, so
+        // one ink cannot serve both: black on the 2048 or white on the 2 is a
+        // number that is there and cannot be read. The two are compared to
+        // each other rather than to a literal, so this says the inks differ
+        // *and* which way round they go.
+        let mut app = playing([[2, 0, 0, 0], [0, 0, 0, 0], [0; 4], [0; 4]]);
+        app.board.grid[3][3] = 2048;
+        app.resize(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let ink = |want: &str| {
+            f.commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, color, .. } if text == want => Some(*color),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{want:?} is not on the board"))
+        };
+        let pale = ink("2");
+        let dark = ink("2048");
+        let brightness = |c: Color| u32::from(c.r) + u32::from(c.g) + u32::from(c.b);
+        assert!(
+            brightness(pale) < brightness(dark),
+            "the ink on the pale tile ({pale:?}) is no darker than on the dark one ({dark:?})"
+        );
+    }
+
+    #[test]
+    fn a_long_number_is_shrunk_to_fit_the_cell_it_is_in() {
+        // A four-digit tile at the size a one-digit tile is drawn would be
+        // wider than the cell, and the renderer would cut it off with an
+        // ellipsis: 2048 shown as "20…" is the winning tile made unreadable at
+        // the moment it is won. The width is measured from the body rather
+        // than read out of `text_boxes`, which clamps by the maximum width and
+        // so could never see an overflow.
+        let mut app = playing([[2048, 0, 0, 0], [0; 4], [0; 4], [0; 4]]);
+        app.board.status = GameStatus::WonContinuing;
+        app.resize(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cell = l.cell(0, 0);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let (_, _, size) = text_boxes(&f)
+            .into_iter()
+            .find(|(body, r, _)| body == "2048" && cell.contains(r.x, r.y))
+            .expect("the winning tile is not written in its own cell");
+        let width = text::measure("2048", size, FontWeightHint::Bold);
+        assert!(
+            width <= cell.w + 0.01,
+            "2048 is {width} wide in a cell {} wide, so it is cut off",
+            cell.w
+        );
+        // And not shrunk to nothing to get there: a size of zero would satisfy
+        // the line above and put no number on the board at all.
+        assert!(size > 0.0, "the number was shrunk away rather than fitted");
+    }
+
+    #[test]
+    fn the_type_grows_with_the_window() {
+        // Both sizes are read off the window height, and both are clamped, so
+        // a pair of heights inside the clamps is the only place the slope can
+        // be seen. 300 and 900 give 7.5 -> 8 (floored) and 18 (capped)... so
+        // 400 and 640 are used instead, both strictly inside the band.
+        let small = Layout::new(600.0, 400.0);
+        let large = Layout::new(600.0, 640.0);
+        assert!(
+            large.font > small.font,
+            "the type did not grow with the window: {} then {}",
+            small.font,
+            large.font
+        );
+        assert!(
+            large.small > small.small,
+            "the small type did not grow with the window"
+        );
+        // The two are a fixed distance apart, not the same number under two
+        // names: a small size equal to the body size is a heading and a label
+        // in one type, which no test of either alone would notice.
+        assert!(
+            small.small < small.font,
+            "the small type is not smaller than the body type"
+        );
+        assert!(
+            (small.font - small.small - (large.font - large.small)).abs() < 0.01,
+            "the two type sizes do not keep their distance as the window grows"
+        );
+    }
+
+    #[test]
+    fn the_cell_a_tile_is_dealt_into_is_not_always_the_same_one() {
+        // A dealer that always took the first free cell would pass every test
+        // that only asks whether the tile landed somewhere free. Over enough
+        // deals into a board with four holes, all four must come up.
+        let mut seen = [false; 4];
+        for seed in 0..60_u64 {
+            let mut app = Game2048::with_rng(SeededRng::new(seed));
+            app.board = bare([[2, 4, 8, 16], [4, 8, 16, 32], [8, 16, 32, 64], [0; 4]]);
+            app.board.spawn_tile(&mut app.rng);
+            for (c, seat) in seen.iter_mut().enumerate() {
+                if app.board.at(GRID_SIZE - 1, c) != 0 {
+                    *seat = true;
+                }
+            }
+        }
+        assert!(
+            seen.iter().all(|&s| s),
+            "some free cells are never dealt into: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_move_leaves_the_game_being_played() {
+        // The two end-of-game checks run after every move, and a check that
+        // fires when it should not ends a game the player was in the middle
+        // of. Nothing here is near a win and there is room to move, so the
+        // only correct answer is that the game carries on.
+        let mut app = playing([[0, 2, 4, 0], [0; 4], [0; 4], [0; 4]]);
+        assert!(app.make_move(Direction::Left));
+        assert_eq!(
+            app.board.status,
+            GameStatus::Playing,
+            "an ordinary move ended the game"
+        );
+        // And again from a game that has already won and been told to carry
+        // on, which must not be re-announced as a win.
+        let mut carrying = playing([[0, 2048, 4, 0], [0; 4], [0; 4], [0; 4]]);
+        carrying.board.status = GameStatus::WonContinuing;
+        assert!(carrying.make_move(Direction::Left));
+        assert_eq!(
+            carrying.board.status,
+            GameStatus::WonContinuing,
+            "a game already won was won again"
         );
     }
 }

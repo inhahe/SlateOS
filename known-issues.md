@@ -92294,3 +92294,231 @@ finishes", "until the search finds it", "until the generator deals a solvable
 board". Also every polling helper in an integration test. The safe shapes are a
 bounded `for` with a named failure at the end, or an exit condition that
 depends only on the test's own counter.
+
+### Lesson 56: a fixture one move from finished tests the finish, not the move (lane C, 2026-08-27)
+
+**In short:** most tests of a game start from a fixture — a board in some
+prepared position — and then make a move. If the fixture is *one move away from
+being over*, the first move a test makes ends the game, and every assertion
+after that point is about a **finished** game rather than about the rule the
+test was written for. The test still passes. It passes because the program
+refused the move for a reason the test never mentions. Sudoku shipped six of
+these at once, from a single fixture, and they all went green.
+
+**What happened.** `apps/sudoku`'s tests were built on
+
+```rust
+fn board(holes: &[usize]) -> SudokuApp   // the solved grid, with `holes` emptied
+```
+
+and almost every test called `board(&[idx(1, 7)])` — the finished board with
+exactly one square rubbed out. The solution's digit at `(1, 7)` is a `4`, so:
+
+- `a.apply(Intent::Digit(4))` filled the last hole, `check_completion` fired,
+  and the status became `Won`;
+- `apply` refuses `Select`, `Digit`, `Erase`, `Hint`, `Undo`, `Redo` and
+  `ToggleNotes` once the status is not `Playing`;
+- so every later intent in that test returned `Ignored` — which is very often
+  exactly what the test was asserting.
+
+`a_hint_for_a_square_that_is_already_right_is_refused` is the clearest case. It
+wrote the right digit into the hole, then asked for a hint, then asserted
+`Ignored`. The rule it is named for — *a hint is not spent on a square that is
+already correct* — was never exercised. The hint was refused because the game
+was over. Deleting the `cell.value == self.solution_at(row, col)` clause from
+the production guard would not have failed it.
+
+Six tests were passing for this wrong reason. The fix was one line — a fixture
+with **three** holes instead of one —
+
+```rust
+/// A game with room to play in.
+///
+/// Three holes, not one. A fixture one digit short of finished turns every
+/// test that writes a digit into a test about a *won* game.
+fn playground() -> SudokuApp {
+    board(&[idx(1, 7), idx(7, 1), idx(4, 0)])
+}
+```
+
+— and it turned ten tests red at once, which is what those tests should have
+been saying all along.
+
+**Why review does not catch it.** Nothing in the test's text mentions the
+number of holes; the fixture is a helper call two lines up, and the count is a
+property of the *board data*, not of the test. The assertions are exact and the
+test name is honest about its intent. The defect is that the program has a
+second, unrelated reason to produce the asserted answer, and that reason was
+switched on by the fixture. It is lesson 54's shape — a fixture in which two
+things coincide — but the coinciding things here are not two numbers, they are
+**a rule and a state**: "refused because the square is right" and "refused
+because the game is over" are indistinguishable from the outside.
+
+**The rule.** *A fixture must leave room for every move the test will make, and
+then some.* Concretely:
+
+- **Count the moves the test makes, and give the fixture strictly more slack
+  than that.** One hole plus one digit is zero slack. Three holes and one digit
+  leaves two.
+- **When a program has a terminal state, no fixture should be one step from
+  it** unless reaching the terminal state is the test's subject — and then the
+  test should be named for it (`the_last_digit_wins_…`, `a_redo_can_win_…`) and
+  should be the *only* thing it does.
+- **Assert the precondition the test depends on, in the test.** One line —
+  `assert_eq!(a.status(), GameStatus::Playing, "the fixture was already over")`
+  after the move — converts an invisible property of the board into a failure
+  with a sentence on it. The same trick as lesson 54's `assert_ne!`.
+- **Two fixtures, named for what they are.** `playground()` (room to play) and
+  `almost_done()` (one square left) both exist here now. A single fixture used
+  for both purposes is a fixture that is wrong for one of them.
+
+**How it was found.** Not by review, and not by the mutation sweep either —
+by *raising the hole count and running the suite*. Twelve tests went red;
+ten of them were this. That is the cheap general move: when a fixture encodes a
+number, change the number and see how much of the suite was standing on it. A
+suite that does not notice is a suite that was not testing the number; a suite
+that collapses was testing something else than it claimed.
+
+**Where else to look.** Any test suite for something with a terminal state —
+won/lost/complete/full/exhausted/closed/end-of-file — whose fixture sits on the
+last step before it. Boards with one empty square, buffers with one byte of
+room, counters one below their limit, a quota with one use left, a queue with
+one slot, an undo history one entry from its cap. Also the mirror image: a
+fixture already *in* the terminal state, which makes every "is refused" test
+pass for free.
+
+### Lesson 57: "is it drawn?" is not "is it drawn *there*?" (lane C, 2026-08-28)
+
+**In short:** a layout test that asks only whether each part of the window
+survived, and never where it landed, will pass with the window upside down.
+Sudoku's band test named its subject exactly — "the bands go in the order they
+are named" — and then checked only that each band was *shown*. The mutation
+sweep drew the footer across the top of the window and slid the keypad
+underneath it, and every assertion in that test still held, because a band in
+the wrong place is still a band that is there.
+
+**The fault.** The layout drops bands from the bottom up as the window shrinks,
+so the interesting property is a ladder: at 400 px tall everything fits, at 120
+the footer is gone, at 80 the keypad is gone too. The test walked that ladder
+carefully at four heights and asserted twelve `shows(...)` predicates. Not one
+of them mentions a coordinate. Two mutations survived it:
+
+| Mutation | What it did | Why the test held |
+|---|---|---|
+| `Rect::new(0.0, (h - foot_h - pad_h)…)` to `Rect::new(0.0, (h - pad_h)…)` | put the keypad below the footer | the keypad is still non-empty, so it is still "shown" |
+| `Rect::new(0.0, (h - foot_h)…)` to `Rect::new(0.0, 0.0, w, foot_h)` | drew the footer across the top of the window | same |
+
+**The rule.** *When a test's name contains a spatial word — order, above,
+below, beside, inside, first, last, left, right — at least one assertion must
+compare two coordinates.* Visibility and placement are two different
+properties, and a predicate over one says nothing about the other.
+
+The replacement, `the_bands_stack_down_the_window_in_the_order_they_are_named`,
+asserts four things at one size: the first band starts at the top, the last ends
+at the bottom, every band lies inside the window horizontally, and each band
+begins at or below the end of the band named before it. That last one is the
+whole content of the word "order", written down. Note that the bands are padded
+apart and so do *not* abut — the first draft asserted `a.bottom() == b.y` and
+failed honestly on a six-pixel gap, which is the assertion telling you what the
+layout really promises rather than what you assumed.
+
+**Where else to look.** Anything that answers "which of these exist" as a proxy
+for "how are these arranged": z-order tests that check a thing was drawn rather
+than that it was drawn *last*; tab-order tests that check every control is
+reachable rather than that Tab reaches them in order; menu tests that check
+every item is present; sort tests that check the output is a permutation of the
+input. In each, the sets match and the order is unexamined.
+
+### Lesson 58: a witness that more than one rule explains tests only the strongest of them (lane C, 2026-08-28)
+
+**In short:** to test that a program enforces rule A you give it something that
+rule A forbids and check it says no. If the thing you gave it is *also*
+forbidden by rule B, the program can say no with rule A deleted, and your test
+cannot tell. Sudoku's candidate test struck out a digit in the row, a digit in
+the column and a digit in the box, and asserted each was struck — and all three
+of its witnesses sat inside the same 3x3 box, so the box scan alone did all the
+work. Deleting the row scan and deleting the column scan both survived the
+sweep, and the messages `"the row was ignored"` and `"the column was ignored"`
+had never once been about the row or the column.
+
+**The fault.** The witnesses were `(0, 1)`, `(1, 0)` and `(2, 2)`, chosen for
+cell `(0, 0)`. They read as "one along the row, one down the column, one in the
+box" — and `(0, 1)` and `(1, 0)` genuinely are in the row and in the column,
+which is exactly what makes the mistake easy to make and hard to see. They are
+also both inside cell `(0, 0)`'s own box, which spans rows 0-2 and columns 0-2.
+Sudoku's three rules overlap by construction near the corner of a box, and the
+fixture sat in the overlap. Moving the witnesses to `(0, 5)` and `(5, 0)` — same
+row, same column, different box — took thirty seconds and turned two survivors
+into two catches.
+
+**The rule.** *For each rule you mean to test, pick a witness that no other rule
+explains.* State it as a question about the fixture: "if the code under test
+were deleted, would anything else still produce this answer?" If yes, the
+fixture is wrong however sharp the assertion is.
+
+Two habits that make it cheap:
+
+- **Write the exclusion into the test as a comment naming the other rules,** so
+  the next person to edit the coordinates knows what the coordinates are for. A
+  witness chosen for a reason that is not written down will be moved.
+- **When rules overlap by construction, put the witness as far from the overlap
+  as the domain allows.** In a 9x9 grid of 3x3 boxes, a row witness belongs in
+  a different box band, not in the next column.
+
+**Where else to look.** Any validator with several independent rules that can
+each reject the same input: a password checker tested with `""` (too short —
+and also no digit, no capital, no symbol); an access check tested as a user who
+is both unauthenticated *and* unauthorised; a parser tested with input that is
+both malformed and too long; a firewall rule tested with a packet the default
+policy would drop anyway. The tell is a run of assertions that all use the
+*same* fixture value with only the expected message changing.
+
+### Lesson 59: a fixture with no asymmetry cannot notice that two things were swapped (lane C, 2026-08-28)
+
+**In short:** transposing rows and columns, reversing a cycle, and taking from
+the wrong end of a list are all changes that leave the *shape* of the answer
+intact and move only which item is where. A fixture in which every item is
+alike, or whose arrangement is symmetric, comes out identical either way — so
+the test passes and the swap ships. Sudoku's sweep found three of these in one
+suite, and the fixture was the cause in all three.
+
+**The three faults.**
+
+1. **Nine marks in nine places is symmetric under transposition.** The pencil
+   marks of a square are laid out 3x3, `nrow = slot / 3`, `ncol = slot % 3`.
+   The test set *all nine* marks and asserted that nine texts were drawn in nine
+   distinct positions. Swapping those two lines still draws nine marks in nine
+   distinct positions — the very same nine positions, with the digits permuted.
+   The all-nine fixture hid a second mutation too: with every slot occupied,
+   drawing the marks that were *not* set changed nothing either. Three marks —
+   1, 2 and 4 — answer both questions, because "2 is to the right of 1" and "4
+   is below 1" are statements a transposition breaks, and "only three texts
+   were drawn" is a statement an unfiltered loop breaks.
+2. **A cycle that closes and visits everything also does so backwards.** The
+   difficulty chip steps Easy, Medium, Hard, Easy. Its test asserted that three
+   steps return to the start and that three distinct labels are seen. Both hold
+   of Easy, Hard, Medium, Easy. Naming the three steps
+   (`assert_eq!(Difficulty::Easy.next(), Difficulty::Medium)`) is what a test of
+   an *order* has to say.
+3. **Five hundred identical entries have no oldest and no newest.** The undo
+   history is capped at 500 and drops from the front. The test made 502 changes
+   by toggling one mark on and off, and asserted the depth was 500. Dropping
+   from the *back* instead also leaves 500. Two changes fix it: make the count
+   odd, so the board's final state records how many toggles survived, and then
+   undo the whole history and look — the first toggle fell off the end, so the
+   mark is still set, whereas a history that dropped its newest would rewind
+   all the way to bare.
+
+**The rule.** *Ask what your fixture is symmetric under, and break that
+symmetry.* A test of a mapping needs elements that are distinguishable along
+the axis being mapped: distinct values, an odd count, an asymmetric shape, a
+non-square grid. This is lesson 54 ("two quantities that happen to be equal")
+one level up — there the *numbers* coincided, here the *arrangement* does.
+
+**Where else to look.** Square matrices in a transpose test; a full set where a
+subset would do (all flags set, all bits on, every field populated); an even
+count where parity is the signal; palindromic or sorted-and-uniform test data;
+round-trip tests over a value that is its own inverse; ring buffers filled with
+one repeated byte. Any time a test's data is "all of them" or "the same one
+many times", it is probably symmetric under the very swap you are trying to
+forbid.

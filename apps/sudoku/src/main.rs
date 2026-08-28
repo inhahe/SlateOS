@@ -613,13 +613,20 @@ pub fn solve(grid: &mut [u8; TOTAL_CELLS]) -> bool {
 /// The limit is what makes this affordable: the generator only ever asks "is
 /// there more than one", so it passes 2 and the search stops at the second.
 pub fn count_solutions(grid: &mut [u8; TOTAL_CELLS], limit: usize) -> usize {
+    // Asking for no answers at all is decided here rather than inside the
+    // search, because the search's own bound is the `total >= limit` that ends
+    // its loop. A second `found >= limit` at the top of the recursion would be
+    // a copy of that bound, not a bound of its own: with two of them, breaking
+    // either one leaves the other still stopping the search, so no test could
+    // tell a working bound from a broken one. That is `known-issues.md` lesson
+    // 51, and this is the shape it takes when the duplicate is a base case.
+    if limit == 0 {
+        return 0;
+    }
     count_solutions_inner(grid, limit, 0)
 }
 
 fn count_solutions_inner(grid: &mut [u8; TOTAL_CELLS], limit: usize, found: usize) -> usize {
-    if found >= limit {
-        return found;
-    }
     let Some((row, col, cands)) = next_cell(grid) else {
         return found.saturating_add(1);
     };
@@ -1143,12 +1150,17 @@ impl SudokuApp {
 
     fn move_selection(&mut self, dir: Dir) -> EventResult {
         let (row, col) = self.selected;
-        let last = GRID_SIZE.saturating_sub(1);
+        // No clamp to the last row and column here. `select` already refuses a
+        // row or column off the board, and refusing leaves the selection where
+        // it was -- which is exactly what a clamp would have produced. Clamping
+        // here as well would be a second copy of that bound rather than a bound
+        // of its own, and neither copy could then be tested (`known-issues.md`
+        // lesson 51): breaking one leaves the other holding the edge.
         let next = match dir {
             Dir::Up => (row.saturating_sub(1), col),
-            Dir::Down => (row.saturating_add(1).min(last), col),
+            Dir::Down => (row.saturating_add(1), col),
             Dir::Left => (row, col.saturating_sub(1)),
-            Dir::Right => (row, col.saturating_add(1).min(last)),
+            Dir::Right => (row, col.saturating_add(1)),
         };
         self.select(next.0, next.1)
     }
@@ -1228,7 +1240,13 @@ impl SudokuApp {
         }
         let (row, col) = self.selected;
         let cell = self.cell(row, col);
-        if cell.fixed() || cell.value == self.solution_at(row, col) {
+        // A clue's value *is* the answer it was cut from, so "this square is
+        // already right" refuses clues on its own. Testing `cell.fixed()` here
+        // as well would be a copy of the test beside it -- lesson 51 again --
+        // and the copy is what the mutation sweep caught: deleting it changed
+        // no answer any test could see. `a_clue_holds_the_answer_it_came_from`
+        // is the test that keeps that reasoning true.
+        if cell.value == self.solution_at(row, col) {
             return EventResult::Ignored;
         }
         let answer = self.solution_at(row, col);
@@ -2492,6 +2510,13 @@ mod tests {
 
     #[test]
     fn cycling_difficulty_visits_all_three_and_comes_home() {
+        // The order matters, not just the set: a cycle that runs backwards
+        // closes and visits every level too, so "closes and visits all three"
+        // passes against a chip that steps the wrong way. Name the steps.
+        assert_eq!(Difficulty::Easy.next(), Difficulty::Medium);
+        assert_eq!(Difficulty::Medium.next(), Difficulty::Hard);
+        assert_eq!(Difficulty::Hard.next(), Difficulty::Easy, "the cycle broke");
+
         let mut d = Difficulty::Easy;
         let mut seen = vec![d];
         for _ in 0..Difficulty::ALL.len() {
@@ -2759,12 +2784,18 @@ mod tests {
     fn the_candidates_are_the_digits_that_would_not_break_a_rule() {
         let mut g = [0u8; TOTAL_CELLS];
         assert_eq!(candidates(&g, 0, 0), 0x1FF, "an empty grid forbids nothing");
-        put(&mut g, 0, 1, 5);
+        // Each witness must lie *outside* cell (0, 0)'s own 3x3 box, or the box
+        // scan strikes it out by itself and the row and column scans are never
+        // tested at all. (0, 1) and (1, 0) read like a row witness and a column
+        // witness but are both inside that box, and the mutation sweep caught
+        // it: either scan could be deleted with this test still green, and the
+        // messages below were saying "the row was ignored" about the box.
+        put(&mut g, 0, 5, 5);
         assert!(
             !is_candidate(candidates(&g, 0, 0), 5),
             "the row was ignored"
         );
-        put(&mut g, 1, 0, 6);
+        put(&mut g, 5, 0, 6);
         assert!(
             !is_candidate(candidates(&g, 0, 0), 6),
             "the column was ignored"
@@ -2860,6 +2891,32 @@ mod tests {
         }
         assert!(solve(&mut g), "a solvable grid was refused");
         assert_eq!(g, KNOWN_SOLUTION, "the grid was finished the wrong way");
+    }
+
+    #[test]
+    fn the_solver_takes_back_a_guess_that_led_nowhere() {
+        // Every other solver fixture here is filled by first guesses alone, so
+        // the `put(grid, row, col, 0)` that undoes a failed guess never ran in
+        // this suite and could be deleted with the whole file still green.
+        //
+        // These fourteen holes are the smallest set found that forces the
+        // solver to walk into a contradiction and back out of it: it has one
+        // answer, the solver needs three undos to reach it, and a solver that
+        // leaves its wrong guesses behind does not merely finish differently --
+        // it gives up, because the abandoned digits block every later cell.
+        const HOLES: [usize; 14] = [31, 32, 36, 37, 39, 46, 50, 63, 64, 66, 67, 73, 76, 77];
+        let mut g = KNOWN_SOLUTION;
+        for i in HOLES {
+            g[i] = 0;
+        }
+        let mut probe = g;
+        assert_eq!(
+            count_solutions(&mut probe, 2),
+            1,
+            "the fixture stopped having exactly one answer"
+        );
+        assert!(solve(&mut g), "the solver gave up on a grid it can finish");
+        assert_eq!(g, KNOWN_SOLUTION, "a wrong guess was left on the board");
     }
 
     #[test]
@@ -3183,12 +3240,18 @@ mod tests {
     fn a_clue_cannot_be_written_over() {
         let mut a = board(&[80]);
         select(&mut a, 1, 7);
+        // The digit must differ from the clue's own. Writing a 4 over a clue
+        // that already holds a 4 is refused as a write of the digit that is
+        // already there, not as a write over a clue -- the sweep caught this
+        // test passing with the clue guard deleted for exactly that reason.
+        let clue = KNOWN_SOLUTION[idx(1, 7)];
+        let other = if clue == 9 { 1 } else { clue.saturating_add(1) };
         assert_eq!(
-            a.apply(Intent::Digit(4)),
+            a.apply(Intent::Digit(other)),
             EventResult::Ignored,
             "a clue accepted a digit"
         );
-        assert_eq!(a.value(1, 7), KNOWN_SOLUTION[idx(1, 7)]);
+        assert_eq!(a.value(1, 7), clue);
         assert_eq!(a.undo_depth(), 0, "a refused write went on the history");
     }
 
@@ -3427,14 +3490,33 @@ mod tests {
         let mut a = playground();
         select(&mut a, 1, 7);
         a.apply(Intent::ToggleNotes);
-        // Marks toggle, so this is one square taking as many changes as we like.
-        for _ in 0..MAX_UNDO + 2 {
+        // Marks toggle, so this is one square taking as many changes as we
+        // like. An *odd* number of them, which is what makes the two ends of
+        // the history tell apart: with an even number every change looks the
+        // same as every other and dropping the newest is indistinguishable
+        // from dropping the oldest, which is how the sweep found this test
+        // passing against a history that forgot the wrong end.
+        for _ in 0..=MAX_UNDO {
             a.apply(Intent::Digit(4));
         }
         assert_eq!(
             a.undo_depth(),
             MAX_UNDO,
             "the history grew past the cap it is supposed to keep"
+        );
+        assert!(a.cell(1, 7).has_note(4), "an odd count left the mark off");
+
+        // One change more than the history holds was made, so walking the whole
+        // history back cannot reach the bare square: the first toggle is the
+        // one that fell off the end, and it stands. A history that dropped its
+        // newest move instead would rewind all the way and clear the mark.
+        for _ in 0..MAX_UNDO {
+            a.apply(Intent::Undo);
+        }
+        assert_eq!(a.undo_depth(), 0, "the history would not empty");
+        assert!(
+            a.cell(1, 7).has_note(4),
+            "the history forgot its newest move rather than its oldest"
         );
     }
 
@@ -3486,6 +3568,31 @@ mod tests {
         select(&mut a, 1, 7);
         assert_eq!(a.apply(Intent::Hint), EventResult::Ignored);
         assert_eq!(a.hints_remaining(), MAX_HINTS);
+    }
+
+    #[test]
+    fn a_clue_holds_the_answer_it_came_from() {
+        // `use_hint` refuses clues by way of "this square is already right",
+        // which is only the same rule because a clue's value *is* its answer.
+        // That is an invariant of the generator, not of the hint code, so it
+        // is asserted here rather than left as an unwritten assumption: if a
+        // puzzle ever came with a clue that disagreed with its solution, the
+        // hint guard would quietly stop refusing clues.
+        let a = generated(7, Difficulty::Easy);
+        let mut clues = 0usize;
+        for i in 0..TOTAL_CELLS {
+            let (row, col) = row_col(i);
+            let cell = a.cell(row, col);
+            if cell.origin == Origin::Given {
+                clues = clues.saturating_add(1);
+                assert_eq!(
+                    cell.value,
+                    a.solution_at(row, col),
+                    "the clue at {row},{col} is not the answer there"
+                );
+            }
+        }
+        assert!(clues > 0, "the puzzle came with no clues at all");
     }
 
     // ── The faults the wiring exposed ──────────────────────────────────────
@@ -3557,6 +3664,10 @@ mod tests {
         // Pausing used to lock out every intent, including the ones that undo
         // the pause, so a paused game could only be closed.
         let mut a = playground();
+        // Select a hole first. Without this the selection sits on a clue, and
+        // "a paused game accepted a digit" is really the clue guard answering:
+        // the sweep found this test still green with the pause guard deleted.
+        select(&mut a, 1, 7);
         a.apply(Intent::Pause);
         assert_eq!(a.status(), GameStatus::Paused);
 
@@ -3565,6 +3676,7 @@ mod tests {
             EventResult::Ignored,
             "a paused game accepted a digit"
         );
+        assert_eq!(a.value(1, 7), 0, "a paused game took a digit anyway");
 
         assert_eq!(a.apply(Intent::Pause), EventResult::Consumed);
         assert_eq!(a.status(), GameStatus::Playing, "pause would not lift");
@@ -3611,6 +3723,22 @@ mod tests {
         );
         assert_eq!(b.difficulty(), Difficulty::Hard);
         assert_eq!(b.status(), GameStatus::Playing);
+
+        // The chip in the header sends `CycleDifficulty`, not `SetDifficulty`.
+        // This test was named after the chip while exercising only the other
+        // intent, so a win could have locked the chip out and nothing here
+        // would have noticed -- which is what the sweep reported.
+        let mut c = almost_done();
+        c.apply(Intent::Digit(9));
+        assert_eq!(c.status(), GameStatus::Won);
+        let was = c.difficulty();
+        assert_eq!(c.apply(Intent::CycleDifficulty), EventResult::Consumed);
+        assert_eq!(c.difficulty(), was.next(), "the chip would not turn");
+        assert_eq!(
+            c.status(),
+            GameStatus::Playing,
+            "the difficulty chip left a finished game finished"
+        );
     }
 
     #[test]
@@ -3992,6 +4120,101 @@ mod tests {
         assert!(!none.shows(none.header));
         assert!(!none.shows(none.keypad));
         assert!(!none.shows(none.footer));
+    }
+
+    #[test]
+    fn a_centred_label_starts_inside_its_box_and_may_use_only_what_is_left() {
+        // Both clamps in `centred_in` were untested. The vertical one only
+        // matters when the line is taller than the box it is centred in, and
+        // no other test draws into a box that short; the horizontal one only
+        // matters when there is slack to centre into, and nothing checked the
+        // width the label was allowed. The sweep deleted both unnoticed.
+        let mut f = Frame::new(400.0, 200.0);
+        let short = Rect::new(10.0, 50.0, 200.0, 4.0);
+        centred_in(
+            &mut f,
+            short,
+            "Sudoku",
+            30.0,
+            TEXT_COLOR,
+            FontWeightHint::Bold,
+        );
+
+        let (x, y, max) = f
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    x, y, max_width, ..
+                } => Some((*x, *y, max_width.expect("the label was given no width"))),
+                _ => None,
+            })
+            .expect("nothing was drawn");
+
+        assert!(
+            y >= short.y,
+            "a line taller than its box started above it: {y} vs {}",
+            short.y
+        );
+        assert!(
+            x > short.x,
+            "the text filled the box, so there is no centring here to test"
+        );
+        assert!(
+            (max - (short.right() - x)).abs() < 0.01,
+            "the label may use {max} but only {} is left from where it starts",
+            short.right() - x
+        );
+    }
+
+    #[test]
+    fn the_bands_stack_down_the_window_in_the_order_they_are_named() {
+        // Which bands survive is one question and where they sit is another.
+        // The test above asks only the first, so the footer could have been
+        // drawn at the top of the window, or the keypad below it, with every
+        // band still "shown" -- both of which the mutation sweep did to this
+        // layout without a single test noticing.
+        let (w, h) = (600.0f32, 400.0f32);
+        let l = Layout::new(w, h);
+        let bands = [
+            ("header", l.header),
+            ("board", l.board),
+            ("keypad", l.keypad),
+            ("footer", l.footer),
+        ];
+        for (name, r) in bands {
+            assert!(!r.is_empty(), "the {name} band is not there to place");
+            assert!(
+                r.x >= 0.0 && r.right() <= w,
+                "the {name} band leaves the window"
+            );
+        }
+
+        assert!(
+            l.header.y.abs() < 0.01,
+            "the header does not start at the top: {}",
+            l.header.y
+        );
+        assert!(
+            (l.footer.bottom() - h).abs() < 0.01,
+            "the footer does not end at the bottom: {} vs {h}",
+            l.footer.bottom()
+        );
+        // The bands are padded apart, so they need not abut -- but each must
+        // begin at or below the end of the one named before it, which is what
+        // makes the order in the window the order in the list.
+        for pair in bands.windows(2) {
+            let [(above, a), (below, b)] = pair else {
+                unreachable!("windows(2) yields pairs")
+            };
+            assert!(
+                b.y >= a.bottom() - 0.01,
+                "the {below} band begins at {}, above where the {above} band \
+                 ends at {}",
+                b.y,
+                a.bottom()
+            );
+        }
     }
 
     #[test]
@@ -4721,7 +4944,17 @@ mod tests {
         let f = a.frame(SIZE.0, SIZE.1);
         let mine = fill_color_at(&f, l.cell_rect(1, 7)).expect("the square is not filled");
         let far = fill_color_at(&f, l.cell_rect(5, 2)).expect("a far square is not filled");
+        // The squares the selection lights up along its row, column and box are
+        // shaded too, so "different from a square across the board" is not
+        // enough: the sweep shaded the selection the same as its own row and
+        // this test still passed. It has to differ from its neighbours as well.
+        let peer = fill_color_at(&f, l.cell_rect(1, 3)).expect("a peer is not filled");
         assert_ne!(mine, far, "the selection is invisible");
+        assert_ne!(peer, far, "the selection lights up nothing around it");
+        assert_ne!(
+            mine, peer,
+            "the selected square is shaded like the rest of its row"
+        );
     }
 
     #[test]
@@ -4749,6 +4982,97 @@ mod tests {
             }
         }
         assert_eq!(places.len(), 9);
+    }
+
+    /// Where each mark of `cell_rect(row, col)` was painted, by digit.
+    fn mark_places(a: &SudokuApp, row: usize, col: usize) -> Vec<(String, f32, f32)> {
+        let cell = layout_of(a).cell_rect(row, col);
+        a.frame(SIZE.0, SIZE.1)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { x, y, text, .. } if cell.contains(*x, *y) => {
+                    Some((text.clone(), *x, *y))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn only_the_marks_that_are_set_are_drawn_and_they_read_across() {
+        // Setting all nine marks, as the test above does, hides two faults at
+        // once: every slot is occupied, so drawing the unset ones as well
+        // changes nothing, and the nine places are symmetric, so laying them
+        // out down the columns instead of across the rows still fills them.
+        // The sweep made both changes with the whole suite still green. Three
+        // marks in an asymmetric pattern answer both questions.
+        let mut a = playground();
+        select(&mut a, 1, 7);
+        a.apply(Intent::ToggleNotes);
+        for digit in [1_u8, 2, 4] {
+            a.apply(Intent::Digit(digit));
+        }
+
+        let places = mark_places(&a, 1, 7);
+        let drawn: Vec<&str> = places.iter().map(|(t, _, _)| t.as_str()).collect();
+        assert_eq!(drawn.len(), 3, "a mark nobody set was drawn: {drawn:?}");
+        for want in ["1", "2", "4"] {
+            assert!(drawn.contains(&want), "mark {want} is missing: {drawn:?}");
+        }
+
+        let at = |d: &str| {
+            places
+                .iter()
+                .find(|(t, _, _)| t == d)
+                .map(|(_, x, y)| (*x, *y))
+                .expect("the mark was drawn")
+        };
+        let (x1, y1) = at("1");
+        let (x2, y2) = at("2");
+        let (x4, y4) = at("4");
+        assert!(x2 > x1, "mark 2 is not to the right of mark 1");
+        assert!(
+            (y2 - y1).abs() < 0.01,
+            "marks 1 and 2 are not on the same line"
+        );
+        assert!(y4 > y1, "mark 4 is not below mark 1");
+        assert!(
+            (x4 - x1).abs() < 0.01,
+            "marks 1 and 4 are not in the same column"
+        );
+    }
+
+    #[test]
+    fn a_square_with_a_digit_in_it_draws_no_marks() {
+        // Marks and a digit in the same square would overprint each other. The
+        // marks are drawn only for an empty square, and the sweep showed that
+        // rule was untested: drawing them for a filled one as well passed.
+        // Writing a digit clears that square's marks, so the state this is
+        // about has to be built the other way round: the digit first, then the
+        // marks, which note mode will set over a square that already has one.
+        let mut a = playground();
+        select(&mut a, 1, 7);
+        a.apply(Intent::Digit(3));
+        assert_eq!(a.value(1, 7), 3, "the digit did not go in");
+
+        a.apply(Intent::ToggleNotes);
+        for digit in [1_u8, 2, 4] {
+            a.apply(Intent::Digit(digit));
+        }
+        assert!(
+            a.cell(1, 7).has_note(1),
+            "a square with a digit would not take a mark, so there is nothing \
+             here to draw over the digit and this test proves nothing"
+        );
+
+        let drawn = mark_places(&a, 1, 7);
+        let texts: Vec<&str> = drawn.iter().map(|(t, _, _)| t.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["3"],
+            "a filled square drew its marks as well as its digit"
+        );
     }
 
     #[test]
@@ -4829,6 +5153,53 @@ mod tests {
         assert!(won.contains("Solved 1"), "a win is not counted: {won}");
         assert!(won.contains("Best 00:30"), "the record is not shown: {won}");
         assert!(won.contains("Easy 1"), "the level tally is wrong: {won}");
+    }
+
+    /// Fill every empty square with the answer, one intent at a time.
+    fn play_to_a_win(a: &mut SudokuApp) {
+        for i in 0..TOTAL_CELLS {
+            let (row, col) = row_col(i);
+            if a.value(row, col) != 0 {
+                continue;
+            }
+            select(a, row, col);
+            let answer = a.solution_at(row, col);
+            assert_eq!(
+                a.apply(Intent::Digit(answer)),
+                EventResult::Consumed,
+                "the answer was refused at {row},{col}"
+            );
+        }
+        assert_eq!(a.status(), GameStatus::Won, "the board would not finish");
+    }
+
+    #[test]
+    fn the_footer_counts_every_level_and_not_just_the_one_being_played() {
+        // "Solved N" is the total across all three levels; the tallies beside
+        // it are each level's own. After a single win both numbers are 1, so
+        // the total could be read from the level in play and the test above
+        // could not tell -- and the sweep did exactly that, unnoticed. Two wins
+        // at two levels are what make the two numbers disagree.
+        let mut a = almost_done();
+        a.apply(Intent::Digit(9));
+        assert_eq!(a.status(), GameStatus::Won);
+
+        assert_eq!(
+            a.apply(Intent::SetDifficulty(Difficulty::Medium)),
+            EventResult::Consumed
+        );
+        play_to_a_win(&mut a);
+
+        let l = layout_of(&a);
+        let footer = texts_in(&a.frame(SIZE.0, SIZE.1), l.footer).join(" | ");
+        assert!(
+            footer.contains("Solved 2"),
+            "the total counts one level only: {footer}"
+        );
+        assert!(
+            footer.contains("Easy 1") && footer.contains("Medium 1"),
+            "the level tallies are wrong: {footer}"
+        );
     }
 
     #[test]

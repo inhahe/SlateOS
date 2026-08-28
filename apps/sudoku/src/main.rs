@@ -2203,7 +2203,7 @@ mod tests {
 
     /// Every window shape worth asking a layout question at: the default, the
     /// degenerate, the very wide, the very tall, and a few in between.
-    const SIZES: [(f32, f32); 9] = [
+    const SIZES: [(f32, f32); 10] = [
         (WINDOW_WIDTH, WINDOW_HEIGHT),
         (1.0, 1.0),
         (2.0, 400.0),
@@ -2213,6 +2213,14 @@ mod tests {
         (600.0, 200.0),
         (200.0, 600.0),
         (1000.0, 1000.0),
+        // The height at which a band is actually dropped. Every other entry
+        // here is either comfortable or degenerate, and `BOARD_SHARE` has no
+        // effect on either: above about 136 pixels the three bands' minimums
+        // fit inside any budget, and below about 90 they fit inside none, so
+        // the share changes nothing at both ends and the whole ladder lives in
+        // the middle. A constant that only takes effect at the edge of a range
+        // can only be tested at that edge.
+        (600.0, 120.0),
     ];
 
     /// A finished board, written out here rather than generated.
@@ -2950,7 +2958,22 @@ mod tests {
         // more than "is there a second one".
         let mut g = [0u8; TOTAL_CELLS];
         assert_eq!(count_solutions(&mut g, 1), 1);
-        assert_eq!(count_solutions(&mut g, 0), 0, "a limit of none counted one");
+
+        // A limit of none is asked of a *finished* grid, and which grid it is
+        // asked of is the whole test. On an unfinished one the search's own
+        // `total >= limit` is already true before the first digit is tried, so
+        // nought comes back whether or not `count_solutions` guards the door --
+        // one witness that two separate rules explain, which is
+        // `known-issues.md` lesson 58, found by the sweep in the very suite
+        // that lesson was written from. A finished grid reaches neither the
+        // loop nor the recursion: `next_cell` finds nothing to fill and the
+        // base case answers one, so nought is an answer only the guard gives.
+        let mut done = KNOWN_SOLUTION;
+        assert_eq!(
+            count_solutions(&mut done, 0),
+            0,
+            "a limit of none counted one"
+        );
     }
 
     #[test]
@@ -3490,33 +3513,42 @@ mod tests {
         let mut a = playground();
         select(&mut a, 1, 7);
         a.apply(Intent::ToggleNotes);
-        // Marks toggle, so this is one square taking as many changes as we
-        // like. An *odd* number of them, which is what makes the two ends of
-        // the history tell apart: with an even number every change looks the
-        // same as every other and dropping the newest is indistinguishable
-        // from dropping the oldest, which is how the sweep found this test
-        // passing against a history that forgot the wrong end.
-        for _ in 0..=MAX_UNDO {
-            a.apply(Intent::Digit(4));
+        // The oldest change and the newest have to be *different changes*, or
+        // dropping either end of the history leaves the same history behind.
+        // An earlier draft toggled one mark 501 times: an odd count, so the
+        // depth and the final state were both right, and it still could not
+        // see a history that dropped its newest -- 501 identical toggles
+        // followed by 500 identical undos come to the same parity whichever
+        // 500 of them were kept. Making the count odd fixed the arithmetic and
+        // left the symmetry alone (`known-issues.md` lesson 59). So: one
+        // toggle of mark 1, which is the change that has to fall off the end,
+        // and then a full history's worth of toggles of mark 2 to push it off.
+        a.apply(Intent::Digit(1));
+        for _ in 0..MAX_UNDO {
+            a.apply(Intent::Digit(2));
         }
         assert_eq!(
             a.undo_depth(),
             MAX_UNDO,
             "the history grew past the cap it is supposed to keep"
         );
-        assert!(a.cell(1, 7).has_note(4), "an odd count left the mark off");
 
-        // One change more than the history holds was made, so walking the whole
-        // history back cannot reach the bare square: the first toggle is the
-        // one that fell off the end, and it stands. A history that dropped its
-        // newest move instead would rewind all the way and clear the mark.
+        // Walk the whole history back. Mark 1's toggle is the one change no
+        // longer in it, so mark 1 stands; every toggle of mark 2 is in it, so
+        // mark 2 comes off. A history that dropped its newest move instead has
+        // kept mark 1's toggle and lost one of mark 2's, and both marks come
+        // out the other way round.
         for _ in 0..MAX_UNDO {
             a.apply(Intent::Undo);
         }
         assert_eq!(a.undo_depth(), 0, "the history would not empty");
         assert!(
-            a.cell(1, 7).has_note(4),
+            a.cell(1, 7).has_note(1),
             "the history forgot its newest move rather than its oldest"
+        );
+        assert!(
+            !a.cell(1, 7).has_note(2),
+            "a change still in the history was not undone"
         );
     }
 
@@ -4097,9 +4129,16 @@ mod tests {
     // ── Where everything goes ──────────────────────────────────────────────
 
     #[test]
-    fn the_bands_go_in_the_order_they_are_named() {
+    fn the_bands_are_dropped_from_the_bottom_up_as_the_window_shrinks() {
         // Footer first, then keypad, then header: the ladder written out, so a
         // reordered `BAND_DROP_ORDER` is a failing test rather than a surprise.
+        //
+        // This asks only *which* bands survive, never where any of them lands,
+        // and its name says so. It used to be called "the bands go in the order
+        // they are named", which promised a placement it did not check — the
+        // sweep drew the footer across the top of the window and every
+        // assertion here still held (`known-issues.md` lesson 57). Placement is
+        // `the_bands_stack_down_the_window_in_the_order_they_are_named`.
         let w = 600.0;
         let full = Layout::new(w, 200.0);
         assert!(full.shows(full.header), "the header went first");
@@ -4239,8 +4278,13 @@ mod tests {
     fn the_board_keeps_its_share_of_every_window() {
         for (w, h) in SIZES {
             let l = Layout::new(w, h);
+            // Half, written out, and deliberately not `BOARD_SHARE`. A test
+            // that measures the board against the constant which sets it moves
+            // when the constant moves: the sweep set the share to nothing and
+            // this assertion quietly became `board.h >= -0.01`, which is true
+            // of every window there is (`known-issues.md` lesson 52).
             assert!(
-                l.board.h >= h * BOARD_SHARE - 0.01,
+                l.board.h >= h * 0.5 - 0.01,
                 "{w}x{h}: the bands ate the board — {} of {h}",
                 l.board.h
             );
@@ -4456,6 +4500,26 @@ mod tests {
                 assert!(r.intersect(p).is_none(), "chip {i} overlaps its neighbour");
             }
             previous = Some(r);
+        }
+
+        // "Inside the header" has two edges, and at a comfortable width only
+        // the right one is ever in question: the chips are placed by
+        // subtracting their own width from the right edge, so the left edge has
+        // slack that no arithmetic here can use up, and the clamp holding them
+        // on is unreachable. It is reachable in a header too narrow for three
+        // of them — and there the chips genuinely do pile up, so this leg
+        // asserts containment only, and not the side-by-side claim above.
+        let narrow = Layout::new(120.0, SIZE.1);
+        for i in 0..3 {
+            let r = narrow.chip(i);
+            assert!(
+                r.x >= narrow.header.x - 0.01,
+                "chip {i} runs off the left of the header: {r:?}"
+            );
+            assert!(
+                r.right() <= narrow.header.right() + 0.01,
+                "chip {i} runs off the right of the header: {r:?}"
+            );
         }
     }
 
@@ -4767,7 +4831,14 @@ mod tests {
     #[test]
     fn a_click_is_read_against_the_size_the_frame_was_drawn_at() {
         let mut a = board(&[0]);
-        a.resize(1200.0, 1000.0);
+        // Drawn through `render`, because that is the only way a window ever
+        // gets a size into this program. An earlier draft called `resize`
+        // directly — which nothing outside the tests does — and so could not
+        // see `render` failing to remember the size it had just drawn at: the
+        // sweep deleted that line and this test, whose whole subject is the
+        // size the frame was drawn at, went green.
+        let tree = a.render(1200.0, 1000.0);
+        assert!(!tree.commands.is_empty(), "nothing was drawn");
         let l = Layout::new(1200.0, 1000.0);
         let (x, y) = l.cell_rect(1, 7).centre();
         assert_eq!(

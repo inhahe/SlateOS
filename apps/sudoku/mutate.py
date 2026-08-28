@@ -878,7 +878,7 @@ MUTATIONS = [
         "the header is dropped before the footer",
         "pub const BAND_DROP_ORDER: [usize; 3] = [2, 1, 0];",
         "pub const BAND_DROP_ORDER: [usize; 3] = [0, 1, 2];",
-        ["a_band_that_did_not_fit_is_gone_rather_than_flat"],
+        ["the_bands_are_dropped_from_the_bottom_up_as_the_window_shrinks"],
     ),
     (
         "the board keeps no share of the window",
@@ -920,14 +920,14 @@ MUTATIONS = [
         "the board starts at the top of the window rather than under the header",
         "        let board = Rect::new(\n            pad,\n            head_h + pad,",
         "        let board = Rect::new(\n            pad,\n            pad,",
-        ["the_bands_go_in_the_order_they_are_named"],
+        ["the_bands_stack_down_the_window_in_the_order_they_are_named"],
     ),
     (
         "the board's band ignores the bands below it",
         "            (h - head_h - pad_h - foot_h - pad * 2.0).max(0.0),",
         "            (h - head_h - pad * 2.0).max(0.0),",
         [
-            "the_bands_go_in_the_order_they_are_named",
+            "the_bands_stack_down_the_window_in_the_order_they_are_named",
             "no_cell_is_drawn_over_a_band_or_outside_the_window",
         ],
     ),
@@ -1001,13 +1001,13 @@ MUTATIONS = [
         "a key is taller than the strip it sits in",
         "        let kh = (self.keypad.h - self.pad).max(1.0).min(self.keypad.h);",
         "        let kh = (self.keypad.h + self.pad).max(1.0);",
-        ["every_keypad_key_records_a_hit_box_where_it_was_painted"],
+        ["the_keypad_keys_sit_in_a_row_and_do_not_overlap"],
     ),
     (
         "a keypad key past the last one still has a rectangle",
         "        if !self.shows(self.keypad) || i >= KEYPAD.len() {",
         "        if !self.shows(self.keypad) {",
-        ["every_control_the_program_has_can_be_reached_with_a_mouse"],
+        ["the_keypad_keys_sit_in_a_row_and_do_not_overlap"],
     ),
     (
         "the header chips all sit on top of each other",
@@ -1025,7 +1025,7 @@ MUTATIONS = [
         "a band nought pixels tall is worth drawing into",
         "        !r.is_empty() && r.w > 0.0 && r.h > 0.0",
         "        r.w >= 0.0 && r.h >= 0.0",
-        ["a_window_too_small_for_anything_still_draws_something"],
+        ["a_band_that_did_not_fit_is_gone_rather_than_flat"],
     ),
     # ── Drawing ───────────────────────────────────────────────────────────
     (
@@ -1216,7 +1216,7 @@ MUTATIONS = [
         "a resize is ignored",
         "            app.resize(*width as f32, *height as f32);\n            EventResult::Consumed",
         "            EventResult::Consumed",
-        ["a_click_is_read_against_the_size_the_frame_was_drawn_at"],
+        ["resizing_the_window_moves_the_board"],
     ),
     (
         "the ticks never reach the clock",

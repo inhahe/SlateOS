@@ -92522,3 +92522,47 @@ round-trip tests over a value that is its own inverse; ring buffers filled with
 one repeated byte. Any time a test's data is "all of them" or "the same one
 many times", it is probably symmetric under the very swap you are trying to
 forbid.
+
+### Lesson 60: a layout that shrinks type to fit assumes the renderer will honour the size it asked for (lane C, 2026-08-28)
+
+**In short:** every app in this campaign scales its text with the window, so
+that a small window gets small type. It does that by computing a font size as a
+fraction of some band's height and passing it to the drawing pass. But the
+renderer does not draw at the size you ask for — `gui/font/src/system.rs`'s
+`round_px` does `px.clamp(1.0, 512.0).round()`, so a request below one pixel is
+drawn *one whole pixel* high. Below that floor the layout's arithmetic and the
+screen part company: the layout believes it laid out a tenth-of-a-pixel line,
+the renderer draws it thirteen times taller than that, and the text spills out
+of the band, over its neighbours, and off the window. 2048's help sheet did
+exactly this at a 4x4 window — the rows were sized 0.0849 and drawn about
+1.32 pixels high, stacked on top of each other and outside the sheet entirely.
+
+**Why it is easy to miss.** The fault is invisible at every ordinary window
+size and only appears when a fraction-of-a-band computation goes sub-pixel,
+which needs a window small enough that nobody thinks to test it. It is also
+*the opposite* of the failure you brace for: you guard against text being
+clipped or unreadably small, and the actual bug is text coming out too
+**large**. A `size > 0.0` check — the obvious guard, and the one 2048 had —
+does not catch it, because 0.0849 is greater than zero.
+
+**The fix, and where it goes.** Name the renderer's floor as a constant with
+the reason attached (`const MIN_DRAWN_FONT: f32 = 1.0;`) and refuse to draw
+below it, in *one* place — the single function every string in the program
+passes through on its way to the frame. 2048 has `label`, which `centred` and
+every button caption call in turn, so one guard covers the program. Putting the
+check at each call site instead would be lesson 51's shape: a guard repeated in
+front of a guard is a guard no mutation can remove and no test can own.
+Refusing is the right answer rather than clamping the size up, because a line
+drawn at a size its band cannot hold is not a smaller line, it is a line in the
+wrong place; leaving it out is the only outcome the layout's own arithmetic
+still describes.
+
+**Where else to look.** Any `(band.h * f).min(cap)` or `font * k` that is not
+floored; any layout that keeps shrinking rather than dropping a band when the
+window runs out; and anything that treats "the size I asked for" as "the size
+that was drawn" when measuring — `text::measure(body, size, weight)` in a test
+computes the *asked* size's extent, so a test that measures cannot see this
+fault either. The window-size fixture is the thing that catches it: keep a
+window in the list small enough to drive at least one computed size under a
+pixel (2048's `WINDOWS` has `(4, 4)` for exactly this), and assert that no text
+is drawn outside the window it belongs to.

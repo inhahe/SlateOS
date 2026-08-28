@@ -611,8 +611,19 @@ impl Layout {
     }
 
     /// The `index`th of `count` evenly-spaced buttons filling `row`.
+    ///
+    /// There is no guard against an empty `row`, because a band that did not
+    /// fit is `Rect::EMPTY` and the arithmetic below turns that back into
+    /// `Rect::EMPTY` unaided: a zero width leaves a zero gap and a zero button
+    /// width, a zero height leaves a zero button height, and every offset is a
+    /// multiple of those. A `row.is_empty()` test here would stand in front of
+    /// a rule that already holds — a guard no mutation can remove and so no
+    /// test can own (`known-issues.md` lesson 51). The range check is a
+    /// different matter and does have to be made: a fourth footer button in a
+    /// footer that is really there would otherwise be laid out past the end of
+    /// the row.
     fn nth_of(row: Rect, count: usize, index: usize) -> Rect {
-        if row.is_empty() || index >= count {
+        if index >= count {
             return Rect::EMPTY;
         }
         let n = count.max(1) as f32;
@@ -992,6 +1003,20 @@ impl Game2048 {
     }
 
     pub fn apply(&mut self, intent: Intent) -> EventResult {
+        // The sheet is modal to the game, and has to be, because it is drawn
+        // over the board. Without this an arrow key played a move on a board
+        // hidden behind the help text -- the pointer had the same fault, from
+        // the other direction, and is fixed where the sheet records its hit
+        // box. Anything the game would otherwise act on shuts the sheet
+        // instead, which is the same answer a click gets and the one its own
+        // closing line promises. The two help intents fall through, because
+        // shutting the sheet is what they were going to do anyway; and
+        // `key_intent` has already refused the window's own key combinations,
+        // so this cannot swallow a ctrl-W on its way to the window manager.
+        if self.show_help && !matches!(intent, Intent::ToggleHelp | Intent::CloseHelp) {
+            self.show_help = false;
+            return EventResult::Consumed;
+        }
         match intent {
             Intent::Move(dir) => {
                 if self.make_move(dir) {
@@ -1278,10 +1303,17 @@ impl Game2048 {
             return;
         }
         fill(f, h, COL_SURFACE0, (h.h * 0.04).min(10.0));
-        // The whole sheet takes the click, and closes. A pointer that opened
-        // the sheet must be able to shut it even in a window too small to be
-        // drawing the footer it used.
-        f.hit(Target::HelpSheet, h);
+        // The hit box is the whole *window*, not the sheet's own rectangle,
+        // and the sheet's last line is the reason: it says "Click anywhere to
+        // close", and anywhere means anywhere. Claiming only its own rectangle
+        // left the direction pad and the footer live underneath a sheet that
+        // covers the board -- so a click on the pad slid tiles the player could
+        // not see, and closing the sheet afterwards revealed a board that had
+        // moved on without them. Recorded last, so it lies over every control
+        // drawn before it and takes their clicks (`Frame::hit_test` answers
+        // with the last box painted). This also means a pointer can shut the
+        // sheet in a window too small to be drawing the footer it opened from.
+        f.hit(Target::HelpSheet, l.window);
 
         let head_h = (h.h * 0.16).max(0.0);
         centred(
@@ -1662,6 +1694,25 @@ mod tests {
     }
 
     #[test]
+    fn a_merge_takes_the_tile_next_to_it_and_not_the_one_past_that() {
+        // Three alike is the wrong fixture for this question, and that is the
+        // point of having a second test. `[2,2,2]` comes out `[4,2]` whether
+        // the merge looks at the tile *next* to it or at the one *after* that:
+        // with every tile the same, reaching past a neighbour finds a tile of
+        // the same value at either distance, and the leftovers pack down to the
+        // same pair (`known-issues.md` lesson 59 -- a fixture with no asymmetry
+        // cannot notice a swap). Put something different in between and the two
+        // rules part company: `[2,4,2]` is already packed and stays as it is,
+        // whereas a merge that reached over the 4 would fuse the two 2s into a
+        // 4 and leave `[4,2]`, scoring points for a merge of tiles that were
+        // never touching.
+        let (out, points, moved) = Board::slide(&[2, 4, 2, 0]);
+        assert_eq!(out, [2, 4, 2, 0], "a merge reached over the tile between");
+        assert_eq!(points, 0, "a merge that never happened was scored");
+        assert!(!moved, "a packed line claimed it had moved");
+    }
+
+    #[test]
     fn a_line_with_nothing_to_do_says_it_did_nothing() {
         let (out, points, moved) = Board::slide(&[2, 4, 8, 16]);
         assert_eq!(out, [2, 4, 8, 16]);
@@ -2022,6 +2073,17 @@ mod tests {
 
     #[test]
     fn a_lost_game_refuses_every_direction() {
+        // This asserts the outcome, not the mechanism, and the distinction is
+        // worth writing down: a board is only ever marked `Lost` because it has
+        // no move left, so on this fixture the frozen-status guard in
+        // `make_move` and the board's own emptiness of moves give the same
+        // answer, and deleting the guard changes nothing here. Only a *won*
+        // game -- frozen while the board still has moves in it -- can tell the
+        // two apart, which is why the guard's owning test is
+        // `a_won_game_refuses_to_move_until_the_player_says_to_keep_going` and
+        // not this one (`known-issues.md` lesson 58). Constructing a `Lost`
+        // status over a board that can still move to make this test own the
+        // guard would be testing a state the program cannot reach.
         let mut app = playing([
             [2, 4, 8, 16],
             [4, 8, 16, 32],
@@ -2521,26 +2583,45 @@ mod tests {
 
     #[test]
     fn a_band_that_did_not_fit_is_gone_rather_than_flat() {
-        // A zero-high rectangle at the right y is still a rectangle, and a
-        // click on its edge would still land in it. A band that did not fit
-        // must be `Rect::EMPTY`, which is nowhere.
-        let l = Layout::new(600.0, 130.0);
-        for (name, band) in [
-            ("header", l.header),
-            ("info", l.info),
-            ("dpad", l.dpad),
-            ("footer", l.footer),
-        ] {
-            if !l.shows(band) {
-                assert_eq!(band, Rect::EMPTY, "{name} was flattened, not dropped");
+        // A zero-high rectangle at the right y is still a rectangle: it carries
+        // the band's width and its y, so a reader of those fields is told a
+        // band is there. A band that did not fit must be `Rect::EMPTY`, which
+        // is nowhere.
+        //
+        // A ladder of heights, not one window, and the reason is the fault this
+        // paragraph replaced. The bands are given up in the order
+        // `BAND_DROP_ORDER` names -- footer, info, header, pad -- so a single
+        // fixture only ever exercises a prefix of that order, and 600x130 (the
+        // fixture this test used to have) drops the footer and the info band
+        // and keeps the other two. Flattening the *header* instead of dropping
+        // it was therefore invisible to a test whose loop named all four bands
+        // and whose window only put two of them to the question. Three heights
+        // reach three different depths of the ladder, and the last assertion
+        // makes the coverage a claim rather than a hope: every one of the four
+        // has to have been dropped somewhere in the ladder, so a change to the
+        // clamps that quietly stops dropping one of them fails here rather
+        // than silently narrowing what this test looks at.
+        let mut dropped: Vec<&str> = Vec::new();
+        for h in [130.0, 110.0, 50.0] {
+            let l = Layout::new(600.0, h);
+            for (name, band) in [
+                ("header", l.header),
+                ("info", l.info),
+                ("dpad", l.dpad),
+                ("footer", l.footer),
+            ] {
+                if !l.shows(band) {
+                    assert_eq!(band, Rect::EMPTY, "at height {h} {name} was flattened");
+                    dropped.push(name);
+                }
             }
         }
-        assert!(
-            [l.header, l.info, l.dpad, l.footer]
-                .iter()
-                .any(|b| b.is_empty()),
-            "the fixture window kept every band, so it tests nothing"
-        );
+        for name in ["header", "info", "dpad", "footer"] {
+            assert!(
+                dropped.contains(&name),
+                "no window in the ladder ever dropped the {name}, so it was not tested"
+            );
+        }
     }
 
     #[test]
@@ -3123,6 +3204,61 @@ mod tests {
             Some(Target::HelpSheet),
             "the sheet did not take the click"
         );
+
+        // And the part that gives the test its name. The centre of the sheet
+        // is over the board, which has no controls in it, so the leg above
+        // asks only whether the sheet answers where nothing else wanted to --
+        // which is not "hides what it covers" at all. The sheet's rectangle
+        // does not even reach the direction pad at this window size, so a
+        // drawing pass that painted the pad *over* the sheet went unnoticed:
+        // the sheet's centre was still the sheet's. What the modal rule
+        // actually promises is that while the sheet is up, every control in
+        // the window answers with the sheet instead of itself, wherever it
+        // happens to sit. That is what is asked here, of all seven of them.
+        for (name, r) in [
+            ("left", l.dpad_button(0)),
+            ("up", l.dpad_button(1)),
+            ("down", l.dpad_button(2)),
+            ("right", l.dpad_button(3)),
+            ("new game", l.footer_button(0)),
+            ("undo", l.footer_button(1)),
+            ("help", l.footer_button(2)),
+        ] {
+            assert!(!r.is_empty(), "the fixture window has no {name} button");
+            let (bx, by) = r.centre();
+            assert_eq!(
+                app.target_at(bx, by),
+                Some(Target::HelpSheet),
+                "the {name} button was still clickable under the sheet"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_pressed_over_the_help_sheet_shuts_it_rather_than_playing_a_move() {
+        // The other half of the same rule, and the one a pointer test cannot
+        // reach. The sheet is drawn over the board, so a move made while it is
+        // open is a move made on a board the player cannot see; they close the
+        // sheet afterwards and find the game somewhere else. Every key the game
+        // has a use for shuts the sheet and does nothing else, which is the
+        // answer a click gets and the one the sheet's own closing line
+        // promises.
+        for key in [Key::Left, Key::Up, Key::Down, Key::Right, Key::R] {
+            let mut app = playing([[2, 0, 0, 2], [0; 4], [0; 4], [0; 4]]);
+            app.show_help = true;
+            let before = app.board.grid;
+            assert_eq!(
+                press(&mut app, key),
+                EventResult::Consumed,
+                "{key:?} over the sheet was left for someone else"
+            );
+            assert!(!app.help_is_open(), "{key:?} did not shut the sheet");
+            assert_eq!(
+                app.board.grid, before,
+                "{key:?} played a move on a board hidden behind the sheet"
+            );
+            assert_eq!(app.board.moves(), 0, "{key:?} counted a move");
+        }
     }
 
     #[test]
@@ -3342,7 +3478,21 @@ mod tests {
 
     #[test]
     fn a_window_opens_at_a_size_its_own_layout_can_use() {
-        let (w, h) = Game2048::SIZE;
+        // Asked of `initial_size`, which is the number the window system
+        // actually opens the window at, and not of `Probe::SIZE`, which is the
+        // number the tests draw at. The two are written from the same pair of
+        // constants and so agree by construction -- but only one of them is the
+        // program's answer to "how big should this window be", and taking the
+        // other left this test unable to see `initial_size` return a window a
+        // single pixel square. The last assertion is what keeps the two from
+        // drifting apart now that this test depends on only one of them.
+        let app = game();
+        let (w, h) = (app.initial_size().0 as f32, app.initial_size().1 as f32);
+        assert_eq!(
+            Game2048::SIZE,
+            (w, h),
+            "the size the tests draw at is not the size the window opens at"
+        );
         let l = Layout::new(w, h);
         for (name, band) in [
             ("header", l.header),
@@ -3558,6 +3708,99 @@ mod tests {
     }
 
     #[test]
+    fn a_title_crowded_out_by_the_score_boxes_is_not_drawn_at_all() {
+        // The window that actually squeezes a label to nothing, which the
+        // fixture above does not contain. The header lays its score boxes out
+        // from the right edge inwards and gives the title whatever is left, so
+        // there is a band of widths -- wide enough for one box, not wide enough
+        // for a box and a title -- in which the title's width is exactly zero.
+        // `label` refuses that and the header comes out with boxes and no name
+        // on it. Nothing in `WINDOWS` lands in that band, so the guard was
+        // reachable in the program and unreached by the suite: the sweep
+        // deleted it and every test still passed.
+        //
+        // The band is searched for rather than written down, because its edges
+        // are the box's own width clamp and the padding, and a test that stated
+        // them would have to be edited every time either moved -- and would
+        // then be stating the layout's arithmetic back to it rather than
+        // checking a consequence of it. The last assertion is what makes the
+        // search honest: if no width in the range crowds the title out, this
+        // test is looking at nothing and says so.
+        let h = 800.0;
+        let mut crowded = Vec::new();
+        for w in 40..=220 {
+            let w = w as f32;
+            let l = Layout::new(w, h);
+            if !l.shows(l.header) || l.score_box(0).is_empty() {
+                continue;
+            }
+            let app = windowed(w, h);
+            let titled = text_boxes(&app.frame(w, h))
+                .into_iter()
+                .any(|(body, ..)| body == "2048");
+            if !titled {
+                crowded.push(w);
+            }
+        }
+        assert!(
+            !crowded.is_empty(),
+            "no width from 40 to 220 left the title without room, so the \
+             refusal to draw a label with no width was never put to the test"
+        );
+    }
+
+    #[test]
+    fn a_line_too_big_for_its_box_still_starts_inside_it() {
+        // Centring is subtraction, and subtraction goes negative. A line taller
+        // than the box it is centred in offsets to *minus* half the difference
+        // and begins above the box -- which for a box at the top of the window
+        // means beginning off the window, where nothing is drawn at all. The
+        // same holds across.
+        //
+        // Both fixtures are built to overflow rather than found in a window,
+        // because the sizes the layout computes are chosen to fit and only
+        // overflow at the rounding edge of a font size, which is too narrow a
+        // target to aim a test at. What matters is that the rule holds, and the
+        // rule is about `centred`, so `centred` is what is asked.
+        let short = Rect::new(20.0, 30.0, 160.0, 4.0);
+        let size = 20.0;
+        let weight = FontWeightHint::Bold;
+        assert!(
+            text::line_height(size, weight) > short.h,
+            "the fixture box is tall enough for the line, so it tests nothing"
+        );
+        let mut f = Frame::new(400.0, 200.0);
+        centred(&mut f, short, "Keep going", size, COL_TEXT, weight);
+        let (_, drawn, _) = text_boxes(&f)
+            .into_iter()
+            .next()
+            .expect("the line was not drawn");
+        assert!(
+            drawn.y >= short.y - 0.01,
+            "a line taller than its box began at y={} above the box {short:?}",
+            drawn.y
+        );
+
+        let narrow = Rect::new(20.0, 30.0, 10.0, 60.0);
+        let body = "Click anywhere to close";
+        assert!(
+            text::measure(body, size, weight) > narrow.w,
+            "the fixture box is wide enough for the line, so it tests nothing"
+        );
+        let mut f = Frame::new(400.0, 200.0);
+        centred(&mut f, narrow, body, size, COL_TEXT, weight);
+        let (_, drawn, _) = text_boxes(&f)
+            .into_iter()
+            .next()
+            .expect("the line was not drawn");
+        assert!(
+            drawn.x >= narrow.x - 0.01,
+            "a line wider than its box began at x={} left of the box {narrow:?}",
+            drawn.x
+        );
+    }
+
+    #[test]
     fn a_label_in_a_button_is_written_across_the_middle_of_it() {
         // Every caption in the window is centred in its box, and a caption
         // pushed to one edge is the difference between a button and a button
@@ -3636,11 +3879,30 @@ mod tests {
             .into_iter()
             .find(|(body, ..)| body == "8")
             .expect("the tile was not written at all");
-        let want = l.cell(0, 2);
+        // The column the 8 must be in is worked out here, from the board and
+        // the size of the grid, rather than asked of `Layout::cell`. Asking
+        // `cell` would be asking the very function under test where it thinks
+        // the cell is: a layout that read the row where it should read the
+        // column would move `cell(0, 2)` and the drawn 8 together, and the
+        // containment check would hold in the wrong place
+        // (`known-issues.md` lesson 52). Stated in the test's own hand, the
+        // third column of four is the half-open band from half the board's
+        // width to three quarters of it.
+        let step = l.board.w / GRID_SIZE as f32;
+        let (want_col, want_row) = (2.0, 0.0);
         assert!(
-            want.contains(eight.1.x, eight.1.y),
-            "the 8 was written at {:?}, not in its cell {want:?}",
-            eight.1
+            eight.1.x >= l.board.x + want_col * step
+                && eight.1.x < l.board.x + (want_col + 1.0) * step,
+            "the 8 was written at x={}, not in column 2 of a board at {:?}",
+            eight.1.x,
+            l.board
+        );
+        assert!(
+            eight.1.y >= l.board.y + want_row * step
+                && eight.1.y < l.board.y + (want_row + 1.0) * step,
+            "the 8 was written at y={}, not in row 0 of a board at {:?}",
+            eight.1.y,
+            l.board
         );
     }
 

@@ -1717,6 +1717,18 @@ const _: () = assert!(COLS == 7, "the digit keys 1-7 name every column");
 /// A free function rather than a method, so the mapping can be read and tested
 /// without a game to read it against.
 pub fn key_intent(ev: &KeyEvent) -> Option<Intent> {
+    // Presses only. A `KeyEvent` carries `pressed`, and the compositor sends one
+    // with `pressed: false` for every key-up (`gui/compositor/src/lib.rs`), so a
+    // handler that does not read it runs each action twice — once when the key
+    // goes down and once when it comes back up. For this game that is two pieces
+    // per keystroke: the player's move, then the same move again into the next
+    // free cell, played on behalf of the AI. This file shipped without the
+    // check while `maze`, `life`, `game2048`, `sudoku`, `minesweeper` and
+    // `wordsearch` all had it — the sixth app in a row to lose the same line,
+    // which is what a rule kept by copying looks like from the inside.
+    if !ev.pressed {
+        return None;
+    }
     if ev.key == Key::Z && ev.modifiers.ctrl {
         return Some(Intent::Undo);
     }
@@ -3943,6 +3955,30 @@ mod tests {
         app.apply(Intent::ToggleHelp);
         assert_eq!(app.apply(Intent::Undo), EventResult::Consumed);
         assert_eq!(app.board.pieces(), 1, "the move was taken back behind it");
+    }
+
+    #[test]
+    fn a_key_coming_back_up_is_not_a_second_move() {
+        // The compositor sends a `KeyEvent` for the release as well as the
+        // press, so a handler that reads only `key` plays every move twice: the
+        // player's piece, and then the same column again -- which, because the
+        // turn has passed, is a piece dropped on the AI's behalf. This file
+        // shipped without the check that every other wired app in the tree
+        // carries. The test is written against the whole event route rather
+        // than against `key_intent`, because the route is what the compositor
+        // uses and a guard placed in a function nothing calls is no guard.
+        let mut app = game();
+        assert_eq!(press(&mut app, Key::Num1), EventResult::Consumed);
+        assert_eq!(app.board.pieces(), 1, "the press dropped one piece");
+
+        let mut release = probe::press(Key::Num1);
+        release.pressed = false;
+        assert_eq!(
+            handle_event(&mut app, &Event::Key(release)),
+            EventResult::Ignored,
+            "the key coming back up asked for something"
+        );
+        assert_eq!(app.board.pieces(), 1, "the release dropped a second piece");
     }
 
     #[test]

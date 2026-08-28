@@ -92677,3 +92677,55 @@ allocator that returns a pointer and a size. The tell is an `assert_eq!` whose
 two sides can be traced back to a single call. Related to lesson 58 but not the
 same shape: there, two independent *rules* could each explain one witness; here
 there is only ever one rule, and the witness is downstream of it.
+
+### Lesson 63: a rule kept only by copying is a rule that will be dropped (lane C, 2026-08-28)
+
+**In short:** a keyboard on this system reports a key twice — once when it goes
+down and once when it comes back up — and an application is expected to act only
+on the first. Ninety-two applications did. One did not, and it was the one
+written most recently, by the author who had just put the same check into six
+others in a row. Nothing complained: it compiled, and every test that pressed a
+key passed, because no test thought to let one go. The fix is not another
+correct copy; it is `scripts/check-key-release-wiring.py`, a gate that fails the
+build when a windowed program routes keys and never reads the flag.
+
+**The fault.** `guitk::event::KeyEvent` carries `pressed`, and
+`gui/compositor/src/lib.rs` sends one event with `pressed: true` and a second
+with `pressed: false` for every keystroke. `apps/connect4`'s `key_intent`
+matched on `ev.key` and never looked at `ev.pressed`, so a single press of `1`
+dropped the player's piece *and then dropped a second piece into column one on
+the release* — which, the turn having passed, was played on the AI's behalf. The
+board advanced two moves for one keystroke, and the game shown was not the game
+being played. `apps/life` had stepped the generation twice per press for the
+same reason, and `apps/maze` had moved the walker two cells.
+
+**Why it is easy to write.** The guard is one `if` at the top of a function
+whose *interesting* content is a twenty-arm match, so it reads as boilerplate
+and gets skipped by anyone writing the handler from memory rather than copying
+the file next door. And it is invisible to everything that would normally catch
+a mistake:
+
+* the compiler is happy — `pressed` is a field nobody is obliged to read;
+* `clippy` is happy for the same reason;
+* the whole test suite is happy, because a test helper called `press` builds
+  `pressed: true` and no test builds the other one. A suite of two hundred
+  keyboard tests can have complete coverage of *which key does what* and zero
+  coverage of *how many times*.
+
+**The rule.** When the same one-line guard has to be written into every member
+of a family, stop writing it and write the gate instead. The tell is the count:
+if you can say "ninety-two files have this line", the line is a convention, and
+a convention with ninety-two instances has no mechanism holding it up — only the
+memory of whoever edits next. Conventions at that scale fail silently and fail
+on the newest file, because the newest file is the one written without the
+others open. A gate turns "everybody remembers" into "nobody has to", and its
+baseline should be zero from the day it is written if the population is already
+clean; a ratchet is for a mess you inherited, not for one you are still making.
+
+**Where else to look.** Any flag on an event or a message that a handler is free
+to ignore: `pressed` here; a `repeat` flag when key auto-repeat lands (the same
+fault one step along — an action that runs thirty times while a key is held);
+`MouseEventKind::Release` for a handler that only wants presses; a
+`compact_boundary` or `is_replay` marker on a stream a client re-reads. In every
+case the shape is the same — the field is *available*, ignoring it type-checks,
+and the consequence is a doubled action rather than a crash.

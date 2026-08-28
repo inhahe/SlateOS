@@ -950,22 +950,39 @@ impl Game2048 {
         }
     }
 
-    pub fn continue_after_win(&mut self) {
-        if self.board.status == GameStatus::Won {
-            self.board.status = GameStatus::WonContinuing;
-            // The winning move may also have been the one that filled the
-            // board. Choosing to keep going has to re-ask whether there is
-            // anything left to do, or the game sits at `WonContinuing` for
-            // ever with every direction refused and nothing saying why.
-            self.check_stuck();
+    /// Take up a won game again. Returns whether there was a win to take up.
+    ///
+    /// The answer is returned rather than left for the caller to work out from
+    /// the status a second time: `apply` used to ask "is this game won?" itself
+    /// and then call this, which asked the same question again. Two copies of
+    /// one rule are one rule that a test can only ever half-remove
+    /// (`known-issues.md` lesson 51).
+    pub fn continue_after_win(&mut self) -> bool {
+        if self.board.status != GameStatus::Won {
+            return false;
         }
+        self.board.status = GameStatus::WonContinuing;
+        // The winning move may also have been the one that filled the
+        // board. Choosing to keep going has to re-ask whether there is
+        // anything left to do, or the game sits at `WonContinuing` for
+        // ever with every direction refused and nothing saying why.
+        self.check_stuck();
+        true
     }
 
     // ── Window ──
 
+    /// Remember the size the window is now, for the next click to be read
+    /// against.
+    ///
+    /// The size is stored as given. It used to be floored at a pixel here as
+    /// well as in `Layout::new`, and the floor here could never do anything
+    /// the one there did not already do -- every use of these two numbers goes
+    /// through a `Layout`. A guard standing in front of a guard is a guard no
+    /// test can take away (`known-issues.md` lesson 51).
     pub fn resize(&mut self, width: f32, height: f32) {
-        self.width = width.max(1.0);
-        self.height = height.max(1.0);
+        self.width = width;
+        self.height = height;
     }
 
     /// What a click at (`x`, `y`) would land on, read from the frame the
@@ -995,8 +1012,7 @@ impl Game2048 {
                 }
             }
             Intent::Continue => {
-                if self.board.status == GameStatus::Won {
-                    self.continue_after_win();
+                if self.continue_after_win() {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -2179,9 +2195,15 @@ mod tests {
         let after_merge = app.board.score();
         assert_eq!(after_merge, 4, "the fixture's first move did not merge");
 
+        // The cap is written out as a number rather than taken from
+        // `MAX_UNDO`: a test that counts to the constant it is checking counts
+        // to whatever the constant becomes, and could not notice a history
+        // five moves deep or five hundred (`known-issues.md` lesson 52).
+        const CAP: usize = 50;
+
         // Nudge a lone tile from wall to wall. Each is a real move and none
         // of them scores, so the score is the mark of the first move alone.
-        for i in 0..MAX_UNDO {
+        for i in 0..CAP {
             app.board.grid = [[0, 0, 0, 0], [0; 4], [0; 4], [0; 4]];
             app.board.grid[1][if i % 2 == 0 { 0 } else { 3 }] = 8;
             app.board.status = GameStatus::Playing;
@@ -2194,11 +2216,11 @@ mod tests {
         }
         assert_eq!(
             app.undo_depth(),
-            MAX_UNDO,
-            "the history grew past the cap it is supposed to keep"
+            CAP,
+            "the history is not the depth it is supposed to keep"
         );
 
-        for _ in 0..MAX_UNDO {
+        for _ in 0..CAP {
             app.undo();
         }
         assert_eq!(app.undo_depth(), 0, "the history would not empty");
@@ -3498,6 +3520,72 @@ mod tests {
             find("Click anywhere to close").y > previous,
             "the line that says how to shut the sheet is not below the last row"
         );
+        // The blank row is a gap and a gap is nothing at all. Drawn as an
+        // empty line it would be a text command that paints no pixels, an
+        // invisible thing in the frame for every later pass to trip over.
+        assert!(
+            added.iter().all(|(body, ..)| !body.is_empty()),
+            "the sheet drew an empty line"
+        );
+    }
+
+    #[test]
+    fn a_label_with_no_room_left_is_not_drawn_at_all() {
+        // A label carries the width it may use and the renderer elides it to
+        // fit. Given a width of nothing it elides to nothing: an empty string
+        // in the frame, which paints no pixels but is still a line of text as
+        // far as everything downstream is concerned. The header's title is the
+        // one that meets this -- in a narrow window the score boxes leave it
+        // no room -- but the rule is checked over every line at every size,
+        // because any of them could be the next to be squeezed out.
+        for (w, h) in WINDOWS {
+            let mut app = windowed(w, h);
+            app.show_help = true;
+            app.board.status = GameStatus::Won;
+            for c in app.frame(w, h).commands() {
+                if let RenderCommand::Text {
+                    text, max_width, ..
+                } = c
+                {
+                    assert!(
+                        max_width.is_none_or(|m| m > 0.0),
+                        "{w}x{h}: {text:?} was drawn with no room to draw it in"
+                    );
+                    assert!(!text.is_empty(), "{w}x{h}: an empty line was drawn");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_label_in_a_button_is_written_across_the_middle_of_it() {
+        // Every caption in the window is centred in its box, and a caption
+        // pushed to one edge is the difference between a button and a button
+        // that looks broken. Containment cannot see it: a label pinned to the
+        // left of its button is still inside the button.
+        let app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for (index, body) in ["New game", "Undo", "Help"].into_iter().enumerate() {
+            let seat = l.footer_button(index);
+            assert!(!seat.is_empty(), "the footer has no {body:?} button");
+            let (_, r, _) = text_boxes(&f)
+                .into_iter()
+                .find(|(t, ..)| t == body)
+                .unwrap_or_else(|| panic!("{body:?} is not on any button"));
+            let left = r.x - seat.x;
+            let right = seat.right() - r.right();
+            assert!(
+                (left - right).abs() < 0.51,
+                "{body:?} sits {left} from the left of its button and {right} from the right"
+            );
+            let above = r.y - seat.y;
+            let below = seat.bottom() - r.bottom();
+            assert!(
+                (above - below).abs() < 0.51,
+                "{body:?} sits {above} below the top of its button and {below} above the foot"
+            );
+        }
     }
 
     #[test]

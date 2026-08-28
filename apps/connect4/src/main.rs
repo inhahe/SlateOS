@@ -54,6 +54,21 @@
 //! 9. **The crate did not pass the lane's clippy gate at all**, carrying
 //!    `#![allow(dead_code)]` and nine more crate-wide allows. All ten are gone,
 //!    and with them `Board::check_line`, which only the tests ever called.
+//! 10. **`has_won(Cell::Empty)` was true on an empty board.** The scan asked
+//!     whether four cells in a line all held the colour it was handed, and on
+//!     a board of nothing they all hold `Empty` — so the position "nobody has
+//!     played yet" answered yes to "has this player won". Nothing in the
+//!     shipped program passed `Empty` to it, which is why it went unseen, but
+//!     the function is one caller away from crowning a winner before the first
+//!     move. Absence is not a colour: the scan refuses `Empty` up front now.
+//! 11. **`minimax`'s emptiness guard was a duplicate of the test above it.**
+//!     It returned early when the move list was empty — but the line before it
+//!     had already returned on `is_terminal`, which is true of exactly those
+//!     positions, so the guard was unreachable. What it was standing in for,
+//!     the "the loop improved on nothing" case, was instead papered over by a
+//!     `fallback` column that claimed a choice had been made when none had.
+//!     The chosen column is an `Option` now, `None` only when there was
+//!     genuinely nothing to choose.
 
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -416,6 +431,14 @@ impl Board {
     /// own hand-written scan, and a disagreement would have had the AI
     /// searching positions the game already considered won.
     fn has_won(&self, player: Cell) -> bool {
+        // Nobody wins by not being there. Without this, every run on an empty
+        // board is four cells of one "colour" and `has_won(Cell::Empty)` is
+        // true before a piece has been played — the same trap `line_owner`
+        // sidesteps, and what lets the two scans be claimed to agree for
+        // *every* argument rather than only for the two the callers pass.
+        if player == Cell::Empty {
+            return false;
+        }
         all_lines().any(|cells| {
             cells
                 .into_iter()
@@ -516,11 +539,17 @@ fn minimax(
 
     let moves = board.valid_moves();
     // The first legal move is the fallback answer: alpha-beta can cut the loop
-    // off before any move has beaten `best_score`, and no legal move at all
-    // means there is nothing to report.
-    let Some(&fallback) = moves.first() else {
-        return (0, None);
-    };
+    // off before any move has beaten `best_score` -- `score > best_score` is
+    // false for a score of `i32::MIN` -- so the loop can end with nothing
+    // chosen, and the first move it would have tried is the honest answer.
+    //
+    // Written as the initial value of `best_col` rather than as an early
+    // return, because an early return would need a branch for "no legal move
+    // at all" that can never be taken: a board with no legal move is a full
+    // board, and a full board is terminal and returned above. A guard standing
+    // in front of a rule that already holds is a line no test can own
+    // (`known-issues.md` lesson 51).
+    let mut best_col = moves.first().copied();
     let deeper = depth.saturating_sub(1);
     let mover = if maximizing {
         ai_player
@@ -528,7 +557,6 @@ fn minimax(
         ai_player.opponent()
     };
 
-    let mut best_col = fallback;
     let mut best_score = if maximizing { i32::MIN } else { i32::MAX };
     for &col in &moves {
         let Some((score, _)) = board.with_move(col, mover, |after| {
@@ -542,13 +570,13 @@ fn minimax(
         if maximizing {
             if score > best_score {
                 best_score = score;
-                best_col = col;
+                best_col = Some(col);
             }
             alpha = alpha.max(score);
         } else {
             if score < best_score {
                 best_score = score;
-                best_col = col;
+                best_col = Some(col);
             }
             beta = beta.min(score);
         }
@@ -556,7 +584,7 @@ fn minimax(
             break;
         }
     }
-    (best_score, Some(best_col))
+    (best_score, best_col)
 }
 
 /// The column the AI plays, or `None` on a board with no room left.
@@ -1743,762 +1771,3340 @@ fn main() -> ExitCode {
     app::launch("connect4", &mut game)
 }
 
-// ── Tests ───────────────────────────────────────────────────────────
+// ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    // A test that indexes out of range should fail loudly and point at the
-    // line that did it — that is the diagnosis. The defensive lints exist to
-    // keep panics out of code that runs on a user's data, which this is not.
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
     #![allow(
         clippy::indexing_slicing,
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
+        clippy::float_cmp,
         clippy::arithmetic_side_effects
     )]
 
     use super::*;
+    use guitk::event::Modifiers;
+    use guitk::probe;
 
-    // ── Board basic tests ───────────────────────────────────────────
+    /// Windows to check the layout against, from a desktop down to something
+    /// no sane person would resize to.
+    ///
+    /// Each of the last five earns its place by making a rule bind that binds
+    /// nowhere else in the list:
+    ///
+    /// - `(120, 800)` is tall enough for every band and too narrow for the
+    ///   third score readout, which is the only condition under which
+    ///   `score_box`'s "ran off the left edge" refusal fires.
+    /// - `(600, 150)` and `(300, 110)` are short enough that the drop ladder
+    ///   runs, which is the only condition under which `BOARD_SHARE` and
+    ///   `BAND_DROP_ORDER` have any effect at all.
+    /// - `(24, 24)` drops every band, so the board is drawn with no chrome
+    ///   above or below it -- the case where `column`'s "no chute, start at the
+    ///   board" arm is the one taken.
+    /// - `(4, 4)` is here for the padding and the font floor: at every other
+    ///   size the padding lands on its 2px floor, so the clamp's upper bound --
+    ///   a quarter of the smaller side, which stops the padding eating the
+    ///   thing it pads -- never binds; and it is the only size at which the
+    ///   help sheet's type is driven below one pixel.
+    const WINDOWS: [(f32, f32); 12] = [
+        (1920.0, 1080.0),
+        (1280.0, 800.0),
+        (WINDOW_WIDTH, WINDOW_HEIGHT),
+        (480.0, 400.0),
+        (400.0, 640.0),
+        (120.0, 800.0),
+        (600.0, 150.0),
+        (640.0, 200.0),
+        (300.0, 110.0),
+        (90.0, 120.0),
+        (24.0, 24.0),
+        (4.0, 4.0),
+    ];
 
-    #[test]
-    fn test_new_board_is_empty() {
-        let board = Board::new();
+    // ── Fixtures ──
+
+    fn game() -> Connect4 {
+        Connect4::new()
+    }
+
+    /// A game whose stored window is `(width, height)`, which is the size a
+    /// click on it will be read against.
+    fn windowed(width: f32, height: f32) -> Connect4 {
+        let mut app = game();
+        app.resize(width, height);
+        app
+    }
+
+    /// A game with a search shallow enough to run inside a test.
+    ///
+    /// The depth is the AI's strength, not its rules: every test that drives a
+    /// tick is asking whether the move is *played*, not whether it is good, and
+    /// the two tests that do ask about the move's quality build the position so
+    /// that `ai_best_move` answers from its immediate win/block scan without
+    /// searching at all.
+    fn shallow() -> Connect4 {
+        let mut app = game();
+        app.ai_depth = 2;
+        app
+    }
+
+    /// A full board with no four in a row anywhere: rows in pairs, each pair
+    /// offset by one column from the pair below.
+    ///
+    /// Checked by `a_full_board_with_no_line_on_it_is_a_draw` rather than
+    /// asserted here, so the fixture's own claim is a test and not a comment.
+    fn drawn_board() -> Board {
+        let mut b = Board::new();
         for row in 0..ROWS {
             for col in 0..COLS {
-                assert_eq!(board.get(row, col), Cell::Empty);
-            }
-        }
-    }
-
-    #[test]
-    fn test_new_board_heights_zero() {
-        let board = Board::new();
-        for col in 0..COLS {
-            assert_eq!(board.heights[col], 0);
-        }
-    }
-
-    #[test]
-    fn test_new_board_piece_count_zero() {
-        let board = Board::new();
-        assert_eq!(board.piece_count, 0);
-    }
-
-    #[test]
-    fn test_can_drop_empty_board() {
-        let board = Board::new();
-        for col in 0..COLS {
-            assert!(board.can_drop(col));
-        }
-    }
-
-    #[test]
-    fn test_can_drop_invalid_column() {
-        let board = Board::new();
-        assert!(!board.can_drop(COLS));
-        assert!(!board.can_drop(COLS + 1));
-    }
-
-    #[test]
-    fn test_drop_piece_returns_row() {
-        let mut board = Board::new();
-        assert_eq!(board.drop_piece(3, Cell::Red), Some(0));
-        assert_eq!(board.drop_piece(3, Cell::Yellow), Some(1));
-        assert_eq!(board.drop_piece(3, Cell::Red), Some(2));
-    }
-
-    #[test]
-    fn test_drop_piece_updates_grid() {
-        let mut board = Board::new();
-        board.drop_piece(0, Cell::Red);
-        assert_eq!(board.get(0, 0), Cell::Red);
-        assert_eq!(board.get(1, 0), Cell::Empty);
-    }
-
-    #[test]
-    fn test_drop_piece_updates_height() {
-        let mut board = Board::new();
-        board.drop_piece(2, Cell::Red);
-        assert_eq!(board.heights[2], 1);
-        board.drop_piece(2, Cell::Yellow);
-        assert_eq!(board.heights[2], 2);
-    }
-
-    #[test]
-    fn test_drop_piece_updates_count() {
-        let mut board = Board::new();
-        board.drop_piece(0, Cell::Red);
-        assert_eq!(board.piece_count, 1);
-        board.drop_piece(1, Cell::Yellow);
-        assert_eq!(board.piece_count, 2);
-    }
-
-    #[test]
-    fn test_drop_full_column() {
-        let mut board = Board::new();
-        for i in 0..ROWS {
-            let piece = if i % 2 == 0 { Cell::Red } else { Cell::Yellow };
-            assert!(board.drop_piece(0, piece).is_some());
-        }
-        assert!(!board.can_drop(0));
-        assert_eq!(board.drop_piece(0, Cell::Red), None);
-    }
-
-    #[test]
-    fn test_undo_drop_basic() {
-        let mut board = Board::new();
-        board.drop_piece(3, Cell::Red);
-        assert_eq!(board.get(0, 3), Cell::Red);
-        let removed = board.undo_drop(3);
-        assert_eq!(removed, Some(Cell::Red));
-        assert_eq!(board.get(0, 3), Cell::Empty);
-        assert_eq!(board.heights[3], 0);
-        assert_eq!(board.piece_count, 0);
-    }
-
-    #[test]
-    fn test_undo_drop_empty_column() {
-        let mut board = Board::new();
-        assert_eq!(board.undo_drop(0), None);
-    }
-
-    #[test]
-    fn test_undo_drop_multiple() {
-        let mut board = Board::new();
-        board.drop_piece(2, Cell::Red);
-        board.drop_piece(2, Cell::Yellow);
-        board.drop_piece(2, Cell::Red);
-
-        assert_eq!(board.undo_drop(2), Some(Cell::Red));
-        assert_eq!(board.heights[2], 2);
-        assert_eq!(board.undo_drop(2), Some(Cell::Yellow));
-        assert_eq!(board.heights[2], 1);
-        assert_eq!(board.undo_drop(2), Some(Cell::Red));
-        assert_eq!(board.heights[2], 0);
-    }
-
-    #[test]
-    fn test_get_out_of_bounds() {
-        let board = Board::new();
-        assert_eq!(board.get(ROWS, 0), Cell::Empty);
-        assert_eq!(board.get(0, COLS), Cell::Empty);
-        assert_eq!(board.get(100, 100), Cell::Empty);
-    }
-
-    #[test]
-    fn test_is_full_empty_board() {
-        let board = Board::new();
-        assert!(!board.is_full());
-    }
-
-    #[test]
-    fn test_is_full_full_board() {
-        let mut board = Board::new();
-        for col in 0..COLS {
-            for row_idx in 0..ROWS {
-                let piece = if (col + row_idx) % 2 == 0 {
+                let piece = if (row / 2 + col) % 2 == 0 {
                     Cell::Red
                 } else {
                     Cell::Yellow
                 };
-                board.drop_piece(col, piece);
+                assert!(b.set(row, col, piece), "({row}, {col}) is on the board");
             }
         }
-        assert!(board.is_full());
+        b.heights = [ROWS; COLS];
+        b.piece_count = CELL_COUNT;
+        b
     }
 
-    // ── Win detection tests ─────────────────────────────────────────
-
-    #[test]
-    fn test_horizontal_win_bottom_row() {
-        let mut board = Board::new();
-        for col in 0..4 {
-            board.drop_piece(col, Cell::Red);
+    /// Four of `player`'s pieces along the bottom row, starting at column 0.
+    fn won_board(player: Cell) -> Board {
+        let mut b = Board::new();
+        for col in 0..RUN {
+            b.drop_piece(col, player);
         }
-        assert!(board.has_won(Cell::Red));
-        assert!(!board.has_won(Cell::Yellow));
+        b
+    }
+
+    fn press(app: &mut Connect4, key: Key) -> EventResult {
+        handle_event(app, &Event::Key(probe::press(key)))
+    }
+
+    fn click(app: &mut Connect4, x: f32, y: f32) -> EventResult {
+        let size = (app.width, app.height);
+        app.click_at(x, y, MouseButton::Left, size)
+    }
+
+    /// Click the middle of the named control, at the app's current size.
+    fn click_on(app: &mut Connect4, target: Target) -> EventResult {
+        let size = (app.width, app.height);
+        probe::click_sized(app, target, MouseButton::Left, size)
+    }
+
+    fn tick(app: &mut Connect4) -> EventResult {
+        handle_event(app, &Event::Tick { elapsed_ms: 60 })
+    }
+
+    fn texts(f: &Frame) -> Vec<String> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every line in the frame with the box it will actually cover.
+    ///
+    /// The width is the one that reaches the screen, not the one the whole
+    /// string measures to: a label carries a maximum width and is elided to fit
+    /// it, so measuring the body would report an overflow that is never painted
+    /// -- and would make every one of these tests a test of the string rather
+    /// than of the layout.
+    fn text_boxes(f: &Frame) -> Vec<(String, Rect, f32)> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    font_size,
+                    font_weight,
+                    max_width,
+                    ..
+                } => {
+                    let full = text::measure(text, *font_size, *font_weight);
+                    let w = max_width.map_or(full, |m| full.min(m));
+                    Some((
+                        text.clone(),
+                        Rect::new(*x, *y, w, text::line_height(*font_size, *font_weight)),
+                        *font_size,
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colour the frame last painted the given box, read out of the
+    /// commands rather than out of the function that chose it.
+    fn fill_at(f: &Frame, r: Rect) -> Option<Color> {
+        f.commands().iter().rev().find_map(|c| match c {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } if (*x - r.x).abs() < 0.01
+                && (*y - r.y).abs() < 0.01
+                && (*width - r.w).abs() < 0.01
+                && (*height - r.h).abs() < 0.01 =>
+            {
+                Some(*color)
+            }
+            _ => None,
+        })
+    }
+
+    fn hits_for(f: &Frame, target: Target) -> Vec<Rect> {
+        f.hits()
+            .iter()
+            .filter(|(t, _)| *t == target)
+            .map(|&(_, r)| r)
+            .collect()
+    }
+
+    // ── Run geometry: the one place a run's bounds are checked ──
+
+    #[test]
+    fn a_run_that_fits_reports_the_four_cells_it_covers() {
+        assert_eq!(
+            line_cells(1, 2, 0, 1),
+            Some([(1, 2), (1, 3), (1, 4), (1, 5)]),
+            "a horizontal run steps the column and holds the row"
+        );
     }
 
     #[test]
-    fn test_horizontal_win_middle() {
-        let mut board = Board::new();
-        // Fill bottom row first so we can place on second row
-        for col in 2..6 {
-            board.drop_piece(col, Cell::Yellow);
+    fn a_run_that_would_leave_the_right_edge_is_refused() {
+        // Column 4 is on the board and so is a run starting there in every
+        // other direction -- it is the fourth cell, column 7, that is not.
+        assert!(line_cells(0, 4, 0, 1).is_none(), "a run ran off the right");
+        assert!(line_cells(0, 3, 0, 1).is_some(), "the last run that fits");
+    }
+
+    #[test]
+    fn a_run_that_would_leave_the_top_is_refused() {
+        assert!(line_cells(3, 0, 1, 0).is_none(), "a run ran off the top");
+        assert!(line_cells(2, 0, 1, 0).is_some(), "the last run that fits");
+    }
+
+    #[test]
+    fn a_run_that_would_leave_the_left_edge_is_refused() {
+        // The down-left direction is the only one that can produce a negative
+        // coordinate, and a negative coordinate has no `usize` -- which is the
+        // bound, not a comparison written next to it.
+        assert!(line_cells(0, 2, 1, -1).is_none(), "a run ran off the left");
+        assert!(line_cells(0, 3, 1, -1).is_some(), "the last run that fits");
+    }
+
+    #[test]
+    fn a_run_starting_off_the_board_is_refused() {
+        assert!(line_cells(ROWS, 0, 0, 1).is_none(), "row past the top");
+        assert!(line_cells(0, COLS, 1, 0).is_none(), "column past the right");
+    }
+
+    #[test]
+    fn the_board_holds_sixty_nine_runs_of_four() {
+        // 24 across (6 rows x 4 starts), 21 up (7 columns x 3 starts) and 12
+        // on each diagonal. Counted here so that a change to `ROWS`, `COLS` or
+        // `RUN` has to be looked at rather than absorbed.
+        assert_eq!(all_lines().count(), 69);
+    }
+
+    #[test]
+    fn no_run_is_yielded_twice() {
+        let mut seen: Vec<[(usize, usize); RUN]> = Vec::new();
+        for cells in all_lines() {
+            assert!(
+                !seen.contains(&cells),
+                "{cells:?} was yielded more than once"
+            );
+            seen.push(cells);
         }
-        for col in 2..6 {
-            board.drop_piece(col, Cell::Red);
+    }
+
+    #[test]
+    fn a_run_and_the_same_run_walked_backwards_are_not_both_listed() {
+        // The reverse of a run is the same four cells in the other order, so a
+        // direction table carrying both would find every win twice and double
+        // every window's contribution to the AI's score.
+        let mut sorted: Vec<Vec<(usize, usize)>> = all_lines()
+            .map(|cells| {
+                let mut v = cells.to_vec();
+                v.sort_unstable();
+                v
+            })
+            .collect();
+        let before = sorted.len();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(before, sorted.len(), "a run is listed in both directions");
+    }
+
+    #[test]
+    fn every_run_lies_entirely_on_the_board() {
+        for cells in all_lines() {
+            for (row, col) in cells {
+                assert!(row < ROWS && col < COLS, "{cells:?} leaves the board");
+            }
         }
-        assert!(board.has_won(Cell::Red));
     }
 
+    // ── The board ──
+
     #[test]
-    fn test_horizontal_win_right_edge() {
-        let mut board = Board::new();
-        for col in 3..7 {
-            board.drop_piece(col, Cell::Yellow);
+    fn a_new_board_is_empty_everywhere() {
+        let b = Board::new();
+        for row in 0..ROWS {
+            for col in 0..COLS {
+                assert_eq!(b.get(row, col), Cell::Empty, "({row}, {col})");
+            }
         }
-        assert!(board.has_won(Cell::Yellow));
+        assert_eq!(b.pieces(), 0);
+        assert!(!b.is_full());
     }
 
     #[test]
-    fn test_vertical_win() {
-        let mut board = Board::new();
-        for _ in 0..4 {
-            board.drop_piece(0, Cell::Red);
+    fn a_dropped_piece_lands_on_the_floor_of_an_empty_column() {
+        let mut b = Board::new();
+        assert_eq!(b.drop_piece(3, Cell::Red), Some(0), "row 0 is the bottom");
+        assert_eq!(b.get(0, 3), Cell::Red);
+    }
+
+    #[test]
+    fn a_dropped_piece_lands_on_top_of_what_is_already_there() {
+        let mut b = Board::new();
+        b.drop_piece(3, Cell::Red);
+        assert_eq!(b.drop_piece(3, Cell::Yellow), Some(1));
+        assert_eq!(b.get(0, 3), Cell::Red, "the piece underneath moved");
+        assert_eq!(b.get(1, 3), Cell::Yellow);
+    }
+
+    #[test]
+    fn a_drop_lands_in_the_column_it_was_aimed_at_and_no_other() {
+        let mut b = Board::new();
+        b.drop_piece(2, Cell::Red);
+        for col in 0..COLS {
+            let expected = if col == 2 { Cell::Red } else { Cell::Empty };
+            assert_eq!(b.get(0, col), expected, "bottom of column {col}");
         }
-        assert!(board.has_won(Cell::Red));
     }
 
     #[test]
-    fn test_vertical_win_not_bottom() {
-        let mut board = Board::new();
-        // Put 2 yellow at bottom, then 4 red on top
-        board.drop_piece(3, Cell::Yellow);
-        board.drop_piece(3, Cell::Yellow);
-        for _ in 0..4 {
-            board.drop_piece(3, Cell::Red);
+    fn a_full_column_takes_no_more() {
+        let mut b = Board::new();
+        for _ in 0..ROWS {
+            assert!(b.drop_piece(0, Cell::Red).is_some());
         }
-        assert!(board.has_won(Cell::Red));
+        assert!(!b.can_drop(0), "a column with six pieces still says yes");
+        assert_eq!(b.drop_piece(0, Cell::Yellow), None);
+        assert_eq!(b.pieces(), ROWS, "the refused drop was counted");
     }
 
     #[test]
-    fn test_diagonal_up_right_win() {
-        let mut board = Board::new();
-        // Build a diagonal: (0,0), (1,1), (2,2), (3,3)
-        // Col 0: R
-        board.drop_piece(0, Cell::Red);
-        // Col 1: Y, R
-        board.drop_piece(1, Cell::Yellow);
-        board.drop_piece(1, Cell::Red);
-        // Col 2: Y, Y, R
-        board.drop_piece(2, Cell::Yellow);
-        board.drop_piece(2, Cell::Yellow);
-        board.drop_piece(2, Cell::Red);
-        // Col 3: Y, Y, Y, R
-        board.drop_piece(3, Cell::Yellow);
-        board.drop_piece(3, Cell::Yellow);
-        board.drop_piece(3, Cell::Yellow);
-        board.drop_piece(3, Cell::Red);
-
-        assert!(board.has_won(Cell::Red));
+    fn a_column_that_is_not_on_the_board_takes_nothing() {
+        let mut b = Board::new();
+        assert!(!b.can_drop(COLS));
+        assert_eq!(b.drop_piece(COLS, Cell::Red), None);
+        assert_eq!(b.pieces(), 0);
     }
 
     #[test]
-    fn test_diagonal_up_left_win() {
-        let mut board = Board::new();
-        // Build a diagonal: (0,6), (1,5), (2,4), (3,3)
-        // Col 6: R
-        board.drop_piece(6, Cell::Red);
-        // Col 5: Y, R
-        board.drop_piece(5, Cell::Yellow);
-        board.drop_piece(5, Cell::Red);
-        // Col 4: Y, Y, R
-        board.drop_piece(4, Cell::Yellow);
-        board.drop_piece(4, Cell::Yellow);
-        board.drop_piece(4, Cell::Red);
-        // Col 3: Y, Y, Y, R
-        board.drop_piece(3, Cell::Yellow);
-        board.drop_piece(3, Cell::Yellow);
-        board.drop_piece(3, Cell::Yellow);
-        board.drop_piece(3, Cell::Red);
-
-        assert!(board.has_won(Cell::Red));
+    fn a_cell_off_the_board_reads_as_empty_rather_than_panicking() {
+        let b = won_board(Cell::Red);
+        assert_eq!(b.get(ROWS, 0), Cell::Empty, "past the top");
+        assert_eq!(b.get(0, COLS), Cell::Empty, "past the right");
+        assert_eq!(b.get(usize::MAX, usize::MAX), Cell::Empty);
     }
 
     #[test]
-    fn test_no_win_three_in_a_row() {
-        let mut board = Board::new();
-        for col in 0..3 {
-            board.drop_piece(col, Cell::Red);
+    fn taking_a_piece_back_returns_the_piece_that_was_taken() {
+        let mut b = Board::new();
+        b.drop_piece(1, Cell::Red);
+        b.drop_piece(1, Cell::Yellow);
+        assert_eq!(b.undo_drop(1), Some(Cell::Yellow), "the top piece");
+        assert_eq!(b.undo_drop(1), Some(Cell::Red));
+        assert_eq!(b.undo_drop(1), None, "an empty column had a piece to give");
+    }
+
+    #[test]
+    fn taking_a_piece_back_empties_the_cell_it_came_from() {
+        let mut b = Board::new();
+        b.drop_piece(1, Cell::Red);
+        b.undo_drop(1);
+        assert_eq!(b.get(0, 1), Cell::Empty, "the cell kept its piece");
+        assert_eq!(b.pieces(), 0);
+        assert!(b.can_drop(1));
+    }
+
+    #[test]
+    fn taking_a_piece_off_a_column_that_is_not_on_the_board_is_refused() {
+        // This was the one place in the drop/undo pair where the column index
+        // went unchecked: an off-board column that `can_drop` merely declined
+        // would panic here.
+        let mut b = Board::new();
+        assert_eq!(b.undo_drop(COLS), None);
+        assert_eq!(b.undo_drop(usize::MAX), None);
+    }
+
+    #[test]
+    fn a_drop_and_the_undo_of_it_leave_the_board_exactly_as_it_was() {
+        let mut b = Board::new();
+        b.drop_piece(0, Cell::Red);
+        b.drop_piece(3, Cell::Yellow);
+        let before = b.clone();
+        b.drop_piece(3, Cell::Red);
+        b.undo_drop(3);
+        assert_eq!(b, before, "the round trip changed the board");
+    }
+
+    #[test]
+    fn a_board_is_full_only_when_every_cell_is() {
+        let mut b = drawn_board();
+        assert!(b.is_full());
+        assert_eq!(b.pieces(), CELL_COUNT);
+        b.undo_drop(0);
+        assert!(!b.is_full(), "a board with a hole in it claimed to be full");
+    }
+
+    #[test]
+    fn with_move_hands_the_position_the_move_makes_to_its_caller() {
+        let mut b = Board::new();
+        let seen = b.with_move(4, Cell::Yellow, |after| after.get(0, 4));
+        assert_eq!(seen, Some(Cell::Yellow), "the move was not there to see");
+    }
+
+    #[test]
+    fn with_move_leaves_the_board_exactly_as_it_found_it() {
+        let mut b = won_board(Cell::Red);
+        let before = b.clone();
+        b.with_move(6, Cell::Yellow, |_| ());
+        assert_eq!(b, before);
+    }
+
+    #[test]
+    fn with_move_on_a_full_column_runs_nothing_and_undoes_nothing() {
+        // The AI used to drop and undo as two separate statements and discard
+        // both results, so a refused drop still ran the undo -- taking back a
+        // piece some earlier move had put there.
+        let mut b = Board::new();
+        for _ in 0..ROWS {
+            b.drop_piece(2, Cell::Red);
         }
-        assert!(!board.has_won(Cell::Red));
+        let before = b.clone();
+        let mut ran = false;
+        let out = b.with_move(2, Cell::Yellow, |_| {
+            ran = true;
+        });
+        assert_eq!(out, None, "a refused move reported a result");
+        assert!(!ran, "the body ran on a move that was never made");
+        assert_eq!(b, before, "the undo of a move never made took a piece");
     }
 
     #[test]
-    fn test_no_win_interrupted_line() {
-        let mut board = Board::new();
-        board.drop_piece(0, Cell::Red);
-        board.drop_piece(1, Cell::Red);
-        board.drop_piece(2, Cell::Yellow);
-        board.drop_piece(3, Cell::Red);
-        assert!(!board.has_won(Cell::Red));
-    }
-
-    // ── Board status tests ──────────────────────────────────────────
-
-    // ── Cell tests ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_cell_opponent() {
+    fn nobodys_opponent_is_nobody() {
         assert_eq!(Cell::Red.opponent(), Cell::Yellow);
         assert_eq!(Cell::Yellow.opponent(), Cell::Red);
         assert_eq!(Cell::Empty.opponent(), Cell::Empty);
     }
 
-    // ── Valid moves tests ───────────────────────────────────────────
-
     #[test]
-    fn test_valid_moves_empty_board() {
-        let board = Board::new();
-        let moves = board.valid_moves();
-        assert_eq!(moves.len(), COLS);
-        // Should be center-first ordered
-        assert_eq!(moves[0], 3);
+    fn the_playable_columns_are_ordered_from_the_centre_outwards() {
+        // Move ordering for alpha-beta, not a preference of the game's: the
+        // centre column is on more runs than any other, so trying it first is
+        // what makes the search's cutoffs happen early.
+        assert_eq!(Board::new().valid_moves(), vec![3, 2, 4, 1, 5, 0, 6]);
     }
 
     #[test]
-    fn test_valid_moves_full_column_excluded() {
-        let mut board = Board::new();
+    fn a_full_column_is_not_offered_as_a_move() {
+        let mut b = Board::new();
         for _ in 0..ROWS {
-            board.drop_piece(3, Cell::Red);
+            b.drop_piece(3, Cell::Red);
         }
-        let moves = board.valid_moves();
-        assert_eq!(moves.len(), COLS - 1);
-        assert!(!moves.contains(&3));
+        let moves = b.valid_moves();
+        assert!(!moves.contains(&3), "a full column was still offered");
+        assert_eq!(moves.len(), COLS - 1, "another column went missing with it");
     }
 
     #[test]
-    fn test_valid_moves_empty_on_full_board() {
-        let mut board = Board::new();
-        for col in 0..COLS {
-            for _ in 0..ROWS {
-                board.drop_piece(col, Cell::Red);
-            }
+    fn a_full_board_offers_no_move_at_all() {
+        assert!(drawn_board().valid_moves().is_empty());
+    }
+
+    // ── Outcome: one function, one scan, one answer ──
+
+    #[test]
+    fn an_empty_board_is_still_being_played() {
+        assert_eq!(Board::new().outcome(), (GameStatus::Playing, None));
+    }
+
+    #[test]
+    fn three_in_a_row_is_not_a_win() {
+        let mut b = Board::new();
+        for col in 0..3 {
+            b.drop_piece(col, Cell::Red);
         }
-        assert!(board.valid_moves().is_empty());
-    }
-
-    // ── AI evaluation tests ─────────────────────────────────────────
-
-    #[test]
-    fn test_evaluate_window_four_player() {
-        let window = [Cell::Red, Cell::Red, Cell::Red, Cell::Red];
-        assert_eq!(evaluate_window(&window, Cell::Red), SCORE_WIN);
+        assert_eq!(b.outcome().0, GameStatus::Playing, "three won the game");
     }
 
     #[test]
-    fn test_evaluate_window_three_player_one_empty() {
-        let window = [Cell::Red, Cell::Red, Cell::Red, Cell::Empty];
-        assert_eq!(evaluate_window(&window, Cell::Red), SCORE_THREE);
+    fn four_across_the_bottom_wins_and_names_its_four_cells() {
+        let (status, line) = won_board(Cell::Red).outcome();
+        assert_eq!(status, GameStatus::Won(Cell::Red));
+        assert_eq!(
+            line.expect("a win with no line to show").cells,
+            [(0, 0), (0, 1), (0, 2), (0, 3)]
+        );
     }
 
     #[test]
-    fn test_evaluate_window_two_player_two_empty() {
-        let window = [Cell::Red, Cell::Empty, Cell::Red, Cell::Empty];
-        assert_eq!(evaluate_window(&window, Cell::Red), SCORE_TWO);
-    }
-
-    #[test]
-    fn test_evaluate_window_opp_three_block() {
-        let window = [Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Empty];
-        assert_eq!(evaluate_window(&window, Cell::Red), SCORE_OPP_THREE);
-    }
-
-    #[test]
-    fn test_evaluate_window_mixed_no_score() {
-        let window = [Cell::Red, Cell::Yellow, Cell::Red, Cell::Empty];
-        assert_eq!(evaluate_window(&window, Cell::Red), 0);
-    }
-
-    #[test]
-    fn test_evaluate_window_all_empty() {
-        let window = [Cell::Empty, Cell::Empty, Cell::Empty, Cell::Empty];
-        assert_eq!(evaluate_window(&window, Cell::Red), 0);
-    }
-
-    #[test]
-    fn test_evaluate_board_center_preference() {
-        let mut board1 = Board::new();
-        board1.drop_piece(3, Cell::Red); // center
-        let mut board2 = Board::new();
-        board2.drop_piece(0, Cell::Red); // edge
-        assert!(evaluate_board(&board1, Cell::Red) > evaluate_board(&board2, Cell::Red));
-    }
-
-    // ── AI behavior tests ───────────────────────────────────────────
-
-    #[test]
-    fn test_ai_blocks_horizontal_win() {
-        let mut board = Board::new();
-        // Human has three in a row, AI must block
-        board.drop_piece(0, Cell::Red);
-        board.drop_piece(1, Cell::Red);
-        board.drop_piece(2, Cell::Red);
-        // AI should play column 3 to block
-        let col = ai_best_move(&mut board, Cell::Yellow, 4);
-        assert_eq!(col, Some(3));
-    }
-
-    #[test]
-    fn test_ai_blocks_vertical_win() {
-        let mut board = Board::new();
-        board.drop_piece(0, Cell::Red);
-        board.drop_piece(0, Cell::Red);
-        board.drop_piece(0, Cell::Red);
-        // AI should play column 0 to block vertical
-        let col = ai_best_move(&mut board, Cell::Yellow, 4);
-        assert_eq!(col, Some(0));
-    }
-
-    #[test]
-    fn test_ai_takes_winning_move() {
-        let mut board = Board::new();
-        board.drop_piece(0, Cell::Yellow);
-        board.drop_piece(1, Cell::Yellow);
-        board.drop_piece(2, Cell::Yellow);
-        // AI should play column 3 to win
-        let col = ai_best_move(&mut board, Cell::Yellow, 4);
-        assert_eq!(col, Some(3));
-    }
-
-    #[test]
-    fn test_ai_prefers_win_over_block() {
-        let mut board = Board::new();
-        // AI has 3 in a row on bottom
-        board.drop_piece(0, Cell::Yellow);
-        board.drop_piece(1, Cell::Yellow);
-        board.drop_piece(2, Cell::Yellow);
-        // Human also has 3 in a row on second row
-        board.drop_piece(4, Cell::Red);
-        board.drop_piece(5, Cell::Red);
-        board.drop_piece(6, Cell::Red);
-        // But col 3 finishes AI's win, AI should take the win
-        let col = ai_best_move(&mut board, Cell::Yellow, 4);
-        assert_eq!(col, Some(3));
-    }
-
-    #[test]
-    fn test_ai_returns_some_on_non_full_board() {
-        let mut board = Board::new();
-        board.drop_piece(3, Cell::Red);
-        let col = ai_best_move(&mut board, Cell::Yellow, 2);
-        assert!(col.is_some());
-    }
-
-    #[test]
-    fn test_is_terminal_win() {
-        let mut board = Board::new();
-        for col in 0..4 {
-            board.drop_piece(col, Cell::Red);
+    fn four_across_wins_away_from_the_left_edge_too() {
+        let mut b = Board::new();
+        for col in 3..COLS {
+            b.drop_piece(col, Cell::Yellow);
         }
-        assert!(is_terminal(&board));
+        let (status, line) = b.outcome();
+        assert_eq!(status, GameStatus::Won(Cell::Yellow));
+        assert_eq!(
+            line.unwrap().cells,
+            [(0, 3), (0, 4), (0, 5), (0, 6)],
+            "the run against the right edge"
+        );
     }
 
     #[test]
-    fn test_is_terminal_draw() {
-        let mut board = Board::new();
-        let pattern = [
-            [
-                Cell::Red,
-                Cell::Red,
-                Cell::Red,
-                Cell::Yellow,
-                Cell::Yellow,
-                Cell::Yellow,
-                Cell::Red,
-            ],
-            [
-                Cell::Yellow,
-                Cell::Yellow,
-                Cell::Yellow,
-                Cell::Red,
-                Cell::Red,
-                Cell::Red,
-                Cell::Yellow,
-            ],
-            [
-                Cell::Red,
-                Cell::Red,
-                Cell::Red,
-                Cell::Yellow,
-                Cell::Yellow,
-                Cell::Yellow,
-                Cell::Red,
-            ],
-            [
-                Cell::Red,
-                Cell::Red,
-                Cell::Red,
-                Cell::Yellow,
-                Cell::Yellow,
-                Cell::Yellow,
-                Cell::Red,
-            ],
-            [
-                Cell::Yellow,
-                Cell::Yellow,
-                Cell::Yellow,
-                Cell::Red,
-                Cell::Red,
-                Cell::Red,
-                Cell::Yellow,
-            ],
-            [
-                Cell::Red,
-                Cell::Red,
-                Cell::Red,
-                Cell::Yellow,
-                Cell::Yellow,
-                Cell::Yellow,
-                Cell::Red,
-            ],
+    fn four_up_a_column_wins() {
+        let mut b = Board::new();
+        for _ in 0..RUN {
+            b.drop_piece(5, Cell::Yellow);
+        }
+        let (status, line) = b.outcome();
+        assert_eq!(status, GameStatus::Won(Cell::Yellow));
+        assert_eq!(line.unwrap().cells, [(0, 5), (1, 5), (2, 5), (3, 5)]);
+    }
+
+    #[test]
+    fn four_up_a_column_wins_when_it_does_not_start_at_the_floor() {
+        // A vertical scan anchored at row 0 rather than at every row would miss
+        // this: the run is rows 2..5, on top of two pieces of the other colour.
+        let mut b = Board::new();
+        b.drop_piece(5, Cell::Red);
+        b.drop_piece(5, Cell::Red);
+        for _ in 0..RUN {
+            b.drop_piece(5, Cell::Yellow);
+        }
+        assert_eq!(b.outcome().0, GameStatus::Won(Cell::Yellow));
+        assert_eq!(
+            b.outcome().1.unwrap().cells,
+            [(2, 5), (3, 5), (4, 5), (5, 5)]
+        );
+    }
+
+    #[test]
+    fn four_up_and_to_the_right_wins() {
+        // Built by dropping, so every piece is supported the way a real game's
+        // would be -- a diagonal written straight into the grid could sit on
+        // nothing and would not test the position a game can actually reach.
+        let mut b = Board::new();
+        let staircase = [
+            (0, Cell::Red),
+            (1, Cell::Yellow),
+            (1, Cell::Red),
+            (2, Cell::Yellow),
+            (2, Cell::Yellow),
+            (2, Cell::Red),
+            (3, Cell::Yellow),
+            (3, Cell::Yellow),
+            (3, Cell::Yellow),
+            (3, Cell::Red),
         ];
-        board.grid = pattern;
-        board.heights = [ROWS; COLS];
-        board.piece_count = ROWS * COLS;
-        assert!(is_terminal(&board));
+        for (col, piece) in staircase {
+            b.drop_piece(col, piece);
+        }
+        let (status, line) = b.outcome();
+        assert_eq!(status, GameStatus::Won(Cell::Red));
+        assert_eq!(line.unwrap().cells, [(0, 0), (1, 1), (2, 2), (3, 3)]);
     }
 
     #[test]
-    fn test_is_terminal_playing() {
-        let board = Board::new();
-        assert!(!is_terminal(&board));
-    }
-
-    #[test]
-    fn test_minimax_immediate_win() {
-        let mut board = Board::new();
-        board.drop_piece(0, Cell::Red);
-        board.drop_piece(1, Cell::Red);
-        board.drop_piece(2, Cell::Red);
-        let (score, col) = minimax(&mut board, 1, i32::MIN, i32::MAX, true, Cell::Red);
-        assert!(score > 0);
-        assert_eq!(col, Some(3));
-    }
-
-    // ── App tests ───────────────────────────────────────────────────
-
-    // ── Rendering tests ─────────────────────────────────────────────
-
-    // ── Diagonal win variants ───────────────────────────────────────
-
-    // ── Edge cases ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_drop_and_undo_preserves_board() {
-        let mut board = Board::new();
-        board.drop_piece(0, Cell::Red);
-        board.drop_piece(1, Cell::Yellow);
-        let snapshot_grid = board.grid;
-        let snapshot_heights = board.heights;
-        let snapshot_count = board.piece_count;
-
-        board.drop_piece(3, Cell::Red);
-        board.undo_drop(3);
-
-        assert_eq!(board.grid, snapshot_grid);
-        assert_eq!(board.heights, snapshot_heights);
-        assert_eq!(board.piece_count, snapshot_count);
-    }
-
-    #[test]
-    fn test_multiple_drops_same_column() {
-        let mut board = Board::new();
-        let pieces = [
-            Cell::Red,
-            Cell::Yellow,
-            Cell::Red,
-            Cell::Yellow,
-            Cell::Red,
-            Cell::Yellow,
+    fn four_up_and_to_the_left_wins() {
+        let mut b = Board::new();
+        let staircase = [
+            (6, Cell::Red),
+            (5, Cell::Yellow),
+            (5, Cell::Red),
+            (4, Cell::Yellow),
+            (4, Cell::Yellow),
+            (4, Cell::Red),
+            (3, Cell::Yellow),
+            (3, Cell::Yellow),
+            (3, Cell::Yellow),
+            (3, Cell::Red),
         ];
-        for (i, &piece) in pieces.iter().enumerate() {
-            let row = board.drop_piece(4, piece);
-            assert_eq!(row, Some(i));
+        for (col, piece) in staircase {
+            b.drop_piece(col, piece);
         }
-        assert!(!board.can_drop(4));
+        let (status, line) = b.outcome();
+        assert_eq!(status, GameStatus::Won(Cell::Red));
+        assert_eq!(
+            line.unwrap().cells,
+            [(0, 6), (1, 5), (2, 4), (3, 3)],
+            "the run is reported from its lowest cell"
+        );
     }
 
     #[test]
-    fn test_ai_blocks_diagonal_threat() {
-        let mut board = Board::new();
-        // Set up a diagonal threat for Red: (0,0), (1,1), (2,2)
-        // Need to fill support pieces
-        board.grid[0][0] = Cell::Red;
-        board.heights[0] = 1;
-        board.piece_count = 1;
-
-        board.grid[0][1] = Cell::Yellow;
-        board.grid[1][1] = Cell::Red;
-        board.heights[1] = 2;
-        board.piece_count = 3;
-
-        board.grid[0][2] = Cell::Yellow;
-        board.grid[1][2] = Cell::Yellow;
-        board.grid[2][2] = Cell::Red;
-        board.heights[2] = 3;
-        board.piece_count = 6;
-
-        // Red needs (3,3) to win. Col 3 height is 0, so to block,
-        // AI needs to fill col 3 up to row 3. But that means AI
-        // should first play col 3 to start blocking.
-        // Actually the direct block would require col 3 at row 3,
-        // but we need supports. Let's simplify: AI just needs to
-        // notice the threat.
-        // Since filling col 3 to row 3 requires 3 pieces first,
-        // let's fill them
-        board.grid[0][3] = Cell::Yellow;
-        board.grid[1][3] = Cell::Yellow;
-        board.grid[2][3] = Cell::Yellow;
-        board.heights[3] = 3;
-        board.piece_count = 9;
-
-        // Now Red threatens (3,3) for the diagonal win
-        // AI (Yellow) should block by playing col 3 (which puts piece at row 3)
-        let col = ai_best_move(&mut board, Cell::Yellow, 4);
-        assert_eq!(col, Some(3));
+    fn a_line_broken_by_the_other_colour_is_not_a_win() {
+        let mut b = Board::new();
+        b.drop_piece(0, Cell::Red);
+        b.drop_piece(1, Cell::Red);
+        b.drop_piece(2, Cell::Yellow);
+        b.drop_piece(3, Cell::Red);
+        b.drop_piece(4, Cell::Red);
+        assert_eq!(b.outcome().0, GameStatus::Playing);
     }
 
     #[test]
-    fn test_evaluate_board_symmetry() {
-        // An empty board should evaluate the same for both players
-        let board = Board::new();
-        let red_score = evaluate_board(&board, Cell::Red);
-        let yellow_score = evaluate_board(&board, Cell::Yellow);
-        assert_eq!(red_score, yellow_score);
+    fn a_run_of_four_empty_cells_is_not_a_win_for_nobody() {
+        // Every run on an empty board is four cells of one "colour", and that
+        // colour is `Empty`. A scan that only checked "are these four alike"
+        // would report `Won(Empty)` before the first piece was played.
+        assert_eq!(Board::new().outcome().0, GameStatus::Playing);
+        assert!(
+            Board::new()
+                .line_owner([(0, 0), (0, 1), (0, 2), (0, 3)])
+                .is_none()
+        );
     }
 
     #[test]
-    fn test_board_clone_independence() {
-        let mut board = Board::new();
-        board.drop_piece(0, Cell::Red);
-        let clone = board.clone();
-        board.drop_piece(1, Cell::Yellow);
-        // Clone should not be affected
-        assert_eq!(clone.get(0, 1), Cell::Empty);
-        assert_eq!(clone.piece_count, 1);
+    fn a_full_board_with_no_line_on_it_is_a_draw() {
+        let (status, line) = drawn_board().outcome();
+        assert_eq!(status, GameStatus::Draw, "the draw fixture has a win on it");
+        assert_eq!(line, None, "a draw named a winning line");
     }
 
     #[test]
-    fn test_win_line_struct() {
-        let line = WinLine {
-            cells: [(0, 0), (0, 1), (0, 2), (0, 3)],
-        };
-        assert_eq!(line.cells[0], (0, 0));
-        assert_eq!(line.cells[3], (0, 3));
-    }
-
-    #[test]
-    fn test_game_status_variants() {
-        assert_eq!(GameStatus::Playing, GameStatus::Playing);
-        assert_eq!(GameStatus::Draw, GameStatus::Draw);
-        assert_eq!(GameStatus::Won(Cell::Red), GameStatus::Won(Cell::Red));
-        assert_ne!(GameStatus::Won(Cell::Red), GameStatus::Won(Cell::Yellow));
-        assert_ne!(GameStatus::Playing, GameStatus::Draw);
-    }
-
-    // ── Run geometry ────────────────────────────────────────────────
-    //
-    // `all_lines` replaced eight hand-written nested scans. These tests pin
-    // the set it yields, because every other scan on the board now trusts it.
-
-    #[test]
-    fn all_lines_yields_every_run_of_four_exactly_once() {
-        let lines: Vec<_> = all_lines().collect();
-        // 24 horizontal (6 rows x 4 starts) + 21 vertical (7 cols x 3) +
-        // 12 up-right + 12 up-left. This is the standard count of
-        // four-in-a-row windows on a 7x6 board.
-        assert_eq!(lines.len(), 69, "wrong number of runs on the board");
-
-        let mut seen: Vec<[(usize, usize); RUN]> = Vec::new();
-        for line in &lines {
-            assert!(
-                !seen.contains(line),
-                "run {line:?} was yielded twice -- it would be scored twice"
-            );
-            seen.push(*line);
+    fn a_full_board_with_a_line_on_it_is_a_win_and_not_a_draw() {
+        // The order of the two questions is the rule: a board can be both full
+        // and won, and the game it was won on did not end in a draw.
+        let mut b = drawn_board();
+        for col in 0..RUN {
+            assert!(b.set(0, col, Cell::Red));
         }
+        assert_eq!(b.outcome().0, GameStatus::Won(Cell::Red));
     }
 
     #[test]
-    fn every_run_all_lines_yields_is_on_the_board() {
-        for line in all_lines() {
-            for (row, col) in line {
-                assert!(
-                    row < ROWS && col < COLS,
-                    "run left the board at ({row}, {col})"
+    fn the_win_scan_and_the_ai_s_form_of_it_agree() {
+        // `outcome` says which four cells; `has_won` says only whether. They
+        // scan the same runs in the same order, and a disagreement would have
+        // the search exploring positions the game already considers finished.
+        for board in [
+            Board::new(),
+            won_board(Cell::Red),
+            won_board(Cell::Yellow),
+            drawn_board(),
+        ] {
+            let by_outcome = match board.outcome().0 {
+                GameStatus::Won(winner) => Some(winner),
+                _ => None,
+            };
+            for player in [Cell::Red, Cell::Yellow] {
+                assert_eq!(
+                    board.has_won(player),
+                    by_outcome == Some(player),
+                    "the two scans disagree about {player:?}"
                 );
             }
         }
     }
 
     #[test]
-    fn a_run_that_would_leave_the_board_has_no_cells() {
-        // Off the right edge, off the top, off the left edge going up-left,
-        // and starting outside the board entirely.
-        assert_eq!(line_cells(0, 4, 0, 1), None);
-        assert_eq!(line_cells(3, 0, 1, 0), None);
-        assert_eq!(line_cells(0, 2, 1, -1), None);
-        assert_eq!(line_cells(ROWS, 0, 0, 1), None);
+    fn nobody_has_won_an_empty_board_including_nobody() {
+        let b = Board::new();
+        assert!(!b.has_won(Cell::Red));
+        assert!(!b.has_won(Cell::Yellow));
+        assert!(!b.has_won(Cell::Empty), "the empty cells won the game");
     }
 
-    // ── Bounds made total, not merely unreached ─────────────────────
+    // ── The AI ──
 
     #[test]
-    fn an_off_board_column_is_declined_rather_than_indexed() {
-        let mut board = Board::new();
-        // `can_drop` always declined an off-board column; `undo_drop` used to
-        // index `heights` with it and panic. Both now answer the same way.
-        assert!(!board.can_drop(COLS));
-        assert_eq!(board.drop_piece(COLS, Cell::Red), None);
-        assert_eq!(board.undo_drop(COLS), None);
-        assert_eq!(board.height(COLS), None);
-        assert_eq!(board.piece_count, 0, "a declined drop changes nothing");
+    fn a_window_of_four_is_worth_a_win() {
+        let w = [Cell::Red; RUN];
+        assert_eq!(evaluate_window(&w, Cell::Red), SCORE_WIN);
+        assert_eq!(evaluate_window(&w, Cell::Yellow), 0, "the loser scored it");
     }
 
     #[test]
-    fn cells_off_the_board_are_empty_and_cannot_be_written() {
-        let mut board = Board::new();
-        assert_eq!(board.get(ROWS, 0), Cell::Empty);
-        assert_eq!(board.get(0, COLS), Cell::Empty);
-        assert!(!board.set(ROWS, 0, Cell::Red));
-        assert!(!board.set(0, COLS, Cell::Red));
-        assert!(board.set(0, 0, Cell::Red));
-        assert_eq!(board.get(0, 0), Cell::Red);
+    fn three_with_a_gap_is_worth_more_than_two_with_two() {
+        let three = [Cell::Red, Cell::Red, Cell::Red, Cell::Empty];
+        let two = [Cell::Red, Cell::Red, Cell::Empty, Cell::Empty];
+        assert_eq!(evaluate_window(&three, Cell::Red), SCORE_THREE);
+        assert_eq!(evaluate_window(&two, Cell::Red), SCORE_TWO);
+        // Scored, not named: comparing the two constants is a claim about the
+        // ladder the compiler can settle, and clippy rightly refuses it.
+        assert!(
+            evaluate_window(&three, Cell::Red) > evaluate_window(&two, Cell::Red),
+            "the ladder is upside down"
+        );
     }
 
     #[test]
-    fn with_move_leaves_the_board_exactly_as_it_found_it() {
-        let mut board = Board::new();
-        board.drop_piece(3, Cell::Red);
-        board.drop_piece(3, Cell::Yellow);
-        board.drop_piece(4, Cell::Red);
-        let before = board.clone();
-
-        let saw = board.with_move(3, Cell::Yellow, |after| after.get(2, 3));
-        assert_eq!(saw, Some(Cell::Yellow), "the closure sees the played move");
-        assert_eq!(board.grid, before.grid);
-        assert_eq!(board.heights, before.heights);
-        assert_eq!(board.piece_count, before.piece_count);
+    fn the_opponents_three_with_a_gap_scores_against_you() {
+        let w = [Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Empty];
+        assert_eq!(evaluate_window(&w, Cell::Red), SCORE_OPP_THREE);
+        assert!(
+            evaluate_window(&w, Cell::Red) < 0,
+            "a threat against you scored for you"
+        );
     }
 
     #[test]
-    fn with_move_on_a_full_column_runs_nothing_and_undoes_nothing() {
-        let mut board = Board::new();
-        for _ in 0..ROWS {
-            board.drop_piece(0, Cell::Red);
+    fn a_window_both_colours_are_in_is_worth_nothing_to_either() {
+        // Neither can complete it, so it is not a threat and not a chance.
+        let w = [Cell::Red, Cell::Yellow, Cell::Red, Cell::Empty];
+        assert_eq!(evaluate_window(&w, Cell::Red), 0);
+        assert_eq!(evaluate_window(&w, Cell::Yellow), 0);
+    }
+
+    #[test]
+    fn an_empty_window_is_worth_nothing() {
+        assert_eq!(evaluate_window(&[Cell::Empty; RUN], Cell::Red), 0);
+    }
+
+    #[test]
+    fn three_with_no_gap_to_complete_them_is_worth_nothing() {
+        // Three of yours and one of theirs is a dead run, not a near-win. The
+        // `empty_count == 1` clause is what tells the two apart.
+        let w = [Cell::Red, Cell::Red, Cell::Red, Cell::Yellow];
+        assert_eq!(evaluate_window(&w, Cell::Red), 0);
+    }
+
+    #[test]
+    fn a_piece_in_the_centre_column_is_worth_more_than_one_at_the_edge() {
+        let mut centre = Board::new();
+        centre.drop_piece(CENTER_COL, Cell::Red);
+        let mut edge = Board::new();
+        edge.drop_piece(0, Cell::Red);
+        assert!(
+            evaluate_board(&centre, Cell::Red) > evaluate_board(&edge, Cell::Red),
+            "the centre bonus is not being paid"
+        );
+    }
+
+    #[test]
+    fn the_centre_bonus_is_paid_to_the_player_it_is_evaluated_for() {
+        let mut b = Board::new();
+        b.drop_piece(CENTER_COL, Cell::Red);
+        assert!(
+            evaluate_board(&b, Cell::Red) > evaluate_board(&b, Cell::Yellow),
+            "the centre piece counted for the player who did not play it"
+        );
+    }
+
+    #[test]
+    fn an_empty_board_is_worth_the_same_to_both_players() {
+        let b = Board::new();
+        assert_eq!(
+            evaluate_board(&b, Cell::Red),
+            evaluate_board(&b, Cell::Yellow)
+        );
+    }
+
+    #[test]
+    fn a_position_is_over_when_someone_has_won() {
+        assert!(is_terminal(&won_board(Cell::Red)));
+        assert!(is_terminal(&won_board(Cell::Yellow)));
+    }
+
+    #[test]
+    fn a_position_is_over_when_the_board_is_full() {
+        assert!(is_terminal(&drawn_board()));
+    }
+
+    #[test]
+    fn a_position_with_room_and_no_win_is_not_over() {
+        assert!(!is_terminal(&Board::new()));
+    }
+
+    #[test]
+    fn the_ai_plays_the_move_that_wins_now() {
+        let mut b = Board::new();
+        for col in 0..3 {
+            b.drop_piece(col, Cell::Yellow);
         }
-        board.drop_piece(1, Cell::Yellow);
-        let before = board.clone();
-
-        // The old code dropped and undid as two statements: a refused drop
-        // still ran the undo, which would have taken back the piece in
-        // column 0 that a different move had put there.
-        let mut ran = false;
-        let out = board.with_move(0, Cell::Yellow, |_| {
-            ran = true;
-        });
-        // The board first: an undo without a matching drop is what actually
-        // damages the position, and it is what this test exists to catch.
-        assert_eq!(board.grid, before.grid, "a refused drop moved a piece");
-        assert_eq!(board.heights, before.heights);
-        assert_eq!(board.piece_count, before.piece_count);
-        assert_eq!(out, None, "a full column is refused");
-        assert!(!ran, "the closure must not run on a refused drop");
+        assert_eq!(ai_best_move(&mut b, Cell::Yellow, 1), Some(3));
     }
 
-    // ── The two win detectors agree ─────────────────────────────────
+    #[test]
+    fn the_ai_blocks_the_move_that_would_lose_now() {
+        let mut b = Board::new();
+        for col in 0..3 {
+            b.drop_piece(col, Cell::Red);
+        }
+        assert_eq!(ai_best_move(&mut b, Cell::Yellow, 1), Some(3));
+    }
+
+    #[test]
+    fn the_ai_takes_its_own_win_rather_than_blocking_theirs() {
+        // Yellow can complete a column at 6 and Red can complete a row at 3.
+        // Winning ends the game; blocking only postpones theirs.
+        let mut b = Board::new();
+        for col in 0..3 {
+            b.drop_piece(col, Cell::Red);
+        }
+        for _ in 0..3 {
+            b.drop_piece(6, Cell::Yellow);
+        }
+        assert_eq!(
+            ai_best_move(&mut b, Cell::Yellow, 1),
+            Some(6),
+            "it blocked a loss it could have avoided by winning"
+        );
+    }
+
+    #[test]
+    fn the_ai_finds_a_move_on_any_board_with_room() {
+        let mut b = Board::new();
+        b.drop_piece(0, Cell::Red);
+        let col = ai_best_move(&mut b, Cell::Yellow, 2).expect("no move on a board with room");
+        assert!(b.can_drop(col), "it chose a column it cannot play");
+    }
+
+    #[test]
+    fn the_ai_has_no_move_on_a_full_board() {
+        assert_eq!(ai_best_move(&mut drawn_board(), Cell::Yellow, 2), None);
+    }
+
+    #[test]
+    fn the_ai_leaves_the_board_it_was_asked_about_alone() {
+        // It searches by playing and taking back on the caller's board, so a
+        // single missed undo would leave a phantom piece in the real game.
+        let mut b = Board::new();
+        b.drop_piece(3, Cell::Red);
+        let before = b.clone();
+        ai_best_move(&mut b, Cell::Yellow, 3);
+        assert_eq!(b, before, "the search left something behind");
+    }
+
+    #[test]
+    fn a_search_that_can_see_the_win_scores_it_as_a_win() {
+        let mut b = Board::new();
+        for col in 0..3 {
+            b.drop_piece(col, Cell::Yellow);
+        }
+        let (score, col) = minimax(&mut b, 2, i32::MIN, i32::MAX, true, Cell::Yellow);
+        assert!(score >= SCORE_WIN, "a forced win scored {score}");
+        assert_eq!(col, Some(3));
+    }
+
+    #[test]
+    fn a_win_found_sooner_is_worth_more_than_the_same_win_found_later() {
+        // Without the depth bonus every winning line scores identically and the
+        // search has no reason to prefer the one that ends the game now.
+        let won = won_board(Cell::Yellow);
+        let (near, _) = minimax(&mut won.clone(), 5, i32::MIN, i32::MAX, true, Cell::Yellow);
+        let (far, _) = minimax(&mut won.clone(), 1, i32::MIN, i32::MAX, true, Cell::Yellow);
+        assert!(near > far, "the search is indifferent to how soon it wins");
+    }
+
+    #[test]
+    fn a_position_the_opponent_has_already_won_scores_against_the_searcher() {
+        let mut b = won_board(Cell::Red);
+        let (score, _) = minimax(&mut b, 3, i32::MIN, i32::MAX, true, Cell::Yellow);
+        assert!(score <= -SCORE_WIN, "a lost position scored {score}");
+    }
+
+    #[test]
+    fn a_full_position_scores_level() {
+        let mut b = drawn_board();
+        assert_eq!(
+            minimax(&mut b, 3, i32::MIN, i32::MAX, true, Cell::Yellow).0,
+            0
+        );
+    }
+
+    #[test]
+    fn a_search_with_no_move_to_make_reports_no_move() {
+        // The board is full, so there is no column to report. It is reported as
+        // `None` rather than as a column nobody can play: `best_col` starts as
+        // the first legal move *if there is one*, which is where the emptiness
+        // is handled -- there is no separate `is_empty` arm, because a full
+        // board is terminal and such an arm could never run
+        // (`known-issues.md` lesson 51).
+        let mut b = drawn_board();
+        assert_eq!(
+            minimax(&mut b, 2, i32::MIN, i32::MAX, true, Cell::Yellow).1,
+            None
+        );
+    }
+
+    #[test]
+    fn a_search_that_reaches_its_depth_reports_a_score_and_no_column() {
+        // Depth zero is a leaf: it is worth something, but no move was tried
+        // in it, so naming a column would be naming one nothing looked at.
+        let mut b = Board::new();
+        let (score, col) = minimax(&mut b, 0, i32::MIN, i32::MAX, true, Cell::Yellow);
+        assert_eq!(col, None);
+        assert_eq!(score, evaluate_board(&b, Cell::Yellow));
+    }
+
+    #[test]
+    fn the_column_a_search_reports_is_always_one_that_can_be_played() {
+        // The column is filled in alternating colours: six of one colour would
+        // be four in a column, which is a won position and returns before any
+        // move is tried.
+        let mut b = Board::new();
+        for i in 0..ROWS {
+            b.drop_piece(3, if i % 2 == 0 { Cell::Red } else { Cell::Yellow });
+        }
+        let (_, col) = minimax(&mut b, 2, i32::MIN, i32::MAX, true, Cell::Yellow);
+        let col = col.expect("a board with room reported no move");
+        assert!(b.can_drop(col), "the search named the full column");
+    }
+
+    // ── Layout ──
+
+    #[test]
+    fn the_layout_covers_the_window_it_was_given() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            assert_eq!(l.window, Rect::new(0.0, 0.0, w, h), "at {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn a_window_of_no_size_still_produces_a_layout_of_some_size() {
+        // A zero-sized window is a real event -- a compositor sends one while a
+        // window is being mapped -- and every division in the layout would be
+        // by zero. The floor is one pixel, so the arithmetic stays finite.
+        let l = Layout::new(0.0, 0.0);
+        assert_eq!(l.window, Rect::new(0.0, 0.0, 1.0, 1.0));
+        assert!(l.step.is_finite() && l.step >= 0.0, "step {}", l.step);
+        assert!(l.pad.is_finite(), "pad {}", l.pad);
+    }
+
+    #[test]
+    fn every_band_stays_inside_the_window() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            for (name, band) in [
+                ("header", l.header),
+                ("info", l.info),
+                ("chute", l.chute),
+                ("board", l.board),
+                ("footer", l.footer),
+                ("help", l.help),
+            ] {
+                if band.is_empty() {
+                    continue;
+                }
+                assert!(
+                    band.x >= -0.01
+                        && band.y >= -0.01
+                        && band.right() <= w + 0.01
+                        && band.bottom() <= h + 0.01,
+                    "{name} {band:?} leaves the {w}x{h} window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_bands_are_stacked_in_the_order_they_are_read_in() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if l.shows(l.header) && l.shows(l.info) {
+                assert!(
+                    l.info.y >= l.header.bottom() - 0.01,
+                    "info above header at {w}x{h}"
+                );
+            }
+            if l.shows(l.chute) && !l.board.is_empty() {
+                assert!(
+                    l.chute.bottom() <= l.board.y + 0.01,
+                    "chute below the board"
+                );
+            }
+            if l.shows(l.footer) && !l.board.is_empty() {
+                assert!(
+                    l.footer.y >= l.board.bottom() - 0.01,
+                    "footer above the board at {w}x{h}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_chute_sits_directly_on_top_of_the_board_and_over_the_same_columns() {
+        // The board is centred in what the bands left, so it is only where the
+        // chute's own reserved band is when it happens to fill that space
+        // exactly. A chute drawn at its band's height would float above the
+        // board at every other size, pointing at nothing.
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if !l.shows(l.chute) {
+                continue;
+            }
+            assert_eq!(l.chute.x, l.board.x, "chute not over the board at {w}x{h}");
+            assert_eq!(l.chute.w, l.board.w, "chute not as wide as the board");
+            assert!(
+                (l.chute.bottom() - l.board.y).abs() < 0.01,
+                "a gap of {} between chute and board at {w}x{h}",
+                l.board.y - l.chute.bottom()
+            );
+        }
+    }
+
+    #[test]
+    fn the_boards_cells_are_square() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if l.board.is_empty() {
+                continue;
+            }
+            assert!(
+                (l.board.w / COLS as f32 - l.board.h / ROWS as f32).abs() < 0.01,
+                "cells are {}x{} at {w}x{h}",
+                l.board.w / COLS as f32,
+                l.board.h / ROWS as f32
+            );
+            assert_eq!(l.board.w, l.step * COLS as f32);
+            assert_eq!(l.board.h, l.step * ROWS as f32);
+        }
+    }
+
+    #[test]
+    fn the_board_is_centred_across_the_window() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if l.board.is_empty() {
+                continue;
+            }
+            assert!(
+                (l.board.x - (w - l.board.right())).abs() < 0.01,
+                "the margins differ at {w}x{h}: {} and {}",
+                l.board.x,
+                w - l.board.right()
+            );
+        }
+    }
+
+    #[test]
+    fn the_board_never_runs_into_the_footer_or_the_bands_above_it() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if l.board.is_empty() {
+                continue;
+            }
+            let top = l.header.h + l.info.h + l.chute.h;
+            assert!(
+                l.board.y >= top - 0.01,
+                "the board is under the bands at {w}x{h}"
+            );
+            assert!(
+                l.board.bottom() <= h - l.footer.h + 0.01,
+                "the board is under the footer at {w}x{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_too_short_for_the_chrome_drops_the_chute_first_and_the_footer_last() {
+        // The order is the ladder in `BAND_DROP_ORDER`: the chute is decoration
+        // over a board whose columns are still clickable, the status line and
+        // the title are context, and the footer holds the only controls that
+        // are not the board itself -- so it is the last thing to go.
+        let mut seen_stages = 0_u32;
+        for h in [700.0_f32, 260.0, 200.0, 150.0, 120.0, 90.0, 40.0] {
+            let l = Layout::new(600.0, h);
+            let bands = [
+                l.shows(l.header),
+                l.shows(l.info),
+                l.shows(l.chute),
+                l.shows(l.footer),
+            ];
+            if bands[2] {
+                assert!(
+                    bands[0] && bands[1] && bands[3],
+                    "chute went last at 600x{h}"
+                );
+            }
+            if bands[1] {
+                assert!(bands[0] && bands[3], "info outlived the header at 600x{h}");
+            }
+            if bands[0] {
+                assert!(bands[3], "the header outlived the footer at 600x{h}");
+            }
+            seen_stages |= 1 << bands.iter().filter(|b| **b).count();
+        }
+        assert!(
+            seen_stages.count_ones() >= 3,
+            "every height in the sweep dropped the same number of bands"
+        );
+    }
+
+    #[test]
+    fn a_band_that_did_not_fit_is_nothing_rather_than_a_flat_strip() {
+        // A flat band would still be at some `y`, and everything measured from
+        // it would be measured from a rectangle nobody can see.
+        let l = Layout::new(24.0, 24.0);
+        assert_eq!(l.header, Rect::EMPTY);
+        assert_eq!(l.info, Rect::EMPTY);
+        assert_eq!(l.chute, Rect::EMPTY);
+        assert_eq!(l.footer, Rect::EMPTY);
+        assert!(!l.board.is_empty(), "the board went too");
+    }
+
+    #[test]
+    fn shows_answers_no_for_a_band_with_no_area() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(l.shows(l.header));
+        assert!(!l.shows(Rect::EMPTY));
+        assert!(
+            !l.shows(Rect::new(10.0, 10.0, 40.0, 0.0)),
+            "a flat band shows"
+        );
+        assert!(
+            !l.shows(Rect::new(10.0, 10.0, 0.0, 40.0)),
+            "a thin band shows"
+        );
+    }
+
+    #[test]
+    fn the_board_keeps_nearly_half_the_window_when_everything_fits() {
+        // What `BOARD_SHARE` promises. It is only a promise where the ladder
+        // runs at all -- at a comfortable size the bands take far less than
+        // their share and the board takes the rest.
+        let l = Layout::new(600.0, 150.0);
+        assert!(
+            l.board.h >= 150.0 * BOARD_SHARE * 0.9,
+            "the board got {} of a 150px window",
+            l.board.h
+        );
+    }
+
+    #[test]
+    fn the_padding_never_eats_more_than_a_quarter_of_the_smaller_side() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            assert!(
+                l.pad <= w.min(h) / 4.0 + 0.01,
+                "padding {} in a {w}x{h} window",
+                l.pad
+            );
+        }
+    }
+
+    #[test]
+    fn the_type_size_is_bounded_at_both_ends() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            assert!((8.0..=18.0).contains(&l.font), "font {} at {w}x{h}", l.font);
+            assert!(l.small >= 7.0, "small {} at {w}x{h}", l.small);
+            assert!(l.small < l.font, "the small size is not smaller");
+        }
+    }
+
+    // ── Cells, columns and chute slots ──
+
+    #[test]
+    fn row_zero_is_drawn_at_the_bottom_of_the_board() {
+        // Row 0 is the floor a piece lands on; drawn at the top it would show
+        // every game upside down. The flip lives in `cell` alone.
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let bottom = l.cell(0, 0);
+        let top = l.cell(ROWS - 1, 0);
+        assert!(bottom.y > top.y, "row 0 was drawn above row {}", ROWS - 1);
+        assert!(bottom.bottom() <= l.board.bottom() + 0.01);
+        assert!(top.y >= l.board.y - 0.01);
+    }
+
+    #[test]
+    fn the_holes_of_the_board_tile_it_without_overlapping() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut boxes = Vec::new();
+        for row in 0..ROWS {
+            for col in 0..COLS {
+                let r = l.cell(row, col);
+                assert!(!r.is_empty(), "({row}, {col}) has no box");
+                assert!(
+                    r.x >= l.board.x - 0.01
+                        && r.y >= l.board.y - 0.01
+                        && r.right() <= l.board.right() + 0.01
+                        && r.bottom() <= l.board.bottom() + 0.01,
+                    "({row}, {col}) at {r:?} leaves the board {:?}",
+                    l.board
+                );
+                for other in &boxes {
+                    assert!(
+                        r.intersect(*other).is_none(),
+                        "({row}, {col}) overlaps {other:?}"
+                    );
+                }
+                boxes.push(r);
+            }
+        }
+    }
+
+    #[test]
+    fn the_holes_are_round_because_they_are_square() {
+        // They are drawn as discs, and a disc is a rectangle with a corner
+        // radius of half its side -- which is only a circle when the sides are
+        // equal.
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let r = l.cell(2, 2);
+        assert!((r.w - r.h).abs() < 0.01, "hole {r:?} is not square");
+    }
+
+    #[test]
+    fn the_gap_between_holes_comes_out_of_them_and_not_off_the_boards_edge() {
+        // Taken out of the hole rather than added to the step, so the last hole
+        // ends where the board does instead of a gap past it.
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let last = l.cell(0, COLS - 1);
+        let gap = l.step - last.w;
+        assert!(gap > 0.0, "the holes touch");
+        assert!(
+            (last.right() + gap / 2.0 - l.board.right()).abs() < 0.01,
+            "the last column ends {} short of the board",
+            l.board.right() - last.right()
+        );
+    }
+
+    #[test]
+    fn a_cell_that_is_not_on_the_board_has_no_box() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(l.cell(ROWS, 0), Rect::EMPTY, "past the top row");
+        assert_eq!(l.cell(0, COLS), Rect::EMPTY, "past the last column");
+    }
+
+    #[test]
+    fn a_column_strip_covers_the_column_it_names_and_the_chute_above_it() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if l.board.is_empty() {
+                continue;
+            }
+            for col in 0..COLS {
+                let strip = l.column(col);
+                let cell = l.cell(0, col);
+                assert!(!strip.is_empty(), "column {col} has no strip at {w}x{h}");
+                assert!(
+                    strip.x <= cell.x + 0.01 && strip.right() >= cell.right() - 0.01,
+                    "strip {strip:?} does not cover cell {cell:?} at {w}x{h}"
+                );
+                assert!(
+                    (strip.bottom() - l.board.bottom()).abs() < 0.01,
+                    "the strip stops short of the board's floor at {w}x{h}"
+                );
+                let top = if l.shows(l.chute) {
+                    l.chute.y
+                } else {
+                    l.board.y
+                };
+                assert!(
+                    (strip.y - top).abs() < 0.01,
+                    "strip starts at {} not {top}",
+                    strip.y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_column_strips_tile_the_board_without_overlapping() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for col in 1..COLS {
+            let left = l.column(col - 1);
+            let right = l.column(col);
+            assert!(
+                (left.right() - right.x).abs() < 0.01,
+                "a seam between columns {} and {col}",
+                col - 1
+            );
+        }
+        assert_eq!(l.column(0).x, l.board.x);
+        assert!((l.column(COLS - 1).right() - l.board.right()).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_column_that_is_not_on_the_board_has_no_strip() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(l.column(COLS), Rect::EMPTY);
+        assert_eq!(l.column(usize::MAX), Rect::EMPTY);
+    }
+
+    #[test]
+    fn a_chute_slot_sits_over_the_column_it_names() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for col in 0..COLS {
+            let slot = l.chute_slot(col);
+            let cell = l.cell(ROWS - 1, col);
+            assert!(!slot.is_empty(), "column {col} has no chute slot");
+            let (sx, _) = slot.centre();
+            let (cx, _) = cell.centre();
+            assert!((sx - cx).abs() < 0.01, "slot {sx} is not over cell {cx}");
+            assert!(slot.bottom() <= l.board.y + 0.01);
+        }
+    }
+
+    #[test]
+    fn there_are_no_chute_slots_when_the_chute_did_not_fit() {
+        let l = Layout::new(24.0, 24.0);
+        assert!(!l.shows(l.chute));
+        for col in 0..COLS {
+            assert_eq!(l.chute_slot(col), Rect::EMPTY, "slot {col}");
+        }
+    }
+
+    #[test]
+    fn a_chute_slot_for_a_column_that_is_not_there_is_nothing() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(l.chute_slot(COLS), Rect::EMPTY);
+    }
+
+    // ── The footer's buttons and the header's readouts ──
+
+    #[test]
+    fn the_three_footer_buttons_are_side_by_side_inside_the_footer() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut previous: Option<Rect> = None;
+        for i in 0..3 {
+            let r = l.footer_button(i);
+            assert!(!r.is_empty(), "button {i} has no box");
+            assert!(
+                r.y >= l.footer.y - 0.01 && r.bottom() <= l.footer.bottom() + 0.01,
+                "button {i} is outside the footer"
+            );
+            assert!(r.x >= l.footer.x && r.right() <= l.footer.right() + 0.01);
+            if let Some(p) = previous {
+                assert!(r.x > p.right(), "button {i} overlaps the one before it");
+                assert!(
+                    (r.w - p.w).abs() < 0.01,
+                    "the buttons are not the same width"
+                );
+            }
+            previous = Some(r);
+        }
+    }
+
+    #[test]
+    fn there_is_no_fourth_footer_button() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(l.footer_button(3), Rect::EMPTY);
+        assert_eq!(l.footer_button(usize::MAX), Rect::EMPTY);
+    }
+
+    #[test]
+    fn a_footer_that_did_not_fit_has_no_buttons_rather_than_flat_ones() {
+        let l = Layout::new(24.0, 24.0);
+        for i in 0..3 {
+            assert!(l.footer_button(i).is_empty(), "button {i} at 24x24");
+        }
+    }
+
+    #[test]
+    fn the_score_readouts_are_laid_out_from_the_right_edge_inwards() {
+        // Index 0 is the box nearest the edge, so adding a fourth would not
+        // move the other three.
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let first = l.score_box(0);
+        let second = l.score_box(1);
+        let third = l.score_box(2);
+        assert!(!first.is_empty() && !second.is_empty() && !third.is_empty());
+        assert!(
+            first.x > second.x && second.x > third.x,
+            "not right to left"
+        );
+        assert!(
+            first.right() <= l.header.right() - l.pad + 0.01,
+            "past the edge"
+        );
+        assert!(second.right() < first.x, "the boxes overlap");
+    }
+
+    #[test]
+    fn the_score_readouts_sit_inside_the_header() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for i in 0..3 {
+            let r = l.score_box(i);
+            assert!(
+                r.y >= l.header.y - 0.01 && r.bottom() <= l.header.bottom() + 0.01,
+                "readout {i} at {r:?} is outside the header"
+            );
+        }
+    }
+
+    #[test]
+    fn a_readout_that_would_run_off_the_left_edge_is_dropped() {
+        // A header this narrow holds two of the three. The third is refused
+        // rather than drawn at a negative x, where it would be half off the
+        // window and over the title.
+        let l = Layout::new(120.0, 800.0);
+        assert!(l.shows(l.header), "the header did not survive at 120x800");
+        assert!(!l.score_box(0).is_empty(), "the first readout went");
+        assert_eq!(l.score_box(2), Rect::EMPTY, "the third readout was drawn");
+    }
+
+    #[test]
+    fn there_is_no_fourth_readout() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(l.score_box(3), Rect::EMPTY);
+    }
+
+    #[test]
+    fn a_header_that_did_not_fit_has_no_readouts() {
+        let l = Layout::new(24.0, 24.0);
+        for i in 0..3 {
+            assert_eq!(l.score_box(i), Rect::EMPTY, "readout {i}");
+        }
+    }
+
+    #[test]
+    fn the_help_sheet_is_centred_in_the_window() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            assert!(
+                (l.help.x - (w - l.help.right())).abs() < 0.01
+                    && (l.help.y - (h - l.help.bottom())).abs() < 0.01,
+                "the sheet is off-centre at {w}x{h}"
+            );
+        }
+    }
+
+    // ── A new game ──
+
+    #[test]
+    fn a_new_game_starts_empty_with_the_player_to_move_and_the_cursor_in_the_middle() {
+        let app = game();
+        assert_eq!(app.board.pieces(), 0);
+        assert_eq!(app.status(), GameStatus::Playing);
+        assert_eq!(app.win_line(), None);
+        assert_eq!(app.current_player, app.human_player);
+        assert_eq!(app.cursor_col(), CENTER_COL);
+        assert!(app.moves().is_empty());
+        assert!(!app.can_undo(), "there is a move to take back already");
+        assert!(!app.help_is_open());
+    }
+
+    #[test]
+    fn the_player_is_red_and_moves_first_and_the_search_plays_yellow() {
+        let app = game();
+        assert_eq!(app.human_player, Cell::Red);
+        assert_eq!(app.ai_player, Cell::Yellow);
+        assert_ne!(app.human_player, app.ai_player, "both sides are one player");
+    }
+
+    #[test]
+    fn a_new_game_clears_the_board_and_keeps_the_tally() {
+        // A new game is a new board, not a new session: the score of the match
+        // so far is the reason to press the button twice.
+        let mut app = game();
+        app.human_wins = 3;
+        app.ai_wins = 2;
+        app.draws = 1;
+        app.drop_at(0);
+        app.new_game();
+        assert_eq!(app.board.pieces(), 0);
+        assert!(app.moves().is_empty());
+        assert!(!app.can_undo(), "a new game can undo into the old one");
+        assert_eq!((app.human_wins, app.ai_wins, app.draws), (3, 2, 1));
+    }
+
+    #[test]
+    fn a_new_game_puts_the_cursor_back_in_the_middle() {
+        let mut app = game();
+        app.cursor_col = 0;
+        app.new_game();
+        assert_eq!(app.cursor_col(), CENTER_COL);
+    }
+
+    #[test]
+    fn a_new_game_clears_a_finished_games_result() {
+        let mut app = game();
+        app.board = won_board(Cell::Red);
+        app.status = GameStatus::Won(Cell::Red);
+        app.win_line = app.board.outcome().1;
+        app.new_game();
+        assert_eq!(app.status(), GameStatus::Playing);
+        assert_eq!(app.win_line(), None, "the old game's line is still ringed");
+        assert_eq!(app.current_player, Cell::Red, "the loser is not to move");
+    }
+
+    // ── Dropping ──
+
+    #[test]
+    fn a_drop_puts_the_moving_players_piece_on_the_board() {
+        let mut app = game();
+        assert!(app.drop_at(2));
+        assert_eq!(app.board.get(0, 2), Cell::Red);
+        assert_eq!(app.moves(), [(2, Cell::Red)]);
+    }
+
+    #[test]
+    fn a_drop_hands_the_turn_to_the_other_player() {
+        let mut app = game();
+        app.drop_at(2);
+        assert_eq!(app.current_player, Cell::Yellow);
+        app.drop_at(3);
+        assert_eq!(app.current_player, Cell::Red, "the turn did not come back");
+        assert_eq!(
+            app.board.get(0, 3),
+            Cell::Yellow,
+            "the wrong piece was played"
+        );
+    }
+
+    #[test]
+    fn a_drop_into_a_full_column_changes_nothing() {
+        let mut app = game();
+        for _ in 0..ROWS {
+            app.drop_at(0);
+        }
+        let before = app.current_player;
+        let pieces = app.board.pieces();
+        let history = app.moves().len();
+        assert!(!app.drop_at(0), "a full column took a piece");
+        assert_eq!(app.board.pieces(), pieces, "the refused drop landed");
+        assert_eq!(app.current_player, before, "the refused drop took the turn");
+        assert_eq!(app.moves().len(), history, "the refused drop was recorded");
+        assert!(!app.can_undo() || app.moves().len() == history);
+    }
+
+    #[test]
+    fn a_refused_drop_leaves_nothing_to_take_back() {
+        // The snapshot is taken before the drop is attempted, so a drop that is
+        // then refused must not push it -- an undo that restored a position
+        // identical to the current one would look like a control that does
+        // nothing.
+        let mut app = game();
+        for _ in 0..ROWS {
+            app.drop_at(0);
+        }
+        let depth = app.history.len();
+        app.drop_at(0);
+        assert_eq!(app.history.len(), depth, "a refused drop was made undoable");
+    }
+
+    #[test]
+    fn a_drop_on_a_finished_game_is_refused() {
+        let mut app = game();
+        app.status = GameStatus::Won(Cell::Red);
+        assert!(!app.drop_at(1), "a won game took another move");
+        assert_eq!(app.board.pieces(), 0);
+    }
+
+    #[test]
+    fn a_drop_on_a_drawn_game_is_refused() {
+        let mut app = game();
+        app.status = GameStatus::Draw;
+        assert!(!app.drop_at(1));
+    }
+
+    #[test]
+    fn a_drop_that_wins_ends_the_game_and_leaves_the_winner_to_move() {
+        // The winner staying as the current player is what lets the tally know
+        // who won without a second field saying so.
+        let mut app = game();
+        for col in 0..3 {
+            app.drop_at(col);
+            app.current_player = Cell::Red;
+        }
+        assert!(app.drop_at(3));
+        assert_eq!(app.status(), GameStatus::Won(Cell::Red));
+        assert_eq!(app.current_player, Cell::Red);
+    }
+
+    #[test]
+    fn a_drop_that_wins_shows_which_four_cells_did_it() {
+        let mut app = game();
+        for col in 0..3 {
+            app.drop_at(col);
+            app.current_player = Cell::Red;
+        }
+        app.drop_at(3);
+        assert_eq!(
+            app.win_line().expect("a win with no line").cells,
+            [(0, 0), (0, 1), (0, 2), (0, 3)]
+        );
+    }
+
+    #[test]
+    fn a_win_by_the_player_is_scored_to_the_player() {
+        let mut app = game();
+        for col in 0..3 {
+            app.drop_at(col);
+            app.current_player = Cell::Red;
+        }
+        app.drop_at(3);
+        assert_eq!(app.human_wins, 1);
+        assert_eq!(app.ai_wins, 0, "the AI was paid for the player's win");
+        assert_eq!(app.draws, 0);
+    }
+
+    #[test]
+    fn a_win_by_the_search_is_scored_to_the_search() {
+        let mut app = game();
+        app.current_player = Cell::Yellow;
+        for col in 0..3 {
+            app.drop_at(col);
+            app.current_player = Cell::Yellow;
+        }
+        app.drop_at(3);
+        assert_eq!(app.status(), GameStatus::Won(Cell::Yellow));
+        assert_eq!(app.ai_wins, 1);
+        assert_eq!(app.human_wins, 0, "the player was paid for the AI's win");
+    }
+
+    #[test]
+    fn a_drop_that_fills_the_last_hole_without_a_line_is_a_draw() {
+        let mut app = game();
+        app.board = drawn_board();
+        app.board.undo_drop(6);
+        // The colour the fixture wanted in that hole, so the board the drop
+        // completes is the drawn one and not a won one.
+        app.current_player = if ((ROWS - 1) / 2 + 6).is_multiple_of(2) {
+            Cell::Red
+        } else {
+            Cell::Yellow
+        };
+        assert!(app.drop_at(6));
+        assert_eq!(app.status(), GameStatus::Draw);
+        assert_eq!(app.draws, 1);
+        assert_eq!(app.win_line(), None);
+    }
+
+    #[test]
+    fn the_tally_only_moves_when_a_game_ends() {
+        let mut app = game();
+        app.drop_at(0);
+        app.drop_at(1);
+        assert_eq!((app.human_wins, app.ai_wins, app.draws), (0, 0, 0));
+    }
+
+    // ── Whose turn it is ──
+
+    #[test]
+    fn the_search_owes_a_move_only_when_it_is_its_turn_on_a_live_game() {
+        let mut app = game();
+        assert!(!app.ai_to_play(), "the AI moves before the player has");
+        app.drop_at(3);
+        assert!(app.ai_to_play(), "the AI does not owe a reply");
+        app.status = GameStatus::Won(Cell::Yellow);
+        assert!(!app.ai_to_play(), "the AI moves on a finished game");
+    }
+
+    #[test]
+    fn the_search_plays_the_move_it_owes_and_nothing_else() {
+        let mut app = shallow();
+        app.drop_at(3);
+        let col = app.ai_turn().expect("the AI passed on its turn");
+        assert_eq!(app.moves().len(), 2, "it played more than one piece");
+        assert_eq!(app.moves()[1], (col, Cell::Yellow));
+        assert_eq!(app.current_player, Cell::Red, "the turn did not come back");
+    }
+
+    #[test]
+    fn the_search_declines_a_turn_that_is_not_its_own() {
+        let mut app = shallow();
+        assert_eq!(app.ai_turn(), None, "the AI moved on the player's turn");
+        assert_eq!(app.board.pieces(), 0);
+    }
+
+    #[test]
+    fn the_search_declines_to_move_on_a_finished_game() {
+        let mut app = shallow();
+        app.board = won_board(Cell::Red);
+        app.status = GameStatus::Won(Cell::Red);
+        app.current_player = Cell::Yellow;
+        assert_eq!(app.ai_turn(), None, "the AI played on after the game ended");
+    }
+
+    #[test]
+    fn a_click_by_the_player_out_of_turn_is_ignored() {
+        // Two rules, not one written twice: this is "it is not your turn", and
+        // `drop_at`'s is "the game is over".
+        let mut app = shallow();
+        app.drop_at(3);
+        assert_eq!(app.apply(Intent::Drop(0)), EventResult::Ignored);
+        assert_eq!(app.board.pieces(), 1, "the out-of-turn drop landed");
+    }
+
+    #[test]
+    fn a_drop_on_a_game_the_player_won_is_refused_by_the_game_being_over() {
+        // The won game leaves the human as the current player, so the "not your
+        // turn" rule passes and only the "game is over" rule can refuse. If
+        // those two were one rule this move would be played.
+        let mut app = game();
+        for col in 0..3 {
+            app.drop_at(col);
+            app.current_player = Cell::Red;
+        }
+        app.drop_at(3);
+        assert_eq!(app.current_player, app.human_player, "the fixture is wrong");
+        assert_eq!(app.apply(Intent::Drop(5)), EventResult::Ignored);
+        assert_eq!(app.board.pieces(), 4, "a piece was played after the win");
+    }
+
+    // ── Taking a move back ──
+
+    #[test]
+    fn there_is_nothing_to_take_back_before_the_first_move() {
+        let mut app = game();
+        assert!(!app.can_undo());
+        assert!(!app.undo(), "an empty game had something to undo");
+    }
+
+    #[test]
+    fn taking_back_the_first_move_leaves_an_empty_board_with_the_player_to_move() {
+        let mut app = game();
+        app.drop_at(3);
+        assert!(app.can_undo());
+        assert!(app.undo());
+        assert_eq!(app.board.pieces(), 0);
+        assert!(app.moves().is_empty());
+        assert_eq!(app.current_player, Cell::Red);
+        assert!(!app.can_undo(), "there is still something to take back");
+    }
+
+    #[test]
+    fn taking_back_takes_the_whole_round_and_not_half_of_it() {
+        // One drop when the AI has not replied and two when it has. A rule
+        // written as "pop two" is wrong on the first move of the game.
+        let mut app = shallow();
+        app.drop_at(3);
+        app.ai_turn();
+        assert_eq!(app.moves().len(), 2);
+        assert!(app.undo());
+        assert_eq!(app.board.pieces(), 0, "the AI's reply was left behind");
+        assert_eq!(app.current_player, Cell::Red);
+    }
+
+    #[test]
+    fn taking_back_stops_at_the_players_turn_rather_than_unwinding_the_game() {
+        let mut app = shallow();
+        for _ in 0..3 {
+            app.drop_at(app.cursor_col());
+            app.ai_turn();
+        }
+        let before = app.moves().len();
+        app.undo();
+        assert_eq!(
+            app.moves().len(),
+            before - 2,
+            "one undo took back more than one round"
+        );
+    }
+
+    #[test]
+    fn taking_back_the_winning_move_puts_the_game_back_in_play() {
+        // 2048 -- this program's neighbour -- shipped an undo that restored the
+        // grid and the score and left the *status* alone, so taking back the
+        // winning move left "You win!" over a board with no win on it. A whole
+        // snapshot cannot restore four fields and forget the fifth.
+        let mut app = game();
+        for col in 0..3 {
+            app.drop_at(col);
+            app.current_player = Cell::Red;
+        }
+        app.drop_at(3);
+        assert_eq!(app.status(), GameStatus::Won(Cell::Red));
+        assert!(app.undo());
+        assert_eq!(
+            app.status(),
+            GameStatus::Playing,
+            "the win outlived the move"
+        );
+        assert_eq!(app.win_line(), None, "four cells are still ringed");
+        assert_eq!(app.board.get(0, 3), Cell::Empty);
+    }
+
+    #[test]
+    fn taking_back_the_winning_move_takes_back_the_point_it_scored() {
+        let mut app = game();
+        for col in 0..3 {
+            app.drop_at(col);
+            app.current_player = Cell::Red;
+        }
+        app.drop_at(3);
+        assert_eq!(app.human_wins, 1);
+        app.undo();
+        assert_eq!(
+            app.human_wins, 0,
+            "the tally kept a win that was taken back"
+        );
+    }
+
+    #[test]
+    fn taking_back_does_not_disturb_the_tally_of_earlier_games() {
+        let mut app = game();
+        app.human_wins = 4;
+        app.ai_wins = 2;
+        app.draws = 3;
+        app.drop_at(0);
+        app.undo();
+        assert_eq!((app.human_wins, app.ai_wins, app.draws), (4, 2, 3));
+    }
+
+    #[test]
+    fn taking_back_restores_the_position_exactly() {
+        let mut app = shallow();
+        app.drop_at(2);
+        app.ai_turn();
+        let before = app.board.clone();
+        app.drop_at(4);
+        app.ai_turn();
+        app.undo();
+        assert_eq!(app.board, before, "the position came back different");
+    }
+
+    #[test]
+    fn the_history_is_trimmed_to_the_move_it_is_taken_back_to() {
+        let mut app = shallow();
+        app.drop_at(1);
+        app.ai_turn();
+        app.drop_at(5);
+        app.ai_turn();
+        app.undo();
+        assert_eq!(
+            app.moves().len(),
+            2,
+            "the taken-back moves are still listed"
+        );
+        assert_eq!(app.moves()[0], (1, Cell::Red));
+    }
+
+    // ── The cursor ──
+
+    #[test]
+    fn the_cursor_moves_one_column_at_a_time() {
+        let mut app = game();
+        assert_eq!(app.apply(Intent::CursorLeft), EventResult::Consumed);
+        assert_eq!(app.cursor_col(), CENTER_COL - 1);
+        assert_eq!(app.apply(Intent::CursorRight), EventResult::Consumed);
+        assert_eq!(app.cursor_col(), CENTER_COL);
+    }
+
+    #[test]
+    fn the_cursor_stops_at_the_left_wall_and_says_nothing_happened() {
+        // A cursor already against the wall reports `Ignored`, because a redraw
+        // would be a frame spent painting the same picture.
+        let mut app = game();
+        app.cursor_col = 0;
+        assert_eq!(app.apply(Intent::CursorLeft), EventResult::Ignored);
+        assert_eq!(app.cursor_col(), 0, "the cursor wrapped or went negative");
+    }
+
+    #[test]
+    fn the_cursor_stops_at_the_right_wall_and_says_nothing_happened() {
+        let mut app = game();
+        app.cursor_col = COLS - 1;
+        assert_eq!(app.apply(Intent::CursorRight), EventResult::Ignored);
+        assert_eq!(app.cursor_col(), COLS - 1);
+    }
+
+    #[test]
+    fn dropping_into_a_named_column_moves_the_cursor_there() {
+        // So the keyboard picks up where the pointer left off.
+        let mut app = game();
+        app.apply(Intent::Drop(6));
+        assert_eq!(app.cursor_col(), 6);
+    }
+
+    #[test]
+    fn a_drop_into_a_column_that_is_not_on_the_board_leaves_the_cursor_alone() {
+        let mut app = game();
+        assert_eq!(app.apply(Intent::Drop(COLS)), EventResult::Ignored);
+        assert_eq!(app.cursor_col(), CENTER_COL, "the cursor left the board");
+    }
+
+    #[test]
+    fn dropping_at_the_cursor_drops_where_the_cursor_is() {
+        let mut app = game();
+        app.cursor_col = 5;
+        assert_eq!(app.apply(Intent::DropAtCursor), EventResult::Consumed);
+        assert_eq!(app.board.get(0, 5), Cell::Red);
+    }
+
+    #[test]
+    fn dropping_at_a_cursor_over_a_full_column_is_refused() {
+        let mut app = game();
+        for _ in 0..ROWS {
+            app.drop_at(0);
+        }
+        app.cursor_col = 0;
+        assert_eq!(app.apply(Intent::DropAtCursor), EventResult::Ignored);
+    }
+
+    // ── The help sheet ──
+
+    #[test]
+    fn help_opens_and_shuts_on_the_same_intent() {
+        let mut app = game();
+        assert_eq!(app.apply(Intent::ToggleHelp), EventResult::Consumed);
+        assert!(app.help_is_open());
+        assert_eq!(app.apply(Intent::ToggleHelp), EventResult::Consumed);
+        assert!(!app.help_is_open());
+    }
+
+    #[test]
+    fn closing_a_sheet_that_is_already_shut_does_nothing() {
+        let mut app = game();
+        assert_eq!(app.apply(Intent::CloseHelp), EventResult::Ignored);
+        assert!(!app.help_is_open());
+    }
+
+    #[test]
+    fn an_open_sheet_swallows_the_move_a_key_would_have_made() {
+        // The sheet is drawn over the board, so without this an arrow key would
+        // move a cursor the player cannot see and Enter would drop a piece
+        // behind the help text.
+        let mut app = game();
+        app.apply(Intent::ToggleHelp);
+        assert_eq!(app.apply(Intent::DropAtCursor), EventResult::Consumed);
+        assert_eq!(
+            app.board.pieces(),
+            0,
+            "a piece was dropped behind the sheet"
+        );
+        assert!(!app.help_is_open(), "the sheet stayed up");
+    }
+
+    #[test]
+    fn an_open_sheet_swallows_a_cursor_move_and_shuts() {
+        let mut app = game();
+        app.apply(Intent::ToggleHelp);
+        assert_eq!(app.apply(Intent::CursorLeft), EventResult::Consumed);
+        assert_eq!(app.cursor_col(), CENTER_COL, "the cursor moved behind it");
+        assert!(!app.help_is_open());
+    }
+
+    #[test]
+    fn an_open_sheet_swallows_a_new_game_and_an_undo() {
+        let mut app = game();
+        app.drop_at(0);
+        app.apply(Intent::ToggleHelp);
+        assert_eq!(app.apply(Intent::NewGame), EventResult::Consumed);
+        assert_eq!(
+            app.board.pieces(),
+            1,
+            "the board was cleared behind the sheet"
+        );
+        app.apply(Intent::ToggleHelp);
+        assert_eq!(app.apply(Intent::Undo), EventResult::Consumed);
+        assert_eq!(app.board.pieces(), 1, "the move was taken back behind it");
+    }
+
+    #[test]
+    fn the_two_help_intents_still_reach_an_open_sheet() {
+        // They fall through the modal guard, because shutting the sheet is what
+        // they were going to do anyway -- and a `ToggleHelp` caught by the
+        // guard would leave the Help button unable to close what it opened.
+        let mut app = game();
+        app.apply(Intent::ToggleHelp);
+        assert_eq!(app.apply(Intent::CloseHelp), EventResult::Consumed);
+        assert!(!app.help_is_open());
+        app.apply(Intent::ToggleHelp);
+        assert_eq!(app.apply(Intent::ToggleHelp), EventResult::Consumed);
+        assert!(!app.help_is_open());
+    }
+
+    #[test]
+    fn an_undo_with_nothing_to_take_back_reports_that_nothing_happened() {
+        let mut app = game();
+        assert_eq!(app.apply(Intent::Undo), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_new_game_always_reports_that_something_happened() {
+        // Even on a board with nothing on it: the button is a promise that the
+        // game in front of you is gone, and answering `Ignored` would leave the
+        // frame unpainted after a control the player pressed.
+        let mut app = game();
+        assert_eq!(app.apply(Intent::NewGame), EventResult::Consumed);
+    }
+
+    // ── What a key asks for ──
+
+    #[test]
+    fn the_arrow_keys_move_the_cursor() {
+        assert_eq!(
+            key_intent(&probe::press(Key::Left)),
+            Some(Intent::CursorLeft)
+        );
+        assert_eq!(
+            key_intent(&probe::press(Key::Right)),
+            Some(Intent::CursorRight)
+        );
+    }
+
+    #[test]
+    fn a_and_d_move_the_cursor_the_same_way_the_arrows_do() {
+        assert_eq!(key_intent(&probe::press(Key::A)), Some(Intent::CursorLeft));
+        assert_eq!(key_intent(&probe::press(Key::D)), Some(Intent::CursorRight));
+    }
+
+    #[test]
+    fn enter_and_space_both_drop_at_the_cursor() {
+        assert_eq!(
+            key_intent(&probe::press(Key::Enter)),
+            Some(Intent::DropAtCursor)
+        );
+        assert_eq!(
+            key_intent(&probe::press(Key::Space)),
+            Some(Intent::DropAtCursor)
+        );
+    }
+
+    #[test]
+    fn each_digit_key_names_its_own_column_counting_from_one() {
+        // The keys are labelled 1-7 and the columns are numbered 0-6, so the
+        // off-by-one is the whole content of this mapping.
+        let keys = [
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Num4,
+            Key::Num5,
+            Key::Num6,
+            Key::Num7,
+        ];
+        assert_eq!(keys.len(), COLS, "there is a column no digit key reaches");
+        for (col, key) in keys.into_iter().enumerate() {
+            assert_eq!(
+                key_intent(&probe::press(key)),
+                Some(Intent::Drop(col)),
+                "the key for column {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn n_starts_a_new_game_and_u_takes_a_move_back_and_h_shows_the_sheet() {
+        assert_eq!(key_intent(&probe::press(Key::N)), Some(Intent::NewGame));
+        assert_eq!(key_intent(&probe::press(Key::U)), Some(Intent::Undo));
+        assert_eq!(key_intent(&probe::press(Key::H)), Some(Intent::ToggleHelp));
+    }
+
+    #[test]
+    fn escape_shuts_the_help_sheet() {
+        // `Escape to quit` used to be in the module documentation and in no
+        // handler at all. It is the sheet's dismissal now, which is the one
+        // thing in this window it can mean.
+        assert_eq!(
+            key_intent(&probe::press(Key::Escape)),
+            Some(Intent::CloseHelp)
+        );
+    }
+
+    #[test]
+    fn escape_on_a_game_with_no_sheet_up_does_nothing() {
+        let mut app = game();
+        assert_eq!(press(&mut app, Key::Escape), EventResult::Ignored);
+        assert_eq!(app.board.pieces(), 0);
+    }
+
+    #[test]
+    fn ctrl_z_takes_a_move_back() {
+        assert_eq!(key_intent(&probe::ctrl(Key::Z)), Some(Intent::Undo));
+    }
+
+    #[test]
+    fn a_bare_z_asks_for_nothing() {
+        // Only the chord undoes. A bare Z that undid would make the letter a
+        // control the sheet does not list.
+        assert_eq!(key_intent(&probe::press(Key::Z)), None);
+    }
+
+    #[test]
+    fn ctrl_and_alt_chords_belong_to_the_window_and_not_to_the_board() {
+        // A Ctrl+Left that moved the cursor is a Ctrl+Left the desktop cannot
+        // have. Ctrl+Z is the one exception and is answered before this rule.
+        for key in [Key::Left, Key::Right, Key::Enter, Key::N, Key::U, Key::H] {
+            assert_eq!(key_intent(&probe::ctrl(key)), None, "ctrl+{key:?}");
+            let alt = Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            };
+            assert_eq!(
+                key_intent(&probe::press_with(key, alt)),
+                None,
+                "alt+{key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shift_does_not_stop_a_key_meaning_what_it_means() {
+        // Shift is how a keyboard produces most of these letters in the first
+        // place on some layouts, and it belongs to no window chord here.
+        assert_eq!(
+            key_intent(&probe::shift(Key::N)),
+            Some(Intent::NewGame),
+            "shift swallowed a plain letter"
+        );
+    }
+
+    #[test]
+    fn a_key_this_window_has_no_use_for_is_left_for_something_else() {
+        for key in [Key::Tab, Key::Up, Key::Down, Key::Q, Key::Num0] {
+            assert_eq!(key_intent(&probe::press(key)), None, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn a_key_the_window_has_no_use_for_reports_that_it_did_nothing() {
+        let mut app = game();
+        assert_eq!(press(&mut app, Key::Q), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_keystroke_reaches_the_board_it_names() {
+        let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(press(&mut app, Key::Num7), EventResult::Consumed);
+        assert_eq!(app.board.get(0, COLS - 1), Cell::Red);
+    }
+
+    // ── What clicking a control asks for ──
+
+    #[test]
+    fn every_control_asks_for_exactly_one_thing() {
+        assert_eq!(target_intent(Target::Column(4)), Intent::Drop(4));
+        assert_eq!(target_intent(Target::NewGame), Intent::NewGame);
+        assert_eq!(target_intent(Target::Undo), Intent::Undo);
+        assert_eq!(target_intent(Target::Help), Intent::ToggleHelp);
+        assert_eq!(target_intent(Target::HelpSheet), Intent::CloseHelp);
+    }
+
+    #[test]
+    fn a_column_asks_for_a_drop_into_itself_and_not_into_its_neighbour() {
+        for col in 0..COLS {
+            assert_eq!(target_intent(Target::Column(col)), Intent::Drop(col));
+        }
+    }
+
+    #[test]
+    fn clicking_a_column_drops_a_piece_into_it() {
+        let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(click_on(&mut app, Target::Column(5)), EventResult::Consumed);
+        assert_eq!(app.board.get(0, 5), Cell::Red, "the piece went elsewhere");
+    }
+
+    #[test]
+    fn clicking_each_column_drops_into_that_column_and_no_other() {
+        // The mapping from a place on the screen to a column is the interface;
+        // an off-by-one in it would be invisible in every test that only ever
+        // clicks one column.
+        for col in 0..COLS {
+            let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+            click_on(&mut app, Target::Column(col));
+            assert_eq!(app.moves(), [(col, Cell::Red)], "clicking column {col}");
+        }
+    }
+
+    #[test]
+    fn a_click_low_in_a_column_and_a_click_high_in_it_are_the_same_move() {
+        // The whole strip is one control: a column is played by pointing at it,
+        // not by pointing at the hole the piece will land in.
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let strip = l.column(2);
+        for y in [strip.y + 1.0, strip.bottom() - 1.0] {
+            let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let (cx, _) = strip.centre();
+            assert_eq!(click(&mut app, cx, y), EventResult::Consumed, "at y={y}");
+            assert_eq!(app.moves(), [(2, Cell::Red)]);
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_piece_still_drops_into_the_column_that_piece_is_in() {
+        // The column strips take clicks last of the board's parts, so the
+        // pieces drawn over them do not swallow the move.
+        let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.drop_at(1);
+        app.current_player = Cell::Red;
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let (cx, cy) = l.cell(0, 1).centre();
+        assert_eq!(click(&mut app, cx, cy), EventResult::Consumed);
+        assert_eq!(app.board.get(1, 1), Cell::Red, "the click hit the piece");
+    }
+
+    #[test]
+    fn a_full_column_keeps_its_control_and_answers_no() {
+        // A control that silently stops existing cannot say "no" -- and the
+        // answer to clicking a full column is "no", not "nothing is here".
+        let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for _ in 0..ROWS {
+            app.drop_at(0);
+        }
+        app.current_player = Cell::Red;
+        assert!(
+            probe::is_visible_sized(&app, Target::Column(0), (WINDOW_WIDTH, WINDOW_HEIGHT)),
+            "the full column stopped being a control"
+        );
+        assert_eq!(click_on(&mut app, Target::Column(0)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn clicking_new_game_clears_the_board() {
+        let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.drop_at(3);
+        assert_eq!(click_on(&mut app, Target::NewGame), EventResult::Consumed);
+        assert_eq!(app.board.pieces(), 0);
+    }
+
+    #[test]
+    fn clicking_undo_takes_the_last_move_back() {
+        let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.drop_at(3);
+        assert_eq!(click_on(&mut app, Target::Undo), EventResult::Consumed);
+        assert_eq!(app.board.pieces(), 0);
+    }
+
+    #[test]
+    fn clicking_help_opens_the_sheet_and_clicking_it_again_shuts_it() {
+        let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        click_on(&mut app, Target::Help);
+        assert!(app.help_is_open());
+        // The second click lands on the sheet, which covers the button -- and
+        // shuts it, which is what the button would have done anyway.
+        assert_eq!(click_on(&mut app, Target::HelpSheet), EventResult::Consumed);
+        assert!(!app.help_is_open());
+    }
+
+    #[test]
+    fn a_click_anywhere_at_all_shuts_an_open_sheet() {
+        // The sheet's last line says "click anywhere to close", and anywhere
+        // means anywhere -- including over the board it covers, where a live
+        // column would otherwise drop a piece the player cannot see.
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let places = [
+            ("a column", l.column(0).centre()),
+            ("the new game button", l.footer_button(0).centre()),
+            ("the header", (l.header.x + 4.0, l.header.y + 4.0)),
+            ("the corner", (WINDOW_WIDTH - 1.0, WINDOW_HEIGHT - 1.0)),
+        ];
+        for (name, (x, y)) in places {
+            let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+            app.apply(Intent::ToggleHelp);
+            assert_eq!(click(&mut app, x, y), EventResult::Consumed, "on {name}");
+            assert!(!app.help_is_open(), "the sheet survived a click on {name}");
+            assert_eq!(app.board.pieces(), 0, "a click on {name} played a move");
+        }
+    }
+
+    #[test]
+    fn a_click_that_lands_on_nothing_does_nothing() {
+        // Not every pixel is a control: the gap between the footer buttons is
+        // not, and a click there should not fall through to whatever is behind.
+        let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let (x, y) = probe::bare_point(&app, (WINDOW_WIDTH, WINDOW_HEIGHT))
+            .expect("the window is entirely covered by controls");
+        assert_eq!(click(&mut app, x, y), EventResult::Ignored);
+        assert_eq!(app.board.pieces(), 0);
+    }
+
+    #[test]
+    fn only_the_left_button_plays_a_move() {
+        // The right button belongs to a context menu this program does not
+        // have; taking it as a drop would make a stray right-click a move.
+        let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let size = (WINDOW_WIDTH, WINDOW_HEIGHT);
+        let out = probe::click_sized(&mut app, Target::Column(3), MouseButton::Right, size);
+        assert_eq!(out, EventResult::Ignored);
+        assert_eq!(app.board.pieces(), 0, "a right-click dropped a piece");
+    }
+
+    #[test]
+    fn a_click_is_read_against_the_window_the_last_frame_was_drawn_at() {
+        // The two sizes put the same column in different places, so a click at
+        // one window's coordinates means something else at the other's. Reading
+        // it against a remembered size rather than a constant is the whole
+        // reason the size is stored.
+        let small = (300.0_f32, 400.0_f32);
+        let column_at_small = Layout::new(small.0, small.1).column(0);
+        let (x, y) = column_at_small.centre();
+
+        let mut app = windowed(small.0, small.1);
+        assert_eq!(click(&mut app, x, y), EventResult::Consumed);
+        assert_eq!(app.moves(), [(0, Cell::Red)], "at the small size");
+
+        // The same point in the big window is not column 0 -- it is not even on
+        // the board, which is centred and much wider there.
+        let big = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(
+            !big.column(0).contains(x, y),
+            "the fixture's two sizes put column 0 in the same place"
+        );
+    }
+
+    // ── Events ──
+
+    #[test]
+    fn a_resize_is_taken_and_remembered() {
+        let mut app = game();
+        let out = handle_event(
+            &mut app,
+            &Event::Resize {
+                width: 500,
+                height: 320,
+            },
+        );
+        assert_eq!(out, EventResult::Consumed);
+        assert_eq!((app.width, app.height), (500.0, 320.0));
+    }
+
+    #[test]
+    fn a_tick_plays_the_move_the_search_owes() {
+        // The move is played on the tick rather than inside the handler for the
+        // key that prompted it, so the frame that says the search is thinking
+        // is painted before the search that makes it wait begins.
+        let mut app = shallow();
+        app.drop_at(3);
+        assert_eq!(tick(&mut app), EventResult::Consumed);
+        assert_eq!(app.moves().len(), 2, "the tick played nothing");
+        assert_eq!(app.current_player, Cell::Red);
+    }
+
+    #[test]
+    fn a_tick_on_the_players_turn_does_nothing() {
+        let mut app = shallow();
+        assert_eq!(tick(&mut app), EventResult::Ignored);
+        assert_eq!(app.board.pieces(), 0, "the AI moved out of turn");
+    }
+
+    #[test]
+    fn a_tick_on_a_finished_game_does_nothing() {
+        let mut app = shallow();
+        app.board = won_board(Cell::Red);
+        app.status = GameStatus::Won(Cell::Red);
+        app.current_player = Cell::Yellow;
+        assert_eq!(tick(&mut app), EventResult::Ignored);
+        assert_eq!(app.board.pieces(), RUN, "a piece was played after the win");
+    }
+
+    #[test]
+    fn a_second_tick_does_not_play_a_second_reply() {
+        let mut app = shallow();
+        app.drop_at(3);
+        tick(&mut app);
+        assert_eq!(tick(&mut app), EventResult::Ignored);
+        assert_eq!(app.moves().len(), 2, "the AI moved twice for one turn");
+    }
+
+    #[test]
+    fn the_clock_runs_only_while_the_search_owes_a_move() {
+        // `tick_interval` is consulted after every event, so this starts when
+        // the player moves and stops when the reply lands. A game waiting on a
+        // person holds no timer.
+        let mut app = shallow();
+        assert_eq!(app.tick_interval(), None, "a clock on the player's turn");
+        app.drop_at(3);
+        assert_eq!(app.tick_interval(), Some(AI_TICK));
+        tick(&mut app);
+        assert_eq!(app.tick_interval(), None, "the clock outlived the reply");
+    }
+
+    #[test]
+    fn the_clock_stops_when_the_game_ends() {
+        let mut app = shallow();
+        app.current_player = Cell::Yellow;
+        assert_eq!(app.tick_interval(), Some(AI_TICK));
+        app.status = GameStatus::Draw;
+        assert_eq!(app.tick_interval(), None);
+    }
+
+    #[test]
+    fn a_close_request_ends_the_program() {
+        let mut app = game();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn an_event_that_changed_something_asks_for_a_repaint_and_one_that_did_not_does_not() {
+        let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(
+            app.on_event(&Event::Key(probe::press(Key::Num1))),
+            Response::Redraw
+        );
+        assert_eq!(
+            app.on_event(&Event::Key(probe::press(Key::Q))),
+            Response::Idle,
+            "an ignored key asked for a frame"
+        );
+    }
+
+    #[test]
+    fn an_event_this_window_has_no_use_for_is_ignored() {
+        let mut app = game();
+        for event in [
+            Event::FocusIn,
+            Event::FocusOut,
+            Event::Moved { x: 10, y: 20 },
+            Event::ScaleChanged { scale: 2.0 },
+        ] {
+            assert_eq!(
+                handle_event(&mut app, &event),
+                EventResult::Ignored,
+                "{event:?}"
+            );
+        }
+        assert_eq!(app.board.pieces(), 0);
+    }
+
+    #[test]
+    fn rendering_remembers_the_size_it_rendered_at() {
+        // The size a frame is drawn at is the size the next click is read
+        // against -- that is the whole point of storing it.
+        let mut app = game();
+        app.render(333.0, 222.0);
+        assert_eq!((app.width, app.height), (333.0, 222.0));
+    }
+
+    #[test]
+    fn the_window_names_itself_and_opens_at_a_size_the_board_fits_in() {
+        let app = game();
+        assert_eq!(app.title(), "Connect Four");
+        assert_eq!(app.app_id(), "connect4");
+        let (w, h) = app.initial_size();
+        assert_eq!((w, h), (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
+        let l = Layout::new(w as f32, h as f32);
+        assert!(l.shows(l.header) && l.shows(l.info) && l.shows(l.chute) && l.shows(l.footer));
+        assert!(
+            !l.board.is_empty(),
+            "the default window has no room for a board"
+        );
+    }
+
+    // ── The drawing pass ──
+
+    #[test]
+    fn a_frame_is_drawn_at_the_size_it_was_asked_for() {
+        for (w, h) in WINDOWS {
+            let f = game().frame(w, h);
+            assert_eq!((f.width, f.height), (w.max(1.0), h.max(1.0)), "at {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn every_frame_closes_what_it_opens() {
+        for (w, h) in WINDOWS {
+            let mut app = game();
+            app.apply(Intent::ToggleHelp);
+            assert!(
+                app.frame(w, h).is_balanced(),
+                "with the sheet up at {w}x{h}"
+            );
+            app.apply(Intent::ToggleHelp);
+            assert!(app.frame(w, h).is_balanced(), "at {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn a_frame_paints_something_at_every_size_it_is_asked_for() {
+        // Including sizes with no room for a band or a word: the window is
+        // never blank, because the background alone is a command.
+        for (w, h) in WINDOWS {
+            assert!(
+                !game().frame(w, h).commands().is_empty(),
+                "nothing was drawn at {w}x{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_is_ever_painted_outside_the_window() {
+        for (w, h) in WINDOWS {
+            let mut app = game();
+            app.drop_at(3);
+            app.apply(Intent::ToggleHelp);
+            let f = app.frame(w, h);
+            for c in f.commands() {
+                if let RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } = c
+                {
+                    assert!(
+                        *x >= -0.01 && *y >= -0.01 && x + width <= w.max(1.0) + 0.01,
+                        "a box at ({x}, {y}) {width}x{height} leaves the {w}x{h} window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_line_of_text_starts_inside_the_window() {
+        // A line centred in a box narrower than the line would otherwise begin
+        // at a negative offset -- off the left edge, and for a box at the top of
+        // the window off the top as well.
+        for (w, h) in WINDOWS {
+            let mut app = game();
+            app.human_wins = 999;
+            app.apply(Intent::ToggleHelp);
+            for (body, r, _) in text_boxes(&app.frame(w, h)) {
+                assert!(
+                    r.x >= -0.01 && r.y >= -0.01,
+                    "{body:?} starts at ({}, {}) in a {w}x{h} window",
+                    r.x,
+                    r.y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_line_is_ever_asked_for_at_a_size_the_renderer_would_round_up() {
+        // The renderer clamps a requested size to a whole pixel, so a request
+        // below one pixel is drawn *larger* than the band it was sized to fit
+        // and every caller that shrinks its type to fit is silently overruled
+        // (`known-issues.md` lesson 60). Refusing is the honest answer.
+        for (w, h) in WINDOWS {
+            let mut app = game();
+            app.apply(Intent::ToggleHelp);
+            for (body, _, size) in text_boxes(&app.frame(w, h)) {
+                assert!(
+                    size >= MIN_DRAWN_FONT,
+                    "{body:?} asked for {size}px in a {w}x{h} window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_with_no_room_for_a_legible_line_shows_its_boxes_and_no_words() {
+        let mut app = game();
+        app.apply(Intent::ToggleHelp);
+        let f = app.frame(4.0, 4.0);
+        assert!(
+            texts(&f).is_empty(),
+            "words were drawn at 4x4: {:?}",
+            texts(&f)
+        );
+        assert!(
+            f.commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::FillRect { .. })),
+            "the sheet was not drawn either"
+        );
+    }
+
+    #[test]
+    fn an_empty_string_is_never_pushed_as_a_line_of_text() {
+        // Elided to fit in no space at all, a label would be an empty string
+        // sitting in the frame: a text command that paints nothing and still
+        // counts as text drawn.
+        for (w, h) in WINDOWS {
+            let mut app = game();
+            app.apply(Intent::ToggleHelp);
+            for body in texts(&app.frame(w, h)) {
+                assert!(!body.is_empty(), "an empty line was drawn at {w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_label_with_no_width_to_fit_in_is_not_drawn() {
+        let mut f = Frame::new(100.0, 100.0);
+        label(
+            &mut f,
+            0.0,
+            0.0,
+            "hello",
+            12.0,
+            COL_TEXT,
+            FontWeightHint::Regular,
+            Some(0.0),
+        );
+        assert!(texts(&f).is_empty(), "a label was drawn into no width");
+    }
+
+    #[test]
+    fn a_box_with_no_area_is_not_painted() {
+        let mut f = Frame::new(100.0, 100.0);
+        fill(&mut f, Rect::EMPTY, COL_RED, 0.0);
+        fill(&mut f, Rect::new(10.0, 10.0, 0.0, 20.0), COL_RED, 0.0);
+        assert!(f.commands().is_empty(), "an empty box was painted");
+    }
+
+    #[test]
+    fn a_button_with_no_box_is_neither_painted_nor_clickable() {
+        let mut f = Frame::new(100.0, 100.0);
+        button(
+            &mut f,
+            Rect::EMPTY,
+            Target::Help,
+            "Help",
+            10.0,
+            COL_SURFACE1,
+            COL_TEXT,
+        );
+        assert!(f.commands().is_empty());
+        assert!(f.hits().is_empty(), "a control nobody can see took clicks");
+    }
+
+    #[test]
+    fn a_line_is_centred_in_its_box_both_ways() {
+        let mut f = Frame::new(200.0, 100.0);
+        let r = Rect::new(20.0, 30.0, 160.0, 40.0);
+        centred(&mut f, r, "hi", 12.0, COL_TEXT, FontWeightHint::Regular);
+        let boxes = text_boxes(&f);
+        assert_eq!(boxes.len(), 1);
+        let drawn = boxes[0].1;
+        assert!(
+            (drawn.x - r.x - (r.w - drawn.w) / 2.0).abs() < 0.01,
+            "not centred across: {drawn:?} in {r:?}"
+        );
+        assert!(
+            (drawn.y - r.y - (r.h - drawn.h) / 2.0).abs() < 0.01,
+            "not centred down: {drawn:?} in {r:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_too_big_for_its_box_starts_at_the_boxs_corner_rather_than_before_it() {
+        let mut f = Frame::new(200.0, 100.0);
+        let r = Rect::new(20.0, 30.0, 4.0, 4.0);
+        centred(
+            &mut f,
+            r,
+            "a very long line indeed",
+            12.0,
+            COL_TEXT,
+            FontWeightHint::Regular,
+        );
+        let drawn = text_boxes(&f)[0].1;
+        assert!(drawn.x >= r.x - 0.01, "it began left of its box");
+        assert!(drawn.y >= r.y - 0.01, "it began above its box");
+    }
+
+    // ── The header ──
+
+    #[test]
+    fn the_window_says_what_game_it_is() {
+        let f = game().frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(texts(&f).contains(&"Connect Four".to_string()));
+    }
+
+    #[test]
+    fn the_three_readouts_are_labelled_and_show_their_counts() {
+        let mut app = game();
+        app.human_wins = 3;
+        app.ai_wins = 5;
+        app.draws = 2;
+        let lines = texts(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT));
+        for label in ["You", "AI", "Draw"] {
+            assert!(lines.contains(&label.to_string()), "no {label} readout");
+        }
+        for count in ["3", "5", "2"] {
+            assert!(lines.contains(&count.to_string()), "no count {count}");
+        }
+    }
+
+    #[test]
+    fn the_readouts_read_left_to_right_as_you_then_ai_then_draw() {
+        // They are laid out from the right edge inwards, so getting the order
+        // right means reversing the list -- an easy thing to get backwards and
+        // an invisible one without this.
+        let mut app = game();
+        app.human_wins = 1;
+        app.ai_wins = 2;
+        app.draws = 3;
+        let boxes = text_boxes(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT));
+        let x_of = |name: &str| {
+            boxes
+                .iter()
+                .find(|(body, _, _)| body == name)
+                .unwrap_or_else(|| panic!("no {name} in the frame"))
+                .1
+                .x
+        };
+        assert!(x_of("You") < x_of("AI"), "the AI readout is left of yours");
+        assert!(
+            x_of("AI") < x_of("Draw"),
+            "the draw readout is left of the AI's"
+        );
+    }
+
+    #[test]
+    fn a_readout_shows_the_tally_it_names_and_not_a_neighbours() {
+        // Three different counts, so a readout wired to the wrong field shows a
+        // number that is on screen but in the wrong box (`known-issues.md`
+        // lesson 59 -- a fixture with no asymmetry cannot notice a swap).
+        let mut app = game();
+        app.human_wins = 7;
+        app.ai_wins = 8;
+        app.draws = 9;
+        let boxes = text_boxes(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT));
+        let near = |name: &str, count: &str| {
+            let label = boxes.iter().find(|(b, _, _)| b == name).expect("no label");
+            let value = boxes.iter().find(|(b, _, _)| b == count).expect("no count");
+            (label.1.centre().0 - value.1.centre().0).abs() < label.1.w.max(value.1.w)
+        };
+        assert!(near("You", "7"), "your wins are not under your label");
+        assert!(near("AI", "8"), "the AI's wins are not under its label");
+        assert!(near("Draw", "9"), "the draws are not under their label");
+    }
+
+    #[test]
+    fn the_title_is_never_drawn_over_the_readouts() {
+        // It takes whatever they left and is elided rather than written across
+        // them.
+        for (w, h) in [
+            (WINDOW_WIDTH, WINDOW_HEIGHT),
+            (300.0, 400.0),
+            (120.0, 800.0),
+        ] {
+            let mut app = game();
+            app.human_wins = 88;
+            let l = Layout::new(w, h);
+            let f = app.frame(w, h);
+            let title = text_boxes(&f)
+                .into_iter()
+                .find(|(b, _, _)| b == "Connect Four")
+                .map(|(_, r, _)| r);
+            let leftmost = (0..3)
+                .map(|i| l.score_box(i))
+                .filter(|r| !r.is_empty())
+                .map(|r| r.x)
+                .fold(f32::INFINITY, f32::min);
+            if let Some(t) = title {
+                assert!(
+                    t.right() <= leftmost + 0.01,
+                    "the title runs to {} and the readouts start at {leftmost} at {w}x{h}",
+                    t.right()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_header_that_did_not_fit_is_not_drawn_at_all() {
+        let f = game().frame(24.0, 24.0);
+        let lines = texts(&f);
+        assert!(!lines.contains(&"Connect Four".to_string()), "{lines:?}");
+        assert!(!lines.contains(&"You".to_string()), "{lines:?}");
+    }
+
+    // ── The status line ──
+
+    #[test]
+    fn the_status_line_says_it_is_your_turn_when_it_is() {
+        let f = game().frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(
+            texts(&f).iter().any(|t| t.contains("Your turn")),
+            "the window does not say whose turn it is: {:?}",
+            texts(&f)
+        );
+    }
+
+    #[test]
+    fn the_status_line_says_the_search_is_thinking_while_it_owes_a_move() {
+        // The string existed before and could never be seen: the search ran
+        // inside the key handler that started it, so the frame that would have
+        // shown the message was never painted.
+        let mut app = game();
+        app.drop_at(3);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(
+            texts(&f).iter().any(|t| t.contains("thinking")),
+            "no word of the pause: {:?}",
+            texts(&f)
+        );
+    }
+
+    #[test]
+    fn the_status_line_announces_a_win_a_loss_and_a_draw_differently() {
+        let mut app = game();
+        app.status = GameStatus::Won(Cell::Red);
+        let won = app.status_line();
+        app.status = GameStatus::Won(Cell::Yellow);
+        let lost = app.status_line();
+        app.status = GameStatus::Draw;
+        let drawn = app.status_line();
+        assert_ne!(won, lost, "winning and losing read the same");
+        assert_ne!(won, drawn);
+        assert_ne!(lost, drawn);
+        assert!(won.contains("win"), "{won:?}");
+        assert!(drawn.contains("draw"), "{drawn:?}");
+    }
+
+    #[test]
+    fn the_status_line_is_coloured_by_what_it_says() {
+        let mut app = game();
+        assert_eq!(app.status_colour(), COL_BLUE, "a game in play");
+        app.status = GameStatus::Won(Cell::Red);
+        assert_eq!(app.status_colour(), COL_GREEN, "a win");
+        app.status = GameStatus::Won(Cell::Yellow);
+        assert_eq!(app.status_colour(), COL_RED, "a loss");
+        app.status = GameStatus::Draw;
+        assert_eq!(app.status_colour(), COL_PEACH, "a draw");
+    }
+
+    #[test]
+    fn the_status_line_reaches_the_frame_in_the_colour_it_chose() {
+        let mut app = game();
+        app.status = GameStatus::Won(Cell::Red);
+        let drawn = app
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, color, .. } if text.contains("win") => Some(*color),
+                _ => None,
+            })
+            .expect("the winning line was not drawn");
+        assert_eq!(drawn, COL_GREEN);
+    }
+
+    // ── The chute ──
+
+    #[test]
+    fn every_column_is_numbered_above_it() {
+        let f = game().frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let lines = texts(&f);
+        for col in 0..COLS {
+            assert!(
+                lines.contains(&(col + 1).to_string()),
+                "column {col} is not numbered"
+            );
+        }
+    }
+
+    #[test]
+    fn each_number_is_drawn_over_the_column_it_names() {
+        // "Is it drawn?" is not "is it drawn *there*?" (`known-issues.md`
+        // lesson 57): a column number in the wrong slot points at a column the
+        // player did not mean.
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let f = game().frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for (body, r, _) in text_boxes(&f) {
+            let Ok(number) = body.parse::<usize>() else {
+                continue;
+            };
+            if number == 0 || number > COLS {
+                continue;
+            }
+            let slot = l.chute_slot(number - 1);
+            let (cx, _) = r.centre();
+            assert!(
+                slot.x <= cx && cx <= slot.right(),
+                "the number {number} is at {cx}, and its slot is {slot:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_piece_about_to_fall_is_shown_over_the_cursors_column() {
+        let mut app = game();
+        app.cursor_col = 1;
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let slot = l.chute_slot(1);
+        let waiting = f.commands().iter().any(|c| match c {
+            RenderCommand::FillRect {
+                x, y, color, width, ..
+            } => *color == Cell::Red.face() && slot.contains(x + width / 2.0, *y + 1.0),
+            _ => false,
+        });
+        assert!(waiting, "nothing is waiting over the cursor's column");
+    }
+
+    #[test]
+    fn the_piece_about_to_fall_moves_with_the_cursor() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let waiting_over = |app: &Connect4, col: usize| {
+            let slot = l.chute_slot(col);
+            app.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands()
+                .iter()
+                .any(|c| match c {
+                    RenderCommand::FillRect {
+                        x, y, color, width, ..
+                    } => *color == Cell::Red.face() && slot.contains(x + width / 2.0, *y + 1.0),
+                    _ => false,
+                })
+        };
+        let mut app = game();
+        assert!(waiting_over(&app, CENTER_COL));
+        app.apply(Intent::CursorLeft);
+        assert!(waiting_over(&app, CENTER_COL - 1), "it did not follow");
+        assert!(
+            !waiting_over(&app, CENTER_COL),
+            "it was left behind as well as moved"
+        );
+    }
+
+    #[test]
+    fn nothing_waits_over_a_column_that_cannot_take_a_piece() {
+        // A disc over a full column would promise a move the program then
+        // refuses.
+        let mut app = game();
+        for _ in 0..ROWS {
+            app.drop_at(0);
+        }
+        app.current_player = Cell::Red;
+        app.cursor_col = 0;
+        let slot = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT).chute_slot(0);
+        let waiting = app
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .any(|c| match c {
+                RenderCommand::FillRect {
+                    x, y, color, width, ..
+                } => *color == Cell::Red.face() && slot.contains(x + width / 2.0, *y + 1.0),
+                _ => false,
+            });
+        assert!(!waiting, "a piece waits over a column that is full");
+    }
+
+    #[test]
+    fn nothing_waits_over_any_column_once_the_game_is_over() {
+        let mut app = game();
+        app.board = won_board(Cell::Red);
+        app.status = GameStatus::Won(Cell::Red);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for col in 0..COLS {
+            let slot = l.chute_slot(col);
+            let waiting = f.commands().iter().any(|c| match c {
+                RenderCommand::FillRect {
+                    x, y, color, width, ..
+                } => *color == Cell::Red.face() && slot.contains(x + width / 2.0, *y + 1.0),
+                _ => false,
+            });
+            assert!(!waiting, "a piece waits over column {col} after the game");
+        }
+    }
+
+    // ── The board ──
+
+    #[test]
+    fn every_hole_of_the_board_is_painted() {
+        let f = game().frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for row in 0..ROWS {
+            for col in 0..COLS {
+                assert_eq!(
+                    fill_at(&f, l.cell(row, col)),
+                    Some(Cell::Empty.face()),
+                    "({row}, {col}) is not a hole"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_piece_is_painted_in_the_hole_it_landed_in() {
+        let mut app = game();
+        app.drop_at(2);
+        app.drop_at(2);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(fill_at(&f, l.cell(0, 2)), Some(COL_RED), "the first piece");
+        assert_eq!(fill_at(&f, l.cell(1, 2)), Some(COL_YELLOW), "the second");
+        assert_eq!(fill_at(&f, l.cell(2, 2)), Some(Cell::Empty.face()), "above");
+    }
+
+    #[test]
+    fn a_piece_is_painted_at_the_bottom_of_the_window_and_not_the_top() {
+        // Row 0 is the floor. Drawn at the top the board would be upside down
+        // and every game would read backwards.
+        let mut app = game();
+        app.drop_at(0);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let piece = f.commands().iter().find_map(|c| match c {
+            RenderCommand::FillRect { x, y, color, .. } if *color == COL_RED => Some((*x, *y)),
+            _ => None,
+        });
+        let (_, y) = piece.expect("the piece was not drawn");
+        assert!(
+            y > l.board.centre().1,
+            "the piece was drawn in the top half of the board"
+        );
+    }
+
+    #[test]
+    fn the_winning_four_are_ringed_and_joined() {
+        let mut app = game();
+        for col in 0..3 {
+            app.drop_at(col);
+            app.current_player = Cell::Red;
+        }
+        app.drop_at(3);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let rings = f
+            .commands()
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == COL_GREEN))
+            .count();
+        assert_eq!(rings, RUN, "the ring is not around all four");
+        assert!(
+            f.commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Line { color, .. } if *color == COL_GREEN)),
+            "the run's direction is not drawn"
+        );
+    }
+
+    #[test]
+    fn the_line_joining_the_winning_four_runs_between_the_ends_of_the_run() {
+        let mut app = game();
+        for col in 0..3 {
+            app.drop_at(col);
+            app.current_player = Cell::Red;
+        }
+        app.drop_at(3);
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let drawn = f
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Line { x1, y1, x2, y2, .. } => Some((*x1, *y1, *x2, *y2)),
+                _ => None,
+            })
+            .expect("no line was drawn");
+        let (ax, ay) = l.cell(0, 0).centre();
+        let (bx, by) = l.cell(0, 3).centre();
+        assert!(
+            (drawn.0 - ax).abs() < 0.01 && (drawn.1 - ay).abs() < 0.01,
+            "start"
+        );
+        assert!(
+            (drawn.2 - bx).abs() < 0.01 && (drawn.3 - by).abs() < 0.01,
+            "end"
+        );
+    }
+
+    #[test]
+    fn a_game_still_in_play_has_nothing_ringed() {
+        let mut app = game();
+        app.drop_at(0);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(
+            !f.commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::StrokeRect { .. })),
+            "four cells are ringed on a board with no win on it"
+        );
+    }
+
+    // ── Hit boxes ──
+
+    #[test]
+    fn every_column_is_a_control_at_every_size_the_board_is_drawn_at() {
+        for (w, h) in WINDOWS {
+            let app = windowed(w, h);
+            if Layout::new(w, h).board.is_empty() {
+                continue;
+            }
+            for col in 0..COLS {
+                assert!(
+                    probe::is_visible_sized(&app, Target::Column(col), (w, h)),
+                    "column {col} takes no clicks at {w}x{h}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_columns_control_is_the_strip_the_layout_says_it_is() {
+        // Recorded by the pass that paints it, so there is no second copy of
+        // the geometry to disagree with the first.
+        let app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for col in 0..COLS {
+            assert_eq!(
+                hits_for(&f, Target::Column(col)),
+                vec![l.column(col)],
+                "column {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_three_footer_buttons_are_controls_and_are_labelled() {
+        let app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let lines = texts(&f);
+        for (target, name) in [
+            (Target::NewGame, "New game"),
+            (Target::Undo, "Undo"),
+            (Target::Help, "Help"),
+        ] {
+            assert_eq!(hits_for(&f, target).len(), 1, "{name} is not one control");
+            assert!(lines.contains(&name.to_string()), "{name} has no label");
+        }
+    }
+
+    #[test]
+    fn a_footer_buttons_label_is_inside_the_button() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let boxes = text_boxes(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT));
+        for (i, name) in ["New game", "Undo", "Help"].into_iter().enumerate() {
+            let r = boxes
+                .iter()
+                .find(|(b, _, _)| b == name)
+                .unwrap_or_else(|| panic!("{name} is not drawn"))
+                .1;
+            let button = l.footer_button(i);
+            assert!(
+                r.x >= button.x - 0.01 && r.right() <= button.right() + 0.01,
+                "{name} at {r:?} is outside its button {button:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_undo_button_is_greyed_when_there_is_nothing_to_take_back() {
+        // Greyed rather than gone: the button keeps its hit box, so the answer
+        // to pressing it is a refusal the player can see rather than a control
+        // that moved out from under the pointer.
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cold = fill_at(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT), l.footer_button(1));
+        app.drop_at(3);
+        let warm = fill_at(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT), l.footer_button(1));
+        assert_eq!(cold, Some(COL_SURFACE0), "the dead button is not greyed");
+        assert_eq!(warm, Some(COL_SURFACE1), "the live button is greyed");
+        assert_ne!(cold, warm);
+    }
+
+    #[test]
+    fn the_undo_button_takes_clicks_even_when_there_is_nothing_to_undo() {
+        let app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(!app.can_undo());
+        assert!(
+            probe::is_visible_sized(&app, Target::Undo, (WINDOW_WIDTH, WINDOW_HEIGHT)),
+            "the greyed button stopped being a control"
+        );
+    }
+
+    #[test]
+    fn there_are_no_footer_controls_in_a_window_with_no_footer() {
+        let app = windowed(24.0, 24.0);
+        for target in [Target::NewGame, Target::Undo, Target::Help] {
+            assert!(
+                !probe::is_visible_sized(&app, target, (24.0, 24.0)),
+                "{target:?} is clickable in a window that does not draw it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_window_lists_every_control_it_has_and_no_others() {
+        let app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut names = probe::control_names(&app);
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names,
+            vec!["Column", "Help", "NewGame", "Undo"],
+            "the controls on screen are not the ones the program means to have"
+        );
+    }
+
+    #[test]
+    fn the_help_sheet_appears_in_the_controls_only_when_it_is_up() {
+        let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(!probe::control_names(&app).contains(&"HelpSheet".to_string()));
+        app.apply(Intent::ToggleHelp);
+        assert!(probe::control_names(&app).contains(&"HelpSheet".to_string()));
+    }
+
+    // ── The help sheet, drawn ──
+
+    /// The sheet's title is the same string as the header's, so counting the
+    /// title is the only way to tell "the sheet is up" from "the header is
+    /// drawn": asserting the *absence* of `HELP_TITLE` here would fail on a
+    /// closed sheet, because the header wrote it.
+    #[test]
+    fn the_sheet_is_not_drawn_until_it_is_asked_for() {
+        let lines = texts(&game().frame(WINDOW_WIDTH, WINDOW_HEIGHT));
+        for (key, meaning) in HELP_ROWS {
+            assert!(!lines.contains(&key.to_string()), "{key} without the sheet");
+            assert!(
+                !lines.contains(&meaning.to_string()),
+                "{meaning} without the sheet"
+            );
+        }
+        assert!(
+            !lines.iter().any(|l| l.contains("Click anywhere")),
+            "the closing line is drawn over a shut sheet"
+        );
+        assert_eq!(
+            lines.iter().filter(|l| *l == HELP_TITLE).count(),
+            1,
+            "the title is drawn twice with the sheet shut: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_sheet_lists_every_control_and_what_it_does() {
+        let mut app = game();
+        app.apply(Intent::ToggleHelp);
+        let lines = texts(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT));
+        assert_eq!(
+            lines.iter().filter(|l| *l == HELP_TITLE).count(),
+            2,
+            "the sheet does not head itself: {lines:?}"
+        );
+        for (key, meaning) in HELP_ROWS {
+            assert!(lines.contains(&key.to_string()), "{key} is not listed");
+            assert!(lines.contains(&meaning.to_string()), "{meaning} is missing");
+        }
+        assert!(
+            lines.iter().any(|l| l.contains("Click anywhere")),
+            "the sheet does not say how to shut it"
+        );
+    }
+
+    #[test]
+    fn the_sheets_rows_do_not_overwrite_one_another() {
+        // Each row is sized to the band it is written in, not to the sheet: a
+        // row taller than its band is written across the row beneath it.
+        let mut app = game();
+        app.apply(Intent::ToggleHelp);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut rows: Vec<Rect> = text_boxes(&f)
+            .into_iter()
+            .filter(|(b, _, _)| HELP_ROWS.iter().any(|(k, _)| k == b))
+            .map(|(_, r, _)| r)
+            .collect();
+        assert_eq!(rows.len(), HELP_ROWS.len(), "a row is missing");
+        rows.sort_by(|a, b| a.y.total_cmp(&b.y));
+        for pair in rows.windows(2) {
+            assert!(
+                pair[0].bottom() <= pair[1].y + 0.01,
+                "a row at {:?} runs into the one at {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn the_closing_line_is_written_below_the_last_row_and_not_across_it() {
+        // The ladder divides the sheet's body by `rows + 1` for exactly this
+        // reason: measured back from the sheet's own bottom edge instead, this
+        // line would sit inside the last row's band.
+        let mut app = game();
+        app.apply(Intent::ToggleHelp);
+        let boxes = text_boxes(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT));
+        let closing = boxes
+            .iter()
+            .find(|(b, _, _)| b.contains("Click anywhere"))
+            .expect("no closing line")
+            .1;
+        let last_key = HELP_ROWS[HELP_ROWS.len() - 1].0;
+        let last = boxes
+            .iter()
+            .find(|(b, _, _)| b == last_key)
+            .expect("no last row")
+            .1;
+        assert!(
+            closing.y >= last.bottom() - 0.01,
+            "the closing line at {closing:?} is written over the row at {last:?}"
+        );
+    }
+
+    #[test]
+    fn a_rows_meaning_is_written_to_the_right_of_the_key_it_explains() {
+        let mut app = game();
+        app.apply(Intent::ToggleHelp);
+        let boxes = text_boxes(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT));
+        for (key, meaning) in HELP_ROWS {
+            let k = boxes.iter().find(|(b, _, _)| b == key).expect("no key");
+            let m = boxes
+                .iter()
+                .find(|(b, _, _)| b == meaning)
+                .expect("no meaning");
+            assert!(
+                m.1.x >= k.1.right() - 0.01,
+                "{meaning} is written over {key}"
+            );
+            assert!(
+                (m.1.y - k.1.y).abs() < 0.01,
+                "{meaning} is not on the same line as {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_line_of_the_sheet_stays_inside_the_sheet() {
+        let mut app = game();
+        app.apply(Intent::ToggleHelp);
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            for (body, r, _) in text_boxes(&app.frame(w, h)) {
+                if !HELP_ROWS.iter().any(|(k, m)| *k == body || *m == body) {
+                    continue;
+                }
+                assert!(
+                    r.x >= l.help.x - 0.01 && r.bottom() <= l.help.bottom() + 0.01,
+                    "{body:?} at {r:?} leaves the sheet {:?} at {w}x{h}",
+                    l.help
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_sheet_takes_the_whole_window_and_takes_it_last() {
+        // Its own rectangle would leave the columns and the footer live
+        // underneath a sheet that covers the board, and a click meant to shut
+        // it would drop a piece the player could not see. Recorded last, so it
+        // lies over every control drawn before it.
+        let mut app = game();
+        app.apply(Intent::ToggleHelp);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(
+            hits_for(&f, Target::HelpSheet),
+            vec![Rect::new(0.0, 0.0, WINDOW_WIDTH, WINDOW_HEIGHT)],
+            "the sheet claims less than the window"
+        );
+        assert_eq!(
+            f.hits().last().map(|(t, _)| *t),
+            Some(Target::HelpSheet),
+            "a control was recorded over the sheet"
+        );
+    }
+
+    #[test]
+    fn the_sheet_can_be_shut_in_a_window_too_small_to_draw_the_button_that_opened_it() {
+        let mut app = windowed(24.0, 24.0);
+        app.apply(Intent::ToggleHelp);
+        assert!(
+            !probe::is_visible_sized(&app, Target::Help, (24.0, 24.0)),
+            "the fixture window still draws the Help button"
+        );
+        assert_eq!(click(&mut app, 12.0, 12.0), EventResult::Consumed);
+        assert!(!app.help_is_open(), "the sheet cannot be shut at 24x24");
+    }
 }

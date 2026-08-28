@@ -4359,6 +4359,7 @@ name = "game2048"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]

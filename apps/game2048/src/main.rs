@@ -1,65 +1,134 @@
-//! Slate OS 2048 Game
+//! 2048 — slide the tiles together until two of them make 2048.
 //!
-//! A tile-merging puzzle game where the player slides numbered tiles on a 4×4
-//! grid, combining identical tiles to reach the 2048 tile and beyond.
-
-#![allow(dead_code)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
+//! A 4x4 board. Every move slides every tile as far as it will go in one
+//! direction; two touching tiles of the same value merge into one of twice
+//! the value, and the merged value is added to the score. A new 2 (or, one
+//! time in ten, a 4) appears in a free cell after every move that changed
+//! something. Reach 2048 and you have won, and may keep going. Fill the board
+//! with no two neighbours equal and you have lost.
+//!
+//! ## What wiring this up found
+//!
+//! The game logic underneath was sound — the slide, the merge, the scoring
+//! and the end conditions all did what they claimed. Everything around it was
+//! not:
+//!
+//! 1. **`main` was `let _app = Game2048App::new();`.** It built a board, dealt
+//!    two tiles onto it, dropped the whole thing and exited. No window was
+//!    ever opened, nothing was ever drawn, and no key or click ever arrived.
+//! 2. **The layout was a picture of a window rather than a window.** The board
+//!    lived at a constant `(40, 140)` with a constant 100-pixel cell, and
+//!    `render(width, height)` used its two arguments for the background
+//!    rectangle and nothing else. The board therefore always ran from x=40 to
+//!    x=528 and y=140 to y=628 whatever window it was in: a window narrower
+//!    than 530 cut the board in half, one shorter than 630 cut the bottom off,
+//!    and a large one left the game in the top-left corner. `Layout` is
+//!    derived from the live window size on every frame now and stored on
+//!    nothing.
+//! 3. **Nothing at all was clickable.** `handle_event` matched `Event::Key`
+//!    and dropped everything else on the floor; there was no mouse code
+//!    anywhere in the file. A pointer could not move a tile, start a game,
+//!    undo, or open the help — which for a game whose whole interface is
+//!    "push the pile that way" is not a limitation but an absence. There is a
+//!    direction pad now, and a footer, and every control is a hit box
+//!    recorded by the pass that paints it.
+//! 4. **`Highest:` was a high-water mark over the session, not the highest
+//!    tile on the board.** `update_highest` compared each cell against the
+//!    stored value and kept the larger — it could only ever rise. It was
+//!    never reset, and `UndoEntry` did not carry it, so undoing the merge
+//!    that made a 512 left `Highest: 512` printed over a board whose largest
+//!    tile was 256. It is computed from the grid now, so there is no second
+//!    copy of it left to disagree.
+//! 5. **An undo could not undo a win.** `UndoEntry` held the grid and the
+//!    score and nothing else; `undo` put `Lost` back to `Playing` and left
+//!    `Won` alone. Since `make_move` refuses to move while the status is
+//!    `Won`, undoing the winning move left "You Win!" printed over a board
+//!    with no 2048 anywhere on it and every direction refused — pressing `C`
+//!    to continue was the only way out of a state the player had just asked
+//!    to leave. The entry carries the status now, along with the move count,
+//!    which had been patched up with a `saturating_sub(1)` that was only ever
+//!    right by coincidence.
+//! 6. **Winning on a dead board left a game that could never end.**
+//!    `make_move` returned the moment it saw 2048, skipping the "can anything
+//!    still move?" check, and `continue_after_win` did not check either. Reach
+//!    2048 on the move that fills the last cell, choose to keep going, and the
+//!    game sits at `WonContinuing` for ever: every direction refused, no
+//!    "Game Over" ever shown, and nothing to say why. Continuing re-asks the
+//!    question now.
+//! 7. **The help sheet was drawn on top of the board and off the bottom of the
+//!    window.** `render_help` put it at `BOARD_Y + 480` — y=620, where the
+//!    board ends at y=628 — 420 wide and 200 tall, so it covered the last row
+//!    of tiles and ran to y=820, well past the bottom of the 700-pixel window
+//!    the rest of the file was drawn for. Its `_width` and `_height`
+//!    parameters were ignored, which the underscores admit in writing.
+//! 8. **Two pieces of text were centred by guessing.** The win and loss
+//!    banners offset their titles by a hard-coded `-80.0`, which centres a
+//!    string of one particular length: "You Win!" and "Game Over" are not the
+//!    same width and both got the same offset. Tile numbers were centred with
+//!    `text.len() as f32 * font_size * 0.3`, a guess at the width of a digit.
+//!    Both measure the text now.
+//! 9. **The crate did not pass the lane's clippy gate at all**, carrying
+//!    `#![allow(dead_code)]` and nine more crate-wide allows. All ten are
+//!    gone, and with them `spawn_tile_at` and `is_full`, which nothing called.
 
 use guitk::color::Color;
-#[allow(unused_imports)]
-use guitk::event::{Event, Key, KeyEvent, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{RandomSource, SeededRng, seed_from_system};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
+use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+// ── Catppuccin Mocha, only the entries this program actually paints with ──
+const COL_BASE: Color = Color::from_hex(0x1E1E2E);
+const COL_MANTLE: Color = Color::from_hex(0x181825);
+const COL_CRUST: Color = Color::from_hex(0x11111B);
+const COL_SURFACE0: Color = Color::from_hex(0x313244);
+const COL_SURFACE1: Color = Color::from_hex(0x45475A);
+const COL_SURFACE2: Color = Color::from_hex(0x585B70);
+const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
+const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
+const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
+const COL_BLUE: Color = Color::from_hex(0x89B4FA);
+const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
+const COL_RED: Color = Color::from_hex(0xF38BA8);
+const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
+const COL_PEACH: Color = Color::from_hex(0xFAB387);
+const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
+const COL_TEAL: Color = Color::from_hex(0x94E2D5);
+const COL_MAUVE: Color = Color::from_hex(0xCBA6F7);
 
+/// The side of the board, in cells. 2048 is a 4x4 game; the constant is here
+/// so the arithmetic reads as arithmetic rather than as a sprinkling of 4s.
 const GRID_SIZE: usize = 4;
-const CELL_SIZE: f32 = 100.0;
-const CELL_GAP: f32 = 12.0;
-const BOARD_PADDING: f32 = 12.0;
-const BOARD_X: f32 = 40.0;
-const BOARD_Y: f32 = 140.0;
 
-// Catppuccin Mocha palette
-const COL_BASE: u32 = 0x1E1E2E;
-const COL_MANTLE: u32 = 0x181825;
-const COL_CRUST: u32 = 0x11111B;
-const COL_SURFACE0: u32 = 0x313244;
-const COL_SURFACE1: u32 = 0x45475A;
-const COL_SURFACE2: u32 = 0x585B70;
-const COL_TEXT: u32 = 0xCDD6F4;
-const COL_SUBTEXT0: u32 = 0xA6ADC8;
-const COL_BLUE: u32 = 0x89B4FA;
-const COL_GREEN: u32 = 0xA6E3A1;
-const COL_RED: u32 = 0xF38BA8;
-const COL_YELLOW: u32 = 0xF9E2AF;
-const COL_PEACH: u32 = 0xFAB387;
-const COL_LAVENDER: u32 = 0xB4BEFE;
-const COL_OVERLAY0: u32 = 0x6C7086;
-const COL_TEAL: u32 = 0x94E2D5;
-const COL_MAUVE: u32 = 0xCBA6F7;
+/// The tile that wins the game.
+const WIN_TILE: u32 = 2048;
 
-// ---------------------------------------------------------------------------
-// Randomness
-// ---------------------------------------------------------------------------
-
-/// Seed used when the kernel's entropy source cannot be reached.
+/// How many moves can be taken back.
 ///
-/// A per-crate constant rather than a shared one, so that two programs which
-/// lose entropy on the same boot do not then produce correlated streams. The
-/// bytes spell `2048GAME`.
+/// Bounded because the history is kept in memory and a long game is thousands
+/// of moves; the oldest entry falls off the end rather than the newest, so
+/// what you can always undo is what you just did.
+const MAX_UNDO: usize = 50;
+
+/// One time in ten a new tile is a 4 rather than a 2. The original game's
+/// number, and the reason a board fills faster than doubling alone explains.
+const FOUR_IN: u32 = 10;
+
+const WINDOW_WIDTH: f32 = 560.0;
+const WINDOW_HEIGHT: f32 = 720.0;
+
+/// The seed used when the kernel has no entropy to give.
+///
+/// A per-crate constant rather than a shared one, so two programs that lose
+/// entropy on the same boot do not then produce correlated streams. Refusing
+/// to start would be the worse failure — a predictable 2048 board costs the
+/// player a game, and no game costs them the program. The bytes spell
+/// `2048GAME`.
 const FALLBACK_SEED: u64 = 0x3230_3438_4741_4D45;
 
 // This crate used to carry its own copy of the LCG that got copied into
@@ -75,57 +144,137 @@ const FALLBACK_SEED: u64 = 0x3230_3438_4741_4D45;
 // `randrange::below` is Lemire's method with its rejection step, so the draw
 // is exactly uniform rather than merely unbiased in its high bits.
 
-// ---------------------------------------------------------------------------
-// Direction
-// ---------------------------------------------------------------------------
+const HELP_TITLE: &str = "How to play";
+const HELP_ROWS: [(&str, &str); 8] = [
+    ("Arrows / WASD", "Slide every tile that way"),
+    ("Click < ^ v >", "The same, with a pointer"),
+    ("U / Ctrl+Z", "Take back the last move"),
+    ("N / R", "Start a new game"),
+    ("C / Enter", "Keep playing after winning"),
+    ("H / Esc", "Show or hide this sheet"),
+    ("", ""),
+    ("Two tiles alike", "merge into one of twice the value"),
+];
+
+/// The share of the window height the board is guaranteed, before any band is
+/// allowed to take a pixel. Bands are dropped whole until the rest fit.
+const BOARD_SHARE: f32 = 0.42;
+
+/// Which band is given up first when they do not all fit: footer, info,
+/// header, and the direction pad last of all.
+///
+/// The pad goes last because it is the only route a pointer has to the one
+/// verb this game has. A window with room for exactly one band should keep
+/// the band you can play with, not the one with the title on it. Bands are
+/// dropped whole rather than shrunk together, because a band scaled down to
+/// four pixels costs the board four pixels and shows nothing.
+const BAND_DROP_ORDER: [usize; 4] = [3, 1, 0, 2];
+
+// ── Direction ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Direction {
+pub enum Direction {
     Up,
     Down,
     Left,
     Right,
 }
 
-// ---------------------------------------------------------------------------
-// Game state
-// ---------------------------------------------------------------------------
+impl Direction {
+    /// The four, in the order the direction pad paints them: the reading
+    /// order of a keyboard's arrow cluster flattened into a row.
+    pub const ALL: [Direction; 4] = [
+        Direction::Left,
+        Direction::Up,
+        Direction::Down,
+        Direction::Right,
+    ];
+
+    /// The glyph painted on this direction's button.
+    ///
+    /// ASCII, not the Unicode arrows: a font without them draws a box, and a
+    /// box is the difference between a playable window and an unreadable one.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Direction::Up => "^",
+            Direction::Down => "v",
+            Direction::Left => "<",
+            Direction::Right => ">",
+        }
+    }
+}
+
+// ── The board ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GameStatus {
+pub enum GameStatus {
     Playing,
+    /// 2048 has been reached and the player has not yet said whether to stop.
     Won,
+    /// The board is full and no two neighbours are equal.
     Lost,
+    /// 2048 was reached and the player chose to keep going.
     WonContinuing,
 }
 
 #[derive(Debug, Clone)]
-struct GameState {
+pub struct Board {
     grid: [[u32; GRID_SIZE]; GRID_SIZE],
     score: u32,
     best_score: u32,
     status: GameStatus,
-    moves_count: u32,
-    highest_tile: u32,
+    moves: u32,
 }
 
-impl GameState {
+impl Board {
     fn new() -> Self {
         Self {
             grid: [[0; GRID_SIZE]; GRID_SIZE],
             score: 0,
             best_score: 0,
             status: GameStatus::Playing,
-            moves_count: 0,
-            highest_tile: 0,
+            moves: 0,
         }
+    }
+
+    pub fn at(&self, row: usize, col: usize) -> u32 {
+        self.grid
+            .get(row)
+            .and_then(|r| r.get(col))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn score(&self) -> u32 {
+        self.score
+    }
+
+    pub fn best_score(&self) -> u32 {
+        self.best_score
+    }
+
+    pub fn status(&self) -> GameStatus {
+        self.status
+    }
+
+    pub fn moves(&self) -> u32 {
+        self.moves
+    }
+
+    /// The largest tile **on the board**.
+    ///
+    /// Derived rather than stored. The field this replaced could only ever
+    /// rise — it was compared against and never reset — so an undo left it
+    /// naming a tile that was no longer anywhere on the board.
+    pub fn highest_tile(&self) -> u32 {
+        self.grid.iter().flatten().copied().max().unwrap_or(0)
     }
 
     fn empty_cells(&self) -> Vec<(usize, usize)> {
         let mut cells = Vec::new();
-        for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                if self.grid[r][c] == 0 {
+        for (r, row) in self.grid.iter().enumerate() {
+            for (c, &val) in row.iter().enumerate() {
+                if val == 0 {
                     cells.push((r, c));
                 }
             }
@@ -133,186 +282,138 @@ impl GameState {
         cells
     }
 
-    fn is_full(&self) -> bool {
-        self.empty_cells().is_empty()
-    }
-
     fn spawn_tile(&mut self, rng: &mut SeededRng) {
         let empty = self.empty_cells();
-        if empty.is_empty() {
+        let Some(&(r, c)) = empty.get(rng.below(empty.len())) else {
             return;
-        }
-        let idx = rng.below(empty.len());
-        let (r, c) = empty[idx];
-        // 90% chance of 2, 10% chance of 4
-        let val = if rng.chance_in(9, 10) { 2 } else { 4 };
-        self.grid[r][c] = val;
-        self.update_highest();
-    }
-
-    fn spawn_tile_at(&mut self, row: usize, col: usize, val: u32) {
-        self.grid[row][col] = val;
-        self.update_highest();
-    }
-
-    fn update_highest(&mut self) {
-        for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                if self.grid[r][c] > self.highest_tile {
-                    self.highest_tile = self.grid[r][c];
-                }
-            }
+        };
+        let val = if rng.below(FOUR_IN as usize) == 0 {
+            4
+        } else {
+            2
+        };
+        if let Some(cell) = self.grid.get_mut(r).and_then(|row| row.get_mut(c)) {
+            *cell = val;
         }
     }
 
-    /// Slide and merge a single row to the left. Returns (new_row, points_earned, moved).
-    fn slide_row_left(row: &[u32; GRID_SIZE]) -> ([u32; GRID_SIZE], u32, bool) {
-        let mut result = [0u32; GRID_SIZE];
-        let mut points = 0u32;
-        let mut pos = 0;
-        let mut moved = false;
-
-        // Compact non-zero tiles
-        let mut compacted = [0u32; GRID_SIZE];
-        let mut ci = 0;
-        for &val in row {
+    /// Slide and merge one line towards index 0. Returns the new line, the
+    /// points the merges earned, and whether anything moved.
+    ///
+    /// Every direction is this function: a column is a line, and a rightward
+    /// slide is a reversed line slid leftwards and reversed back. There is one
+    /// copy of the rule, so there is one place for it to be wrong.
+    fn slide(line: &[u32; GRID_SIZE]) -> ([u32; GRID_SIZE], u32, bool) {
+        let mut packed = [0u32; GRID_SIZE];
+        let mut n = 0;
+        for &val in line {
             if val != 0 {
-                compacted[ci] = val;
-                ci += 1;
+                if let Some(slot) = packed.get_mut(n) {
+                    *slot = val;
+                }
+                n = n.saturating_add(1);
             }
         }
 
-        // Merge adjacent equal tiles
-        let mut i = 0;
-        while i < GRID_SIZE {
-            if compacted[i] == 0 {
-                i += 1;
-                continue;
-            }
-            if i + 1 < GRID_SIZE && compacted[i] == compacted[i + 1] {
-                let merged = compacted[i].saturating_mul(2);
-                result[pos] = merged;
-                points = points.saturating_add(merged);
-                pos += 1;
-                i += 2;
-            } else {
-                result[pos] = compacted[i];
-                pos += 1;
-                i += 1;
-            }
-        }
-
-        // Check if anything moved
-        for idx in 0..GRID_SIZE {
-            if result[idx] != row[idx] {
-                moved = true;
+        let mut out = [0u32; GRID_SIZE];
+        let mut points = 0u32;
+        let mut write = 0usize;
+        let mut read = 0usize;
+        while read < GRID_SIZE {
+            let val = packed.get(read).copied().unwrap_or(0);
+            if val == 0 {
                 break;
             }
+            // A tile merges with the one after it at most once per move, which
+            // is why `read` advances by two: [2, 2, 2, 2] is [4, 4], never [8].
+            let pair = packed.get(read.saturating_add(1)).copied().unwrap_or(0);
+            let (value, step) = if pair == val {
+                let merged = val.saturating_mul(2);
+                points = points.saturating_add(merged);
+                (merged, 2)
+            } else {
+                (val, 1)
+            };
+            if let Some(slot) = out.get_mut(write) {
+                *slot = value;
+            }
+            write = write.saturating_add(1);
+            read = read.saturating_add(step);
         }
 
-        (result, points, moved)
+        (out, points, out != *line)
     }
 
-    /// Apply a move in the given direction. Returns true if the board changed.
-    fn apply_move(&mut self, dir: Direction) -> bool {
-        let mut total_points = 0u32;
-        let mut any_moved = false;
-
-        match dir {
-            Direction::Left => {
-                for r in 0..GRID_SIZE {
-                    let row = self.grid[r];
-                    let (new_row, pts, moved) = Self::slide_row_left(&row);
-                    self.grid[r] = new_row;
-                    total_points = total_points.saturating_add(pts);
-                    if moved {
-                        any_moved = true;
-                    }
-                }
-            }
-            Direction::Right => {
-                for r in 0..GRID_SIZE {
-                    let mut reversed = self.grid[r];
-                    reversed.reverse();
-                    let (mut new_row, pts, moved) = Self::slide_row_left(&reversed);
-                    new_row.reverse();
-                    self.grid[r] = new_row;
-                    total_points = total_points.saturating_add(pts);
-                    if moved {
-                        any_moved = true;
-                    }
-                }
-            }
-            Direction::Up => {
-                for c in 0..GRID_SIZE {
-                    let col = [
-                        self.grid[0][c],
-                        self.grid[1][c],
-                        self.grid[2][c],
-                        self.grid[3][c],
-                    ];
-                    let (new_col, pts, moved) = Self::slide_row_left(&col);
-                    for (r, val) in new_col.iter().enumerate() {
-                        self.grid[r][c] = *val;
-                    }
-                    total_points = total_points.saturating_add(pts);
-                    if moved {
-                        any_moved = true;
-                    }
-                }
-            }
-            Direction::Down => {
-                for c in 0..GRID_SIZE {
-                    let mut col = [
-                        self.grid[0][c],
-                        self.grid[1][c],
-                        self.grid[2][c],
-                        self.grid[3][c],
-                    ];
-                    col.reverse();
-                    let (mut new_col, pts, moved) = Self::slide_row_left(&col);
-                    new_col.reverse();
-                    for (r, val) in new_col.iter().enumerate() {
-                        self.grid[r][c] = *val;
-                    }
-                    total_points = total_points.saturating_add(pts);
-                    if moved {
-                        any_moved = true;
-                    }
-                }
-            }
+    /// One column of the board, top to bottom.
+    fn column(&self, c: usize) -> [u32; GRID_SIZE] {
+        let mut col = [0u32; GRID_SIZE];
+        for (r, slot) in col.iter_mut().enumerate() {
+            *slot = self.at(r, c);
         }
-
-        if any_moved {
-            self.score = self.score.saturating_add(total_points);
-            if self.score > self.best_score {
-                self.best_score = self.score;
-            }
-            self.moves_count = self.moves_count.saturating_add(1);
-            self.update_highest();
-        }
-
-        any_moved
+        col
     }
 
-    /// Check if any move is possible.
-    fn can_move(&self) -> bool {
-        // Check for any empty cell
-        for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                if self.grid[r][c] == 0 {
-                    return true;
-                }
+    fn set_column(&mut self, c: usize, col: [u32; GRID_SIZE]) {
+        for (r, &val) in col.iter().enumerate() {
+            if let Some(cell) = self.grid.get_mut(r).and_then(|row| row.get_mut(c)) {
+                *cell = val;
             }
         }
-        // Check for any adjacent equal pair
+    }
+
+    /// Slide every tile one way. Returns whether the board changed.
+    ///
+    /// The score and the move count are only touched when something moved,
+    /// because a move that changes nothing is not a move — pressing left
+    /// against a wall costs neither a turn nor a spawned tile.
+    pub fn apply_move(&mut self, dir: Direction) -> bool {
+        let mut points = 0u32;
+        let mut moved = false;
+        let reversed = matches!(dir, Direction::Right | Direction::Down);
+        let vertical = matches!(dir, Direction::Up | Direction::Down);
+
+        for i in 0..GRID_SIZE {
+            let mut line = if vertical {
+                self.column(i)
+            } else {
+                self.grid.get(i).copied().unwrap_or([0; GRID_SIZE])
+            };
+            if reversed {
+                line.reverse();
+            }
+            let (mut out, pts, line_moved) = Self::slide(&line);
+            if reversed {
+                out.reverse();
+            }
+            if vertical {
+                self.set_column(i, out);
+            } else if let Some(row) = self.grid.get_mut(i) {
+                *row = out;
+            }
+            points = points.saturating_add(pts);
+            moved |= line_moved;
+        }
+
+        if moved {
+            self.score = self.score.saturating_add(points);
+            self.best_score = self.best_score.max(self.score);
+            self.moves = self.moves.saturating_add(1);
+        }
+        moved
+    }
+
+    /// Whether any direction would change the board.
+    pub fn can_move(&self) -> bool {
         for r in 0..GRID_SIZE {
             for c in 0..GRID_SIZE {
-                let val = self.grid[r][c];
-                if c + 1 < GRID_SIZE && self.grid[r][c + 1] == val {
+                let val = self.at(r, c);
+                if val == 0 {
                     return true;
                 }
-                if r + 1 < GRID_SIZE && self.grid[r + 1][c] == val {
+                if c.saturating_add(1) < GRID_SIZE && self.at(r, c.saturating_add(1)) == val {
+                    return true;
+                }
+                if r.saturating_add(1) < GRID_SIZE && self.at(r.saturating_add(1), c) == val {
                     return true;
                 }
             }
@@ -320,1433 +421,988 @@ impl GameState {
         false
     }
 
-    fn has_2048(&self) -> bool {
-        for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                if self.grid[r][c] >= 2048 {
-                    return true;
-                }
-            }
-        }
-        false
+    pub fn has_won(&self) -> bool {
+        self.grid.iter().flatten().any(|&v| v >= WIN_TILE)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Undo stack
-// ---------------------------------------------------------------------------
-
+/// Everything one move changes, kept so the move can be taken back.
+///
+/// The whole of it, deliberately: the previous entry held the grid and the
+/// score, and left the status and the move count to be patched up afterwards
+/// by hand — which is how "undo the winning move" ended up leaving the game
+/// in a won state over a board that had not won.
+///
+/// `best_score` is the one thing *not* restored, and that is not an
+/// oversight: the best score is the best across every game in the session,
+/// and taking a move back does not un-happen having once scored that much.
 #[derive(Debug, Clone)]
 struct UndoEntry {
     grid: [[u32; GRID_SIZE]; GRID_SIZE],
     score: u32,
+    moves: u32,
+    status: GameStatus,
 }
 
-// ---------------------------------------------------------------------------
-// Main app
-// ---------------------------------------------------------------------------
-
-struct Game2048App {
-    state: GameState,
-    rng: SeededRng,
-    undo_stack: Vec<UndoEntry>,
-    max_undo: usize,
-    show_help: bool,
-}
-
-impl Game2048App {
-    fn new() -> Self {
-        // Was `with_seed(42)`: every player, on every machine, got the same
-        // two opening tiles in the same two cells, and then the same spawns
-        // for the rest of the game. Predicting a 2048 board costs the user
-        // nothing but the game, so this asks the kernel and falls back rather
-        // than refusing -- see `randrange::seeded_from_system`.
-        Self::with_seed(seed_from_system(FALLBACK_SEED))
+impl UndoEntry {
+    fn of(board: &Board) -> Self {
+        Self {
+            grid: board.grid,
+            score: board.score,
+            moves: board.moves,
+            status: board.status,
+        }
     }
 
-    fn with_seed(seed: u64) -> Self {
-        let mut app = Self {
-            state: GameState::new(),
-            rng: SeededRng::new(seed),
-            undo_stack: Vec::new(),
-            max_undo: 50,
-            show_help: false,
+    fn restore(self, board: &mut Board) {
+        board.grid = self.grid;
+        board.score = self.score;
+        board.moves = self.moves;
+        board.status = self.status;
+    }
+}
+
+// ── What a click can land on ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Move(Direction),
+    NewGame,
+    Undo,
+    Help,
+    /// The "keep going" button on the banner shown after a win.
+    Continue,
+    /// The help sheet itself. It swallows clicks meant for what it covers,
+    /// and closes — a pointer that opened the sheet has to be able to shut it
+    /// even in a window too small to still be drawing the button it used.
+    HelpSheet,
+}
+
+/// The one thing a key or a click ultimately asks for.
+///
+/// Both routes go through here, so "what does clicking Undo do" and "what
+/// does pressing U do" cannot drift apart: they are the same line of code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Intent {
+    Move(Direction),
+    NewGame,
+    Undo,
+    Continue,
+    ToggleHelp,
+    CloseHelp,
+}
+
+// ── Layout ─────────────────────────────────────────────────────────────────
+
+/// Every rectangle in the window, derived from the window's own size.
+///
+/// Built fresh on every frame and never remembered. A layout stored on the
+/// model is a layout that can disagree with the window it is drawn in, which
+/// is the class of fault this file was built out of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    pub window: Rect,
+    pub header: Rect,
+    pub info: Rect,
+    pub board: Rect,
+    /// The direction pad: four buttons, the only way a pointer can move.
+    pub dpad: Rect,
+    pub footer: Rect,
+    pub help: Rect,
+    pub font: f32,
+    pub small: f32,
+    pub pad: f32,
+}
+
+impl Layout {
+    pub fn new(width: f32, height: f32) -> Self {
+        let w = width.max(1.0);
+        let h = height.max(1.0);
+        let font = (h / 40.0).clamp(8.0, 18.0);
+        let small = (font - 3.0).max(7.0);
+        // Padding is bounded above by a quarter of the smaller side so that in
+        // a tiny window the padding cannot eat the thing it is padding.
+        let pad = (w.min(h) * 0.02).clamp(2.0, 12.0).min(w.min(h) / 4.0);
+
+        // What each band would like, in [header, info, dpad, footer] order.
+        let mut wants = [
+            (h * 0.13).clamp(38.0, 96.0),
+            (h * 0.045).clamp(14.0, 26.0),
+            (h * 0.09).clamp(28.0, 62.0),
+            (h * 0.075).clamp(24.0, 48.0),
+        ];
+        let budget = (h - h * BOARD_SHARE - pad * 2.0).max(0.0);
+        for &i in &BAND_DROP_ORDER {
+            if wants.iter().sum::<f32>() <= budget {
+                break;
+            }
+            if let Some(band) = wants.get_mut(i) {
+                *band = 0.0;
+            }
+        }
+        let [hdr_h, inf_h, dpad_h, foot_h] = wants;
+
+        let header = if hdr_h > 0.0 {
+            Rect::new(0.0, 0.0, w, hdr_h)
+        } else {
+            Rect::EMPTY
         };
-        app.state.spawn_tile(&mut app.rng);
-        app.state.spawn_tile(&mut app.rng);
+        let info = if inf_h > 0.0 {
+            Rect::new(0.0, hdr_h, w, inf_h)
+        } else {
+            Rect::EMPTY
+        };
+        let footer = if foot_h > 0.0 {
+            Rect::new(0.0, h - foot_h, w, foot_h)
+        } else {
+            Rect::EMPTY
+        };
+        let dpad = if dpad_h > 0.0 {
+            Rect::new(0.0, h - foot_h - dpad_h, w, dpad_h)
+        } else {
+            Rect::EMPTY
+        };
+
+        // The board is square and centred in whatever the bands left behind.
+        let top = hdr_h + inf_h;
+        let bottom = h - foot_h - dpad_h;
+        let side = (w - pad * 2.0)
+            .max(0.0)
+            .min((bottom - top - pad * 2.0).max(0.0));
+        let board = Rect::new(
+            (w - side) / 2.0,
+            top + (bottom - top - side) / 2.0,
+            side,
+            side,
+        );
+
+        let help_w = (w * 0.92).min(420.0);
+        let help_h = (h * 0.92).min(300.0);
+        let help = Rect::new((w - help_w) / 2.0, (h - help_h) / 2.0, help_w, help_h);
+
+        Self {
+            window: Rect::new(0.0, 0.0, w, h),
+            header,
+            info,
+            board,
+            dpad,
+            footer,
+            help,
+            font,
+            small,
+            pad,
+        }
+    }
+
+    /// Whether a band survived the drop ladder and is worth drawing into.
+    ///
+    /// A band that did not fit is `Rect::EMPTY`, not a flat one — a zero-high
+    /// rectangle at the right y would still take clicks aimed at its edge.
+    pub fn shows(&self, band: Rect) -> bool {
+        band.w > 0.0 && band.h > 0.0
+    }
+
+    /// The `index`th of `count` evenly-spaced buttons filling `row`.
+    fn nth_of(row: Rect, count: usize, index: usize) -> Rect {
+        if row.is_empty() || index >= count {
+            return Rect::EMPTY;
+        }
+        let n = count.max(1) as f32;
+        let gap = (row.w * 0.012).min(8.0);
+        let bw = ((row.w - gap * (n + 1.0)) / n).max(0.0);
+        let bh = (row.h * 0.76).max(0.0);
+        Rect::new(
+            row.x + gap + index as f32 * (bw + gap),
+            row.y + (row.h - bh) / 2.0,
+            bw,
+            bh,
+        )
+    }
+
+    /// The button for the `index`th of [`Direction::ALL`].
+    pub fn dpad_button(&self, index: usize) -> Rect {
+        Self::nth_of(self.dpad, Direction::ALL.len(), index)
+    }
+
+    /// The footer buttons: new game, undo, help.
+    pub fn footer_button(&self, index: usize) -> Rect {
+        Self::nth_of(self.footer, 3, index)
+    }
+
+    /// One of the two readouts at the right of the header: 0 is the score, 1
+    /// the best. Empty when the header did not survive, or when the header is
+    /// too narrow to hold the title and both boxes.
+    pub fn score_box(&self, index: usize) -> Rect {
+        if !self.shows(self.header) || index >= 2 {
+            return Rect::EMPTY;
+        }
+        let bw = (self.header.w * 0.22).clamp(48.0, 130.0);
+        let bh = (self.header.h * 0.72).max(1.0);
+        let gap = self.pad;
+        let right = self.header.right() - self.pad;
+        // Boxes are laid out from the right edge inwards, so the one nearest
+        // the edge is index 0 and adding a third would not move the other two.
+        let x = right - (bw + gap) * (index as f32 + 1.0) + gap;
+        if x < self.header.x {
+            return Rect::EMPTY;
+        }
+        Rect::new(x, self.header.y + (self.header.h - bh) / 2.0, bw, bh)
+    }
+
+    /// One cell of the board, gaps taken out of the cell rather than added to
+    /// the step — so the last cell ends exactly at the board's edge.
+    pub fn cell(&self, row: usize, col: usize) -> Rect {
+        if self.board.is_empty() || row >= GRID_SIZE || col >= GRID_SIZE {
+            return Rect::EMPTY;
+        }
+        let n = GRID_SIZE as f32;
+        let step = self.board.w / n;
+        let gap = (step * 0.09).min(12.0);
+        Rect::new(
+            self.board.x + col as f32 * step + gap / 2.0,
+            self.board.y + row as f32 * step + gap / 2.0,
+            (step - gap).max(0.0),
+            (step - gap).max(0.0),
+        )
+    }
+
+    /// The banner drawn over the board when the game is won or lost.
+    pub fn banner(&self) -> Rect {
+        if self.board.is_empty() {
+            return Rect::EMPTY;
+        }
+        let bh = (self.board.h * 0.42).min(200.0);
+        Rect::new(
+            self.board.x,
+            self.board.y + (self.board.h - bh) / 2.0,
+            self.board.w,
+            bh,
+        )
+    }
+
+    /// The "keep going" button inside the win banner.
+    pub fn banner_button(&self) -> Rect {
+        let b = self.banner();
+        if b.is_empty() {
+            return Rect::EMPTY;
+        }
+        let bw = (b.w * 0.5).min(220.0);
+        let bh = (b.h * 0.28).min(40.0);
+        Rect::new(
+            b.x + (b.w - bw) / 2.0,
+            (b.bottom() - bh - b.h * 0.08).max(b.y),
+            bw,
+            bh,
+        )
+    }
+}
+
+// ── Drawing helpers ────────────────────────────────────────────────────────
+
+pub type Frame = guitk::frame::Frame<Target>;
+
+fn fill(f: &mut Frame, r: Rect, color: Color, radius: f32) {
+    if r.w <= 0.0 || r.h <= 0.0 {
+        return;
+    }
+    f.push(RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii: if radius > 0.0 {
+            CornerRadii::all(radius)
+        } else {
+            CornerRadii::ZERO
+        },
+    });
+}
+
+fn label(
+    f: &mut Frame,
+    x: f32,
+    y: f32,
+    body: &str,
+    size: f32,
+    color: Color,
+    weight: FontWeightHint,
+    max_width: Option<f32>,
+) {
+    if body.is_empty() || size <= 0.0 {
+        return;
+    }
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: body.to_string(),
+        color,
+        font_size: size,
+        font_weight: weight,
+        max_width,
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+/// A line centred in a box, both ways, and never started outside it.
+///
+/// The offsets are clamped at zero in *both* directions. A line wider or
+/// taller than its box would otherwise centre to a negative offset and begin
+/// above or to the left of the box it is supposed to be inside — which for a
+/// box at the top of the window means beginning off the window.
+fn centred(f: &mut Frame, r: Rect, body: &str, size: f32, color: Color, weight: FontWeightHint) {
+    if r.is_empty() {
+        return;
+    }
+    let tw = text::measure(body, size, weight);
+    let th = text::line_height(size, weight);
+    label(
+        f,
+        r.x + (r.w - tw).max(0.0) / 2.0,
+        r.y + (r.h - th).max(0.0) / 2.0,
+        body,
+        size,
+        color,
+        weight,
+        Some(r.w),
+    );
+}
+
+/// A button: a filled box with a hit box on it and a centred label.
+fn button(f: &mut Frame, r: Rect, target: Target, body: &str, size: f32, face: Color, ink: Color) {
+    if r.w <= 0.0 || r.h <= 0.0 {
+        return;
+    }
+    fill(f, r, face, (r.h * 0.22).min(8.0));
+    // Recorded by the pass that paints it, so a button that moved took its
+    // hit box with it and there is no second copy of the geometry to disagree.
+    f.hit(target, r);
+    centred(f, r, body, size, ink, FontWeightHint::Bold);
+}
+
+/// The face a tile of this value is painted with.
+fn tile_face(value: u32) -> Color {
+    match value {
+        0 => COL_SURFACE0,
+        2 => Color::from_hex(0xEEE4DA),
+        4 => Color::from_hex(0xEDE0C8),
+        8 => COL_PEACH,
+        16 => Color::from_hex(0xF59563),
+        32 => COL_RED,
+        64 => Color::from_hex(0xF65E3B),
+        128 => COL_YELLOW,
+        256 => Color::from_hex(0xEDCC61),
+        512 => COL_GREEN,
+        1024 => COL_TEAL,
+        2048 => COL_BLUE,
+        4096 => COL_MAUVE,
+        8192 => COL_LAVENDER,
+        _ => COL_SURFACE2,
+    }
+}
+
+/// The ink a tile's number is written in. The two palest faces need dark ink;
+/// every other face is dark enough to take light ink.
+fn tile_ink(value: u32) -> Color {
+    match value {
+        2 | 4 => COL_CRUST,
+        _ => COL_TEXT,
+    }
+}
+
+// ── The program ────────────────────────────────────────────────────────────
+
+pub struct Game2048 {
+    board: Board,
+    rng: SeededRng,
+    undo_stack: Vec<UndoEntry>,
+    show_help: bool,
+    /// The size the last frame was drawn at, which is the size the next click
+    /// is read against.
+    width: f32,
+    height: f32,
+}
+
+impl Game2048 {
+    pub fn new() -> Self {
+        // Was `with_seed(42)`: every player, on every machine, got the same
+        // two opening tiles in the same two cells and the same spawns for the
+        // rest of the game. Predicting a 2048 board costs the player the game.
+        Self::with_rng(seeded_from_system(FALLBACK_SEED))
+    }
+
+    pub fn with_rng(rng: SeededRng) -> Self {
+        let mut app = Self {
+            board: Board::new(),
+            rng,
+            undo_stack: Vec::new(),
+            show_help: false,
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
+        };
+        app.deal();
         app
     }
 
-    fn new_game(&mut self) {
-        let old_best = self.state.best_score;
-        self.state = GameState::new();
-        self.state.best_score = old_best;
-        self.undo_stack.clear();
-        self.state.spawn_tile(&mut self.rng);
-        self.state.spawn_tile(&mut self.rng);
+    /// The two tiles every game opens with.
+    fn deal(&mut self) {
+        self.board.spawn_tile(&mut self.rng);
+        self.board.spawn_tile(&mut self.rng);
     }
 
-    fn push_undo(&mut self) {
-        self.undo_stack.push(UndoEntry {
-            grid: self.state.grid,
-            score: self.state.score,
-        });
-        if self.undo_stack.len() > self.max_undo {
+    pub fn board(&self) -> &Board {
+        &self.board
+    }
+
+    pub fn undo_depth(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    pub fn help_is_open(&self) -> bool {
+        self.show_help
+    }
+
+    pub fn new_game(&mut self) {
+        let best = self.board.best_score;
+        self.board = Board::new();
+        self.board.best_score = best;
+        self.undo_stack.clear();
+        self.deal();
+    }
+
+    fn push_undo(&mut self, entry: UndoEntry) {
+        self.undo_stack.push(entry);
+        if self.undo_stack.len() > MAX_UNDO {
             self.undo_stack.remove(0);
         }
     }
 
-    fn undo(&mut self) -> bool {
-        if let Some(entry) = self.undo_stack.pop() {
-            self.state.grid = entry.grid;
-            self.state.score = entry.score;
-            self.state.moves_count = self.state.moves_count.saturating_sub(1);
-            self.state.update_highest();
-            // If we undo from a game-over state, go back to playing
-            if self.state.status == GameStatus::Lost {
-                self.state.status = GameStatus::Playing;
+    pub fn undo(&mut self) -> bool {
+        match self.undo_stack.pop() {
+            Some(entry) => {
+                entry.restore(&mut self.board);
+                true
             }
-            true
-        } else {
-            false
+            None => false,
         }
     }
 
-    fn make_move(&mut self, dir: Direction) -> bool {
-        if self.state.status == GameStatus::Lost {
+    /// Whether the player is allowed to slide right now.
+    ///
+    /// A won game is deliberately frozen until the player says whether to keep
+    /// going, so that the board they won on is still on the screen while they
+    /// decide.
+    fn can_play(&self) -> bool {
+        matches!(
+            self.board.status,
+            GameStatus::Playing | GameStatus::WonContinuing
+        )
+    }
+
+    pub fn make_move(&mut self, dir: Direction) -> bool {
+        if !self.can_play() {
             return false;
         }
-        if self.state.status == GameStatus::Won {
-            return false; // Must choose to continue or restart
+        // The snapshot is taken before the move and kept only if the move
+        // happened, rather than pushed and popped back off again. A move that
+        // changes nothing leaves no trace of having been tried.
+        let before = UndoEntry::of(&self.board);
+        if !self.board.apply_move(dir) {
+            return false;
         }
-
-        self.push_undo();
-        let moved = self.state.apply_move(dir);
-
-        if moved {
-            self.state.spawn_tile(&mut self.rng);
-
-            // Check win condition
-            if self.state.status == GameStatus::Playing && self.state.has_2048() {
-                self.state.status = GameStatus::Won;
-                return true;
-            }
-
-            // Check lose condition
-            if !self.state.can_move() {
-                self.state.status = GameStatus::Lost;
-            }
+        self.push_undo(before);
+        self.board.spawn_tile(&mut self.rng);
+        if self.board.status == GameStatus::Playing && self.board.has_won() {
+            self.board.status = GameStatus::Won;
         } else {
-            // Move didn't change anything, pop the undo entry
-            self.undo_stack.pop();
+            self.check_stuck();
         }
-
-        moved
+        true
     }
 
-    fn continue_after_win(&mut self) {
-        if self.state.status == GameStatus::Won {
-            self.state.status = GameStatus::WonContinuing;
+    /// Called wherever the board might have become unplayable.
+    fn check_stuck(&mut self) {
+        if self.can_play() && !self.board.can_move() {
+            self.board.status = GameStatus::Lost;
         }
     }
 
-    fn handle_key(&mut self, event: &KeyEvent) {
-        if !event.pressed {
-            return;
+    pub fn continue_after_win(&mut self) {
+        if self.board.status == GameStatus::Won {
+            self.board.status = GameStatus::WonContinuing;
+            // The winning move may also have been the one that filled the
+            // board. Choosing to keep going has to re-ask whether there is
+            // anything left to do, or the game sits at `WonContinuing` for
+            // ever with every direction refused and nothing saying why.
+            self.check_stuck();
         }
+    }
 
-        // Help toggle
-        if event.key == Key::H && !event.modifiers.ctrl {
-            self.show_help = !self.show_help;
-            return;
-        }
+    // ── Window ──
 
-        // New game
-        if event.key == Key::N || event.key == Key::R {
-            self.new_game();
-            return;
-        }
+    pub fn resize(&mut self, width: f32, height: f32) {
+        self.width = width.max(1.0);
+        self.height = height.max(1.0);
+    }
 
-        // Undo
-        if event.key == Key::U || (event.key == Key::Z && event.modifiers.ctrl) {
-            self.undo();
-            return;
-        }
+    /// What a click at (`x`, `y`) would land on, read from the frame the
+    /// window is actually showing.
+    pub fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        self.frame(self.width, self.height).hit_test(x, y)
+    }
 
-        // Won state - continue or restart
-        if self.state.status == GameStatus::Won {
-            if event.key == Key::C || event.key == Key::Enter {
-                self.continue_after_win();
+    pub fn apply(&mut self, intent: Intent) -> EventResult {
+        match intent {
+            Intent::Move(dir) => {
+                if self.make_move(dir) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
             }
-            return;
-        }
-
-        // Game over - only restart
-        if self.state.status == GameStatus::Lost {
-            return;
-        }
-
-        // Movement
-        let dir = match event.key {
-            Key::Up | Key::W => Some(Direction::Up),
-            Key::Down | Key::S => Some(Direction::Down),
-            Key::Left | Key::A => Some(Direction::Left),
-            Key::Right | Key::D => Some(Direction::Right),
-            _ => None,
-        };
-
-        if let Some(d) = dir {
-            self.make_move(d);
-        }
-    }
-
-    fn handle_event(&mut self, event: &Event) {
-        if let Event::Key(ke) = event {
-            self.handle_key(ke)
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Rendering
-    // -----------------------------------------------------------------------
-
-    fn tile_color(value: u32) -> Color {
-        match value {
-            0 => Color::from_hex(COL_SURFACE0),
-            2 => Color::from_hex(0xEEE4DA),
-            4 => Color::from_hex(0xEDE0C8),
-            8 => Color::from_hex(COL_PEACH),
-            16 => Color::from_hex(0xF59563),
-            32 => Color::from_hex(COL_RED),
-            64 => Color::from_hex(0xF65E3B),
-            128 => Color::from_hex(COL_YELLOW),
-            256 => Color::from_hex(0xEDCC61),
-            512 => Color::from_hex(COL_GREEN),
-            1024 => Color::from_hex(COL_TEAL),
-            2048 => Color::from_hex(COL_BLUE),
-            4096 => Color::from_hex(COL_MAUVE),
-            8192 => Color::from_hex(COL_LAVENDER),
-            _ => Color::from_hex(COL_SURFACE2),
-        }
-    }
-
-    fn tile_text_color(value: u32) -> Color {
-        match value {
-            0 => Color::from_hex(COL_SURFACE0), // invisible
-            2 | 4 => Color::from_hex(COL_CRUST),
-            _ => Color::from_hex(COL_TEXT),
-        }
-    }
-
-    fn tile_font_size(value: u32) -> f32 {
-        if value >= 10000 {
-            28.0
-        } else if value >= 1000 {
-            32.0
-        } else if value >= 100 {
-            36.0
-        } else {
-            40.0
-        }
-    }
-
-    fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-
-        // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height,
-            color: Color::from_hex(COL_BASE),
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Title
-        cmds.push(RenderCommand::Text {
-            x: BOARD_X,
-            y: 20.0,
-            text: String::from("2048"),
-            color: Color::from_hex(COL_YELLOW),
-            font_size: 48.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Score display
-        let score_x = BOARD_X + 240.0;
-        self.render_score_box(&mut cmds, score_x, 15.0, "SCORE", self.state.score);
-        self.render_score_box(
-            &mut cmds,
-            score_x + 130.0,
-            15.0,
-            "BEST",
-            self.state.best_score,
-        );
-
-        // Moves count
-        cmds.push(RenderCommand::Text {
-            x: BOARD_X,
-            y: 80.0,
-            text: format!(
-                "Moves: {}  |  Highest: {}",
-                self.state.moves_count, self.state.highest_tile
-            ),
-            color: Color::from_hex(COL_SUBTEXT0),
-            font_size: 16.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Controls hint
-        cmds.push(RenderCommand::Text {
-            x: BOARD_X,
-            y: 105.0,
-            text: String::from("Arrow keys: move  |  U: undo  |  N: new game  |  H: help"),
-            color: Color::from_hex(COL_OVERLAY0),
-            font_size: 13.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Board background
-        let board_w = GRID_SIZE as f32 * CELL_SIZE + (GRID_SIZE as f32 + 1.0) * CELL_GAP;
-        let board_h = board_w;
-        cmds.push(RenderCommand::FillRect {
-            x: BOARD_X,
-            y: BOARD_Y,
-            width: board_w,
-            height: board_h,
-            color: Color::from_hex(COL_MANTLE),
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        // Cells
-        for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                let cx = BOARD_X + CELL_GAP + c as f32 * (CELL_SIZE + CELL_GAP);
-                let cy = BOARD_Y + CELL_GAP + r as f32 * (CELL_SIZE + CELL_GAP);
-                let val = self.state.grid[r][c];
-
-                cmds.push(RenderCommand::FillRect {
-                    x: cx,
-                    y: cy,
-                    width: CELL_SIZE,
-                    height: CELL_SIZE,
-                    color: Self::tile_color(val),
-                    corner_radii: CornerRadii::all(6.0),
-                });
-
-                if val > 0 {
-                    let txt = val.to_string();
-                    let fs = Self::tile_font_size(val);
-                    // Center text roughly
-                    let text_x = cx + CELL_SIZE / 2.0 - (txt.len() as f32 * fs * 0.3);
-                    let text_y = cy + CELL_SIZE / 2.0 - fs / 2.0;
-                    cmds.push(RenderCommand::Text {
-                        x: text_x,
-                        y: text_y,
-                        text: txt,
-                        color: Self::tile_text_color(val),
-                        font_size: fs,
-                        font_weight: FontWeightHint::Bold,
-                        max_width: Some(CELL_SIZE),
-                        overflow: TextOverflow::Ellipsis,
-                    });
+            Intent::NewGame => {
+                self.new_game();
+                EventResult::Consumed
+            }
+            Intent::Undo => {
+                if self.undo() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Intent::Continue => {
+                if self.board.status == GameStatus::Won {
+                    self.continue_after_win();
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Intent::ToggleHelp => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Intent::CloseHelp => {
+                if self.show_help {
+                    self.show_help = false;
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
                 }
             }
         }
+    }
 
-        // Game status overlay
-        match self.state.status {
-            GameStatus::Won => {
-                self.render_overlay(
-                    &mut cmds,
-                    board_w,
-                    board_h,
-                    "You Win!",
-                    "Press C to continue or N for new game",
-                    Color::from_hex(COL_GREEN),
-                );
-            }
-            GameStatus::Lost => {
-                self.render_overlay(
-                    &mut cmds,
-                    board_w,
-                    board_h,
-                    "Game Over",
-                    "Press N for new game or U to undo",
-                    Color::from_hex(COL_RED),
-                );
-            }
-            _ => {}
+    fn handle_key(&mut self, ev: &KeyEvent) -> EventResult {
+        // Only presses. A handler that ignores `pressed` runs everything
+        // twice, once on the way down and once on the way up.
+        if !ev.pressed {
+            return EventResult::Ignored;
         }
+        let Some(intent) = key_intent(ev) else {
+            return EventResult::Ignored;
+        };
+        self.apply(intent)
+    }
 
-        // Help panel
-        if self.show_help {
-            self.render_help(&mut cmds, width, height);
+    fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
+            return EventResult::Ignored;
         }
-
-        cmds
+        let Some(target) = self.target_at(ev.x, ev.y) else {
+            return EventResult::Ignored;
+        };
+        self.apply(target_intent(target))
     }
 
-    fn render_score_box(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        label: &str,
-        score: u32,
-    ) {
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: 120.0,
-            height: 55.0,
-            color: Color::from_hex(COL_SURFACE0),
-            corner_radii: CornerRadii::all(6.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: x + 10.0,
-            y: y + 8.0,
-            text: String::from(label),
-            color: Color::from_hex(COL_SUBTEXT0),
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        cmds.push(RenderCommand::Text {
-            x: x + 10.0,
-            y: y + 26.0,
-            text: score.to_string(),
-            color: Color::from_hex(COL_TEXT),
-            font_size: 22.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
+    // ── Painting ──
 
-    fn render_overlay(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        board_w: f32,
-        board_h: f32,
-        title: &str,
-        subtitle: &str,
-        accent: Color,
-    ) {
-        // Semi-transparent overlay
-        cmds.push(RenderCommand::FillRect {
-            x: BOARD_X,
-            y: BOARD_Y,
-            width: board_w,
-            height: board_h,
-            color: Color::rgba(30, 30, 46, 200),
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: BOARD_X + board_w / 2.0 - 80.0,
-            y: BOARD_Y + board_h / 2.0 - 30.0,
-            text: String::from(title),
-            color: accent,
-            font_size: 42.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: BOARD_X + 20.0,
-            y: BOARD_Y + board_h / 2.0 + 20.0,
-            text: String::from(subtitle),
-            color: Color::from_hex(COL_SUBTEXT0),
-            font_size: 16.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(board_w - 40.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-    }
-
-    fn render_help(&self, cmds: &mut Vec<RenderCommand>, _width: f32, _height: f32) {
-        let hx = BOARD_X + 20.0;
-        let hy = BOARD_Y + 480.0;
-
-        cmds.push(RenderCommand::FillRect {
-            x: hx - 10.0,
-            y: hy - 10.0,
-            width: 420.0,
-            height: 200.0,
-            color: Color::from_hex(COL_SURFACE0),
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        let help_lines = [
-            "Arrow keys / WASD: Slide tiles",
-            "U / Ctrl+Z: Undo last move",
-            "N / R: New game",
-            "C / Enter: Continue after winning",
-            "H: Toggle this help",
-            "",
-            "Combine matching tiles to reach 2048!",
-            "After 2048, keep going for a higher score.",
-        ];
-
-        for (i, line) in help_lines.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: hx,
-                y: hy + i as f32 * 22.0,
-                text: String::from(*line),
-                color: Color::from_hex(COL_TEXT),
-                font_size: 15.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(400.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-    }
-}
-
-fn main() {
-    let _app = Game2048App::new();
-}
-
-// ===========================================================================
-// Tests
-// ===========================================================================
-
-#[cfg(test)]
-mod tests {
-    // A test that indexes out of range should fail loudly and point at the line
-    // that did it -- that is the diagnosis. The defensive lints exist to keep
-    // panics out of code that runs on a user's data, which this is not.
-    #![allow(
-        clippy::indexing_slicing,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::float_cmp,
-        clippy::arithmetic_side_effects
-    )]
-
-    use super::*;
-
-    // --- Seeding ---
-
-    // The generator's own contract -- determinism under a seed, divergence
-    // under two, staying inside its bound, surviving a zero bound -- used to be
-    // tested here against the local `Lcg`. It is now tested once, against the
-    // shared implementation, in `randrange`. Sixteen crates each testing their
-    // own copy is sixteen chances to test a copy that has quietly drifted from
-    // the one being shipped.
-
-    /// A fresh game must take its seed from the kernel, not from a literal.
+    /// The whole window, drawn once.
     ///
-    /// Phrased as "which seed", not as "two fresh games differ", because a host
-    /// test build has no SlateOS kernel: `seed_from_system` correctly takes its
-    /// fallback and two fresh games are then identical, exactly as they were
-    /// under the old hardcoded `42`. A variety check would therefore pass on
-    /// the broken code and fail on the fixed code, which is backwards. So the
-    /// test names the seed the no-kernel path must use, and the one it must no
-    /// longer use.
-    #[cfg(not(unix))]
-    #[test]
-    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
-        let fresh = Game2048App::new().state.grid;
-        assert_eq!(
-            fresh,
-            Game2048App::with_seed(FALLBACK_SEED).state.grid,
-            "a fresh game did not use the crate's fallback seed"
+    /// `Frame::hit_test` scans the recorded boxes in reverse, so anything
+    /// drawn later wins the click over what it covers. That is why the banner
+    /// comes after the board and the help sheet comes after everything.
+    pub fn frame(&self, width: f32, height: f32) -> Frame {
+        let l = Layout::new(width, height);
+        let mut f = Frame::new(l.window.w, l.window.h);
+        fill(&mut f, l.window, COL_BASE, 0.0);
+
+        if l.shows(l.header) {
+            self.draw_header(&mut f, &l);
+        }
+        if l.shows(l.info) {
+            self.draw_info(&mut f, &l);
+        }
+        self.draw_board(&mut f, &l);
+        match self.board.status {
+            GameStatus::Won => self.draw_banner(&mut f, &l, "You win!", COL_GREEN, true),
+            GameStatus::Lost => self.draw_banner(&mut f, &l, "Game over", COL_RED, false),
+            GameStatus::Playing | GameStatus::WonContinuing => {}
+        }
+        if l.shows(l.dpad) {
+            self.draw_dpad(&mut f, &l);
+        }
+        if l.shows(l.footer) {
+            self.draw_footer(&mut f, &l);
+        }
+        if self.show_help {
+            self.draw_help(&mut f, &l);
+        }
+        f
+    }
+
+    fn draw_header(&self, f: &mut Frame, l: &Layout) {
+        let score = l.score_box(0);
+        let best = l.score_box(1);
+        // The title gets whatever is left to the left of the boxes, and says
+        // so with a max width rather than by running underneath them.
+        let limit = if best.is_empty() {
+            l.header.right()
+        } else {
+            best.x
+        };
+        let title = Rect::new(
+            l.header.x + l.pad,
+            l.header.y,
+            (limit - l.pad * 2.0 - l.header.x).max(0.0),
+            l.header.h,
         );
-        assert_ne!(
-            fresh,
-            Game2048App::with_seed(42).state.grid,
-            "a fresh game is still seeded by the old hardcoded literal"
+        let size = (l.font * 1.9).min(title.h * 0.8);
+        label(
+            f,
+            title.x,
+            title.y + (title.h - text::line_height(size, FontWeightHint::Bold)).max(0.0) / 2.0,
+            "2048",
+            size,
+            COL_YELLOW,
+            FontWeightHint::Bold,
+            Some(title.w),
+        );
+
+        self.draw_score_box(f, l, best, "BEST", self.board.best_score);
+        self.draw_score_box(f, l, score, "SCORE", self.board.score);
+    }
+
+    fn draw_score_box(&self, f: &mut Frame, l: &Layout, r: Rect, caption: &str, value: u32) {
+        if r.is_empty() {
+            return;
+        }
+        fill(f, r, COL_SURFACE0, (r.h * 0.2).min(8.0));
+        let cap_h = (r.h * 0.4).max(0.0);
+        centred(
+            f,
+            Rect::new(r.x, r.y, r.w, cap_h),
+            caption,
+            l.small.min(cap_h * 0.8),
+            COL_SUBTEXT0,
+            FontWeightHint::Regular,
+        );
+        centred(
+            f,
+            Rect::new(r.x, r.y + cap_h, r.w, r.h - cap_h),
+            &value.to_string(),
+            (l.font * 1.1).min((r.h - cap_h) * 0.8),
+            COL_TEXT,
+            FontWeightHint::Bold,
         );
     }
 
-    /// The opening board must follow the generator it was given.
-    #[test]
-    fn the_opening_board_follows_the_generator_it_was_given() {
-        let boards: Vec<_> = (0..8)
-            .map(|s| Game2048App::with_seed(s).state.grid)
-            .collect();
-        let distinct: std::collections::BTreeSet<_> = boards.iter().collect();
-        assert!(
-            distinct.len() > 1,
-            "eight seeds produced one opening board: {boards:?}"
+    fn draw_info(&self, f: &mut Frame, l: &Layout) {
+        let size = l.small.min(l.info.h * 0.8);
+        label(
+            f,
+            l.info.x + l.pad,
+            l.info.y + (l.info.h - text::line_height(size, FontWeightHint::Regular)).max(0.0) / 2.0,
+            &format!(
+                "Moves: {}   Highest: {}",
+                self.board.moves,
+                self.board.highest_tile()
+            ),
+            size,
+            COL_SUBTEXT0,
+            FontWeightHint::Regular,
+            Some((l.info.w - l.pad * 2.0).max(0.0)),
         );
     }
 
-    // --- GameState creation ---
-
-    #[test]
-    fn new_game_state_empty() {
-        let state = GameState::new();
-        for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                assert_eq!(state.grid[r][c], 0);
-            }
+    fn draw_board(&self, f: &mut Frame, l: &Layout) {
+        if l.board.is_empty() {
+            return;
         }
-        assert_eq!(state.score, 0);
-        assert_eq!(state.moves_count, 0);
-        assert_eq!(state.status, GameStatus::Playing);
-    }
-
-    #[test]
-    fn empty_cells_full_grid() {
-        let state = GameState::new();
-        assert_eq!(state.empty_cells().len(), 16);
-    }
-
-    #[test]
-    fn empty_cells_partial() {
-        let mut state = GameState::new();
-        state.grid[0][0] = 2;
-        state.grid[1][1] = 4;
-        assert_eq!(state.empty_cells().len(), 14);
-    }
-
-    #[test]
-    fn is_full_empty() {
-        let state = GameState::new();
-        assert!(!state.is_full());
-    }
-
-    #[test]
-    fn is_full_filled() {
-        let mut state = GameState::new();
-        for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                state.grid[r][c] = 2;
-            }
-        }
-        assert!(state.is_full());
-    }
-
-    // --- Spawn tiles ---
-
-    #[test]
-    fn spawn_tile_adds_one() {
-        let mut state = GameState::new();
-        let mut rng = SeededRng::new(42);
-        state.spawn_tile(&mut rng);
-        let non_zero: usize = state.grid.iter().flatten().filter(|&&v| v != 0).count();
-        assert_eq!(non_zero, 1);
-    }
-
-    #[test]
-    fn spawn_tile_value_2_or_4() {
-        let mut state = GameState::new();
-        let mut rng = SeededRng::new(42);
-        for _ in 0..16 {
-            state.spawn_tile(&mut rng);
-        }
-        for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                let v = state.grid[r][c];
-                assert!(v == 2 || v == 4, "unexpected tile value: {v}");
+        fill(f, l.board, COL_MANTLE, (l.board.w * 0.02).min(10.0));
+        for row in 0..GRID_SIZE {
+            for col in 0..GRID_SIZE {
+                let r = l.cell(row, col);
+                let val = self.board.at(row, col);
+                fill(f, r, tile_face(val), (r.h * 0.12).min(8.0));
+                if val == 0 {
+                    continue;
+                }
+                let body = val.to_string();
+                // The size is chosen so the number fits the cell it is in,
+                // measured rather than guessed at from the digit count.
+                let mut size = r.h * 0.44;
+                let width = text::measure(&body, size, FontWeightHint::Bold);
+                if width > r.w * 0.84 && width > 0.0 {
+                    size *= r.w * 0.84 / width;
+                }
+                centred(f, r, &body, size, tile_ink(val), FontWeightHint::Bold);
             }
         }
     }
 
-    #[test]
-    fn spawn_tile_at_specific() {
-        let mut state = GameState::new();
-        state.spawn_tile_at(2, 3, 8);
-        assert_eq!(state.grid[2][3], 8);
-        assert_eq!(state.highest_tile, 8);
-    }
-
-    // --- Slide row left ---
-
-    #[test]
-    fn slide_empty_row() {
-        let row = [0, 0, 0, 0];
-        let (result, pts, moved) = GameState::slide_row_left(&row);
-        assert_eq!(result, [0, 0, 0, 0]);
-        assert_eq!(pts, 0);
-        assert!(!moved);
-    }
-
-    #[test]
-    fn slide_single_tile_at_start() {
-        let row = [2, 0, 0, 0];
-        let (result, pts, moved) = GameState::slide_row_left(&row);
-        assert_eq!(result, [2, 0, 0, 0]);
-        assert_eq!(pts, 0);
-        assert!(!moved);
-    }
-
-    #[test]
-    fn slide_single_tile_at_end() {
-        let row = [0, 0, 0, 4];
-        let (result, pts, moved) = GameState::slide_row_left(&row);
-        assert_eq!(result, [4, 0, 0, 0]);
-        assert_eq!(pts, 0);
-        assert!(moved);
-    }
-
-    #[test]
-    fn slide_merge_pair() {
-        let row = [2, 2, 0, 0];
-        let (result, pts, moved) = GameState::slide_row_left(&row);
-        assert_eq!(result, [4, 0, 0, 0]);
-        assert_eq!(pts, 4);
-        assert!(moved);
-    }
-
-    #[test]
-    fn slide_merge_with_gap() {
-        let row = [2, 0, 2, 0];
-        let (result, pts, moved) = GameState::slide_row_left(&row);
-        assert_eq!(result, [4, 0, 0, 0]);
-        assert_eq!(pts, 4);
-        assert!(moved);
-    }
-
-    #[test]
-    fn slide_two_merges() {
-        let row = [2, 2, 4, 4];
-        let (result, pts, moved) = GameState::slide_row_left(&row);
-        assert_eq!(result, [4, 8, 0, 0]);
-        assert_eq!(pts, 12);
-        assert!(moved);
-    }
-
-    #[test]
-    fn slide_no_cascade() {
-        // [4, 2, 2, 0] -> [4, 4, 0, 0] (the two 2s merge but don't cascade with the 4)
-        let row = [4, 2, 2, 0];
-        let (result, pts, moved) = GameState::slide_row_left(&row);
-        assert_eq!(result, [4, 4, 0, 0]);
-        assert_eq!(pts, 4);
-        assert!(moved);
-    }
-
-    #[test]
-    fn slide_three_same() {
-        // [2, 2, 2, 0] -> leftmost pair merges: [4, 2, 0, 0]
-        let row = [2, 2, 2, 0];
-        let (result, pts, moved) = GameState::slide_row_left(&row);
-        assert_eq!(result, [4, 2, 0, 0]);
-        assert_eq!(pts, 4);
-        assert!(moved);
-    }
-
-    #[test]
-    fn slide_four_same() {
-        let row = [2, 2, 2, 2];
-        let (result, pts, moved) = GameState::slide_row_left(&row);
-        assert_eq!(result, [4, 4, 0, 0]);
-        assert_eq!(pts, 8);
-        assert!(moved);
-    }
-
-    #[test]
-    fn slide_no_merge_different() {
-        let row = [2, 4, 8, 16];
-        let (result, pts, moved) = GameState::slide_row_left(&row);
-        assert_eq!(result, [2, 4, 8, 16]);
-        assert_eq!(pts, 0);
-        assert!(!moved);
-    }
-
-    #[test]
-    fn slide_compact_no_merge() {
-        let row = [0, 2, 0, 4];
-        let (result, pts, moved) = GameState::slide_row_left(&row);
-        assert_eq!(result, [2, 4, 0, 0]);
-        assert_eq!(pts, 0);
-        assert!(moved);
-    }
-
-    // --- Apply move directions ---
-
-    #[test]
-    fn apply_move_left() {
-        let mut state = GameState::new();
-        state.grid = [[0, 0, 2, 2], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        let moved = state.apply_move(Direction::Left);
-        assert!(moved);
-        assert_eq!(state.grid[0][0], 4);
-        assert_eq!(state.grid[0][1], 0);
-        assert_eq!(state.score, 4);
-    }
-
-    #[test]
-    fn apply_move_right() {
-        let mut state = GameState::new();
-        state.grid = [[2, 2, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        let moved = state.apply_move(Direction::Right);
-        assert!(moved);
-        assert_eq!(state.grid[0][3], 4);
-        assert_eq!(state.score, 4);
-    }
-
-    #[test]
-    fn apply_move_up() {
-        let mut state = GameState::new();
-        state.grid = [[0, 0, 0, 0], [0, 0, 0, 0], [2, 0, 0, 0], [2, 0, 0, 0]];
-        let moved = state.apply_move(Direction::Up);
-        assert!(moved);
-        assert_eq!(state.grid[0][0], 4);
-        assert_eq!(state.grid[1][0], 0);
-        assert_eq!(state.score, 4);
-    }
-
-    #[test]
-    fn apply_move_down() {
-        let mut state = GameState::new();
-        state.grid = [[2, 0, 0, 0], [2, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        let moved = state.apply_move(Direction::Down);
-        assert!(moved);
-        assert_eq!(state.grid[3][0], 4);
-        assert_eq!(state.score, 4);
-    }
-
-    #[test]
-    fn apply_move_no_change() {
-        let mut state = GameState::new();
-        state.grid = [[2, 4, 8, 16], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        let moved = state.apply_move(Direction::Left);
-        assert!(!moved);
-        assert_eq!(state.score, 0);
-    }
-
-    #[test]
-    fn apply_move_increments_moves() {
-        let mut state = GameState::new();
-        state.grid[0] = [2, 2, 0, 0];
-        state.apply_move(Direction::Left);
-        assert_eq!(state.moves_count, 1);
-    }
-
-    // --- Can move ---
-
-    #[test]
-    fn can_move_empty_board() {
-        let state = GameState::new();
-        assert!(state.can_move());
-    }
-
-    #[test]
-    fn can_move_with_merge() {
-        let mut state = GameState::new();
-        state.grid = [
-            [2, 4, 8, 16],
-            [16, 8, 4, 2],
-            [2, 4, 8, 16],
-            [16, 8, 4, 4], // last two can merge
-        ];
-        assert!(state.can_move());
-    }
-
-    #[test]
-    fn cannot_move_stuck() {
-        let mut state = GameState::new();
-        state.grid = [[2, 4, 8, 16], [16, 8, 4, 2], [2, 4, 8, 16], [16, 8, 4, 2]];
-        assert!(!state.can_move());
-    }
-
-    // --- Win/lose detection ---
-
-    #[test]
-    fn has_2048_false() {
-        let mut state = GameState::new();
-        state.grid[0][0] = 1024;
-        assert!(!state.has_2048());
-    }
-
-    #[test]
-    fn has_2048_true() {
-        let mut state = GameState::new();
-        state.grid[2][3] = 2048;
-        assert!(state.has_2048());
-    }
-
-    #[test]
-    fn has_2048_higher() {
-        let mut state = GameState::new();
-        state.grid[1][1] = 4096;
-        assert!(state.has_2048());
-    }
-
-    // --- App creation ---
-
-    #[test]
-    fn new_app_has_two_tiles() {
-        let app = Game2048App::new();
-        let count: usize = app.state.grid.iter().flatten().filter(|&&v| v != 0).count();
-        assert_eq!(count, 2);
-    }
-
-    #[test]
-    fn new_app_deterministic() {
-        let a1 = Game2048App::with_seed(99);
-        let a2 = Game2048App::with_seed(99);
-        assert_eq!(a1.state.grid, a2.state.grid);
-    }
-
-    #[test]
-    fn new_app_different_seeds() {
-        let a1 = Game2048App::with_seed(1);
-        let a2 = Game2048App::with_seed(2);
-        // Both grids should be well-formed 4x4 with exactly two non-zero starting tiles.
-        // (We don't assert they differ — that's probabilistic.)
-        assert_eq!(a1.state.grid.len(), 4);
-        assert_eq!(a2.state.grid.len(), 4);
-        let count1 = a1.state.grid.iter().flatten().filter(|&&v| v != 0).count();
-        let count2 = a2.state.grid.iter().flatten().filter(|&&v| v != 0).count();
-        assert_eq!(count1, 2);
-        assert_eq!(count2, 2);
-    }
-
-    // --- Undo ---
-
-    #[test]
-    fn undo_empty_stack() {
-        let mut app = Game2048App::with_seed(42);
-        assert!(!app.undo());
-    }
-
-    #[test]
-    fn undo_restores_state() {
-        let mut app = Game2048App::with_seed(42);
-        let grid_before = app.state.grid;
-        let score_before = app.state.score;
-        app.make_move(Direction::Left);
-        app.undo();
-        assert_eq!(app.state.grid, grid_before);
-        assert_eq!(app.state.score, score_before);
-    }
-
-    #[test]
-    fn undo_multiple() {
-        let mut app = Game2048App::with_seed(42);
-        let grid_start = app.state.grid;
-        app.make_move(Direction::Left);
-        app.make_move(Direction::Up);
-        app.undo();
-        app.undo();
-        assert_eq!(app.state.grid, grid_start);
-    }
-
-    #[test]
-    fn undo_stack_limit() {
-        let mut app = Game2048App::with_seed(42);
-        app.max_undo = 3;
-        // Keep making moves that change the board
-        for _ in 0..10 {
-            let dirs = [
-                Direction::Left,
-                Direction::Right,
-                Direction::Up,
-                Direction::Down,
-            ];
-            for &d in &dirs {
-                app.make_move(d);
-            }
-        }
-        assert!(app.undo_stack.len() <= 3);
-    }
-
-    // --- New game ---
-
-    #[test]
-    fn new_game_resets() {
-        let mut app = Game2048App::with_seed(42);
-        app.make_move(Direction::Left);
-        app.make_move(Direction::Up);
-        let best = app.state.best_score;
-        app.new_game();
-        assert_eq!(app.state.score, 0);
-        assert_eq!(app.state.moves_count, 0);
-        assert_eq!(app.state.best_score, best);
-        assert!(app.undo_stack.is_empty());
-        let count: usize = app.state.grid.iter().flatten().filter(|&&v| v != 0).count();
-        assert_eq!(count, 2);
-    }
-
-    #[test]
-    fn new_game_preserves_best_score() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.best_score = 1000;
-        app.new_game();
-        assert_eq!(app.state.best_score, 1000);
-    }
-
-    // --- Make move ---
-
-    #[test]
-    fn make_move_spawns_tile() {
-        let mut app = Game2048App::with_seed(42);
-        let before_count: usize = app.state.grid.iter().flatten().filter(|&&v| v != 0).count();
-        // Try all directions to ensure at least one moves
-        let moved = app.make_move(Direction::Left)
-            || app.make_move(Direction::Right)
-            || app.make_move(Direction::Up)
-            || app.make_move(Direction::Down);
-        if moved {
-            let after_count: usize = app.state.grid.iter().flatten().filter(|&&v| v != 0).count();
-            // After move + spawn: a merge reduces by 1, but the spawn adds 1, so the count is
-            // either equal to (no merges) or one less than (some merges) the count plus spawn.
-            // The bounded relation is: before_count - merges + 1 == after_count, with merges >= 0.
-            // So after_count is at most before_count + 1.
-            assert!(after_count <= before_count + 1);
+    fn draw_dpad(&self, f: &mut Frame, l: &Layout) {
+        let playable = self.can_play();
+        for (i, &dir) in Direction::ALL.iter().enumerate() {
+            let r = l.dpad_button(i);
+            button(
+                f,
+                r,
+                Target::Move(dir),
+                dir.glyph(),
+                (r.h * 0.55).min(l.font * 1.6),
+                if playable { COL_SURFACE1 } else { COL_SURFACE0 },
+                if playable { COL_TEXT } else { COL_OVERLAY0 },
+            );
         }
     }
 
-    #[test]
-    fn make_move_no_change_no_spawn() {
-        let mut app = Game2048App::with_seed(42);
-        // Set up a board where left move does nothing
-        app.state.grid = [[2, 4, 8, 16], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        let count_before: usize = app.state.grid.iter().flatten().filter(|&&v| v != 0).count();
-        let moved = app.make_move(Direction::Left);
-        assert!(!moved);
-        let count_after: usize = app.state.grid.iter().flatten().filter(|&&v| v != 0).count();
-        assert_eq!(count_before, count_after);
-    }
-
-    // --- Win ---
-
-    #[test]
-    fn win_detection() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.grid = [[1024, 1024, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        app.make_move(Direction::Left);
-        assert_eq!(app.state.status, GameStatus::Won);
-    }
-
-    #[test]
-    fn continue_after_win() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.status = GameStatus::Won;
-        app.continue_after_win();
-        assert_eq!(app.state.status, GameStatus::WonContinuing);
-    }
-
-    #[test]
-    fn continue_only_from_won() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.status = GameStatus::Playing;
-        app.continue_after_win();
-        assert_eq!(app.state.status, GameStatus::Playing);
-    }
-
-    #[test]
-    fn won_continuing_allows_moves() {
-        let mut app = Game2048App::with_seed(42);
-        // Leave a gap so a left move actually slides a tile (the old data
-        // [2048, 2, 0, 0] was already left-packed, so make_move returned false).
-        app.state.grid = [[2048, 0, 2, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        app.state.status = GameStatus::WonContinuing;
-        let moved = app.make_move(Direction::Left);
-        assert!(moved);
-    }
-
-    // --- Lose ---
-
-    #[test]
-    fn lose_detection() {
-        let mut app = Game2048App::with_seed(42);
-        // Fill all but one cell with unique values, place merging pair to fill last spot
-        app.state.grid = [
-            [2, 4, 8, 16],
-            [16, 8, 4, 2],
-            [2, 4, 8, 16],
-            [16, 8, 4, 0], // one empty
+    fn draw_footer(&self, f: &mut Frame, l: &Layout) {
+        let entries = [
+            (Target::NewGame, "New game", true),
+            (Target::Undo, "Undo", !self.undo_stack.is_empty()),
+            (Target::Help, "Help", true),
         ];
-        // This specific board after a move that fills the last cell and creates no merges
-        // may or may not trigger game over. Let's set up a guaranteed game over instead.
-        app.state.grid = [
-            [2, 4, 8, 16],
-            [16, 8, 4, 2],
-            [2, 4, 8, 16],
-            [16, 8, 2, 2], // only 2,2 can merge
-        ];
-        // After left, last row becomes [16, 8, 4, 0], so not game over
-        // Let's directly test can_move on a stuck board
-        app.state.grid = [[2, 4, 8, 16], [16, 8, 4, 2], [2, 4, 8, 16], [16, 8, 4, 2]];
-        assert!(!app.state.can_move());
-    }
-
-    #[test]
-    fn no_move_when_lost() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.status = GameStatus::Lost;
-        let moved = app.make_move(Direction::Left);
-        assert!(!moved);
-    }
-
-    // --- Key handling ---
-
-    #[test]
-    fn key_left_arrow() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.grid = [[0, 0, 2, 2], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        app.handle_key(&KeyEvent {
-            key: Key::Left,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert_eq!(app.state.grid[0][0], 4);
-    }
-
-    #[test]
-    fn key_right_arrow() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.grid = [[2, 2, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        app.handle_key(&KeyEvent {
-            key: Key::Right,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert_eq!(app.state.grid[0][3], 4);
-    }
-
-    #[test]
-    fn key_wasd() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.grid = [[0, 0, 2, 2], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        app.handle_key(&KeyEvent {
-            key: Key::A,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: "a".to_string(),
-        });
-        assert_eq!(app.state.grid[0][0], 4);
-    }
-
-    #[test]
-    fn key_undo() {
-        let mut app = Game2048App::with_seed(42);
-        let grid_before = app.state.grid;
-        app.handle_key(&KeyEvent {
-            key: Key::Left,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        app.handle_key(&KeyEvent {
-            key: Key::U,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: "u".to_string(),
-        });
-        assert_eq!(app.state.grid, grid_before);
-    }
-
-    #[test]
-    fn key_ctrl_z_undo() {
-        let mut app = Game2048App::with_seed(42);
-        let grid_before = app.state.grid;
-        app.handle_key(&KeyEvent {
-            key: Key::Left,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        app.handle_key(&KeyEvent {
-            key: Key::Z,
-            pressed: true,
-            modifiers: Modifiers::ctrl(),
-            text: String::new(),
-        });
-        assert_eq!(app.state.grid, grid_before);
-    }
-
-    #[test]
-    fn key_new_game() {
-        let mut app = Game2048App::with_seed(42);
-        app.make_move(Direction::Left);
-        app.handle_key(&KeyEvent {
-            key: Key::N,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: "n".to_string(),
-        });
-        assert_eq!(app.state.score, 0);
-        assert_eq!(app.state.moves_count, 0);
-    }
-
-    #[test]
-    fn key_help_toggle() {
-        let mut app = Game2048App::with_seed(42);
-        assert!(!app.show_help);
-        app.handle_key(&KeyEvent {
-            key: Key::H,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: "h".to_string(),
-        });
-        assert!(app.show_help);
-        app.handle_key(&KeyEvent {
-            key: Key::H,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: "h".to_string(),
-        });
-        assert!(!app.show_help);
-    }
-
-    #[test]
-    fn key_continue_after_win() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.status = GameStatus::Won;
-        app.handle_key(&KeyEvent {
-            key: Key::C,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: "c".to_string(),
-        });
-        assert_eq!(app.state.status, GameStatus::WonContinuing);
-    }
-
-    #[test]
-    fn key_released_ignored() {
-        let mut app = Game2048App::with_seed(42);
-        let grid_before = app.state.grid;
-        app.handle_key(&KeyEvent {
-            key: Key::Left,
-            pressed: false,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert_eq!(app.state.grid, grid_before);
-    }
-
-    #[test]
-    fn key_won_blocks_movement() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.status = GameStatus::Won;
-        let grid_before = app.state.grid;
-        app.handle_key(&KeyEvent {
-            key: Key::Left,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert_eq!(app.state.grid, grid_before);
-    }
-
-    // --- Tile colors ---
-
-    #[test]
-    fn tile_color_variants() {
-        // Just verify no panics and each value returns a color
-        let values = [
-            0, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
-        ];
-        for v in values {
-            let _ = Game2048App::tile_color(v);
-            let _ = Game2048App::tile_text_color(v);
-            let _ = Game2048App::tile_font_size(v);
+        for (i, &(target, body, live)) in entries.iter().enumerate() {
+            let r = l.footer_button(i);
+            button(
+                f,
+                r,
+                target,
+                body,
+                (r.h * 0.42).min(l.font),
+                if live { COL_SURFACE1 } else { COL_SURFACE0 },
+                if live { COL_TEXT } else { COL_OVERLAY0 },
+            );
         }
     }
 
-    #[test]
-    fn tile_font_size_scaling() {
-        assert!(Game2048App::tile_font_size(2) > Game2048App::tile_font_size(1024));
-        assert!(Game2048App::tile_font_size(1024) > Game2048App::tile_font_size(10000));
+    fn draw_banner(&self, f: &mut Frame, l: &Layout, title: &str, accent: Color, offer: bool) {
+        let b = l.banner();
+        if b.is_empty() {
+            return;
+        }
+        fill(f, b, Color::rgba(30, 30, 46, 224), (b.h * 0.08).min(10.0));
+        let head = Rect::new(b.x, b.y, b.w, b.h * 0.45);
+        centred(
+            f,
+            head,
+            title,
+            (head.h * 0.62).min(l.font * 2.4),
+            accent,
+            FontWeightHint::Bold,
+        );
+        let sub = Rect::new(b.x, head.bottom(), b.w, b.h * 0.2);
+        centred(
+            f,
+            sub,
+            &format!("Score {}", self.board.score),
+            (sub.h * 0.72).min(l.font),
+            COL_SUBTEXT0,
+            FontWeightHint::Regular,
+        );
+        if offer {
+            let btn = l.banner_button();
+            button(
+                f,
+                btn,
+                Target::Continue,
+                "Keep going",
+                (btn.h * 0.5).min(l.font),
+                COL_SURFACE1,
+                COL_TEXT,
+            );
+        }
     }
 
-    // --- Rendering ---
+    fn draw_help(&self, f: &mut Frame, l: &Layout) {
+        let h = l.help;
+        if h.is_empty() {
+            return;
+        }
+        fill(f, h, COL_SURFACE0, (h.h * 0.04).min(10.0));
+        // The whole sheet takes the click, and closes. A pointer that opened
+        // the sheet must be able to shut it even in a window too small to be
+        // drawing the footer it used.
+        f.hit(Target::HelpSheet, h);
 
-    #[test]
-    fn render_basic() {
-        let app = Game2048App::new();
-        let cmds = app.render(600.0, 800.0);
-        assert!(!cmds.is_empty());
+        let size = l.small.min(h.h / 12.0);
+        let head_h = (h.h * 0.16).max(0.0);
+        centred(
+            f,
+            Rect::new(h.x, h.y, h.w, head_h),
+            HELP_TITLE,
+            (head_h * 0.6).min(l.font * 1.2),
+            COL_LAVENDER,
+            FontWeightHint::Bold,
+        );
+
+        let rows = HELP_ROWS.len() as f32;
+        let body_h = (h.h - head_h - l.pad * 2.0).max(0.0);
+        let step = body_h / rows;
+        let key_w = (h.w * 0.42).max(0.0);
+        for (i, &(key, meaning)) in HELP_ROWS.iter().enumerate() {
+            let y = h.y + head_h + l.pad + i as f32 * step;
+            label(
+                f,
+                h.x + l.pad,
+                y,
+                key,
+                size,
+                COL_TEXT,
+                FontWeightHint::Bold,
+                Some(key_w),
+            );
+            label(
+                f,
+                h.x + l.pad + key_w,
+                y,
+                meaning,
+                size,
+                COL_SUBTEXT0,
+                FontWeightHint::Regular,
+                Some((h.w - key_w - l.pad * 2.0).max(0.0)),
+            );
+        }
+
+        centred(
+            f,
+            Rect::new(h.x, h.bottom() - step, h.w, step),
+            "Click anywhere to close",
+            (size * 0.9).max(7.0),
+            COL_OVERLAY0,
+            FontWeightHint::Regular,
+        );
+    }
+}
+
+impl Default for Game2048 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// What a key asks for, if anything.
+///
+/// A free function rather than a method, so the mapping can be read and tested
+/// without a game to read it against.
+pub fn key_intent(ev: &KeyEvent) -> Option<Intent> {
+    if ev.key == Key::Z && ev.modifiers.ctrl {
+        return Some(Intent::Undo);
+    }
+    // Ctrl and Alt combinations belong to the window, not to the board: a
+    // Ctrl+Left that slides the tiles is a Ctrl+Left the desktop cannot have.
+    if ev.modifiers.ctrl || ev.modifiers.alt {
+        return None;
+    }
+    match ev.key {
+        Key::Up | Key::W => Some(Intent::Move(Direction::Up)),
+        Key::Down | Key::S => Some(Intent::Move(Direction::Down)),
+        Key::Left | Key::A => Some(Intent::Move(Direction::Left)),
+        Key::Right | Key::D => Some(Intent::Move(Direction::Right)),
+        Key::U => Some(Intent::Undo),
+        Key::N | Key::R => Some(Intent::NewGame),
+        Key::C | Key::Enter => Some(Intent::Continue),
+        Key::H => Some(Intent::ToggleHelp),
+        Key::Escape => Some(Intent::CloseHelp),
+        _ => None,
+    }
+}
+
+/// What clicking a control asks for.
+pub fn target_intent(target: Target) -> Intent {
+    match target {
+        Target::Move(dir) => Intent::Move(dir),
+        Target::NewGame => Intent::NewGame,
+        Target::Undo => Intent::Undo,
+        Target::Help => Intent::ToggleHelp,
+        Target::Continue => Intent::Continue,
+        Target::HelpSheet => Intent::CloseHelp,
+    }
+}
+
+pub fn handle_event(app: &mut Game2048, event: &Event) -> EventResult {
+    match event {
+        Event::Key(ev) => app.handle_key(ev),
+        Event::Mouse(ev) => app.handle_mouse(ev),
+        Event::Resize { width, height } => {
+            app.resize(*width as f32, *height as f32);
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+impl App for Game2048 {
+    fn title(&self) -> String {
+        "2048".to_string()
     }
 
-    #[test]
-    fn render_has_background() {
-        let app = Game2048App::new();
-        let cmds = app.render(600.0, 800.0);
-        let has_bg = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
-        assert!(has_bg);
+    fn app_id(&self) -> String {
+        "game2048".to_string()
     }
 
-    #[test]
-    fn render_has_title() {
-        let app = Game2048App::new();
-        let cmds = app.render(600.0, 800.0);
-        let has_title = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "2048"));
-        assert!(has_title);
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
-    #[test]
-    fn render_has_tiles() {
-        let app = Game2048App::new();
-        let cmds = app.render(600.0, 800.0);
-        // Should have at least 16 fill rects for cells + board bg + screen bg
-        let fill_count = cmds
-            .iter()
-            .filter(|c| matches!(c, RenderCommand::FillRect { .. }))
-            .count();
-        assert!(fill_count >= 18);
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
     }
 
-    #[test]
-    fn render_won_overlay() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.status = GameStatus::Won;
-        let cmds = app.render(600.0, 800.0);
-        let has_win = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "You Win!"));
-        assert!(has_win);
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against — that is the whole point of storing it here.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for Game2048 {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        self.frame(size.0, size.1)
     }
 
-    #[test]
-    fn render_lost_overlay() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.status = GameStatus::Lost;
-        let cmds = app.render(600.0, 800.0);
-        let has_lose = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Game Over"));
-        assert!(has_lose);
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
     }
 
-    #[test]
-    fn render_help_panel() {
-        let mut app = Game2048App::with_seed(42);
-        app.show_help = true;
-        let cmds = app.render(600.0, 800.0);
-        let has_help = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Arrow keys")));
-        assert!(has_help);
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
     }
+}
 
-    #[test]
-    fn render_no_help_by_default() {
-        let app = Game2048App::new();
-        let cmds = app.render(600.0, 800.0);
-        let has_help = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Arrow keys / WASD: Slide")));
-        assert!(!has_help);
-    }
-
-    #[test]
-    fn render_score_display() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.score = 256;
-        let cmds = app.render(600.0, 800.0);
-        let has_score = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "256"));
-        assert!(has_score);
-    }
-
-    // --- Complex scenarios ---
-
-    #[test]
-    fn multiple_moves_scoring() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.grid = [[2, 2, 4, 4], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        app.make_move(Direction::Left);
-        // 2+2=4, 4+4=8, score = 12
-        assert_eq!(app.state.score, 12);
-        assert_eq!(app.state.grid[0][0], 4);
-        assert_eq!(app.state.grid[0][1], 8);
-    }
-
-    #[test]
-    fn best_score_tracking() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.grid = [[128, 128, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        app.make_move(Direction::Left);
-        assert_eq!(app.state.best_score, 256);
-        app.new_game();
-        assert_eq!(app.state.best_score, 256);
-    }
-
-    #[test]
-    fn undo_from_game_over() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.status = GameStatus::Lost;
-        app.undo_stack.push(UndoEntry {
-            grid: [[0; GRID_SIZE]; GRID_SIZE],
-            score: 100,
-        });
-        app.undo();
-        assert_eq!(app.state.status, GameStatus::Playing);
-    }
-
-    #[test]
-    fn highest_tile_tracking() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.grid = [[512, 512, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        app.make_move(Direction::Left);
-        assert_eq!(app.state.highest_tile, 1024);
-    }
-
-    #[test]
-    fn event_handling() {
-        let mut app = Game2048App::with_seed(42);
-        app.state.grid = [[0, 0, 2, 2], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        app.handle_event(&Event::Key(KeyEvent {
-            key: Key::Left,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        }));
-        assert_eq!(app.state.grid[0][0], 4);
-    }
-
-    #[test]
-    fn direction_enum_eq() {
-        assert_eq!(Direction::Up, Direction::Up);
-        assert_ne!(Direction::Up, Direction::Down);
-    }
-
-    #[test]
-    fn game_status_enum_eq() {
-        assert_eq!(GameStatus::Playing, GameStatus::Playing);
-        assert_ne!(GameStatus::Won, GameStatus::Lost);
-    }
-
-    #[test]
-    fn slide_row_large_values() {
-        let row = [1024, 1024, 512, 512];
-        let (result, pts, moved) = GameState::slide_row_left(&row);
-        assert_eq!(result, [2048, 1024, 0, 0]);
-        assert_eq!(pts, 2048 + 1024);
-        assert!(moved);
-    }
-
-    #[test]
-    fn full_board_with_moves() {
-        let mut state = GameState::new();
-        state.grid = [[2, 4, 2, 4], [4, 2, 4, 2], [2, 4, 2, 4], [4, 2, 4, 2]];
-        // Board is full but no adjacent equal, so no moves
-        assert!(!state.can_move());
-    }
-
-    #[test]
-    fn full_board_with_vertical_merge() {
-        let mut state = GameState::new();
-        state.grid = [
-            [2, 4, 2, 4],
-            [4, 2, 4, 2],
-            [2, 4, 2, 4],
-            [4, 2, 4, 4], // 4,4 can merge horizontally
-        ];
-        assert!(state.can_move());
-    }
+fn main() -> ExitCode {
+    let mut game = Game2048::new();
+    app::launch("game2048", &mut game)
 }

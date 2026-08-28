@@ -92566,3 +92566,114 @@ fault either. The window-size fixture is the thing that catches it: keep a
 window in the list small enough to drive at least one computed size under a
 pixel (2048's `WINDOWS` has `(4, 4)` for exactly this), and assert that no text
 is drawn outside the window it belongs to.
+
+### Lesson 61: the exception you carve out of a rule is the one place a comment does the work of a test (lane C, 2026-08-28)
+
+**In short:** when a sweep establishes a rule — "none of these five drawing
+passes needs a `did this band fit?` guard, because every call inside already
+refuses an empty box" — the tempting thing is to keep *one* guard and write a
+paragraph explaining why that one is different. Connect Four did this twice in
+the same afternoon, and both exceptions were wrong: the prose that justified
+them was reasoning about a case that could not arise, and prose cannot be run.
+An exception argued for in a comment is an assertion nobody checks.
+
+**The two instances.**
+
+- **A guard against a window the layout cannot produce.** Four band guards came
+  out of `draw_board`'s siblings under lesson 51. `draw_board`'s stayed, with a
+  comment: unlike the others it pushes a `RenderCommand::Line` between the ends
+  of the winning four *unconditionally*, so on a board with no room that would
+  be a zero-length stroke in the corner of the window. The premise is false.
+  The board is the one band the drop ladder cannot take: the padding is capped
+  at a quarter of the smaller side, so `width - 2 * pad` is never zero, and the
+  ladder empties all four *other* bands before it would eat into the board's
+  `BOARD_SHARE`, so the height left over is always positive. There is no window
+  size, down to 1x1, at which `l.board.is_empty()`. The comment had been
+  standing in for a test for as long as it had existed.
+- **An exemption that landed where the rule landed.** The help sheet is modal:
+  any intent while it is up shuts it and is swallowed. Two intents — "toggle
+  the sheet" and "close the sheet" — were excused from that rule and left to
+  fall through to their own match arms, on the reasoning that shutting the
+  sheet was what they were going to do anyway. That reasoning is exactly why
+  the exemption bought nothing: both arms ended where the guard ends, so no key
+  could tell the two paths apart, and all the exemption actually produced was
+  two branches below that could never be taken with the sheet up. Deleting the
+  exemption turned `ToggleHelp` into an unconditional "open it" and `CloseHelp`
+  into an unconditional "there is nothing to close" — three lines shorter and,
+  for the first time, reachable by a test.
+
+**How the two smell the same.** In both, the justification has the form *"this
+one is different because of what happens over there"* — a claim about another
+part of the program, held in a comment, checked by nobody. Mutation testing
+finds them from the other end: the guard, or the exemption, is a line whose
+removal changes no test's verdict, which is lesson 51's signature. What is new
+here is the *shape of the trap*: lesson 51's guards were obvious duplicates
+sitting one statement from the check they repeated, whereas these two were
+defended, at length, by someone who had already thought about it.
+
+**What to do instead.** If you believe an exception is needed, write the belief
+as a test before you write the guard. "The board is drawn in every window
+however small" is one sweep over a grid of sizes and it either passes — in
+which case the guard is dead and goes — or it fails, in which case you have
+found a real layout bug and the guard was never the fix. `connect4`'s
+`the_board_is_drawn_in_every_window_however_small` is that test; it is also the
+only thing now licensing `draw_board` to go without a guard, which is the
+correct place for the licence to live. And prefer a *grid* of sizes to the
+project's `WINDOWS` list for this: `WINDOWS` holds sizes each chosen because it
+makes some other rule bind, and a claim about every size has to be asked about
+sizes nobody picked deliberately.
+
+### Lesson 62: a witness the code under test produced moves with the fault (lane C, 2026-08-28)
+
+**In short:** to check that a program did the right thing you need a fact about
+it that came from somewhere else. If your only witness is something the program
+itself reported, a fault upstream of the report corrupts the answer *and* the
+evidence together, and they go on agreeing with each other. Connect Four's
+`ai_turn` chose a column, dropped a piece into it, and returned it; the test
+checked that the returned column was the column in the move list. Both come out
+of the same two lines. Shifting the played column one to the right between
+choosing and dropping failed nothing at all.
+
+**The fault, exactly.**
+
+```rust
+let col = ai_best_move(&mut self.board, self.ai_player, self.ai_depth)?;
+if !self.drop_at(col) { return None; }
+Some(col)                          // <- the test's only witness
+```
+
+The mutation inserted `let col = col.saturating_add(1) % COLS;` between the two
+lines. Because the new binding shadows the old, the drop and the return both
+use the shifted column: the piece lands in the wrong place, `ai_turn` reports
+the wrong place, and the two match. Every assertion in the test still held. The
+search's actual choice — the one fact that would have disagreed — was never
+asked for.
+
+**Why it is easy to write.** The test looks thorough. It asserts the move list
+grew by exactly one, that the piece is the AI's colour, that the turn came
+back, and that the reported column is the one that was played. Four assertions,
+and the *last* one reads like the strong one. It is the weak one: it relates
+two outputs of the same computation to each other, which no fault between them
+can break.
+
+**The rule.** *Every test needs at least one fact that did not come through the
+code path under test.* Ask of each assertion: where did the right-hand side
+come from? If the answer is "the function I am testing told me", it is not a
+witness, it is an echo. The fix is usually one line — compute the expected
+answer independently, before the call:
+
+```rust
+let mut board = app.board.clone();
+let want = ai_best_move(&mut board, app.ai_player, app.ai_depth).expect("...");
+let col = app.ai_turn().expect("...");
+assert_eq!(col, want, "the AI played a column the search did not pick");
+```
+
+**Where else to look.** Anywhere a function both *acts* and *reports what it
+did*: a writer that returns the byte count it wrote (asserted against itself
+rather than against the file's length); a scheduler that returns the task it
+picked; a parser that returns both a value and the offset it consumed; an
+allocator that returns a pointer and a size. The tell is an `assert_eq!` whose
+two sides can be traced back to a single call. Related to lesson 58 but not the
+same shape: there, two independent *rules* could each explain one witness; here
+there is only ever one rule, and the witness is downstream of it.

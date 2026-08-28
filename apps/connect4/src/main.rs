@@ -69,6 +69,57 @@
 //!     `fallback` column that claimed a choice had been made when none had.
 //!     The chosen column is an `Option` now, `None` only when there was
 //!     genuinely nothing to choose.
+//! 12. **…and the `Option` was then seeded with a column anyway.** The rewrite
+//!     for fault 11 initialised the chosen column to the first legal move, as
+//!     "the answer for a search alpha-beta cut off before anything beat the
+//!     best score" — a case that cannot arise, because the first move
+//!     compares against `i32::MIN`/`i32::MAX` and always wins that comparison,
+//!     and the cut happens after the assignment. So the `None` that fault 11
+//!     introduced was never returned, and a search that chose nothing was
+//!     indistinguishable from one that chose the column it happened to try
+//!     first. Found by mutation: replacing the seed with `None` changed no
+//!     test's verdict.
+//! 13. **The help sheet excused the two keys that are about the help sheet
+//!     from its own modal rule** — `H` fell through to a toggle and Escape to
+//!     a conditional close — on the reasoning that both would shut the sheet
+//!     anyway. Which is precisely why the exemption was worth nothing: no
+//!     keystroke could tell the two paths apart, and it left `ToggleHelp`'s
+//!     toggle and `CloseHelp`'s open-sheet branch unreachable behind it.
+//!     Anything at all shuts an open sheet now, and the two arms below say
+//!     what they really are: "open it" and "there is nothing to close".
+//! 14. **The undo snapshot carried two fields that could only hold one value.**
+//!     A snapshot is taken in `drop_at`, past its refusal to move on a finished
+//!     game, so the status it recorded was always `Playing` and the winning
+//!     line always `None`. Restoring them *looked* like what puts a taken-back
+//!     win back in play while being a copy of a constant. `restore` now sets
+//!     the game live explicitly and says why.
+//! 15. **All five drawing passes opened with a "did this band fit?" guard that
+//!     nothing needed.** `fill`, `centred`, `label`, `Frame::hit`, `score_box`
+//!     and `chute_slot` all refuse an empty box already, so deleting the
+//!     guards changed not one command in any frame — lesson 51 five times
+//!     over, in a file whose own `nth_of` refuses to write that guard for
+//!     exactly that reason. Four went at once. The fifth, `draw_board`'s, was
+//!     kept for a whole day behind a paragraph explaining why the board was
+//!     different: the line joining the winning four is pushed unguarded, so a
+//!     board with no room would leave a zero-length stroke in the corner of
+//!     the window. The paragraph was wrong. The board is the one band the drop
+//!     ladder cannot take — the padding is capped at a quarter of the smaller
+//!     side, so the width survives, and the ladder empties all four other
+//!     bands before it would eat into `BOARD_SHARE`, so the height does too —
+//!     and there is no window down to 1x1 in which `l.board` is empty.
+//!     `the_board_is_drawn_in_every_window_however_small` is that claim as a
+//!     test rather than as prose, and is now the only thing licensing the
+//!     pass to go without a guard. See `known-issues.md` lesson 61: the
+//!     exception you carve out of a rule is the one place a comment ends up
+//!     doing the work of a test.
+//! 16. **The AI's move was witnessed only by the AI's own report of it.**
+//!     `the_search_plays_the_move_it_owes_and_nothing_else` checked that the
+//!     column `ai_turn` returned was the column that appeared in the move
+//!     list — but both come out of the same two lines, so a fault between
+//!     choosing the column and dropping into it moves the witness with the
+//!     move. Mutation shifted the played column one to the right and no test
+//!     failed. The test now asks `ai_best_move` what it would choose, on a
+//!     clone of the board, before letting `ai_turn` play at all.
 
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -538,18 +589,15 @@ fn minimax(
     }
 
     let moves = board.valid_moves();
-    // The first legal move is the fallback answer: alpha-beta can cut the loop
-    // off before any move has beaten `best_score` -- `score > best_score` is
-    // false for a score of `i32::MIN` -- so the loop can end with nothing
-    // chosen, and the first move it would have tried is the honest answer.
-    //
-    // Written as the initial value of `best_col` rather than as an early
-    // return, because an early return would need a branch for "no legal move
-    // at all" that can never be taken: a board with no legal move is a full
-    // board, and a full board is terminal and returned above. A guard standing
-    // in front of a rule that already holds is a line no test can own
-    // (`known-issues.md` lesson 51).
-    let mut best_col = moves.first().copied();
+    // `None` until a move has genuinely been chosen. This was seeded with the
+    // first legal move, described as the answer for a loop that alpha-beta cut
+    // off before anything beat `best_score` — a case that cannot arise: the
+    // first move compares against `i32::MIN`/`i32::MAX`, which no score can
+    // equal, so the first move always takes the seat, and the cut below is
+    // reached only after that assignment. The seed was therefore a value no
+    // caller could ever read, and worse, it made "the search chose nothing"
+    // indistinguishable from "the search chose the first column it tried".
+    let mut best_col = None;
     let deeper = depth.saturating_sub(1);
     let mover = if maximizing {
         ai_player
@@ -950,9 +998,11 @@ fn centred(f: &mut Frame, r: Rect, body: &str, size: f32, color: Color, weight: 
 
 /// A button: a filled box with a hit box on it and a centred label.
 fn button(f: &mut Frame, r: Rect, target: Target, body: &str, size: f32, face: Color, ink: Color) {
-    if r.is_empty() {
-        return;
-    }
+    // No `r.is_empty()` guard, and none is needed: `fill` and `centred` return
+    // on an empty box, and `Frame::hit` refuses to record one — so a button
+    // with no box paints nothing and takes no clicks whichever way round it is
+    // written. It had one, and mutation testing could not tell it from its own
+    // absence, which is lesson 51's signature.
     fill(f, r, face, (r.h * 0.22).min(8.0));
     // Recorded by the pass that paints it, so a button that moved took its hit
     // box with it and there is no second copy of the geometry to disagree.
@@ -977,18 +1027,22 @@ const HELP_ROWS: [(&str, &str); 6] = [
 
 /// The whole of a game, kept so a move can be taken back.
 ///
-/// Everything a drop changes, in one value. Restoring a snapshot cannot put
-/// four fields back and forget the fifth, which is the fault an
-/// undo-by-field-list keeps having — this program's neighbour, 2048, shipped
-/// an undo that restored the grid and the score and left the *status* alone,
-/// so taking back the winning move left "You win!" over a board with no win
-/// on it.
+/// Everything a drop changes *and could have found in more than one state*, in
+/// one value. Restoring a snapshot cannot put four fields back and forget the
+/// fifth, which is the fault an undo-by-field-list keeps having — this
+/// program's neighbour, 2048, shipped an undo that restored the grid and the
+/// score and left the *status* alone, so taking back the winning move left
+/// "You win!" over a board with no win on it.
+///
+/// The status and the winning line are deliberately *not* among the fields.
+/// A snapshot is only ever taken in `drop_at`, past its refusal to move on a
+/// game that is over, so the position recorded is always one still in play:
+/// storing those two would be storing a constant, and `restore` sets them back
+/// to that constant instead. See `restore`.
 #[derive(Debug, Clone)]
 struct Snapshot {
     board: Board,
     current_player: Cell,
-    status: GameStatus,
-    win_line: Option<WinLine>,
     /// How long `move_history` was, which is what it is truncated back to.
     moves: usize,
     human_wins: u32,
@@ -1098,8 +1152,6 @@ impl Connect4 {
         Snapshot {
             board: self.board.clone(),
             current_player: self.current_player,
-            status: self.status,
-            win_line: self.win_line,
             moves: self.move_history.len(),
             human_wins: self.human_wins,
             ai_wins: self.ai_wins,
@@ -1107,12 +1159,21 @@ impl Connect4 {
         }
     }
 
+    /// Puts a snapshot back, and puts the game back *in play*.
+    ///
+    /// The status is set rather than restored: every snapshot is taken of a
+    /// live game (see `Snapshot`), so the position being returned to is one
+    /// still being played by construction. This is the line that takes the
+    /// "You win!" off the board when the winning move is taken back — and
+    /// while the status travelled in the snapshot it was a field that could
+    /// only ever hold `Playing`, so nothing could tell a restore that read it
+    /// from one that ignored it.
     fn restore(&mut self, s: Snapshot) {
         self.move_history.truncate(s.moves);
         self.board = s.board;
         self.current_player = s.current_player;
-        self.status = s.status;
-        self.win_line = s.win_line;
+        self.status = GameStatus::Playing;
+        self.win_line = None;
         self.human_wins = s.human_wins;
         self.ai_wins = s.ai_wins;
         self.draws = s.draws;
@@ -1208,11 +1269,18 @@ impl Connect4 {
         // The sheet is modal to the game, and has to be, because it is drawn
         // over the board. Without this an arrow key would move a cursor the
         // player cannot see and Enter would drop a piece behind the help text.
-        // Anything the game would otherwise act on shuts the sheet instead,
-        // which is the same answer a click gets and the one the sheet's own
-        // closing line promises. The two help intents fall through, because
-        // shutting the sheet is what they were going to do anyway.
-        if self.show_help && !matches!(intent, Intent::ToggleHelp | Intent::CloseHelp) {
+        // *Anything* shuts it — which is the answer a click gets and the one
+        // the sheet's own closing line promises.
+        //
+        // The two intents that are about the sheet used to be excused from
+        // this rule and left to fall through to their own arms, on the
+        // reasoning that shutting the sheet was what they were going to do
+        // anyway. That reasoning is exactly why the exemption was worth
+        // nothing: `H` toggled a shown sheet to hidden and Escape closed it,
+        // both ending where this line ends, so no key could tell the two paths
+        // apart. All the exemption bought was two branches below that could
+        // never be taken with the sheet up.
+        if self.show_help {
             self.show_help = false;
             return EventResult::Consumed;
         }
@@ -1239,18 +1307,15 @@ impl Connect4 {
                     EventResult::Ignored
                 }
             }
+            // Past the guard above the sheet is always down, so these two are
+            // "open it" and "there is nothing to close" — not a toggle and a
+            // conditional close, which is how they were written while the
+            // guard let them through.
             Intent::ToggleHelp => {
-                self.show_help = !self.show_help;
+                self.show_help = true;
                 EventResult::Consumed
             }
-            Intent::CloseHelp => {
-                if self.show_help {
-                    self.show_help = false;
-                    EventResult::Consumed
-                } else {
-                    EventResult::Ignored
-                }
-            }
+            Intent::CloseHelp => EventResult::Ignored,
         }
     }
 
@@ -1339,9 +1404,14 @@ impl Connect4 {
     }
 
     fn draw_header(&self, f: &mut Frame, l: &Layout) {
-        if !l.shows(l.header) {
-            return;
-        }
+        // No "did the header fit?" guard. A band that did not fit is
+        // `Rect::EMPTY`, and every call below already refuses one: `fill` and
+        // `centred` return on an empty box, `score_box` returns empty boxes of
+        // its own, and the title's width comes out negative and `label`
+        // declines it. A guard here would restate a rule that already holds in
+        // four places — `nth_of` refuses the same guard for the same reason,
+        // and `known-issues.md` lesson 51 is what happens when one is written
+        // anyway: a line no test can own, because deleting it changes nothing.
         fill(f, l.header, COL_MANTLE, 0.0);
 
         let boxes = [
@@ -1394,9 +1464,8 @@ impl Connect4 {
     }
 
     fn draw_info(&self, f: &mut Frame, l: &Layout) {
-        if !l.shows(l.info) {
-            return;
-        }
+        // No band guard, for the reason given in `draw_header`: `centred`
+        // refuses an empty box, and there is nothing else here to refuse.
         centred(
             f,
             l.info,
@@ -1410,9 +1479,9 @@ impl Connect4 {
     /// The strip above the board: each column's number, and under the cursor's
     /// number the piece that is about to fall.
     fn draw_chute(&self, f: &mut Frame, l: &Layout) {
-        if !l.shows(l.chute) {
-            return;
-        }
+        // No band guard: `chute_slot` asks `shows` itself and hands back
+        // `Rect::EMPTY` for every column when the chute did not fit, which the
+        // skip below already handles. See `draw_header`.
         for col in 0..COLS {
             let slot = l.chute_slot(col);
             if slot.is_empty() {
@@ -1450,9 +1519,17 @@ impl Connect4 {
     }
 
     fn draw_board(&self, f: &mut Frame, l: &Layout) {
-        if l.board.is_empty() {
-            return;
-        }
+        // No band guard here either, and this one took two tries to see. The
+        // guard was kept on the reasoning that the line joining the winning
+        // four is pushed unconditionally below, so a board with no room would
+        // leave a zero-length stroke in the corner of the window. The premise
+        // is false: the board is the one band the drop ladder cannot take, and
+        // `the_board_is_drawn_in_every_window_however_small` is the test that
+        // says so — the padding is capped at a quarter of the smaller side, so
+        // the width always survives, and the ladder empties every band before
+        // it would touch the board's `BOARD_SHARE`, so the height does too.
+        // A guard against a case the layout cannot produce is lesson 51 again,
+        // and the comment defending it was doing the same work as the guard.
         fill(f, l.board, COL_BLUE, (l.step * 0.2).min(10.0));
         for row in 0..ROWS {
             for col in 0..COLS {
@@ -1508,9 +1585,10 @@ impl Connect4 {
     }
 
     fn draw_footer(&self, f: &mut Frame, l: &Layout) {
-        if !l.shows(l.footer) {
-            return;
-        }
+        // As in `draw_header`: no guard on the band. `footer_button` turns an
+        // empty footer into empty buttons unaided, and an empty button paints
+        // nothing and records no hit — so a window with no footer has no
+        // footer controls without anything here saying so.
         let size = (l.footer.h * 0.34).min(l.small);
         button(
             f,
@@ -2173,7 +2251,19 @@ mod tests {
 
     #[test]
     fn a_board_is_full_only_when_every_cell_is() {
-        let mut b = drawn_board();
+        // Filled by dropping, not by `drawn_board`, which sets `piece_count`
+        // by hand: asked about a board whose tally the *fixture* wrote, this
+        // test could not tell whether `drop_piece` keeps one at all
+        // (`known-issues.md` lesson 52). It now counts every drop on the way
+        // up, so the tally is the code's own.
+        let mut b = Board::new();
+        for col in 0..COLS {
+            for row in 0..ROWS {
+                assert!(!b.is_full(), "full at {} pieces", b.pieces());
+                assert_eq!(b.pieces(), col * ROWS + row);
+                b.drop_piece(col, Cell::Red).expect("the column has room");
+            }
+        }
         assert!(b.is_full());
         assert_eq!(b.pieces(), CELL_COUNT);
         b.undo_drop(0);
@@ -2528,6 +2618,28 @@ mod tests {
     }
 
     #[test]
+    fn a_position_is_scored_by_the_runs_on_it_and_not_only_by_the_centre_column() {
+        // Two boards with the same number of pieces and the same number of them
+        // in the centre column -- none, so the centre bonus is equal — and a
+        // line of three on one of them. Without the window scan the two score
+        // the same, and a search told to maximise that score has no reason to
+        // build a run at all.
+        let mut threat = Board::new();
+        for col in 0..3 {
+            threat.drop_piece(col, Cell::Red);
+        }
+        let mut scattered = Board::new();
+        for col in [0, 2, 4] {
+            scattered.drop_piece(col, Cell::Red);
+        }
+        assert_eq!(threat.pieces(), scattered.pieces());
+        assert!(
+            evaluate_board(&threat, Cell::Red) > evaluate_board(&scattered, Cell::Red),
+            "three in a line is worth no more than three pieces in none"
+        );
+    }
+
+    #[test]
     fn a_position_is_over_when_someone_has_won() {
         assert!(is_terminal(&won_board(Cell::Red)));
         assert!(is_terminal(&won_board(Cell::Yellow)));
@@ -2550,6 +2662,16 @@ mod tests {
             b.drop_piece(col, Cell::Yellow);
         }
         assert_eq!(ai_best_move(&mut b, Cell::Yellow, 1), Some(3));
+        // And at depth 0, where the search returns no column at all: the scan
+        // for a win on the board *now* is a rule of its own, not an
+        // optimisation of the search, and at any depth that can see the win
+        // the two agree — which is why deleting the scan changed nothing here
+        // until this line was added.
+        assert_eq!(
+            ai_best_move(&mut b, Cell::Yellow, 0),
+            Some(3),
+            "with no search left, the win in front of it went unplayed"
+        );
     }
 
     #[test]
@@ -2559,6 +2681,14 @@ mod tests {
             b.drop_piece(col, Cell::Red);
         }
         assert_eq!(ai_best_move(&mut b, Cell::Yellow, 1), Some(3));
+        // As above: at depth 0 only the scan can answer, so this is the line
+        // that holds the *block* half of it. At depth 1 the search reaches the
+        // same column by way of `SCORE_OPP_THREE` and covers for its absence.
+        assert_eq!(
+            ai_best_move(&mut b, Cell::Yellow, 0),
+            Some(3),
+            "with no search left, the loss in front of it went unblocked"
+        );
     }
 
     #[test]
@@ -2605,13 +2735,66 @@ mod tests {
 
     #[test]
     fn a_search_that_can_see_the_win_scores_it_as_a_win() {
+        // The win is a stack in column 6, which is *last* in the move order —
+        // so "the search chose this column" and "the search handed back the
+        // column it happened to try first" are different answers here. They
+        // were not while the winning move was in column 3, which is where the
+        // move order starts, and a search that named its first move regardless
+        // of the score passed this test for that reason alone.
         let mut b = Board::new();
-        for col in 0..3 {
-            b.drop_piece(col, Cell::Yellow);
+        for _ in 0..3 {
+            b.drop_piece(6, Cell::Yellow);
         }
+        let order = Board::new().valid_moves();
+        assert_eq!(
+            order.first(),
+            Some(&CENTER_COL),
+            "the move order no longer starts in the centre"
+        );
+        assert_eq!(order.last(), Some(&6), "column 6 is no longer tried last");
         let (score, col) = minimax(&mut b, 2, i32::MIN, i32::MAX, true, Cell::Yellow);
         assert!(score >= SCORE_WIN, "a forced win scored {score}");
-        assert_eq!(col, Some(3));
+        assert_eq!(col, Some(6));
+    }
+
+    #[test]
+    fn the_side_that_is_not_the_ai_picks_the_move_that_hurts_it_most() {
+        // Every production caller enters the search on the AI's turn and reads
+        // only the root's column, so the minimising half of it — the half that
+        // makes the search a search and not a one-ply greedy pick — is only
+        // ever exercised through what it returns upwards. Entered directly, it
+        // has to name the move as well: Red has three in column 0 and it is
+        // Red to play, and column 0 is neither the first move the order tries
+        // (3) nor the last (6), so naming it is a real answer.
+        let mut b = Board::new();
+        for _ in 0..3 {
+            b.drop_piece(0, Cell::Red);
+        }
+        let (score, col) = minimax(&mut b, 1, i32::MIN, i32::MAX, false, Cell::Yellow);
+        assert!(
+            score <= -SCORE_WIN,
+            "the opponent's forced win scored {score} to the searcher"
+        );
+        assert_eq!(col, Some(0), "the losing move was not the one reported");
+    }
+
+    #[test]
+    fn a_threat_the_search_cannot_block_is_scored_as_a_loss() {
+        // Red holds the middle three of the bottom row with both ends open, so
+        // whichever end Yellow blocks, Red takes the other. A search in which
+        // both plies play the AI's own pieces never sees the reply and scores
+        // this comfortable.
+        let mut b = Board::new();
+        for col in 1..4 {
+            b.drop_piece(col, Cell::Red);
+        }
+        let (score, col) = minimax(&mut b, 2, i32::MIN, i32::MAX, true, Cell::Yellow);
+        assert!(
+            score <= -SCORE_WIN,
+            "an open-ended three scored {score} to the side that cannot stop it"
+        );
+        let col = col.expect("a board with room reported no move");
+        assert!(b.can_drop(col), "the search named a column it cannot play");
     }
 
     #[test]
@@ -2901,6 +3084,32 @@ mod tests {
     }
 
     #[test]
+    fn the_board_is_drawn_in_every_window_however_small() {
+        // The board is the one band the drop ladder cannot take, and this is
+        // the test that lets `draw_board` go without a "did it fit?" guard.
+        // Two rules hold it up and both are swept here rather than argued:
+        // the padding is capped at a quarter of the smaller side, so a window
+        // can never be narrower than its own margins; and the ladder empties
+        // all four bands before it would eat into `BOARD_SHARE`, so whatever
+        // the bands take, the height left over is still positive.
+        //
+        // The sweep is a grid rather than `WINDOWS` on purpose: `WINDOWS` is a
+        // list of sizes chosen because each makes some *other* rule bind, and
+        // a rule about every size has to be asked about sizes nobody picked.
+        for w in [1.0, 2.0, 3.0, 4.0, 7.0, 13.0, 24.0, 90.0, 300.0, 1920.0] {
+            for h in [1.0, 2.0, 3.0, 4.0, 7.0, 13.0, 24.0, 90.0, 300.0, 1080.0] {
+                let l = Layout::new(w, h);
+                assert!(
+                    !l.board.is_empty(),
+                    "a {w}x{h} window drew no board at all ({:?})",
+                    l.board
+                );
+                assert!(l.step > 0.0, "a {w}x{h} window has cells of no size");
+            }
+        }
+    }
+
+    #[test]
     fn the_padding_never_eats_more_than_a_quarter_of_the_smaller_side() {
         for (w, h) in WINDOWS {
             let l = Layout::new(w, h);
@@ -3175,6 +3384,18 @@ mod tests {
         for i in 0..3 {
             assert_eq!(l.score_box(i), Rect::EMPTY, "readout {i}");
         }
+        // A dropped band is `Rect::EMPTY`, so the case above is also caught by
+        // the "runs off the left edge" check further down `score_box` — the
+        // right edge of a band with no width is to the left of its own left
+        // edge. `shows` is asked about a band with *no height and full width*,
+        // which that check would let through: a row of readouts one pixel tall
+        // in a header that is not there.
+        let mut flat = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        flat.header = Rect::new(0.0, 0.0, WINDOW_WIDTH, 0.0);
+        assert!(!flat.shows(flat.header));
+        for i in 0..3 {
+            assert_eq!(flat.score_box(i), Rect::EMPTY, "readout {i} on a flat band");
+        }
     }
 
     #[test]
@@ -3415,7 +3636,19 @@ mod tests {
     fn the_search_plays_the_move_it_owes_and_nothing_else() {
         let mut app = shallow();
         app.drop_at(3);
+        // What the search chooses, asked independently of the code that plays
+        // it. Without this the test's only witness is `ai_turn`'s own return
+        // value, and a fault between the search and the drop moves *both*: the
+        // played column and the reported column go on agreeing with each other
+        // and stop agreeing with the search. Mutation found this by shifting
+        // the column one to the right between the two lines, and nothing
+        // failed. `known-issues.md` lesson 62 -- a witness the code under test
+        // produced moves with the fault.
+        let mut board = app.board.clone();
+        let want = ai_best_move(&mut board, app.ai_player, app.ai_depth)
+            .expect("the search had a move to make");
         let col = app.ai_turn().expect("the AI passed on its turn");
+        assert_eq!(col, want, "the AI played a column the search did not pick");
         assert_eq!(app.moves().len(), 2, "it played more than one piece");
         assert_eq!(app.moves()[1], (col, Cell::Yellow));
         assert_eq!(app.current_player, Cell::Red, "the turn did not come back");
@@ -3713,10 +3946,14 @@ mod tests {
     }
 
     #[test]
-    fn the_two_help_intents_still_reach_an_open_sheet() {
-        // They fall through the modal guard, because shutting the sheet is what
-        // they were going to do anyway -- and a `ToggleHelp` caught by the
-        // guard would leave the Help button unable to close what it opened.
+    fn the_two_help_controls_close_a_sheet_they_opened() {
+        // The user-visible half of the modal rule: whatever opened the sheet
+        // has to be able to shut it. This was once written as an exemption --
+        // the two help intents were let through the modal guard to their own
+        // arms -- and the exemption was worth nothing, because both arms ended
+        // where the guard ends. The claim below is the part that mattered, and
+        // it is stated in terms of what the player does rather than which
+        // branch runs, so it survived the exemption's removal unchanged.
         let mut app = game();
         app.apply(Intent::ToggleHelp);
         assert_eq!(app.apply(Intent::CloseHelp), EventResult::Consumed);
@@ -4322,6 +4559,25 @@ mod tests {
                 assert!(!body.is_empty(), "an empty line was drawn at {w}x{h}");
             }
         }
+        // The sweep above is a claim about the callers: none of them passes an
+        // empty body today, which is exactly why it could not tell whether
+        // `label` refuses one. The refusal is the helper's own contract, so it
+        // is asked directly.
+        let mut f = Frame::new(100.0, 100.0);
+        label(
+            &mut f,
+            10.0,
+            10.0,
+            "",
+            12.0,
+            COL_TEXT,
+            FontWeightHint::Regular,
+            Some(80.0),
+        );
+        assert!(
+            f.commands().is_empty(),
+            "an empty string was pushed as a line of text"
+        );
     }
 
     #[test]
@@ -4409,16 +4665,33 @@ mod tests {
 
     #[test]
     fn the_three_readouts_are_labelled_and_show_their_counts() {
+        // The counts are looked for *inside the readout they belong to*, not
+        // anywhere in the frame. A tally of 3 and the number over column 3 are
+        // the same string, so a frame that draws no counts at all still holds
+        // "1" through "7" in the chute: this test passed with the count
+        // replaced by an empty string until the box was part of the question
+        // (`known-issues.md` lesson 57).
         let mut app = game();
         app.human_wins = 3;
         app.ai_wins = 5;
         app.draws = 2;
-        let lines = texts(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT));
-        for label in ["You", "AI", "Draw"] {
-            assert!(lines.contains(&label.to_string()), "no {label} readout");
-        }
-        for count in ["3", "5", "2"] {
-            assert!(lines.contains(&count.to_string()), "no count {count}");
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let drawn = text_boxes(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT));
+        for (i, (label, count)) in [("You", "3"), ("AI", "5"), ("Draw", "2")]
+            .into_iter()
+            .enumerate()
+        {
+            // Index 0 is the box nearest the *right* edge, so the readouts
+            // read left to right in the reverse of the order they are indexed.
+            let box_ = l.score_box(2 - i);
+            assert!(!box_.is_empty(), "readout {i} did not fit");
+            for body in [label, count] {
+                assert!(
+                    drawn.iter().any(|(text, r, _)| text == body
+                        && box_.contains(r.x + r.w / 2.0, r.y + r.h / 2.0)),
+                    "{body} is not written in the {label} readout: {drawn:?}"
+                );
+            }
         }
     }
 
@@ -4621,14 +4894,23 @@ mod tests {
         app.cursor_col = 1;
         let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-        let slot = l.chute_slot(1);
-        let waiting = f.commands().iter().any(|c| match c {
-            RenderCommand::FillRect {
-                x, y, color, width, ..
-            } => *color == Cell::Red.face() && slot.contains(x + width / 2.0, *y + 1.0),
-            _ => false,
-        });
-        assert!(waiting, "nothing is waiting over the cursor's column");
+        let over = |col: usize| {
+            let slot = l.chute_slot(col);
+            f.commands().iter().any(|c| match c {
+                RenderCommand::FillRect {
+                    x, y, color, width, ..
+                } => *color == Cell::Red.face() && slot.contains(x + width / 2.0, *y + 1.0),
+                _ => false,
+            })
+        };
+        assert!(over(1), "nothing is waiting over the cursor's column");
+        // And over no other. "There is a piece over column 1" is also true of
+        // a chute with a piece over every column, which is what the test said
+        // before this line: the cursor is *where* the piece is, so the claim
+        // has to be about the other six columns too (lesson 57).
+        for col in (0..COLS).filter(|&c| c != 1) {
+            assert!(!over(col), "a piece is also waiting over column {col}");
+        }
     }
 
     #[test]
@@ -4852,13 +5134,26 @@ mod tests {
         let app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
         let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
         let lines = texts(&f);
-        for (target, name) in [
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for (i, (target, name)) in [
             (Target::NewGame, "New game"),
             (Target::Undo, "Undo"),
             (Target::Help, "Help"),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             assert_eq!(hits_for(&f, target).len(), 1, "{name} is not one control");
             assert!(lines.contains(&name.to_string()), "{name} has no label");
+            // The hit box is the button, not merely *a* box: counting controls
+            // and reading labels cannot tell two buttons drawn in one place
+            // from two buttons in two places, nor a hit box twice the width of
+            // what it sits under.
+            assert_eq!(
+                hits_for(&f, target).first().copied(),
+                Some(l.footer_button(i)),
+                "{name}'s hit box is not the button it is drawn as"
+            );
         }
     }
 
@@ -4989,23 +5284,32 @@ mod tests {
     fn the_sheets_rows_do_not_overwrite_one_another() {
         // Each row is sized to the band it is written in, not to the sheet: a
         // row taller than its band is written across the row beneath it.
-        let mut app = game();
-        app.apply(Intent::ToggleHelp);
-        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-        let mut rows: Vec<Rect> = text_boxes(&f)
-            .into_iter()
-            .filter(|(b, _, _)| HELP_ROWS.iter().any(|(k, _)| k == b))
-            .map(|(_, r, _)| r)
-            .collect();
-        assert_eq!(rows.len(), HELP_ROWS.len(), "a row is missing");
-        rows.sort_by(|a, b| a.y.total_cmp(&b.y));
-        for pair in rows.windows(2) {
-            assert!(
-                pair[0].bottom() <= pair[1].y + 0.01,
-                "a row at {:?} runs into the one at {:?}",
-                pair[0],
-                pair[1]
-            );
+        //
+        // Swept over every window, because the two sizes only part company in
+        // a small one: at the sizes a desktop actually opens at, the type is
+        // already smaller than the band and the `.min(step * 0.7)` that keeps
+        // it that way cannot be told from its own absence.
+        for (w, h) in WINDOWS {
+            let mut app = game();
+            app.apply(Intent::ToggleHelp);
+            let f = app.frame(w, h);
+            let mut rows: Vec<Rect> = text_boxes(&f)
+                .into_iter()
+                .filter(|(b, _, _)| HELP_ROWS.iter().any(|(k, _)| k == b))
+                .map(|(_, r, _)| r)
+                .collect();
+            if (w, h) == (WINDOW_WIDTH, WINDOW_HEIGHT) {
+                assert_eq!(rows.len(), HELP_ROWS.len(), "a row is missing");
+            }
+            rows.sort_by(|a, b| a.y.total_cmp(&b.y));
+            for pair in rows.windows(2) {
+                assert!(
+                    pair[0].bottom() <= pair[1].y + 0.01,
+                    "at {w}x{h} a row at {:?} runs into the one at {:?}",
+                    pair[0],
+                    pair[1]
+                );
+            }
         }
     }
 
@@ -5031,6 +5335,17 @@ mod tests {
         assert!(
             closing.y >= last.bottom() - 0.01,
             "the closing line at {closing:?} is written over the row at {last:?}"
+        );
+        // …and the band it is centred in is one of the sheet's own, not a
+        // seventh hung off the bottom edge. Dividing the body by `rows`
+        // instead of `rows + 1` still leaves this line below the last row —
+        // the rows simply spread out — and puts it outside the sheet, so
+        // "below the last row" is only half the claim.
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(
+            closing.bottom() <= l.help.bottom() - l.pad + 0.01,
+            "the closing line at {closing:?} hangs off the sheet at {:?}",
+            l.help
         );
     }
 

@@ -92729,3 +92729,54 @@ fault one step along — an action that runs thirty times while a key is held);
 `compact_boundary` or `is_replay` marker on a stream a client re-reads. In every
 case the shape is the same — the field is *available*, ignoring it type-checks,
 and the consequence is a doubled action rather than a crash.
+
+
+## `C-NO-PLACE-FOR-AN-APP-TO-KEEP-ANYTHING` (lane C, 2026-08-28) -- **open**, missing service
+
+**What it is.** An application running inside a window has nowhere *agreed* to
+write a setting, a score or a preference that survives the window being closed.
+`std::fs` exists, and the file-handling apps use it -- but there is no call in
+`gui/**` that keeps state on an app's behalf, no per-app directory anybody
+agrees on, and no service that owns "what did this program remember". So a game
+that wants to keep a high score would have to invent a path, a format and a
+failure policy of its own, and the next game would invent different ones. In
+practice none of them do, and a window that is closed forgets everything.
+
+**Where it bites.** Anything a program is supposed to carry from one run to the
+next. Concretely, today:
+
+| Program | What it claimed | What is true |
+|---|---|---|
+| `apps/simon` | "High score tracking persists across restarts", in the module documentation. | `best` starts at `0` at construction. There was no load and no save anywhere in the crate, and nothing in the toolkit to save *to*. |
+| `apps/game2048` | -- | `best_score` starts at `0` every launch, so the "best" is the best of this session. |
+| `apps/mixer` | -- | Every fader is back at its default the next time the window opens. |
+
+Simon's claim is the one that had to be corrected rather than merely noted: a
+documented feature with no code behind it is worse than a missing feature,
+because the reader has no way to tell "the save failed" from "there is no save".
+The documentation now says what is true -- the best is the best of this session
+-- and the gap is here rather than papered over there.
+
+**Why it is not simply a missing function.** A place to keep things is not one
+API but a set of decisions: where the files live (a per-user, per-app directory
+under a home the system has to define), what format they are in (`design.txt`
+says YAML for configuration, with comments and formatting preserved), who may
+read another app's data (capability-gated, not ambient -- an app's store must
+not be reachable by every other app that can open a file), what happens when the
+write is interrupted (atomic replace, or a corrupt settings file bricks the app
+on next launch), and what happens on upgrade (a schema that changed under data
+that did not). Bolting `std::fs::write` into each app would settle all five by
+accident, differently in each app, and every one would have to be undone.
+
+**What the proper fix looks like.** A settings/state service reachable over a
+channel, and a thin `guitk` accessor over it -- roughly "give me my app's
+document, as parsed YAML" and "here is the new one, replace it atomically". Apps
+name their store by the same `app_id` the window manager already uses to group
+them, so there is one identity rather than two. Until that exists, an app must
+not claim to remember anything, and a "best" or a "high score" must be labelled
+as being for the session.
+
+**Trigger to revisit.** When a per-user store is reachable from a windowed app:
+load `best` in `Simon::new` and save it in `score_round`, do the same for
+2048's `best_score`, restore the mixer's levels, and correct the rows of the
+table above.

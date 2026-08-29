@@ -3081,6 +3081,56 @@ check_selftest_format_wording() {
 
 check_selftest_format_wording
 
+# The numbering that the whole self-test log is read by.
+#
+# A boot report says "rung 67 failed" and known-issues.md says "rung 79 cleared
+# the 21 `matches!` sites" -- both are indexing a 103-rung log by number, so the
+# numbers have to be a real index.  Two rungs sharing one is the failure that
+# actually happens: near-simultaneous batches each take the next free number
+# against the same tip, both compile, both run, both pass, and the reference
+# that was supposed to locate a failure is what makes it ambiguous.  Only a
+# reading of all 103 banners finds it, which is what this does.
+check_selftest_rung_numbers() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Self-test rung numbering check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the rung-numbering gate against its fixture ==="
+    if ! "$py" "$PROJECT_ROOT/scripts/check-selftest-rung-numbers.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The rung-numbering gate no longer agrees" >&2
+        echo "with its own fixture, so its verdict means nothing -- it reports a" >&2
+        echo "clean tree and a collapsed analysis in the same words." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that self-test rungs are numbered uniquely and in order ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-selftest-rung-numbers.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  The self-test rung numbering is not a usable" >&2
+    echo "index into the log." >&2
+    echo "" >&2
+    echo "For a duplicate: two batches took the same next-free number against the" >&2
+    echo "same tip.  Renumber the later one to the end -- do not renumber the" >&2
+    echo "earlier, other documents already cite it." >&2
+    echo "" >&2
+    echo "For a gap: a rung was deleted or renumbered.  Close the hole, so that" >&2
+    echo "'the log reached rung N' keeps meaning 'all N rungs ran' and a boot" >&2
+    echo "truncated mid-self-test stays obvious." >&2
+    exit 1
+}
+
+check_selftest_rung_numbers
+
 # A hand-written "every variant" list cannot go stale loudly.
 #
 # `const ALL: [Foo; N] = [...]` claims to name every variant of `Foo`, and the

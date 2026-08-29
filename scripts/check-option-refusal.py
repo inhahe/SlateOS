@@ -560,6 +560,33 @@ def main(argv: list[str]) -> int:
             print(f"{fn} {counts[fn]}")
         return 0
 
+    if "--sites" in argv:
+        # `--ledger` says how much debt a function carries; this says *where*,
+        # which is what burning it down actually needs.  Without it each batch
+        # began by re-deriving the site list with a throwaway script -- a
+        # second, slightly-different matcher that could disagree with the gate
+        # about what counts, which is the last thing a burn-down wants.  Same
+        # `guessed` list the gate grades against, so the two cannot drift.
+        #
+        # Grouped by function and ordered densest-first, because the shapes
+        # co-locate: an arm careless enough to guess one operand usually
+        # guesses the next, so a function is a better batch unit than a
+        # pattern.
+        rest = [a for a in argv[1:] if not a.startswith("-")]
+        want = rest[0] if rest else None
+        by_fn: dict[str, list[tuple[int, str]]] = {}
+        for lineno, fn, text in guessed:
+            if want and want not in fn:
+                continue
+            by_fn.setdefault(fn, []).append((lineno, text))
+        for fn in sorted(by_fn, key=lambda f: (-len(by_fn[f]), f)):
+            print(f"{fn}  ({len(by_fn[fn])} site(s))")
+            for lineno, text in by_fn[fn]:
+                print(f"  {rel}:{lineno}  {text}")
+        total = sum(len(v) for v in by_fn.values())
+        print(f"\n{total} site(s) across {len(by_fn)} function(s)")
+        return 0
+
     ledger = load_ledger()
     seen: dict[str, int] = {}
     unaccounted_guessed = []

@@ -49,7 +49,7 @@
 # `# EXPECT-DIFF` waiver is a waiver that was never about osh at all.
 set -u
 
-DIFF_PROG=osh
+DIFF_PROG='osh'
 DIFF_PKG=oils
 DIFF_BINS=osh
 # `command -v bash` would answer for the *host's* bash on a host that has one

@@ -92,7 +92,7 @@ set -u
 # both sides at once — the worst kind of difference, because it agrees.
 unset GREP_OPTIONS GREP_COLOR GREP_COLORS POSIXLY_CORRECT
 
-DIFF_PROG=grep
+DIFF_PROG='grep'
 # `sort` normalises the directory order the selector cases would otherwise
 # disagree about, and `timeout` is what stops a device case hanging the run.
 # Both are load-bearing enough that running without them would be worse than

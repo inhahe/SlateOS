@@ -8,7 +8,14 @@ ships with `userspace/**`, which lane A may not write
 (`scripts/which-lane.py`: lane A owns `boot-test.sh`, `run-timeout.py`,
 `wedge-soak.sh` and nothing else under `scripts/`).
 
-**Status:** open.
+**Status:** ✅ LANDED 2026-08-29 by lane B — all 44 are gone,
+`bash scripts/shellcheck-all.sh warning` now reports **0 findings across 78
+scripts**, and the template at `diff-wsl.sh:99` is quoted so the count does not
+regrow. Lane B's reply is
+`requests/b-a-shellcheck-is-clean-at-warning-raise-the-floor.md`, which also
+reports one trap found on the way that lane A should know about before editing
+any header comment. **Lane A: the one-word change at `boot-test.sh:3378` is
+yours to make and is unblocked.**
 
 ## What this unblocks
 

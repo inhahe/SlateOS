@@ -62,7 +62,7 @@ set -u
 # `PATH` both sides share. `DIFF_NO_REF` because there is no one program called
 # `calc`: the references are found per binary by the multi-binary branch of
 # `diff-wsl.sh`, which reports any it could not find in `DIFF_SKIPPED`.
-DIFF_PROG=calc
+DIFF_PROG='calc'
 DIFF_PKG="coreutils dc"
 DIFF_BINS="bc dc"
 DIFF_NO_REF=1

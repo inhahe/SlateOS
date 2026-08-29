@@ -80,7 +80,7 @@ set -u
 # `DIFF_REF` is spelled out rather than left to the default `command -v printf`,
 # which finds the shell builtin: the preamble is sourced by a shell, and the
 # builtin is not the program under comparison. See `scripts/printf-probe.sh`.
-DIFF_PROG=printf
+DIFF_PROG='printf'
 DIFF_REF="/usr/bin/printf /bin/printf"
 DIFF_NEED="timeout python3"
 # shellcheck source=diff-wsl.sh

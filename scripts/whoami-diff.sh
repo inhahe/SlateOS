@@ -40,7 +40,7 @@
 # still discriminates: it should report every xfail as XPASS and nothing else.
 set -u
 
-DIFF_PROG=whoami
+DIFF_PROG='whoami'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 

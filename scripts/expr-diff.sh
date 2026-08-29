@@ -58,7 +58,7 @@
 # because then the recorded reason no longer describes reality.
 set -u
 
-DIFF_PROG=expr
+DIFF_PROG='expr'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 

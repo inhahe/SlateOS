@@ -20,6 +20,11 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 cd "$WORK" || exit 1
 
+# Entries that begin with `=` are quoted, as are the ones containing a comma.
+# The `=` is the syntax under test, but inside an array a bare leading `=` reads
+# to shellcheck as a malformed `[index]=value` (SC2191); quoting says "literal"
+# without changing the value, which is the same reason the comma entries are
+# quoted. `u=r` and friends are untouched -- only a *leading* `=` is ambiguous.
 SPECS=(
   # --- whole-string octal, including the short/long distinction --------------
   0 7 644 755 700 000 777 4755 2755 1777 7777 00755 02755 000755 0644
@@ -29,19 +34,20 @@ SPECS=(
   g+r g+w g+x g+X g+s g+t g-r g-w g-x g-s g-t g=r g=w g=x g=X g=s g=t
   o+r o+w o+x o+X o+s o+t o-r o-w o-x o-s o-t o=r o=w o=x o=X o=s o=t
   a+r a+w a+x a+X a+s a+t a-r a-w a-x a-s a-t a=r a=w a=x a=X a=s a=t
-  +r +w +x +X +s +t -r -w -x -X -s -t =r =w =x =X =s =t
+  +r +w +x +X +s +t -r -w -x -X -s -t '=r' '=w' '=x' '=X' '=s' '=t'
   # --- no permissions at all -------------------------------------------------
-  u+ u- u= g= o= a= + - =
+  u+ u- u= g= o= a= + - '='
   # --- multi-letter groups ---------------------------------------------------
   u+rw u+rx u+wx u+rwx u+rX u+sx u+st a+rwx a+rX a+rwxXst go-w go+rw ug+s
   ugo+r ugo=rx uga+r ao+x
   # --- copy sources ----------------------------------------------------------
   u+g u+o u-g u-o u=g u=o g+u g-u g=u o+u o-u o=u o+g o=g a=u a+u a=g a=o
-  +u -u =u +g =g +o =o
+  +u -u '=u' +g '=g' +o '=o'
   # --- chained operators inside one clause -----------------------------------
   u+r-w u+r-w+x u=r+w-r go+r-w a+rw-x u+x-x u=rwx-w +r-w
   # --- per-clause octal ------------------------------------------------------
-  =644 +7 -111 =0 =7777 '=644,+111' '+1,+2,+4' u=644 a+7 '=644x' '=644+1' =10000
+  '=644' +7 -111 '=0' '=7777' '=644,+111' '+1,+2,+4' u=644 a+7 '=644x' '=644+1'
+  '=10000'
   # --- several clauses -------------------------------------------------------
   'u=rwx,g=rx,o=r' 'u+x,g=u' 'a=r,u+w' 'u+s,g+s,o+t' 'a+X,u-w' 'go-rwx,u+rw'
   'a=,u+rw' '755,u+w' 'u+r,' ',u+r' ','

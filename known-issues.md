@@ -92946,3 +92946,53 @@ this specific bug is unknown.
 `userspace/coreutils/{df,du,strings}.rs`, `userspace/coreutils/src/human.rs`).
 Filed to lane A as
 `requests/b-a-kstat-sample-calls-memory-info-from-the-timer-softirq-and-self-deadlocks-on-swap.md`.
+
+---
+
+## `B-XARGS-IS-A-STUB-AND-DASH-ZERO-CANNOT-CARRY-THE-BYTES-IT-EXISTS-FOR` (lane B, 2026-08-29) -- **open**, not yet converted
+
+**In short:** `userspace/coreutils/src/bin/xargs.rs` is a 285-line invention, not
+a transcription of GNU findutils' 1755-line `xargs.c`. The worst consequence is
+that `xargs -0` -- the mode whose entire purpose is carrying arbitrary bytes from
+`find -print0` -- reads stdin with `read_to_string` and so fails on exactly the
+non-UTF-8 filenames it exists to handle. `find . -print0 | xargs -0 rm` is broken
+for the case `-0` was invented for.
+
+**Where:** `userspace/coreutils/src/bin/xargs.rs` -- `run_main()` line 34
+(`env::args().skip(1).collect::<Vec<String>>()`), line 42
+(`io::stdin().read_to_string`), `split_items()` line 152, `parse_args()` line 108.
+Listed in `scripts/argv-utf8-baseline.txt` as `xargs.rs:argv-as-string`.
+
+**Measured against `/usr/bin/xargs` (GNU findutils 4.9.0) on the dev machine.**
+Each row was run, not assumed:
+
+| # | Case | GNU 4.9.0 | Our stub |
+|---|---|---|---|
+| 1 | `printf "a'b c'd\n" \| xargs echo` | `ab cd` (one item; quotes are syntax) | `a'b c'd` (two items, quotes literal) |
+| 2 | `printf 'x\ y\n' \| xargs echo` | `x y` (backslash escapes the space) | two items |
+| 3 | `printf "a'b\n" \| xargs echo` | diagnoses `unmatched single quote` | accepted silently |
+| 4 | empty input, no `-r` | **runs the command once** (`RAN`) | returns success without running |
+| 5 | child exits 1 | xargs exits **123** | exits 1 |
+| 6 | child exits 255 | xargs exits **124** | exits 1 |
+| 7 | command not found | xargs exits **126** | exits 1 |
+| 8 | `printf 'caf\351\0' \| xargs -0 ...` | passes the raw byte through (`63 61 66 e9`) | cannot represent it |
+
+Note row 7: the measured status is **126**, not the 127 the documentation
+implies. Recorded as measured; do not "correct" it to 127 without re-measuring.
+
+Row 4 matters more than it looks: the stub behaves as though `-r`
+(`--no-run-if-empty`) were permanently on, so a script relying on the one
+guaranteed invocation silently gets none.
+
+**Also entirely absent:** `ARG_MAX` splitting. GNU's whole reason for existing is
+building command lines up to the system limit (gnulib `lib/buildcmd.c`, 638
+lines); our default path appends every item to a single command and will `E2BIG`
+on large input. And 15 of 18 long options are missing -- `--arg-file`,
+`--delimiter`, `--eof`, `--max-lines`, `--max-chars`, `--interactive`,
+`--no-run-if-empty`, `--verbose`, `--show-limits`, `--exit`, `--max-procs`,
+`--process-slot-var`, `--open-tty`, `--help`, `--version`.
+
+**Proper fix:** transcribe `xargs.c` + `buildcmd.c` the way `df`, `du` and `ls`
+were done, carrying argv and stdin as bytes throughout, and add
+`scripts/xargs-diff.sh` in the shape of `df-diff.sh` against `/usr/bin/xargs`.
+Reference tarball matches the installed binary exactly (findutils 4.9.0).

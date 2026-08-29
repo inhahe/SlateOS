@@ -92880,6 +92880,234 @@ fault one step along — an action that runs thirty times while a key is held);
 `compact_boundary` or `is_replay` marker on a stream a client re-reads. In every
 case the shape is the same — the field is *available*, ignoring it type-checks,
 and the consequence is a doubled action rather than a crash.
+
+
+## `C-NO-PLACE-FOR-AN-APP-TO-KEEP-ANYTHING` (lane C, 2026-08-28) -- **open**, missing service
+
+**What it is.** An application running inside a window has nowhere *agreed* to
+write a setting, a score or a preference that survives the window being closed.
+`std::fs` exists, and the file-handling apps use it -- but there is no call in
+`gui/**` that keeps state on an app's behalf, no per-app directory anybody
+agrees on, and no service that owns "what did this program remember". So a game
+that wants to keep a high score would have to invent a path, a format and a
+failure policy of its own, and the next game would invent different ones. In
+practice none of them do, and a window that is closed forgets everything.
+
+**Where it bites.** Anything a program is supposed to carry from one run to the
+next. Concretely, today:
+
+| Program | What it claimed | What is true |
+|---|---|---|
+| `apps/simon` | "High score tracking persists across restarts", in the module documentation. | `best` starts at `0` at construction. There was no load and no save anywhere in the crate, and nothing in the toolkit to save *to*. |
+| `apps/game2048` | -- | `best_score` starts at `0` every launch, so the "best" is the best of this session. |
+| `apps/mixer` | -- | Every fader is back at its default the next time the window opens. |
+
+Simon's claim is the one that had to be corrected rather than merely noted: a
+documented feature with no code behind it is worse than a missing feature,
+because the reader has no way to tell "the save failed" from "there is no save".
+The documentation now says what is true -- the best is the best of this session
+-- and the gap is here rather than papered over there.
+
+**Why it is not simply a missing function.** A place to keep things is not one
+API but a set of decisions: where the files live (a per-user, per-app directory
+under a home the system has to define), what format they are in (`design.txt`
+says YAML for configuration, with comments and formatting preserved), who may
+read another app's data (capability-gated, not ambient -- an app's store must
+not be reachable by every other app that can open a file), what happens when the
+write is interrupted (atomic replace, or a corrupt settings file bricks the app
+on next launch), and what happens on upgrade (a schema that changed under data
+that did not). Bolting `std::fs::write` into each app would settle all five by
+accident, differently in each app, and every one would have to be undone.
+
+**What the proper fix looks like.** A settings/state service reachable over a
+channel, and a thin `guitk` accessor over it -- roughly "give me my app's
+document, as parsed YAML" and "here is the new one, replace it atomically". Apps
+name their store by the same `app_id` the window manager already uses to group
+them, so there is one identity rather than two. Until that exists, an app must
+not claim to remember anything, and a "best" or a "high score" must be labelled
+as being for the session.
+
+**Trigger to revisit.** When a per-user store is reachable from a windowed app:
+load `best` in `Simon::new` and save it in `score_round`, do the same for
+2048's `best_score`, restore the mixer's levels, and correct the rows of the
+table above.
+
+
+### Lesson 64: a cache whose key is coarser than its value hands out the wrong answer to whoever asks second (lane C, 2026-08-28)
+
+**In short:** the system font cache rounded the requested pixel size to a whole
+number to make a lookup key, and then built the font at the size that was
+*asked for* rather than at the size the key names. Two callers wanting 13.6 and
+14.4 pixels share the key 14, so the first one through the door decided what
+both of them got -- and a single request for a size no font can be built at
+(zero, a negative, an enormous one) installed a coarse fallback bitmap under a
+key that ordinary callers use, poisoning it for the rest of the program's life.
+The fix is one line: build the entry at `key_px(key)`, not at `px`.
+
+**The fault.** `gui/font/src/system.rs`:
+
+```rust
+let key = round_px(px);                     // clamp to 1..=512, round
+self.fonts.entry((key, weight, family))
+    .or_insert_with(|| SystemFont::from_shared(face, px) ... )
+//                                             ^^ px, not key
+```
+
+`round_px` is deliberately lossy -- it exists so that a hundred slightly
+different requested sizes share a handful of rasterisations. But the value
+stored under the lossy key was built at the *unrounded* size, so the map no
+longer had one value per key; it had one value per key, chosen by whoever asked
+first. That is order-dependence in a pure-looking accessor: `get(13.6)` then
+`get(14.4)` and `get(14.4)` then `get(13.6)` return different fonts, and which
+order happens depends on the order a UI paints its text in, which depends on the
+window size, which depends on the user.
+
+**Why it took an app to find it.** The failure that exposed it was three
+subsystems away and looked nothing like a font bug. `apps/simon` at a 24x24
+window drops every band, so a readout box is empty; the readout still computed a
+size for its caption -- `0.0` -- and asked for its line height before the
+early-return that would have skipped the drawing. `round_px(0.0)` clamps to 1;
+`SystemFont::from_shared(face, 0.0)` fails; the 8x16 builtin bitmap is installed
+under key 1. Later the *pad numbers*, legitimately 1.472 pixels, round to key 1,
+find the poisoned entry, and measure 8.0 x 16.0 -- so a text-inside-the-window
+test failed, naming a string that had nothing to do with the readout that
+poisoned the cache. The distance between cause and symptom is the whole point:
+a cache is shared mutable state, and shared mutable state converts a local
+mistake into a remote one.
+
+**The rule.** *Whatever you key a cache by, build the value from the key.* If
+the key is derived from an argument by any lossy function -- rounding, clamping,
+case-folding, normalising a path, truncating a hash -- then the value must be
+computed from the derived key, never from the raw argument. Write the inverse
+explicitly (here, `key_px`) so the round trip is visible and testable, rather
+than relying on the two call sites happening to agree. And treat a failed build
+as a thing not to memoise at all, or to memoise only under a key nobody else can
+land on; a negative cache entry that shares a key with a positive one is a
+denial of service you inflict on yourself.
+
+**Where else to look.** Anything with a `round`, `clamp`, `to_lowercase`,
+`canonicalize` or `& MASK` between an argument and a map key: a glyph atlas
+keyed by rounded size; a scaled-image cache keyed by integer dimensions built
+from float ones; a DNS or path cache keyed by a case-folded name that stores the
+result for the original spelling; a capability lookup keyed by a truncated
+identifier. The tell is a key expression and a value expression that mention the
+same variable in two different forms. The test that catches it is always the
+same shape -- ask twice in both orders and require the same answer, and ask once
+for something that cannot succeed and then once for something that can.
+
+
+## `C-THIRTEEN-COPIES-OF-THE-MUTATION-HARNESS` (lane C, 2026-08-29) -- **fixed** the same day
+
+**What it is.** Every app wired in this campaign carries its own
+`apps/<app>/mutate.py`, and there are thirteen of them. Only the `MUTATIONS`
+table at the top is genuinely per-app; everything below it -- `run_tests`, the
+compile/hang/crash classification, the `[ok]`/`[??]`/`[BAD]` verdicts, the
+backup, the `try/finally` restore and the summary -- is the same harness copied
+thirteen times.
+
+**Why it matters, concretely.** On 2026-08-29 a machine restart killed a sweep
+mid-mutation and left `apps/simon/src/main.rs` holding a live mutation, with the
+real program in `main.rs.bak`. The `finally` that exists to prevent exactly this
+cannot run when the process is never asked to clean up. The fix -- refuse to
+start when a backup survives, print the diff, name the two recoveries and exit 2
+-- went into `apps/simon/mutate.py` only. **The other twelve still have the
+gap**, and will keep it until each is edited by hand.
+
+That is `known-issues.md` lesson 63 in its own tooling: a rule kept only by
+copying is a rule that will be dropped. The failure mode is quiet and it
+poisons evidence rather than crashing -- a mutant compiles, so the next run
+reads it as `original` and mutates on top of it, and a sweep reporting `[ok]`
+throughout then proves nothing at all.
+
+**A second divergence, found the same day.** Simon's second sweep returned 182
+`[ok]`, one `[skip]` and two wrong-test verdicts -- and **exited 0**. All
+thirteen harnesses print their verdicts and return success unconditionally, so
+a run that has not passed is indistinguishable from one that has unless someone
+reads every line of the log. Simon's now exits 1 unless every mutation was
+caught by the tests named for it, and counts a `[skip]` as a failure: a
+survivor is loud, but a stale anchor silently stops applying its mutation, and
+does so inside a run that still ends "0 survived". The other twelve still exit
+0 regardless. This is the same debt as above and doubles the argument for
+extracting the harness -- two independent correctness fixes have now had to be
+written into one copy of thirteen.
+
+**The fix as built.** The harness is now `scripts/mutation_harness.py`, exposing
+`sweep(src, mutations, crate, timeout=..., only=None)`. Each
+`apps/<app>/mutate.py` is its docstring, its `MUTATIONS` table and a two-line
+call; the startup guard, the restore, the verdict classification and the exit
+code exist once. All thirteen were converted mechanically and each table was
+verified to be byte-identical to the one at `HEAD`. The tables stayed per-app:
+they are the part that is genuinely different, and the part worth reading.
+
+**It is in `scripts/`, not `apps/`, and that is not cosmetic.** The first
+attempt put it at `apps/mutation_harness.py`. `apps/*` is a Cargo workspace
+member glob, so the `apps/__pycache__/` directory Python writes on first import
+became a workspace member, and *every* `cargo test` in the tree started failing
+with "failed to load manifest for workspace member `apps/__pycache__`" before
+compiling anything. `__pycache__/` is in `.gitignore`, so the thing that broke
+the build was invisible to `git status`. See lesson 66.
+
+**Four faults the extraction itself exposed** -- worth recording, because the
+argument for extracting was "thirteen copies hide bugs", and consolidating them
+promptly surfaced four more, every one of which produced a *false green*:
+
+1. **The verdict classifier could not tell a dead test run from an absent one.**
+   `crashed = compiled and not timed_out and not failed and returncode != 0`
+   was meant to catch a mutant that aborts the test process before any test can
+   report. But `compiled` was `"could not compile" not in output`, and a
+   *manifest* error is not a compile error -- so a cargo that never started
+   satisfied every clause. The `apps/__pycache__` break therefore scored all 20
+   of sliding's mutations as `[ok] caught -- the harness died` and exited 0,
+   having run no test at all. `run_tests` now requires positive evidence that a
+   test binary started (`running N tests` in the output), and a mutant that
+   compiles but produces no such line **stops the sweep** rather than earning a
+   verdict.
+
+2. **No sweep had ever checked that the suite passes on the unmutated program.**
+   That is the general form of fault 1 and the cheaper guard: a run whose green
+   condition is "the thing I broke got noticed" cannot distinguish "my sabotage
+   worked" from "this was already broken", and the more thoroughly the
+   environment is broken the more mutations get "caught". `sweep` now runs the
+   suite once against the real source first and refuses to start unless it
+   compiled, ran and passed.
+
+3. **The per-mutation timeout was being spent on the build.** It exists to catch
+   a mutant that loops forever, and is sized for the tests -- sliding allows
+   120s. But `cargo test` builds first, and a cold workspace build is slower
+   than any suite: sliding's baseline was killed at 120s while still compiling
+   dependencies. Unfixed, the first mutation after any cold build would have
+   been scored "caught by a hang" -- a false `[ok]`, the worst kind. `sweep` now
+   builds with `--no-run` outside the timed window first, so every timed run
+   recompiles one crate, which is what the timeout was calibrated against.
+
+4. **A hang verdict is the one verdict that checks nothing, and they cascade.**
+   `[ok] caught -- the suite hung` is accepted without ever consulting the
+   mutation's `expect` list: there are no test names to read, so the coverage the
+   entry was written to prove is not verified at all. Fixing (3) only moved the
+   *cold* build out of the timed window; every incremental rebuild was still
+   inside it. So when sliding's one genuinely unbounded mutation timed out, the
+   runner killed the tree mid-work, the redo landed inside the *next* mutation's
+   120s, and the two mutations after it were also scored "caught by a hang" --
+   neither of which can loop. Three of twenty verdicts were hangs; only one was
+   real. `sweep` now builds every mutant untimed before the timed run, so the
+   timed window holds test execution and nothing else, and a compile failure is
+   observed at the build step instead of inferred from test output.
+
+   Confirmed rather than assumed: re-running those three with the fix,
+   `the scramble walks until it is unsolved, without a bound` still hangs -- it
+   is an unbounded loop -- while `the shuffle undoes itself half the time` and
+   `a won board goes on playing` now name their owning tests
+   (`the_walk_never_undoes_the_move_it_just_made`,
+   `a_won_board_ignores_further_moves`).
+
+**Verified** by running a previously-green app's sweep to completion against the
+shared harness before trusting the other twelve: sliding, 20 of 20 caught, exit
+0, source restored. Note what that number would have been worth on its own --
+the run was "20/20 green" both before and after fault 4 was fixed, and the
+difference was three verdicts that proved nothing versus one. A sweep's headline
+count is not its result; the distribution of *kinds* of verdict is.
+
+
 ## `A-MODULE-SELF-TEST-ASSERTIONS-WERE-GUARDED-BY-NOTHING` (lane A, 2026-08-29) -- **fixed by a new gate**
 
 **What it is.** ~300 assertions of the shape
@@ -93066,3 +93294,106 @@ on large input. And 15 of 18 long options are missing -- `--arg-file`,
 were done, carrying argv and stdin as bytes throughout, and add
 `scripts/xargs-diff.sh` in the shape of `df-diff.sh` against `/usr/bin/xargs`.
 Reference tarball matches the installed binary exactly (findutils 4.9.0).
+
+
+### Lesson 65: a check that reuses the assumption it is checking will agree with itself (lane C, 2026-08-29)
+
+**In short:** a script converted thirteen `mutate.py` files to a shared harness,
+copying each file's `MUTATIONS` table across verbatim. A second script checked
+that no table was damaged in the move. Both found the table the same way -- look
+for the statement `MUTATIONS = [...]` -- and one of the thirteen builds its table
+in *two* statements, `MUTATIONS = [...]` followed by `MUTATIONS += [...]`. The
+converter kept the first and dropped 55 of `wordsearch`'s 103 mutations; the
+checker compared first-to-first, found them identical, and printed `OK`. The
+check was not weak, it was **blind in exactly the place the converter was**.
+
+**The shape of it.** The verifier was not lazy -- it was already careful. It used
+`ast` rather than text scanning (an earlier version had scanned for a closing
+`]` and stopped at a `]` that appeared *inside* a mutation's replacement text).
+It normalised CRLF against LF so the five CRLF files would not report a false
+difference. It compared the table body byte-for-byte *and* counted the entries
+with `ast.literal_eval`. Every one of those refinements was real, and none of
+them mattered, because the question it asked was "does the `MUTATIONS`
+assignment match?" and the defect was "there is a second statement". Refining an
+answer does not widen a question.
+
+**Why the line count nearly did not save it.** The only visible symptom was that
+`wordsearch` shrank by 428 lines where the other twelve shrank by 52-143. That
+is the sort of number it is very easy to explain away -- "it has a long
+docstring", "it had more boilerplate" -- and the verifier saying `OK` is exactly
+the authority you would use to explain it away with. A green check next to an
+anomalous number is more dangerous than no check at all, because it converts a
+question into a settled matter.
+
+**The fix, and the general form.** Compare *outputs*, not *the artefact you
+believe produces them*: the verifier now `exec`s both modules and compares the
+`MUTATIONS` lists they actually build, so however a file assembles its table --
+one statement, two, a loop, a comprehension -- the check sees the result. That
+is the rule. **When you verify a transformation, observe the transformed thing's
+behaviour, not its structure** -- because your model of its structure is the
+thing most likely to be wrong, and it is precisely the model the transformation
+was built on.
+
+**Where else to look.** Any migration validated by a script that shares a parser,
+a schema, a glob, or a "find the interesting node" helper with the migrator: a
+config rewriter checked by re-reading with the same loader; a codemod verified by
+the same AST query it used to match; a data backfill audited by the query that
+selected the rows to backfill. If the same assumption is on both sides of the
+equals sign, the equation is `x == x`.
+
+### Lesson 66: a harness that never watched the tests pass cannot tell "caught" from "nothing ran" (lane C, 2026-08-29)
+
+**In short:** extracting that shared harness put `mutation_harness.py` in
+`apps/`. `apps/*` is a Cargo workspace member glob, so the `apps/__pycache__/`
+directory Python created on first import was read by cargo as a crate, and every
+`cargo test` in the entire tree began failing with "failed to load manifest for
+workspace member `apps/__pycache__`" -- before compiling anything. The mutation
+sweep then ran 20 mutations, saw a non-zero exit and no named test failures every
+time, classified all 20 as `[ok] caught -- the harness died`, printed
+**"OK: all 20 mutation(s) caught by the tests named for them"**, and exited 0.
+Not one test had been compiled, let alone run. And `__pycache__/` is in
+`.gitignore`, so the directory that broke the build never appeared in
+`git status`.
+
+**Why the harness believed it.** Its classifier had a rule for the genuine case
+where a mutant kills the test process before any test can report -- an abort, a
+stack overflow -- which cannot be recognised by a named failure because there is
+no name to read:
+
+```python
+crashed = compiled and not timed_out and not failed and out.returncode != 0
+```
+
+Every clause of that was true of a cargo that never started. `compiled` was
+computed as `"could not compile" not in output`, and the manifest error is not a
+compile error, so a run that compiled *nothing* scored `compiled = True`. The
+predicate meant to say "the tests ran and died" actually said "something exited
+non-zero", and those are the same sentence only when you already know the tests
+ran.
+
+**The two fixes.** *(1)* The classifier now requires positive evidence that a
+test binary started -- `^running \d+ tests?$` in the output -- and a mutant that
+compiles but produces no such line **stops the sweep** rather than earning a
+verdict, because the tree changed underneath the run and nothing after that point
+would mean anything either. *(2)* More importantly, `sweep` now runs the suite
+once against the **unmutated** source before it mutates anything, and refuses to
+start unless it compiled, ran, and passed. That single run is the whole class of
+defect: a sweep that has never once observed the tests passing on the real
+program has no baseline against which "the tests failed" is information.
+
+**The rule.** *Before you accept failure as evidence, prove you can observe
+success.* A negative-result harness -- mutation testing, fault injection, chaos
+testing, a regression bisect, anything whose green condition is "the thing I
+broke got noticed" -- must first demonstrate the unbroken case, or it cannot
+distinguish "my sabotage worked" from "this was already broken". The failure mode
+is silent and self-confirming: the more thoroughly the environment is broken, the
+more mutations get "caught", and the louder the harness insists everything is
+fine.
+
+**And the location fix.** `mutation_harness.py` now lives in `scripts/`, which is
+not a workspace member. The general point is smaller but sharp: **a directory
+covered by a build-system glob is not a neutral place to put a file.** Dropping a
+Python module, a README generator, or a scratch script into `apps/`, `crates/`,
+`packages/*` or any other globbed member directory can add a member to the build
+-- and the artefact that does it may be one the tool creates on its own, and one
+your VCS is configured not to show you.

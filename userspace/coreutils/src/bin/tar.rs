@@ -8,7 +8,7 @@
 //! `--get`), `--list`, `--verbose`, `--file`, `--directory`,
 //! `--preserve-permissions` (or `--same-permissions`) — abbreviable to any
 //! unambiguous prefix, and `--` ends the options. `-?`/`--help`, `--usage` and
-//! `--version` answer and exit 0. The other 159 long options GNU has are
+//! `--version` answer and exit 0. The other 160 long options GNU has are
 //! **recognised and refused** rather than ignored; see
 //! [`LONG_OPTIONS`] for why a table of names this tar does not implement is
 //! load-bearing rather than decorative, and [`unsupported`] for why refusing
@@ -128,13 +128,13 @@ const TAR: Program = Program::new("tar", EXIT_USAGE);
 /// listing it is all that is needed.
 const SHORT_OPTIONS: &str = "cxtvpf:C:?";
 
-/// Every long option GNU tar 1.35 has — all 171 — in argp's own table order.
+/// Every long option GNU tar 1.35 has — all 172 — in argp's own table order.
 ///
 /// # Why the whole set, when this tar implements twelve of them
 ///
 /// Because the table is what decides whether an abbreviation is *ambiguous*,
 /// and an abbreviation is resolved against every name tar knows, not every name
-/// tar acts on. Drop the 159 unimplemented entries and `tar --ex` stops being
+/// tar acts on. Drop the 160 unimplemented entries and `tar --ex` stops being
 /// an error and silently becomes `--extract` — GNU refuses it, listing
 /// fourteen candidates. A table that lists only what it implements does not
 /// merely give a worse message; it gives a *different command* than GNU would.
@@ -142,7 +142,7 @@ const SHORT_OPTIONS: &str = "cxtvpf:C:?";
 /// The unimplemented names are still refused, by [`parse_args`] — recognising a
 /// name and performing it are separate things. See [`unsupported`].
 ///
-/// # Why the order is load-bearing, and must not be alphabetised
+/// # Why the order is load-bearing, and must not be sorted
 ///
 /// `getopt_long` lists an ambiguous prefix's candidates in the order the caller
 /// declared them, so this array's order is observable output:
@@ -153,66 +153,197 @@ const SHORT_OPTIONS: &str = "cxtvpf:C:?";
 /// ```
 ///
 /// `--extract` precedes `--exclude`, which alphabetical order would reverse.
+/// The order is neither alphabetical nor arbitrary: it is argp's own grouping
+/// by function — the operation modes, then the incremental options, then the
+/// overwrite-control ones, and so on — which is why sorting it by any key at
+/// all is wrong.
 ///
 /// # How this was obtained
 ///
-/// Measured from the binary, not transcribed from `--help` or from memory.
+/// One measurement, from the binary:
 ///
-/// - **Order**: argp prints its possibilities in table order, and every
-///   candidate for an ambiguous prefix necessarily shares its first letter — so
-///   one query per letter (`tar --a`, `tar --b`, …) reports each letter's group
-///   in declaration order, and cross-letter order is unobservable. 36 queries
-///   fix the whole array.
-/// - **Argument class**: `tar --opt=zz` answering `doesn't allow an argument`
-///   is `Nothing`; `tar --opt` *as the last word* answering `requires an
-///   argument` is `Required`; neither is `Optional`. The option must be last —
-///   a `Required` one followed by anything simply eats it, so `tar --file
-///   --version` reports nothing at all. Getting that wrong is what first
-///   reported zero required options.
-/// - **`--program-name`** appears in no `--help` output: it is argp-hidden, and
-///   was found only because `tar --p` listed it among its possibilities. This
-///   is why the ambiguity lists, not `--help`, are the authority for the name
-///   *set* as well as the order.
+/// ```text
+/// $ tar --=x
+/// tar: option '--' is ambiguous; possibilities: '--list' '--extract' ...
+/// ```
 ///
-/// The whole table was then checked against GNU exhaustively: all **1381**
-/// distinct prefixes of all 171 names were put to the binary and its verdict
-/// compared with this table's — resolved, unrecognised, or ambiguous, and for
-/// ambiguous ones the candidate list in order. **Zero mismatches.** That is
-/// also what establishes tar needs [`Program::resolve_long`] rather than
+/// The empty name is a prefix of every entry, so the ambiguity list *is* the
+/// table — all 172 names, in declaration order, in one line.
+/// `scripts/getopt-ambiguity-check.py` runs exactly this at push time and
+/// refuses a push whose table disagrees, so the array below is verified against
+/// the real utility on every push rather than only when it was written.
+///
+/// The argument classes are a second sweep: `tar --opt=zz` answering `doesn't
+/// allow an argument` is `Nothing`; `tar --opt` *as the last word* answering
+/// `requires an argument` is `Required`; neither is `Optional`. The option must
+/// be last — a `Required` one followed by anything simply eats it, so `tar
+/// --file --version` reports nothing at all. That comes out 113 / 52 / 7.
+///
+/// **Two names are invisible to `--help`,** which is why the ambiguity list and
+/// not the help text is the authority for the name *set*:
+///
+/// - `--program-name`, which argp hides.
+/// - `--HANG`, a hidden debug option that sleeps forever, and the only name
+///   here beginning with a capital letter. It was missed by the first version
+///   of this table, which was reconstructed a letter at a time from `tar --a`,
+///   `tar --b`, … over the lower-case alphabet — a sweep that can never reach
+///   it. The push-time check caught it. The lesson is the general one:
+///   enumerate from the utility's own output, never from an alphabet you chose.
+///
+/// The table was also checked exhaustively against GNU: every distinct prefix
+/// of every name was put to the binary and its verdict compared with this
+/// table's — resolved, unrecognised, or ambiguous, and for ambiguous ones the
+/// candidate list in order — for **zero** mismatches. That is also what
+/// establishes tar needs [`Program::resolve_long`] rather than
 /// `resolve_long_aliased`: tar does have aliases (`--extract`/`--get`), but no
 /// two of them share a prefix, so name-only resolution is exact here. Were that
-/// untrue, some prefix among the 1381 would have been accepted by GNU and
-/// called ambiguous by us.
+/// untrue, some prefix would have been accepted by GNU and called ambiguous by
+/// us.
 const LONG_OPTIONS: &[(&str, Takes)] = &[
-    ("append", Takes::Nothing),
-    ("atime-preserve", Takes::Optional),
-    ("acls", Takes::Nothing),
-    ("auto-compress", Takes::Nothing),
-    ("absolute-names", Takes::Nothing),
-    ("after-date", Takes::Required),
-    ("add-file", Takes::Required),
-    ("anchored", Takes::Nothing),
-    ("blocking-factor", Takes::Required),
-    ("bzip2", Takes::Nothing),
-    ("backup", Takes::Optional),
-    ("block-number", Takes::Nothing),
+    ("list", Takes::Nothing),
+    ("extract", Takes::Nothing),
+    ("get", Takes::Nothing),
     ("create", Takes::Nothing),
+    ("diff", Takes::Nothing),
     ("compare", Takes::Nothing),
+    ("append", Takes::Nothing),
+    ("update", Takes::Nothing),
     ("catenate", Takes::Nothing),
     ("concatenate", Takes::Nothing),
+    ("delete", Takes::Nothing),
+    ("test-label", Takes::Nothing),
+    ("sparse", Takes::Nothing),
+    ("hole-detection", Takes::Required),
+    ("sparse-version", Takes::Required),
+    ("incremental", Takes::Nothing),
+    ("listed-incremental", Takes::Required),
+    ("level", Takes::Required),
+    ("ignore-failed-read", Takes::Nothing),
+    ("occurrence", Takes::Optional),
+    ("seek", Takes::Nothing),
+    ("no-seek", Takes::Nothing),
+    ("no-check-device", Takes::Nothing),
     ("check-device", Takes::Nothing),
+    ("verify", Takes::Nothing),
+    ("remove-files", Takes::Nothing),
+    ("keep-old-files", Takes::Nothing),
+    ("skip-old-files", Takes::Nothing),
+    ("keep-newer-files", Takes::Nothing),
+    ("overwrite", Takes::Nothing),
+    ("unlink-first", Takes::Nothing),
+    ("recursive-unlink", Takes::Nothing),
+    ("no-overwrite-dir", Takes::Nothing),
+    ("overwrite-dir", Takes::Nothing),
+    ("keep-directory-symlink", Takes::Nothing),
+    ("one-top-level", Takes::Optional),
+    ("to-stdout", Takes::Nothing),
+    ("to-command", Takes::Required),
+    ("ignore-command-error", Takes::Nothing),
+    ("no-ignore-command-error", Takes::Nothing),
+    ("owner", Takes::Required),
+    ("group", Takes::Required),
+    ("owner-map", Takes::Required),
+    ("group-map", Takes::Required),
+    ("mtime", Takes::Required),
     ("clamp-mtime", Takes::Nothing),
+    ("mode", Takes::Required),
+    ("atime-preserve", Takes::Optional),
+    ("touch", Takes::Nothing),
+    ("same-owner", Takes::Nothing),
+    ("no-same-owner", Takes::Nothing),
+    ("numeric-owner", Takes::Nothing),
+    ("preserve-permissions", Takes::Nothing),
+    ("same-permissions", Takes::Nothing),
+    ("no-same-permissions", Takes::Nothing),
+    ("preserve-order", Takes::Nothing),
+    ("same-order", Takes::Nothing),
+    ("delay-directory-restore", Takes::Nothing),
+    ("no-delay-directory-restore", Takes::Nothing),
+    ("sort", Takes::Required),
+    ("xattrs", Takes::Nothing),
+    ("no-xattrs", Takes::Nothing),
+    ("xattrs-include", Takes::Required),
+    ("xattrs-exclude", Takes::Required),
+    ("selinux", Takes::Nothing),
+    ("no-selinux", Takes::Nothing),
+    ("acls", Takes::Nothing),
+    ("no-acls", Takes::Nothing),
+    ("file", Takes::Required),
+    ("force-local", Takes::Nothing),
+    ("rmt-command", Takes::Required),
+    ("rsh-command", Takes::Required),
+    ("multi-volume", Takes::Nothing),
+    ("tape-length", Takes::Required),
+    ("info-script", Takes::Required),
+    ("new-volume-script", Takes::Required),
+    ("volno-file", Takes::Required),
+    ("blocking-factor", Takes::Required),
+    ("record-size", Takes::Required),
+    ("ignore-zeros", Takes::Nothing),
+    ("read-full-records", Takes::Nothing),
+    ("format", Takes::Required),
+    ("old-archive", Takes::Nothing),
+    ("portability", Takes::Nothing),
+    ("posix", Takes::Nothing),
+    ("pax-option", Takes::Required),
+    ("label", Takes::Required),
+    ("auto-compress", Takes::Nothing),
+    ("no-auto-compress", Takes::Nothing),
+    ("use-compress-program", Takes::Required),
+    ("bzip2", Takes::Nothing),
+    ("gzip", Takes::Nothing),
+    ("gunzip", Takes::Nothing),
+    ("ungzip", Takes::Nothing),
     ("compress", Takes::Nothing),
+    ("uncompress", Takes::Nothing),
+    ("lzip", Takes::Nothing),
+    ("lzma", Takes::Nothing),
+    ("lzop", Takes::Nothing),
+    ("xz", Takes::Nothing),
+    ("zstd", Takes::Nothing),
+    ("one-file-system", Takes::Nothing),
+    ("absolute-names", Takes::Nothing),
+    ("dereference", Takes::Nothing),
+    ("hard-dereference", Takes::Nothing),
+    ("starting-file", Takes::Required),
+    ("newer", Takes::Required),
+    ("after-date", Takes::Required),
+    ("newer-mtime", Takes::Required),
+    ("backup", Takes::Optional),
+    ("suffix", Takes::Required),
+    ("strip-components", Takes::Required),
+    ("transform", Takes::Required),
+    ("xform", Takes::Required),
     ("checkpoint", Takes::Optional),
     ("checkpoint-action", Takes::Required),
     ("check-links", Takes::Nothing),
+    ("totals", Takes::Optional),
+    ("utc", Takes::Nothing),
+    ("full-time", Takes::Nothing),
+    ("index-file", Takes::Required),
+    ("block-number", Takes::Nothing),
+    ("show-defaults", Takes::Nothing),
+    ("show-snapshot-field-ranges", Takes::Nothing),
+    ("show-omitted-dirs", Takes::Nothing),
+    ("show-transformed-names", Takes::Nothing),
+    ("show-stored-names", Takes::Nothing),
+    ("quoting-style", Takes::Required),
+    ("quote-chars", Takes::Required),
+    ("no-quote-chars", Takes::Required),
+    ("interactive", Takes::Nothing),
     ("confirmation", Takes::Nothing),
-    ("diff", Takes::Nothing),
-    ("delete", Takes::Nothing),
-    ("delay-directory-restore", Takes::Nothing),
-    ("dereference", Takes::Nothing),
+    ("verbose", Takes::Nothing),
+    ("warning", Takes::Required),
+    ("restrict", Takes::Nothing),
+    ("add-file", Takes::Required),
     ("directory", Takes::Required),
-    ("extract", Takes::Nothing),
+    ("files-from", Takes::Required),
+    ("null", Takes::Nothing),
+    ("no-null", Takes::Nothing),
+    ("unquote", Takes::Nothing),
+    ("no-unquote", Takes::Nothing),
+    ("verbatim-files-from", Takes::Nothing),
+    ("no-verbatim-files-from", Takes::Nothing),
     ("exclude", Takes::Required),
     ("exclude-from", Takes::Required),
     ("exclude-caches", Takes::Nothing),
@@ -226,135 +357,21 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("exclude-vcs", Takes::Nothing),
     ("exclude-vcs-ignores", Takes::Nothing),
     ("exclude-backups", Takes::Nothing),
-    ("file", Takes::Required),
-    ("force-local", Takes::Nothing),
-    ("format", Takes::Required),
-    ("full-time", Takes::Nothing),
-    ("files-from", Takes::Required),
-    ("get", Takes::Nothing),
-    ("group", Takes::Required),
-    ("group-map", Takes::Required),
-    ("gzip", Takes::Nothing),
-    ("gunzip", Takes::Nothing),
-    ("hole-detection", Takes::Required),
-    ("hard-dereference", Takes::Nothing),
-    ("help", Takes::Nothing),
-    ("incremental", Takes::Nothing),
-    ("ignore-failed-read", Takes::Nothing),
-    ("ignore-command-error", Takes::Nothing),
-    ("info-script", Takes::Required),
-    ("ignore-zeros", Takes::Nothing),
-    ("index-file", Takes::Required),
-    ("interactive", Takes::Nothing),
-    ("ignore-case", Takes::Nothing),
-    ("keep-old-files", Takes::Nothing),
-    ("keep-newer-files", Takes::Nothing),
-    ("keep-directory-symlink", Takes::Nothing),
-    ("list", Takes::Nothing),
-    ("listed-incremental", Takes::Required),
-    ("level", Takes::Required),
-    ("label", Takes::Required),
-    ("lzip", Takes::Nothing),
-    ("lzma", Takes::Nothing),
-    ("lzop", Takes::Nothing),
-    ("mtime", Takes::Required),
-    ("mode", Takes::Required),
-    ("multi-volume", Takes::Nothing),
-    ("no-seek", Takes::Nothing),
-    ("no-check-device", Takes::Nothing),
-    ("no-overwrite-dir", Takes::Nothing),
-    ("no-ignore-command-error", Takes::Nothing),
-    ("no-same-owner", Takes::Nothing),
-    ("numeric-owner", Takes::Nothing),
-    ("no-same-permissions", Takes::Nothing),
-    ("no-delay-directory-restore", Takes::Nothing),
-    ("no-xattrs", Takes::Nothing),
-    ("no-selinux", Takes::Nothing),
-    ("no-acls", Takes::Nothing),
-    ("new-volume-script", Takes::Required),
-    ("no-auto-compress", Takes::Nothing),
-    ("newer", Takes::Required),
-    ("newer-mtime", Takes::Required),
-    ("no-quote-chars", Takes::Required),
-    ("null", Takes::Nothing),
-    ("no-null", Takes::Nothing),
-    ("no-unquote", Takes::Nothing),
-    ("no-verbatim-files-from", Takes::Nothing),
-    ("no-recursion", Takes::Nothing),
-    ("no-anchored", Takes::Nothing),
-    ("no-ignore-case", Takes::Nothing),
-    ("no-wildcards", Takes::Nothing),
-    ("no-wildcards-match-slash", Takes::Nothing),
-    ("occurrence", Takes::Optional),
-    ("overwrite", Takes::Nothing),
-    ("overwrite-dir", Takes::Nothing),
-    ("one-top-level", Takes::Optional),
-    ("owner", Takes::Required),
-    ("owner-map", Takes::Required),
-    ("old-archive", Takes::Nothing),
-    ("one-file-system", Takes::Nothing),
-    ("preserve-permissions", Takes::Nothing),
-    ("preserve-order", Takes::Nothing),
-    ("portability", Takes::Nothing),
-    ("posix", Takes::Nothing),
-    ("pax-option", Takes::Required),
-    ("program-name", Takes::Required),
-    ("quoting-style", Takes::Required),
-    ("quote-chars", Takes::Required),
-    ("remove-files", Takes::Nothing),
-    ("recursive-unlink", Takes::Nothing),
-    ("rmt-command", Takes::Required),
-    ("rsh-command", Takes::Required),
-    ("record-size", Takes::Required),
-    ("read-full-records", Takes::Nothing),
-    ("restrict", Takes::Nothing),
     ("recursion", Takes::Nothing),
-    ("sparse", Takes::Nothing),
-    ("sparse-version", Takes::Required),
-    ("seek", Takes::Nothing),
-    ("skip-old-files", Takes::Nothing),
-    ("same-owner", Takes::Nothing),
-    ("same-permissions", Takes::Nothing),
-    ("same-order", Takes::Nothing),
-    ("sort", Takes::Required),
-    ("selinux", Takes::Nothing),
-    ("starting-file", Takes::Required),
-    ("suffix", Takes::Required),
-    ("strip-components", Takes::Required),
-    ("show-defaults", Takes::Nothing),
-    ("show-snapshot-field-ranges", Takes::Nothing),
-    ("show-omitted-dirs", Takes::Nothing),
-    ("show-transformed-names", Takes::Nothing),
-    ("show-stored-names", Takes::Nothing),
-    ("test-label", Takes::Nothing),
-    ("to-stdout", Takes::Nothing),
-    ("to-command", Takes::Required),
-    ("touch", Takes::Nothing),
-    ("tape-length", Takes::Required),
-    ("transform", Takes::Required),
-    ("totals", Takes::Optional),
-    ("update", Takes::Nothing),
-    ("unlink-first", Takes::Nothing),
-    ("use-compress-program", Takes::Required),
-    ("ungzip", Takes::Nothing),
-    ("uncompress", Takes::Nothing),
-    ("utc", Takes::Nothing),
-    ("unquote", Takes::Nothing),
-    ("usage", Takes::Nothing),
-    ("verify", Takes::Nothing),
-    ("volno-file", Takes::Required),
-    ("verbose", Takes::Nothing),
-    ("verbatim-files-from", Takes::Nothing),
-    ("version", Takes::Nothing),
-    ("warning", Takes::Required),
+    ("no-recursion", Takes::Nothing),
+    ("anchored", Takes::Nothing),
+    ("no-anchored", Takes::Nothing),
+    ("ignore-case", Takes::Nothing),
+    ("no-ignore-case", Takes::Nothing),
     ("wildcards", Takes::Nothing),
+    ("no-wildcards", Takes::Nothing),
     ("wildcards-match-slash", Takes::Nothing),
-    ("xattrs", Takes::Nothing),
-    ("xattrs-include", Takes::Required),
-    ("xattrs-exclude", Takes::Required),
-    ("xz", Takes::Nothing),
-    ("xform", Takes::Required),
-    ("zstd", Takes::Nothing),
+    ("no-wildcards-match-slash", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("usage", Takes::Nothing),
+    ("program-name", Takes::Required),
+    ("HANG", Takes::Optional),
+    ("version", Takes::Nothing),
 ];
 
 /// A long option GNU tar has and this one does not implement.
@@ -4253,7 +4270,7 @@ mod tests {
     //
     // Every expectation below was measured against GNU tar 1.35, and the table
     // that drives them was checked against it exhaustively: all 1381 distinct
-    // prefixes of all 171 names, verdict and candidate list, zero mismatches.
+    // prefixes of every name, verdict and candidate list, zero mismatches.
     // See `LONG_OPTIONS`.
 
     #[test]
@@ -4318,7 +4335,7 @@ mod tests {
         // makes it so — `--verbatim-files-from` — is one this tar does not
         // implement. So this case is decided *entirely* by an entry that exists
         // for no other reason, which is the clearest statement of why the table
-        // carries all 171 names. Measured: GNU refuses `--verb` identically,
+        // carries all 172 names. Measured: GNU refuses `--verb` identically,
         // and `--verbo` lists an archive.
         let err = run_args(&s(&["--verb"])).unwrap_err();
         assert_eq!(
@@ -4330,7 +4347,7 @@ mod tests {
 
     #[test]
     fn parse_refuses_an_ambiguous_abbreviation_listing_gnus_candidates() {
-        // The reason the table carries all 171 names. With only the twelve this
+        // The reason the table carries all 172 names. With only the twelve this
         // tar implements, `--ex` would be a *unique* prefix of `--extract` and
         // would silently extract.
         let err = run_args(&s(&["--ex"])).unwrap_err();
@@ -4464,22 +4481,51 @@ mod tests {
     fn long_option_table_is_in_gnus_measured_order_and_has_no_duplicates() {
         // Guards the table itself rather than the parser. A duplicate name
         // would make one entry unreachable, and the count pins the set: 170
-        // from `--help` plus `--program-name`, which is argp-hidden and appears
-        // in no help output.
-        assert_eq!(LONG_OPTIONS.len(), 171);
+        // from `--help` plus the two it hides, `--program-name` and `--HANG`.
+        // `scripts/getopt-ambiguity-check.py` re-derives the whole thing from
+        // `tar --=x` at push time; this is the cheap local guard.
+        assert_eq!(LONG_OPTIONS.len(), 172);
         // Fully qualified: the file's `BTreeSet` import is `#[cfg(unix)]`, and
         // this test is not.
         let mut seen = std::collections::BTreeSet::new();
         for (name, _) in LONG_OPTIONS {
             assert!(seen.insert(*name), "duplicate long option: --{name}");
         }
+        // The two `--help` does not mention. `--HANG` is also the only name
+        // with a capital in it, and so the one no lower-case prefix sweep can
+        // ever reach — which is how the first version of this table lost it.
         assert!(seen.contains("program-name"));
+        assert!(seen.contains("HANG"));
         // Not sorted — and that is the invariant, not an accident. See the
         // ambiguity-order test above.
         assert!(
             LONG_OPTIONS.windows(2).any(|w| w[0].0 > w[1].0),
             "table looks alphabetised; GNU's order is observable output"
         );
+    }
+
+    #[test]
+    fn the_empty_long_name_lists_the_whole_table_in_order() {
+        // `tar --=x`: the empty name is a prefix of every entry, so the
+        // ambiguity list *is* the table. This is the only case in which the
+        // full cross-letter order is observable — every other ambiguous prefix
+        // has candidates that all share its first letter — which is why the
+        // array is GNU's declaration order and not a per-letter reconstruction
+        // of it. Measured byte for byte against GNU: 2806 identical bytes,
+        // both exiting 64. It is also the measurement
+        // `scripts/getopt-ambiguity-check.py` reads GNU's table with.
+        let err = run_args(&s(&["--=x"])).unwrap_err();
+        let expected: String = LONG_OPTIONS
+            .iter()
+            .map(|(name, _)| format!(" '--{name}'"))
+            .collect();
+        // The word as typed, `=x` and all — glibc names the argv word in an
+        // ambiguity, and only resolves to a table name once one entry has won.
+        assert_eq!(
+            err.sentence,
+            format!("option '--=x' is ambiguous; possibilities:{expected}")
+        );
+        assert_eq!(err.status, EXIT_USAGE);
     }
 
     // ---------------- --help, --usage, --version ----------------
@@ -4572,7 +4618,7 @@ mod tests {
         }
         // The point of writing our own help rather than reproducing GNU's: an
         // option the parser refuses must not be advertised. `--exclude` stands
-        // in for the other 158. See `design-decisions.md` 703.
+        // in for the other 159. See `design-decisions.md` 703.
         for name in ["--exclude", "--overwrite", "--gzip", "--strip-components"] {
             assert!(
                 !help.contains(name),

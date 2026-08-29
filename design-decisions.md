@@ -50666,7 +50666,13 @@ nesting and so no soleness test. If a third such site appears outside the
 that the defect concentrates in positional operands, and two known exceptions is
 where the bet still pays.
 
-## 703. `tar` carries all 171 of GNU's long-option names but performs nine — a recognised name it cannot honour is refused, not ignored
+## 703. `tar` carries every one of GNU's long-option names but performs twelve — a recognised name it cannot honour is refused, not ignored
+
+> The counts written into the body below — 171 names, nine performed — were both
+> corrected within the day; see the two amendments at the end. The real figures
+> are **172 names, twelve performed**. The body is left as written because the
+> second amendment is about *how* the wrong number was arrived at, which is the
+> part worth not losing.
 
 **Date:** 2026-08-29
 **Decided by:** Claude (autonomous)
@@ -50745,12 +50751,30 @@ unobservable. That sweep is also what turned up `--program-name`, which appears
 in no `--help` output because argp hides it, and which is therefore in the table
 on the authority of the ambiguity lists alone.
 
-**Amendment (2026-08-29, same day).** `--help`, `--usage` and `--version` were
-promptly moved from the refused group into the performed one — see 704 — so the
-counts above now read *twelve performed, 159 refused*. Nothing else changes: the
-table is still all 171 names, and the reasoning is unaffected.
+**Two amendments, both the same day (2026-08-29).**
 
-## 704. `tar --help` prints this tar's twelve options, not GNU's 171 — and, like GNU, does not check that the write landed
+1. `--help`, `--usage` and `--version` moved from the refused group into the
+   performed one — see 704 — so the counts read *twelve performed*.
+2. **The table is 172 names, not 171, and the paragraph above is wrong about
+   the order.** The push-time gate `scripts/getopt-ambiguity-check.py` — which
+   this entry did not know existed — reads GNU's table with one measurement the
+   per-letter sweep cannot match: `tar --=x`. The empty name is a prefix of
+   *every* entry, so the ambiguity list is the whole table, in declaration
+   order, in one line. Two things fell out. First, it found `--HANG`, a hidden
+   debug option that sleeps forever and the only name beginning with a capital
+   — invisible to a sweep over `--a … --z`, and therefore missed above. Second,
+   the claim that "cross-letter order is unobservable" is false: this one case
+   observes all of it, and the real order is argp's grouping by function, not
+   the letter-grouped reconstruction that was committed. Both are fixed, the
+   exemption that had kept `tar` out of the gate is deleted, and `tar --=x` is
+   now byte-identical to GNU's (2806 bytes, exit 64). Nothing else in this entry
+   changes — the per-letter order happened to be right *within* each letter, so
+   every diagnostic it was reasoned about stayed the same. The lesson worth
+   carrying: **enumerate from the utility's own output, never from an alphabet
+   you chose**, and check whether the repository already has a gate for what you
+   are about to measure by hand.
+
+## 704. `tar --help` prints this tar's twelve options, not GNU's 172 — and, like GNU, does not check that the write landed
 
 **Date:** 2026-08-29
 **Decided by:** Claude (autonomous)
@@ -50770,7 +50794,7 @@ rather than reported.
 | Answer | *What changes* |
 |---|---|
 | **Write our own (chosen)** | `tar --help` lists twelve long options. A user who has read GNU's help gets a shorter, unfamiliar page — but everything on it works. |
-| Reproduce GNU's help verbatim | `tar --help` lists 171 options, 159 of which the same program then refuses. The page is instantly familiar and is a lie in 159 places. |
+| Reproduce GNU's help verbatim | `tar --help` lists 172 options, 160 of which the same program then refuses. The page is instantly familiar and is a lie in 159 places. |
 
 Copying GNU's page is the more *compatible* answer and the wrong one, for the
 reason 703 already settled about options generally: help text is read

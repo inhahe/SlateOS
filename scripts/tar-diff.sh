@@ -292,8 +292,17 @@ list_case() {
 # as the token `NOW`: every fixture's stored mtimes are 2018-2020 dates, so a
 # recent stamp means "assigned by the extraction", and *that* both sides must
 # still agree about — a tar that failed to invent a directory has no line at all.
+#
+# A symlink *target* gets one substitution for the same reason. The two runs
+# unpack into `od` and `gd`, so a fixture that plants a link naming its own
+# destination — which the ancestor cases must, since pointing back inside by an
+# absolute or climbing path is the behaviour under test — records two different
+# strings for identical behaviour. The destination's own name becomes `@D` and
+# the work directory above it `@W`, which leaves every other byte of the target
+# compared literally.
 manifest() {
   ( cd "$1" 2>/dev/null || return 0
+    dest="$1"
     now=$(date +%s)
     # mt EPOCH — the stamp, or `NOW` if the extraction just made it up.
     mt() {
@@ -311,7 +320,11 @@ manifest() {
         read -r mode mtime <<EOF
 $(stat -c '%a %Y' -- "$p")
 EOF
-        printf 'l %s %s %s -> %s\n' "$p" "$mode" "$(mt "$mtime")" "$(readlink -- "$p")"
+        tgt=$(readlink -- "$p")
+        tgt=${tgt//"$work/$dest"/@W/@D}
+        tgt=${tgt//"../$dest"/../@D}
+        tgt=${tgt//"$work"/@W}
+        printf 'l %s %s %s -> %s\n' "$p" "$mode" "$(mt "$mtime")" "$tgt"
       elif [ -d "$p" ]; then
         read -r mode mtime <<EOF
 $(stat -c '%a %Y' -- "$p")
@@ -549,6 +562,84 @@ prep_dir_over_file() {
 }
 PREP=prep_dir_over_file extract_case 'a directory member over a plain file' spec.tar
 
+# ---------------------------------------------------------------------------
+# A symlink that is an *ancestor* of the member, already in the destination.
+#
+# The cases above all put the obstacle at a member's *own* path, where the
+# creation itself meets it. This is the other shape and it is the dangerous
+# one: `d/x` is a symlink pointing outside, the archive holds `x/pwned`, and an
+# extractor that resolves the name normally writes at the far end. Neither the
+# `..` refusal nor the delayed-symlink placeholder covers it — the link came
+# from the filesystem, not the archive — and two archives are enough to arrange
+# it even in an empty destination (the `twostep` case below).
+#
+# GNU's rule, measured member by member, is `openat2(RESOLVE_BENEATH)`: each
+# component is judged as the walk reaches it, and a walk that would step above
+# the destination is refused *there*, even if a later component would have come
+# back. That is not the same as canonicalising and checking the prefix, and the
+# difference is exactly the `absolute, inside` and `up and straight back in`
+# cases below — a prefix check allows both; GNU refuses both. Every refusal is
+# `EXDEV`, printed as `Invalid cross-device link`.
+mkdir -p ancsrc/x
+printf 'p\n' > ancsrc/x/pwned
+ln -s elsewhere ancsrc/x/sl
+mkfifo ancsrc/x/p
+mkdir -p ancsrc/x/dir
+( cd ancsrc && "$gnu_real" $GNUFMT -cf ../anc.tar x/pwned x/sl x/p x/dir )
+
+# Allowed: the link stays inside, however indirectly.
+prep_anc_inside()    { mkdir -p sub;      ln -s sub x; }
+prep_anc_updown()    { mkdir -p sub deep; ln -s deep/../sub x; }
+prep_anc_toroot()    { mkdir -p deep/er;  ln -s deep/er/../.. x; }
+prep_anc_chain_in()  { mkdir -p sub y2;   ln -s y2/on x; ln -s ../sub y2/on; }
+PREP=prep_anc_inside   extract_case 'an ancestor symlink pointing inside'      anc.tar
+PREP=prep_anc_updown   extract_case 'an ancestor symlink whose .. comes back'  anc.tar
+PREP=prep_anc_toroot   extract_case 'an ancestor symlink back to the root'     anc.tar
+PREP=prep_anc_chain_in extract_case 'a chain of ancestor symlinks, all inside' anc.tar
+
+# Refused: absolute at all, or a step above the root at any point. The two
+# absolute ones point *into* the destination and are still refused, which is
+# the fact that rules out a canonicalise-and-compare implementation.
+prep_anc_absin()     { mkdir -p sub;      ln -s "$PWD/sub" x; }
+prep_anc_absroot()   {                    ln -s "$PWD" x; }
+prep_anc_backin()    { mkdir -p sub;      ln -s "../$(basename "$PWD")/sub" x; }
+prep_anc_out()       {                    ln -s ../escape x; }
+prep_anc_absout()    {                    ln -s "$work/escape" x; }
+prep_anc_chain_out() { mkdir -p y2;       ln -s y2/on x; ln -s ../../escape y2/on; }
+PREP=prep_anc_absin     extract_case 'an ancestor symlink, absolute but inside'  anc.tar
+PREP=prep_anc_absroot   extract_case 'an ancestor symlink, absolute to the root' anc.tar
+PREP=prep_anc_backin    extract_case 'an ancestor symlink up and straight back'  anc.tar
+PREP=prep_anc_out       extract_case 'an ancestor symlink pointing outside'      anc.tar
+PREP=prep_anc_absout    extract_case 'an ancestor symlink, absolute and outside' anc.tar
+PREP=prep_anc_chain_out extract_case 'a chain whose second hop escapes'          anc.tar
+
+# The two-step attack, which is what makes this reachable with no help from the
+# filesystem: the first archive holds only the symlink member `x -> ../escape`,
+# which both tars withhold as a placeholder and then create at the end of that
+# run; the second archive holds `x/pwned` and meets a real symlink. Each binary
+# plants its own link, so the first stage is under test as well as the second.
+mkdir -p anclinksrc
+ln -s ../escape anclinksrc/x
+( cd anclinksrc && "$gnu_real" $GNUFMT -cf ../anclink.tar x )
+prep_anc_twostep() {
+  local which=gnu
+  [ "$(basename "$PWD")" = od ] && which=ours
+  env PATH="$bindir/$which" tar -xf ../anclink.tar >/dev/null 2>&1
+}
+PREP=prep_anc_twostep extract_case 'a symlink planted by an earlier archive' anc.tar
+
+# The other end of a *hard link* member is a name in the archive too, and it is
+# resolved beneath the destination on the same terms. Without that, an archive
+# linking to `x/secret` through an escaping `x` hands the caller a second name
+# for a file outside the tree — and write access to it.
+mkdir -p anchsrc/x
+printf 's\n' > anchsrc/x/secret
+ln anchsrc/x/secret anchsrc/h
+( cd anchsrc && "$gnu_real" $GNUFMT -cf ../anch.tar x/secret h )
+prep_anc_hard() { ln -s ../escape x; printf 'loot\n' > ../escape/secret; }
+PREP=prep_anc_hard extract_case 'a hard link target reached through an escape' anch.tar h
+rm -f escape/secret
+
 # Ancestors that are not stored in the archive. `tar -cf deep.tar a/b/c` stores
 # the one member and neither `a/` nor `a/b/`, so extracting it is the case that
 # forces the extractor to invent them.
@@ -702,7 +793,7 @@ done
 # The traversal cases aimed at `escape/`. A tree comparison cannot see this:
 # both sides leave `d` a symlink either way, and the difference is whether
 # anything was written through it.
-if [ -f h-traverse.tar ]; then
+if [ -d escape ]; then
   leaked=$(find escape -mindepth 1 2>/dev/null)
   if [ -z "$leaked" ]; then
     pass=$((pass+1))

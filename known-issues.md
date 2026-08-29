@@ -94683,7 +94683,7 @@ terminal, util-linux drives it through terminfo
 pager. The decision to pause, and the keystroke handling, are covered by unit
 tests in `more.rs` instead.
 
-## `B-tar-WALKS-THROUGH-A-PRE-EXISTING-SYMLINK-AND-WRITES-OUTSIDE-THE-DESTINATION` (lane B, 2026-08-29) -- **open**, security
+## `B-tar-WALKS-THROUGH-A-PRE-EXISTING-SYMLINK-AND-WRITES-OUTSIDE-THE-DESTINATION` (lane B, 2026-08-29) -- **fixed 2026-08-29**, security
 
 **In short:** unpacking an archive is supposed to put files *under* the
 directory you unpacked it in, and nowhere else. Ours does not guarantee that.
@@ -94813,3 +94813,48 @@ keep the descriptors in a stack so `..` pops it and popping the root is the
 refusal. Holding a descriptor per level is what makes it race-free -- a
 check-then-create by path would be correct on a quiet disk and defeatable by
 an attacker who swaps a component in between.
+
+### Fixed
+
+Done as described. `tar.rs` gained `Dir` (the destination, held open) and
+`Located` (a parent descriptor plus the one component naming the member in it);
+`Dir::locate` is the walk above and every creation, stamp and removal in the
+extraction path is now an `*at()` call through the descriptor `locate` returned.
+`create_at` replaces `create_recovering`: it resolves the parent first and only
+invents ancestors on the `ENOENT` that says one is genuinely absent, so the
+`mkdir -p` that used to run ahead of the open -- and would have made a directory
+where a withheld symlink's placeholder stood -- is gone.
+
+All ten rows of the table above now match GNU exactly, refusals and permissions
+alike, with the same errno and the same per-type wording; so does the hard
+link whose *target* escapes, which is refused because `link_target` is resolved
+through the same `locate`. `scripts/tar-diff.sh` carries twelve new fixtures
+(`an ancestor symlink ...`, `a chain whose second hop escapes`, `a symlink
+planted by an earlier archive`, `a hard link target reached through an escape`)
+and its existing "nothing was written outside the destination" check now runs
+unconditionally rather than only when python3 was available to forge headers.
+Verified to discriminate: rebuilt against the pre-fix `tar.rs`, eight of the
+twelve fail and the leak check reports `escape/pwned escape/sl escape/p
+escape/dir`. 90 pass, 0 differ, 3 differ on purpose.
+
+Two things found along the way, both fixed here:
+
+* `identity()` was `openat(O_RDONLY|O_NOFOLLOW)` + `File::metadata`, chosen to
+  avoid declaring a `struct stat` by hand. That breaks the delayed-symlink
+  placeholder outright: the placeholder is created **mode 0**, and an
+  unprivileged process cannot open a mode-0 file even when it owns it, so every
+  archive containing an absolute or climbing symlink failed with
+  `tar: x: Cannot open: Permission denied`. It is `fstatat(AT_SYMLINK_NOFOLLOW)`
+  now. `posix/src/stat.rs` documents its `Stat` as matching Linux x86-64's, so
+  one declaration serves both targets; a `const` assertion on its size fails the
+  build if that ever drifts.
+* `locate` returned `EINVAL` for a name with no components, which is what
+  `tar -cf x.tar .` stores (`./`). The destination is a location, not an error:
+  the leaf is `.` relative to the root's own descriptor, and `mkdirat`/`openat`/
+  `linkat` then produce GNU's `EEXIST`/`EEXIST`/`EPERM` of their own accord.
+
+Off unix there is a twin that resolves lexically and creates by path. It is a
+genuinely weaker guarantee -- a member cannot be *named* outside the
+destination, but a link planted between the check and the creation would not be
+caught -- and it is documented as such at the type. That platform cannot create
+a symlink, a fifo or a device node in the first place.

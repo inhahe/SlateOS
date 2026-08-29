@@ -54,7 +54,11 @@ use coreutils::errmsg::strerror;
 // `set_quoting_style` above. Measured side by side in one run of one command:
 // `tar: esc: Cannot hard link to ‘etc/passwd’: ...` next to
 // `tar: caf\351: Not found in archive`.
-use coreutils::quote::{escape, escape_os, os_bytes, os_from_bytes, quote, quoteaf};
+use coreutils::quote::{escape, escape_os, os_bytes, quote, quoteaf};
+// Only the non-unix twin of `Dir` builds a path out of a member's bytes; on
+// unix every component is handed to `openat` as it stands.
+#[cfg(any(not(unix), test))]
+use coreutils::quote::os_from_bytes;
 use coreutils::stdfd;
 #[cfg(unix)]
 use std::collections::{BTreeMap, BTreeSet};
@@ -1764,12 +1768,12 @@ fn extraction_mode(stored: u32, same_permissions: bool, umask: u32) -> u32 {
 /// The wording of the mode failure is GNU's, symbolic bits and all
 /// (`Cannot change mode to rwxr-xr-x`), which is why [`mode_string`] is shared
 /// with the `-tv` listing rather than each having its own.
-fn restore_metadata(name: &[u8], path: &Path, mode: u32, mtime: i64, status: &mut i32) {
-    if let Err(e) = set_mtime(path, mtime) {
+fn restore_metadata(at: &Located, name: &[u8], mode: u32, mtime: i64, status: &mut i32) {
+    if let Err(e) = at.set_mtime(mtime) {
         diag!("tar: {}: Cannot utime: {}", escape(name), strerror(&e));
         *status = EXIT_FATAL;
     }
-    if let Err(e) = set_mode(path, mode) {
+    if let Err(e) = at.set_mode(mode) {
         let bits = mode_string(mode, b'0');
         diag!(
             "tar: {}: Cannot change mode to {}: {}",
@@ -1781,135 +1785,74 @@ fn restore_metadata(name: &[u8], path: &Path, mode: u32, mtime: i64, status: &mu
     }
 }
 
-/// Set a path's modification time (and its access time with it — ustar stores
-/// only the one, and leaving atime at "now" would be a lie of the same size).
+/// Create something for the member called `name`, beneath `root`, replacing
+/// whatever is already standing there.
 ///
-/// Named after the syscall rather than after `File::set_times` for a reason
-/// that only appeared once this tar could create a **fifo**: stamping a path by
-/// opening it and calling `futimens` means opening a fifo, and opening a fifo
-/// blocks until somebody opens the other end. An archive holding one named pipe
-/// was therefore a hang — `tar -xf` sat there for ever with no output and no
-/// way to tell it from slow I/O. `utimensat` acts on the name and never opens
-/// anything, which is also why GNU uses it.
-#[cfg(unix)]
-fn set_mtime(path: &Path, mtime: i64) -> io::Result<()> {
-    stamp_path(path, mtime, 0)
-}
-
-/// [`set_mtime`] for the development host, where there is no `utimensat` and no
-/// fifo to be trapped by.
-#[cfg(not(unix))]
-fn set_mtime(path: &Path, mtime: i64) -> io::Result<()> {
-    use std::fs::FileTimes;
-    use std::time::{Duration, SystemTime};
-    let t = if mtime >= 0 {
-        SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(mtime.unsigned_abs()))
-    } else {
-        SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs(mtime.unsigned_abs()))
-    };
-    // A header can hold a time no clock can represent; refusing it is right,
-    // and refusing it *loudly* is what tells the caller the tree is not the
-    // archive.
-    let Some(t) = t else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "timestamp out of range",
-        ));
-    };
-    // A read handle, not a write one: `futimens` is permitted on a read-only
-    // descriptor, and a directory — which this must also work on — cannot be
-    // opened for writing at all.
-    let f = File::open(path)?;
-    f.set_times(FileTimes::new().set_accessed(t).set_modified(t))
-}
-
-/// Set a path's permission bits. A no-op off unix, where there are none to set.
-#[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-}
-
-#[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
-    Ok(())
-}
-
-/// Create something at `path`, replacing whatever is already standing there.
+/// Two steps, and the split between them is the security boundary. First the
+/// member's **parent** is resolved beneath `root` — see [`Dir::locate`], which
+/// is what refuses to walk through a symlink out of the destination. Then the
+/// leaf is created relative to the descriptor that came back, so the kernel
+/// never re-resolves the path that was just vetted.
 ///
-/// This is GNU's `maybe_recoverable`, and the order it does things in is
-/// observable. The creation is attempted *first*; only an `EEXIST` provokes a
-/// removal and a second attempt. That is why extracting a symlink over a
+/// The recovery is GNU's `maybe_recoverable`, and the order it does things in
+/// is observable. The creation is attempted *first*; only an `EEXIST` provokes
+/// a removal and a second attempt. That is why extracting a symlink over a
 /// **non-empty** directory reports `File exists` and not `Directory not empty`
 /// — the removal's failure is discarded and the original `EEXIST` is what the
 /// caller sees. Measured both ways: over an *empty* directory the symlink is
 /// created (so the removal is an `rmdir` as well as an `unlink`), and over a
 /// non-empty one GNU says `Cannot create symlink to ‘f’: File exists`.
 ///
-/// `remove_file` is tried before `remove_dir` because the overwhelmingly common
-/// case is a file, and because `unlink` on a directory is the cheap failure.
-///
-/// `ENOENT` is the other recoverable error: an archive may store `a/b/link`
-/// without storing `a/`, so the ancestors have to be made. They are made *only*
-/// on that error — never speculatively — because a `mkdir -p` run before the
-/// attempt is what turns a withheld symlink into a traversal.
+/// `unlink` is tried before `rmdir` because the overwhelmingly common case is a
+/// file, and because `unlink` on a directory is the cheap failure.
 ///
 /// Generic in the created thing so the one recovery serves every member type.
 /// A regular member yields the open [`File`]; the others yield `()`. Before,
 /// regular files had a second, subtly different copy of this in
 /// `open_for_member`, and the two drifted: only this one replaced an existing
 /// entry, which is how `create_file` came to write through a hard link.
-fn create_recovering<T, F>(
-    path: &Path,
-    name: &[u8],
-    status: &mut i32,
-    mut create: F,
-) -> io::Result<T>
+///
+/// The resolved location is handed back with the result because every caller
+/// wants it afterwards — to stamp a mode and an mtime on what it just made, or
+/// to write the member's data into it.
+fn create_at<T, F>(root: &Dir, name: &[u8], status: &mut i32, create: F) -> io::Result<(Located, T)>
 where
-    F: FnMut() -> io::Result<T>,
+    F: Fn(&Located) -> io::Result<T>,
 {
-    match create() {
-        Err(first) if first.kind() == io::ErrorKind::AlreadyExists => {
-            if fs::remove_file(path).is_err() && fs::remove_dir(path).is_err() {
-                return Err(first);
-            }
-            create()
-        }
-        Err(first) if first.kind() == io::ErrorKind::NotFound => {
-            make_ancestors(name, status);
+    // Resolving the parent is what used to be an `ENOENT` from the creation
+    // itself: an archive may store `a/b/link` without storing `a/`, and the
+    // resolution is the thing that discovers the ancestor is absent. Ancestors
+    // are made *only* on that error — never speculatively — because a `mkdir -p`
+    // run before the attempt is what turns a withheld symlink into a traversal.
+    let loc = match root.locate(name) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            make_ancestors(root, name, status);
             // Retried even when nothing was made: GNU reports the *second*
             // attempt's error, and this is the line that puts its `Cannot mkdir`
             // message before the caller's `Cannot open` one.
-            create()
+            root.locate(name)?
         }
-        other => other,
+        other => other?,
+    };
+    match create(&loc) {
+        Err(first) if first.kind() == io::ErrorKind::AlreadyExists => {
+            if loc.unlink().is_err() && loc.rmdir().is_err() {
+                return Err(first);
+            }
+            create(&loc).map(|v| (loc, v))
+        }
+        other => other.map(|v| (loc, v)),
     }
 }
 
 /// `mkdir` for a directory *member*, where an existing directory is success.
 ///
 /// The `AlreadyExists` is passed through for anything that is not a directory,
-/// so [`create_recovering`] removes the obstacle and tries again. That is GNU's
+/// so [`create_at`] removes the obstacle and tries again. That is GNU's
 /// behaviour and it matters twice over: a directory member extracted over a
 /// plain file replaces the file (measured, `tar-rules11.sh` case 4), and one
 /// extracted over a **symlink pointing at a directory** replaces the *symlink*
 /// (`tar-rules12.sh`) instead of quietly extracting through it into wherever it
-/// pointed. `create_dir_all`, which this replaced, did the opposite: it asks
-/// `is_dir()`, which follows the link, sees a directory and reports success —
-/// leaving the symlink in place for every member that followed to be written
-/// through. `symlink_metadata` is the whole of the difference.
-fn make_dir(path: &Path) -> io::Result<()> {
-    match fs::create_dir(path) {
-        Err(e)
-            if e.kind() == io::ErrorKind::AlreadyExists
-                && fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) =>
-        {
-            Ok(())
-        }
-        other => other,
-    }
-}
-
 /// Create a member's missing ancestor directories, GNU's way.
 ///
 /// Not `create_dir_all`. The two agree whenever they succeed, and agree on the
@@ -1938,16 +1881,18 @@ fn make_dir(path: &Path) -> io::Result<()> {
 ///
 /// The caller retries the creation afterwards and reports its own failure too,
 /// so a failed ancestor produces the two lines GNU prints, in GNU's order.
-fn make_ancestors(name: &[u8], status: &mut i32) {
+fn make_ancestors(root: &Dir, name: &[u8], status: &mut i32) {
     // (end offset of the ancestor, why it could not be made)
     let mut failure: Option<(usize, io::Error)> = None;
     for (i, byte) in name.iter().enumerate() {
         if *byte != b'/' || i == 0 || name.get(i.wrapping_sub(1)) == Some(&b'/') {
             continue;
         }
+        // The *prefix* of the name, separators and all, rather than the
+        // components rejoined: it is what the diagnostic prints, and a name
+        // with a doubled slash must be named back the way it was written.
         let ancestor = name.get(..i).unwrap_or(name);
-        let owned = os_from_bytes(ancestor);
-        match fs::create_dir(Path::new(&owned)) {
+        match root.locate(ancestor).and_then(|at| at.mkdir()) {
             Ok(()) => failure = None,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => failure = None,
             Err(e) => {
@@ -1991,25 +1936,530 @@ fn embedded_nul() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte")
 }
 
-// The three creation calls `std` does not wrap, plus the timestamp call that
-// can be told not to follow a symlink. Declared here, beside their callers,
-// rather than pulled from a libc binding — this crate depends on none, and the
+/// A single path component as a NUL-terminated byte string.
+#[cfg(unix)]
+fn c_name(component: &[u8]) -> io::Result<Vec<u8>> {
+    if component.contains(&0) {
+        return Err(embedded_nul());
+    }
+    let mut buf = Vec::with_capacity(component.len().saturating_add(1));
+    buf.extend_from_slice(component);
+    buf.push(0);
+    Ok(buf)
+}
+
+// The syscalls `std` does not wrap. Declared here, beside their callers, rather
+// than pulled from a libc binding — this crate depends on none, and the
 // signatures are short enough to check against `posix/src/file.rs` by eye.
+//
+// They are the `*at` forms, taking a directory descriptor and a single
+// component, and that is not a stylistic preference: it is half of the defence
+// described on [`Dir::locate`]. Creating by *path* would make the kernel
+// re-resolve every component, following any symlink it met, so no amount of
+// checking beforehand could stop somebody who swapped a component in between.
 #[cfg(unix)]
 unsafe extern "C" {
-    fn mkfifo(path: *const u8, mode: u32) -> i32;
-    fn mknod(path: *const u8, mode: u32, dev: u64) -> i32;
+    fn openat(dirfd: i32, path: *const u8, flags: i32, mode: u32) -> i32;
+    fn close(fd: i32) -> i32;
+    fn readlinkat(dirfd: i32, path: *const u8, buf: *mut u8, bufsiz: usize) -> isize;
+    fn mkdirat(dirfd: i32, path: *const u8, mode: u32) -> i32;
+    fn symlinkat(target: *const u8, newdirfd: i32, linkpath: *const u8) -> i32;
+    fn linkat(
+        olddirfd: i32,
+        oldpath: *const u8,
+        newdirfd: i32,
+        newpath: *const u8,
+        flags: i32,
+    ) -> i32;
+    fn mkfifoat(dirfd: i32, path: *const u8, mode: u32) -> i32;
+    fn mknodat(dirfd: i32, path: *const u8, mode: u32, dev: u64) -> i32;
+    fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32;
+    fn fchmodat(dirfd: i32, path: *const u8, mode: u32, flags: i32) -> i32;
     fn utimensat(dirfd: i32, path: *const u8, times: *const CTimespec, flags: i32) -> i32;
+    fn fstatat(dirfd: i32, path: *const u8, buf: *mut CStat, flags: i32) -> i32;
+}
+
+/// The `open` flags used here, as Linux numbers them and as
+/// `posix/src/fcntl.rs` declares them.
+#[cfg(unix)]
+mod oflag {
+    pub const RDONLY: i32 = 0;
+    pub const WRONLY: i32 = 1;
+    pub const CREAT: i32 = 0o100;
+    pub const EXCL: i32 = 0o200;
+    pub const NONBLOCK: i32 = 0o4000;
+    pub const DIRECTORY: i32 = 0o200_000;
+    pub const NOFOLLOW: i32 = 0o400_000;
+    pub const CLOEXEC: i32 = 0o2_000_000;
+}
+
+/// `AT_REMOVEDIR` — `unlinkat` should `rmdir` rather than `unlink`.
+#[cfg(unix)]
+const AT_REMOVEDIR: i32 = 0x200;
+
+/// `AT_SYMLINK_NOFOLLOW` — act on the link, not on what it names.
+#[cfg(unix)]
+const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+
+/// `AT_FDCWD` — resolve a relative path against the working directory.
+#[cfg(unix)]
+const AT_FDCWD: i32 = -100;
+
+/// `EXDEV`, which is what a resolution that would leave the destination reports.
+///
+/// An odd errno for a symlink, and deliberately GNU's: `openat2` returns it for
+/// a `RESOLVE_BENEATH` violation, so a tar built on that call reports "Invalid
+/// cross-device link" for a link that never crossed a device. Ours says the same
+/// thing because the *messages* are the interface, and a log that has to be read
+/// beside GNU's should not have two spellings of one refusal.
+#[cfg(unix)]
+const EXDEV: i32 = 18;
+
+/// `ELOOP`, for a chain of symlinks with no end.
+#[cfg(unix)]
+const ELOOP: i32 = 40;
+
+/// How many symlinks one member's parent may be resolved through.
+///
+/// Linux's own limit is 40, and matching it means a tree this tar can unpack is
+/// a tree the rest of the system can then open.
+#[cfg(unix)]
+const MAX_SYMLINK_HOPS: u32 = 40;
+
+/// The refusal that keeps an extraction inside the directory it was pointed at.
+#[cfg(unix)]
+fn escapes_destination() -> io::Error {
+    io::Error::from_raw_os_error(EXDEV)
+}
+
+/// Split a `/`-separated name into components, dropping the empty ones a
+/// leading or doubled slash produces, and the `.`s that name no step.
+fn components(name: &[u8]) -> Vec<Vec<u8>> {
+    name.split(|b| *b == b'/')
+        .filter(|c| !c.is_empty() && *c != b".")
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+/// An open handle on a directory.
+///
+/// It owns the descriptor and closes it on drop, which is the only reason this
+/// is a type rather than a bare `i32`: [`Dir::locate`] keeps a stack of these
+/// and unwinds it on every `..` and on every failure.
+#[cfg(unix)]
+struct Dir(i32);
+
+#[cfg(unix)]
+impl Drop for Dir {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` came from `openat` and is owned solely by this value
+        // — `Dir` is not `Copy` and never hands the number out — so this is the
+        // one and only close of it.
+        unsafe { close(self.0) };
+    }
+}
+
+#[cfg(unix)]
+impl Dir {
+    /// Open the destination root. The one place a directory is opened by path.
+    fn open_root(path: &Path) -> io::Result<Self> {
+        let Some(cpath) = c_path(path) else {
+            return Err(embedded_nul());
+        };
+        Self::open_child(AT_FDCWD, &cpath)
+    }
+
+    /// `openat` for a directory, refusing to follow a symlink.
+    ///
+    /// `O_NOFOLLOW` is the load-bearing flag. Without it this walk would follow
+    /// exactly the links it exists to catch; with it, a symlink component fails
+    /// (`ELOOP` on Linux) and the caller gets to decide whether the target is
+    /// somewhere the extraction may go.
+    fn open_child(dirfd: i32, cname: &[u8]) -> io::Result<Self> {
+        // SAFETY: `cname` is NUL-terminated and outlives the call, which does
+        // not retain the pointer. The mode argument is unused without `O_CREAT`.
+        let fd = unsafe {
+            openat(
+                dirfd,
+                cname.as_ptr(),
+                oflag::RDONLY | oflag::DIRECTORY | oflag::NOFOLLOW | oflag::CLOEXEC,
+                0,
+            )
+        };
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(Self(fd))
+        }
+    }
+
+    /// A second, independent handle on the same directory.
+    fn reopen(&self) -> io::Result<Self> {
+        Self::open_child(self.0, b".\0")
+    }
+
+    /// Read a component as a symlink, or `None` if it is not one.
+    fn read_link(dirfd: i32, cname: &[u8]) -> Option<Vec<u8>> {
+        let mut buf = vec![0u8; 4096];
+        // SAFETY: `cname` is NUL-terminated; `buf` is a live allocation of
+        // exactly the length passed, and `readlinkat` writes no more than that.
+        let n = unsafe { readlinkat(dirfd, cname.as_ptr(), buf.as_mut_ptr(), buf.len()) };
+        let n = usize::try_from(n).ok()?;
+        // A target that filled the buffer may have been cut short, and acting on
+        // the *prefix* of a symlink target is how a check gets fooled.
+        if n >= buf.len() {
+            return None;
+        }
+        buf.truncate(n);
+        Some(buf)
+    }
+
+    /// Resolve `name`'s parent directory, refusing to leave this one.
+    ///
+    /// This is the rule GNU gets from `openat2(RESOLVE_BENEATH)`, emulated on
+    /// primitives every target here has, because ours does not enforce the
+    /// resolve flags (`posix/src/file.rs`: "accepted but not enforced") and
+    /// glibc exports no wrapper for the call at all.
+    ///
+    /// # Why it exists
+    ///
+    /// Every other defence in this program is about names the *archive*
+    /// chooses: `strip_leading` cuts a name back past its last `..`,
+    /// `contains_dot_dot` refuses what survives, and [`is_delayed_target`]
+    /// withholds a symlink member that points out of the tree until the last
+    /// member has been written. None of them says anything about a symlink that
+    /// was **already on disk** when tar started. Unpacking into a directory
+    /// where `x -> ../../elsewhere` already exists used to follow it and write
+    /// `x/f` outside the destination, in silence, exit 0 — and it took only two
+    /// ordinary archives to arrange, the first holding `x -> ../../elsewhere`
+    /// as a perfectly normal symlink member and the second holding `x/f`.
+    /// See `known-issues.md` →
+    /// `B-tar-WALKS-THROUGH-A-PRE-EXISTING-SYMLINK-AND-WRITES-OUTSIDE-THE-DESTINATION`.
+    ///
+    /// # The rule, measured against GNU tar 1.35
+    ///
+    /// A symlink ancestor is *followed* when it stays beneath the destination
+    /// and *refused* otherwise, judged step by step rather than by resolving
+    /// the whole path and comparing:
+    ///
+    /// | target of an ancestor link | |
+    /// |---|---|
+    /// | `sub`, `deep/../sub`, `deep/er/../..` | followed |
+    /// | `/anything`, **including the destination root itself** | refused |
+    /// | `../out`, and `../dest/sub` that comes straight back in | refused |
+    /// | a chain, if every hop is beneath | followed |
+    ///
+    /// The two refusals nothing else would produce are the ones that pin the
+    /// rule down: an *absolute* target is refused however harmless it is, and a
+    /// `..` is refused the moment it would step above the root even if a later
+    /// component returns. Canonicalising and checking the prefix would allow
+    /// both. Measured in `tar-rules16.sh`; `tar-rules14.sh`'s earlier table
+    /// looked like evidence for the same conclusion but was not — its targets
+    /// passed back through the very link under test, so they were resolution
+    /// loops refused for an unrelated reason.
+    ///
+    /// # Shape
+    ///
+    /// A stack of open descriptors, one per level below the root, so `..` is a
+    /// pop and popping the root is the refusal. Symlink targets are spliced
+    /// into the front of the pending components rather than resolved
+    /// separately, which is what makes a chain cost nothing extra and keeps one
+    /// hop counter honest across all of them.
+    ///
+    /// Holding a descriptor per level is also what makes this race-free: the
+    /// caller creates relative to the descriptor that came back, so there is no
+    /// second resolution for anyone to interfere with. A check-then-create by
+    /// path would be correct on a quiet disk and defeatable on a busy one.
+    fn locate(&self, name: &[u8]) -> io::Result<Located> {
+        let mut pending: std::collections::VecDeque<Vec<u8>> = components(name).into();
+        // No components at all: `.`, `/`, `./`, or the empty name — all of them
+        // the destination itself. That is not an error and must not be turned
+        // into one: `tar -cf x.tar .` stores a `./` directory member, and
+        // extracting it applies the archive's mode and timestamp to the
+        // destination directory. Naming the root `.` relative to the root's own
+        // descriptor lets every operation below take its natural course —
+        // `mkdirat` says `EEXIST` and the member is accepted, `openat(O_EXCL)`
+        // says `EEXIST` and is reported, `linkat` says `EPERM` because a
+        // directory cannot be hard-linked. Each is what GNU prints. Returning
+        // `EINVAL` here instead made all three read `Invalid argument` and lost
+        // the `./` member's metadata entirely.
+        let leaf = pending.pop_back().unwrap_or_else(|| b".".to_vec());
+        // Never as the leaf, whatever the caller thought it was asking for.
+        // `contains_dot_dot` already refuses these upstream, but this function
+        // is the boundary and must not depend on having been called correctly.
+        if leaf == b".." {
+            return Err(escapes_destination());
+        }
+        let mut stack = vec![self.reopen()?];
+        let mut hops: u32 = 0;
+        while let Some(comp) = pending.pop_front() {
+            if comp == b".." {
+                // Length 1 is the root itself; popping it is the escape.
+                if stack.len() <= 1 {
+                    return Err(escapes_destination());
+                }
+                stack.pop();
+                continue;
+            }
+            let cname = c_name(&comp)?;
+            let Some(top) = stack.last().map(|d| d.0) else {
+                return Err(escapes_destination());
+            };
+            match Dir::open_child(top, &cname) {
+                Ok(dir) => stack.push(dir),
+                Err(e) => {
+                    // The open refused a symlink, or the component is not a
+                    // directory, or it is not there at all. `readlinkat` is what
+                    // tells the first case from the rest, and it is tried
+                    // unconditionally rather than on a particular errno: the
+                    // code for "would have followed a symlink" is `ELOOP` on
+                    // Linux and is not promised to be anywhere else.
+                    let Some(target) = Dir::read_link(top, &cname) else {
+                        return Err(e);
+                    };
+                    hops = hops.saturating_add(1);
+                    if hops > MAX_SYMLINK_HOPS {
+                        return Err(io::Error::from_raw_os_error(ELOOP));
+                    }
+                    if target.first() == Some(&b'/') {
+                        return Err(escapes_destination());
+                    }
+                    for c in components(&target).into_iter().rev() {
+                        pending.push_front(c);
+                    }
+                }
+            }
+        }
+        let Some(dir) = stack.pop() else {
+            return Err(escapes_destination());
+        };
+        Ok(Located { dir, leaf })
+    }
+}
+
+/// Somewhere a member may be created: the directory it goes in, held open, and
+/// the one component naming it there.
+///
+/// Produced only by [`Dir::locate`], which is what makes holding one a proof
+/// that the place is beneath the destination.
+#[cfg(unix)]
+struct Located {
+    dir: Dir,
+    leaf: Vec<u8>,
+}
+
+#[cfg(unix)]
+impl Located {
+    /// The result of an `*at` call that returns 0 or -1.
+    fn checked(rc: i32) -> io::Result<()> {
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    /// Open the leaf, `O_CLOEXEC` added to whatever else was asked for.
+    fn open(&self, flags: i32, mode: u32) -> io::Result<File> {
+        use std::os::unix::io::FromRawFd;
+        let cname = c_name(&self.leaf)?;
+        // SAFETY: `cname` is NUL-terminated and outlives the call.
+        let fd = unsafe { openat(self.dir.0, cname.as_ptr(), flags | oflag::CLOEXEC, mode) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` was just returned by `openat`, is not -1, and is owned
+        // here — nothing else holds it, so handing it to `File` transfers the
+        // sole responsibility for closing it.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    /// `mkdir`, plain: `EEXIST` comes straight back out.
+    fn mkdir(&self) -> io::Result<()> {
+        let cname = c_name(&self.leaf)?;
+        // SAFETY: `cname` is NUL-terminated and outlives the call. 0o777 is
+        // masked by the umask, which is what `fs::create_dir` passes too.
+        Self::checked(unsafe { mkdirat(self.dir.0, cname.as_ptr(), 0o777) })
+    }
+
+    /// `mkdir` for a directory *member*, where an existing directory is success.
+    ///
+    /// The `EEXIST` is passed through for anything that is *not* a directory, so
+    /// [`create_at`] removes the obstacle and tries again. That is GNU's
+    /// behaviour and it matters twice over: a directory member extracted over a
+    /// plain file replaces the file (measured, `tar-rules11.sh` case 4), and one
+    /// extracted over a **symlink pointing at a directory** replaces the
+    /// *symlink* (`tar-rules12.sh`) instead of quietly extracting through it
+    /// into wherever it pointed. `create_dir_all`, which this replaced, did the
+    /// opposite: it asks `is_dir()`, which follows the link, sees a directory
+    /// and reports success — leaving the symlink in place for every member that
+    /// followed to be written through. Not following the link is the whole of
+    /// the difference, and [`Dir::open_child`]'s `O_NOFOLLOW` is where it lives.
+    fn mkdir_member(&self) -> io::Result<()> {
+        match self.mkdir() {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && self.is_real_dir() => Ok(()),
+            other => other,
+        }
+    }
+
+    /// Is the leaf a directory in its own right, rather than a link to one?
+    fn is_real_dir(&self) -> bool {
+        c_name(&self.leaf).is_ok_and(|cname| Dir::open_child(self.dir.0, &cname).is_ok())
+    }
+
+    fn symlink(&self, target: &[u8]) -> io::Result<()> {
+        let cname = c_name(&self.leaf)?;
+        let ctarget = c_name(target)?;
+        // SAFETY: both strings are NUL-terminated and outlive the call.
+        Self::checked(unsafe { symlinkat(ctarget.as_ptr(), self.dir.0, cname.as_ptr()) })
+    }
+
+    /// Hard-link this leaf to `target`, which must have been resolved beneath
+    /// the same root — GNU confines the target as well as the link
+    /// (`tar-rules17.sh`: a target reached through an escaping symlink reports
+    /// `Cannot hard link to ‘x/secret’: Invalid cross-device link`).
+    fn hard_link_to(&self, target: &Self) -> io::Result<()> {
+        let cname = c_name(&self.leaf)?;
+        let ctarget = c_name(&target.leaf)?;
+        // SAFETY: both strings are NUL-terminated and outlive the call; the two
+        // descriptors are live for the duration because `self` and `target` are
+        // borrowed. `flags` is 0: a hard link to a symlink stores the link.
+        Self::checked(unsafe {
+            linkat(
+                target.dir.0,
+                ctarget.as_ptr(),
+                self.dir.0,
+                cname.as_ptr(),
+                0,
+            )
+        })
+    }
+
+    fn mkfifo(&self, mode: u32) -> io::Result<()> {
+        let cname = c_name(&self.leaf)?;
+        // SAFETY: `cname` is NUL-terminated and outlives the call. `mkfifoat`
+        // supplies the `S_IFIFO` bit itself.
+        Self::checked(unsafe { mkfifoat(self.dir.0, cname.as_ptr(), mode & 0o7777) })
+    }
+
+    fn mknod(&self, mode: u32, dev: u64) -> io::Result<()> {
+        let cname = c_name(&self.leaf)?;
+        // SAFETY: `cname` is NUL-terminated and outlives the call. `mode`
+        // carries the `S_IFCHR`/`S_IFBLK` bit the caller put there.
+        Self::checked(unsafe { mknodat(self.dir.0, cname.as_ptr(), mode, dev) })
+    }
+
+    fn unlink(&self) -> io::Result<()> {
+        let cname = c_name(&self.leaf)?;
+        // SAFETY: `cname` is NUL-terminated and outlives the call.
+        Self::checked(unsafe { unlinkat(self.dir.0, cname.as_ptr(), 0) })
+    }
+
+    fn rmdir(&self) -> io::Result<()> {
+        let cname = c_name(&self.leaf)?;
+        // SAFETY: as above; `AT_REMOVEDIR` makes this an `rmdir`.
+        Self::checked(unsafe { unlinkat(self.dir.0, cname.as_ptr(), AT_REMOVEDIR) })
+    }
+
+    fn chmod(&self, mode: u32) -> io::Result<()> {
+        let cname = c_name(&self.leaf)?;
+        // SAFETY: `cname` is NUL-terminated and outlives the call.
+        Self::checked(unsafe { fchmodat(self.dir.0, cname.as_ptr(), mode, 0) })
+    }
+
+    /// Stamp the leaf's access and modification times to the same second.
+    ///
+    /// `flags` is `0` to follow a final symlink or [`AT_SYMLINK_NOFOLLOW`] to
+    /// stamp the link itself.
+    ///
+    /// Named after the syscall rather than after `File::set_times` for a reason
+    /// that only appeared once this tar could create a **fifo**: stamping by
+    /// opening and calling `futimens` means opening a fifo, and opening a fifo
+    /// blocks until somebody opens the other end. An archive holding one named
+    /// pipe was therefore a hang — `tar -xf` sat there for ever with no output
+    /// and no way to tell it from slow I/O. `utimensat` acts on the name and
+    /// never opens anything, which is also why GNU uses it.
+    fn stamp(&self, mtime: i64, flags: i32) -> io::Result<()> {
+        let cname = c_name(&self.leaf)?;
+        let t = CTimespec {
+            tv_sec: mtime,
+            tv_nsec: 0,
+        };
+        let times = [t, t];
+        // SAFETY: `cname` is NUL-terminated and `times` is exactly the
+        // two-element array `utimensat` reads; both outlive the call, which
+        // retains neither.
+        Self::checked(unsafe { utimensat(self.dir.0, cname.as_ptr(), times.as_ptr(), flags) })
+    }
+
+    /// The `(device, inode)` pair identifying whatever is at the leaf now.
+    ///
+    /// `fstatat`, not an open. This was `openat(O_RDONLY|O_NOFOLLOW)` plus
+    /// `File::metadata`, to avoid declaring a `struct stat` by hand — and that
+    /// broke the delayed-symlink placeholder outright, because the placeholder
+    /// is created **mode 0** and an unprivileged process cannot open a mode-0
+    /// file it owns. Every archive holding a symlink to an absolute or climbing
+    /// target failed with `tar: x: Cannot open: Permission denied`. Asking about
+    /// a name is not the same as asking to read it, and only the second needs
+    /// permission.
+    ///
+    /// `AT_SYMLINK_NOFOLLOW` so a link that appeared since is *not* the file we
+    /// made, and so a dangling one still answers rather than erroring.
+    fn identity(&self) -> io::Result<(u64, u64)> {
+        let cname = c_name(&self.leaf)?;
+        let mut st = CStat::default();
+        // SAFETY: `cname` is NUL-terminated and `st` is a `CStat`, which is the
+        // layout both C libraries this links against declare for `struct stat`
+        // (see the type's own comment); the call fills it and retains neither.
+        Self::checked(unsafe {
+            fstatat(self.dir.0, cname.as_ptr(), &raw mut st, AT_SYMLINK_NOFOLLOW)
+        })?;
+        Ok((st.st_dev, st.st_ino))
+    }
+}
+
+/// `struct stat`, in the layout `posix/src/stat.rs` declares — which is itself
+/// documented as matching Linux x86-64's, so the one declaration serves both
+/// the host build and the SlateOS one.
+///
+/// Only `st_dev` and `st_ino` are read. The rest is present so the struct is
+/// the right *size*: `fstatat` writes all of it, and a short buffer would be a
+/// stack overwrite rather than a wrong answer.
+#[repr(C)]
+#[derive(Default)]
+#[cfg_attr(not(unix), allow(dead_code))]
+struct CStat {
+    st_dev: u64,
+    st_ino: u64,
+    st_nlink: u64,
+    st_mode: u32,
+    st_uid: u32,
+    st_gid: u32,
+    _pad0: i32,
+    st_rdev: u64,
+    st_size: i64,
+    st_blksize: i64,
+    st_blocks: i64,
+    st_atim: CTimespec,
+    st_mtim: CTimespec,
+    st_ctim: CTimespec,
+    _reserved: [i64; 3],
 }
 
 /// `struct timespec`, in the layout `posix/src/stat.rs` declares.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 #[cfg_attr(not(unix), allow(dead_code))]
 struct CTimespec {
     tv_sec: i64,
     tv_nsec: i64,
 }
+
+/// The size [`CStat`] must have, checked here rather than discovered as a
+/// corrupted stack: `fstatat` writes 144 bytes on x86-64 whatever this file
+/// thinks, so a declaration that drifted from the C one has to fail the build.
+#[cfg(unix)]
+const _: () = assert!(core::mem::size_of::<CStat>() == 144);
 
 /// Rebuild a `dev_t` from the two halves ustar stores it in.
 ///
@@ -2026,181 +2476,346 @@ fn make_dev(major: u64, minor: u64) -> u64 {
 const S_IFCHR: u32 = 0o020000;
 const S_IFBLK: u32 = 0o060000;
 
-/// Create a symlink at `path` pointing at `target`.
-///
-/// The target is stored, and used, **verbatim** — absolute targets and targets
-/// full of `..` alike. That is measured GNU behaviour (`abs -> /etc/passwd` and
-/// `up -> ../../outside` are both created, in silence, exit 0) and it is safe
-/// for the same reason it is safe in GNU: a symlink is only a name until
-/// something follows it, and whether to follow it is the *caller's* choice
-/// later, not this program's now. What must not happen is that tar itself walks
-/// through one while unpacking the rest of the archive.
+/// The parts of a member's creation whose *wording* is worth keeping beside
+/// the flags that produce it.
 #[cfg(unix)]
-fn make_symlink(target: &[u8], path: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(os_from_bytes(target), path)
-}
-
-#[cfg(not(unix))]
-fn make_symlink(_target: &[u8], _path: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "symlinks are not supported on this host",
-    ))
-}
-
-/// Create a named pipe at `path` with the given mode.
-///
-/// The mode is applied again by the caller through [`restore_metadata`], and
-/// has to be: `mkfifo` masks what it is given by the umask, so a 0666 fifo
-/// under umask 022 arrives 0644 whatever the archive said, and `-p` would have
-/// no effect at all.
-#[cfg(unix)]
-fn make_fifo(path: &Path, mode: u32) -> io::Result<()> {
-    let Some(cpath) = c_path(path) else {
-        return Err(embedded_nul());
-    };
-    // SAFETY: `cpath` is NUL-terminated and outlives the call, which does not
-    // retain the pointer. `mode` is a permission word; `mkfifo` supplies the
-    // `S_IFIFO` bit itself.
-    if unsafe { mkfifo(cpath.as_ptr(), mode & 0o7777) } == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(unix))]
-fn make_fifo(_path: &Path, _mode: u32) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "named pipes are not supported on this host",
-    ))
-}
-
-/// Create a character or block device node.
-///
-/// Fails with `EPERM` for anyone but root, which is not a defect to work around
-/// — it is the kernel refusing to let an archive hand an unprivileged user a
-/// readable `/dev/sda`. GNU reports it and carries on with the next member, and
-/// so does the caller here.
-#[cfg(unix)]
-fn make_device(path: &Path, mode: u32, block: bool, major: u64, minor: u64) -> io::Result<()> {
-    let Some(cpath) = c_path(path) else {
-        return Err(embedded_nul());
-    };
-    let kind = if block { S_IFBLK } else { S_IFCHR };
-    // SAFETY: as `make_fifo`. The mode carries the `S_IFMT` bits `mknod`
-    // requires, and `dev` is a plain integer.
-    if unsafe {
-        mknod(
-            cpath.as_ptr(),
-            kind | (mode & 0o7777),
-            make_dev(major, minor),
+impl Located {
+    /// Open the leaf for a regular member: `O_WRONLY|O_CREAT|O_EXCL|O_NONBLOCK`.
+    ///
+    /// **Exclusive, not truncating**, which is GNU's `open_output_file` when
+    /// `--overwrite` was not given, and the difference is not a nicety. This used
+    /// to pass `.create(true).truncate(true)`, i.e. `O_TRUNC`, and so wrote
+    /// *through* whatever already stood at the path:
+    ///
+    /// * over a file with **other hard links**, `O_TRUNC` rewrites the shared
+    ///   inode, so extracting `x` silently rewrote every other name for it.
+    ///   GNU's `O_EXCL` fails, [`create_at`] unlinks the name, and the second
+    ///   open makes a *new* inode -- the link is broken, the other names keep
+    ///   their contents. Measured (`tar-rules5.sh`): after extracting over a
+    ///   twice-linked file GNU leaves `links=1` and the other name unchanged.
+    /// * over a **symlink**, `O_TRUNC` follows it and writes at the far end. An
+    ///   archive of `x` unpacked into a directory where `x -> ../outside`
+    ///   already exists therefore wrote outside the destination -- a traversal
+    ///   that survived every other defence here, because the symlink came from
+    ///   the filesystem rather than from the archive. GNU replaces the symlink
+    ///   itself.
+    ///
+    /// `O_NONBLOCK` remains because `open` on a **fifo** blocks until a reader
+    /// appears. With `O_EXCL` an existing fifo is now unlinked and replaced
+    /// rather than opened, so the flag no longer has a case to answer on the
+    /// paths this program takes -- but it costs nothing and the guarantee is
+    /// worth stating outright rather than deducing from the flag two lines above.
+    ///
+    /// 0o666 is the mode `File::create` would have asked for, and the umask
+    /// takes it down from there; the archive's own mode is applied afterwards.
+    fn create_file(&self) -> io::Result<File> {
+        self.open(
+            oflag::WRONLY | oflag::CREAT | oflag::EXCL | oflag::NONBLOCK,
+            0o666,
         )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
+    }
+
+    /// Stand up the empty file a delayed symlink's place is held with.
+    ///
+    /// Mode 0, as GNU's `create_placeholder_file` opens it: nothing should be
+    /// able to use this file for anything during the seconds it exists.
+    fn create_placeholder(&self) -> io::Result<()> {
+        self.open(
+            oflag::WRONLY | oflag::CREAT | oflag::EXCL | oflag::NONBLOCK,
+            0,
+        )
+        .map(drop)
+    }
+
+    /// Create a symlink at the leaf, pointing at `target`.
+    ///
+    /// The target is stored, and used, **verbatim** — absolute targets and
+    /// targets full of `..` alike. That is measured GNU behaviour
+    /// (`abs -> /etc/passwd` and `up -> ../../outside` are both created, in
+    /// silence, exit 0) and it is safe for the same reason it is safe in GNU: a
+    /// symlink is only a name until something follows it, and whether to follow
+    /// it is the *caller's* choice later, not this program's now. What must not
+    /// happen is that tar itself walks through one while unpacking the rest of
+    /// the archive — see [`Dir::locate`], which is what stops it.
+    fn make_symlink(&self, target: &[u8]) -> io::Result<()> {
+        self.symlink(target)
+    }
+
+    /// Create a named pipe at the leaf.
+    ///
+    /// The mode is applied again by the caller through [`restore_metadata`], and
+    /// has to be: `mkfifo` masks what it is given by the umask, so a 0666 fifo
+    /// under umask 022 arrives 0644 whatever the archive said, and `-p` would
+    /// have no effect at all.
+    fn make_fifo(&self, mode: u32) -> io::Result<()> {
+        self.mkfifo(mode)
+    }
+
+    /// Create a character or block device node at the leaf.
+    ///
+    /// Fails with `EPERM` for anyone but root, which is not a defect to work
+    /// around — it is the kernel refusing to let an archive hand an
+    /// unprivileged user a readable `/dev/sda`. GNU reports it and carries on
+    /// with the next member, and so does the caller here.
+    fn make_device(&self, mode: u32, block: bool, major: u64, minor: u64) -> io::Result<()> {
+        let kind = if block { S_IFBLK } else { S_IFCHR };
+        self.mknod(kind | (mode & 0o7777), make_dev(major, minor))
+    }
+
+    /// Set the leaf's modification time, following a final symlink.
+    fn set_mtime(&self, mtime: i64) -> io::Result<()> {
+        self.stamp(mtime, 0)
+    }
+
+    /// Set a **symlink's own** modification time, without following it.
+    ///
+    /// [`Located::set_mtime`] would stamp the target instead — or fail outright
+    /// on a dangling link, which is a perfectly ordinary thing for an archive to
+    /// hold. Measured: GNU restores it, and a symlink archived at 2019-05-06
+    /// comes back dated 2019-05-06 even when what it points at does not exist.
+    fn set_symlink_mtime(&self, mtime: i64) -> io::Result<()> {
+        self.stamp(mtime, AT_SYMLINK_NOFOLLOW)
+    }
+
+    /// Set the leaf's permission bits.
+    fn set_mode(&self, mode: u32) -> io::Result<()> {
+        self.chmod(mode)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The same thing off unix, where the primitives it is built from do not exist.
+// ---------------------------------------------------------------------------
+
+/// A directory, named rather than held open.
+///
+/// The unix [`Dir`] holds a descriptor per level and creates through it, which
+/// is what makes the confinement race-free. There is no `openat` here to build
+/// that from, so this twin resolves lexically and creates by path: the member
+/// still cannot be *named* outside the destination, but a symlink planted in
+/// the destination between the check and the creation would not be caught.
+///
+/// That is a real gap and it is recorded as one. It is also not the platform
+/// this program is for: extraction off unix already cannot make a symlink, a
+/// fifo or a device node, and says so.
+#[cfg(not(unix))]
+struct Dir(std::path::PathBuf);
+
+#[cfg(not(unix))]
+impl Dir {
+    fn open_root(path: &Path) -> io::Result<Self> {
+        // Canonicalised so the stored root is something later joins cannot walk
+        // out of by accident, and so a destination that does not exist fails
+        // here rather than once per member.
+        Ok(Self(fs::canonicalize(path)?))
+    }
+
+    fn locate(&self, name: &[u8]) -> io::Result<Located> {
+        let mut stack: Vec<Vec<u8>> = Vec::new();
+        let mut comps = components(name);
+        // The destination itself when the name has no components — see the unix
+        // twin for why that is a location and not an error.
+        let leaf = comps.pop().unwrap_or_else(|| b".".to_vec());
+        if leaf == b".." {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "name escapes the destination",
+            ));
+        }
+        for comp in comps {
+            if comp == b".." {
+                if stack.pop().is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "name escapes the destination",
+                    ));
+                }
+            } else {
+                stack.push(comp);
+            }
+        }
+        let mut path = self.0.clone();
+        for comp in &stack {
+            path.push(os_from_bytes(comp));
+        }
+        Ok(Located { dir: path, leaf })
     }
 }
 
 #[cfg(not(unix))]
-fn make_device(_path: &Path, _mode: u32, _block: bool, _major: u64, _minor: u64) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "device nodes are not supported on this host",
-    ))
+struct Located {
+    dir: std::path::PathBuf,
+    leaf: Vec<u8>,
 }
 
-/// `AT_SYMLINK_NOFOLLOW` — act on the link, not on what it names.
-#[cfg(unix)]
-const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+#[cfg(not(unix))]
+impl Located {
+    fn path(&self) -> std::path::PathBuf {
+        self.dir.join(os_from_bytes(&self.leaf))
+    }
 
-/// Stamp a path's access and modification times to the same second.
-///
-/// `flags` is `0` to follow a final symlink or [`AT_SYMLINK_NOFOLLOW`] to stamp
-/// the link itself.
-#[cfg(unix)]
-fn stamp_path(path: &Path, mtime: i64, flags: i32) -> io::Result<()> {
-    /// `AT_FDCWD` — resolve a relative path against the working directory.
-    const AT_FDCWD: i32 = -100;
+    fn mkdir(&self) -> io::Result<()> {
+        fs::create_dir(self.path())
+    }
 
-    let Some(cpath) = c_path(path) else {
-        return Err(embedded_nul());
-    };
-    let t = CTimespec {
-        tv_sec: mtime,
-        tv_nsec: 0,
-    };
-    let times = [t, t];
-    // SAFETY: `cpath` is NUL-terminated and `times` is exactly the two-element
-    // array `utimensat` reads; both outlive the call, which retains neither.
-    if unsafe { utimensat(AT_FDCWD, cpath.as_ptr(), times.as_ptr(), flags) } == 0 {
+    fn mkdir_member(&self) -> io::Result<()> {
+        match self.mkdir() {
+            Err(e)
+                if e.kind() == io::ErrorKind::AlreadyExists
+                    && fs::symlink_metadata(self.path()).is_ok_and(|m| m.is_dir()) =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
+    fn unlink(&self) -> io::Result<()> {
+        fs::remove_file(self.path())
+    }
+
+    fn rmdir(&self) -> io::Result<()> {
+        fs::remove_dir(self.path())
+    }
+
+    fn hard_link_to(&self, target: &Self) -> io::Result<()> {
+        fs::hard_link(target.path(), self.path())
+    }
+
+    fn create_file(&self) -> io::Result<File> {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.path())
+    }
+
+    fn create_placeholder(&self) -> io::Result<()> {
+        self.create_file().map(drop)
+    }
+
+    /// `(0, 0)` for everything: there is no inode number to compare here, so the
+    /// call answers only "does it still exist". The placeholder check it feeds
+    /// is therefore weaker off unix, in the same way and for the same reason
+    /// resolution is.
+    fn identity(&self) -> io::Result<(u64, u64)> {
+        fs::symlink_metadata(self.path())?;
+        Ok((0, 0))
+    }
+
+    fn make_symlink(&self, _target: &[u8]) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "symlinks are not supported on this host",
+        ))
+    }
+
+    fn make_fifo(&self, _mode: u32) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "named pipes are not supported on this host",
+        ))
+    }
+
+    fn make_device(&self, _mode: u32, _block: bool, _major: u64, _minor: u64) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "device nodes are not supported on this host",
+        ))
+    }
+
+    fn set_mtime(&self, mtime: i64) -> io::Result<()> {
+        use std::fs::FileTimes;
+        use std::time::{Duration, SystemTime};
+        let t = if mtime >= 0 {
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(mtime.unsigned_abs()))
+        } else {
+            SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs(mtime.unsigned_abs()))
+        };
+        // A header can hold a time no clock can represent; refusing it is right,
+        // and refusing it *loudly* is what tells the caller the tree is not the
+        // archive.
+        let Some(t) = t else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "timestamp out of range",
+            ));
+        };
+        let f = File::open(self.path())?;
+        f.set_times(FileTimes::new().set_accessed(t).set_modified(t))
+    }
+
+    /// A no-op: there are no symlinks here to stamp.
+    fn set_symlink_mtime(&self, _mtime: i64) -> io::Result<()> {
         Ok(())
-    } else {
-        Err(io::Error::last_os_error())
+    }
+
+    /// A no-op off unix, where there are no permission bits to set.
+    fn set_mode(&self, _mode: u32) -> io::Result<()> {
+        Ok(())
     }
 }
 
-/// Set a **symlink's own** modification time, without following it.
+/// Stand up the empty file that holds a delayed symlink's place, and identify
+/// it so [`apply_delayed_links`] can tell later whether it is still ours.
 ///
-/// [`set_mtime`] would stamp the target instead — or fail outright on a
-/// dangling link, which is a perfectly ordinary thing for an archive to hold.
-/// Measured: GNU restores it, and a symlink archived at 2019-05-06 comes back
-/// dated 2019-05-06 even when what it points at does not exist.
-#[cfg(unix)]
-fn set_symlink_mtime(path: &Path, mtime: i64) -> io::Result<()> {
-    stamp_path(path, mtime, AT_SYMLINK_NOFOLLOW)
+/// Created exclusively, so an existing entry is replaced through the same
+/// remove-and-retry [`create_at`] does everywhere else -- which is why a symlink
+/// over a *non-empty directory* reports `Cannot open: File exists` rather than
+/// the `Cannot create symlink to ‘…’` a relative one would.
+fn make_placeholder(root: &Dir, name: &[u8], status: &mut i32) -> io::Result<(u64, u64)> {
+    let (at, ()) = create_at(root, name, status, Located::create_placeholder)?;
+    at.identity()
 }
 
-#[cfg(not(unix))]
-fn set_symlink_mtime(_path: &Path, _mtime: i64) -> io::Result<()> {
-    Ok(())
-}
-
-/// Open a path for a regular member: `O_WRONLY|O_CREAT|O_EXCL|O_NONBLOCK`.
+/// Replace every placeholder with the symlink it stood for.
 ///
-/// **Exclusive, not truncating**, which is GNU's `open_output_file` when
-/// `--overwrite` was not given, and the difference is not a nicety. This used to
-/// pass `.create(true).truncate(true)`, i.e. `O_TRUNC`, and so wrote *through*
-/// whatever already stood at the path:
+/// A placeholder that is no longer the file this run created is left alone and
+/// nothing is said, which is GNU's handling: the archive has already been read,
+/// something else now owns that path, and unlinking it on the strength of a
+/// name would be the very substitution the placeholder exists to prevent.
 ///
-/// * over a file with **other hard links**, `O_TRUNC` rewrites the shared inode,
-///   so extracting `x` silently rewrote every other name for it. GNU's
-///   `O_EXCL` fails, [`create_recovering`] unlinks the name, and the second open
-///   makes a *new* inode — the link is broken, the other names keep their
-///   contents. Measured (`tar-rules5.sh`): after extracting over a
-///   twice-linked file GNU leaves `links=1` and the other name unchanged.
-/// * over a **symlink**, `O_TRUNC` follows it and writes at the far end. An
-///   archive of `x` unpacked into a directory where `x -> ../outside` already
-///   exists therefore wrote outside the destination — a traversal that survived
-///   every other defence here, because the symlink came from the filesystem
-///   rather than from the archive. GNU replaces the symlink itself.
-///
-/// `O_NONBLOCK` remains because `open` on a **fifo** blocks until a reader
-/// appears. With `O_EXCL` an existing fifo is now unlinked and replaced rather
-/// than opened, so the flag no longer has a case to answer on the paths this
-/// program takes — but it costs nothing and the guarantee is worth stating
-/// outright rather than deducing from the flag two lines above.
-#[cfg(unix)]
-fn create_file(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    /// `O_NONBLOCK`, as Linux numbers it.
-    const O_NONBLOCK: i32 = 0o4000;
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .custom_flags(O_NONBLOCK)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-fn create_file(path: &Path) -> io::Result<File> {
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
+/// The location is resolved afresh rather than held from the first pass. Holding
+/// one would mean an open descriptor per delayed link for the length of the
+/// extraction, and an archive is free to contain as many of them as it likes.
+fn apply_delayed_links(root: &Dir, links: Vec<DelayedLink>, status: &mut i32) {
+    for link in links {
+        let Ok(at) = root.locate(&link.name) else {
+            // The name resolved when the placeholder was made. That it does not
+            // now means something moved underneath us, which is exactly the
+            // case the identity check below exists to decline.
+            continue;
+        };
+        if at.identity().ok() != Some(link.id) {
+            continue;
+        }
+        if let Err(e) = at.unlink() {
+            diag!(
+                "tar: {}: Cannot unlink: {}",
+                escape(&link.name),
+                strerror(&e)
+            );
+            *status = EXIT_FATAL;
+            continue;
+        }
+        if let Err(e) = at.make_symlink(&link.target) {
+            diag!(
+                "tar: {}: Cannot create symlink to {}: {}",
+                escape(&link.name),
+                quote(&link.target),
+                strerror(&e)
+            );
+            *status = EXIT_FATAL;
+            continue;
+        }
+        if let Err(e) = at.set_symlink_mtime(link.mtime) {
+            diag!(
+                "tar: {}: Cannot utime: {}",
+                escape(&link.name),
+                strerror(&e)
+            );
+            *status = EXIT_FATAL;
+        }
+    }
 }
 
 fn do_extract(
@@ -2229,6 +2844,19 @@ fn do_extract(
         diag!("tar: {}: Cannot chdir: {}", escape_os(dir), strerror(&e));
         return fatal();
     }
+
+    // After the chdir, not before: `-C` chooses the destination, and the
+    // destination is the boundary every member is resolved beneath. Held open
+    // for the whole extraction, so that a rename of the destination underneath
+    // us moves the extraction with it rather than spilling into whatever took
+    // the old name.
+    let root = match Dir::open_root(Path::new(".")) {
+        Ok(root) => root,
+        Err(e) => {
+            diag!("tar: {}: Cannot open: {}", escape(b"."), strerror(&e));
+            return fatal();
+        }
+    };
 
     let mut status = 0;
     // A hard link's target gets its own notice, separate from the member-name
@@ -2288,9 +2916,7 @@ fn do_extract(
                 // about it names `d` — and the trailing slash would also make
                 // the ancestor walk treat the member itself as its own ancestor.
                 let name = trim_slashes(&name).to_vec();
-                let path = os_from_bytes(&name);
-                let path = Path::new(&path);
-                if let Err(e) = create_recovering(path, &name, &mut status, || make_dir(path)) {
+                if let Err(e) = create_at(&root, &name, &mut status, Located::mkdir_member) {
                     diag!("tar: {}: Cannot mkdir: {}", escape(&name), strerror(&e));
                     status = EXIT_FATAL;
                 } else {
@@ -2304,21 +2930,25 @@ fn do_extract(
             }
             b'0' | b'\0' | b'7' => {
                 let mode = extraction_mode(member.mode, same_permissions, umask);
-                extract_plain(input, &name, member, mode, &mut status)
+                extract_plain(&root, input, &name, member, mode, &mut status)
             }
             b'2' if is_delayed_target(&member.linkname) => {
                 // A symlink out of the destination — absolute, or climbing —
                 // is not created now. It is stood up as an empty placeholder
                 // *file* and turned into the symlink after the last member,
-                // which is GNU's design and is the whole of tar's defence
-                // against being walked through its own output: an archive
-                // holding `d -> /tmp` followed by `d/pwned` writes nothing to
-                // `/tmp`, because at the moment `d/pwned` is opened, `d` is a
-                // regular file and the open fails with `Not a directory`.
-                // Measured, `tar-rules2.sh`.
-                let path = os_from_bytes(&name);
-                let path = Path::new(&path);
-                match make_placeholder(path, &name, &mut status) {
+                // which is GNU's design and is one leg of tar's defence against
+                // being walked through its own output: an archive holding
+                // `d -> /tmp` followed by `d/pwned` writes nothing to `/tmp`,
+                // because at the moment `d/pwned` is opened, `d` is a regular
+                // file and the open fails with `Not a directory`. Measured,
+                // `tar-rules2.sh`.
+                //
+                // It is only *one* leg, and only covers the run that creates
+                // the link: the placeholder is replaced before this function
+                // returns, so a second archive would meet a real symlink. What
+                // stops that one is [`Dir::locate`], which refuses to walk
+                // through it however it got there.
+                match make_placeholder(&root, &name, &mut status) {
                     Ok(id) => delayed.push(DelayedLink {
                         name: name.clone(),
                         target: member.linkname.clone(),
@@ -2336,35 +2966,44 @@ fn do_extract(
                 Handled::Skip
             }
             b'2' => {
-                let path = os_from_bytes(&name);
-                let path = Path::new(&path);
-                let create = || make_symlink(&member.linkname, path);
-                if let Err(e) = create_recovering(path, &name, &mut status, create) {
-                    diag!(
-                        "tar: {}: Cannot create symlink to {}: {}",
-                        escape(&name),
-                        quote(&member.linkname),
-                        strerror(&e)
-                    );
-                    status = EXIT_FATAL;
-                } else if let Err(e) = set_symlink_mtime(path, member.mtime) {
+                let create = |at: &Located| at.make_symlink(&member.linkname);
+                match create_at(&root, &name, &mut status, create) {
+                    Err(e) => {
+                        diag!(
+                            "tar: {}: Cannot create symlink to {}: {}",
+                            escape(&name),
+                            quote(&member.linkname),
+                            strerror(&e)
+                        );
+                        status = EXIT_FATAL;
+                    }
                     // No mode is applied. A symlink has none of its own on any
                     // system this runs on — `lrwxrwxrwx` is a constant — and
                     // `chmod` through one would silently repermission whatever
                     // it points at, which for an archived `-> /etc/passwd` is
                     // the whole attack.
-                    diag!("tar: {}: Cannot utime: {}", escape(&name), strerror(&e));
-                    status = EXIT_FATAL;
+                    Ok((at, ())) => {
+                        if let Err(e) = at.set_symlink_mtime(member.mtime) {
+                            diag!("tar: {}: Cannot utime: {}", escape(&name), strerror(&e));
+                            status = EXIT_FATAL;
+                        }
+                    }
                 }
                 Handled::Skip
             }
             b'1' => {
-                let path = os_from_bytes(&name);
-                let path = Path::new(&path);
-                let target_path = os_from_bytes(&link_target);
-                let target_path = Path::new(&target_path);
-                let create = || fs::hard_link(target_path, path);
-                if let Err(e) = create_recovering(path, &name, &mut status, create) {
+                // The *target* is resolved beneath the destination too, not
+                // just the link's own name. Measured (`tar-rules17.sh`): with
+                // `x -> ../out` already in the destination, GNU refuses a
+                // member linking to `x/secret` with `Cannot hard link to
+                // ‘x/secret’: Invalid cross-device link` — a hard link to a
+                // file outside the tree would otherwise hand its contents, and
+                // write access to them, to whoever unpacked the archive.
+                let create = |at: &Located| {
+                    let target = root.locate(&link_target)?;
+                    at.hard_link_to(&target)
+                };
+                if let Err(e) = create_at(&root, &name, &mut status, create) {
                     // The one place in this program that quotes with `‘…’`
                     // instead of tar's escape style, because it is the one
                     // place GNU does: this sentence is built with gnulib's
@@ -2384,33 +3023,34 @@ fn do_extract(
             }
             b'6' => {
                 let mode = extraction_mode(member.mode, same_permissions, umask);
-                let path = os_from_bytes(&name);
-                let path = Path::new(&path);
-                if let Err(e) =
-                    create_recovering(path, &name, &mut status, || make_fifo(path, mode))
-                {
-                    diag!("tar: {}: Cannot mkfifo: {}", escape(&name), strerror(&e));
-                    status = EXIT_FATAL;
-                } else {
-                    restore_metadata(&name, path, mode, member.mtime, &mut status);
+                match create_at(&root, &name, &mut status, |at| at.make_fifo(mode)) {
+                    Err(e) => {
+                        diag!("tar: {}: Cannot mkfifo: {}", escape(&name), strerror(&e));
+                        status = EXIT_FATAL;
+                    }
+                    Ok((at, ())) => {
+                        restore_metadata(&at, &name, mode, member.mtime, &mut status);
+                    }
                 }
                 Handled::Skip
             }
             b'3' | b'4' => {
                 let mode = extraction_mode(member.mode, same_permissions, umask);
                 let block = member.typeflag == b'4';
-                let path = os_from_bytes(&name);
-                let path = Path::new(&path);
-                let create = || make_device(path, mode, block, member.devmajor, member.devminor);
-                if let Err(e) = create_recovering(path, &name, &mut status, create) {
-                    // `Operation not permitted` for everyone but root, and that
-                    // is the point rather than a shortcoming: an archive that
-                    // could conjure a block device would be handing whoever
-                    // unpacked it raw access to a disk.
-                    diag!("tar: {}: Cannot mknod: {}", escape(&name), strerror(&e));
-                    status = EXIT_FATAL;
-                } else {
-                    restore_metadata(&name, path, mode, member.mtime, &mut status);
+                let create =
+                    |at: &Located| at.make_device(mode, block, member.devmajor, member.devminor);
+                match create_at(&root, &name, &mut status, create) {
+                    Err(e) => {
+                        // `Operation not permitted` for everyone but root, and
+                        // that is the point rather than a shortcoming: an
+                        // archive that could conjure a block device would be
+                        // handing whoever unpacked it raw access to a disk.
+                        diag!("tar: {}: Cannot mknod: {}", escape(&name), strerror(&e));
+                        status = EXIT_FATAL;
+                    }
+                    Ok((at, ())) => {
+                        restore_metadata(&at, &name, mode, member.mtime, &mut status);
+                    }
                 }
                 Handled::Skip
             }
@@ -2433,7 +3073,7 @@ fn do_extract(
                     escape(&[other])
                 );
                 let mode = extraction_mode(member.mode, same_permissions, umask);
-                extract_plain(input, &name, member, mode, &mut status)
+                extract_plain(&root, input, &name, member, mode, &mut status)
             }
         }
     });
@@ -2444,14 +3084,23 @@ fn do_extract(
     // applies the links, then fixes the ancestors — and the observable result
     // is identical: measured, an archive whose only member under `sub/` is a
     // symlink to an absolute path leaves `sub`'s stored mtime intact.
-    apply_delayed_links(delayed, &mut status);
+    apply_delayed_links(&root, delayed, &mut status);
 
     // Deepest first: `pending_dirs` is in archive order, which is parents
     // before children, so the reverse leaves a parent's timestamp untouched by
     // work still to be done inside it.
     for (name, mode, mtime) in pending_dirs.into_iter().rev() {
-        let path = os_from_bytes(&name);
-        restore_metadata(&name, Path::new(&path), mode, mtime, &mut status);
+        match root.locate(&name) {
+            Ok(at) => restore_metadata(&at, &name, mode, mtime, &mut status),
+            Err(e) => {
+                // The directory was made a moment ago and resolved then. That
+                // it does not resolve now means the tree changed underneath the
+                // extraction, and the stamp is declined rather than applied to
+                // whatever took the name.
+                diag!("tar: {}: Cannot utime: {}", escape(&name), strerror(&e));
+                status = EXIT_FATAL;
+            }
+        }
     }
 
     let missing = selector.report_missing();
@@ -2473,13 +3122,14 @@ fn do_extract(
 /// operation: GNU's answer to a type flag it does not recognise is to keep the
 /// bytes and say so.
 fn extract_plain(
+    root: &Dir,
     input: &mut dyn Read,
     name: &[u8],
     member: &Member,
     mode: u32,
     status: &mut i32,
 ) -> Handled {
-    if extract_regular_file(input, name, member.size, mode, member.mtime, status) {
+    if extract_regular_file(root, input, name, member.size, mode, member.mtime, status) {
         Handled::Consumed
     } else {
         Handled::Truncated
@@ -2537,95 +3187,6 @@ struct DelayedLink {
     id: (u64, u64),
 }
 
-/// Stand up the empty file that holds a delayed symlink's place.
-///
-/// Mode 0, as GNU's `create_placeholder_file` opens it: nothing should be able
-/// to use this file for anything during the seconds it exists. Created
-/// exclusively, so an existing entry is replaced through the same
-/// remove-and-retry [`create_recovering`] does everywhere else — which is why a
-/// symlink over a *non-empty directory* reports `Cannot open: File exists`
-/// rather than the `Cannot create symlink to ‘…’` a relative one would.
-fn make_placeholder(path: &Path, name: &[u8], status: &mut i32) -> io::Result<(u64, u64)> {
-    create_recovering(path, name, status, || create_exclusive(path))?;
-    file_identity(path)
-}
-
-#[cfg(unix)]
-fn create_exclusive(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o000)
-        .open(path)
-        .map(|_| ())
-}
-
-#[cfg(not(unix))]
-fn create_exclusive(path: &Path) -> io::Result<()> {
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map(|_| ())
-}
-
-#[cfg(unix)]
-fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    let md = fs::symlink_metadata(path)?;
-    Ok((md.dev(), md.ino()))
-}
-
-#[cfg(not(unix))]
-fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
-    fs::symlink_metadata(path)?;
-    Ok((0, 0))
-}
-
-/// Replace every placeholder with the symlink it stood for.
-///
-/// A placeholder that is no longer the file this run created is left alone and
-/// nothing is said, which is GNU's handling: the archive has already been read,
-/// something else now owns that path, and unlinking it on the strength of a
-/// name would be the very substitution the placeholder exists to prevent.
-fn apply_delayed_links(links: Vec<DelayedLink>, status: &mut i32) {
-    for link in links {
-        let path = os_from_bytes(&link.name);
-        let path = Path::new(&path);
-        if file_identity(path).ok() != Some(link.id) {
-            continue;
-        }
-        if let Err(e) = fs::remove_file(path) {
-            diag!(
-                "tar: {}: Cannot unlink: {}",
-                escape(&link.name),
-                strerror(&e)
-            );
-            *status = EXIT_FATAL;
-            continue;
-        }
-        if let Err(e) = make_symlink(&link.target, path) {
-            diag!(
-                "tar: {}: Cannot create symlink to {}: {}",
-                escape(&link.name),
-                quote(&link.target),
-                strerror(&e)
-            );
-            *status = EXIT_FATAL;
-            continue;
-        }
-        if let Err(e) = set_symlink_mtime(path, link.mtime) {
-            diag!(
-                "tar: {}: Cannot utime: {}",
-                escape(&link.name),
-                strerror(&e)
-            );
-            *status = EXIT_FATAL;
-        }
-    }
-}
-
 /// The archive's name for a diagnostic: its path, or `-` for standard input.
 fn archive_label(archive_file: Option<&OsStr>) -> Vec<u8> {
     archive_file.map_or_else(|| b"-".to_vec(), |p| os_bytes(p).into_owned())
@@ -2634,25 +3195,30 @@ fn archive_label(archive_file: Option<&OsStr>) -> Vec<u8> {
 /// Open the file a regular member is to be written to, reporting why not.
 ///
 /// The ordering here is a security property, not a style choice. This used to
-/// `create_dir_all(parent)` up front and *then* open — which quietly undid
+/// `create_dir_all(parent)` up front and *then* open -- which quietly undid
 /// tar's traversal defence. An archive holding `d -> /tmp` followed by
 /// `d/pwned` gets the symlink withheld (see [`is_delayed_target`]), so `d` is a
 /// zero-length placeholder file when `d/pwned` arrives; `create_dir_all` saw
 /// `d` was not a directory and reported `d: Cannot mkdir: File exists`, and on
 /// a run where the placeholder had *not* been left behind it would have made
-/// the directory and written the member. GNU opens first and only reaches for
-/// `mkdir` on the `ENOENT` that says an ancestor is genuinely absent, which
+/// the directory and written the member. GNU resolves first and only reaches
+/// for `mkdir` on the `ENOENT` that says an ancestor is genuinely absent, which
 /// makes the same archive fail the way it should: `tar: d/pwned: Cannot open:
 /// Not a directory`. Measured, `tar-xmine.sh` cases `traverse`/`traverse2`.
 ///
 /// The recovery still has to exist, because an archive need not store a
-/// directory before the members inside it — `tar -cf - a/b/c` with no `a/` or
-/// `a/b/` member is legal and GNU extracts it. It now lives in
-/// [`create_recovering`], shared with every other member type; this function is
-/// just the wording of the failure.
-fn open_for_member(path: &Path, name: &[u8], status: &mut i32) -> Option<File> {
-    match create_recovering(path, name, status, || create_file(path)) {
-        Ok(file) => Some(file),
+/// directory before the members inside it -- `tar -cf - a/b/c` with no `a/` or
+/// `a/b/` member is legal and GNU extracts it. It lives in [`create_at`],
+/// shared with every other member type; this function is just the wording of
+/// the failure.
+///
+/// The location comes back with the handle so the mode and timestamp can be
+/// applied through the *same* resolved parent the file was created in, rather
+/// than by walking the name a second time and hoping it still leads to the file
+/// just written.
+fn open_for_member(root: &Dir, name: &[u8], status: &mut i32) -> Option<(Located, File)> {
+    match create_at(root, name, status, Located::create_file) {
+        Ok(pair) => Some(pair),
         Err(e) => {
             diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
             *status = EXIT_FATAL;
@@ -2670,6 +3236,7 @@ fn open_for_member(path: &Path, name: &[u8], status: &mut i32) -> Option<File> {
 /// terabyte before reading a single block — a one-line denial of service
 /// costing the attacker 512 bytes of file.
 fn extract_regular_file(
+    root: &Dir,
     input: &mut dyn Read,
     name: &[u8],
     size: u64,
@@ -2677,15 +3244,9 @@ fn extract_regular_file(
     mtime: i64,
     status: &mut i32,
 ) -> bool {
-    // `name` has been through `strip_leading` and `contains_dot_dot`, so it is
-    // a relative path of `/`-separated non-`..` components — but its bytes are
-    // still the archive's, and are turned back into a path without inspecting
-    // them.
-    let path = os_from_bytes(name);
-    let path = Path::new(&path);
     // Still consume the data whatever happens below: the archive may hold
     // members after this one, and abandoning the stream would lose them too.
-    let mut file = open_for_member(path, name, status);
+    let mut opened = open_for_member(root, name, status);
 
     let mut remaining = size;
     let mut block = [0u8; BLOCK_SIZE];
@@ -2699,36 +3260,32 @@ fn extract_regular_file(
             .unwrap_or(BLOCK_SIZE)
             .min(BLOCK_SIZE);
         remaining = remaining.saturating_sub(take as u64);
-        if let Some(f) = file.as_mut()
+        if let Some((_, f)) = opened.as_mut()
             && let Err(e) = f.write_all(block.get(..take).unwrap_or(&[]))
         {
             diag!("tar: {}: Cannot write: {}", escape(name), strerror(&e));
             *status = EXIT_FATAL;
             // Drop the handle so the rest of the member is only skipped, but
-            // keep reading so the following headers stay aligned.
-            file = None;
+            // keep reading so the following headers stay aligned. Dropping the
+            // location with it is what stops the metadata below being stamped
+            // onto a file whose contents are wrong.
+            opened = None;
         }
     }
     // Buffered data is not the issue here (`File` is unbuffered), but a
     // filesystem that reports a write error at close would otherwise be
     // ignored, which is the same defect as the discarded `write_all` above.
-    let wrote = match file {
-        Some(mut f) => {
-            if let Err(e) = f.flush() {
-                diag!("tar: {}: Cannot write: {}", escape(name), strerror(&e));
-                *status = EXIT_FATAL;
-                false
-            } else {
-                true
-            }
+    //
+    // Only a file this call actually created is stamped. Applying the mode and
+    // time of a member that could not be opened would be writing the archive's
+    // metadata onto whatever was already at that path.
+    if let Some((at, mut f)) = opened {
+        if let Err(e) = f.flush() {
+            diag!("tar: {}: Cannot write: {}", escape(name), strerror(&e));
+            *status = EXIT_FATAL;
+        } else {
+            restore_metadata(&at, name, mode, mtime, status);
         }
-        None => false,
-    };
-    // Only for a file this call actually created. Stamping the mode and time of
-    // a member that could not be opened would be writing the archive's metadata
-    // onto whatever was already at that path.
-    if wrote {
-        restore_metadata(name, path, mode, mtime, status);
     }
     true
 }

@@ -55076,5 +55076,9 @@ CARRIED FORWARD -- a posix/ gap this exposed
   filed as a request yet because nothing depends on it beyond cosmetics.
 
 REMAINING argv-utf8 BACKLOG -- 10 findings across 9 files
-  diff ed fetch grep logger more patch ps sh tar   (`sh` carries two: argv and
+  diff ed fetch logger more patch ps sh tar   (`sh` carries two: argv and
   env).  `python scripts/argv-utf8.py --check` is the authority.
+  grep left the list on 2026-08-29.  This line read "10 across 9" while grep
+  was still on it, which was wrong by one in both numbers -- it counted the
+  files and forgot `sh`'s second finding.  Do not maintain the count by hand;
+  re-run the script.

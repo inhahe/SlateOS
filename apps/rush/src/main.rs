@@ -697,13 +697,14 @@ impl Layout {
     #[must_use]
     pub fn button_rects(&self) -> [Rect; BUTTONS.len()] {
         let mut out = [Rect::EMPTY; BUTTONS.len()];
-        if self.controls.is_empty() {
-            return out;
-        }
         let n = BUTTONS.len() as f32;
         let inner = (self.controls.w - self.pad * (n + 1.0)).max(0.0);
         let bw = inner / n;
         let bh = (self.controls.h - self.pad).max(0.0);
+        // No `controls.is_empty()` bail in front of this: a band that was
+        // dropped has a zero width *and* a zero height, so `inner` clamps to
+        // zero and `bh` clamps to zero, and this test fires anyway. The guard
+        // that used to sit here was a line no mutation could kill.
         if bw <= 0.0 || bh <= 0.0 {
             return out;
         }
@@ -1055,26 +1056,51 @@ impl RushHour {
     /// won is `slide`'s business, so that this stays a geometric predicate a
     /// test can ask in any state.
     ///
-    /// Only the cells *entered* are tested, walking outward from the leading
-    /// edge. Those are strictly beyond the car's own body, so a car can never
-    /// be its own obstacle and there is no "unless it is me" case — the version
-    /// this replaced carried one, and it could never fire.
+    /// Asking for `delta` is asking whether the free run in front of the car is
+    /// at least that long, so this measures the run once with `max_slide` rather
+    /// than walking it a second time. The two used to be separate walks of the
+    /// same rule — a rule kept by copying — and `max_slide`'s copy was the one
+    /// no test could reach.
     #[must_use]
     pub fn can_slide(&self, id: usize, delta: isize) -> bool {
         if delta == 0 {
             return false;
         }
+        self.max_slide(id, delta.signum()) >= delta.unsigned_abs()
+    }
+
+    /// The furthest the car can slide in `direction` (`-1` back, `+1` on),
+    /// in cells. Zero when it is blocked or the direction is neither.
+    ///
+    /// This is the single place the move rule lives. The walk starts at the
+    /// cell just past the leading edge and stops at the first cell it may not
+    /// enter; everything beyond that cell is behind an obstacle whether or not
+    /// it happens to be free.
+    #[must_use]
+    pub fn max_slide(&self, id: usize, direction: isize) -> usize {
+        if direction == 0 {
+            return 0;
+        }
         let Some(v) = self.vehicle(id) else {
-            return false;
+            return 0;
         };
         let occupancy = self.occupancy();
-        let backwards = delta < 0;
+        let backwards = direction < 0;
+        // Only the cells *entered* are tested, walking outward from the leading
+        // edge. Those are strictly beyond the car's own body, so a car can never
+        // be its own obstacle and there is no "unless it is me" case — the
+        // version this replaced carried one, and it could never fire.
         let (lead_row, lead_col) = if backwards {
             (v.row, v.col)
         } else {
             (v.tail_row(), v.tail_col())
         };
-        for step in 1..=delta.unsigned_abs() {
+        let mut reach = 0;
+        // A car `length` long in a yard `GRID_SIZE` wide can travel at most the
+        // difference between them, so that is where the walk ends. The bound
+        // used to be the grid width, which made its last step one no car in any
+        // puzzle could ever take — a step no test could tell the loop had lost.
+        for step in 1..=GRID_SIZE.saturating_sub(v.length) {
             let cell = match v.orientation {
                 Orientation::Horizontal => {
                     let moved = if backwards {
@@ -1093,36 +1119,19 @@ impl RushHour {
                     moved.map(|r| (r, lead_col))
                 }
             };
+            // Off the near edge of the yard. `checked_sub` is the form the
+            // overflow lint requires, and its `None` means exactly what the far
+            // edge's `None` means below — there is no third answer here to
+            // test for.
             let Some((row, col)) = cell else {
-                return false;
+                break;
             };
             match occupancy.get(row).and_then(|r| r.get(col)) {
-                None => return false,
-                Some(Some(_)) => return false,
+                // Off the far edge of the yard.
+                None => break,
+                // Another car. The free cells beyond it are not reachable.
+                Some(Some(_)) => break,
                 Some(None) => {}
-            }
-        }
-        true
-    }
-
-    /// The furthest the car can slide in `direction` (`-1` back, `+1` on),
-    /// in cells. Zero when it is blocked or the direction is neither.
-    #[must_use]
-    pub fn max_slide(&self, id: usize, direction: isize) -> usize {
-        if direction == 0 {
-            return 0;
-        }
-        let mut reach = 0;
-        // A car cannot travel further than the yard is wide, so the walk is
-        // bounded by the grid rather than by trusting `can_slide` to say no.
-        for step in 1..GRID_SIZE {
-            let delta = if direction < 0 {
-                (step as isize).saturating_neg()
-            } else {
-                step as isize
-            };
-            if !self.can_slide(id, delta) {
-                break;
             }
             reach = step;
         }
@@ -2081,6 +2090,10 @@ mod tests {
         (140.0, 100.0),
         (170.0, 900.0),
         (200.0, 160.0),
+        // The only size in the list short enough to lose the *controls* — the
+        // last band to go. Without it every window keeps a controls band, and
+        // the yard's bottom edge is never read from a band that is not there.
+        (240.0, 50.0),
         (320.0, 240.0),
         (400.0, 900.0),
         (480.0, 700.0),
@@ -2514,10 +2527,30 @@ mod tests {
     #[test]
     fn the_board_survives_every_window_a_band_is_dropped_in() {
         // Dropping chrome is only worth doing if it buys the yard room.
+        //
+        // The two witnesses are what stop this being a test of windows that
+        // drop nothing. The yard's top edge is read from the header's *height*
+        // and its bottom edge from the controls' — never from a dropped band's
+        // `y`, which is the origin and would put the bottom edge above the top.
+        // Only a window that has actually lost each band proves that.
+        let mut lost_header = 0;
+        let mut lost_controls = 0;
         for &(w, h) in WINDOWS {
             let l = Layout::new(w, h);
+            lost_header += usize::from(l.header.is_empty());
+            lost_controls += usize::from(l.controls.is_empty());
             assert!(l.cell > 0.0, "at {w}x{h} there is no yard left to play in");
         }
+        assert!(
+            lost_header > 0,
+            "no window in the list drops the header, so the yard's top edge is \
+             never measured against a band that is not there"
+        );
+        assert!(
+            lost_controls > 0,
+            "no window in the list drops the controls, so the yard's bottom \
+             edge is never measured against a band that is not there"
+        );
     }
 
     #[test]
@@ -3110,26 +3143,60 @@ mod tests {
 
     #[test]
     fn every_centred_string_is_limited_to_the_box_it_is_centred_in() {
-        // The width that decides the centre is the width the renderer is told
-        // to stop at, so the two cannot disagree.
-        let mut g = game();
-        probe::key(&mut g, &probe::press(Key::P));
-        for c in g.frame(SIZE.0, SIZE.1).commands() {
-            if let RenderCommand::Text {
-                text,
-                max_width,
-                overflow,
-                ..
-            } = c
-                && max_width.is_some()
-            {
-                assert_eq!(
-                    *overflow,
-                    TextOverflow::Ellipsis,
-                    "{text:?} has a width limit but is cut without a mark"
-                );
+        // `label_centred` measures the string against the box to decide where
+        // it starts, then hands the renderer that same box width as the limit.
+        // The width that decided the centre is the width the string is cut at,
+        // so the two cannot disagree — a centred string with *no* limit is one
+        // centred against a box the renderer was never told about, free to run
+        // out of both ends of it.
+        //
+        // The buttons are the check because their box is known independently:
+        // `button_rects` is the same rect `draw_controls` centres the name in.
+        let g = game();
+        let l = Layout::new(SIZE.0, SIZE.1);
+        let f = g.frame(SIZE.0, SIZE.1);
+        let mut checked = 0;
+        for ((_, name), r) in BUTTONS.into_iter().zip(l.button_rects()) {
+            if r.is_empty() {
+                continue;
             }
+            let found = f.commands().iter().find_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    font_size,
+                    font_weight,
+                    max_width,
+                    overflow,
+                    ..
+                } if text == name => Some((*x, *font_size, *font_weight, *max_width, *overflow)),
+                _ => None,
+            });
+            let Some((x, size, weight, max_width, overflow)) = found else {
+                continue;
+            };
+            checked += 1;
+            assert_eq!(
+                max_width,
+                Some(r.w),
+                "{name:?} is centred in a {}-wide button but limited to {max_width:?}",
+                r.w
+            );
+            assert_eq!(
+                overflow,
+                TextOverflow::Ellipsis,
+                "{name:?} has a width limit but is cut without a mark"
+            );
+            let ink = text::measure(name, size, weight).min(r.w);
+            assert!(
+                (x - (r.x + (r.w - ink) / 2.0)).abs() <= 0.01,
+                "{name:?} starts at {x} rather than centred in its button"
+            );
         }
+        assert!(
+            checked > 0,
+            "no button name was drawn at {SIZE:?}, so nothing here is centred"
+        );
     }
 
     #[test]
@@ -3307,9 +3374,18 @@ mod tests {
             let mut g = game();
             g.load_puzzle(i);
             assert!(!g.is_won(), "puzzle {i} is already solved");
+            // Blocked means the red car cannot reach the way out in one go —
+            // which is a fact about the win rule, not about a number being
+            // smaller than the grid. So drive it as far as it will go and ask.
             let id = player_id(&g);
+            let reach = g.max_slide(id, 1);
+            if let Ok(delta) = isize::try_from(reach)
+                && delta > 0
+            {
+                assert!(g.slide(id, delta));
+            }
             assert!(
-                g.max_slide(id, 1) < GRID_SIZE,
+                !g.is_won(),
                 "puzzle {i} lets the red car drive straight out"
             );
         }
@@ -3320,6 +3396,26 @@ mod tests {
         // An undo entry and the selection both name a car by id, and the old
         // `UndoAction` spent a `Vec` index as though the two were the same
         // thing.
+        //
+        // The *opening* position is checked on its own and first. It is the
+        // only board on which a counter that starts at zero would put id 0 at
+        // index 0: loading a puzzle first spends the low ids on the board that
+        // was thrown away, after which every starting value looks alike.
+        let g = game();
+        let mut seen = HashSet::new();
+        for (index, v) in g.vehicles().iter().enumerate() {
+            assert!(
+                seen.insert(v.id),
+                "the opening position hands out id {} twice",
+                v.id
+            );
+            assert_ne!(
+                v.id, index,
+                "the opening position's id {} is also a position in the vector",
+                v.id
+            );
+        }
+
         for i in 0..PUZZLE_COUNT {
             let mut g = game();
             g.load_puzzle(i);
@@ -3447,6 +3543,7 @@ mod tests {
 
     #[test]
     fn a_car_cannot_slide_off_the_yard() {
+        // Backwards through the near wall.
         let mut g = game();
         g.position(0, &[]);
         let id = player_id(&g);
@@ -3456,6 +3553,19 @@ mod tests {
         );
         assert!(g.can_slide(id, 4));
         assert!(!g.can_slide(id, 5), "the red car drove out past the fence");
+
+        // Forwards through the far wall. From column 0 the walk runs out of
+        // *steps* before it runs out of yard, so the far wall is never reached
+        // and a wall that had stopped stopping cars would not show. From
+        // column 2 the walk reaches column 6, which is not there.
+        let mut g = game();
+        g.position(2, &[]);
+        let id = player_id(&g);
+        assert!(g.can_slide(id, 2), "the red car could not reach column 4");
+        assert!(
+            !g.can_slide(id, 3),
+            "the red car's tail drove out through the far fence"
+        );
     }
 
     #[test]
@@ -3514,6 +3624,19 @@ mod tests {
             "the red car should reach columns 2-3"
         );
         assert_eq!(g.max_slide(id, -1), 0);
+
+        // And with free cells *beyond* the blocker. This is the fixture that
+        // can tell "stop at the first obstacle" from "skip it and carry on":
+        // with the blocker at columns 2-3 the free run at 4-5 is behind it, so
+        // the answer is nought rather than four.
+        let mut g = game();
+        g.position(0, &[(EXIT_ROW, 2, 2, H)]);
+        let id = player_id(&g);
+        assert_eq!(
+            g.max_slide(id, 1),
+            0,
+            "columns 4 and 5 are free, but they are on the far side of a car"
+        );
     }
 
     #[test]
@@ -3523,6 +3646,19 @@ mod tests {
         let id = player_id(&g);
         assert_eq!(g.max_slide(id, 1), 3);
         assert_eq!(g.max_slide(id, -1), 1);
+
+        // From the near end of an empty row the car travels the whole width it
+        // can, which is the *last* step the walk's bound allows. A bound one
+        // short would stop the red car one cell from the way out for ever, and
+        // no shorter journey would show it.
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        assert_eq!(
+            g.max_slide(id, 1),
+            GRID_SIZE - PLAYER_LENGTH,
+            "the red car cannot reach the wall of an empty row"
+        );
     }
 
     #[test]
@@ -3723,14 +3859,19 @@ mod tests {
         // Aiming at the far wall is how a player says "as far as you can go".
         // Demanding the exact cell be reachable — which is what the exact-delta
         // rule did — answers that by doing nothing at all.
+        //
+        // The blocker sits at columns 3-4 so that column 5 is free *beyond*
+        // it: the cell aimed at has to be one the car genuinely cannot reach,
+        // or the clamp has nothing to clamp and the test would pass against a
+        // program that never clamps at all.
         let mut g = game();
-        g.position(0, &[(EXIT_ROW, 4, 2, H)]);
+        g.position(0, &[(EXIT_ROW, 3, 2, H)]);
         let id = player_id(&g);
         probe::click(&mut g, Target::Vehicle(id));
-        probe::click(&mut g, Target::Cell(EXIT_ROW, 3));
+        probe::click(&mut g, Target::Cell(EXIT_ROW, 5));
         assert_eq!(
             g.player().unwrap().col,
-            2,
+            1,
             "the car stopped short of the blocker it could have reached"
         );
         assert_eq!(g.moves(), 1);

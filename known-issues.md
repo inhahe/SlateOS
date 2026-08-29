@@ -93644,6 +93644,84 @@ Python module, a README generator, or a scratch script into `apps/`, `crates/`,
 -- and the artefact that does it may be one the tool creates on its own, and one
 your VCS is configured not to show you.
 
+### Lesson 67: a test over a branch must prove the branch was entered (lane C, 2026-08-29)
+
+**In short:** rush's `every_string_drawn_is_inside_the_window` measured every
+string the frame drew and asserted it fitted the window. It passed. It could not
+have failed, because at none of the ten window sizes it ran at was any string
+wider than the space it was given — so the two mechanisms that keep a long string
+inside a narrow window, the `max_width` limit and the footer's clip rect, were
+never once the reason the assertion held. The test named them and exercised
+neither. Two more in the same suite were vacuous the same way: the branch that
+drops a car's letter when the glyph is taller than the car was never reached
+(cells were never that small), and no string was ever elided.
+
+**Why it is not the same as an untested line.** An untested line is *visibly*
+untested — coverage says so, and mutating it produces a surviving mutant nobody
+can explain. This is worse, because the test *names* the thing and appears in the
+mutation table opposite it. The table entry "the footer's lines are not clipped
+to the footer → `every_string_drawn_is_inside_the_window`" is a claim that a
+human wrote and a sweep would have to disprove. Here the sweep would have
+disproved it — the mutant survives — but only if the mutation was written in the
+first place, which is exactly the point at which the hole was found. Had the
+mutation table skipped that line as obviously-covered, nothing would ever have
+said otherwise.
+
+**The tell.** The three tests share a shape: an assertion of the form "for every
+X, P(X)", where the interesting case is the one where P is *nearly* false. A
+universally-quantified assertion is satisfied most easily by a fixture set in
+which nothing is close to the boundary — and a fixture set is chosen for
+convenience, so it will drift toward exactly that. The list of window sizes had
+been picked to be "some small, some big"; nothing in it was *narrow*, because
+narrow-and-tall is not a shape anyone reaches for.
+
+**The fix, and it generalises.** Each test now carries a witness that the branch
+was entered, checked after the loop:
+
+```rust
+assert!(
+    cut_somewhere,
+    "no window in the list is narrow enough to cut a single string, so the \
+     clip and the width limits are branches this test never enters"
+);
+```
+
+and a window (170x900) was added in which the footer's second line and the header
+title are each wider than the whole window. The counting form — `dropped > 0` —
+does the same job for the glyph test. **Any test whose subject is a conditional
+should assert, in the test, that the condition was met at least once.** It costs
+one line and it converts a test that cannot fail into one that fails the day
+someone tidies the fixture list.
+
+**And it found a real fault.** The window added to make those three tests real
+immediately exposed one: at 170x900 the header drew its title at the left with no
+width limit while drawing its counters against a flat 120-pixel reservation, so
+the two were painted through each other. The fault had been there since the
+rewrite, in code whose whole stated purpose was to stop text being positioned by
+guessing. The vacuous test was not merely failing to test the mechanism — it was
+concealing a live bug in it, which is the ordinary consequence and worth
+expecting rather than being surprised by.
+
+**Seen four more times the same day, in the same suite, by the sweep.** Once the
+mutation table existed, four more of rush's tests turned out to name something
+they never reached — and the shape was different each time, which is why "add a
+witness" has to be a habit rather than a rule with one fixed form:
+
+| Test | What it never reached |
+|---|---|
+| `ids_are_unique_and_never_a_position_in_the_vector` | Called `game()` and *then* `load_puzzle(i)`. `game()` has already spent the low ids, so every board it looked at had ids well past the index range whatever the counter started at. The one board where a zero-based counter puts id 0 at index 0 is the opening position — the board it skipped. Klotski's fault 14, repeated exactly, in the very next app wired — which is the strongest argument here for the witness being mechanical rather than remembered. |
+| `clicking_past_a_blocker_slides_as_far_as_the_yard_allows` | Aimed at a cell the car could actually reach, so the clamp it is named after had nothing to clamp. It passed identically against a program that never clamps. |
+| `every_centred_string_is_limited_to_the_box_it_is_centred_in` | Guarded its whole body on `max_width.is_some()`, so a string that *lost* its limit was skipped rather than caught. A test whose subject is "X is always there" must not use X's presence as its filter. |
+| `the_board_survives_every_window_a_band_is_dropped_in` | Ran at ten window sizes, none of which dropped the band whose absence the line under test exists to survive. |
+
+The common cause is not carelessness about the assertion — every one of these
+asserts the right thing. It is that **the fixture and the assertion are chosen at
+different moments**: the assertion states the rule while it is fresh, the fixture
+is whatever was already lying around in the test module. That is also the
+argument for the witness being an `assert!` inside the test rather than a note in
+a comment: it is re-checked every run, at the same moment as the assertion it
+guards, so the two cannot drift apart later.
+
 ## `A-DESIGN-DECISIONS-NINE-DUPLICATE-SECTION-NUMBERS` (lane A, 2026-08-29) — ⚠️ RECORDED, NOT FIXED (deliberately); the *recurrence* is fixed
 
 **In short:** `design-decisions.md` numbers its sections, and other files cite

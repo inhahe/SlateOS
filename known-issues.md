@@ -81827,8 +81827,25 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **335 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **332 of 800 remain**
 
+> **Burn-down log.** 2026-08-29 (thirty-ninth batch): the batch that was not
+> about this defect at all, and moved its count anyway. Batch 39 went after a
+> *third* shape of §600 — an operand read as a number and dropped in **silence**
+> when the word would not read, with no message, no default and no non-zero
+> exit — tracked separately as
+> `A-KSHELL-AN-OPERAND-READ-AS-A-NUMBER-AND-DROPPED-IN-SILENCE`. 22 sites
+> converted there. Three of them turned out to *also* carry a guessed value in
+> the same few lines (`mlink battery`'s percentage, `qs set`'s two operands), so
+> this heading fell 335 → 332 across 186 → 185 functions as a side-effect.
+>
+> The general point is worth more than the three sites: **the shapes co-locate.**
+> An arm careless enough to drop one word silently is the same arm that guesses
+> at the next one, so reading an arm to fix either shape tends to surface the
+> other. That argues for finishing this backlog arm-by-arm rather than
+> pattern-by-pattern — the gate can only sort by pattern, but the defects are
+> distributed by author attention.
+>
 > **Burn-down log.** 2026-08-29 (thirty-eighth batch): `cmd_iomem` (5),
 > `cmd_ioport` (6), `cmd_vmmap` (6), `cmd_kprobes` (4), `cmd_pciids` (4),
 > `cmd_usbpolicy` (3), `cmd_sysrq` (1) and `cmd_gpu` (1) cleared — 30 sites

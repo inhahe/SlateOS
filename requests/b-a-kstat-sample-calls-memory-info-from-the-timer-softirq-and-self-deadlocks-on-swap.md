@@ -130,6 +130,15 @@ after userspace has started). `boot-history` reports 508 boots recorded, 387
 clean — so this class of intermittent failure is not new, though I can't say
 how many of the 121 are this specific one.
 
+**Measured frequency, such as it is: 1 in 2.** The immediately following boot
+test, same debug/TCG configuration on `ca0a25d96` (the same tree plus your two
+kshell commits), **passed** — 897 s, clean, no `SELF-DEADLOCK` line other than
+lockdep's own intentional self-test. So the window is narrow enough to miss on
+a retry and wide enough to hit on a first try, which is the worst shape for a
+race: it will not show up reliably in whoever's boot test, and it will
+eventually show up in everyone's. Please don't treat the passing re-run as
+evidence against it — I only re-ran to establish that it was intermittent.
+
 If it helps, the full serial log from my failing run is reproducible with
 `./scripts/boot-test.sh` in the lane-B worktree; I have not kept the artefact
 because the build directory gets reused.

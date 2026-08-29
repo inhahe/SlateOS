@@ -92940,6 +92940,12 @@ during the `sysdiag` self-tests. `boot-history` reports 508 boots, 387 clean --
 this class of intermittent failure is not new, though how many of the 121 are
 this specific bug is unknown.
 
+**Frequency: 1 in 2 so far.** The next boot test, same debug/TCG configuration
+on `ca0a25d96` (same tree plus lane A's two kshell commits), passed clean in
+897 s. The window is narrow enough to miss on a retry and wide enough to hit on
+a first try -- the worst shape for a race. The passing re-run is not evidence
+against the bug; it was run only to establish intermittency.
+
 **Not a lane-B regression:** the lane-B diff for that merge touches no
 `kernel/`, `drivers/`, `fs/` or `net/` file (`design-decisions.md`,
 `requests/`, `scripts/argv-utf8-baseline.txt`, `scripts/df-diff.sh`,

@@ -120019,7 +120019,8 @@ fn tr_escape(src: &[char], at: usize) -> Result<(char, usize), TrParseError> {
             }
             // Above `\177` an octal escape means a *byte* in every tr, and this
             // one's sets are code points — a deliberate choice recorded in
-            // `design-decisions.md` §276, and the only one under which `à-â` is
+            // `design-decisions.md` §276 (*`tr`'s character classes*, not the
+            // scheduler §276), and the only one under which `à-â` is
             // a range of three characters rather than of six bytes. There is no
             // reading of `\303` that is right under both, so it is refused
             // instead of silently answered as U+00C3.
@@ -120894,11 +120895,12 @@ fn cmd_xargs(_args: &str) {
 /// one" rule in `CLAUDE.md`.
 ///
 /// **Why `max` is the right operator and not merely a convenient one.** Under
-/// the convention `design-decisions.md` §275 established, a larger status is a
-/// worse one: 2 ("I could not check") outranks 1 ("the answer is no") in
-/// `grep`, `cmp` and `diff`. Taking the maximum therefore propagates a failure
-/// to look over a negative finding, which is the same precedence §275 argues
-/// for within a single command.
+/// the convention `design-decisions.md` §275 established — *the three exit
+/// statuses for `grep`/`cmp`/`diff`*, not the thread-teardown §275 — a larger
+/// status is a worse one: 2 ("I could not check") outranks 1 ("the answer is
+/// no") in `grep`, `cmp` and `diff`. Taking the maximum therefore propagates a
+/// failure to look over a negative finding, which is the same precedence §275
+/// argues for within a single command.
 ///
 /// **Why not GNU's 123.** GNU `xargs` maps every child failure onto 123 so that
 /// it can reserve 124–127 for "child exited 255", "child killed by a signal",

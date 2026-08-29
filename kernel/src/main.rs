@@ -7426,8 +7426,9 @@ extern "C" fn kernel_main() -> ! {
         // Process management: spawn and manage children.
         (cap::ResourceType::Process, 0, cap::Rights::ALL),
         // The three objects §312's capability projection derives the
-        // remaining privileged POSIX operations from (§269 for the object
-        // design, §350 for the projection).  All are
+        // remaining privileged POSIX operations from (§269 — *the capability
+        // types*, not the hrtimer §269 — for the object design, §350 for the
+        // projection).  All are
         // class-wide (`resource_id == 0`): a token nobody holds is
         // indistinguishable from leaving the operation denied, which is the
         // outcome the operator rejected in Q48.

@@ -294,18 +294,44 @@ def unescape(lit: str) -> bytes:
     return bytes(out)
 
 
-def _suffix_alt(seg: bytes) -> bytes:
-    """Regex matching any suffix of `seg` -- longest first, empty last."""
-    return b"(?:" + b"|".join(re.escape(seg[k:]) for k in range(len(seg) + 1)) + b")"
+def _ordered_embed(window: bytes, parts: list[bytes]) -> bool:
+    """Do `parts` occur inside `window`, in order and without overlapping?
+
+    Leftmost-greedy, which is optimal here: taking the earliest occurrence of
+    each part leaves the most room for the ones after it, so if any placement
+    exists this finds one.
+    """
+    pos = 0
+    for s in parts:
+        if not s:
+            continue
+        k = window.find(s, pos)
+        if k < 0:
+            return False
+        pos = k + len(s)
+    return True
 
 
-def _prefix_alt(seg: bytes) -> bytes:
-    """Regex matching any prefix of `seg` -- longest first, empty last."""
-    return (
-        b"(?:"
-        + b"|".join(re.escape(seg[: len(seg) - k]) for k in range(len(seg) + 1))
-        + b")"
-    )
+def _shortest_run_head(seg: bytes, frag: bytes) -> int | None:
+    """Shortest `a >= MIN_FIXED_RUN` with `frag[:a]` a suffix of `seg`.
+
+    Shortest, because `a` is text consumed from the *start* of the fragment: a
+    longer head leaves a smaller window for whatever must follow, and any head
+    long enough to satisfy the run rule is as good as any other.
+    """
+    for a in range(MIN_FIXED_RUN, min(len(seg), len(frag)) + 1):
+        if seg.endswith(frag[:a]):
+            return a
+    return None
+
+
+def _shortest_run_tail(seg: bytes, frag: bytes) -> int | None:
+    """Shortest `b >= MIN_FIXED_RUN` with `frag[-b:]` a prefix of `seg`."""
+    n = len(frag)
+    for b in range(MIN_FIXED_RUN, min(len(seg), n) + 1):
+        if seg.startswith(frag[n - b :]):
+            return b
+    return None
 
 
 PLACEHOLDER = re.compile(rb"\{[^{}]*\}")
@@ -355,20 +381,50 @@ def producible(frag: bytes, lit: bytes) -> bool:
     for seg in segs:
         if frag and frag in seg:
             return True
+    n = len(frag)
+    if n == 0:
+        return False
+
+    # The alignment is enumerated directly rather than expressed as a regex.
+    # The regex form was both ruinously slow and *wrong*. Slow, because a
+    # "suffix of `seg`" alternation has one branch per byte of the segment, and
+    # `net::dashboard` formats its 16 KiB HTML page from one literal with 48
+    # segments -- 1128 segment pairs, each compiling an alternation of thousands
+    # of branches, which took minutes for a single fragment. Wrong, because
+    # `.*?` between two alternations commits to one split (longest head,
+    # shortest gap) and never reconsiders it, so an alignment that exists under
+    # a different split was silently missed.
+    #
+    # Only three placements can ever be worth trying per segment pair, because
+    # the run has to come from somewhere:
+    #
+    #   * a spanned segment carries it -- then head and tail are free, and 0/0
+    #     leaves the largest window, so it is the placement most likely to fit;
+    #   * the head carries it -- then take the SHORTEST qualifying head and no
+    #     tail, again for the largest remaining window;
+    #   * the tail carries it -- symmetrically.
+    #
+    # Each is optimal within its case (a bigger window is a superset of a
+    # smaller one), so three tests decide the pair exactly.
+    heads = [_shortest_run_head(seg, frag) for seg in segs]
+    tails = [_shortest_run_tail(seg, frag) for seg in segs]
+
     for i in range(len(segs)):
         for j in range(i + 1, len(segs)):
             spanned = segs[i + 1 : j]
-            middle = b"".join(re.escape(s) + b".*?" for s in spanned)
-            pat = (
-                b"(?P<a>" + _suffix_alt(segs[i]) + b").*?"
-                + middle
-                + b"(?P<b>" + _prefix_alt(segs[j]) + b")"
-            )
-            m = re.fullmatch(pat, frag, re.S)
-            if m is None:
+            # Segments only accumulate as `j` grows, so one that cannot fit in
+            # the fragment rules out every longer span too.
+            if spanned and len(spanned[-1]) > n:
+                break
+            if any(len(s) >= MIN_FIXED_RUN for s in spanned):
+                if _ordered_embed(frag, spanned):
+                    return True
                 continue
-            runs = [len(m.group("a")), len(m.group("b"))] + [len(s) for s in spanned]
-            if max(runs) >= MIN_FIXED_RUN:
+            a = heads[i]
+            if a is not None and _ordered_embed(frag[a:], spanned):
+                return True
+            b = tails[j]
+            if b is not None and _ordered_embed(frag[: n - b], spanned):
                 return True
     return False
 

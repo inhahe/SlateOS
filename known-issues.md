@@ -81821,8 +81821,65 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **432 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **400 of 800 remain**
 
+> **Burn-down log.** 2026-08-29 (thirty-fourth batch): `cmd_pidfd` (5),
+> `cmd_userfault` (5), `cmd_oomkiller` (5), `cmd_prociso` (6), `cmd_coredump`
+> (5) and `cmd_devfreq` (5) cleared — 431 → 400 across 207 → 201 functions.
+> Pinned by self-test rung 98. (The 432 → 431 step is `cmd_energysaver`, cleared
+> in passing by the toggle sweep of 2026-08-29 and logged under
+> `A-KSHELL-A-TOGGLE-WORD-IT-DOES-NOT-RECOGNISE-MEANS-OFF` rather than here;
+> the heading above was left reading 432 at the time, and is corrected now.)
+>
+> **In short:** all thirty-one sites were the same statement —
+> `parts.get(N).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0)` — and in
+> twenty of them the operand was a **pid**. `unwrap_or(0)` there is not a
+> default. It is a placeholder, chosen because it looked inert, and it is not:
+> pid 0 is the idle task.
+>
+> * **The success line launders the substitution.** Every one of these arms
+>   prints the number it used. `pidfd signal l23` printed `pidfd: signal to pid
+>   0` — a sentence that is true about what happened and reads as confirmation
+>   of what was asked. There is no wording in which a substituted value and a
+>   supplied one look different, which is why the fix has to be a refusal and
+>   cannot be a better message.
+> * **`oomkiller kill` is the sharp end.** A pid the shell could not read
+>   became a request to the out-of-memory killer to kill pid 0. Nothing in the
+>   transcript distinguishes that from having typed `0`.
+> * **`prociso` is the instructive one, and it is why "there is already a guard"
+>   is not a defence.** Its six sites *did* refuse an unreadable word. But only
+>   as a coincidence: the word became 0, and 0 happened to be an invalid id, so
+>   a downstream `if id == 0` caught it — and then printed `Usage: prociso
+>   attach <pid> <ns_id>`, blaming the synopsis rather than naming which of the
+>   two operands was unreadable. A refusal that rests on a fact about the value
+>   space stops refusing the day that fact changes, silently and with no test
+>   failing. This is the second shape (after batch 29's forge-then-check pairs)
+>   where the *absence* of a visible bug today is load-bearing on an accident.
+> * **Three catch-all `match` arms went with them, though the gate does not
+>   count those.** `userfault fault <pid> mnor` recorded a *missing*-page fault;
+>   `userfault resolve <pid> <ns> cpy` recorded a *zero-page* resolution when
+>   `copy` was meant; `devfreq governor <id> powersace` set **ondemand**. Each
+>   then named the substitute in its success line. These are §600's second
+>   prohibited shape in `match` clothing: the `_ =>` arm is an answer, and a
+>   catch-all that returns a value cannot say "I did not understand you".
+> * **`oomkiller exempt` was the toggle defect hiding in this batch.**
+>   `parts.get(2).copied().unwrap_or("true") != "false"` meant every word that
+>   was not exactly `false` **shielded the process from the killer**. That is
+>   the failure direction that wedges a machine rather than the one that loses a
+>   process, and it is the same asymmetry rung 97 documented for `vpn
+>   killswitch`.
+> * **One destructive arm.** `coredump cleanup 5O` deleted every dump but the
+>   newest **ten** and reported `keeping 10`, which reads as a statement of what
+>   was done rather than as a correction of what was asked.
+>
+> Helper choice was made per site by meaning, not mechanically: `required_num`
+> where the operand names the thing being acted on (a pid, an id), and
+> `optional_num` only where the help documents a resting value — `coredump
+> cleanup`'s keep count, `devfreq register`'s frequency bounds, `coredump
+> record`'s synthetic-dump fields. Getting that split wrong would turn a
+> required operand into an optional one, which is a behaviour change wearing a
+> bug fix.
+>
 > **Burn-down log.** 2026-08-26 (thirty-third batch): `cmd_prochistory` (6)
 > cleared — 438 → 432 across 209 → 208 functions. Not pinned by a rung.
 >
@@ -84069,7 +84126,7 @@ the `} else {` bug, from a single site — `cmd_brightness` had an obvious
 
 ---
 
-## `A-KSHELL-A-TOGGLE-WORD-IT-DOES-NOT-RECOGNISE-MEANS-OFF` (lane A, 2026-08-25) — **open**, 21 sites in 16 commands
+## `A-KSHELL-A-TOGGLE-WORD-IT-DOES-NOT-RECOGNISE-MEANS-OFF` (lane A, 2026-08-25) — **fixed 2026-08-29**, 21 + 37 sites in 35 commands
 
 **In short:** 21 shell settings are switched with a word — `on`, `off`, `yes`,
 `no`. Each tests the word against a short list of "true" spellings and treats
@@ -84135,9 +84192,89 @@ folded into a numeric-operand commit.
 
 **Not a regression.** True since each site was written.
 
+**Fixed in two halves, because the defect had two spellings.**
+
+The first half (`df9252ffc`, 2026-08-26) cleared the 21 `matches!` sites
+described above. `toggle_word` became the one place that decides which words
+mean what; `required_toggle` reads an operand with no query form, `toggle_arg`
+one that has one. Pinned by `kshell::self_test` rung 79.
+
+The second half (2026-08-29) cleared **37 more sites across 19 further
+commands** that this entry missed entirely, because they were written as `==`
+chains rather than `matches!` and so did not match the grep that produced the
+count in the title:
+
+```rust
+let on = parts[2] == "on" || parts[2] == "true";              // 16 sites
+let val = parts.get(2).copied().unwrap_or("");  … val == "on" //  6 sites
+let on = parts.get(1).copied().unwrap_or("on") == "on";       //  9 sites
+if let Some(v) = parts.get(1) { let on = *v == "on" || …; }   //  6 sites
+```
+
+The 19 commands: `schedtune`, `mmtune`, `vpn`, `ia11y`, `usbpolicy`,
+`touchscreen`, `policyengine`, `colorblind`, `gestures`, `energysaver`,
+`vpnprofile`, `taskbar`, `installer`, `screenlock`, `oobe`, `wallpaper`,
+`location`, `spatialaudio`, `appdefaults`.
+
+An `||` chain of `==` has the same two outputs as `matches!` and the same
+missing third, so the analysis above applies unchanged. Two of the new sites
+fail in the unsafe direction, as `datausage` and `kernelbuild` did in the first
+half: `vpn killswitch <id> 1` **disabled** the kill switch it was asked to
+enable, and `policyengine enforce 1` turned enforcement off — both printing the
+setting as applied and exiting 0. `usbpolicy block 1` is the same shape.
+
+Three things came out of the second half that the first did not have to
+consider:
+
+- **`optional_toggle` had to be added.** Nine of the new sites read
+  `unwrap_or("<default>")`, i.e. a documented value for an *absent* operand.
+  `toggle_arg` is wrong for those (absence there means *report*), so the
+  boolean twin of `optional_num` now draws the same absent-vs-unreadable
+  distinction: `installer user 1 alice` still means "password login, no
+  autologin"; `installer user 1 alice ys` is refused.
+- **`taskbar config` echoed the input rather than the flag.** Its four toggles
+  printed `val` — the word the user typed — so `taskbar config names 1` printed
+  `Show names: 1` while storing *no*, and the bare `taskbar config names`
+  printed `Show names: ` with nothing after the colon, having turned names off.
+  An output that quotes its input cannot disagree with it, so reading the
+  transcript could never have revealed the guess. They now read the flag back.
+- **Two sites were queries that mutated.** `spatialaudio headtrack` and
+  `doppler` read `unwrap_or("on")`, so the shortest way to *ask* what the
+  setting was **enabled** it. Both now take the `toggle_arg` query path the
+  rest of the shell gives a `[on|off]` operand. `location history <word>`
+  entered its set arm only for the two exact words `on`/`off` and fell through
+  to the history *listing* for everything else, so a request to start recording
+  was answered with the last ten fixes.
+
+Also folded in, because they were the same statement: `ia11y mouse on 4O`
+dropped the speed with `if let Ok(speed) = …` under a success line, and
+`energysaver autoswitch on 2O` guessed a 20% threshold via
+`unwrap_or(20)`. Both now refuse.
+
+Pinned by `kshell::self_test` rung 97, whose controls run against
+`taskbar config names` for the §604 reason — `taskbar::set_show_names` is a
+lock-and-assign with no `Result` and no subsystem init behind it, so a success
+assertion there cannot fail because a fresh boot has not initialised something.
+
+**The lesson for the next sweep of this shape.** The title of this entry said
+"21 sites" for four days and was wrong by 35, because the census was a grep for
+one *syntax* rather than for the *defect*. A boolean read that cannot report
+failure looks like `matches!`, like `a == x || a == y`, like
+`unwrap_or(d) == x`, and like `if let Some(v) = … { v == x }`; counting the
+first spelling and stopping produced a number that read as complete. Count the
+call sites of the thing being set, not the instances of the idiom you noticed
+first.
+
 ---
 
-## `A-KSHELL-FIND-SIZE-DEFAULT-UNIT-IS-BYTES-NOT-BLOCKS` (lane A, 2026-08-25) — **open**
+## `A-KSHELL-FIND-SIZE-DEFAULT-UNIT-IS-BYTES-NOT-BLOCKS` (lane A, 2026-08-25) — **open**, and **queued for the operator as `open-questions.md` A-Q1** (2026-08-29)
+
+> **Not a bug for whoever reads this next to go and fix.** It is a user-visible
+> compatibility policy with three defensible answers, so it was promoted to the
+> operator's decision queue rather than settled inside a lane. The options and
+> the recommendation now live in `open-questions.md` → **A-Q1**. What follows is
+> the background, kept here because it is what the *implementation* will need
+> once the answer arrives.
 
 **In short:** `find . -size 100` means "100 bytes" here and "100 512-byte
 blocks" (i.e. up to 51 200 bytes) in GNU `find`. A command line copied from
@@ -89072,7 +89209,7 @@ which the same rework has to fix; this entry is the caller waiting on both.
 read and names the first failure if a block was malformed, and both refuse
 clearly (`"Cannot export: $HOME is not set"`) rather than failing silently.
 
-## `A-KCOUNTERS-REGISTRY-HAS-NO-REGISTRANTS-AND-CMD-COUNTERS-HIDES-THAT` (lane A, 2026-08-26)
+## `A-KCOUNTERS-REGISTRY-HAS-NO-REGISTRANTS-AND-CMD-COUNTERS-HIDES-THAT` (lane A, 2026-08-26) -- **fixed 2026-08-29**
 
 **In short:** `kernel/src/kcounters.rs` has two halves — a registry that
 subsystems are meant to add counters to, and a hardcoded aggregator that reads
@@ -89153,6 +89290,20 @@ files (the same search that produced the `netdev` and `irqstat` entries above);
 
 **Not a regression.** True since the module was written — it has never had a
 registrant.
+
+**Fixed 2026-08-29** by taking the first option: the registry half is gone.
+Deleted `CounterDesc`, `Registry`, `MAX_COUNTERS`, `REGISTRY`,
+`REGISTRATION_DONE`, `register()`, `seal()`, `snapshot()`, `count()` and the
+three macros -- with them a `static mut` and an `unsafe fn` whose boot-ordering
+`# Safety` contract no call had ever exercised. `cmd_counters` now reads
+`builtin_snapshot()` alone, its doc comment describes what it does rather than
+leading with the dead half, and its empty-case message says "No counters
+available" instead of "No counters registered", which named a path that no
+longer exists. The module `//!` doc, whose entire usage example was of the
+deleted API, now records why there is deliberately no registration path and what
+to do instead when a new counter is needed (add the atomic where the event
+happens, expose it via that subsystem's stats accessor, add a row to
+`builtin_snapshot`) -- so the reasoning survives the code it is about.
 
 ---
 
@@ -92892,3 +93043,61 @@ and a sweep is the one thing that cannot be run while its own harness is being
 edited. It should be done between apps, not during one, and re-verified by
 running one previously-green app's sweep to completion against the shared
 harness before the other twelve are switched over.
+
+
+## `A-MODULE-SELF-TEST-ASSERTIONS-WERE-GUARDED-BY-NOTHING` (lane A, 2026-08-29) -- **fixed by a new gate**
+
+**What it is.** ~300 assertions of the shape
+`assert!(formatted.contains("some text"))`, inside module `self_test`
+functions all over the kernel, had no static check of any kind behind them.
+The sibling gate `scripts/check-selftest-wording.py` covers only kshell rungs
+-- it resolves a *command word* to the text that command prints -- and a
+module self-test that formats a string and asserts on it has no command word
+to resolve, so the sibling never looked at one.
+
+**Why "no check" means "no check at all."** `kernel/Cargo.toml` carries
+`test = false`: a bare-metal binary supplies its own `panic_impl`, so the
+kernel's assertions cannot run on the host. The only thing that executes one is
+an eleven-minute QEMU boot. `cargo build` and `cargo clippy` are green on a tree
+whose self-test panics on the first assertion it reaches.
+
+**The variant that is worse than a panic.** `net::dashboard` asserted
+`metrics.contains("os_net_rx_bytes_total ")` -- with a trailing space, meaning
+"the sample line, not just the header." The `# HELP` and `# TYPE` lines satisfy
+that on their own. When the metric gained a `source` label its sample line
+became `os_net_rx_bytes_total{source="..."} N`, and the assertion went on
+passing against a build emitting no samples at all. A panicking assertion at
+least announces itself on the next boot; this one guarded nothing and said so
+in the same words as a working test.
+
+**The gate.** `scripts/check-selftest-format-wording.py`, run from
+`scripts/boot-test.sh` beside its sibling. It enforces: *every fragment a
+`self_test` requires a string to contain must be text some string literal in the
+kernel can actually produce.* Three things make it usable rather than noisy:
+
+| Rule | Why |
+|---|---|
+| The pool excludes *consuming* positions (`contains`, `starts_with`, `assert_output_contains`, ...) rather than enumerating producing ones. | A taxonomy of producers is a list that will be incomplete, and every omission is a false accusation. Over-approximating the pool errs toward missing a defect; under-approximating it errs toward the gate being switched off. |
+| Acceptance is crate-wide verbatim first, then same-file alignment against a format string. | A module legitimately asserts on another module's wording (`net::netstat` asserts `"ESTABLISHED"`, which `TcpState` spells). Widening the *alignment* stage to the crate would make almost anything producible. |
+| Only *presence* assertions are targets. | `if cpu_text.contains("processors:") { fail }` and `assert!(!x.contains(L))` demand the opposite; for them "nothing produces this" is the state being enforced, and reporting them would accuse a working regression guard. |
+
+**22 exemptions, each checked by hand** (`ALLOWED` in the script, with reasons).
+They are all text the code *computes* -- a byte count scaled to `3.0 MiB`,
+`Content-Length: 9`, base64 `YWRtaW46c2VjcmV0`, a dot-stuffed SMTP line -- or
+pasted together without a format string, as `http` does with
+`extend_from_slice(b"Content-Type: ")` and `journal` with
+`push_str(name); push_str("_hex\":\"")`. Modelling concatenation was considered
+and rejected: `RX packets:` is `RX packets` plus a colon, and a colon is a
+literal somewhere in every large program, so admitting it would accept the very
+bug the gate was written for.
+
+**A fix in the shared helper.** `producible()` in `check-selftest-wording.py`
+expressed its alignment as a regex whose "suffix of segment" alternation has one
+branch per byte. `net::dashboard` formats its 16 KiB HTML page from one literal
+with 48 segments: 1128 segment pairs, each compiling an alternation of thousands
+of branches, which took **minutes for a single fragment**. It was also *wrong* --
+`.*?` between two alternations commits to one split and never reconsiders, so an
+alignment existing under a different split was silently missed. Replaced with
+direct enumeration of the three placements that can ever carry the run. The
+whole gate now runs in 19 s; the sibling's verdict on kshell is unchanged
+(502 assertions, 7 allowed).

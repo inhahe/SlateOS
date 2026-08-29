@@ -19722,6 +19722,299 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = Vfs::rmdir(dir);
     }
 
+    serial_println!(
+        "  kshell::self_test 97: the same guessed toggle in its other spelling, and four \
+         settings that reported the word instead of the flag"
+    );
+    // Rung 79 cleared the 21 sites written `matches!(word, "on" | "true" | …)`.
+    // The identical defect survived in a second spelling that grep for
+    // `matches!` never saw: `let on = parts[1] == "on" || parts[1] == "true";`,
+    // and its `if let Some(v) = parts.get(1)` and `unwrap_or("on") == "on"`
+    // relatives -- 35 more sites across 20 commands. An `||` chain of `==` has
+    // the same two outputs as `matches!` and the same missing third, so every
+    // word it could not read still became `false`.
+    //
+    // Two of them fail toward less protection, which is what makes this a
+    // continuation rather than a tidy-up: `vpn killswitch <id> 1` disabled the
+    // kill switch it was asked to enable, and `policyengine enforce 1` turned
+    // enforcement off, each printing the setting as applied and exiting 0.
+    //
+    // `taskbar config` held a compounding defect the others did not. It echoed
+    // `val` -- the word the user typed -- rather than the flag it stored, so
+    // `taskbar config names 1` printed `Show names: 1` while setting it to
+    // *no*, and the operand-less `taskbar config names` printed `Show names: `
+    // with nothing after the colon, having just turned names off. An output
+    // that quotes the input cannot disagree with it, so no amount of reading
+    // the transcript would have revealed the guess.
+    {
+        // The controls run against `taskbar config names` for the reason §604
+        // records: `taskbar::set_show_names` is a lock-and-assign with no
+        // `Result` and no subsystem init behind it, so a success assertion here
+        // cannot fail because a fresh boot has not initialised something.
+        let restore = crate::fs::taskbar::config().show_names;
+
+        let out = capture_command("taskbar config names on");
+        assert_output_contains("a toggle still sets", &out, b"Show names: yes");
+        assert_eq!(last_exit(), 0, "`taskbar config names on` succeeds");
+
+        let out = capture_command("taskbar config names off");
+        assert_output_contains("and still clears", &out, b"Show names: no");
+        assert_eq!(last_exit(), 0, "`taskbar config names off` succeeds");
+
+        // `1` was not in this site's vocabulary, so it used to mean off. The
+        // report is the point of the assertion as much as the setting is: it
+        // reads back the flag, so it can contradict the word that produced it.
+        let out = capture_command("taskbar config names 1");
+        assert_output_contains(
+            "`1' reaches the shared vocabulary here too",
+            &out,
+            b"Show names: yes",
+        );
+        assert_eq!(last_exit(), 0, "`taskbar config names 1` succeeds");
+        assert_output_lacks(
+            "and the report is the flag, not the word that was typed",
+            &out,
+            b"Show names: 1",
+        );
+
+        // Absence and unreadability are now different events with different
+        // messages. Neither used to be: both set the flag to false and printed
+        // a `Show names:` line confirming it.
+        let out = capture_command("taskbar config names");
+        assert_output_contains(
+            "an omitted toggle is reported as missing",
+            &out,
+            b"missing on or off",
+        );
+        assert_eq!(last_exit(), 1, "a bare `taskbar config names` errors");
+        assert_output_lacks(
+            "and nothing is reported set behind the refusal",
+            &out,
+            b"Show names:",
+        );
+
+        let out = capture_command("taskbar config names zzon");
+        assert_output_contains(
+            "and a misspelt one is named",
+            &out,
+            b"`zzon' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "`taskbar config names zzon` errors");
+        assert_output_lacks(
+            "and names are not switched off behind that refusal either",
+            &out,
+            b"Show names:",
+        );
+
+        // Leave the taskbar as this rung found it, so a later rung reading the
+        // config does not see a setting this one invented.
+        crate::fs::taskbar::set_show_names(restore);
+
+        // The three settings whose guessed `false` mattered most. As in rung 79
+        // these run against ids that do not exist: the refusal is emitted before
+        // the subsystem is called, so the assertion tests the word-reading
+        // without depending on state a fresh boot may lack.
+        let out = capture_command("vpn killswitch 999 zzon");
+        assert_output_contains(
+            "a VPN kill switch is not silently disabled",
+            &out,
+            b"`zzon' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable killswitch toggle errors");
+        assert_output_lacks("and no kill switch is reported set", &out, b"Kill switch");
+
+        let out = capture_command("policyengine enforce zzon");
+        assert_output_contains(
+            "policy enforcement is not silently disabled",
+            &out,
+            b"`zzon' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable enforce toggle errors");
+        assert_output_lacks("and enforcement is not reported set", &out, b"Enforcement:");
+
+        let out = capture_command("usbpolicy block zzon");
+        assert_output_contains(
+            "unknown USB devices are not silently unblocked",
+            &out,
+            b"`zzon' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable block toggle errors");
+        assert_output_lacks("and blocking is not reported set", &out, b"Block unknown:");
+
+        // An operand with a documented default for *absence* still refuses a
+        // word it cannot read -- `optional_toggle`'s whole reason to exist,
+        // asserted here against `installer user`, whose third and fourth
+        // operands are genuinely optional.
+        let out = capture_command("installer user 999 zzname zzyes");
+        assert_output_contains(
+            "a defaulted toggle still names the word it could not read",
+            &out,
+            b"`zzyes' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable optional toggle errors");
+        assert_output_lacks("and no user is reported created", &out, b"User:");
+
+        // `spatialaudio headtrack` read its operand with `unwrap_or("on")`, so
+        // the shortest way to ask what the setting was *enabled* it. Whatever
+        // this build reports for an uninitialised subsystem, the one thing it
+        // must no longer do is act.
+        let out = capture_command("spatialaudio headtrack");
+        assert_output_lacks(
+            "a bare query does not enable head tracking",
+            &out,
+            b"Head tracking enabled.",
+        );
+
+        // `location history <word>` entered its set arm only for the two exact
+        // words `on` and `off`; everything else fell through to the *listing*,
+        // so a request to start recording was answered with the last ten fixes.
+        let out = capture_command("location history zzon");
+        assert_output_contains(
+            "a word that is neither `clear' nor a toggle is named",
+            &out,
+            b"`zzon' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable history toggle errors");
+        assert_output_lacks(
+            "and the history listing is not printed in place of an answer",
+            &out,
+            b"No history recorded.",
+        );
+
+        // A typed preference is the one place the file already refused an
+        // unreadable *integer* while accepting any word at all as a boolean.
+        let out = capture_command("appdefaults set zzapp zzkey ture bool");
+        assert_output_contains(
+            "a bool-typed preference refuses a word like the int-typed one does",
+            &out,
+            b"`ture' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable bool preference errors");
+        assert_output_lacks("and nothing is reported stored", &out, b"Set zzapp.zzkey");
+    }
+
+    serial_println!(
+        "  kshell::self_test 98: six commands that answered an unreadable pid with pid 0, and \
+         three catch-all arms that answered an unreadable word with a different setting"
+    );
+    // Rungs 79 and 97 were about *booleans*. This one is the numeric half of
+    // the same rule, and the first batch off the counted backlog in
+    // `scripts/option-refusal-ledger.txt` (431 -> 400 sites, 207 -> 201
+    // functions).
+    //
+    // The shape was `parts.get(1).and_then(|s| s.parse::<u32>().ok())
+    // .unwrap_or(0)`, thirty-one times. `unwrap_or(0)` there is not a default;
+    // it is a placeholder, and pid 0 is not an inert one -- it is the idle
+    // task. So `oomkiller kill l23` asked the out-of-memory killer to kill the
+    // idle task and `pidfd signal l23` recorded a signal against it, each
+    // reporting the outcome with the substituted number in it, which reads as
+    // confirmation of what was typed rather than as a substitution for it.
+    //
+    // `prociso` is the instructive one. Its six sites *did* refuse -- but only
+    // because 0 happened to be an invalid id, so the guard downstream caught
+    // it and blamed the synopsis. A refusal that rests on a coincidence about
+    // the value space stops refusing the day that value becomes legal, and it
+    // cannot say which of two operands was the unreadable one.
+    {
+        // Every assertion here is a refusal, emitted before the subsystem is
+        // reached, so none of them depends on state a fresh boot may not have
+        // initialised -- the §604 trap that a success assertion would walk
+        // into.
+        let out = capture_command("pidfd signal l23");
+        assert_output_contains("an unreadable pid is named", &out, b"`l23' is not a pid");
+        assert_eq!(last_exit(), 1, "`pidfd signal l23` errors");
+        assert_output_lacks(
+            "and no signal is reported against the idle task",
+            &out,
+            b"signal to pid 0",
+        );
+
+        // Absence was the same event as unreadability here: both became 0.
+        let out = capture_command("pidfd create");
+        assert_output_contains("an omitted pid is reported missing", &out, b"missing pid");
+        assert_eq!(last_exit(), 1, "a bare `pidfd create` errors");
+        assert_output_lacks("and nothing is reported created", &out, b"created for pid");
+
+        let out = capture_command("oomkiller kill l23");
+        assert_output_contains(
+            "the out-of-memory killer will not take a pid it could not read",
+            &out,
+            b"`l23' is not a pid",
+        );
+        assert_eq!(last_exit(), 1, "`oomkiller kill l23` errors");
+        assert_output_lacks("and nothing is reported killed", &out, b"Killed PID");
+
+        // `!= "false"` meant every word that was not exactly `false` shielded
+        // the process from the killer -- the direction that wedges a machine.
+        let out = capture_command("oomkiller exempt 7 fasle");
+        assert_output_contains(
+            "a misspelt `false' no longer means exempt",
+            &out,
+            b"`fasle' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "`oomkiller exempt 7 fasle` errors");
+        assert_output_lacks("and no exemption is reported set", &out, b"exempt=");
+
+        // Two catch-all `match` arms that substituted a *different* event for
+        // the one asked for, and then named the substitute in the success line.
+        let out = capture_command("userfault fault 7 mnor");
+        assert_output_contains(
+            "a misspelt fault type is named rather than replaced",
+            &out,
+            b"`mnor' is not a fault type",
+        );
+        assert_eq!(last_exit(), 1, "`userfault fault 7 mnor` errors");
+        assert_output_lacks("and no fault is reported recorded", &out, b"fault recorded");
+
+        let out = capture_command("userfault resolve 7 5000 cpy");
+        assert_output_contains(
+            "a misspelt `copy' does not silently mean zero-page",
+            &out,
+            b"`cpy' is not a resolution",
+        );
+        assert_eq!(last_exit(), 1, "`userfault resolve 7 5000 cpy` errors");
+        assert_output_lacks(
+            "and no resolve is reported recorded",
+            &out,
+            b"resolve recorded",
+        );
+
+        let out = capture_command("devfreq governor 0 powersace");
+        assert_output_contains(
+            "a misspelt governor is named rather than replaced with ondemand",
+            &out,
+            b"`powersace' is not a governor",
+        );
+        assert_eq!(last_exit(), 1, "`devfreq governor 0 powersace` errors");
+
+        // The blame moves off the synopsis and onto the word: this used to
+        // print `Usage: prociso attach <pid> <ns_id>`, which says nothing about
+        // which of the two operands was the unreadable one. That string is now
+        // absent from the file entirely, so there is nothing left to assert it
+        // is missing -- the wording gate rejects a `lacks` on text no command
+        // can print, and it is right to: an assertion that can never fire is
+        // not evidence. The `contains` above carries the claim instead.
+        let out = capture_command("prociso attach zzpid 5");
+        assert_output_contains(
+            "the unreadable operand is named, not the synopsis reprinted",
+            &out,
+            b"`zzpid' is not a pid",
+        );
+        assert_eq!(last_exit(), 1, "`prociso attach zzpid 5` errors");
+        assert_output_lacks("and nothing is reported attached", &out, b"Attached PID");
+
+        // The one destructive arm in the batch. `cleanup 5O` deleted all but
+        // the newest ten and said "keeping 10", which reads as a report.
+        let out = capture_command("coredump cleanup 5O");
+        assert_output_contains(
+            "a destructive keep-count is not silently replaced",
+            &out,
+            b"`5O' is not a keep count",
+        );
+        assert_eq!(last_exit(), 1, "`coredump cleanup 5O` errors");
+        assert_output_lacks("and nothing is reported cleaned up", &out, b"Cleaned up");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -36723,22 +37016,26 @@ fn cmd_wallpaper(args: &str) {
             }
         }
         "login" => {
-            let val = parts.get(1).copied().unwrap_or("");
-            if val == "on" || val == "true" || val == "yes" {
-                wallpaper::set_use_for_login(true);
-                shell_println!("Login screen uses desktop wallpaper");
-            } else if val == "off" || val == "false" || val == "no" {
-                wallpaper::set_use_for_login(false);
-                shell_println!("Login screen uses separate wallpaper");
-            } else {
-                shell_println!(
+            let Some(t) = toggle_arg(&parts, 1, "wallpaper", "login") else {
+                return;
+            };
+            match t {
+                Toggle::Set(true) => {
+                    wallpaper::set_use_for_login(true);
+                    shell_println!("Login screen uses desktop wallpaper");
+                }
+                Toggle::Set(false) => {
+                    wallpaper::set_use_for_login(false);
+                    shell_println!("Login screen uses separate wallpaper");
+                }
+                Toggle::Query => shell_println!(
                     "Login wallpaper: {}",
                     if wallpaper::use_for_login() {
                         "same"
                     } else {
                         "separate"
                     }
-                );
+                ),
             }
         }
         "monitor" => {
@@ -44880,6 +45177,39 @@ fn required_toggle(parts: &[&str], idx: usize, cmd: &str, sub: &str) -> Option<b
     Some(v)
 }
 
+/// The `on`/`off` operand of a setting that stands for a documented value when
+/// omitted — but which is still refused when a word *is* present and cannot be
+/// read.
+///
+/// [`optional_num`]'s boolean twin, and it exists for the same reason: absence
+/// and unreadability are different events that the `unwrap_or` idiom cannot tell
+/// apart. `installer user 1 alice` legitimately means "password login, no
+/// autologin" because two operands are missing; `installer user 1 alice ys`
+/// means the user typed something, and answering it with the default for
+/// *absence* is a guess dressed as a documented behaviour.
+///
+/// Distinct from [`toggle_arg`], which is for arms where absence means *report
+/// the current value*. Use this one only where the default is a real value the
+/// call is made with — a positional flag with a documented resting state — and
+/// `toggle_arg` wherever there is something to print instead.
+fn optional_toggle(
+    parts: &[&str],
+    idx: usize,
+    cmd: &str,
+    sub: &str,
+    default: bool,
+) -> Option<bool> {
+    let Some(word) = parts.get(idx) else {
+        return Some(default);
+    };
+    let Some(v) = toggle_word(word) else {
+        shell_println!("{}: {}: `{}' is not on or off", cmd, sub, word);
+        set_exit(1);
+        return None;
+    };
+    Some(v)
+}
+
 /// `fstune` — filesystem tuning profiles and parameters.
 fn cmd_fstune(args: &str) {
     use crate::fs::fstune;
@@ -45909,8 +46239,12 @@ fn cmd_installer(args: &str) {
                 return;
             };
             let name = parts.get(2).copied().unwrap_or("user");
-            let pass = parts.get(3).copied().unwrap_or("yes") == "yes";
-            let auto = parts.get(4).copied().unwrap_or("no") == "yes";
+            let Some(pass) = optional_toggle(&parts, 3, "installer", sub, true) else {
+                return;
+            };
+            let Some(auto) = optional_toggle(&parts, 4, "installer", sub, false) else {
+                return;
+            };
             match installer::set_user(id, name, pass, auto) {
                 Ok(()) => shell_println!("User: {}", name),
                 Err(e) => {
@@ -45964,7 +46298,9 @@ fn cmd_installer(args: &str) {
                 return;
             };
             let ssid = parts.get(2).copied().unwrap_or("");
-            let pass = parts.get(3).copied().unwrap_or("yes") == "yes";
+            let Some(pass) = optional_toggle(&parts, 3, "installer", sub, true) else {
+                return;
+            };
             match installer::set_wifi(id, ssid, pass) {
                 Ok(()) => shell_println!("Wifi: {}", ssid),
                 Err(e) => {
@@ -47330,7 +47666,9 @@ fn cmd_schedtune(args: &str) {
                         return;
                     }
                 };
-                let on = parts[2] == "on" || parts[2] == "true";
+                let Some(on) = required_toggle(parts, 2, "schedtune", "interactive") else {
+                    return;
+                };
                 match schedtune::set_interactive_boost(id, on) {
                     Ok(()) => {
                         shell_println!("Set interactive boost {}.", if on { "on" } else { "off" })
@@ -47430,7 +47768,9 @@ fn cmd_schedtune(args: &str) {
                         return;
                     }
                 };
-                let on = parts[2] == "on" || parts[2] == "true";
+                let Some(on) = required_toggle(parts, 2, "schedtune", "numa") else {
+                    return;
+                };
                 match schedtune::set_numa_aware(id, on) {
                     Ok(()) => shell_println!("Set NUMA-aware {}.", if on { "on" } else { "off" }),
                     Err(e) => {
@@ -47991,7 +48331,9 @@ fn cmd_mmtune(args: &str) {
                         return;
                     }
                 };
-                let on = parts[2] == "on" || parts[2] == "true";
+                let Some(on) = required_toggle(parts, 2, "mmtune", "zram") else {
+                    return;
+                };
                 match mmtune::set_zram_enabled(id, on) {
                     Ok(()) => shell_println!("Set ZRAM {}.", if on { "on" } else { "off" }),
                     Err(e) => {
@@ -48018,7 +48360,9 @@ fn cmd_mmtune(args: &str) {
                         return;
                     }
                 };
-                let on = parts[2] == "on" || parts[2] == "true";
+                let Some(on) = required_toggle(parts, 2, "mmtune", "zerofree") else {
+                    return;
+                };
                 match mmtune::set_zero_on_free(id, on) {
                     Ok(()) => shell_println!("Set zero-on-free {}.", if on { "on" } else { "off" }),
                     Err(e) => {
@@ -49040,7 +49384,9 @@ fn cmd_vpn(args: &str) {
                     return;
                 }
             };
-            let on = parts[2] == "on" || parts[2] == "true";
+            let Some(on) = required_toggle(&parts, 2, "vpn", "killswitch") else {
+                return;
+            };
             match vpn::set_kill_switch(id, on) {
                 Ok(()) => {
                     shell_println!("Kill switch {}.", if on { "enabled" } else { "disabled" })
@@ -49065,7 +49411,9 @@ fn cmd_vpn(args: &str) {
                     return;
                 }
             };
-            let on = parts[2] == "on" || parts[2] == "true";
+            let Some(on) = required_toggle(&parts, 2, "vpn", "routeall") else {
+                return;
+            };
             match vpn::set_route_all(id, on) {
                 Ok(()) => shell_println!(
                     "Route all traffic {}.",
@@ -49091,7 +49439,9 @@ fn cmd_vpn(args: &str) {
                     return;
                 }
             };
-            let on = parts[2] == "on" || parts[2] == "true";
+            let Some(on) = required_toggle(&parts, 2, "vpn", "autoconnect") else {
+                return;
+            };
             match vpn::set_auto_connect(id, on) {
                 Ok(()) => {
                     shell_println!("Auto-connect {}.", if on { "enabled" } else { "disabled" })
@@ -59634,19 +59984,27 @@ fn cmd_location(args: &str) {
                         set_exit(1);
                     }
                 }
-            } else if parts.len() > 1 && (parts[1] == "on" || parts[1] == "off") {
-                let on = parts[1] == "on";
-                match location::set_record_history(on) {
-                    Ok(()) => shell_println!(
-                        "History recording {}.",
-                        if on { "enabled" } else { "disabled" }
-                    ),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
             } else {
+                // The `on`/`off` arm used to be entered only by those two exact
+                // words, so every other word fell through to the listing below
+                // -- `location history yes` printed the last ten fixes and said
+                // nothing about the recording it had been asked to switch on.
+                let Some(t) = toggle_arg(&parts, 1, "location", "history") else {
+                    return;
+                };
+                if let Toggle::Set(on) = t {
+                    match location::set_record_history(on) {
+                        Ok(()) => shell_println!(
+                            "History recording {}.",
+                            if on { "enabled" } else { "disabled" }
+                        ),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
+                    }
+                    return;
+                }
                 let hist = location::get_history();
                 if hist.is_empty() {
                     shell_println!("No history recorded.");
@@ -62122,7 +62480,9 @@ fn cmd_gestures(args: &str) {
                 }
                 return;
             }
-            let on = parts[1] == "on" || parts[1] == "true" || parts[1] == "yes";
+            let Some(on) = required_toggle(&parts, 1, "gestures", "natural") else {
+                return;
+            };
             match gestures::set_natural_scroll(on) {
                 Ok(()) => shell_println!(
                     "Natural scroll {}.",
@@ -70372,12 +70732,9 @@ fn cmd_inputa11y(args: &str) {
             }
         }
         "sticky" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: ia11y sticky <on|off>");
-                set_exit(1);
+            let Some(on) = required_toggle(&parts, 1, "ia11y", "sticky") else {
                 return;
-            }
-            let on = parts[1] == "on" || parts[1] == "true";
+            };
             match inputa11y::set_sticky_keys(on) {
                 Ok(()) => {
                     shell_println!("Sticky keys {}.", if on { "enabled" } else { "disabled" })
@@ -70389,12 +70746,9 @@ fn cmd_inputa11y(args: &str) {
             }
         }
         "filter" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: ia11y filter <on|off>");
-                set_exit(1);
+            let Some(on) = required_toggle(&parts, 1, "ia11y", "filter") else {
                 return;
-            }
-            let on = parts[1] == "on" || parts[1] == "true";
+            };
             match inputa11y::set_filter_keys(on) {
                 Ok(()) => {
                     shell_println!("Filter keys {}.", if on { "enabled" } else { "disabled" })
@@ -70406,12 +70760,9 @@ fn cmd_inputa11y(args: &str) {
             }
         }
         "toggle" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: ia11y toggle <on|off>");
-                set_exit(1);
+            let Some(on) = required_toggle(&parts, 1, "ia11y", "toggle") else {
                 return;
-            }
-            let on = parts[1] == "on" || parts[1] == "true";
+            };
             match inputa11y::set_toggle_keys(on) {
                 Ok(()) => {
                     shell_println!("Toggle keys {}.", if on { "enabled" } else { "disabled" })
@@ -70423,20 +70774,28 @@ fn cmd_inputa11y(args: &str) {
             }
         }
         "mouse" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: ia11y mouse <on|off> [speed]");
-                set_exit(1);
+            let Some(on) = required_toggle(&parts, 1, "ia11y", "mouse") else {
                 return;
-            }
-            let on = parts[1] == "on" || parts[1] == "true";
+            };
             match inputa11y::set_mouse_keys(on) {
                 Ok(()) => {
                     shell_println!("Mouse keys {}.", if on { "enabled" } else { "disabled" });
+                    // The optional speed was read with `if let Ok(speed) = …`, so
+                    // `ia11y mouse on 4O` set mouse keys on and then said nothing
+                    // at all about the speed -- the one operand the user was
+                    // clearly trying to change, dropped in silence under a line
+                    // reporting success.
                     if on && parts.len() > 2 {
-                        if let Ok(speed) = parts[2].parse::<u32>() {
-                            inputa11y::set_mouse_speed(speed).ok();
-                            shell_println!("Mouse speed set to {}.", speed);
+                        let Some(speed) = required_num::<u32>(&parts, 2, "ia11y", "mouse", "speed")
+                        else {
+                            return;
+                        };
+                        if let Err(e) = inputa11y::set_mouse_speed(speed) {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                            return;
                         }
+                        shell_println!("Mouse speed set to {}.", speed);
                     }
                 }
                 Err(e) => {
@@ -70446,12 +70805,9 @@ fn cmd_inputa11y(args: &str) {
             }
         }
         "bounce" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: ia11y bounce <on|off>");
-                set_exit(1);
+            let Some(on) = required_toggle(&parts, 1, "ia11y", "bounce") else {
                 return;
-            }
-            let on = parts[1] == "on" || parts[1] == "true";
+            };
             match inputa11y::set_bounce_keys(on) {
                 Ok(()) => {
                     shell_println!("Bounce keys {}.", if on { "enabled" } else { "disabled" })
@@ -74503,7 +74859,9 @@ fn cmd_screenlock(args: &str) {
         }
         "option" => {
             let opt = parts.get(1).copied().unwrap_or("");
-            let val = parts.get(2).copied().unwrap_or("on") == "on";
+            let Some(val) = optional_toggle(&parts, 2, "slock", "option", true) else {
+                return;
+            };
             match screenlock::set_lock_screen_option(opt, val) {
                 Ok(()) => shell_println!("{} → {}", opt, if val { "on" } else { "off" }),
                 Err(e) => {
@@ -76279,9 +76637,15 @@ fn cmd_oobe(args: &str) {
             }
         }
         "privacy" => {
-            let diag = parts.get(1).copied().unwrap_or("off") == "on";
-            let loc = parts.get(2).copied().unwrap_or("off") == "on";
-            let upd = parts.get(3).copied().unwrap_or("on") == "on";
+            let Some(diag) = optional_toggle(&parts, 1, "oobe", sub, false) else {
+                return;
+            };
+            let Some(loc) = optional_toggle(&parts, 2, "oobe", sub, false) else {
+                return;
+            };
+            let Some(upd) = optional_toggle(&parts, 3, "oobe", sub, true) else {
+                return;
+            };
             match oobe::set_privacy(diag, loc, upd) {
                 Ok(()) => shell_println!(
                     "Diagnostics: {}, Location: {}, Auto-updates: {}",
@@ -82613,7 +82977,23 @@ fn cmd_spatialaudio(args: &str) {
             }
         }
         "headtrack" => {
-            let on = parts.get(1).copied().unwrap_or("on") == "on";
+            // `unwrap_or("on")` made the bare `spatialaudio headtrack` *enable*
+            // head tracking, so the shortest way to ask what a setting is set it
+            // instead -- and `headtrack yes` disabled it. `[on|off]` in the help
+            // means the query form the rest of the shell gives it.
+            let Some(t) = toggle_arg(&parts, 1, "spatialaudio", sub) else {
+                return;
+            };
+            let Toggle::Set(on) = t else {
+                match spatialaudio::get_config() {
+                    Some(cfg) => shell_println!("Head tracking: {}", cfg.head_tracking),
+                    None => {
+                        shell_println!("Not initialised.");
+                        set_exit(1);
+                    }
+                }
+                return;
+            };
             match spatialaudio::set_head_tracking(on) {
                 Ok(()) => {
                     shell_println!("Head tracking {}.", if on { "enabled" } else { "disabled" })
@@ -82625,7 +83005,19 @@ fn cmd_spatialaudio(args: &str) {
             }
         }
         "doppler" => {
-            let on = parts.get(1).copied().unwrap_or("on") == "on";
+            let Some(t) = toggle_arg(&parts, 1, "spatialaudio", sub) else {
+                return;
+            };
+            let Toggle::Set(on) = t else {
+                match spatialaudio::get_config() {
+                    Some(cfg) => shell_println!("Doppler: {}", cfg.doppler_effect),
+                    None => {
+                        shell_println!("Not initialised.");
+                        set_exit(1);
+                    }
+                }
+                return;
+            };
             match spatialaudio::set_doppler(on) {
                 Ok(()) => shell_println!(
                     "Doppler effect {}.",
@@ -84717,18 +85109,15 @@ fn cmd_usbpolicy(args: &str) {
             }
         }
         "block" => {
-            if let Some(v) = parts.get(1) {
-                let block = *v == "on" || *v == "true" || *v == "yes";
-                match usbpolicy::set_block_unknown(block) {
-                    Ok(()) => shell_println!("Block unknown: {}", if block { "ON" } else { "OFF" }),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(block) = required_toggle(&parts, 1, "usbpolicy", "block") else {
+                return;
+            };
+            match usbpolicy::set_block_unknown(block) {
+                Ok(()) => shell_println!("Block unknown: {}", if block { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: usbpolicy block <on|off>");
-                set_exit(1);
             }
         }
         "list" => {
@@ -85645,48 +86034,39 @@ fn cmd_touchscreen(args: &str) {
             }
         }
         "palm" => {
-            if let Some(v) = parts.get(1) {
-                let on = *v == "on" || *v == "true" || *v == "yes";
-                match touchscreen::set_palm_rejection(on) {
-                    Ok(()) => shell_println!("Palm rejection: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(on) = required_toggle(&parts, 1, "touchscreen", "palm") else {
+                return;
+            };
+            match touchscreen::set_palm_rejection(on) {
+                Ok(()) => shell_println!("Palm rejection: {}", if on { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: touchscreen palm <on|off>");
-                set_exit(1);
             }
         }
         "sound" => {
-            if let Some(v) = parts.get(1) {
-                let on = *v == "on" || *v == "true";
-                match touchscreen::set_touch_sound(on) {
-                    Ok(()) => shell_println!("Touch sound: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(on) = required_toggle(&parts, 1, "touchscreen", "sound") else {
+                return;
+            };
+            match touchscreen::set_touch_sound(on) {
+                Ok(()) => shell_println!("Touch sound: {}", if on { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: touchscreen sound <on|off>");
-                set_exit(1);
             }
         }
         "vibration" | "haptic" => {
-            if let Some(v) = parts.get(1) {
-                let on = *v == "on" || *v == "true";
-                match touchscreen::set_touch_vibration(on) {
-                    Ok(()) => shell_println!("Touch vibration: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(on) = required_toggle(&parts, 1, "touchscreen", "vibration") else {
+                return;
+            };
+            match touchscreen::set_touch_vibration(on) {
+                Ok(()) => shell_println!("Touch vibration: {}", if on { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: touchscreen vibration <on|off>");
-                set_exit(1);
             }
         }
         "gesture" => {
@@ -86169,7 +86549,15 @@ fn cmd_appdefaults(args: &str) {
                     }
                 }
                 "bool" | "b" => {
-                    let v = raw == "true" || raw == "yes" || raw == "1" || raw == "on";
+                    // The `int` branch just above refuses a word it cannot read;
+                    // this one stored `false` for it, so `appdefaults set x k
+                    // ture bool` recorded the opposite of the typo's intent and
+                    // reported `Set x.k = ture`.
+                    let Some(v) = toggle_word(raw) else {
+                        shell_println!("appdefaults: set: `{}' is not on or off", raw);
+                        set_exit(1);
+                        return;
+                    };
                     appdefaults::PrefValue::Bool(v)
                 }
                 "string" | "s" => appdefaults::PrefValue::Str(alloc::string::String::from(raw)),
@@ -86448,18 +86836,15 @@ fn cmd_policyengine(args: &str) {
             }
         }
         "enforce" => {
-            if let Some(v) = parts.get(1) {
-                let on = *v == "on" || *v == "true" || *v == "yes";
-                match policyengine::set_enforcement(on) {
-                    Ok(()) => shell_println!("Enforcement: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(on) = required_toggle(&parts, 1, "policyengine", "enforce") else {
+                return;
+            };
+            match policyengine::set_enforcement(on) {
+                Ok(()) => shell_println!("Enforcement: {}", if on { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: policyengine enforce <on|off>");
-                set_exit(1);
             }
         }
         "default" => {
@@ -87881,18 +88266,15 @@ fn cmd_colorblind(args: &str) {
             }
         }
         "simulate" => {
-            if let Some(v) = parts.get(1) {
-                let on = *v == "on" || *v == "true";
-                match colorblind::set_simulate(on) {
-                    Ok(()) => shell_println!("Simulation mode: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(on) = required_toggle(&parts, 1, "colorblind", "simulate") else {
+                return;
+            };
+            match colorblind::set_simulate(on) {
+                Ok(()) => shell_println!("Simulation mode: {}", if on { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: colorblind simulate <on|off>");
-                set_exit(1);
             }
         }
         "preset" => {
@@ -88276,13 +88658,14 @@ fn cmd_energysaver(args: &str) {
             }
         }
         "autoswitch" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: energysaver autoswitch <on|off> <threshold_%>");
-                set_exit(1);
+            let Some(enabled) = required_toggle(&parts, 1, "energysaver", "autoswitch") else {
                 return;
-            }
-            let enabled = parts[1] == "on";
-            let thresh: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            };
+            let Some(thresh) =
+                required_num::<u32>(&parts, 2, "energysaver", "autoswitch", "threshold percent")
+            else {
+                return;
+            };
             match energysaver::set_auto_switch(enabled, thresh) {
                 Ok(()) => shell_println!(
                     "Auto-switch: {} at {}%",
@@ -90367,7 +90750,9 @@ fn cmd_vpnprofile(args: &str) {
                     return;
                 }
             };
-            let enabled = parts[2] == "on";
+            let Some(enabled) = required_toggle(&parts, 2, "vpnprofile", "killswitch") else {
+                return;
+            };
             match vpnprofile::set_kill_switch(id, enabled) {
                 Ok(()) => shell_println!(
                     "Kill switch {} for profile {}",
@@ -92528,10 +92913,9 @@ fn cmd_coredump(args: &str) {
             }
         }
         "get" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "coredump", sub, "dump id") else {
+                return;
+            };
             match coredump::get_dump(id) {
                 Some(d) => {
                     shell_println!("Core dump #{}:", d.id);
@@ -92548,15 +92932,20 @@ fn cmd_coredump(args: &str) {
         }
         "record" => {
             coredump::init_defaults();
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            // `record` is the synthetic-dump arm, so its operands really do
+            // have documented resting values -- but only when *omitted*.
+            // Typed and unreadable they were replaced just as quietly, so
+            // `coredump record 4l zsh 4O96` filed a dump against pid 1 (init)
+            // sized 4096 bytes and reported `Recorded core dump #3`, naming
+            // neither of the two words it had thrown away.
+            let Some(pid) = optional_num::<u32>(&parts, 1, "coredump", sub, "pid", 1) else {
+                return;
+            };
             let name = parts.get(2).copied().unwrap_or("test_process");
-            let size = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
+            let Some(size) = optional_num::<u64>(&parts, 3, "coredump", sub, "size in bytes", 4096)
+            else {
+                return;
+            };
             match coredump::record_dump(pid, name, coredump::DumpReason::Segfault, size, 11) {
                 Ok(id) => shell_println!("Recorded core dump #{}", id),
                 Err(e) => {
@@ -92566,10 +92955,9 @@ fn cmd_coredump(args: &str) {
             }
         }
         "delete" | "rm" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "coredump", sub, "dump id") else {
+                return;
+            };
             match coredump::delete_dump(id) {
                 Ok(()) => shell_println!("Deleted dump {}.", id),
                 Err(e) => {
@@ -92580,10 +92968,14 @@ fn cmd_coredump(args: &str) {
         }
         "cleanup" => {
             coredump::init_defaults();
-            let keep = parts
-                .get(1)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(10);
+            // The one destructive arm in this command, and the one whose guess
+            // was hardest to notice: `coredump cleanup 5O` deleted everything
+            // but the newest *ten* and said "keeping 10", which reads as a
+            // report rather than as a correction of what was asked for.
+            let Some(keep) = optional_num::<usize>(&parts, 1, "coredump", sub, "keep count", 10)
+            else {
+                return;
+            };
             match coredump::cleanup(keep) {
                 Ok(n) => shell_println!("Cleaned up {} old dumps (keeping {}).", n, keep),
                 Err(e) => {
@@ -94059,10 +94451,14 @@ fn cmd_oomkiller(args: &str) {
             }
         }
         "score" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // The four `unwrap_or(0)`s in this command were placeholders, not
+            // defaults, and the `kill` arm is why they matter most here: an
+            // unreadable pid resolved to 0 and `oomkiller kill l23` asked the
+            // out-of-memory killer to kill the idle task, reporting the
+            // outcome as though pid 0 were what had been named.
+            let Some(pid) = required_num::<u32>(&parts, 1, "oomkiller", sub, "pid") else {
+                return;
+            };
             match oomkiller::get_score(pid) {
                 Some(s) => {
                     let eff = (s.score + s.adj).max(0);
@@ -94080,14 +94476,15 @@ fn cmd_oomkiller(args: &str) {
             }
         }
         "adjust" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let adj = parts
-                .get(2)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "oomkiller", sub, "pid") else {
+                return;
+            };
+            // `adjust` with no adjustment is a no-op wearing a success line,
+            // so the score is required rather than defaulted to 0.
+            let Some(adj) = required_num::<i32>(&parts, 2, "oomkiller", sub, "score adjustment")
+            else {
+                return;
+            };
             match oomkiller::adjust_score(pid, adj) {
                 Ok(()) => shell_println!("Set PID {} adj to {}", pid, adj),
                 Err(e) => {
@@ -94097,11 +94494,17 @@ fn cmd_oomkiller(args: &str) {
             }
         }
         "exempt" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let exempt = parts.get(2).copied().unwrap_or("true") != "false";
+            let Some(pid) = required_num::<u32>(&parts, 1, "oomkiller", sub, "pid") else {
+                return;
+            };
+            // `!= "false"` made every word that was not exactly `false` mean
+            // *exempt this process from being killed* -- so `oomkiller exempt
+            // 7 fasle` shielded pid 7 from the out-of-memory killer and
+            // printed `exempt=true`, which is the failure direction that
+            // wedges a machine rather than one that loses a process.
+            let Some(exempt) = optional_toggle(&parts, 2, "oomkiller", sub, true) else {
+                return;
+            };
             match oomkiller::set_exempt(pid, exempt) {
                 Ok(()) => shell_println!("PID {} exempt={}", pid, exempt),
                 Err(e) => {
@@ -94126,10 +94529,9 @@ fn cmd_oomkiller(args: &str) {
             }
         }
         "kill" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "oomkiller", sub, "pid") else {
+                return;
+            };
             match oomkiller::kill(pid) {
                 Ok(freed) => shell_println!("Killed PID {}, freed {} bytes.", pid, freed),
                 Err(e) => {
@@ -95129,13 +95531,16 @@ fn cmd_prociso(args: &str) {
             }
         }
         "delete" => {
-            let id_str = parts.get(1).copied().unwrap_or("0");
-            let id = id_str.parse::<u32>().unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: prociso delete <ns_id>");
-                set_exit(1);
+            // These six sites *did* refuse, but only as a side effect: an
+            // unreadable word became 0 and 0 happened to be an invalid id, so
+            // the guard below caught it and blamed the synopsis rather than
+            // the word. That refusal is load-bearing on a coincidence -- the
+            // day an id of 0 becomes legal it silently stops refusing -- and
+            // it tells the user nothing about which of their two operands was
+            // the unreadable one. `required_num` names the word instead.
+            let Some(id) = required_num::<u32>(&parts, 1, "prociso", sub, "namespace id") else {
                 return;
-            }
+            };
             prociso::init_defaults();
             match prociso::delete_namespace(id) {
                 Ok(()) => shell_println!("Deleted namespace #{}", id),
@@ -95146,15 +95551,12 @@ fn cmd_prociso(args: &str) {
             }
         }
         "attach" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let ns_str = parts.get(2).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            let ns_id = ns_str.parse::<u32>().unwrap_or(0);
-            if pid == 0 || ns_id == 0 {
-                shell_println!("Usage: prociso attach <pid> <ns_id>");
-                set_exit(1);
+            let Some(pid) = required_num::<u32>(&parts, 1, "prociso", sub, "pid") else {
                 return;
-            }
+            };
+            let Some(ns_id) = required_num::<u32>(&parts, 2, "prociso", sub, "namespace id") else {
+                return;
+            };
             prociso::init_defaults();
             match prociso::attach(pid, ns_id) {
                 Ok(()) => shell_println!("Attached PID {} to namespace #{}", pid, ns_id),
@@ -95165,15 +95567,12 @@ fn cmd_prociso(args: &str) {
             }
         }
         "detach" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let ns_str = parts.get(2).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            let ns_id = ns_str.parse::<u32>().unwrap_or(0);
-            if pid == 0 || ns_id == 0 {
-                shell_println!("Usage: prociso detach <pid> <ns_id>");
-                set_exit(1);
+            let Some(pid) = required_num::<u32>(&parts, 1, "prociso", sub, "pid") else {
                 return;
-            }
+            };
+            let Some(ns_id) = required_num::<u32>(&parts, 2, "prociso", sub, "namespace id") else {
+                return;
+            };
             prociso::init_defaults();
             match prociso::detach(pid, ns_id) {
                 Ok(()) => shell_println!("Detached PID {} from namespace #{}", pid, ns_id),
@@ -95219,13 +95618,15 @@ fn cmd_prociso(args: &str) {
                     }
                 }
                 "delete" => {
-                    let id_str = parts.get(2).copied().unwrap_or("0");
-                    let id = id_str.parse::<u32>().unwrap_or(0);
-                    if id == 0 {
-                        shell_println!("Usage: prociso container delete <id>");
-                        set_exit(1);
+                    let Some(id) = required_num::<u32>(
+                        &parts,
+                        2,
+                        "prociso",
+                        "container delete",
+                        "container id",
+                    ) else {
                         return;
-                    }
+                    };
                     prociso::init_defaults();
                     match prociso::delete_container(id) {
                         Ok(()) => shell_println!("Deleted container #{}", id),
@@ -101483,14 +101884,30 @@ fn cmd_devfreq(args: &str) {
         }
         "register" => {
             let name = parts.get(1).copied().unwrap_or("unnamed");
-            let min = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(100_000);
-            let max = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1_000_000);
+            // The success line prints the range, so a guessed bound looks like
+            // a report of what was asked for: `devfreq register gpu 3OO000
+            // 1500000` printed `100000-1500000 kHz` and nothing said the
+            // lower bound was not the one typed.
+            let Some(min) = optional_num::<u64>(
+                &parts,
+                2,
+                "devfreq",
+                sub,
+                "minimum frequency in kHz",
+                100_000,
+            ) else {
+                return;
+            };
+            let Some(max) = optional_num::<u64>(
+                &parts,
+                3,
+                "devfreq",
+                sub,
+                "maximum frequency in kHz",
+                1_000_000,
+            ) else {
+                return;
+            };
             match devfreq::register(name, min, max) {
                 Ok(id) => shell_println!(
                     "devfreq: registered '{}' {}-{} kHz → id {}",
@@ -101506,14 +101923,14 @@ fn cmd_devfreq(args: &str) {
             }
         }
         "transition" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let freq = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(500_000);
+            let Some(id) = required_num::<u32>(&parts, 1, "devfreq", sub, "device id") else {
+                return;
+            };
+            let Some(freq) =
+                optional_num::<u64>(&parts, 2, "devfreq", sub, "frequency in kHz", 500_000)
+            else {
+                return;
+            };
             match devfreq::record_transition(id, freq) {
                 Ok(()) => shell_println!("devfreq: {} → {} kHz", id, freq),
                 Err(e) => {
@@ -101523,16 +101940,29 @@ fn cmd_devfreq(args: &str) {
             }
         }
         "governor" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let gov = match parts.get(2).copied().unwrap_or("ondemand") {
-                "performance" | "perf" => devfreq::Governor::Performance,
-                "powersave" | "save" => devfreq::Governor::PowerSave,
-                "userspace" | "user" => devfreq::Governor::Userspace,
-                "simple" => devfreq::Governor::Simple,
-                _ => devfreq::Governor::OnDemand,
+            let Some(id) = required_num::<u32>(&parts, 1, "devfreq", sub, "device id") else {
+                return;
+            };
+            // The catch-all arm turned `devfreq governor 0 powersace` into
+            // *ondemand* -- neither the governor asked for nor the one that
+            // was in force -- and the success line named `ondemand`, which
+            // reads as confirmation rather than substitution.
+            let gov = match parts.get(2).copied() {
+                None | Some("ondemand" | "demand") => devfreq::Governor::OnDemand,
+                Some("performance" | "perf") => devfreq::Governor::Performance,
+                Some("powersave" | "save") => devfreq::Governor::PowerSave,
+                Some("userspace" | "user") => devfreq::Governor::Userspace,
+                Some("simple") => devfreq::Governor::Simple,
+                Some(other) => {
+                    shell_println!(
+                        "devfreq: {}: `{}' is not a governor (expected ondemand, performance, \
+                         powersave, userspace or simple)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match devfreq::set_governor(id, gov) {
                 Ok(()) => shell_println!("devfreq: {} → {}", id, gov.label()),
@@ -101749,10 +102179,12 @@ fn cmd_userfault(args: &str) {
             shell_println!("userfault: initialized");
         }
         "register" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // Same placeholder-as-default as `pidfd`: an unreadable or missing
+            // pid became pid 0 -- the idle task -- and the arm then reported
+            // success against it.
+            let Some(pid) = required_num::<u32>(&parts, 1, "userfault", sub, "pid") else {
+                return;
+            };
             match userfault::register(pid) {
                 Ok(()) => shell_println!("userfault: registered pid {}", pid),
                 Err(e) => {
@@ -101762,10 +102194,9 @@ fn cmd_userfault(args: &str) {
             }
         }
         "unregister" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "userfault", sub, "pid") else {
+                return;
+            };
             match userfault::unregister(pid) {
                 Ok(()) => shell_println!("userfault: unregistered pid {}", pid),
                 Err(e) => {
@@ -101775,14 +102206,28 @@ fn cmd_userfault(args: &str) {
             }
         }
         "fault" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let ft = match parts.get(2).copied().unwrap_or("") {
-                "wp" => userfault::FaultType::WriteProtect,
-                "minor" => userfault::FaultType::Minor,
-                _ => userfault::FaultType::Missing,
+            let Some(pid) = required_num::<u32>(&parts, 1, "userfault", sub, "pid") else {
+                return;
+            };
+            // The catch-all arm meant `userfault fault 7 mnor` recorded a
+            // *missing*-page fault and said so, which is a different event
+            // from the one asked for and indistinguishable in the output from
+            // having asked for it. An omitted type still means `missing`,
+            // which is a documented default; a typed word that is not one of
+            // the three is refused.
+            let ft = match parts.get(2).copied() {
+                None | Some("missing") => userfault::FaultType::Missing,
+                Some("wp") => userfault::FaultType::WriteProtect,
+                Some("minor") => userfault::FaultType::Minor,
+                Some(other) => {
+                    shell_println!(
+                        "userfault: {}: `{}' is not a fault type (expected missing, wp or minor)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match userfault::record_fault(pid, ft) {
                 Ok(()) => {
@@ -101795,15 +102240,29 @@ fn cmd_userfault(args: &str) {
             }
         }
         "resolve" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let ns = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(5000);
-            let is_copy = parts.get(3).copied().unwrap_or("copy") == "copy";
+            let Some(pid) = required_num::<u32>(&parts, 1, "userfault", sub, "pid") else {
+                return;
+            };
+            let Some(ns) = optional_num::<u64>(&parts, 2, "userfault", sub, "duration in ns", 5000)
+            else {
+                return;
+            };
+            // `== "copy"` gave every unrecognised word the *zero-page*
+            // resolution, so `userfault resolve 7 5000 cpy` recorded the
+            // opposite of the intent under a line that mentions neither.
+            let is_copy = match parts.get(3).copied() {
+                None | Some("copy") => true,
+                Some("zero") => false,
+                Some(other) => {
+                    shell_println!(
+                        "userfault: {}: `{}' is not a resolution (expected copy or zero)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
+            };
             match userfault::record_resolve(pid, ns, is_copy) {
                 Ok(()) => shell_println!("userfault: resolve recorded pid={} ns={}", pid, ns),
                 Err(e) => {
@@ -103988,10 +104447,15 @@ fn cmd_pidfd(args: &str) {
             shell_println!("pidfd: initialized");
         }
         "create" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // `unwrap_or(0)` here was not a default, it was a placeholder:
+            // every one of these six arms answered an unreadable *or absent*
+            // pid with pid 0, then reported success against it. Pid 0 is not
+            // an inert sentinel either -- it is the idle task -- so `pidfd
+            // signal l23` printed `signal to pid 0` and recorded a signal
+            // against the one process on the machine you least meant.
+            let Some(pid) = required_num::<u32>(&parts, 1, "pidfd", sub, "pid") else {
+                return;
+            };
             match pidfd::record_create(pid) {
                 Ok(()) => shell_println!("pidfd: created for pid {}", pid),
                 Err(e) => {
@@ -104001,10 +104465,9 @@ fn cmd_pidfd(args: &str) {
             }
         }
         "poll" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "pidfd", sub, "pid") else {
+                return;
+            };
             match pidfd::record_poll(pid) {
                 Ok(()) => shell_println!("pidfd: polled pid {}", pid),
                 Err(e) => {
@@ -104014,10 +104477,9 @@ fn cmd_pidfd(args: &str) {
             }
         }
         "signal" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "pidfd", sub, "pid") else {
+                return;
+            };
             match pidfd::record_signal(pid) {
                 Ok(()) => shell_println!("pidfd: signal to pid {}", pid),
                 Err(e) => {
@@ -104027,10 +104489,9 @@ fn cmd_pidfd(args: &str) {
             }
         }
         "wait" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "pidfd", sub, "pid") else {
+                return;
+            };
             match pidfd::record_wait(pid) {
                 Ok(()) => shell_println!("pidfd: wait on pid {}", pid),
                 Err(e) => {
@@ -104040,10 +104501,9 @@ fn cmd_pidfd(args: &str) {
             }
         }
         "close" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "pidfd", sub, "pid") else {
+                return;
+            };
             match pidfd::record_close(pid) {
                 Ok(()) => shell_println!("pidfd: closed for pid {}", pid),
                 Err(e) => {
@@ -104759,21 +105219,39 @@ fn cmd_taskbar(args: &str) {
                     taskbar::set_position(p);
                     shell_println!("Position: {}", val);
                 }
+                // These four echoed `val` -- the word the user typed -- rather
+                // than the flag that was stored, so `taskbar config names 1`
+                // printed `Show names: 1` while setting it to *no*, and the bare
+                // `taskbar config names` printed `Show names: ` (empty) having
+                // turned names off. The report now reads back the flag, in the
+                // same yes/no vocabulary the query arm above prints.
                 "names" => {
-                    taskbar::set_show_names(val == "on" || val == "yes" || val == "true");
-                    shell_println!("Show names: {}", val);
+                    let Some(on) = required_toggle(&parts, 2, "taskbar", key) else {
+                        return;
+                    };
+                    taskbar::set_show_names(on);
+                    shell_println!("Show names: {}", if on { "yes" } else { "no" });
                 }
                 "group" | "grouping" => {
-                    taskbar::set_grouping(val == "on" || val == "yes" || val == "true");
-                    shell_println!("Grouping: {}", val);
+                    let Some(on) = required_toggle(&parts, 2, "taskbar", key) else {
+                        return;
+                    };
+                    taskbar::set_grouping(on);
+                    shell_println!("Grouping: {}", if on { "yes" } else { "no" });
                 }
                 "autohide" | "auto-hide" => {
-                    taskbar::set_auto_hide(val == "on" || val == "yes" || val == "true");
-                    shell_println!("Auto-hide: {}", val);
+                    let Some(on) = required_toggle(&parts, 2, "taskbar", key) else {
+                        return;
+                    };
+                    taskbar::set_auto_hide(on);
+                    shell_println!("Auto-hide: {}", if on { "yes" } else { "no" });
                 }
                 "small" | "small-icons" => {
-                    taskbar::set_small_icons(val == "on" || val == "yes" || val == "true");
-                    shell_println!("Small icons: {}", val);
+                    let Some(on) = required_toggle(&parts, 2, "taskbar", key) else {
+                        return;
+                    };
+                    taskbar::set_small_icons(on);
+                    shell_println!("Small icons: {}", if on { "yes" } else { "no" });
                 }
                 _ => {
                     shell_println!("Unknown config key: {}", key);
@@ -125280,31 +125758,26 @@ fn cmd_pacct(args: &str) {
     }
 }
 
-/// `counters` — display unified kernel event counters.
+/// `counters` — display kernel event counters, grouped by subsystem.
 ///
-/// Shows all registered counters grouped by subsystem, plus built-in
-/// counters aggregated from various kernel subsystems.
 ///   `counters`       — show all counters
 ///   `counters <grp>` — filter by group (mm, sched, irq, softirq, syscall, pacct)
 fn cmd_counters(args: &str) {
     let filter = args.trim();
 
-    // Get built-in counters (from existing subsystem atomics).
-    let builtin = crate::kcounters::builtin_snapshot();
-
-    // Get explicitly-registered counters.
-    let registered = crate::kcounters::snapshot();
-
-    // Merge both lists.
-    let all: alloc::vec::Vec<_> = builtin
+    let counters = crate::kcounters::builtin_snapshot();
+    let all: alloc::vec::Vec<_> = counters
         .iter()
-        .chain(registered.iter())
         .filter(|c| filter.is_empty() || c.group == filter)
         .collect();
 
     if all.is_empty() {
         if filter.is_empty() {
-            shell_println!("No counters registered.");
+            // Only reachable if `builtin_snapshot` itself returns nothing,
+            // which would mean every subsystem accessor it reads had gone
+            // away.  Say that, rather than "none registered" -- that wording
+            // described a registration path this kernel no longer has.
+            shell_println!("No counters available.");
         } else {
             shell_println!("No counters in group '{}'.", filter);
         }
@@ -125328,12 +125801,7 @@ fn cmd_counters(args: &str) {
     }
 
     shell_println!("");
-    shell_println!(
-        "Total: {} counters ({} registered, {} built-in)",
-        all.len(),
-        registered.len(),
-        builtin.len()
-    );
+    shell_println!("Total: {} counters", all.len());
 }
 
 /// `topology` — display CPU topology (package/core/SMT mapping).

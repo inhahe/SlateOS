@@ -53,13 +53,11 @@ cmd_cliphistory 1
 cmd_clipsync 2
 cmd_clocksrc 1
 cmd_compstat 1
-cmd_coredump 5
 cmd_cpuset 4
 cmd_cursorsettings 2
 cmd_datausage 5
 cmd_defaultapps 4
 cmd_deskicons 2
-cmd_devfreq 5
 cmd_dictation 1
 cmd_directio 3
 cmd_diskhealth 1
@@ -73,7 +71,6 @@ cmd_dnssettings 1
 cmd_dpiscaling 3
 cmd_drvmon 2
 cmd_elog 5
-cmd_energysaver 1
 cmd_entropy 2
 cmd_envvars 2
 cmd_epollstat 4
@@ -148,12 +145,10 @@ cmd_netthrottle 2
 cmd_netusage 3
 cmd_nightlight 1
 cmd_notifcenter 1
-cmd_oomkiller 5
 cmd_pacct 1
 cmd_parentaltime 4
 cmd_pftrack 3
 cmd_pgtable 1
-cmd_pidfd 5
 cmd_pidns 1
 cmd_pidstat 1
 cmd_pipestat 1
@@ -165,7 +160,6 @@ cmd_prefetch 2
 cmd_printf 5
 cmd_printmgr 2
 cmd_printqueue 1
-cmd_prociso 6
 cmd_procstat 4
 cmd_progmgr 2
 cmd_quicknote 1
@@ -216,7 +210,6 @@ cmd_udp6 1
 cmd_upnp 4
 cmd_usagetime 1
 cmd_usbpolicy 1
-cmd_userfault 5
 cmd_vmballoon 3
 cmd_vmfrag 2
 cmd_vmguest 2

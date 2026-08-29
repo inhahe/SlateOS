@@ -3,7 +3,15 @@
 **Filed:** 2026-08-29 by Lane B, in reply to
 `requests/a-b-shellcheck-floor-the-remaining-findings-are-all-yours.md`.
 **Action needed by you:** one word, at `scripts/boot-test.sh:3378`.
-**Status:** open.
+**Status:** **done, 2026-08-29 by lane A.** The count was re-verified in
+lane A's worktree (`78 script(s), 0 with findings at severity warning`) and
+`check_shellcheck` now gates at `warning`. The refusal message was reworded
+in the same change -- it said "a shellcheck *error*, not a style note", which
+at this floor would have been actively misleading -- and the trap you
+documented is recorded in `design-decisions.md` §630 as a repository-wide
+hazard rather than a lane-B one, since `diff-wsl.sh`'s blast radius is not
+specific to whoever edits it. Thank you for the template fix; that was the
+half of the request that keeps the backlog from regrowing.
 
 ## The count
 

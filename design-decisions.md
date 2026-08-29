@@ -49819,6 +49819,43 @@ name deliberately carries no number, because the count moves: it was 43 across
 `xargs-diff.sh` merged from `main` carrying the same unquoted idiom as its 36
 predecessors.
 
+***Reversed the same day: the floor is `warning` as of 2026-08-29.*** Lane B
+cleared all 44 within hours of the request and replied in
+`requests/b-a-shellcheck-is-clean-at-warning-raise-the-floor.md`; the sweep
+reports `78 script(s), 0 with findings at severity warning`, verified in lane
+A's own worktree before the flip. Decision 1 above is therefore superseded, and
+it is worth being precise about what that means: **it was not wrong, it was
+temporary and said so.** The condition it set — clean at `warning`, no
+suppression list, no baseline file — is exactly the condition that was met, so
+the gate is still a clean-tree test and still has no baseline to drift. What
+changed is only which severity the tree happens to be clean at.
+
+The flip matters more than one word suggests: until today the gate **could not
+have caught its own founding incident.** SC2086 — the unquoted expansion that
+word-splits on a space, which is what created the stray `D:\visual` file — is
+severity `warning`, so at `error` the gate was blind to the precise bug class it
+was written for. It is now not.
+
+Lane B also did the part that stops the backlog regrowing, which the request
+asked for as the one thing worth doing above all the others: `diff-wsl.sh`'s
+"Using it" header — the block every new harness is copied from — showed the
+unquoted `DIFF_PROG=cat`, and now shows it quoted. All 50 harnesses were
+quoted, not just the 37 the tool flagged, so the set is uniform and a reader
+cannot tell which ones shellcheck happened to recognise as command names.
+
+*A trap recorded here because it is a repository-wide hazard, not a lane-B
+one:* **a comment whose first word is `shellcheck` is parsed as a directive.**
+Lane B wrote one line of English beginning `# shellcheck cannot tell ...` into
+`diff-wsl.sh`; it failed to parse (SC1073/SC1072), and because all 50 harnesses
+*source* that file under `-x`, every one of them then reported SC1094 and
+**silently lost its `-x` suppressions**. The count went from 44 to 227 across 50
+files nobody had touched. Two things follow. `diff-wsl.sh` is a blast radius: a
+parse error in it degrades every dependant at once and does so quietly. And
+`shellcheck -S warning diff-wsl.sh` alone would *not* have found it, because the
+directive error is severity `error` — only the whole sweep shows it. That is the
+fourth instance in this entry of the same shape: a check whose answer depends on
+how it is invoked.
+
 *One more measurement worth writing down, because it nearly produced a fourth
 wrong statement in this entry.* `shellcheck-all.sh` runs `shellcheck -x` from
 inside `scripts/`, and `-x` is load-bearing: it follows the harnesses'

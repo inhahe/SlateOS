@@ -3348,13 +3348,28 @@ check_orphan_modules
 # unquoted-path one escaped the repository entirely and created a stray file
 # named `D:\visual` on the operator's disk, which then wedged an unrelated lane.
 #
-# `error`, NOT `warning`, AND THEREFORE NOT A RATCHET.  At `error` the tree has
-# 0 findings, so this is a clean-tree test with no baseline file to drift.  At
-# `warning` it has 48, most of them SC2209 on `DIFF_PROG=<name>` in the
-# differential harnesses, where the tool cannot distinguish a bare command name
-# from a forgotten `$(...)` -- a false positive that would need 34 one-line
-# edits in another lane's files to silence.  Gating on a floor the tree already
-# meets keeps this honest: it can only ever fire on something newly introduced.
+# `warning`, RAISED FROM `error` ON 2026-08-29, AND STILL NOT A RATCHET.  The
+# floor has always been the highest severity the tree already meets, so that
+# this stays a clean-tree test with no baseline file to drift and can only ever
+# fire on something newly introduced.  For two days that was `error`, because at
+# `warning` the tree had 44 findings -- 37 of them SC2209 on `DIFF_PROG=<name>`
+# in lane B's differential harnesses, where the tool cannot distinguish a bare
+# command name from a forgotten `$(...)`.  Lane B cleared all 44 (quoting them
+# rather than disabling the code, and fixing `diff-wsl.sh`'s copy-from template
+# so the backlog stops regrowing by one per new harness), so the floor moves up.
+#
+# THIS IS THE SEVERITY THE GATE WAS BUILT FOR.  `error` catches shell that will
+# not run; it does *not* catch an unquoted expansion that word-splits on a
+# space -- that is SC2086, a `warning`, and it is the exact class that escaped
+# the repository and created the stray `D:\visual` file described above.  Until
+# today the gate could not have caught its own founding incident.
+#
+# ONE TRAP FOR WHOEVER EDITS A COMMENT IN scripts/ NEXT, learned by lane B the
+# expensive way: a comment whose first word is `shellcheck` is parsed as a
+# *directive*, not prose.  One such line in `diff-wsl.sh` -- which all 50
+# harnesses source under `-x` -- failed to parse, and each dependant then
+# silently lost its `-x` suppressions and reported SC1094.  The count went from
+# 44 to 227 across 50 untouched files.  Keep the word off the start of a line.
 #
 # SKIPS, LOUDLY, WHEN THE TOOL IS ABSENT.  shellcheck is a third-party binary,
 # and hard-failing the kernel build in a lane that has not installed one would
@@ -3375,7 +3390,7 @@ check_shellcheck() {
     # failing assignment would abort the entire boot test before `rc` was ever
     # read -- taking the *skip* path (exit 2, shellcheck not installed) down
     # with it, which is the opposite of what the skip is for.
-    out="$(bash "$PROJECT_ROOT/scripts/shellcheck-all.sh" error 2>&1)" && rc=0 || rc=$?
+    out="$(bash "$PROJECT_ROOT/scripts/shellcheck-all.sh" warning 2>&1)" && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
         printf '%s\n' "$out" | tail -1
         return 0
@@ -3392,12 +3407,16 @@ check_shellcheck() {
 
     printf '%s\n' "$out" >&2
     echo "" >&2
-    echo "ERROR: refusing to build.  A script above has a shellcheck *error*," >&2
-    echo "not a style note -- the tree was at zero of these, so this one is" >&2
-    echo "newly introduced by the change in hand." >&2
+    echo "ERROR: refusing to build.  A script above has a shellcheck finding" >&2
+    echo "at severity *warning* or worse -- the tree was at zero of these, so" >&2
+    echo "this one is newly introduced by the change in hand." >&2
+    echo "" >&2
+    echo "'warning' is not a style level: it is where the unquoted expansion" >&2
+    echo "that word-splits on a space lives (SC2086), which is the class that" >&2
+    echo "once created a stray file named 'D:\\visual' on the operator's disk." >&2
     echo "" >&2
     echo "Reproduce and read the findings with:" >&2
-    echo "    bash scripts/shellcheck-all.sh error --full" >&2
+    echo "    bash scripts/shellcheck-all.sh warning --full" >&2
     echo "" >&2
     echo "Do not silence it with a blanket 'shellcheck disable' at the top of" >&2
     echo "the file.  If a finding is genuinely wrong, disable that one code on" >&2

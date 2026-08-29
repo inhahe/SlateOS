@@ -19722,6 +19722,177 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = Vfs::rmdir(dir);
     }
 
+    serial_println!(
+        "  kshell::self_test 97: the same guessed toggle in its other spelling, and four \
+         settings that reported the word instead of the flag"
+    );
+    // Rung 79 cleared the 21 sites written `matches!(word, "on" | "true" | …)`.
+    // The identical defect survived in a second spelling that grep for
+    // `matches!` never saw: `let on = parts[1] == "on" || parts[1] == "true";`,
+    // and its `if let Some(v) = parts.get(1)` and `unwrap_or("on") == "on"`
+    // relatives -- 35 more sites across 20 commands. An `||` chain of `==` has
+    // the same two outputs as `matches!` and the same missing third, so every
+    // word it could not read still became `false`.
+    //
+    // Two of them fail toward less protection, which is what makes this a
+    // continuation rather than a tidy-up: `vpn killswitch <id> 1` disabled the
+    // kill switch it was asked to enable, and `policyengine enforce 1` turned
+    // enforcement off, each printing the setting as applied and exiting 0.
+    //
+    // `taskbar config` held a compounding defect the others did not. It echoed
+    // `val` -- the word the user typed -- rather than the flag it stored, so
+    // `taskbar config names 1` printed `Show names: 1` while setting it to
+    // *no*, and the operand-less `taskbar config names` printed `Show names: `
+    // with nothing after the colon, having just turned names off. An output
+    // that quotes the input cannot disagree with it, so no amount of reading
+    // the transcript would have revealed the guess.
+    {
+        // The controls run against `taskbar config names` for the reason §604
+        // records: `taskbar::set_show_names` is a lock-and-assign with no
+        // `Result` and no subsystem init behind it, so a success assertion here
+        // cannot fail because a fresh boot has not initialised something.
+        let restore = crate::fs::taskbar::config().show_names;
+
+        let out = capture_command("taskbar config names on");
+        assert_output_contains("a toggle still sets", &out, b"Show names: yes");
+        assert_eq!(last_exit(), 0, "`taskbar config names on` succeeds");
+
+        let out = capture_command("taskbar config names off");
+        assert_output_contains("and still clears", &out, b"Show names: no");
+        assert_eq!(last_exit(), 0, "`taskbar config names off` succeeds");
+
+        // `1` was not in this site's vocabulary, so it used to mean off. The
+        // report is the point of the assertion as much as the setting is: it
+        // reads back the flag, so it can contradict the word that produced it.
+        let out = capture_command("taskbar config names 1");
+        assert_output_contains(
+            "`1' reaches the shared vocabulary here too",
+            &out,
+            b"Show names: yes",
+        );
+        assert_eq!(last_exit(), 0, "`taskbar config names 1` succeeds");
+        assert_output_lacks(
+            "and the report is the flag, not the word that was typed",
+            &out,
+            b"Show names: 1",
+        );
+
+        // Absence and unreadability are now different events with different
+        // messages. Neither used to be: both set the flag to false and printed
+        // a `Show names:` line confirming it.
+        let out = capture_command("taskbar config names");
+        assert_output_contains(
+            "an omitted toggle is reported as missing",
+            &out,
+            b"missing on or off",
+        );
+        assert_eq!(last_exit(), 1, "a bare `taskbar config names` errors");
+        assert_output_lacks(
+            "and nothing is reported set behind the refusal",
+            &out,
+            b"Show names:",
+        );
+
+        let out = capture_command("taskbar config names zzon");
+        assert_output_contains(
+            "and a misspelt one is named",
+            &out,
+            b"`zzon' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "`taskbar config names zzon` errors");
+        assert_output_lacks(
+            "and names are not switched off behind that refusal either",
+            &out,
+            b"Show names:",
+        );
+
+        // Leave the taskbar as this rung found it, so a later rung reading the
+        // config does not see a setting this one invented.
+        crate::fs::taskbar::set_show_names(restore);
+
+        // The three settings whose guessed `false` mattered most. As in rung 79
+        // these run against ids that do not exist: the refusal is emitted before
+        // the subsystem is called, so the assertion tests the word-reading
+        // without depending on state a fresh boot may lack.
+        let out = capture_command("vpn killswitch 999 zzon");
+        assert_output_contains(
+            "a VPN kill switch is not silently disabled",
+            &out,
+            b"`zzon' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable killswitch toggle errors");
+        assert_output_lacks("and no kill switch is reported set", &out, b"Kill switch");
+
+        let out = capture_command("policyengine enforce zzon");
+        assert_output_contains(
+            "policy enforcement is not silently disabled",
+            &out,
+            b"`zzon' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable enforce toggle errors");
+        assert_output_lacks("and enforcement is not reported set", &out, b"Enforcement:");
+
+        let out = capture_command("usbpolicy block zzon");
+        assert_output_contains(
+            "unknown USB devices are not silently unblocked",
+            &out,
+            b"`zzon' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable block toggle errors");
+        assert_output_lacks("and blocking is not reported set", &out, b"Block unknown:");
+
+        // An operand with a documented default for *absence* still refuses a
+        // word it cannot read -- `optional_toggle`'s whole reason to exist,
+        // asserted here against `installer user`, whose third and fourth
+        // operands are genuinely optional.
+        let out = capture_command("installer user 999 zzname zzyes");
+        assert_output_contains(
+            "a defaulted toggle still names the word it could not read",
+            &out,
+            b"`zzyes' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable optional toggle errors");
+        assert_output_lacks("and no user is reported created", &out, b"User:");
+
+        // `spatialaudio headtrack` read its operand with `unwrap_or("on")`, so
+        // the shortest way to ask what the setting was *enabled* it. Whatever
+        // this build reports for an uninitialised subsystem, the one thing it
+        // must no longer do is act.
+        let out = capture_command("spatialaudio headtrack");
+        assert_output_lacks(
+            "a bare query does not enable head tracking",
+            &out,
+            b"Head tracking enabled.",
+        );
+
+        // `location history <word>` entered its set arm only for the two exact
+        // words `on` and `off`; everything else fell through to the *listing*,
+        // so a request to start recording was answered with the last ten fixes.
+        let out = capture_command("location history zzon");
+        assert_output_contains(
+            "a word that is neither `clear' nor a toggle is named",
+            &out,
+            b"`zzon' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable history toggle errors");
+        assert_output_lacks(
+            "and the history listing is not printed in place of an answer",
+            &out,
+            b"No history recorded.",
+        );
+
+        // A typed preference is the one place the file already refused an
+        // unreadable *integer* while accepting any word at all as a boolean.
+        let out = capture_command("appdefaults set zzapp zzkey ture bool");
+        assert_output_contains(
+            "a bool-typed preference refuses a word like the int-typed one does",
+            &out,
+            b"`ture' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable bool preference errors");
+        assert_output_lacks("and nothing is reported stored", &out, b"Set zzapp.zzkey");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -36723,22 +36894,26 @@ fn cmd_wallpaper(args: &str) {
             }
         }
         "login" => {
-            let val = parts.get(1).copied().unwrap_or("");
-            if val == "on" || val == "true" || val == "yes" {
-                wallpaper::set_use_for_login(true);
-                shell_println!("Login screen uses desktop wallpaper");
-            } else if val == "off" || val == "false" || val == "no" {
-                wallpaper::set_use_for_login(false);
-                shell_println!("Login screen uses separate wallpaper");
-            } else {
-                shell_println!(
+            let Some(t) = toggle_arg(&parts, 1, "wallpaper", "login") else {
+                return;
+            };
+            match t {
+                Toggle::Set(true) => {
+                    wallpaper::set_use_for_login(true);
+                    shell_println!("Login screen uses desktop wallpaper");
+                }
+                Toggle::Set(false) => {
+                    wallpaper::set_use_for_login(false);
+                    shell_println!("Login screen uses separate wallpaper");
+                }
+                Toggle::Query => shell_println!(
                     "Login wallpaper: {}",
                     if wallpaper::use_for_login() {
                         "same"
                     } else {
                         "separate"
                     }
-                );
+                ),
             }
         }
         "monitor" => {
@@ -44880,6 +45055,39 @@ fn required_toggle(parts: &[&str], idx: usize, cmd: &str, sub: &str) -> Option<b
     Some(v)
 }
 
+/// The `on`/`off` operand of a setting that stands for a documented value when
+/// omitted — but which is still refused when a word *is* present and cannot be
+/// read.
+///
+/// [`optional_num`]'s boolean twin, and it exists for the same reason: absence
+/// and unreadability are different events that the `unwrap_or` idiom cannot tell
+/// apart. `installer user 1 alice` legitimately means "password login, no
+/// autologin" because two operands are missing; `installer user 1 alice ys`
+/// means the user typed something, and answering it with the default for
+/// *absence* is a guess dressed as a documented behaviour.
+///
+/// Distinct from [`toggle_arg`], which is for arms where absence means *report
+/// the current value*. Use this one only where the default is a real value the
+/// call is made with — a positional flag with a documented resting state — and
+/// `toggle_arg` wherever there is something to print instead.
+fn optional_toggle(
+    parts: &[&str],
+    idx: usize,
+    cmd: &str,
+    sub: &str,
+    default: bool,
+) -> Option<bool> {
+    let Some(word) = parts.get(idx) else {
+        return Some(default);
+    };
+    let Some(v) = toggle_word(word) else {
+        shell_println!("{}: {}: `{}' is not on or off", cmd, sub, word);
+        set_exit(1);
+        return None;
+    };
+    Some(v)
+}
+
 /// `fstune` — filesystem tuning profiles and parameters.
 fn cmd_fstune(args: &str) {
     use crate::fs::fstune;
@@ -45909,8 +46117,12 @@ fn cmd_installer(args: &str) {
                 return;
             };
             let name = parts.get(2).copied().unwrap_or("user");
-            let pass = parts.get(3).copied().unwrap_or("yes") == "yes";
-            let auto = parts.get(4).copied().unwrap_or("no") == "yes";
+            let Some(pass) = optional_toggle(&parts, 3, "installer", sub, true) else {
+                return;
+            };
+            let Some(auto) = optional_toggle(&parts, 4, "installer", sub, false) else {
+                return;
+            };
             match installer::set_user(id, name, pass, auto) {
                 Ok(()) => shell_println!("User: {}", name),
                 Err(e) => {
@@ -45964,7 +46176,9 @@ fn cmd_installer(args: &str) {
                 return;
             };
             let ssid = parts.get(2).copied().unwrap_or("");
-            let pass = parts.get(3).copied().unwrap_or("yes") == "yes";
+            let Some(pass) = optional_toggle(&parts, 3, "installer", sub, true) else {
+                return;
+            };
             match installer::set_wifi(id, ssid, pass) {
                 Ok(()) => shell_println!("Wifi: {}", ssid),
                 Err(e) => {
@@ -47330,7 +47544,9 @@ fn cmd_schedtune(args: &str) {
                         return;
                     }
                 };
-                let on = parts[2] == "on" || parts[2] == "true";
+                let Some(on) = required_toggle(parts, 2, "schedtune", "interactive") else {
+                    return;
+                };
                 match schedtune::set_interactive_boost(id, on) {
                     Ok(()) => {
                         shell_println!("Set interactive boost {}.", if on { "on" } else { "off" })
@@ -47430,7 +47646,9 @@ fn cmd_schedtune(args: &str) {
                         return;
                     }
                 };
-                let on = parts[2] == "on" || parts[2] == "true";
+                let Some(on) = required_toggle(parts, 2, "schedtune", "numa") else {
+                    return;
+                };
                 match schedtune::set_numa_aware(id, on) {
                     Ok(()) => shell_println!("Set NUMA-aware {}.", if on { "on" } else { "off" }),
                     Err(e) => {
@@ -47991,7 +48209,9 @@ fn cmd_mmtune(args: &str) {
                         return;
                     }
                 };
-                let on = parts[2] == "on" || parts[2] == "true";
+                let Some(on) = required_toggle(parts, 2, "mmtune", "zram") else {
+                    return;
+                };
                 match mmtune::set_zram_enabled(id, on) {
                     Ok(()) => shell_println!("Set ZRAM {}.", if on { "on" } else { "off" }),
                     Err(e) => {
@@ -48018,7 +48238,9 @@ fn cmd_mmtune(args: &str) {
                         return;
                     }
                 };
-                let on = parts[2] == "on" || parts[2] == "true";
+                let Some(on) = required_toggle(parts, 2, "mmtune", "zerofree") else {
+                    return;
+                };
                 match mmtune::set_zero_on_free(id, on) {
                     Ok(()) => shell_println!("Set zero-on-free {}.", if on { "on" } else { "off" }),
                     Err(e) => {
@@ -49040,7 +49262,9 @@ fn cmd_vpn(args: &str) {
                     return;
                 }
             };
-            let on = parts[2] == "on" || parts[2] == "true";
+            let Some(on) = required_toggle(&parts, 2, "vpn", "killswitch") else {
+                return;
+            };
             match vpn::set_kill_switch(id, on) {
                 Ok(()) => {
                     shell_println!("Kill switch {}.", if on { "enabled" } else { "disabled" })
@@ -49065,7 +49289,9 @@ fn cmd_vpn(args: &str) {
                     return;
                 }
             };
-            let on = parts[2] == "on" || parts[2] == "true";
+            let Some(on) = required_toggle(&parts, 2, "vpn", "routeall") else {
+                return;
+            };
             match vpn::set_route_all(id, on) {
                 Ok(()) => shell_println!(
                     "Route all traffic {}.",
@@ -49091,7 +49317,9 @@ fn cmd_vpn(args: &str) {
                     return;
                 }
             };
-            let on = parts[2] == "on" || parts[2] == "true";
+            let Some(on) = required_toggle(&parts, 2, "vpn", "autoconnect") else {
+                return;
+            };
             match vpn::set_auto_connect(id, on) {
                 Ok(()) => {
                     shell_println!("Auto-connect {}.", if on { "enabled" } else { "disabled" })
@@ -59634,19 +59862,27 @@ fn cmd_location(args: &str) {
                         set_exit(1);
                     }
                 }
-            } else if parts.len() > 1 && (parts[1] == "on" || parts[1] == "off") {
-                let on = parts[1] == "on";
-                match location::set_record_history(on) {
-                    Ok(()) => shell_println!(
-                        "History recording {}.",
-                        if on { "enabled" } else { "disabled" }
-                    ),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
             } else {
+                // The `on`/`off` arm used to be entered only by those two exact
+                // words, so every other word fell through to the listing below
+                // -- `location history yes` printed the last ten fixes and said
+                // nothing about the recording it had been asked to switch on.
+                let Some(t) = toggle_arg(&parts, 1, "location", "history") else {
+                    return;
+                };
+                if let Toggle::Set(on) = t {
+                    match location::set_record_history(on) {
+                        Ok(()) => shell_println!(
+                            "History recording {}.",
+                            if on { "enabled" } else { "disabled" }
+                        ),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
+                    }
+                    return;
+                }
                 let hist = location::get_history();
                 if hist.is_empty() {
                     shell_println!("No history recorded.");
@@ -62122,7 +62358,9 @@ fn cmd_gestures(args: &str) {
                 }
                 return;
             }
-            let on = parts[1] == "on" || parts[1] == "true" || parts[1] == "yes";
+            let Some(on) = required_toggle(&parts, 1, "gestures", "natural") else {
+                return;
+            };
             match gestures::set_natural_scroll(on) {
                 Ok(()) => shell_println!(
                     "Natural scroll {}.",
@@ -70372,12 +70610,9 @@ fn cmd_inputa11y(args: &str) {
             }
         }
         "sticky" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: ia11y sticky <on|off>");
-                set_exit(1);
+            let Some(on) = required_toggle(&parts, 1, "ia11y", "sticky") else {
                 return;
-            }
-            let on = parts[1] == "on" || parts[1] == "true";
+            };
             match inputa11y::set_sticky_keys(on) {
                 Ok(()) => {
                     shell_println!("Sticky keys {}.", if on { "enabled" } else { "disabled" })
@@ -70389,12 +70624,9 @@ fn cmd_inputa11y(args: &str) {
             }
         }
         "filter" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: ia11y filter <on|off>");
-                set_exit(1);
+            let Some(on) = required_toggle(&parts, 1, "ia11y", "filter") else {
                 return;
-            }
-            let on = parts[1] == "on" || parts[1] == "true";
+            };
             match inputa11y::set_filter_keys(on) {
                 Ok(()) => {
                     shell_println!("Filter keys {}.", if on { "enabled" } else { "disabled" })
@@ -70406,12 +70638,9 @@ fn cmd_inputa11y(args: &str) {
             }
         }
         "toggle" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: ia11y toggle <on|off>");
-                set_exit(1);
+            let Some(on) = required_toggle(&parts, 1, "ia11y", "toggle") else {
                 return;
-            }
-            let on = parts[1] == "on" || parts[1] == "true";
+            };
             match inputa11y::set_toggle_keys(on) {
                 Ok(()) => {
                     shell_println!("Toggle keys {}.", if on { "enabled" } else { "disabled" })
@@ -70423,20 +70652,28 @@ fn cmd_inputa11y(args: &str) {
             }
         }
         "mouse" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: ia11y mouse <on|off> [speed]");
-                set_exit(1);
+            let Some(on) = required_toggle(&parts, 1, "ia11y", "mouse") else {
                 return;
-            }
-            let on = parts[1] == "on" || parts[1] == "true";
+            };
             match inputa11y::set_mouse_keys(on) {
                 Ok(()) => {
                     shell_println!("Mouse keys {}.", if on { "enabled" } else { "disabled" });
+                    // The optional speed was read with `if let Ok(speed) = …`, so
+                    // `ia11y mouse on 4O` set mouse keys on and then said nothing
+                    // at all about the speed -- the one operand the user was
+                    // clearly trying to change, dropped in silence under a line
+                    // reporting success.
                     if on && parts.len() > 2 {
-                        if let Ok(speed) = parts[2].parse::<u32>() {
-                            inputa11y::set_mouse_speed(speed).ok();
-                            shell_println!("Mouse speed set to {}.", speed);
+                        let Some(speed) = required_num::<u32>(&parts, 2, "ia11y", "mouse", "speed")
+                        else {
+                            return;
+                        };
+                        if let Err(e) = inputa11y::set_mouse_speed(speed) {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                            return;
                         }
+                        shell_println!("Mouse speed set to {}.", speed);
                     }
                 }
                 Err(e) => {
@@ -70446,12 +70683,9 @@ fn cmd_inputa11y(args: &str) {
             }
         }
         "bounce" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: ia11y bounce <on|off>");
-                set_exit(1);
+            let Some(on) = required_toggle(&parts, 1, "ia11y", "bounce") else {
                 return;
-            }
-            let on = parts[1] == "on" || parts[1] == "true";
+            };
             match inputa11y::set_bounce_keys(on) {
                 Ok(()) => {
                     shell_println!("Bounce keys {}.", if on { "enabled" } else { "disabled" })
@@ -74503,7 +74737,9 @@ fn cmd_screenlock(args: &str) {
         }
         "option" => {
             let opt = parts.get(1).copied().unwrap_or("");
-            let val = parts.get(2).copied().unwrap_or("on") == "on";
+            let Some(val) = optional_toggle(&parts, 2, "slock", "option", true) else {
+                return;
+            };
             match screenlock::set_lock_screen_option(opt, val) {
                 Ok(()) => shell_println!("{} → {}", opt, if val { "on" } else { "off" }),
                 Err(e) => {
@@ -76279,9 +76515,15 @@ fn cmd_oobe(args: &str) {
             }
         }
         "privacy" => {
-            let diag = parts.get(1).copied().unwrap_or("off") == "on";
-            let loc = parts.get(2).copied().unwrap_or("off") == "on";
-            let upd = parts.get(3).copied().unwrap_or("on") == "on";
+            let Some(diag) = optional_toggle(&parts, 1, "oobe", sub, false) else {
+                return;
+            };
+            let Some(loc) = optional_toggle(&parts, 2, "oobe", sub, false) else {
+                return;
+            };
+            let Some(upd) = optional_toggle(&parts, 3, "oobe", sub, true) else {
+                return;
+            };
             match oobe::set_privacy(diag, loc, upd) {
                 Ok(()) => shell_println!(
                     "Diagnostics: {}, Location: {}, Auto-updates: {}",
@@ -82613,7 +82855,23 @@ fn cmd_spatialaudio(args: &str) {
             }
         }
         "headtrack" => {
-            let on = parts.get(1).copied().unwrap_or("on") == "on";
+            // `unwrap_or("on")` made the bare `spatialaudio headtrack` *enable*
+            // head tracking, so the shortest way to ask what a setting is set it
+            // instead -- and `headtrack yes` disabled it. `[on|off]` in the help
+            // means the query form the rest of the shell gives it.
+            let Some(t) = toggle_arg(&parts, 1, "spatialaudio", sub) else {
+                return;
+            };
+            let Toggle::Set(on) = t else {
+                match spatialaudio::get_config() {
+                    Some(cfg) => shell_println!("Head tracking: {}", cfg.head_tracking),
+                    None => {
+                        shell_println!("Not initialised.");
+                        set_exit(1);
+                    }
+                }
+                return;
+            };
             match spatialaudio::set_head_tracking(on) {
                 Ok(()) => {
                     shell_println!("Head tracking {}.", if on { "enabled" } else { "disabled" })
@@ -82625,7 +82883,19 @@ fn cmd_spatialaudio(args: &str) {
             }
         }
         "doppler" => {
-            let on = parts.get(1).copied().unwrap_or("on") == "on";
+            let Some(t) = toggle_arg(&parts, 1, "spatialaudio", sub) else {
+                return;
+            };
+            let Toggle::Set(on) = t else {
+                match spatialaudio::get_config() {
+                    Some(cfg) => shell_println!("Doppler: {}", cfg.doppler_effect),
+                    None => {
+                        shell_println!("Not initialised.");
+                        set_exit(1);
+                    }
+                }
+                return;
+            };
             match spatialaudio::set_doppler(on) {
                 Ok(()) => shell_println!(
                     "Doppler effect {}.",
@@ -84717,18 +84987,15 @@ fn cmd_usbpolicy(args: &str) {
             }
         }
         "block" => {
-            if let Some(v) = parts.get(1) {
-                let block = *v == "on" || *v == "true" || *v == "yes";
-                match usbpolicy::set_block_unknown(block) {
-                    Ok(()) => shell_println!("Block unknown: {}", if block { "ON" } else { "OFF" }),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(block) = required_toggle(&parts, 1, "usbpolicy", "block") else {
+                return;
+            };
+            match usbpolicy::set_block_unknown(block) {
+                Ok(()) => shell_println!("Block unknown: {}", if block { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: usbpolicy block <on|off>");
-                set_exit(1);
             }
         }
         "list" => {
@@ -85645,48 +85912,39 @@ fn cmd_touchscreen(args: &str) {
             }
         }
         "palm" => {
-            if let Some(v) = parts.get(1) {
-                let on = *v == "on" || *v == "true" || *v == "yes";
-                match touchscreen::set_palm_rejection(on) {
-                    Ok(()) => shell_println!("Palm rejection: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(on) = required_toggle(&parts, 1, "touchscreen", "palm") else {
+                return;
+            };
+            match touchscreen::set_palm_rejection(on) {
+                Ok(()) => shell_println!("Palm rejection: {}", if on { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: touchscreen palm <on|off>");
-                set_exit(1);
             }
         }
         "sound" => {
-            if let Some(v) = parts.get(1) {
-                let on = *v == "on" || *v == "true";
-                match touchscreen::set_touch_sound(on) {
-                    Ok(()) => shell_println!("Touch sound: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(on) = required_toggle(&parts, 1, "touchscreen", "sound") else {
+                return;
+            };
+            match touchscreen::set_touch_sound(on) {
+                Ok(()) => shell_println!("Touch sound: {}", if on { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: touchscreen sound <on|off>");
-                set_exit(1);
             }
         }
         "vibration" | "haptic" => {
-            if let Some(v) = parts.get(1) {
-                let on = *v == "on" || *v == "true";
-                match touchscreen::set_touch_vibration(on) {
-                    Ok(()) => shell_println!("Touch vibration: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(on) = required_toggle(&parts, 1, "touchscreen", "vibration") else {
+                return;
+            };
+            match touchscreen::set_touch_vibration(on) {
+                Ok(()) => shell_println!("Touch vibration: {}", if on { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: touchscreen vibration <on|off>");
-                set_exit(1);
             }
         }
         "gesture" => {
@@ -86169,7 +86427,15 @@ fn cmd_appdefaults(args: &str) {
                     }
                 }
                 "bool" | "b" => {
-                    let v = raw == "true" || raw == "yes" || raw == "1" || raw == "on";
+                    // The `int` branch just above refuses a word it cannot read;
+                    // this one stored `false` for it, so `appdefaults set x k
+                    // ture bool` recorded the opposite of the typo's intent and
+                    // reported `Set x.k = ture`.
+                    let Some(v) = toggle_word(raw) else {
+                        shell_println!("appdefaults: set: `{}' is not on or off", raw);
+                        set_exit(1);
+                        return;
+                    };
                     appdefaults::PrefValue::Bool(v)
                 }
                 "string" | "s" => appdefaults::PrefValue::Str(alloc::string::String::from(raw)),
@@ -86448,18 +86714,15 @@ fn cmd_policyengine(args: &str) {
             }
         }
         "enforce" => {
-            if let Some(v) = parts.get(1) {
-                let on = *v == "on" || *v == "true" || *v == "yes";
-                match policyengine::set_enforcement(on) {
-                    Ok(()) => shell_println!("Enforcement: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(on) = required_toggle(&parts, 1, "policyengine", "enforce") else {
+                return;
+            };
+            match policyengine::set_enforcement(on) {
+                Ok(()) => shell_println!("Enforcement: {}", if on { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: policyengine enforce <on|off>");
-                set_exit(1);
             }
         }
         "default" => {
@@ -87881,18 +88144,15 @@ fn cmd_colorblind(args: &str) {
             }
         }
         "simulate" => {
-            if let Some(v) = parts.get(1) {
-                let on = *v == "on" || *v == "true";
-                match colorblind::set_simulate(on) {
-                    Ok(()) => shell_println!("Simulation mode: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(on) = required_toggle(&parts, 1, "colorblind", "simulate") else {
+                return;
+            };
+            match colorblind::set_simulate(on) {
+                Ok(()) => shell_println!("Simulation mode: {}", if on { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: colorblind simulate <on|off>");
-                set_exit(1);
             }
         }
         "preset" => {
@@ -88276,13 +88536,14 @@ fn cmd_energysaver(args: &str) {
             }
         }
         "autoswitch" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: energysaver autoswitch <on|off> <threshold_%>");
-                set_exit(1);
+            let Some(enabled) = required_toggle(&parts, 1, "energysaver", "autoswitch") else {
                 return;
-            }
-            let enabled = parts[1] == "on";
-            let thresh: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            };
+            let Some(thresh) =
+                required_num::<u32>(&parts, 2, "energysaver", "autoswitch", "threshold percent")
+            else {
+                return;
+            };
             match energysaver::set_auto_switch(enabled, thresh) {
                 Ok(()) => shell_println!(
                     "Auto-switch: {} at {}%",
@@ -90367,7 +90628,9 @@ fn cmd_vpnprofile(args: &str) {
                     return;
                 }
             };
-            let enabled = parts[2] == "on";
+            let Some(enabled) = required_toggle(&parts, 2, "vpnprofile", "killswitch") else {
+                return;
+            };
             match vpnprofile::set_kill_switch(id, enabled) {
                 Ok(()) => shell_println!(
                     "Kill switch {} for profile {}",
@@ -104759,21 +105022,39 @@ fn cmd_taskbar(args: &str) {
                     taskbar::set_position(p);
                     shell_println!("Position: {}", val);
                 }
+                // These four echoed `val` -- the word the user typed -- rather
+                // than the flag that was stored, so `taskbar config names 1`
+                // printed `Show names: 1` while setting it to *no*, and the bare
+                // `taskbar config names` printed `Show names: ` (empty) having
+                // turned names off. The report now reads back the flag, in the
+                // same yes/no vocabulary the query arm above prints.
                 "names" => {
-                    taskbar::set_show_names(val == "on" || val == "yes" || val == "true");
-                    shell_println!("Show names: {}", val);
+                    let Some(on) = required_toggle(&parts, 2, "taskbar", key) else {
+                        return;
+                    };
+                    taskbar::set_show_names(on);
+                    shell_println!("Show names: {}", if on { "yes" } else { "no" });
                 }
                 "group" | "grouping" => {
-                    taskbar::set_grouping(val == "on" || val == "yes" || val == "true");
-                    shell_println!("Grouping: {}", val);
+                    let Some(on) = required_toggle(&parts, 2, "taskbar", key) else {
+                        return;
+                    };
+                    taskbar::set_grouping(on);
+                    shell_println!("Grouping: {}", if on { "yes" } else { "no" });
                 }
                 "autohide" | "auto-hide" => {
-                    taskbar::set_auto_hide(val == "on" || val == "yes" || val == "true");
-                    shell_println!("Auto-hide: {}", val);
+                    let Some(on) = required_toggle(&parts, 2, "taskbar", key) else {
+                        return;
+                    };
+                    taskbar::set_auto_hide(on);
+                    shell_println!("Auto-hide: {}", if on { "yes" } else { "no" });
                 }
                 "small" | "small-icons" => {
-                    taskbar::set_small_icons(val == "on" || val == "yes" || val == "true");
-                    shell_println!("Small icons: {}", val);
+                    let Some(on) = required_toggle(&parts, 2, "taskbar", key) else {
+                        return;
+                    };
+                    taskbar::set_small_icons(on);
+                    shell_println!("Small icons: {}", if on { "yes" } else { "no" });
                 }
                 _ => {
                     shell_println!("Unknown config key: {}", key);

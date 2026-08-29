@@ -73,7 +73,6 @@ cmd_dnssettings 1
 cmd_dpiscaling 3
 cmd_drvmon 2
 cmd_elog 5
-cmd_energysaver 1
 cmd_entropy 2
 cmd_envvars 2
 cmd_epollstat 4

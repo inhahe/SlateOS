@@ -108,16 +108,16 @@ NOT_GNU = {
 # Distinct from NOT_GNU, which is "we cannot compare this". These *could* be
 # compared; the point is that the table they would be compared against is the
 # wrong table.
-NOT_GETOPT = {
-    "tar": (
-        "GNU tar uses argp, not getopt_long: `tar --=x` lists 175 long options "
-        "including --usage/--program-name/--HANG, and its old option format "
-        "(`tar cvf x.tar`) cannot be expressed in getopt at all. A table here "
-        "would describe a parser we are not emulating, and this gate would "
-        "then demand all 175 entries. tar reads argv as bytes with its own "
-        "parser; see known-issues.md -> B-tar-READ-EVERY-PATH-AS-UTF-8."
-    ),
-}
+#
+# `tar` used to be here, on the reasoning that argp is not getopt_long and a
+# table would describe a parser we were not emulating. That reasoning was
+# wrong in its premise: argp *calls* getopt_long, so tar's long-option
+# behaviour -- abbreviation, ambiguity, the candidate list and its order -- is
+# glibc's, and is exactly what this gate compares. tar now carries the full
+# 172-entry table and is checked like everything else. (The one thing that
+# really is outside getopt is tar's dash-less "old option" form,
+# `tar cvf x.tar`, which this gate does not claim to cover either way.)
+NOT_GETOPT: dict[str, str] = {}
 
 # Bins whose source file is named something other than the program, because the
 # obvious name is taken. Checking these under `path.stem` would probe a command

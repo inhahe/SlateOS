@@ -20666,6 +20666,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_lacks("and no fill is reported", &out, b"Filled display");
     }
 
+    serial_println!(
+        "  kshell::self_test 103: the operand that was read as a number and then \
+         dropped in silence is refused -- a mistyped config id, session id, tile \
+         value or container quota is named, where before it printed nothing and \
+         exited 0"
+    );
     {
         // Rung 103 -- the operand dropped in *silence*, which is the third
         // shape of §600 and the worst of the three. The two shapes above both

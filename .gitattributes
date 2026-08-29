@@ -39,3 +39,28 @@
 # is exactly where an unmergeable 4.5 MB conflict is most expensive.
 *.md text eol=lf
 *.txt text eol=lf
+
+# The two append-only JSONL logs, for the third variety of the same problem.
+#
+# Every lane's boot test appends one record to `boot-history.jsonl`, and every
+# benchmark run one to `history.jsonl` -- always at end of file, never touching
+# an existing line. Two lanes running in the same window therefore append at the
+# same offset and git conflicts, on a machine-generated file that nobody should
+# ever be hand-editing. Lane B hit it three times in one session
+# (requests/b-a-boot-history-jsonl-conflicts-*).
+#
+# `merge=union` keeps both sides' lines instead of conflicting, which is always
+# the right resolution here: each line is an independent record and neither side
+# has modified the other's.
+#
+# It is only safe because the loaders sort. Union merge *concatenates* -- for a
+# conflicting hunk it emits ours then theirs -- so the merged file's last line
+# need not be the latest record, and both scripts read "most recent" out of file
+# position (`tail_clean_streak` walks backwards from the end;
+# `previous_for_host` returns `window[-1]`). `load_history` in each script now
+# sorts by timestamp, which makes file order carry no meaning at all; that sort
+# is load-bearing for these two lines and must not be "optimised away".
+# `scripts/test-boot-history.py` asserts the property directly: a shuffled file
+# must yield the same answers as a sorted one.
+bench/boot-history.jsonl merge=union
+bench/history.jsonl merge=union

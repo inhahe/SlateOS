@@ -34,6 +34,7 @@ import io
 import json
 import math
 import os
+import random
 import statistics
 import sys
 import tempfile
@@ -5782,6 +5783,173 @@ def test_no_unlabelled_run_in_the_window_is_hardware_virtualised(bh):
                                    bh.ACCEL_UNRECORDED)
     check("no run in the unlabelled window is hardware-virtualised",
           [r.get("timestamp") for r in window if virtualised(r)], [])
+
+
+# --------------------------------------------------------------------------
+# File order is not chronological order
+#
+# `bench/history.jsonl` is marked `merge=union` in `.gitattributes` so three
+# lanes appending concurrently stop conflicting. Union merge *concatenates* --
+# it emits our lines then theirs -- so the merged file's last line is not the
+# latest run, and `previous_for_host` reads "most recent" out of file position
+# (`window[-1]`). `load_history` sorts by `timestamp` to make position carry no
+# meaning; these tests are what stop that sort being read as cosmetic and
+# tidied away. Same defect and same fix as `boot-history.py`; the sibling
+# tests live in `test-boot-history.py`.
+# --------------------------------------------------------------------------
+
+
+def _dated_runs():
+    """Six comparable runs on one host/profile/accelerator, oldest first."""
+    return [
+        _accel_run(accel="tcg", commit=f"run{i}",
+                   when=f"2026-08-2{i}T00:00:00+00:00")
+        for i in range(6)
+    ]
+
+
+def _write_runs(tmpdir, name, records):
+    path = os.path.join(tmpdir, name)
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+    return path
+
+
+def test_a_union_merged_history_still_baselines_against_the_latest_run(bh,
+                                                                      tmpdir):
+    """The baseline must be the newest run, not the last line.
+
+    The order below is what `merge=union` actually produces: a common ancestor
+    (run0, run1), then *our* appends (run3, run5), then *theirs* (run2, run4).
+    Nothing is corrupt and nothing is missing -- the lines are simply not in
+    time order. Off by one record, every delta in the report is measured
+    against the wrong baseline, and a benchmark diff that is quietly wrong is
+    worse than one that fails: it is a regression or an improvement nobody can
+    reproduce.
+    """
+    chrono = _dated_runs()
+    merged = [chrono[0], chrono[1], chrono[3], chrono[5], chrono[2], chrono[4]]
+
+    def baseline(records):
+        prev = bh.previous_for_host(records, "H", "release", "tcg")
+        return prev and prev["commit"]
+
+    check("chronological order baselines against the newest run",
+          baseline(chrono), "run5")
+    # The fixture has to exercise the hazard: if a later edit made the merged
+    # order incidentally chronological, everything below would pass while
+    # testing nothing.
+    check("raw file order really does pick the wrong baseline (else this test "
+          "proves nothing)", baseline(merged), "run4")
+
+    check("a union-merged file loads in time order",
+          [r["commit"] for r in bh.load_history(
+              _write_runs(tmpdir, "merged.jsonl", merged))],
+          [r["commit"] for r in chrono])
+    check("...so the baseline is the same as the sorted file's",
+          baseline(bh.load_history(_write_runs(tmpdir, "m2.jsonl", merged))),
+          "run5")
+
+
+def test_any_shuffle_of_the_bench_history_picks_the_same_baseline(bh, tmpdir):
+    """The general form: file order must carry no information at all.
+
+    A sort that only handled the shapes union merge happens to produce would
+    pass the test above and fail here.
+    """
+    chrono = _dated_runs()
+    want = [r["commit"] for r in chrono]
+    rng = random.Random(20260829)  # Fixed seed: a flaky test proves nothing.
+    bad_order_seen = False
+    for i in range(50):
+        shuffled = chrono[:]
+        rng.shuffle(shuffled)
+        prev = bh.previous_for_host(shuffled, "H", "release", "tcg")
+        if prev["commit"] != "run5":
+            bad_order_seen = True
+        got = bh.load_history(_write_runs(tmpdir, f"s{i}.jsonl", shuffled))
+        if [r["commit"] for r in got] != want:
+            check(f"shuffle {i} restored to time order",
+                  [r["commit"] for r in got], want)
+            return
+    check("50 shuffles all load in time order", True, True)
+    check("at least one shuffle would have picked the wrong baseline unsorted",
+          bad_order_seen, True)
+
+
+def test_a_damaged_timestamp_sorts_early_instead_of_raising(bh, tmpdir):
+    """One bad record must not cost us the whole history.
+
+    Three shapes of damage, two different handlings:
+
+    * `timestamp: null` and a numeric timestamp are *records* -- everything
+      else about them is usable -- so they are kept, and sort first. That is
+      the safe direction: a record too damaged to place must not displace the
+      genuinely-latest one from the end. (Under a bare
+      `r.get("timestamp", "")` key they would instead raise TypeError
+      comparing None/int against str, and take out the entire history over one
+      line.)
+    * A line that is valid JSON but not an object is not a record at all. It
+      is dropped at the loader, because keeping it only defers the failure to
+      the first `record.get(...)` several frames away -- an AttributeError
+      naming neither the file nor the line.
+    """
+    chrono = _dated_runs()
+    damaged = [_accel_run(accel="tcg", commit="cnull", when=None),
+               _accel_run(accel="tcg", commit="cnum", when=17),
+               "not an object at all"]
+    # Written *last*, so a loader that failed to sort them would baseline the
+    # next run against one of them.
+    path = _write_runs(tmpdir, "damaged.jsonl", chrono + damaged)
+
+    got = bh.load_history(path)
+    check("the two datable-but-damaged records are kept, the non-object is not",
+          len(got), len(chrono) + 2)
+    check("nothing that is not a record survives the loader",
+          [r for r in got if not isinstance(r, dict)], [])
+    check("the damaged records sort to the front",
+          sorted(r["commit"] for r in got[:2]), ["cnull", "cnum"])
+    check("...leaving the datable runs in time order behind them",
+          [r["commit"] for r in got[2:]], [r["commit"] for r in chrono])
+    prev = bh.previous_for_host(got, "H", "release", "tcg")
+    check("and the baseline is still the newest datable run",
+          prev and prev["commit"], "run5")
+
+
+def test_the_real_bench_history_has_a_uniform_utc_offset(bh):
+    """`load_history` sorts `timestamp` as a string; that needs one offset.
+
+    Same-offset ISO-8601 sorts correctly lexicographically, and every record
+    ever written carries a literal `+00:00` because the writer hardcodes
+    `timezone.utc`. Mix in a `-04:00` and string order stops being time order
+    for the overlapping hours -- misplacing exactly the runs recorded around a
+    lane handover. Asserted against the *real* file, because the property is
+    about the writer and a fixture cannot notice a writer that changed.
+    """
+    path = bh.DEFAULT_HISTORY
+    check("the real bench history exists", os.path.exists(path), True)
+    if not os.path.exists(path):
+        return
+    offsets = set()
+    untyped = 0
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            stamp = record.get("timestamp") if isinstance(record, dict) else None
+            if isinstance(stamp, str):
+                offsets.add(stamp[-6:])
+            else:
+                untyped += 1
+    check("every real record's timestamp is a string", untyped, 0)
+    check("every real record's timestamp carries the same UTC offset",
+          offsets, {"+00:00"})
 
 
 def main():

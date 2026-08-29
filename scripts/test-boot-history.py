@@ -33,6 +33,7 @@ import importlib.util
 import inspect
 import json
 import os
+import random
 import sys
 import tempfile
 
@@ -1525,6 +1526,180 @@ def test_streaks_and_list_run_on_an_empty_history(bh, tmpdir):
                                                     "--streaks"]), 0)
     check("--list on an empty history", bh.main(["--history", hist,
                                                  "--list"]), 0)
+
+
+# --------------------------------------------------------------------------
+# File order is not chronological order
+#
+# `bench/boot-history.jsonl` is marked `merge=union` in `.gitattributes` so
+# three lanes appending concurrently stop conflicting. Union merge
+# *concatenates* -- for a conflicting hunk it emits our lines then theirs --
+# so the merged file's last line is not the latest boot. `load_history` sorts
+# by `ts` to make file position carry no meaning at all, and these two tests
+# are what stop that sort being "tidied away" by someone who reads it as
+# cosmetic. (Filed by lane B:
+# requests/b-a-boot-history-jsonl-conflicts-*.)
+# --------------------------------------------------------------------------
+
+
+def _streak_records(ts_suffix="+00:00"):
+    """Six boots whose *chronological* tail is three clean ones.
+
+    The WEDGE sits at t2 so that the clean tail (t3, t4, t5) is long enough to
+    be shortened by a reordering rather than merely permuted.
+    """
+    verdicts = ["PASS", "PASS", "WEDGE", "PASS", "PASS", "PASS"]
+    return [
+        {"ts": f"2026-08-2{i}T00:00:00{ts_suffix}", "verdict": v,
+         "commit": f"c{i:06d}", "label": "test"}
+        for i, v in enumerate(verdicts)
+    ]
+
+
+def _write_jsonl(path, records):
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        for rec in records:
+            fh.write(json.dumps(rec) + "\n")
+
+
+def test_union_merged_order_yields_the_same_streak_as_a_sorted_one(bh, tmpdir):
+    """A union-merged file must produce the streak the timestamps say.
+
+    The order below is exactly what `merge=union` produces from a real
+    concurrent session: a common ancestor (t0, t1), then *our* appends
+    (t3, t5), then *theirs* (t2, t4). Nothing is corrupt and nothing is
+    missing -- the lines are simply not in time order, which is the entire
+    hazard, because a wrong streak is a number that closes a live
+    `known-issues.md` entry and a merge conflict is not.
+    """
+    chrono = _streak_records()
+    merged = [chrono[0], chrono[1], chrono[3], chrono[5], chrono[2], chrono[4]]
+
+    sorted_path = os.path.join(tmpdir, "sorted.jsonl")
+    merged_path = os.path.join(tmpdir, "merged.jsonl")
+    _write_jsonl(sorted_path, chrono)
+    _write_jsonl(merged_path, merged)
+
+    want = bh.tail_clean_streak(bh.load_history(sorted_path))
+    check("the sorted file's streak is the three clean boots at the end",
+          want, 3)
+
+    # The fixture has to actually exercise the hazard. If a later edit made the
+    # union order incidentally chronological, every other assertion here would
+    # still pass while testing nothing -- so pin the wrong answer explicitly.
+    # Reading the merged file's *raw* order stops one record in, at t2's
+    # WEDGE, and reports a streak of 1 for a tree that has booted clean 3
+    # times running.
+    check("raw file order really does give the wrong answer (else this test "
+          "proves nothing)", bh.tail_clean_streak(merged), 1)
+
+    got = bh.load_history(merged_path)
+    check("load_history returns union-merged records in time order",
+          [r["commit"] for r in got], [r["commit"] for r in chrono])
+    check("and so the streak is the same as the sorted file's",
+          bh.tail_clean_streak(got), want)
+
+
+def test_any_shuffle_of_the_history_gives_the_same_streak(bh, tmpdir):
+    """The stronger form: order must carry no information at all.
+
+    The union-merge test above pins one specific reordering. This one asserts
+    the general property, over many random permutations, so that a partial fix
+    -- a sort that only handles the shapes union merge happens to produce --
+    fails here.
+    """
+    chrono = _streak_records()
+    want_commits = [r["commit"] for r in chrono]
+    rng = random.Random(20260829)  # Fixed seed: a flaky test proves nothing.
+    bad_order_seen = False
+    for i in range(50):
+        shuffled = chrono[:]
+        rng.shuffle(shuffled)
+        if bh.tail_clean_streak(shuffled) != 3:
+            bad_order_seen = True
+        path = os.path.join(tmpdir, f"shuffled{i}.jsonl")
+        _write_jsonl(path, shuffled)
+        got = bh.load_history(path)
+        if [r["commit"] for r in got] != want_commits:
+            check(f"shuffle {i} restored to time order", got, chrono)
+            return
+        if bh.tail_clean_streak(got) != 3:
+            check(f"shuffle {i} gives the chronological streak",
+                  bh.tail_clean_streak(got), 3)
+            return
+    check("50 shuffles all load in time order with streak 3", True, True)
+    check_true("at least one shuffle would have given the wrong streak "
+               "unsorted", bad_order_seen)
+
+
+def test_a_damaged_ts_sorts_early_instead_of_raising(bh, tmpdir):
+    """One bad record must not cost us the whole history.
+
+    `ts: null` and a numeric `ts` both compare-fail against `str` under a bare
+    `r.get("ts", "")` key, and the resulting TypeError would escape
+    `load_history` -- defeating the per-line recovery the loader is built
+    around, and taking out `--streaks` entirely over a single damaged line.
+    They sort first instead: the safe direction, since a record too damaged to
+    place must not be able to displace the genuinely-latest one from the end.
+    """
+    chrono = _streak_records()
+    damaged = [{"ts": None, "verdict": "WEDGE", "commit": "cnull"},
+               {"ts": 17, "verdict": "WEDGE", "commit": "cnum"},
+               {"verdict": "WEDGE", "commit": "cmissing"}]
+    path = os.path.join(tmpdir, "damaged.jsonl")
+    # Written *last* in the file, so a loader that failed to sort them would
+    # end its walk on them and report a zero streak. The bare string is a
+    # separate case: valid JSON, but not a record, so the loader drops it
+    # rather than handing a caller something with no `.get`.
+    _write_jsonl(path, chrono + damaged + ["not an object at all"])
+
+    got = bh.load_history(path)
+    check("the damaged records are kept, the non-object is not",
+          len(got), len(chrono) + len(damaged))
+    check("nothing that is not a record survives the loader",
+          [r for r in got if not isinstance(r, dict)], [])
+    check("the damaged records sort to the front",
+          sorted(r["commit"] for r in got[:3]), ["cmissing", "cnull", "cnum"])
+    check("...leaving the datable records in time order behind them",
+          [r["commit"] for r in got[3:]], [r["commit"] for r in chrono])
+    check("and the streak is unaffected by them", bh.tail_clean_streak(got), 3)
+
+
+def test_the_real_history_has_a_uniform_utc_offset(bh):
+    """`load_history` sorts `ts` as a string; that needs one offset, not two.
+
+    Same-offset ISO-8601 sorts correctly lexicographically -- `_now_iso()`
+    hardcodes `timezone.utc`, so every record ever written carries a literal
+    `+00:00`. Mix in a `-04:00` and string order stops being time order for
+    the overlapping hours, which would misplace exactly the records written
+    around a lane handover. Asserted against the *real* file rather than a
+    fixture, because the property being guarded is about the writer, and a
+    fixture cannot notice a writer that changed.
+    """
+    path = bh.DEFAULT_HISTORY
+    check_true(f"the real history exists at {bh.display_path(path)}",
+               os.path.exists(path))
+    if not os.path.exists(path):
+        return
+    offsets = set()
+    untyped = 0
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = rec.get("ts") if isinstance(rec, dict) else None
+            if isinstance(ts, str):
+                offsets.add(ts[-6:])
+            else:
+                untyped += 1
+    check("every real record's ts is a string", untyped, 0)
+    check("every real record's ts carries the same UTC offset",
+          offsets, {"+00:00"})
 
 
 def main():

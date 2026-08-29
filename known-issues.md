@@ -95216,6 +95216,13 @@ and checking that it agreed. The fifth (D4) was found by writing that check
 down as a fixture *before* trusting the zero. The fixture is the cheaper method
 and the only one that keeps working.
 
+The first row is now **closed** (2026-08-29): §630's missing-tool arm was the
+only blindness in the table that was *designed in on purpose*, and its stated
+reversal trigger — all three lanes confirmed to have the binary — was verified
+and acted on the same day. `check_shellcheck` now exits 1 rather than returning
+0 when the tool is absent, so a removed binary stops the build instead of
+quietly restoring the blindness.
+
 **Two things this leaves.** D4 does not reach `container create`'s `cpu=`/
 `mem=` options, whose word comes from `strip_prefix` inside a loop rather than
 from `parts.get`, so there is no positional nesting and no soleness test to
@@ -95224,3 +95231,41 @@ And `${x:1:abc}` expands to the rest of the string where bash gives the empty
 string — a compatibility divergence noticed while reading the 17, not fixed
 here because it needs bash's arithmetic-context rules rather than a guess at
 them.
+
+### A sixth blindness, in the rung rather than the gate — and this one is not fixable by a gate
+
+The boot that verified this batch passed, and rung 103's six assertions all
+ran and all held. But the rung was **invisible in the log**: the block was
+committed with no `serial_println!` banner, so the serial output went straight
+from rung 102 to `kshell::self_test PASSED`. Deleting the entire rung would
+have left the log byte-identical.
+
+That is the same shape as the defect the rung was written to pin, one level up.
+The batch-39 bug was a command that did its work and said nothing; this was a
+*test* that did its work and said nothing. In both cases the thing that was
+supposed to make an event observable was the thing that was missing, and in
+both cases the surviving evidence — exit 0, `PASSED` — was indistinguishable
+from success.
+
+**It is not statically detectable, and the attempt is documented so nobody
+repeats it.** The obvious rule — every top-level brace-block containing
+assertions must be preceded by a banner — cannot be written, because a sibling
+rung missing its banner and a legitimate *scoping* sub-block are the same
+syntax. `self_test` has two real scoping blocks (one saves and restores
+`KSHELL_SELFTEST_VAR`, one shadows a `PrintfSpec`), and nothing separates them
+from an unbannered rung without reading intent. Numbering does not help either:
+with no banner at all, the numbering stayed a clean contiguous 1..102.
+
+So what was gated is the invariant that *is* mechanical, and it starts at zero:
+`scripts/check-selftest-rung-numbers.py` requires the banner numbers to be
+unique, contiguous from 1, and in file order — 103 rungs, 1..103, clean. Its
+value is a different failure that is likelier than this one and equally
+invisible: **two batches taking the same next-free number against the same
+tip.** Both compile, both run, both pass, and a report naming "rung 103" then
+points at either — the reference that was supposed to locate a failure is what
+makes it ambiguous. Only a reading of all 103 banners finds that.
+
+For the unbannered rung itself the mitigation is not a gate but a habit: after
+adding a rung, **read the boot's serial output and confirm the new banner is
+there.** This one was caught that way — by checking the log for rung 103 before
+pushing, rather than by trusting that a green boot meant the rung had run.

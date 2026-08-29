@@ -5,6 +5,12 @@ edition = "2024"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The app drew a sudoku and answered arrow keys for its whole life without ever
+# depending on the window system, so there was nothing for a player to click:
+# `main` generated a puzzle and dropped it. `oswindow` is what makes the
+# difference between a simulation and a program.
+oswindow = { path = "../../gui/window" }
+randrange = { path = "../../randrange" }
 
 [lints]
 workspace = true

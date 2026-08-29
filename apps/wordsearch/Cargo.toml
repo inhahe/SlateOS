@@ -2,10 +2,17 @@
 name = "wordsearch"
 version = "0.1.0"
 edition = "2024"
+description = "SlateOS Word Search — find hidden words in a grid of letters"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
 randrange = { path = "../../randrange" }
+# The window. Without it `main` built a `WordSearchApp`, bound it to `_app` and
+# returned — so no board ever reached a screen and no event ever arrived. That
+# is how a word-search game could ship with no `Event::Mouse` arm anywhere in
+# the file, a clock field that nothing incremented, and a `format_time` that
+# four tests covered and the header did not call.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

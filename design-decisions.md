@@ -49934,6 +49934,22 @@ written to remove. A heading that starts with a number but parses as neither
 style is rejected rather than skipped, for the same reason: a heading the gate
 cannot number is invisible to every check in it.
 
+**Amended 2026-08-29, the day after: the high-water mark is taken over what was
+already *established*, not over every heading in the band.** As first written,
+the no-backfill rule compared a new section against every other section in its
+band — including other sections new in the same change. That made a change that
+adds *two* sections to one band impossible to write correctly: the earlier and
+lower of the pair is always "below" the later and higher one, so it was reported
+as backfilling. This was not a hypothetical shape and it fired the first time it
+arose, on §631 and §632 (the pair being: this entry, and the one for a
+`printf` batch that settled a second question the same afternoon). One batch of
+work can settle two questions. The comparison is now against the baseline plus
+any new heading standing *above* this one in the file, which loses nothing —
+numbers still only ever go up, both against history and down the page, so a run
+of new sections must still be written lowest-first, and a new number below a
+*spent* one is still rejected wherever in the file that spent one sits. Three
+tests pin the three cases.
+
 **What it does not do.** It does not check that a section's *content* belongs
 to the lane that claims it, and it cannot: `**Lane:**` is self-declared. Its
 value is that a lane writing into another's band now produces a one-line
@@ -49941,7 +49957,7 @@ contradiction in the diff instead of a silent collision six weeks later.
 
 **Where it lives:** `scripts/check-design-decisions-bands.py`,
 `scripts/design-decisions-baseline.json`,
-`scripts/test-check-design-decisions-bands.py` (35 assertions), wired as
+`scripts/test-check-design-decisions-bands.py` (38 assertions), wired as
 `check_design_decisions_bands` in `scripts/boot-test.sh` immediately after
 `check_python_suites`. Fulfils
 `requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`.

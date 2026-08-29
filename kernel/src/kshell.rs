@@ -42337,18 +42337,27 @@ fn cmd_kbsettings(args: &str) {
             }
         },
         "override" => {
-            let kc = parts
-                .get(1)
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or(0);
-            let delay = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let rate = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // The keycode names which key is being overridden, and
+            // `add_override` *replaces* any existing entry with the same code
+            // -- so a guessed 0 did not just target the wrong key, it
+            // destroyed whatever override key 0 already had, and reported
+            // success.  There is no default for "which key", so it is
+            // required.
+            let Some(kc) = required_num::<u16>(&parts, 1, "kbsettings", sub, "keycode") else {
+                return;
+            };
+            // Delay and rate are stored verbatim, and 0 is a meaningful value
+            // ("no delay"), so an omission keeps meaning 0; only an unreadable
+            // word is refused, since it would otherwise become that same 0 and
+            // be indistinguishable from having been asked for.
+            let Some(delay) = optional_num::<u32>(&parts, 2, "kbsettings", sub, "delay in ms", 0)
+            else {
+                return;
+            };
+            let Some(rate) = optional_num::<u32>(&parts, 3, "kbsettings", sub, "rate in ms", 0)
+            else {
+                return;
+            };
             let no_rep = parts.get(4).copied() == Some("norepeat");
             match kbsettings::add_override(kc, delay, rate, no_rep) {
                 Ok(()) => shell_println!(
@@ -42365,10 +42374,12 @@ fn cmd_kbsettings(args: &str) {
             }
         }
         "rmoverride" => {
-            let kc = parts
-                .get(1)
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or(0);
+            // Removal, so the guess was destructive in the same way `override`
+            // was constructive: `kbs rmoverride 1E` removed key 0's override
+            // and said so, naming a key the caller never typed.
+            let Some(kc) = required_num::<u16>(&parts, 1, "kbsettings", sub, "keycode") else {
+                return;
+            };
             match kbsettings::remove_override(kc) {
                 Ok(()) => shell_println!("Removed override for 0x{:02x}", kc),
                 Err(e) => {
@@ -57723,7 +57734,14 @@ fn cmd_defaultapps(args: &str) {
         }
         "get" => {
             if let Some(mime) = parts.get(1) {
-                let uid: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                // `[uid]` is documented optional and 0 means the system-wide
+                // default, so an omission keeps meaning that.  An unreadable
+                // one must not: 0 is a *security principal* -- root -- so
+                // `defaultapps rm text/html 100O` would have removed root's
+                // default rather than uid 1000's, and said it had succeeded.
+                let Some(uid) = optional_num::<u32>(&parts, 2, "defaultapps", sub, "uid", 0) else {
+                    return;
+                };
                 match defaultapps::default_for_type(mime, uid) {
                     Some(app) => shell_println!("{} → {}", mime, app),
                     None => shell_println!("No default for '{}'", mime),
@@ -57738,7 +57756,12 @@ fn cmd_defaultapps(args: &str) {
             if parts.len() >= 3 {
                 let mime = parts[1];
                 let app = parts[2];
-                let uid: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+                // Same as the `get(2)` arms above: absent still means the
+                // system-wide default, but a mistyped uid is refused rather
+                // than silently resolving to root.
+                let Some(uid) = optional_num::<u32>(&parts, 3, "defaultapps", sub, "uid", 0) else {
+                    return;
+                };
                 match defaultapps::set_default(mime, app, uid) {
                     Ok(()) => shell_println!("{} → {}", mime, app),
                     Err(e) => {
@@ -57753,7 +57776,14 @@ fn cmd_defaultapps(args: &str) {
         }
         "rm" | "remove" => {
             if let Some(mime) = parts.get(1) {
-                let uid: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                // `[uid]` is documented optional and 0 means the system-wide
+                // default, so an omission keeps meaning that.  An unreadable
+                // one must not: 0 is a *security principal* -- root -- so
+                // `defaultapps rm text/html 100O` would have removed root's
+                // default rather than uid 1000's, and said it had succeeded.
+                let Some(uid) = optional_num::<u32>(&parts, 2, "defaultapps", sub, "uid", 0) else {
+                    return;
+                };
                 match defaultapps::remove_default(mime, uid) {
                     Ok(()) => shell_println!("Removed default for '{}'", mime),
                     Err(e) => {
@@ -57771,7 +57801,12 @@ fn cmd_defaultapps(args: &str) {
             if parts.len() >= 3 {
                 let cat_name = parts[1];
                 let app = parts[2];
-                let uid: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+                // Same as the `get(2)` arms above: absent still means the
+                // system-wide default, but a mistyped uid is refused rather
+                // than silently resolving to root.
+                let Some(uid) = optional_num::<u32>(&parts, 3, "defaultapps", sub, "uid", 0) else {
+                    return;
+                };
                 let cat = match cat_name {
                     "browser" | "web" => Some(defaultapps::AppCategory::WebBrowser),
                     "email" | "mail" => Some(defaultapps::AppCategory::EmailClient),
@@ -67063,17 +67098,37 @@ fn cmd_upnp(args: &str) {
                     return;
                 }
             };
-            let int_port: u16 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            // The internal port is required and was already effectively
+            // refused, but again only by colliding with 0 and being caught by
+            // a guard that says "Invalid port" without saying which one.
+            let Some(int_port) = required_num::<u16>(&parts, 2, "upnp", sub, "internal port")
+            else {
+                return;
+            };
             if int_port == 0 {
                 shell_println!("Invalid port");
                 set_exit(1);
                 return;
             }
-            let ext_port: u16 = parts
-                .get(3)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(int_port);
-            let lifetime: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(3600);
+            // `[ext_port]` is optional and its default is *the other operand*
+            // -- absent genuinely means "same as internal", so that stays.
+            // Unreadable must not: this arm opens a port through the router,
+            // and `upnp add tcp 8080 808O` would have opened 8080 externally
+            // while the caller believed they had asked for 8080→8080 anyway,
+            // making the two cases indistinguishable in the success line.
+            let Some(ext_port) =
+                optional_num::<u16>(&parts, 3, "upnp", sub, "external port", int_port)
+            else {
+                return;
+            };
+            // `[lifetime]` -- absent keeps the one-hour default; a mistyped
+            // one no longer silently becomes an hour, which for a hole in the
+            // firewall is the difference the caller most needs to be sure of.
+            let Some(lifetime) =
+                optional_num::<u32>(&parts, 4, "upnp", sub, "lifetime in seconds", 3600)
+            else {
+                return;
+            };
             let desc = parts.get(5..).map(|s| s.join(" ")).unwrap_or_default();
             let desc = if desc.is_empty() {
                 String::from("kshell")
@@ -67108,7 +67163,13 @@ fn cmd_upnp(args: &str) {
                     return;
                 }
             };
-            let port: u16 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            // Unlike `add`, this arm had no guard at all behind the guess, so
+            // a mistyped port fell through to port 0 and the shell reported
+            // "No mapping found for tcp port 0" -- a confident, specific,
+            // entirely invented answer to a question nobody asked.
+            let Some(port) = required_num::<u16>(&parts, 2, "upnp", sub, "port") else {
+                return;
+            };
             if upnp::remove_mapping(proto, port) {
                 shell_println!("Removed mapping for {} port {}", proto.label(), port);
             } else {
@@ -68676,7 +68737,16 @@ fn cmd_netsyslog(args: &str) {
                     return;
                 }
             };
-            let port: u16 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(514);
+            // `[port]` is documented optional, so an omission still means the
+            // syslog well-known port 514.  Note what the guess did to the arm
+            // beside it: the *address* was parsed and refused when malformed,
+            // then the port next to it was silently rewritten to 514 and the
+            // confirmation line printed that 514 back as though it had been
+            // asked for -- so the one operand the caller could check against
+            // the output was the one that had been invented.
+            let Some(port) = optional_num::<u16>(&parts, 2, "netsyslog", sub, "port", 514) else {
+                return;
+            };
             syslog::set_remote_server(ip, port);
             shell_println!("Forwarding logs to {}:{}", ip, port);
         }
@@ -68702,7 +68772,16 @@ fn cmd_netsyslog(args: &str) {
                     return;
                 }
             };
-            let port: u16 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(514);
+            // `[port]` is documented optional, so an omission still means the
+            // syslog well-known port 514.  Note what the guess did to the arm
+            // beside it: the *address* was parsed and refused when malformed,
+            // then the port next to it was silently rewritten to 514 and the
+            // confirmation line printed that 514 back as though it had been
+            // asked for -- so the one operand the caller could check against
+            // the output was the one that had been invented.
+            let Some(port) = optional_num::<u16>(&parts, 2, "netsyslog", sub, "port", 514) else {
+                return;
+            };
             syslog::set_remote_server_v6(ip, port);
             shell_println!("Forwarding logs to [{}]:{}", ip, port);
         }
@@ -68718,7 +68797,14 @@ fn cmd_netsyslog(args: &str) {
             shell_println!("Sent: {}", message);
         }
         "recent" | "messages" | "log" => {
-            let count: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(20);
+            // A limit on how much of the buffer is shown: absent still means
+            // 20, but an unreadable one must not, because a truncated log
+            // reads exactly like a short one.
+            let Some(count) =
+                optional_num::<usize>(&parts, 1, "netsyslog", sub, "message count", 20)
+            else {
+                return;
+            };
             let messages = syslog::recent_messages(count);
             if messages.is_empty() {
                 shell_println!("No messages in buffer");
@@ -68755,7 +68841,15 @@ fn cmd_netsyslog(args: &str) {
             if port_str.is_empty() {
                 shell_println!("Listen port: {}", syslog::stats().listen_port);
             } else {
-                let port: u16 = port_str.parse().unwrap_or(0);
+                // This arm *did* reject the guess -- but only by making the
+                // unreadable word collide with 0 and then rejecting 0.  The
+                // two are different mistakes and deserve different messages,
+                // and the collision was luck: it worked here because 0 is not
+                // a legal listen port, and would have silently accepted the
+                // typo for any operand whose default was a legal value.
+                let Some(port) = readable_num::<u16>(port_str, "netsyslog", sub, "port") else {
+                    return;
+                };
                 if port == 0 {
                     shell_println!("Invalid port");
                     set_exit(1);
@@ -75616,33 +75710,35 @@ fn cmd_webcam(args: &str) {
             }
         }
         "open" => {
-            let cam_id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // The camera id was guessed as `0` and `0` was then reused as the
+            // sentinel for "absent", so `cam open zzz` and `cam open` printed
+            // the same usage line -- a typo reported as a missing operand --
+            // and camera 0 was unreachable however it was spelled.  The usage
+            // line calls it `<cam_id>`, so it is required.
+            let Some(cam_id) = required_num::<u32>(&parts, 1, "cam", sub, "camera id") else {
+                return;
+            };
             let app = parts.get(2).copied().unwrap_or("kshell");
-            let w = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1280);
-            let h = parts
-                .get(4)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(720);
-            let fps = parts
-                .get(5)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(30);
-            if cam_id == 0 {
-                shell_println!("Usage: cam open <cam_id> [app] [width] [height] [fps]");
-                set_exit(1);
-            } else {
-                match webcam::open_stream(cam_id, app, 0, w, h, fps) {
-                    Ok(sid) => shell_println!("Opened stream {} on camera {}", sid, cam_id),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            // Width, height and frame rate are documented `[optional]`, so an
+            // absent one keeps its default; an unreadable one is refused
+            // rather than silently becoming that default.  Guessing here is
+            // not harmless: `cam open 1 vid 128O 720 30` would have opened a
+            // 1280-wide stream and reported success, and the only evidence of
+            // the typo would be a resolution the caller did not ask for.
+            let Some(w) = optional_num::<u32>(&parts, 3, "cam", sub, "width", 1280) else {
+                return;
+            };
+            let Some(h) = optional_num::<u32>(&parts, 4, "cam", sub, "height", 720) else {
+                return;
+            };
+            let Some(fps) = optional_num::<u32>(&parts, 5, "cam", sub, "frame rate", 30) else {
+                return;
+            };
+            match webcam::open_stream(cam_id, app, 0, w, h, fps) {
+                Ok(sid) => shell_println!("Opened stream {} on camera {}", sid, cam_id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -78316,13 +78412,13 @@ fn cmd_hdrdisplay(args: &str) {
             }
         }
         "enable" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid display ID");
-                    set_exit(1);
-                    return;
-                }
+            // The usage line writes this `<id>`, so it is required.  An
+            // omitted or mistyped one used to be guessed as display 1, which
+            // is a real display rather than a spare number, so every typo
+            // silently acted on #1 and reported that it had done so.
+            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id")
+            else {
+                return;
             };
             let std = match parts.get(2).copied().unwrap_or("hdr10") {
                 "hdr10plus" | "hdr10+" => hdrdisplay::HdrStandard::Hdr10Plus,
@@ -78339,13 +78435,13 @@ fn cmd_hdrdisplay(args: &str) {
             }
         }
         "disable" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid display ID");
-                    set_exit(1);
-                    return;
-                }
+            // The usage line writes this `<id>`, so it is required.  An
+            // omitted or mistyped one used to be guessed as display 1, which
+            // is a real display rather than a spare number, so every typo
+            // silently acted on #1 and reported that it had done so.
+            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id")
+            else {
+                return;
             };
             match hdrdisplay::disable_hdr(id) {
                 Ok(()) => shell_println!("HDR disabled on display #{}", id),
@@ -78356,13 +78452,13 @@ fn cmd_hdrdisplay(args: &str) {
             }
         }
         "tonemap" | "tm" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid display ID");
-                    set_exit(1);
-                    return;
-                }
+            // The usage line writes this `<id>`, so it is required.  An
+            // omitted or mistyped one used to be guessed as display 1, which
+            // is a real display rather than a spare number, so every typo
+            // silently acted on #1 and reported that it had done so.
+            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id")
+            else {
+                return;
             };
             let tm = match parts.get(2).copied().unwrap_or("auto") {
                 "aces" | "filmic" => hdrdisplay::ToneMapping::AcesFilmic,
@@ -78380,13 +78476,13 @@ fn cmd_hdrdisplay(args: &str) {
             }
         }
         "sdrboost" | "boost" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid display ID");
-                    set_exit(1);
-                    return;
-                }
+            // The usage line writes this `<id>`, so it is required.  An
+            // omitted or mistyped one used to be guessed as display 1, which
+            // is a real display rather than a spare number, so every typo
+            // silently acted on #1 and reported that it had done so.
+            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id")
+            else {
+                return;
             };
             let boost: u32 = parts.get(2).unwrap_or(&"50").parse().unwrap_or(50);
             match hdrdisplay::set_sdr_boost(id, boost) {
@@ -78398,13 +78494,13 @@ fn cmd_hdrdisplay(args: &str) {
             }
         }
         "colorspace" | "cs" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid display ID");
-                    set_exit(1);
-                    return;
-                }
+            // The usage line writes this `<id>`, so it is required.  An
+            // omitted or mistyped one used to be guessed as display 1, which
+            // is a real display rather than a spare number, so every typo
+            // silently acted on #1 and reported that it had done so.
+            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id")
+            else {
+                return;
             };
             let cs = match parts.get(2).copied().unwrap_or("srgb") {
                 "bt2020" | "2020" => hdrdisplay::ColorSpace::Bt2020,
@@ -79451,13 +79547,13 @@ fn cmd_dpiscaling(args: &str) {
             }
         }
         "set" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid display ID");
-                    set_exit(1);
-                    return;
-                }
+            // The usage line writes this `<id>`, so it is required.  An
+            // omitted or mistyped one used to be guessed as display 1, which
+            // is a real display rather than a spare number, so every typo
+            // silently acted on #1 and reported that it had done so.
+            let Some(id) = required_num::<u32>(&parts, 1, "dpiscaling", sub, "display id")
+            else {
+                return;
             };
             let pct: u32 = parts.get(2).unwrap_or(&"100").parse().unwrap_or(100);
             match dpiscaling::set_scale(id, pct) {
@@ -79469,13 +79565,13 @@ fn cmd_dpiscaling(args: &str) {
             }
         }
         "method" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid display ID");
-                    set_exit(1);
-                    return;
-                }
+            // The usage line writes this `<id>`, so it is required.  An
+            // omitted or mistyped one used to be guessed as display 1, which
+            // is a real display rather than a spare number, so every typo
+            // silently acted on #1 and reported that it had done so.
+            let Some(id) = required_num::<u32>(&parts, 1, "dpiscaling", sub, "display id")
+            else {
+                return;
             };
             let m = match parts.get(2).copied().unwrap_or("fractional") {
                 "integer" | "int" => dpiscaling::ScalingMethod::Integer,
@@ -80077,8 +80173,20 @@ fn cmd_displayarrange(args: &str) {
         }
         "add" => {
             let name = parts.get(1).copied().unwrap_or("Monitor");
-            let w: u32 = parts.get(2).unwrap_or(&"1920").parse().unwrap_or(1920);
-            let h: u32 = parts.get(3).unwrap_or(&"1080").parse().unwrap_or(1080);
+            // The double-guess shape: the default was written twice, once for
+            // "absent" and once for "unreadable", so the two cases could never
+            // be told apart even in principle.  The usage line documents these
+            // `[w] [h]`, so absent keeps its default and only the typo is
+            // refused -- `darr add HDMI 192O 1080` no longer adds a
+            // 1920-wide display and reports it as the one that was asked for.
+            let Some(w) = optional_num::<u32>(&parts, 2, "displayarrange", sub, "width", 1920)
+            else {
+                return;
+            };
+            let Some(h) = optional_num::<u32>(&parts, 3, "displayarrange", sub, "height", 1080)
+            else {
+                return;
+            };
             match displayarrange::add_display(name, w, h) {
                 Ok(id) => shell_println!("Added display #{}: {} ({}x{})", id, name, w, h),
                 Err(e) => {
@@ -80088,16 +80196,26 @@ fn cmd_displayarrange(args: &str) {
             }
         }
         "pos" | "position" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid display ID");
-                    set_exit(1);
-                    return;
-                }
+            // The usage line writes this `<id>`, so it is required -- but an
+            // omitted one used to be guessed as display 1, which is a real
+            // display rather than a spare number, so `darr primary` silently
+            // promoted #1 and said it had done what was asked.
+            let Some(id) = required_num::<u32>(&parts, 1, "displayarrange", sub, "display id")
+            else {
+                return;
             };
-            let x: i32 = parts.get(2).unwrap_or(&"0").parse().unwrap_or(0);
-            let y: i32 = parts.get(3).unwrap_or(&"0").parse().unwrap_or(0);
+            // `pos <id> <x> <y>` writes both coordinates as required, and the
+            // guess was the worst possible one: 0,0 is the origin, so a
+            // mistyped coordinate did not merely move the display to the wrong
+            // place -- it stacked it on top of whatever already sits there.
+            let Some(x) = required_num::<i32>(&parts, 2, "displayarrange", sub, "x coordinate")
+            else {
+                return;
+            };
+            let Some(y) = required_num::<i32>(&parts, 3, "displayarrange", sub, "y coordinate")
+            else {
+                return;
+            };
             match displayarrange::set_position(id, x, y) {
                 Ok(()) => shell_println!("Display #{} at ({}, {})", id, x, y),
                 Err(e) => {
@@ -80107,13 +80225,13 @@ fn cmd_displayarrange(args: &str) {
             }
         }
         "primary" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid display ID");
-                    set_exit(1);
-                    return;
-                }
+            // The usage line writes this `<id>`, so it is required -- but an
+            // omitted one used to be guessed as display 1, which is a real
+            // display rather than a spare number, so `darr primary` silently
+            // promoted #1 and said it had done what was asked.
+            let Some(id) = required_num::<u32>(&parts, 1, "displayarrange", sub, "display id")
+            else {
+                return;
             };
             match displayarrange::set_primary(id) {
                 Ok(()) => shell_println!("Primary: #{}", id),
@@ -80124,13 +80242,13 @@ fn cmd_displayarrange(args: &str) {
             }
         }
         "orient" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid display ID");
-                    set_exit(1);
-                    return;
-                }
+            // The usage line writes this `<id>`, so it is required -- but an
+            // omitted one used to be guessed as display 1, which is a real
+            // display rather than a spare number, so `darr primary` silently
+            // promoted #1 and said it had done what was asked.
+            let Some(id) = required_num::<u32>(&parts, 1, "displayarrange", sub, "display id")
+            else {
+                return;
             };
             let o = match parts.get(2).copied().unwrap_or("landscape") {
                 "portrait" | "vert" => displayarrange::Orientation::Portrait,
@@ -86256,14 +86374,26 @@ fn cmd_sysresource(args: &str) {
             }
         }
         "sample" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(25);
-            let mem_used = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4000000);
+            // `sample [cpu] [mem]` -- optional, so an omission still records
+            // the synthetic 25%/4 GB snapshot.  But the numbers go into the
+            // history ring and are then averaged, charted and compared against
+            // alert thresholds, so a guessed one is not a wrong argument, it
+            // is a fabricated observation: `sres sample 9O` recorded 25% and
+            // then reported "Sample recorded (CPU=25%)" as confirmation.
+            let Some(cpu) = optional_num::<u32>(&parts, 1, "sysresource", sub, "cpu percent", 25)
+            else {
+                return;
+            };
+            let Some(mem_used) = optional_num::<u64>(
+                &parts,
+                2,
+                "sysresource",
+                sub,
+                "memory used in KB",
+                4_000_000,
+            ) else {
+                return;
+            };
             let snap = sysresource::ResourceSnapshot {
                 timestamp_ns: crate::hpet::elapsed_ns(),
                 cpu_percent: cpu,
@@ -86333,18 +86463,26 @@ fn cmd_sysresource(args: &str) {
             }
         }
         "avg" => {
-            let n = parts
-                .get(1)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(10);
+            // `avg [n]` -- optional.  The window size is printed back in the
+            // answer ("Average CPU (last {} samples)"), so a guessed one did
+            // not merely average the wrong span, it labelled the result with
+            // the span it had invented.
+            let Some(n) = optional_num::<usize>(&parts, 1, "sysresource", sub, "sample count", 10)
+            else {
+                return;
+            };
             let avg = sysresource::avg_cpu(n);
             shell_println!("Average CPU (last {} samples): {}%", n, avg);
         }
         "history" => {
-            let max = parts
-                .get(1)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(10);
+            // `history [max]` -- optional, and the usual truncation hazard:
+            // ten rows in answer to a request for a hundred looks exactly
+            // like a history only ten samples deep.
+            let Some(max) =
+                optional_num::<usize>(&parts, 1, "sysresource", sub, "sample count", 10)
+            else {
+                return;
+            };
             let hist = sysresource::get_history(max);
             if hist.is_empty() {
                 shell_println!("No history.");
@@ -90713,7 +90851,15 @@ fn cmd_eventlog(args: &str) {
             }
         }
         "recent" => {
-            let max: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(10);
+            // A limit is not an ordinary operand: it decides how much of the
+            // log the caller is shown, and a short list looks exactly like a
+            // complete one.  `eventlog recent 5O` printed 10 events with no
+            // hint that the 50 asked for had been silently cut to 10.  Absent
+            // still means the default; only the typo is refused.
+            let Some(max) = optional_num::<usize>(&parts, 1, "eventlog", sub, "event count", 10)
+            else {
+                return;
+            };
             let events = eventlog::recent(max);
             if events.is_empty() {
                 shell_println!("No events");
@@ -90731,7 +90877,12 @@ fn cmd_eventlog(args: &str) {
             }
         }
         "errors" => {
-            let max: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(20);
+            // Same truncation hazard as `recent`, and worse here: this is the
+            // arm someone runs to find out whether anything went wrong.
+            let Some(max) = optional_num::<usize>(&parts, 1, "eventlog", sub, "event count", 20)
+            else {
+                return;
+            };
             let events = eventlog::query_by_severity(crate::fs::eventlog::Severity::Error, max);
             if events.is_empty() {
                 shell_println!("No errors");
@@ -90757,7 +90908,13 @@ fn cmd_eventlog(args: &str) {
                     return;
                 }
             };
-            let max: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            // As in `recent`/`errors`: an unreadable limit silently truncated
+            // the answer to a filtered query, which is the shape most likely
+            // to be mistaken for "there is nothing more to see".
+            let Some(max) = optional_num::<usize>(&parts, 2, "eventlog", sub, "event count", 20)
+            else {
+                return;
+            };
             let events = eventlog::query_by_source(src, max);
             if events.is_empty() {
                 shell_println!("No events from '{}'", src);
@@ -90782,7 +90939,13 @@ fn cmd_eventlog(args: &str) {
                     return;
                 }
             };
-            let max: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            // As in `recent`/`errors`: an unreadable limit silently truncated
+            // the answer to a filtered query, which is the shape most likely
+            // to be mistaken for "there is nothing more to see".
+            let Some(max) = optional_num::<usize>(&parts, 2, "eventlog", sub, "event count", 20)
+            else {
+                return;
+            };
             let events = eventlog::query_by_category(cat, max);
             if events.is_empty() {
                 shell_println!("No events in category '{}'", cat.label());
@@ -96643,10 +96806,17 @@ fn cmd_procstat(args: &str) {
             }
         }
         "get" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
+            // The old code reached the right outcome by the wrong route: the
+            // unreadable word was turned into 0 and then caught by a guard
+            // meant for "no pid given", so both mistakes shared one message
+            // that named neither.  `required_num` separates them; the guard
+            // stays, because pid 0 is still not a process this command
+            // reports on.
+            let Some(pid) = required_num::<u32>(&parts, 1, "procstat", sub, "pid") else {
+                return;
+            };
             if pid == 0 {
-                shell_println!("Usage: procstat get <pid>");
+                shell_println!("procstat: pid 0 is not a reportable process");
                 set_exit(1);
                 return;
             }
@@ -96672,8 +96842,15 @@ fn cmd_procstat(args: &str) {
             }
         }
         "topcpu" => {
-            let n_str = parts.get(1).copied().unwrap_or("5");
-            let n = n_str.parse::<usize>().unwrap_or(0);
+            // A "top N" limit.  Absent still means 5, and an explicit 0 still
+            // means 5 (asking for the top nothing is taken as not having
+            // chosen), but an unreadable word is now refused: a top-5 list
+            // printed in answer to a request for the top 50 is not a smaller
+            // answer, it is a wrong one, and its heading says "Top 5" only
+            // because that is how many rows came back.
+            let Some(n) = optional_num::<usize>(&parts, 1, "procstat", sub, "count", 5) else {
+                return;
+            };
             let n = if n == 0 { 5 } else { n };
             procstat::init_defaults();
             let top = procstat::top_cpu(n);
@@ -96683,8 +96860,15 @@ fn cmd_procstat(args: &str) {
             }
         }
         "topmem" => {
-            let n_str = parts.get(1).copied().unwrap_or("5");
-            let n = n_str.parse::<usize>().unwrap_or(0);
+            // A "top N" limit.  Absent still means 5, and an explicit 0 still
+            // means 5 (asking for the top nothing is taken as not having
+            // chosen), but an unreadable word is now refused: a top-5 list
+            // printed in answer to a request for the top 50 is not a smaller
+            // answer, it is a wrong one, and its heading says "Top 5" only
+            // because that is how many rows came back.
+            let Some(n) = optional_num::<usize>(&parts, 1, "procstat", sub, "count", 5) else {
+                return;
+            };
             let n = if n == 0 { 5 } else { n };
             procstat::init_defaults();
             let top = procstat::top_mem(n);
@@ -96694,11 +96878,16 @@ fn cmd_procstat(args: &str) {
             }
         }
         "register" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
             let name = parts.get(2).copied().unwrap_or("unnamed");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
+            // Same as `get`, and here the guess also *wrote*: a mistyped pid
+            // was rewritten to 0 before the guard saw it, so the only reason
+            // it did not register a row under the wrong pid is that 0 happened
+            // to be the value the guard rejects.
+            let Some(pid) = required_num::<u32>(&parts, 1, "procstat", sub, "pid") else {
+                return;
+            };
             if pid == 0 {
-                shell_println!("Usage: procstat register <pid> <name>");
+                shell_println!("procstat: pid 0 is not a reportable process");
                 set_exit(1);
                 return;
             }
@@ -99383,18 +99572,21 @@ fn cmd_epollstat(args: &str) {
         }
         "create" => {
             epollstat::init_defaults();
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let max = parts
-                .get(2)
-                .copied()
-                .unwrap_or("64")
-                .parse::<u32>()
-                .unwrap_or(64);
+            // Written `<pid>` in the usage line, so required.  The guess was
+            // 0, which is not a spare value -- it is a process id the caller
+            // may well have meant -- so a typo and a real request for pid 0
+            // were indistinguishable in the output.
+            let Some(pid) = required_num::<u32>(&parts, 1, "epollstat", sub, "pid") else {
+                return;
+            };
+            // `[max]` is documented optional, so an omission still means 64;
+            // only the unreadable word is refused.  The double-guess spelled
+            // the same 64 twice, once as a string and once as a number, which
+            // is what made the two cases impossible to separate.
+            let Some(max) = optional_num::<u32>(&parts, 2, "epollstat", sub, "max events", 64)
+            else {
+                return;
+            };
             match epollstat::create_instance(pid, max) {
                 Ok(id) => shell_println!("Created epoll instance {} for pid {}.", id, pid),
                 Err(e) => {
@@ -99405,12 +99597,12 @@ fn cmd_epollstat(args: &str) {
         }
         "destroy" => {
             epollstat::init_defaults();
-            let id = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            // `destroy` is the destructive arm, and it was the one guessing:
+            // `epollstat destroy 1O` destroyed instance 0 and reported that
+            // it had, naming an instance the caller never typed.
+            let Some(id) = required_num::<u32>(&parts, 1, "epollstat", sub, "instance id") else {
+                return;
+            };
             match epollstat::destroy_instance(id) {
                 Ok(()) => shell_println!("Destroyed epoll instance {}.", id),
                 Err(e) => {
@@ -99421,12 +99613,13 @@ fn cmd_epollstat(args: &str) {
         }
         "pid" => {
             epollstat::init_defaults();
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            // Written `<pid>` in the usage line, so required.  The guess was
+            // 0, which is not a spare value -- it is a process id the caller
+            // may well have meant -- so a typo and a real request for pid 0
+            // were indistinguishable in the output.
+            let Some(pid) = required_num::<u32>(&parts, 1, "epollstat", sub, "pid") else {
+                return;
+            };
             let insts = epollstat::instances_for_pid(pid);
             if insts.is_empty() {
                 shell_println!("No epoll instances for pid {}.", pid);
@@ -99791,12 +99984,13 @@ fn cmd_schedclass(args: &str) {
         }
         "show" => {
             schedclass::init_defaults();
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            // Written `<pid>` in the usage line, so required.  The guess was
+            // 0, which is not a spare value -- it is a process id the caller
+            // may well have meant -- so a typo and a real request for pid 0
+            // were indistinguishable in the output.
+            let Some(pid) = required_num::<u32>(&parts, 1, "schedclass", sub, "pid") else {
+                return;
+            };
             match schedclass::task_info(pid) {
                 Some(t) => {
                     shell_println!(
@@ -100163,12 +100357,13 @@ fn cmd_taskstats(args: &str) {
             }
         }
         "get" => {
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            // Written `<pid>` in the usage line, so required.  The guess was
+            // 0, which is not a spare value -- it is a process id the caller
+            // may well have meant -- so a typo and a real request for pid 0
+            // were indistinguishable in the output.
+            let Some(pid) = required_num::<u32>(&parts, 1, "taskstats", sub, "pid") else {
+                return;
+            };
             match taskstats::get(pid) {
                 Some(t) => {
                     shell_println!("PID {} ({})", t.pid, t.name);
@@ -100411,12 +100606,13 @@ fn cmd_netsock(args: &str) {
             }
         }
         "pid" => {
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            // Written `<pid>` in the usage line, so required.  The guess was
+            // 0, which is not a spare value -- it is a process id the caller
+            // may well have meant -- so a typo and a real request for pid 0
+            // were indistinguishable in the output.
+            let Some(pid) = required_num::<u32>(&parts, 1, "netsock", sub, "pid") else {
+                return;
+            };
             for s in netsock::by_pid(pid) {
                 shell_println!(
                     "{} {}:{} -> {}:{} {} rx={} tx={}",
@@ -100851,12 +101047,13 @@ fn cmd_filelock(args: &str) {
             }
         }
         "pid" => {
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            // Written `<pid>` in the usage line, so required.  The guess was
+            // 0, which is not a spare value -- it is a process id the caller
+            // may well have meant -- so a typo and a real request for pid 0
+            // were indistinguishable in the output.
+            let Some(pid) = required_num::<u32>(&parts, 1, "filelock", sub, "pid") else {
+                return;
+            };
             for l in filelock::by_pid(pid) {
                 shell_println!(
                     "[{}] id={} {} cont={}",
@@ -101006,12 +101203,13 @@ fn cmd_pipestat(args: &str) {
             }
         }
         "pid" => {
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            // Written `<pid>` in the usage line, so required.  The guess was
+            // 0, which is not a spare value -- it is a process id the caller
+            // may well have meant -- so a typo and a real request for pid 0
+            // were indistinguishable in the output.
+            let Some(pid) = required_num::<u32>(&parts, 1, "pipestat", sub, "pid") else {
+                return;
+            };
             for p in pipestat::by_pid(pid) {
                 shell_println!(
                     "[{}] id={} buf={}/{} written={} read={}",
@@ -101372,10 +101570,14 @@ fn cmd_kthread(args: &str) {
         }
         "register" => {
             let name = parts.get(1).copied().unwrap_or("unnamed");
-            let cpu = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // `[cpu]` is documented optional, so an omission still pins the
+            // thread to CPU 0; only an unreadable word is refused.  It matters
+            // because the CPU is recorded on the thread and reported back --
+            // `kthread register flush 1O` would have registered it on CPU 0
+            // and printed "on cpu 0" as though that were what was asked.
+            let Some(cpu) = optional_num::<u32>(&parts, 2, "kthread", sub, "cpu id", 0) else {
+                return;
+            };
             match kthread::register(name, cpu) {
                 Ok(id) => {
                     shell_println!("kthread: registered '{}' on cpu {} → id {}", name, cpu, id)
@@ -101387,10 +101589,12 @@ fn cmd_kthread(args: &str) {
             }
         }
         "unregister" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // `<id>` in the usage line, so required.  Thread 0 is a real
+            // thread, not a spare number, so the guess pointed every typo at
+            // it -- and one of these two arms unregisters what it points at.
+            let Some(id) = required_num::<u32>(&parts, 1, "kthread", sub, "thread id") else {
+                return;
+            };
             match kthread::unregister(id) {
                 Ok(()) => shell_println!("kthread: unregistered {}", id),
                 Err(e) => {
@@ -101400,10 +101604,13 @@ fn cmd_kthread(args: &str) {
             }
         }
         "state" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // `state <id> <...>` -- required, and note the asymmetry the guess
+            // created: the *state* word was already checked and refused when
+            // unrecognised, while the id beside it was silently rewritten to
+            // 0.  Two operands on one line, one strict and one guessing.
+            let Some(id) = required_num::<u32>(&parts, 1, "kthread", sub, "thread id") else {
+                return;
+            };
             let st = match parts.get(2).copied().unwrap_or("") {
                 "running" => kthread::KthreadState::Running,
                 "sleeping" => kthread::KthreadState::Sleeping,
@@ -101438,10 +101645,13 @@ fn cmd_kthread(args: &str) {
             }
         }
         "cpu" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // `cpu <cpu_id>` -- required.  A read-only listing, but the guess
+            // still lied: `kthread cpu 1O` printed CPU 0's threads under a
+            // heading the caller read as CPU 10's, which is worse than
+            // printing nothing.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "kthread", sub, "cpu id") else {
+                return;
+            };
             for t in kthread::on_cpu(cpu) {
                 shell_println!(
                     "  [{}] {:<16} state={:<10} cpu_time={}ns wakeups={}",
@@ -102085,10 +102295,11 @@ fn cmd_bpfstat(args: &str) {
                 "cgroup" | "cgroup_skb" => bpfstat::BpfProgType::CgroupSkb,
                 _ => bpfstat::BpfProgType::Kprobe,
             };
-            let insns = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(64);
+            let Some(insns) =
+                optional_num::<u32>(&parts, 3, "bpfstat", sub, "instruction count", 64)
+            else {
+                return;
+            };
             match bpfstat::load_program(name, pt, insns) {
                 Ok(id) => shell_println!(
                     "bpfstat: loaded '{}' type={} insns={} → id {}",
@@ -102104,10 +102315,14 @@ fn cmd_bpfstat(args: &str) {
             }
         }
         "unload" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // A program id names an object; there is no sensible default for
+            // "which program", and `0` is a real id rather than a spare one --
+            // so both an absent and an unreadable word are wrong here, which
+            // is `required_num`.  Guessing meant `bpfstat unload 1O` unloaded
+            // program 0 and reported it, naming a program the user never typed.
+            let Some(id) = required_num::<u32>(&parts, 1, "bpfstat", sub, "program id") else {
+                return;
+            };
             match bpfstat::unload_program(id) {
                 Ok(()) => shell_println!("bpfstat: unloaded {}", id),
                 Err(e) => {
@@ -102117,14 +102332,18 @@ fn cmd_bpfstat(args: &str) {
             }
         }
         "run" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let ns = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(100);
+            let Some(id) = required_num::<u32>(&parts, 1, "bpfstat", sub, "program id") else {
+                return;
+            };
+            // The duration is a *measurement being filed*, which is the worse
+            // half of this arm: a guessed 100ns is not discarded, it is added
+            // to the program's run statistics and then reported back as if it
+            // had been observed.  An absent one keeps meaning 100; an
+            // unreadable one is refused before it becomes evidence.
+            let Some(ns) = optional_num::<u64>(&parts, 2, "bpfstat", sub, "duration in ns", 100)
+            else {
+                return;
+            };
             match bpfstat::record_run(id, ns) {
                 Ok(()) => shell_println!("bpfstat: run id={} {}ns", id, ns),
                 Err(e) => {
@@ -103231,10 +103450,13 @@ fn cmd_netqueue(args: &str) {
         }
         "register" => {
             let iface = parts.get(1).copied().unwrap_or("eth0");
-            let qid = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // Both usage lines write this `<qid>`, so it is required.  Queue 0
+            // exists on every interface, so the guess always landed on a real
+            // queue: a mistyped id was not a failure, it was a different
+            // queue's row being registered or credited.
+            let Some(qid) = required_num::<u32>(&parts, 2, "netqueue", sub, "queue id") else {
+                return;
+            };
             let dir = match parts.get(3).copied().unwrap_or("rx") {
                 "tx" => netqueue::QueueDir::Tx,
                 _ => netqueue::QueueDir::Rx,
@@ -103249,18 +103471,27 @@ fn cmd_netqueue(args: &str) {
         }
         "rx" | "tx" => {
             let iface = parts.get(1).copied().unwrap_or("eth0");
-            let qid = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let pkts = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
-            let bytes = parts
-                .get(4)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1500);
+            // Both usage lines write this `<qid>`, so it is required.  Queue 0
+            // exists on every interface, so the guess always landed on a real
+            // queue: a mistyped id was not a failure, it was a different
+            // queue's row being registered or credited.
+            let Some(qid) = required_num::<u32>(&parts, 2, "netqueue", sub, "queue id") else {
+                return;
+            };
+            // `[pkts]` and `[bytes]` are documented optional, so an omission
+            // keeps its default -- but these are counters being *filed*, not
+            // settings: `record_packets` adds them to the queue's running
+            // totals, where a guessed 1500 is thereafter indistinguishable
+            // from an observed one.  Refusing the typo is the only point at
+            // which the difference still exists.
+            let Some(pkts) = optional_num::<u64>(&parts, 3, "netqueue", sub, "packet count", 1)
+            else {
+                return;
+            };
+            let Some(bytes) = optional_num::<u64>(&parts, 4, "netqueue", sub, "byte count", 1500)
+            else {
+                return;
+            };
             let dir = if sub == "tx" {
                 netqueue::QueueDir::Tx
             } else {
@@ -104784,14 +105015,19 @@ fn cmd_diskstat(args: &str) {
         }
         "read" => {
             let name = parts.get(1).copied().unwrap_or("");
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
-            let ns = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1000);
+            // Both operands are measurements being *filed*: they do not merely
+            // control this command, they are added to the device's cumulative
+            // I/O counters and read back later as though observed.  A guessed
+            // 4096 is indistinguishable from a real 4096 the moment it lands,
+            // so the typo is unrecoverable rather than merely wrong.
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "diskstat", sub, "byte count", 4096)
+            else {
+                return;
+            };
+            let Some(ns) = optional_num::<u64>(&parts, 3, "diskstat", sub, "duration in ns", 1000)
+            else {
+                return;
+            };
             match diskstat::record_read(name, bytes, ns) {
                 Ok(()) => shell_println!("diskstat: read {} bytes {}ns on {}", bytes, ns, name),
                 Err(e) => {
@@ -104802,14 +105038,18 @@ fn cmd_diskstat(args: &str) {
         }
         "write" => {
             let name = parts.get(1).copied().unwrap_or("");
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
-            let ns = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(2000);
+            // As in the `read` arm above: both operands are filed into the
+            // device's cumulative counters rather than merely steering this
+            // one command.  The defaults differ from `read`'s (a write is
+            // modelled as slower), so the two arms cannot share a line.
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "diskstat", sub, "byte count", 4096)
+            else {
+                return;
+            };
+            let Some(ns) = optional_num::<u64>(&parts, 3, "diskstat", sub, "duration in ns", 2000)
+            else {
+                return;
+            };
             match diskstat::record_write(name, bytes, ns) {
                 Ok(()) => shell_println!("diskstat: write {} bytes {}ns on {}", bytes, ns, name),
                 Err(e) => {
@@ -105604,10 +105844,16 @@ fn cmd_vmzone(args: &str) {
                 "movable" => vmzone::ZoneType::Movable,
                 _ => vmzone::ZoneType::Normal,
             };
-            let pages = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(10000);
+            // There is no per-subcommand usage line to say whether the page
+            // count is required, so an omission keeps meaning what it meant --
+            // only the *typo* stops being guessed at.  The guess is worse here
+            // than one wrong number: `pages` also derives the watermarks, so a
+            // misread count sets the low, min and high marks too, and the zone
+            // then reclaims against thresholds nobody chose.
+            let Some(pages) = optional_num::<u64>(&parts, 3, "vmzone", sub, "page count", 10000)
+            else {
+                return;
+            };
             match vmzone::register(name, ztype, pages, pages / 100, pages / 50, pages / 20) {
                 Ok(()) => shell_println!(
                     "vmzone: registered {} [{}] {} pages",
@@ -105623,10 +105869,14 @@ fn cmd_vmzone(args: &str) {
         }
         "alloc" => {
             let name = parts.get(1).copied().unwrap_or("");
-            let pages = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
+            // alloc, free and reclaim are inverse bookkeeping operations on one
+            // running total, so a guessed count is not a wrong number that gets
+            // overwritten -- it is a wrong number that stays.  `vmzone free
+            // zone0 10O` freed 1 page, said "freed 1 pages", and left the
+            // zone's accounting 99 pages adrift with nothing to point at.
+            let Some(pages) = optional_num::<u64>(&parts, 2, "vmzone", sub, "page count", 1) else {
+                return;
+            };
             match vmzone::record_alloc(name, pages) {
                 Ok(()) => shell_println!("vmzone: allocated {} pages from {}", pages, name),
                 Err(e) => {
@@ -105637,10 +105887,14 @@ fn cmd_vmzone(args: &str) {
         }
         "free" => {
             let name = parts.get(1).copied().unwrap_or("");
-            let pages = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
+            // alloc, free and reclaim are inverse bookkeeping operations on one
+            // running total, so a guessed count is not a wrong number that gets
+            // overwritten -- it is a wrong number that stays.  `vmzone free
+            // zone0 10O` freed 1 page, said "freed 1 pages", and left the
+            // zone's accounting 99 pages adrift with nothing to point at.
+            let Some(pages) = optional_num::<u64>(&parts, 2, "vmzone", sub, "page count", 1) else {
+                return;
+            };
             match vmzone::record_free(name, pages) {
                 Ok(()) => shell_println!("vmzone: freed {} pages to {}", pages, name),
                 Err(e) => {
@@ -105651,10 +105905,14 @@ fn cmd_vmzone(args: &str) {
         }
         "reclaim" => {
             let name = parts.get(1).copied().unwrap_or("");
-            let pages = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
+            // alloc, free and reclaim are inverse bookkeeping operations on one
+            // running total, so a guessed count is not a wrong number that gets
+            // overwritten -- it is a wrong number that stays.  `vmzone free
+            // zone0 10O` freed 1 page, said "freed 1 pages", and left the
+            // zone's accounting 99 pages adrift with nothing to point at.
+            let Some(pages) = optional_num::<u64>(&parts, 2, "vmzone", sub, "page count", 1) else {
+                return;
+            };
             match vmzone::record_reclaim(name, pages) {
                 Ok(()) => shell_println!("vmzone: reclaimed {} pages from {}", pages, name),
                 Err(e) => {

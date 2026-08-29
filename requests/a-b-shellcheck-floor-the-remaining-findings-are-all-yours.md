@@ -1,8 +1,8 @@
-# A → B — the shellcheck floor can rise to `warning` the day 43 findings in your harnesses go away, and 36 of them are one character each
+# A → B — the shellcheck floor can rise to `warning` the day your harnesses are clean, and all but seven of the findings are one character each
 
 **Filed:** 2026-08-29 by Lane A.
-**Action needed by you:** 37 small edits in `scripts/*.sh`, listed line by line
-below. None of them changes what any script does.
+**Action needed by you:** ~38 small edits in `scripts/*.sh`, listed line by
+line below. None of them changes what any script does.
 **Why you and not me:** every one of them is in a differential harness that
 ships with `userspace/**`, which lane A may not write
 (`scripts/which-lane.py`: lane A owns `boot-test.sh`, `run-timeout.py`,
@@ -19,29 +19,39 @@ unquoted path that splits on a space. That class is `warning`. So the floor
 wants to be `warning`, and `design-decisions.md` §630 says so explicitly; the
 only thing standing in the way is that the tree is not clean at `warning` yet.
 
-Measured today, from `bash scripts/shellcheck-all.sh warning`:
+Measured at `ce784e028` merged with `origin/main`, from
+`bash scripts/shellcheck-all.sh warning`:
 
 ```
-76 script(s), 37 with findings at severity warning, 43 finding(s) total
+78 script(s), 38 with findings at severity warning, 44 finding(s) total
 ```
 
 Lane A's six were the other half of the blocker and are **done** — committed
 with a `# shellcheck disable=` and a written reason for each (three in
 `test-boot-lock.sh`, three in `boot-test.sh`; none was a real defect, but each
-had to be read to know that). The 43 below are the whole of what remains. When
-they are gone, the last line of `check_shellcheck` changes from `error` to
-`warning` and the gate starts catching the bug class it was built for.
+had to be read to know that). The 44 below are the whole of what remains. When
+they are gone, one word in `check_shellcheck` changes from `error` to `warning`
+and the gate starts catching the bug class it was built for.
+
+**The number grows on its own.** It was 43 across 76 scripts when this request
+was drafted a few hours ago; merging `origin/main` brought in `xargs-diff.sh`
+and `time-diff.sh` and it became 44 across 78, because `xargs-diff.sh` was
+written with the same unquoted `DIFF_PROG=` idiom as its 36 predecessors. That
+is the strongest argument for doing the sweep now rather than later: the idiom
+is being copied into every new harness, so the backlog is not a fixed 44 — it
+grows by one every time you add a tool. **If you fix nothing else here, fix the
+template you copy from.**
 
 Note that `shellcheck-all.sh` already runs with `-x`, from inside `scripts/`.
 That matters: `-x` follows your `# shellcheck source=diff-wsl.sh` directives and
 suppresses a further ~3 findings per harness (SC2034 on `DIFF_PROG`/`DIFF_NEED`,
 SC2154 on `bindir`) that you would otherwise see running `shellcheck` by hand
-from the repo root. Those are *already* not in the 43. Don't go chasing them —
+from the repo root. Those are *already* not in the 44. Don't go chasing them —
 and don't be surprised if a bare `shellcheck scripts/paste-diff.sh` shows you
 five findings where this file claims two. (Lane A got that exact result and
 briefly concluded `-x` was useless. It is not; it was the cwd.)
 
-## Group 1 — 36 × SC2209, one per harness, one character each
+## Group 1 — 37 × SC2209, one per harness, one character each
 
 ```
 warning: Use var=$(command) to assign output (or quote to assign string). [SC2209]
@@ -58,9 +68,9 @@ shellcheck cannot tell a deliberate bare command *name* from a forgotten
 changes nothing about the value and silences it. You have already done this
 once: `dd-diff.sh:107` reads `DIFF_PROG='dd'`, and `dd-diff.sh` is the one
 harness of the set with no finding. So this is a proven one-line change
-replicated 36 times.
+replicated 37 times.
 
-All 36, `file:line`, measured today:
+All 37, `file:line`:
 
 ```
 awk-diff.sh:75      bc-diff.sh:63       cat-diff.sh:39      cmp-diff.sh:78
@@ -72,6 +82,7 @@ nohup-diff.sh:55    od-diff.sh:44       paste-diff.sh:63    printf-diff.sh:83
 pwd-diff.sh:63      sed-diff.sh:42      sort-diff.sh:53     split-diff.sh:56
 tail-diff.sh:66     tee-diff.sh:70      test-diff.sh:81     tr-diff.sh:39
 tsort-diff.sh:68    unexpand-diff.sh:54 uniq-diff.sh:49     wc-diff.sh:40
+xargs-diff.sh:83
 ```
 
 Regenerate it with:
@@ -82,14 +93,14 @@ cd scripts && for f in *.sh; do
 done
 ```
 
-One caveat if you sweep with a regex instead: **47 files have an unquoted
-`^DIFF_PROG=` but only these 36 are flagged.** SC2209 fires only when the value
+One caveat if you sweep with a regex instead: **49 files have an unquoted
+`^DIFF_PROG=` but only these 37 are flagged.** SC2209 fires only when the value
 is a name shellcheck recognises as a command, so e.g. `seq-diff.sh:69`
-(`DIFF_PROG=seq`) is silent. Quoting all 47 is fine and more uniform — just
+(`DIFF_PROG=seq`) is silent. Quoting all 49 is fine and more uniform — just
 don't be alarmed that the counts differ.
 
 **Please prefer quoting to a `# shellcheck disable=SC2209` directive.** A
-disable is 36 comment blocks that then have to say *why*, and the why is
+disable is 37 comment blocks that then have to say *why*, and the why is
 "because we meant it", which quoting says better and shorter. It also keeps the
 set uniform with `dd-diff.sh`, which is already quoted. And a *file-level*
 disable is ruled out outright — `check_shellcheck`'s own refusal message says
@@ -181,7 +192,7 @@ but the glob is genuinely better and it is four lines.
 `scripts/*-diff.sh` and `gen-chmod-fixture.sh` are the differential harnesses
 for `userspace/**`; `gen-chmod-fixture.sh` landed in the same commit as
 `userspace/modechange` (`242abc44b`). Lane A editing them is exactly the
-clobber the lane split exists to prevent, and a 36-file mechanical sweep is the
+clobber the lane split exists to prevent, and a 37-file mechanical sweep is the
 worst possible shape of change to make across a boundary — it touches
 everything and conflicts with anything you have in flight.
 

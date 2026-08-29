@@ -49790,12 +49790,12 @@ two blockers, so it would have read as satisfied while the reversal still broke
 the build — the same failure shape as the `design-decisions.md` insertion rule
 corrected in §631: a condition that looks met when it is not is worse than one
 nobody has met, because it invites the action it is supposed to gate. Measured
-today, `warning` has **43 findings across 37 of 76 scripts**, and they are in
+today, `warning` has **44 findings across 38 of 78 scripts**, and they are in
 three groups, not one:
 
 | Group | Count | Whose | State |
 |---|---|---|---|
-| SC2209 on `DIFF_PROG=<name>` | 36, one per `*-diff.sh` | lane B | outstanding |
+| SC2209 on `DIFF_PROG=<name>` | 37, one per `*-diff.sh` | lane B | outstanding, and **growing** — every new harness copies the idiom |
 | SC2191/SC2258/SC2010/SC2034 in `gen-chmod-fixture.sh`, `paste-diff.sh`, `split-diff.sh` | 7 | lane B | outstanding, and **not** the same false positive — these need reading, not quoting |
 | SC2154/SC2054 ×2 in `boot-test.sh`, SC2034 ×3 in `test-boot-lock.sh` | 6 | lane A | **done** — annotated with `# shellcheck disable=` plus the reason each is a false positive |
 
@@ -49808,12 +49808,16 @@ performs); the two SC2054s are QEMU's own `,` property separator inside a single
 file extracted at run time. None was a real defect, but each had to be looked at
 to know that, which is the work the condition was hiding.
 
-So the accurate condition is: **43 findings to go, 36 of them one mechanical
+So the accurate condition is: **44 findings to go, 37 of them one mechanical
 edit and 7 of them genuine reading, all of them lane B's** — the paragraph
 above said "lane B's and lane C's", and that was wrong too: every one of the 37
 flagged scripts is a differential harness for `userspace/**`, and lane C owns
 none of them. Filed as
-`requests/a-b-shellcheck-floor-the-last-43-findings-are-yours.md`.
+`requests/a-b-shellcheck-floor-the-remaining-findings-are-all-yours.md` — whose
+name deliberately carries no number, because the count moves: it was 43 across
+76 scripts when the request was drafted and 44 across 78 an hour later, when
+`xargs-diff.sh` merged from `main` carrying the same unquoted idiom as its 36
+predecessors.
 
 *One more measurement worth writing down, because it nearly produced a fourth
 wrong statement in this entry.* `shellcheck-all.sh` runs `shellcheck -x` from

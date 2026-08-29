@@ -93722,6 +93722,62 @@ argument for the witness being an `assert!` inside the test rather than a note i
 a comment: it is re-checked every run, at the same moment as the assertion it
 guards, so the two cannot drift apart later.
 
+### Lesson 68: a containment assertion has slack, and any fault that fits inside the slack is invisible (lane C, 2026-08-29)
+
+**In short:** "the button is inside the band" and "the button is *centred* in the
+band" are different claims, and only the second one is a placement. The first is
+an inequality with room to spare, so a fault that moves the thing by less than
+that room passes it. Sokoban's control-button test compared coordinates — it was
+not lesson 57's mistake of checking only that a thing was drawn — and still could
+not see the buttons slide to the top edge of the band they sit in.
+
+**The fault.** `button_rects` gives each button a height of `controls.h - pad`
+and places it at `controls.y + (controls.h - bh) / 2.0`, i.e. half a pad of
+breathing room above and half below. The test asserted:
+
+```rust
+r.y >= l.controls.y - 0.01 && r.bottom() <= l.controls.bottom() + 0.01
+```
+
+Replace the `y` with a bare `controls.y` and the button moves down by half a pad
+— visibly, in the drawn picture — and the assertion still holds, because
+`controls.y >= controls.y` and the bottom edge, now `controls.y + controls.h -
+pad`, is *further* inside the band than before. The mutation moved the button and
+the test that owns button placement said nothing. The centring was, in effect,
+untested code that happened to be correct.
+
+**The rule.** *An assertion of the form `a <= x <= b` tests the endpoints, not the
+value. If the value is determined by a formula — centred, thirds, golden — assert
+the formula, not the interval it lands in.* The replacement is one line and says
+exactly what the code does:
+
+```rust
+((r.y - l.controls.y) - (l.controls.bottom() - r.bottom())).abs() <= 0.01
+```
+
+"The gap above equals the gap below" is what the word "centred" means, written
+down. Note that it is stated as a relation between two measured gaps rather than
+as `r.y == controls.y + (controls.h - bh) / 2.0` — the latter is lesson 65's
+mistake, a check that recomputes the thing it is checking and therefore agrees
+with any formula the production code happens to hold.
+
+**How it was found, and why that matters.** Not by reading the test — by trying
+to write a mutation for a guard that had just been deleted. Faults 16 and 17 in
+sokoban were five-plus-three unobservable guards (lesson 51), and deleting them
+left three mutation slots with nothing to break. Reaching for something else in
+the same function to break is what surfaced the hole. **Deleting dead defensive
+code is worth doing for its own sake, but the mutation slot it frees is the more
+valuable half**: it forces you to ask what else in that function is load-bearing,
+and the answer is usually a line no test has ever disagreed with.
+
+**Where else to look.** Every "stays inside the window", "does not overlap",
+"fits in its box" assertion in these suites — they are the commonest shape in the
+layout tests and every one of them is an interval. They are the right test for
+the fault they were written against (a thing drawn off the edge) and say nothing
+about position within the box. The tell is a test whose name contains *inside*,
+*within*, *stays*, *fits*, or *does not overlap* and whose subject is computed by
+a formula with a division in it.
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print

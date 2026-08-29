@@ -3330,7 +3330,8 @@ check_orphan_modules() {
 
 check_orphan_modules
 
-# Refuse to build when any script in scripts/ has a shellcheck `error`.
+# Refuse to build when any script in scripts/ has a shellcheck finding at
+# severity `warning` or worse.
 #
 # WHY IT NEEDS A GATE.  `scripts/shellcheck-all.sh` was added by lane B on
 # 2026-08-27 and, until this line, was referenced by nothing: no gate, no
@@ -3379,7 +3380,7 @@ check_orphan_modules
 #
 # COST: ~40 s measured here, against a boot whose QEMU window alone is 400-900 s.
 check_shellcheck() {
-    echo "=== Checking scripts/ for shellcheck errors ==="
+    echo "=== Checking scripts/ for shellcheck findings (floor: warning) ==="
     # `local out rc` is deliberately a separate statement from the assignment:
     # `local out="$(...)"` makes `local` the command whose status `$?` reports,
     # which is always 0, silently discarding the exit code this gate is built

@@ -63746,7 +63746,8 @@ against `dst_len` before copying anything. Both Limine paths use it;
 `min(fb.width, self.width) - x_start`. Commit `b050e0bd5`.
 
 **Why it discards rather than errors:** same reasoning as
-`design-decisions.md` §271 — an over-wide rectangle now yields a visibly
+`design-decisions.md` §271 (*non-contiguous framebuffer*) — an over-wide
+rectangle now yields a visibly
 clipped picture, which gets reported as a display bug, rather than corruption
 in whatever the firmware mapped after the framebuffer, which gets blamed on a
 subsystem three layers away.
@@ -64595,14 +64596,16 @@ library crate is not dead code as far as `rustc` is concerned — something
 outside the crate might call it. Several also carried `#[allow(dead_code)]`.
 Nothing in the toolchain separates "exported for callers" from "exported and
 forgotten", so the predicate had to be written down: see
-`scripts/check-self-tests-wired.py` and design-decisions.md §273.
+`scripts/check-self-tests-wired.py` and design-decisions.md §273
+(*a self-test the build cannot reach is a build failure*).
 
 **A caveat that is not fixed, and is not this bug.** A further **258**
 self-tests are reachable *only* from `kshell.rs`, as interactive `test`
 subcommands of the kernel shell. They are runnable but the boot test never runs
 them, so a regression in one is caught only if a human happens to type the
 command. The checker reports that count on every run rather than failing on it
-— see §273 for why. Shrinking it is open work, not a defect with a fix.
+— see §273 (*unreachable self-tests*) for why. Shrinking it is open work, not a
+defect with a fix.
 
 ## B-A-CHANGE-JOURNAL-REPORTED-ITS-OWN-BOOKKEEPING-AS-CHANGES (lane A, 2026-08-22) — FIXED 2026-08-22
 
@@ -71547,7 +71550,8 @@ appends ` — N section(s) SKIPPED` to the summary line), `classify()` (the
 `Ready`/`Unsupported`/`Failed` split — only `NotSupported`,
 `ReadOnlyFilesystem` and `NoSuchDevice` mean "this system cannot"), and
 `is_mounted()`/`is_mounted_rw()` (the commonest looked-up fact). The rationale
-is written up in `design-decisions.md` §270.
+is written up in `design-decisions.md` §270 (*a self-test may skip, but only on
+a fact it looked up*).
 
 Three sites were more than reporting fixes, because removing the skip exposed
 what the skip had been hiding: `fs/mime` now fails when `detect()` errors
@@ -71777,7 +71781,8 @@ returns a `Display` adaptor (`SkipSuffix`) instead of a `String`, so all ~26
 `serial_println!("… PASSED{}", skips.suffix())` call sites are unchanged.
 Overflow past `MAX_SKIPS` (16) is **counted, not dropped** — a dropped skip
 would restore exactly the silence §270 exists to prevent, while still printing
-a number, and the number would be wrong. See `design-decisions.md` §271.
+a number, and the number would be wrong. See `design-decisions.md` §271 (*the
+fixed-capacity skip ledger* — not the framebuffer §271).
 
 **Regression test.** `fs::selftest::self_test()`, called from `main.rs`
 immediately after `mm::heap::init` — the earliest point in boot where
@@ -75704,7 +75709,8 @@ Two independent causes, both genuine:
    violation landing in the same window, and would leave the self-test's own
    assertions with nothing to check.
 
-See `design-decisions.md` §273 for the alternatives weighed on both.
+See `design-decisions.md` §273 (*lockdep's `try_lock` edge* — not the
+unreachable-self-tests §273) for the alternatives weighed on both.
 
 **Two lessons, and the second is the general one.**
 
@@ -93540,16 +93546,20 @@ are cited in **both**, so following a citation can land you on the wrong entry:
 - **§270** — `kernel/src/drm/mod.rs:409,665,782`, `kernel/src/drm/atomic.rs:375`,
   `kernel/src/drm/ati/backend.rs:382` and two `requests/` files all mean the
   *page-flip* entry. `kernel/src/syscall/dispatch.rs:3535` ("which is why the
-  checker cannot see it") and `known-issues.md:71549,71749,71779` (the
+  checker cannot see it") and `known-issues.md:71553,71753,71783` (the
   `fs::selftest::Skips` ledger) all mean the *self-test skip* entry. Twenty-one
   citations, split across two unrelated subsystems.
 - **§271** — `known-issues.md:63749` ("an over-wide rectangle now yields a
-  visibly…") means the framebuffer entry; `known-issues.md:71780` means the skip
+  visibly…") means the framebuffer entry; `known-issues.md:71784` means the skip
   ledger.
-- **§273** — `known-issues.md:64598,64605` (next to
+- **§273** — `known-issues.md:64599,64607` (next to
   `scripts/check-self-tests-wired.py`) mean the unreachable-self-test entry;
-  `known-issues.md:75707` (lockdep's own self-test violations tallied
+  `known-issues.md:75712` (lockdep's own self-test violations tallied
   separately) means the `try_lock` entry.
+
+(Those line numbers are of this file *after* the annotation pass described at
+the end of this entry, and they will drift again as it grows — they are a
+starting point for a grep, not an address.)
 
 ### Why they are not being renumbered
 
@@ -93598,11 +93608,32 @@ The fix that matters is not the gate, it is that the gate's own test suite pins
 the *document's* two-styleness as a fact, so the blindness cannot be
 reintroduced by someone tidying up.
 
-### If you want to reduce the ambiguity without renumbering
+### Reducing the ambiguity without renumbering — done for lane A's sites
 
 The cheap, lane-local option nobody has to coordinate: make the **citing** site
-unambiguous rather than the cited one — write ``§270 (page flip)`` or ``§270
-(self-test skips)`` at each of the sites listed above. That is 12 edits, all in
-lane A's tree or in this shared file, and it needs no agreement from B or C.
-Not done here because it is a separate change from landing the gate, and mixing
-them would make the gate's commit unreviewable. Filed as open work.
+unambiguous rather than the cited one, so the reader does not need this entry to
+know which §270 was meant.
+
+**Done, as its own commit after the gate landed**, for every ambiguous citation
+in lane A's tree and in lane A's entries in this file — each now reads
+`§271 (*non-contiguous framebuffer*)`, `§273 (*unreachable self-tests*)`,
+`§270 (*a self-test may skip, but only on a fact it looked up*)` and so on. Where
+the two senses sit close enough together to be confused on one screen, the
+annotation names the *other* sense too (`§271 (*the fixed-capacity skip ledger*
+— not the framebuffer §271)`), because a disambiguator that only names one sense
+still leaves the reader wondering whether there is a second.
+
+Deliberately not a rule and not gated: this is a readability annotation on a
+citation, and a gate that demanded one on every `§N` would fire on 500 unambiguous
+citations to make nine legible.
+
+**Two are left, and they are lane C's to make**, because they sit inside lane C
+entries in this file and lane A does not edit another lane's entries:
+
+| Site | Entry | Which §270 it means |
+|---|---|---|
+| `known-issues.md:33817` | `TD-COMPOSITOR-CANNOT-CHANGE-MODE` (lane C) | *page flip* |
+| `known-issues.md:33907` | `BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB` (found by lane C) | *page flip* |
+
+Both are one-word edits — ``§270 (page flip)`` — and neither blocks anything;
+they are listed so the count is honest rather than because they are urgent.

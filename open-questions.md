@@ -1255,6 +1255,90 @@ Nothing is blocked and nothing degrades. The two dialects are documented in
 a recorded decision rather than an accident. The only ongoing cost is that a user
 who learns one pattern language may assume the other works the same way.
 
+## A-Q1 — [A] `find . -size 100` finds 100-byte files here and 50 KiB files everywhere else. Match the rest of the world, or refuse the ambiguous spelling? — Status: OPEN
+
+**In short:** `find` is the command that searches a folder for files matching
+some description. One of the things you can ask about is size. If you write
+`find . -size 100`, our shell reads that as "100 bytes"; the `find` on Linux and
+macOS reads the same line as "100 *blocks*", where a block is 512 bytes — so it
+looks for files around 51 200 bytes instead. Both then print a perfectly
+plausible list of files and neither says anything about having interpreted the
+number differently. The choice is between matching everyone else, keeping our
+(more intuitive) reading, or refusing to accept a bare number at all.
+
+### Why this is a decision and not just a bug to fix
+
+The other `find`'s behaviour is a genuine historical wart — nobody expects a
+bare number to mean 512-byte units, and it surprises every person who meets it
+once. So "bytes" is the reading a human actually intends, and copying the wart
+makes our command worse in isolation.
+
+But the disagreement is *invisible*. A wrong `-type` argument gets you an error
+message; a wrong `-size` unit gets you a tidy list of the wrong files. Anyone
+who brings a command line from a tutorial, a Stack Overflow answer, or their own
+muscle memory gets a different answer here and has no way to notice.
+
+### What each `find` accepts today
+
+| Suffix | Elsewhere (GNU) | Here |
+|---|---|---|
+| *(none)* | 512-byte blocks, rounded up | **bytes** |
+| `c` | bytes | bytes |
+| `k` / `M` / `G` | KiB / MiB / GiB | same |
+| `b` | 512-byte blocks, explicitly | **not accepted** — errors |
+| `w` | 2-byte words | **not accepted** — errors |
+
+Note the last two rows: a suffix we do not implement is already *refused* rather
+than guessed at, which is the behaviour the third option below would extend to
+the bare number.
+
+### The options
+
+**A — match GNU: a bare number means 512-byte blocks.** Also requires adding
+`b` and `w`, so the whole vocabulary lines up.
+*What changes:* `find . -size 100` starts listing ~50 KiB files instead of
+100-byte ones. Commands copied from anywhere else become correct. Any local
+script already written against our reading silently starts selecting different
+files.
+
+**B — keep bytes, and add `b` (and `w`) so blocks can be asked for explicitly.**
+*What changes:* nothing about today's behaviour; `find . -size 100b` becomes a
+new, working way to say "100 blocks". A bare number still means something
+different here than elsewhere, still silently.
+
+**C — keep bytes as the *meaning*, but require the unit to be written.**
+*What changes:* `find . -size 100` becomes an error — `find: -size 100: write
+100c for bytes or 100b for 512-byte blocks` — and `100c`, `100k`, `100b` etc. all
+work. Nobody is ever silently wrong in either direction. Every existing bare-
+number use has to be edited (there are, today, none outside the shell's own help
+text and tests).
+
+### Claude's recommendation
+
+**C.** It is the same principle this lane has been applying everywhere else in
+the shell all month: where two readings are both plausible and the difference
+does not show up in the output, *refuse* rather than pick a side. It is also the
+only option under which a command line copied from outside cannot quietly mean
+something else — A fixes that for GNU users while breaking it for anyone who
+learned our version, and B fixes it for nobody.
+
+`-size` is new enough here that the cost of C is close to zero, which will not
+stay true.
+
+### If this is never answered
+
+Today's behaviour is safe and is documented in the function's own doc comment;
+nothing is blocked. The cost is quiet and grows slowly: every script written
+against a bare `-size` number is one more thing that has to be checked if the
+answer later turns out to be A or C.
+
+### Where it bites
+
+`kernel/src/kshell.rs` — `parse_size_predicate` (the final `else` arm,
+`(rest, 1i64) // default: bytes`) and its one caller, the `-size` arm of `find`.
+Tracked in `known-issues.md` as
+`A-KSHELL-FIND-SIZE-DEFAULT-UNIT-IS-BYTES-NOT-BLOCKS`.
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

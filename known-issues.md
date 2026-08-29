@@ -84210,7 +84210,14 @@ first.
 
 ---
 
-## `A-KSHELL-FIND-SIZE-DEFAULT-UNIT-IS-BYTES-NOT-BLOCKS` (lane A, 2026-08-25) — **open**
+## `A-KSHELL-FIND-SIZE-DEFAULT-UNIT-IS-BYTES-NOT-BLOCKS` (lane A, 2026-08-25) — **open**, and **queued for the operator as `open-questions.md` A-Q1** (2026-08-29)
+
+> **Not a bug for whoever reads this next to go and fix.** It is a user-visible
+> compatibility policy with three defensible answers, so it was promoted to the
+> operator's decision queue rather than settled inside a lane. The options and
+> the recommendation now live in `open-questions.md` → **A-Q1**. What follows is
+> the background, kept here because it is what the *implementation* will need
+> once the answer arrives.
 
 **In short:** `find . -size 100` means "100 bytes" here and "100 512-byte
 blocks" (i.e. up to 51 200 bytes) in GNU `find`. A command line copied from

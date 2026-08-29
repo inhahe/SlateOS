@@ -374,13 +374,19 @@ MUTATIONS = [
     (
         # `new_game` no longer assigns `flash = None` -- the pad going out at a
         # restart is derived from the state, so this mutates the derivation.
+        # Only `the_pad_the_player_lost_on_goes_out` can see this, and the
+        # reason is worth keeping: the mutation lights the pad during
+        # `PreSequence` only, and that test asserts immediately after
+        # `Intent::NewGame`, while the game is still in it.
+        # `the_players_turn_always_begins_...` runs `to_player_input` first,
+        # which walks the game *through* `PreSequence` to `PlayerInput`, so the
+        # window the fault is visible in has closed before it looks. Both tests
+        # are right; they watch different moments, and naming the second one
+        # here claimed a coverage that does not exist.
         "the pad the player lost on stays lit into the next game",
         "            GameState::ShowSequence | GameState::PreSequence => None,",
         "            GameState::ShowSequence => None,\n            GameState::PreSequence => self.flash.map(|(c, _)| c),",
-        [
-            "the_pad_the_player_lost_on_goes_out",
-            "the_players_turn_always_begins_at_the_first_step_with_nothing_lit",
-        ],
+        ["the_pad_the_player_lost_on_goes_out"],
     ),
     (
         "starting a game counts as losing one",
@@ -645,9 +651,16 @@ MUTATIONS = [
         ["every_colour_of_the_sequence_is_shown_for_the_same_time"],
     ),
     (
+        # The anchor used to run from the `if` straight to the assignment. Turn
+        # C put a six-line comment between them explaining why the two other
+        # assignments there were deleted, and the anchor stopped matching --
+        # which the harness reported as `[skip]`, not as a failure. A skipped
+        # mutation is the quietest way for a suite to stop being checked: it
+        # scrolls past in a run that ends "0 survived". Anchored on the
+        # condition alone now, which is the part the mutation is about.
         "the playback never hands over to the player",
-        "            if self.sequence.get(self.playback.step).is_none() {\n                self.state = GameState::PlayerInput;",
-        "            if false {\n                self.state = GameState::PlayerInput;",
+        "            if self.sequence.get(self.playback.step).is_none() {",
+        "            if false {",
         ["the_playback_hands_over_to_the_player_at_the_end"],
     ),
     (
@@ -1172,10 +1185,24 @@ MUTATIONS = [
     # restatement, plus the mutations that now own the properties the deleted
     # lines were aiming at.
     (
-        "PROBE: deal_round does not reset the playback",
+        # Ran as a redundancy probe and did not survive, which is the answer the
+        # probe existed to get: five tests fail without it, so the reset is
+        # load-bearing and stays.  It is a normal mutation now, listing the tests
+        # that actually own it rather than the one guessed for it -- carrying a
+        # stale expectation is how a suite starts describing a program that is
+        # not the one on disk.  `the_pause_runs_before_anything_lights_up` was
+        # the guess, and it passes: it watches the pause *before* playback, and
+        # a playback left mid-sequence is only visible once playback runs.
+        "deal_round does not reset the playback, so a round resumes the last one",
         "        self.pre_ms = 0;\n        self.success_ms = 0;\n        self.playback = Playback::new();",
         "        self.pre_ms = 0;\n        self.success_ms = 0;",
-        ["the_pause_runs_before_anything_lights_up"],
+        [
+            "changing_the_speed_mid_playback_restarts_the_phase_rather_than_skipping_a_colour",
+            "every_colour_of_the_sequence_is_shown_for_the_same_time",
+            "one_long_tick_completes_as_much_of_the_sequence_as_it_covers",
+            "only_the_lit_pad_is_drawn_lit",
+            "the_gap_between_two_flashes_is_dark",
+        ],
     ),
     (
         # `deal_round` is now the only place `player_index` is rewound -- the
@@ -1324,6 +1351,26 @@ def main():
     for name, v in verdicts:
         print(f"{v:<34} {name}")
 
+    # The run is green only if every mutation was caught by the tests named for
+    # it.  Until this existed the script printed its verdicts and exited 0
+    # regardless, so a sweep carrying a stale anchor and two wrong-test results
+    # looked exactly like a clean one from the outside -- the three were found
+    # by reading 185 lines of log, which is not a check, it is a habit.
+    #
+    # A `[skip]` counts as a failure and that is the important half.  A survivor
+    # is loud: some test should have failed and none did.  A skip is silent --
+    # the anchor stopped matching because the production code moved under it, so
+    # the mutation was never applied and the coverage it stood for quietly
+    # stopped being verified, inside a run that still ends "0 survived".
+    bad = [(n, v) for n, v in verdicts if not v.startswith("caught")]
+    if bad:
+        print(f"\nFAIL: {len(bad)} of {len(verdicts)} mutation(s) not caught as named:")
+        for name, v in bad:
+            print(f"  {v:<32} {name}")
+        return 1
+    print(f"\nOK: all {len(verdicts)} mutation(s) caught by the tests named for them.")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

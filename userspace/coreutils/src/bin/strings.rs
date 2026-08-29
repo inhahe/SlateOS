@@ -1120,10 +1120,10 @@ mod tests {
     #[test]
     fn a_non_utf8_operand_survives_parsing() {
         let name = coreutils::quote::os_from_bytes(b"\xff\xfename.bin");
-        let parsed = parse_args(&[name.clone()]).unwrap();
+        let parsed = parse_args(std::slice::from_ref(&name)).unwrap();
         assert_eq!(
             parsed,
-            Request::Run(Box::new(Options::default()), vec![Source::Path(name)])
+            Request::Run(Box::default(), vec![Source::Path(name)])
         );
     }
 

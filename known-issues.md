@@ -92936,3 +92936,133 @@ alignment existing under a different split was silently missed. Replaced with
 direct enumeration of the three placements that can ever carry the run. The
 whole gate now runs in 19 s; the sibling's verdict on kshell is unchanged
 (502 assertions, 7 allowed).
+
+---
+
+## `A-KSTAT-SAMPLE-CALLS-MEMORY-INFO-FROM-THE-TIMER-SOFTIRQ` (lane A's code, filed by lane B, 2026-08-29) -- **open**, intermittent boot panic
+
+**In short:** the periodic metrics sampler runs inside the timer interrupt and
+calls a heavyweight memory query that takes ordinary blocking locks. When the
+timer lands on a CPU that already holds one of those locks, the interrupt
+handler spins for a lock only the code it just suspended could release. The
+kernel detects the recursive acquire and panics instead of hanging. Observed on
+`mm::swap::SWAP`, but `SWAP` is only the lock that lost the race -- the same
+path takes at least three others.
+
+**Where:** `kernel/src/kstat.rs:140` (`sample()` -> `mm::memory_pressure()`),
+`kernel/src/mm/mod.rs:428` (`memory_pressure()` -> `memory_info()`),
+`kernel/src/mm/mod.rs:286` (`memory_info()` -> `swap::summary()`),
+`kernel/src/mm/swap.rs:1149` (`SWAP.lock()`). Panic raised at
+`kernel/src/sync.rs:969`.
+
+**The path:**
+
+```
+sync::Mutex::lock        <- blocks forever
+mm::swap::summary        <- SWAP.lock()        swap.rs:1149
+mm::memory_info          <- swap::summary()    mm/mod.rs:286
+mm::memory_pressure      <- memory_info()      mm/mod.rs:428
+kstat::sample            <- memory_pressure()  kstat.rs:140
+softirq::handle_timer / process_pending / handle_timer_irq / idt::dispatch_vector
+```
+
+The interrupted context was inside `lockdep::lock_release`, i.e. mid-release of
+`SWAP` when the timer fired. That few-instruction window is why this is
+intermittent rather than every boot.
+
+**It is a real deadlock, not a lockdep false positive.** `fail_if_recursive` is
+reached only from `lock_contended` -- *after* `try_acquire` has already failed --
+so the lock word was genuinely still held, not merely still recorded as held.
+The owner check compares against `sched::current_task_id()`, which in softirq
+context is the interrupted task (task 0, idle). Hardware state and ownership
+bookkeeping agree.
+
+**The tell.** `kstat::sample()` already knows it must not block, and applies
+that discipline inconsistently fifteen lines apart:
+
+| Line | Call | Locking |
+|---|---|---|
+| `kstat.rs:125` | `mm::frame::try_stats()` | try-lock; comment reads `--- Memory stats (lock-free query) ---` |
+| `kstat.rs:140` | `mm::memory_pressure()` | blocking, and reaches four different locks |
+
+Blocking locks reachable from `memory_info()`: `frame::stats()` (`mm/mod.rs:274`
+*and* `:296` -- the blocking `stats()`, though `try_stats()` exists at
+`frame.rs:2692`), `swap::summary()` (`:286`), `heap::stats()` (`:283`), and
+`kswapd::is_running()`/`reclaim_cycles()`/`total_reclaimed()` (`:290-292`).
+Fixing only `SWAP` moves the panic rather than removing it.
+
+**Proper fix:** give `memory_info` a non-blocking twin -- `swap::try_summary()`,
+`try_memory_info()`, `try_memory_pressure()`, each returning `None` when any
+lock is busy -- and have `kstat::sample()` skip the sample rather than block. A
+dropped metrics sample costs nothing; the next tick gets it. This is exactly the
+shape `frame::try_stats()` already has. Alternatives (defer sampling to a kernel
+thread; make the locks IRQ-safe) are set out in the request file.
+
+**Reproduce:** not deterministic. Seen on `./scripts/boot-test.sh` against
+`lane-b` @ `8340fe48b`, debug profile, QEMU TCG; panic at serial log line 43907,
+during the `sysdiag` self-tests. `boot-history` reports 508 boots, 387 clean --
+this class of intermittent failure is not new, though how many of the 121 are
+this specific bug is unknown.
+
+**Frequency: 1 in 2 so far.** The next boot test, same debug/TCG configuration
+on `ca0a25d96` (same tree plus lane A's two kshell commits), passed clean in
+897 s. The window is narrow enough to miss on a retry and wide enough to hit on
+a first try -- the worst shape for a race. The passing re-run is not evidence
+against the bug; it was run only to establish intermittency.
+
+**Not a lane-B regression:** the lane-B diff for that merge touches no
+`kernel/`, `drivers/`, `fs/` or `net/` file (`design-decisions.md`,
+`requests/`, `scripts/argv-utf8-baseline.txt`, `scripts/df-diff.sh`,
+`userspace/coreutils/{df,du,strings}.rs`, `userspace/coreutils/src/human.rs`).
+Filed to lane A as
+`requests/b-a-kstat-sample-calls-memory-info-from-the-timer-softirq-and-self-deadlocks-on-swap.md`.
+
+---
+
+## `B-XARGS-IS-A-STUB-AND-DASH-ZERO-CANNOT-CARRY-THE-BYTES-IT-EXISTS-FOR` (lane B, 2026-08-29) -- **open**, not yet converted
+
+**In short:** `userspace/coreutils/src/bin/xargs.rs` is a 285-line invention, not
+a transcription of GNU findutils' 1755-line `xargs.c`. The worst consequence is
+that `xargs -0` -- the mode whose entire purpose is carrying arbitrary bytes from
+`find -print0` -- reads stdin with `read_to_string` and so fails on exactly the
+non-UTF-8 filenames it exists to handle. `find . -print0 | xargs -0 rm` is broken
+for the case `-0` was invented for.
+
+**Where:** `userspace/coreutils/src/bin/xargs.rs` -- `run_main()` line 34
+(`env::args().skip(1).collect::<Vec<String>>()`), line 42
+(`io::stdin().read_to_string`), `split_items()` line 152, `parse_args()` line 108.
+Listed in `scripts/argv-utf8-baseline.txt` as `xargs.rs:argv-as-string`.
+
+**Measured against `/usr/bin/xargs` (GNU findutils 4.9.0) on the dev machine.**
+Each row was run, not assumed:
+
+| # | Case | GNU 4.9.0 | Our stub |
+|---|---|---|---|
+| 1 | `printf "a'b c'd\n" \| xargs echo` | `ab cd` (one item; quotes are syntax) | `a'b c'd` (two items, quotes literal) |
+| 2 | `printf 'x\ y\n' \| xargs echo` | `x y` (backslash escapes the space) | two items |
+| 3 | `printf "a'b\n" \| xargs echo` | diagnoses `unmatched single quote` | accepted silently |
+| 4 | empty input, no `-r` | **runs the command once** (`RAN`) | returns success without running |
+| 5 | child exits 1 | xargs exits **123** | exits 1 |
+| 6 | child exits 255 | xargs exits **124** | exits 1 |
+| 7 | command not found | xargs exits **126** | exits 1 |
+| 8 | `printf 'caf\351\0' \| xargs -0 ...` | passes the raw byte through (`63 61 66 e9`) | cannot represent it |
+
+Note row 7: the measured status is **126**, not the 127 the documentation
+implies. Recorded as measured; do not "correct" it to 127 without re-measuring.
+
+Row 4 matters more than it looks: the stub behaves as though `-r`
+(`--no-run-if-empty`) were permanently on, so a script relying on the one
+guaranteed invocation silently gets none.
+
+**Also entirely absent:** `ARG_MAX` splitting. GNU's whole reason for existing is
+building command lines up to the system limit (gnulib `lib/buildcmd.c`, 638
+lines); our default path appends every item to a single command and will `E2BIG`
+on large input. And 15 of 18 long options are missing -- `--arg-file`,
+`--delimiter`, `--eof`, `--max-lines`, `--max-chars`, `--interactive`,
+`--no-run-if-empty`, `--verbose`, `--show-limits`, `--exit`, `--max-procs`,
+`--process-slot-var`, `--open-tty`, `--help`, `--version`.
+
+**Proper fix:** transcribe `xargs.c` + `buildcmd.c` the way `df`, `du` and `ls`
+were done, carrying argv and stdin as bytes throughout, and add
+`scripts/xargs-diff.sh` in the shape of `df-diff.sh` against `/usr/bin/xargs`.
+Reference tarball matches the installed binary exactly (findutils 4.9.0).

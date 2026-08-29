@@ -3396,6 +3396,102 @@ check_shellcheck() {
 
 check_shellcheck
 
+# Run the tooling's own test suites.
+#
+# WHY THIS GATE EXISTS.  `scripts/` holds fourteen `test-*.py` suites -- around
+# 400 assertions covering the boot harness itself, the two history loaders, the
+# canary loader, the sysroot fixtures, the space reclaimer, the source digest --
+# and until 2026-08-29 **nothing ran any of them**.  They ran when an agent
+# happened to remember, which for most of them was the day they were written.
+# That is the same failure this file's other gates exist to prevent, one level
+# up: a suite that is not run is not a test, it is a comment that takes an hour
+# to write.  The specific hazard is worse here than for kernel code, because
+# these scripts *are* the harness -- a regression in `boot-history.py` corrupts
+# the record of every boot, including the ones that would have shown it.
+#
+# WHY IT IS AFFORDABLE.  Measured, not assumed: all fourteen together take ~95 s
+# (the slowest, `test-canary-load.py`, is 31 s), against a boot test that runs
+# 900-1200 s.  It is also the cheapest possible place to spend it -- these fail
+# in seconds and before the build, so a broken harness stops the run instead of
+# corrupting its output an hour later.
+#
+# WHY IT DISCOVERS RATHER THAN LISTS.  A hand-written list is a second place a
+# new suite must be registered, and forgetting is silent: the suite passes by
+# not running, which is indistinguishable from passing.  So the glob is the
+# list, and a floor below guards the failure mode discovery has instead -- a
+# glob that matches nothing also reports no failures.
+check_python_suites() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Tooling test suites: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Running the tooling's own test suites (scripts/test-*.py) ==="
+    local suites=()
+    local f
+    for f in "$PROJECT_ROOT"/scripts/test-*.py; do
+        # An unmatched glob expands to itself in bash, so the literal pattern
+        # would be "run" as a filename and fail confusingly.  Test for the file.
+        [ -f "$f" ] && suites+=("$f")
+    done
+
+    # The floor.  Fourteen suites existed when this gate was written; the check
+    # is deliberately `-lt` against a number below that rather than `-eq`, so
+    # adding a suite does not fail the build, while losing most of them -- a
+    # broken glob, a renamed directory, a checkout that dropped `scripts/` --
+    # does.  Without it this gate's own failure mode is a silent pass.
+    if [ "${#suites[@]}" -lt 10 ]; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  Only ${#suites[@]} tooling test suite(s)" >&2
+        echo "were discovered under scripts/test-*.py; there are at least 10." >&2
+        echo "Discovery is broken, not the code -- and a gate that discovers" >&2
+        echo "nothing reports no failures, which reads exactly like a pass." >&2
+        exit 1
+    fi
+
+    local failed=()
+    local out rc
+    for f in "${suites[@]}"; do
+        # `&& rc=0 || rc=$?` rather than a bare `rc=$?`: this file runs under
+        # `set -e`, where a failing command in an assignment would abort the
+        # whole boot test before the status could be reported as a suite
+        # failure.  Same reasoning as check_shellcheck above.
+        out="$("$py" -u "$f" 2>&1)" && rc=0 || rc=$?
+        if [ "$rc" -eq 0 ]; then
+            printf '    %-32s %s\n' "$(basename "$f")" "$(printf '%s\n' "$out" | tail -1)"
+            continue
+        fi
+        failed+=("$(basename "$f")")
+        echo "" >&2
+        echo "--- $(basename "$f") FAILED (exit $rc) ---" >&2
+        # The whole output, not a tail: these suites print one line per
+        # assertion and the failing one is rarely last.
+        printf '%s\n' "$out" >&2
+    done
+
+    if [ "${#failed[@]}" -eq 0 ]; then
+        echo "=== Tooling test suites: ${#suites[@]} suites, all passed ==="
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  ${#failed[@]} tooling test suite(s) failed:" >&2
+    printf '    %s\n' "${failed[@]}" >&2
+    echo "" >&2
+    echo "These test the harness itself, so a failure here means the numbers" >&2
+    echo "this run would produce cannot be trusted -- including the boot" >&2
+    echo "verdict and the history it gets recorded in.  Reproduce with:" >&2
+    echo "    python scripts/${failed[0]}" >&2
+    exit 1
+}
+
+check_python_suites
+
 # Resolved once, here, because two things now need it: the clippy gate below
 # and the build after it.  Hoisted out of the build block rather than
 # duplicated -- a gate that resolves `cargo` differently from the build it

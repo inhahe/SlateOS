@@ -3521,6 +3521,78 @@ check_kernel_clippy() {
 
 check_kernel_clippy
 
+# Compile every `#[cfg(unix)]` arm in the workspace, which nothing else does.
+#
+# Requested by lane B in
+# requests/b-a-a-windows-only-check-never-compiles-your-cfg-unix-arms.md.
+#
+# WHY THIS IS NOT REDUNDANT WITH EVERY OTHER CHECK IN THIS FILE.  We all
+# develop on a Windows host, so `cargo build`, `cargo clippy` and `cargo test`
+# all run for a Windows target.  rustc does not *compile* what `#[cfg(unix)]`
+# guards on a Windows target -- it discards the tokens -- so that code can
+# contain plain name-resolution and syntax errors while every routine check
+# comes back green.  SlateOS is a unix (`toolchain/x86_64-slateos.json` sets
+# `"target-family": ["unix"]`), so the arm that is never compiled is the arm
+# that ships.  Lane B's `userspace/backup` did not compile for a unix target
+# for nearly three months on exactly this.
+#
+# IT IS SELF-INFLICTING, WHICH IS WHY IT BELONGS NEXT TO THE CLIPPY GATE.  The
+# commit that broke `backup` was a clippy hygiene sweep: it answered a genuine
+# "unused variable" warning on a `ManifestEntry::Symlink { target, path }` by
+# rebinding to `target: _`.  On Windows that warning is correct, because the
+# only reader of `target` is the `cfg(unix)` arm below it; on unix the rebind
+# is a hard error.  Any `-D warnings` sweep over a file containing `cfg(unix)`
+# is a fresh chance to do this again -- the warnings such a sweep is chasing
+# exist *because* the unix arm is invisible to it.
+#
+# `x86_64-unknown-linux-gnu`, NOT `x86_64-slateos`: the latter needs
+# `-Zbuild-std` and is far slower, and for `cfg(unix)` coverage the two are
+# equivalent.  `check` rather than `build` means nothing is linked, so no
+# cross-linker is needed on a Windows host.
+#
+# COST: ~10 s warm, measured (5m22s on the first, cold run that populates
+# target/x86_64-unknown-linux-gnu).  Lane B estimated "under three minutes";
+# it is an order cheaper than that once the cache exists.
+check_cfg_unix() {
+    if ! rustup target list --installed 2>/dev/null \
+        | grep -qx "x86_64-unknown-linux-gnu"; then
+        echo "=== cfg(unix) check: skipped (x86_64-unknown-linux-gnu not installed) ===" >&2
+        echo "    rustup target add x86_64-unknown-linux-gnu" >&2
+        return 0
+    fi
+
+    echo "=== Checking that every #[cfg(unix)] arm compiles ==="
+    local log start rc
+    log="$PROJECT_ROOT/build/check-cfg-unix.log"
+    start="$(date +%s)"
+    # Same `&& rc=0 || rc=$?` reasoning as check_shellcheck: this file runs
+    # under `set -e`, so a bare `if ! cargo ...` is fine but a plain command
+    # whose status we want to read is not.
+    "$CARGO" check --workspace --target x86_64-unknown-linux-gnu \
+        --message-format=short > "$log" 2>&1 && rc=0 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo "cfg(unix) OK ($(( $(date +%s) - start ))s, every cfg(unix) arm compiles)."
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Code guarded by #[cfg(unix)] does not" >&2
+    echo "compile for a unix target.  This is invisible to every other check" >&2
+    echo "here, because they all run for the Windows host -- and it is the arm" >&2
+    echo "that ships, because SlateOS sets target-family = [\"unix\"]." >&2
+    echo "" >&2
+    grep -E '^[^ ].*: error' "$log" >&2 || true
+    echo "" >&2
+    echo "Full output: $log" >&2
+    echo "" >&2
+    echo "If you arrived here from a warning-cleanup sweep, suspect the sweep:" >&2
+    echo "an \"unused variable\" that is real on Windows is often read only by" >&2
+    echo "the cfg(unix) arm the host target discarded." >&2
+    exit 1
+}
+
+check_cfg_unix
+
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then
     check_free_space "before building"

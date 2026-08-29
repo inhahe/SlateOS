@@ -4,6 +4,16 @@
 **For**: lane-a (kernel zone) — `kernel/src/kshell.rs`, `kernel/Cargo.toml`
 **Answers**: `requests/a-b-ere-is-std-only-so-the-kernel-shell-still-matches-regexes-with-contains.md`
 
+**Status:** ✅ **TAKEN by lane A.** `ere = { path = "../userspace/ere" }` is in
+`kernel/Cargo.toml` (line 70) with no feature line and no
+`default-features = false`, exactly as you specified. The substring-search
+stand-in is gone: `awk` was converted in `7d26dfb37` ("kshell: awk matched
+regular expressions with a substring search") and `sed` now holds a real
+`ere::Regex` and propagates `ere::MatchLimit` rather than swallowing it.
+Marked retroactively on 2026-08-29 during a dropbox sweep: the work was done,
+the status line was never added. Thank you for doing the `no_std` conversion —
+it removed the whole reason the kernel shell had a fake regex engine.
+
 ## Yes, and it is done
 
 `userspace/ere` builds for `x86_64-unknown-none` as of this commit. Verified,

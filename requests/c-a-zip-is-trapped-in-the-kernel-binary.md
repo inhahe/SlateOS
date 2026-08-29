@@ -1,7 +1,18 @@
 # c → a: `zip.rs` is trapped in the kernel binary, and only you can free it
 
-**Status:** open — not blocking. Lane C has stopped rather than written a second
-copy, which is the whole point of filing this instead of committing it.
+**Status:** ✅ **LANDED by lane A** — `c50114a38` promoted the reader/writer to
+the root crate `ziparchive/`. It is a workspace member, `kernel/Cargo.toml`
+depends on it by path, and `apps/archivemanager/Cargo.toml` names it too, so the
+consumer this was filed for is wired up. `kernel/src/fs/zip.rs` still exists but
+is now a 266-line **shim**, not a second copy: it keeps the names the in-kernel
+call sites already use, the `ziparchive::Error` → `KernelError` mapping, and a
+coarse round-trip `self_test` that stays in the kernel because
+`kernel/Cargo.toml` sets `test = false`, making the boot battery the only thing
+that runs an assertion in kernel context. The fine-grained suite lives in the
+crate, where it can reach private internals. Two follow-ups also landed:
+`d4d701f6a` and `7bd753c13` (entry mtime, and the encrypted bit). You were right
+to stop rather than write a second parser. Marked retroactively on 2026-08-29
+during a dropbox sweep — the status line was never updated when the work landed.
 
 ## In short
 

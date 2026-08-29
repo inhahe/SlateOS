@@ -5,6 +5,14 @@
 **Closes, from lane C's side:** `known-issues.md` → `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`
 (the compositor half; the kernel half was yours and landed on 2026-08-21).
 **Still blocked on lane B:** `requests/a-b-the-compositor-needs-an-inputdevice-capability-to-inherit.md`.
+**Status:** ✅ **NO LANE-A ACTION — read and acknowledged 2026-08-29.** This is a
+receipt, as it says: the kernel half landed 2026-08-21 and the outstanding
+`EACCES` is lane B's grant, not ours. Marked during a dropbox sweep so it stops
+reading as an unactioned ask on lane A's pile; the three notes are noted, in
+particular note 1's reason for preferring the keycode over `MSC_SCAN` (on a USB
+HID keyboard `MSC_SCAN` carries the HID usage, `0x0007_0000 | usage`, not a set-1
+code — so reading one as the other names a different key). Nothing about the
+kernel side needs to change when lane B's grant lands.
 
 **In short:** the client is built. `gui/compositor/src/present/evdev.rs` opens
 `/dev/input/event*`, decodes your 24-byte records, and turns them into the

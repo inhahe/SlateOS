@@ -3319,6 +3319,83 @@ check_orphan_modules() {
 
 check_orphan_modules
 
+# Refuse to build when any script in scripts/ has a shellcheck `error`.
+#
+# WHY IT NEEDS A GATE.  `scripts/shellcheck-all.sh` was added by lane B on
+# 2026-08-27 and, until this line, was referenced by nothing: no gate, no
+# harness, no other script.  It ran only when someone remembered it.  It was
+# also *unrunnable* under lane A's account -- shellcheck was never installed
+# there, so the script exited 2 -- which means the tree it polices went
+# unchecked in at least one of the three lanes for the whole of its existence.
+# A gate nobody runs is not a gate; this makes it one.
+#
+# The shell is where this project's worst-behaved code lives, precisely because
+# nothing type-checks it: `bash -n` catches syntax only, and the failures that
+# actually bite are semantic and silent -- an unquoted expansion that
+# word-splits a path containing a space, a `$?` read after the wrong command, a
+# `cd` whose failure the next line ignores.  All three have happened here.  The
+# unquoted-path one escaped the repository entirely and created a stray file
+# named `D:\visual` on the operator's disk, which then wedged an unrelated lane.
+#
+# `error`, NOT `warning`, AND THEREFORE NOT A RATCHET.  At `error` the tree has
+# 0 findings, so this is a clean-tree test with no baseline file to drift.  At
+# `warning` it has 48, most of them SC2209 on `DIFF_PROG=<name>` in the
+# differential harnesses, where the tool cannot distinguish a bare command name
+# from a forgotten `$(...)` -- a false positive that would need 34 one-line
+# edits in another lane's files to silence.  Gating on a floor the tree already
+# meets keeps this honest: it can only ever fire on something newly introduced.
+#
+# SKIPS, LOUDLY, WHEN THE TOOL IS ABSENT.  shellcheck is a third-party binary,
+# and hard-failing the kernel build in a lane that has not installed one would
+# be a worse outcome than the checking it buys.  Exit 2 from shellcheck-all.sh
+# means "tool not found" and is distinct from exit 1, "findings"; only the
+# latter stops the build.  Same shape as the `no python` escapes above.
+#
+# COST: ~40 s measured here, against a boot whose QEMU window alone is 400-900 s.
+check_shellcheck() {
+    echo "=== Checking scripts/ for shellcheck errors ==="
+    # `local out rc` is deliberately a separate statement from the assignment:
+    # `local out="$(...)"` makes `local` the command whose status `$?` reports,
+    # which is always 0, silently discarding the exit code this gate is built
+    # around.  (That exact trap is one of the things shellcheck flags, SC2155.)
+    local out rc
+    # And the status must be captured with `&& rc=0 || rc=$?` rather than a bare
+    # `rc=$?` on the next line, because this file runs under `set -e`: a plain
+    # failing assignment would abort the entire boot test before `rc` was ever
+    # read -- taking the *skip* path (exit 2, shellcheck not installed) down
+    # with it, which is the opposite of what the skip is for.
+    out="$(bash "$PROJECT_ROOT/scripts/shellcheck-all.sh" error 2>&1)" && rc=0 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        printf '%s\n' "$out" | tail -1
+        return 0
+    fi
+    if [ "$rc" -eq 2 ]; then
+        echo "=== shellcheck check: skipped (shellcheck not installed) ===" >&2
+        echo "    Install it -- it is one static binary and needs no root:" >&2
+        echo "      Windows: shellcheck-stable.zip from the koalaman/shellcheck" >&2
+        echo "               releases; put shellcheck.exe in ~/bin (MSYS resolves" >&2
+        echo "               the .exe suffix, so no rename is needed)." >&2
+        echo "      Linux:   shellcheck-stable.linux.x86_64.tar.xz, same place." >&2
+        return 0
+    fi
+
+    printf '%s\n' "$out" >&2
+    echo "" >&2
+    echo "ERROR: refusing to build.  A script above has a shellcheck *error*," >&2
+    echo "not a style note -- the tree was at zero of these, so this one is" >&2
+    echo "newly introduced by the change in hand." >&2
+    echo "" >&2
+    echo "Reproduce and read the findings with:" >&2
+    echo "    bash scripts/shellcheck-all.sh error --full" >&2
+    echo "" >&2
+    echo "Do not silence it with a blanket 'shellcheck disable' at the top of" >&2
+    echo "the file.  If a finding is genuinely wrong, disable that one code on" >&2
+    echo "that one line, with a comment saying why it is a false positive." >&2
+    exit 1
+}
+
+check_shellcheck
+
 # Resolved once, here, because two things now need it: the clippy gate below
 # and the build after it.  Hoisted out of the build block rather than
 # duplicated -- a gate that resolves `cargo` differently from the build it
@@ -3443,6 +3520,78 @@ check_kernel_clippy() {
 }
 
 check_kernel_clippy
+
+# Compile every `#[cfg(unix)]` arm in the workspace, which nothing else does.
+#
+# Requested by lane B in
+# requests/b-a-a-windows-only-check-never-compiles-your-cfg-unix-arms.md.
+#
+# WHY THIS IS NOT REDUNDANT WITH EVERY OTHER CHECK IN THIS FILE.  We all
+# develop on a Windows host, so `cargo build`, `cargo clippy` and `cargo test`
+# all run for a Windows target.  rustc does not *compile* what `#[cfg(unix)]`
+# guards on a Windows target -- it discards the tokens -- so that code can
+# contain plain name-resolution and syntax errors while every routine check
+# comes back green.  SlateOS is a unix (`toolchain/x86_64-slateos.json` sets
+# `"target-family": ["unix"]`), so the arm that is never compiled is the arm
+# that ships.  Lane B's `userspace/backup` did not compile for a unix target
+# for nearly three months on exactly this.
+#
+# IT IS SELF-INFLICTING, WHICH IS WHY IT BELONGS NEXT TO THE CLIPPY GATE.  The
+# commit that broke `backup` was a clippy hygiene sweep: it answered a genuine
+# "unused variable" warning on a `ManifestEntry::Symlink { target, path }` by
+# rebinding to `target: _`.  On Windows that warning is correct, because the
+# only reader of `target` is the `cfg(unix)` arm below it; on unix the rebind
+# is a hard error.  Any `-D warnings` sweep over a file containing `cfg(unix)`
+# is a fresh chance to do this again -- the warnings such a sweep is chasing
+# exist *because* the unix arm is invisible to it.
+#
+# `x86_64-unknown-linux-gnu`, NOT `x86_64-slateos`: the latter needs
+# `-Zbuild-std` and is far slower, and for `cfg(unix)` coverage the two are
+# equivalent.  `check` rather than `build` means nothing is linked, so no
+# cross-linker is needed on a Windows host.
+#
+# COST: ~10 s warm, measured (5m22s on the first, cold run that populates
+# target/x86_64-unknown-linux-gnu).  Lane B estimated "under three minutes";
+# it is an order cheaper than that once the cache exists.
+check_cfg_unix() {
+    if ! rustup target list --installed 2>/dev/null \
+        | grep -qx "x86_64-unknown-linux-gnu"; then
+        echo "=== cfg(unix) check: skipped (x86_64-unknown-linux-gnu not installed) ===" >&2
+        echo "    rustup target add x86_64-unknown-linux-gnu" >&2
+        return 0
+    fi
+
+    echo "=== Checking that every #[cfg(unix)] arm compiles ==="
+    local log start rc
+    log="$PROJECT_ROOT/build/check-cfg-unix.log"
+    start="$(date +%s)"
+    # Same `&& rc=0 || rc=$?` reasoning as check_shellcheck: this file runs
+    # under `set -e`, so a bare `if ! cargo ...` is fine but a plain command
+    # whose status we want to read is not.
+    "$CARGO" check --workspace --target x86_64-unknown-linux-gnu \
+        --message-format=short > "$log" 2>&1 && rc=0 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo "cfg(unix) OK ($(( $(date +%s) - start ))s, every cfg(unix) arm compiles)."
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Code guarded by #[cfg(unix)] does not" >&2
+    echo "compile for a unix target.  This is invisible to every other check" >&2
+    echo "here, because they all run for the Windows host -- and it is the arm" >&2
+    echo "that ships, because SlateOS sets target-family = [\"unix\"]." >&2
+    echo "" >&2
+    grep -E '^[^ ].*: error' "$log" >&2 || true
+    echo "" >&2
+    echo "Full output: $log" >&2
+    echo "" >&2
+    echo "If you arrived here from a warning-cleanup sweep, suspect the sweep:" >&2
+    echo "an \"unused variable\" that is real on Windows is often read only by" >&2
+    echo "the cfg(unix) arm the host target discarded." >&2
+    exit 1
+}
+
+check_cfg_unix
 
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then

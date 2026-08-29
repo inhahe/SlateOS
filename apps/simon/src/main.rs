@@ -117,6 +117,50 @@
 //!     took a bare `Key` and never saw `modifiers`, so every desktop
 //!     accelerator that happens to end in one of this game's letters was also
 //!     one of this game's controls.
+//!
+//! Six more came out of mutating the finished program to check the tests
+//! actually watch it — five of them lines that could be deleted with nothing
+//! failing, which is either a gap in the suite or a line that should not exist
+//! (`known-issues.md` lesson 51). All five were the second kind:
+//!
+//! 21. **A `max(1)` in `flash_pad` was defended by a comment that was false.**
+//!     It claimed a zero-millisecond flash would be "lit by `lit` and never
+//!     cleared by `age_flash`" — but `age_flash` maps `Some(0)` to `None` on
+//!     the very next tick, so the case the floor existed to prevent could not
+//!     happen. An exception argued for in a comment is an assertion nobody
+//!     checks (lesson 61); the floor is gone and `ms` passes through unfloored.
+//! 22. **Four assignments restated what already held.** `new_game`'s
+//!     `flash = None`, the playback handover's `player_index = 0` *and*
+//!     `flash = None`, and a second `Playback::new()` in `begin_playback` one
+//!     line after the first. Each was deleted and replaced by a test holding
+//!     the property it was aiming at, so a future change that makes the
+//!     restatement load-bearing again fails loudly instead of silently.
+//! 23. **The pad halo was clipped against a window it cannot leave.** The
+//!     proof is arithmetic — below a 200-pixel step the halo grows by at most
+//!     `step * 0.0368` against a half-gap of `step * 0.04`, and above it the
+//!     growth caps at 6 against a half-gap of 8 — so the `intersect` was dead
+//!     in every window. The clip is gone and the proof is in the comment.
+//! 24. **`draw_readout` guarded against an empty box** that `fill` and
+//!     `centred` already refuse. Deleting it turned a test red, which looked
+//!     like the guard being load-bearing and was not: see below.
+//! 25. **A test proved `PAD_SHARE` by computing `PAD_SHARE`.** It rebuilt the
+//!     expected geometry from the same constant the code uses, so it agreed
+//!     with any value the constant took and could only fail if the arithmetic
+//!     around it changed. It asserts against measured pixels now.
+//!
+//! And one that was not simon's at all. Deleting the guard in 24 failed
+//! `every_line_of_type_stays_inside_the_window` at a 24x24 window — naming the
+//! *pad numbers*, which no readout draws. The chain ran three subsystems deep:
+//! at that size every band is dropped, so a readout box is empty and its
+//! caption asks for a 0-pixel line height *before* the early return that would
+//! have skipped it; `gui/font`'s `FontCache::get` rounded 0.0 to cache key 1
+//! but built the entry at the raw 0.0, which no face can scale to, installing
+//! the coarse 8x16 bitmap fallback under key 1 — and the pad numbers,
+//! legitimately 1.472 pixels, round to that same key and measured 8x16.
+//! A cache keyed coarsely but built from the raw argument hands the wrong
+//! answer to whoever asks second. Fixed at the root (entries are built at
+//! `key_px(key)` now) and written up as `known-issues.md` lesson 64; with the
+//! toolkit honest, simon's guard was dead after all and went.
 
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};

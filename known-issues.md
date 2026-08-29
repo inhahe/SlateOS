@@ -92868,6 +92868,18 @@ poisons evidence rather than crashing -- a mutant compiles, so the next run
 reads it as `original` and mutates on top of it, and a sweep reporting `[ok]`
 throughout then proves nothing at all.
 
+**A second divergence, found the same day.** Simon's second sweep returned 182
+`[ok]`, one `[skip]` and two wrong-test verdicts -- and **exited 0**. All
+thirteen harnesses print their verdicts and return success unconditionally, so
+a run that has not passed is indistinguishable from one that has unless someone
+reads every line of the log. Simon's now exits 1 unless every mutation was
+caught by the tests named for it, and counts a `[skip]` as a failure: a
+survivor is loud, but a stale anchor silently stops applying its mutation, and
+does so inside a run that still ends "0 survived". The other twelve still exit
+0 regardless. This is the same debt as above and doubles the argument for
+extracting the harness -- two independent correctness fixes have now had to be
+written into one copy of thirteen.
+
 **What the proper fix looks like.** Extract the harness into one module -- say
 `apps/mutation_harness.py` -- exposing a `sweep(src_path, mutations)` entry
 point, and reduce each `apps/<app>/mutate.py` to its docstring, its `MUTATIONS`

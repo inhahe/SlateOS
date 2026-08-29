@@ -20768,6 +20768,101 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!(
+        "  kshell::self_test 104: the guess that was already being rejected by \
+         accident is rejected on purpose -- a mistyped port, sample window, \
+         byte count or pid is named, and no invented answer, filed measurement \
+         or truncated listing is reported in its place"
+    );
+    {
+        // Rung 104 -- batch 40, the last of the four-site functions. Every
+        // assertion below is a *pair*, as in rung 103: the refusal is named and
+        // the old confident output is asserted absent, because a fix that
+        // refuses and then acts anyway would satisfy the first half alone.
+        //
+        // The four cases are chosen for the four distinct ways the old code
+        // survived review, not for coverage of four commands.
+
+        // 1. The guard that worked by luck. `upnp remove` had no guard at all
+        // behind the guess, so a mistyped port fell through to 0 and the shell
+        // answered "No mapping found for tcp port 0" -- confident, specific and
+        // about a port nobody typed. Its sibling `upnp add` *did* reject the
+        // typo, but only because the guessed default was 0 and a separate
+        // `if int_port == 0` caught it; that collision was luck, and the same
+        // code with a legal default would have accepted the typo in silence.
+        let out = capture_command("upnp remove tcp 8O");
+        assert_output_contains(
+            "a mistyped port is refused rather than answered about port 0",
+            &out,
+            b"`8O' is not a port",
+        );
+        assert_eq!(last_exit(), 1, "`upnp remove tcp 8O` errors");
+        assert_output_lacks("and no answer is given about port 0", &out, b"port 0");
+
+        // 2. Strict and guessing on the same line. `netsyslog forward` parsed
+        // the address and refused a malformed one, then invented the port next
+        // to it and printed 514 back in the confirmation -- so the one operand
+        // the caller could check against the output was the one that had been
+        // made up.
+        let out = capture_command("netsyslog forward 10.0.0.1 51O");
+        assert_output_contains(
+            "a mistyped port is refused even though the address beside it parsed",
+            &out,
+            b"`51O' is not a port",
+        );
+        assert_eq!(last_exit(), 1, "`netsyslog forward 10.0.0.1 51O` errors");
+        assert_output_lacks(
+            "and no forwarding is reported to the invented port",
+            &out,
+            b"Forwarding logs",
+        );
+
+        // 3. The limit that truncates evidence, printed back as if chosen.
+        // `sres avg 1O` averaged the last 10 samples and labelled the result
+        // "Average CPU (last 10 samples)" -- a short answer that reads exactly
+        // like a complete one, carrying the invented window in its own caption.
+        let out = capture_command("sres avg 1O");
+        assert_output_contains(
+            "a mistyped sample window is refused rather than silently narrowed",
+            &out,
+            b"`1O' is not a sample count",
+        );
+        assert_eq!(last_exit(), 1, "`sres avg 1O` errors");
+        assert_output_lacks("and no average is captioned with it", &out, b"Average CPU");
+
+        // 4. The operand that is a measurement being *filed*. `diskstat read`
+        // does not merely act on its byte count -- it adds it to the device's
+        // cumulative I/O counters, where a guessed 4096 becomes indistinguishable
+        // from an observed one the moment it lands. This is the one case in the
+        // rung where refusing late would already be too late.
+        let out = capture_command("diskstat read zzdev 4O96");
+        assert_output_contains(
+            "a mistyped byte count is refused before it becomes a statistic",
+            &out,
+            b"`4O96' is not a byte count",
+        );
+        assert_eq!(last_exit(), 1, "`diskstat read zzdev 4O96` errors");
+        assert_output_lacks("and nothing is reported read", &out, b"diskstat: read ");
+
+        // A fifth, pinning the gate rather than the shell. Five of these arms
+        // were converted by a whole-file replace of a block that was not unique
+        // to the function being edited, so they came out correct in substance
+        // while announcing themselves as `epollstat`. Nothing downstream saw it:
+        // it compiled, it formatted, and the option-refusal gate scored the
+        // sites as fixed. scripts/check-shell-message-names.py now decides this
+        // statically against the dispatch table; this asserts it in the log too,
+        // because a message that names the wrong command sends its reader to
+        // another command's source.
+        let out = capture_command("filelock pid 1O");
+        assert_output_contains(
+            "the refusal names filelock, the command it actually came from",
+            &out,
+            b"filelock: pid: `1O' is not a pid",
+        );
+        assert_eq!(last_exit(), 1, "`filelock pid 1O` errors");
+        assert_output_lacks("and not the command it was copied from", &out, b"epollstat");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -78416,8 +78511,7 @@ fn cmd_hdrdisplay(args: &str) {
             // omitted or mistyped one used to be guessed as display 1, which
             // is a real display rather than a spare number, so every typo
             // silently acted on #1 and reported that it had done so.
-            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id")
-            else {
+            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id") else {
                 return;
             };
             let std = match parts.get(2).copied().unwrap_or("hdr10") {
@@ -78439,8 +78533,7 @@ fn cmd_hdrdisplay(args: &str) {
             // omitted or mistyped one used to be guessed as display 1, which
             // is a real display rather than a spare number, so every typo
             // silently acted on #1 and reported that it had done so.
-            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id")
-            else {
+            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id") else {
                 return;
             };
             match hdrdisplay::disable_hdr(id) {
@@ -78456,8 +78549,7 @@ fn cmd_hdrdisplay(args: &str) {
             // omitted or mistyped one used to be guessed as display 1, which
             // is a real display rather than a spare number, so every typo
             // silently acted on #1 and reported that it had done so.
-            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id")
-            else {
+            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id") else {
                 return;
             };
             let tm = match parts.get(2).copied().unwrap_or("auto") {
@@ -78480,8 +78572,7 @@ fn cmd_hdrdisplay(args: &str) {
             // omitted or mistyped one used to be guessed as display 1, which
             // is a real display rather than a spare number, so every typo
             // silently acted on #1 and reported that it had done so.
-            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id")
-            else {
+            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id") else {
                 return;
             };
             let boost: u32 = parts.get(2).unwrap_or(&"50").parse().unwrap_or(50);
@@ -78498,8 +78589,7 @@ fn cmd_hdrdisplay(args: &str) {
             // omitted or mistyped one used to be guessed as display 1, which
             // is a real display rather than a spare number, so every typo
             // silently acted on #1 and reported that it had done so.
-            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id")
-            else {
+            let Some(id) = required_num::<u32>(&parts, 1, "hdrdisplay", sub, "display id") else {
                 return;
             };
             let cs = match parts.get(2).copied().unwrap_or("srgb") {
@@ -79551,8 +79641,7 @@ fn cmd_dpiscaling(args: &str) {
             // omitted or mistyped one used to be guessed as display 1, which
             // is a real display rather than a spare number, so every typo
             // silently acted on #1 and reported that it had done so.
-            let Some(id) = required_num::<u32>(&parts, 1, "dpiscaling", sub, "display id")
-            else {
+            let Some(id) = required_num::<u32>(&parts, 1, "dpiscaling", sub, "display id") else {
                 return;
             };
             let pct: u32 = parts.get(2).unwrap_or(&"100").parse().unwrap_or(100);
@@ -79569,8 +79658,7 @@ fn cmd_dpiscaling(args: &str) {
             // omitted or mistyped one used to be guessed as display 1, which
             // is a real display rather than a spare number, so every typo
             // silently acted on #1 and reported that it had done so.
-            let Some(id) = required_num::<u32>(&parts, 1, "dpiscaling", sub, "display id")
-            else {
+            let Some(id) = required_num::<u32>(&parts, 1, "dpiscaling", sub, "display id") else {
                 return;
             };
             let m = match parts.get(2).copied().unwrap_or("fractional") {

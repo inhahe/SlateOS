@@ -81827,8 +81827,57 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **332 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **267 of 800 remain**
 
+> **Burn-down log.** 2026-08-29 (fortieth batch): every function carrying
+> **four** sites, which is now none. 332 → 267 across 185 → 166 functions;
+> nineteen functions left the ledger entirely. `cmd_webcam`, `cmd_vmzone`,
+> `cmd_bpfstat`, `cmd_defaultapps`, `cmd_diskstat`, `cmd_displayarrange`,
+> `cmd_epollstat`, `cmd_eventlog`, `cmd_kbsettings`, `cmd_kthread`,
+> `cmd_netqueue`, `cmd_netsyslog`, `cmd_procstat`, `cmd_sysresource`,
+> `cmd_upnp`, plus the pid arms of `cmd_filelock`, `cmd_netsock`,
+> `cmd_pipestat`, `cmd_schedclass` and `cmd_taskstats`, which share the
+> statement text. Pinned by self-test rung 104.
+>
+> Three shapes recur often enough to be worth naming for whoever takes the
+> next batch:
+>
+> * **Guards that worked by luck.** `netsyslog port`, `procstat get`/`register`
+>   and `upnp add` *did* reject a mistyped number — but only because the
+>   guessed default was `0` and a separate guard rejects `0`. That collision is
+>   accidental. The same code with a legal default (say `514`) would have
+>   accepted the typo in silence, and the shared message named neither mistake.
+>   A site that looks defended is not necessarily defended *on purpose*, and
+>   the gate cannot tell the difference — it counts the `unwrap_or`, not the
+>   guard three lines down.
+>
+> * **Strict and guessing on the same line.** `kthread state <id> <running|…>`
+>   refused an unrecognised state word while silently rewriting the id beside
+>   it to 0. `netsyslog forward <ip> [port]` parsed and refused a malformed
+>   address, then invented the port and printed it back as confirmation — so
+>   the one operand the caller could check against the output was the one that
+>   had been made up. Where one operand is strict, the reader assumes the arm
+>   is strict.
+>
+> * **Limits that truncate evidence.** `eventlog recent/errors/source/category`,
+>   `netsyslog recent`, `procstat topcpu/topmem`, `sysresource avg/history`. A
+>   short list reads exactly like a complete one, and `sysresource avg` printed
+>   the invented window size into its own caption ("Average CPU (last 10
+>   samples)"). These read as harmless — nothing is written — but they are the
+>   sites most likely to be believed.
+>
+> And, as in batch 39, several operands here are not settings but
+> **measurements being filed**: `diskstat read/write`, `netqueue rx/tx`,
+> `sysresource sample`, `bpfstat run`. Each is added to a cumulative counter
+> and read back later as though observed, so a guessed number is
+> indistinguishable from a real one the moment it lands. Refusing the typo is
+> the last point at which the difference still exists.
+>
+> **The batch also produced a defect of its own, and a gate for it** — see
+> `A-KSHELL-A-DIAGNOSTIC-CAN-NAME-A-COMMAND-IT-DID-NOT-COME-FROM` below. Five
+> of the twenty functions were converted by a whole-file search-and-replace of
+> a statement that was not unique to the function being edited.
+>
 > **Burn-down log.** 2026-08-29 (thirty-ninth batch): the batch that was not
 > about this defect at all, and moved its count anyway. Batch 39 went after a
 > *third* shape of §600 — an operand read as a number and dropped in **silence**
@@ -95269,3 +95318,89 @@ For the unbannered rung itself the mitigation is not a gate but a habit: after
 adding a rung, **read the boot's serial output and confirm the new banner is
 there.** This one was caught that way — by checking the log for rung 103 before
 pushing, rather than by trusting that a green boot meant the rung had run.
+
+## `A-KSHELL-A-DIAGNOSTIC-CAN-NAME-A-COMMAND-IT-DID-NOT-COME-FROM` (lane A, 2026-08-29) — **fixed, and gated**
+
+**In short:** the shell's error messages start with the name of the command
+that produced them — `epollstat: pid: 'x' is not a pid`. That name is typed
+into the source by hand, next to the code that uses it, and nothing checks it
+against the command it is actually written in. Copy a few lines from one
+command into another and the copy keeps saying the *first* command's name. The
+message is then fluent, specific, correct in every other respect, and about the
+wrong program — which sends whoever reads it to the wrong file. It has now been
+made impossible: a build-time check compares each name against the shell's own
+dispatch table.
+
+**How it happened, which is the interesting half.** Batch 40 of the §600
+guess-a-value burn-down converted twenty functions in one sitting. Several were
+done with a whole-file search-and-replace of an identical statement:
+
+```rust
+let pid = parts.get(1).copied().unwrap_or("0").parse::<u32>().unwrap_or(0);
+```
+
+That statement was **not unique to the function being edited**. Seven arms
+across `cmd_filelock`, `cmd_netsock`, `cmd_pipestat`, `cmd_schedclass`,
+`cmd_taskstats`, `cmd_hdrdisplay` and `cmd_dpiscaling` were rewritten too. The
+rewrite was *correct in substance* — each of those arms documents its operand
+as required and each was guessing at it — so the conversions were kept. What
+was wrong was one string: they announced themselves as `epollstat` and
+`displayarrange`.
+
+**Nothing downstream noticed, and it is worth being precise about why:**
+
+| Check | Verdict | Why it could not see it |
+|---|---|---|
+| `cargo build` | clean | the literal is a `&str`; every `&str` is a valid `&str` |
+| `cargo fmt` | clean | formatting is unaffected by a string's contents |
+| `check-option-refusal.py` | **counted them as fixed** | by its own measure they *were* fixed — the `unwrap_or` was gone |
+| self-test rungs | silent | no rung asserted on those arms' text |
+
+So the single visible trace was in the wording of a message that no test reads,
+in code that every gate had just scored as an improvement.
+
+**Why this is the same defect one level up.** The whole point of the operand
+helpers is to stop the shell answering a question it could not read with a
+confident, specific, invented answer. A diagnostic that names the wrong command
+*is* a confident, specific, invented answer — about provenance instead of about
+a value. The fix reproduced the bug it was fixing, inside its own machinery.
+
+**The gate: `scripts/check-shell-message-names.py`.** Decidable rather than
+heuristic, because the shell already writes down the answer. `kshell.rs`
+dispatches on the typed word:
+
+```rust
+"webcam" | "cam" => cmd_webcam(args),
+```
+
+so the set of names a function may legitimately call itself is exactly the set
+of literals in its own dispatch arm. That is also why the obvious rule — "the
+literal must equal the `cmd_` suffix" — is wrong: `cmd_vdesktop` correctly says
+`vd` and `cmd_webcam` correctly says `cam`, because those are the short names
+their usage lines use, and both are in the arm.
+
+It checks `required_num`, `optional_num`, `readable_num`, `readable_hex` and
+`end_help_arm`, and it **starts at zero** — 523 name-bearing calls across 749
+dispatch entries, no mismatch once the seven were corrected. Per
+design-decisions.md §635 that is the bar for a new gate; had it needed a
+baseline, it would have been narrowed until it did not. A `cmd_` function with
+no dispatch arm is reported too: a name-bearing call there has no set of
+legitimate names to be checked against, and was almost certainly copied in.
+
+Wired into `scripts/boot-test.sh` fixture-first, like its siblings — the four
+fixtures (a clean tree with aliases, a name copied from another command, a name
+that dispatches to nothing, a function with no dispatch arm) are graded by
+`--self-test` before the real file is inspected, so a collapsed checker cannot
+report a clean tree in the same words as a clean tree.
+
+**The lesson that generalises past this file.** A whole-file `replace_all` is
+safe only if the text is unique to the target, and *the way to find out is to
+count the matches first* — which is cheap, and which was done for four of the
+six replacements in that batch and skipped for two. The two that were skipped
+are the two that leaked. More generally: when a mechanical edit carries a
+*name* along with the code, the name is the part that will be wrong, because it
+is the only part the compiler is not reading.
+
+Self-test rung 104 asserts the corrected case in the serial log as well
+(`filelock pid 1O` must name `filelock` and must not contain `epollstat`), so
+the invariant is pinned both statically and at runtime.

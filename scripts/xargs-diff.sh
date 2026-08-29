@@ -425,6 +425,44 @@ run_in '\0200\0' -0 argv
 run_in 'caf\0351\n' argv
 run_in 'a\0351b c\n' argv
 
+# --- non-UTF-8 in argv, not merely in the input -------------------------------
+# This is the property the conversion away from `String` argv exists to
+# establish, and every case above tests the *input* side of it. A byte that is
+# not UTF-8 is a legal filename on this OS, so it reaches xargs as an
+# INITIAL-ARG, as the -I pattern's surroundings, as -E's logical EOF string and
+# as -a's operand — none of which the input cases touch. `\351` is Latin-1 `é`.
+e=$(printf 'caf\351')
+run_in 'a b\n' argv "$e"
+run_in 'a b\n' -n 1 argv "$e"
+# Substitution both ways: a non-UTF-8 item into an ASCII arg, and an ASCII item
+# into a non-UTF-8 one. The pattern search has to be over bytes for either.
+run_in 'caf\0351\n' -I@ argv 'pre@post'
+run_in 'x\n' -I@ argv "$(printf 'p\351@s\351')"
+run_in 'caf\0351\n' -I@ argv "$(printf '@\351@')"
+# The -t trace and the -p prompt render arguments through the shell-escape
+# quoting style, which has to decide what to do with a byte it cannot decode.
+run_in 'a\n' -t argv "$e"
+run_in 'caf\0351 a\n' -t argv
+run_in 'caf\0351\n' -t -I@ argv 'pre@post'
+# A logical EOF string that is not UTF-8, matched against an item that is not
+# either. EOF_STR compares the first byte before it calls strcmp, so a mismatch
+# in the high byte alone still has to be a mismatch.
+run_in 'caf\0351\na\n' -E "$e" argv
+run_in 'caf\0350\na\n' -E "$e" argv
+# -a naming a file that does not exist, so the diagnostic has to quote a name
+# it cannot decode. This is the case that arbitrates our quoting against GNU's
+# for undecodable bytes, which no ASCII case can.
+run_case -a "$(printf 'no\351such')" argv
+# A raw high byte as the delimiter, rather than -d's own \351 escape. Upstream
+# stores it in a signed char, so it can never equal a getc result and the input
+# never splits; ours has to reproduce that, not "fix" it.
+run_in 'a\0351b\0351' -d "$(printf '\351')" argv
+run_in 'a\0351b\0351' -d "$(printf '\377')" argv
+# --process-slot-var and the replacement pattern itself, named in bytes.
+run_in 'a b\n' --process-slot-var="$e" slot
+run_in 'a\n' -I "$(printf '\351')" argv "$(printf 'p\351s')"
+unset e
+
 # --- -d / --delimiter ---------------------------------------------------------
 run_in 'a,b,c,' -d , argv
 run_in 'a,b,c' -d , argv

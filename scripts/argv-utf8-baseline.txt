@@ -25,4 +25,3 @@ userspace/coreutils/src/bin/sh.rs:argv-as-string
 userspace/coreutils/src/bin/sh.rs:env-as-string
 userspace/coreutils/src/bin/tar.rs:argv-as-string
 userspace/coreutils/src/bin/time_cmd.rs:argv-as-string
-userspace/coreutils/src/bin/xargs.rs:argv-as-string

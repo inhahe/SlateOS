@@ -5516,10 +5516,10 @@ const VALID_MODE_BITS: u64 = 0o7777;
 /// 4. Inside `build_open_how`: any unknown bit in `how.resolve`
 ///    → `EINVAL`.
 ///
-/// Our implementation still delegates the actual open to regular
-/// `openat` once validation passes — the `resolve` flags are
-/// accepted but not enforced (our VFS doesn't support the
-/// RESOLVE_* restrictions yet).  Validation matches the Linux ABI
+/// Our implementation delegates the actual open to regular `openat`
+/// once validation passes.  `openat` cannot carry a `resolve` word,
+/// so **every restriction this function cannot enforce is refused,
+/// never dropped** — see step 7.  Validation matches the Linux ABI
 /// so callers see consistent errors regardless of backend.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn openat2(dirfd: i32, path: *const u8, how: *const OpenHow, size: usize) -> Fd {
@@ -5586,6 +5586,68 @@ pub extern "C" fn openat2(dirfd: i32, path: *const u8, how: *const OpenHow, size
         (h.flags & crate::fcntl::O_CREAT as u64) != 0 || (h.flags & RAW_O_TMPFILE) != 0;
     if h.mode != 0 && !creates_a_file {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Step 7: the resolve restrictions themselves.
+    //
+    // This step exists because the alternative is silent non-enforcement.
+    // `openat` takes no `resolve` word, so any bit still set here is a
+    // restriction we are about to *not* apply — and returning a valid fd to a
+    // caller who asked to be confined tells them they were confined when they
+    // were not. Step 4 already refuses *unknown* bits on exactly this
+    // reasoning ("callers asking for security restrictions we don't know about
+    // would silently get an unrestricted open"); the argument does not weaken
+    // for a bit we happen to have named. Recognising a flag is not
+    // implementing it.
+    //
+    // The errnos mirror `kernel/src/syscall/linux.rs::sys_openat2` bit for bit,
+    // so the native libc and the Linux ABI give one answer rather than two.
+    // Before this gate they gave opposite answers, and the dangerous one was
+    // here: the kernel refused `RESOLVE_BENEATH` with `EXDEV` while this
+    // function accepted it and opened without restriction.
+    //
+    // `RESOLVE_NO_XDEV` and `RESOLVE_NO_MAGICLINKS` pass through unrefused,
+    // on the same judgement the kernel records: nothing to cross mid-walk and
+    // no `/proc` magic symlinks to traverse. That judgement belongs to the VFS,
+    // so if it ever stops holding both sites must change together.
+    if h.resolve & RESOLVE_CACHED != 0 {
+        // No dcache, so every request is conceptually a miss. Linux documents
+        // EAGAIN as the answer for a miss, which makes this the one refusal
+        // here that is also what Linux itself would say.
+        errno::set_errno(errno::EAGAIN);
+        return -1;
+    }
+    if h.resolve & RESOLVE_IN_ROOT != 0 {
+        // Rooted (chroot-like) resolution needs per-fd root tracking we have
+        // nowhere to keep.
+        errno::set_errno(errno::EOPNOTSUPP);
+        return -1;
+    }
+    if h.resolve & RESOLVE_BENEATH != 0 {
+        // Confinement below `dirfd`. EXDEV is Linux's error for a walk that
+        // would cross a forbidden boundary, and is what the kernel returns.
+        //
+        // Userspace that needs this today must emulate it by walking the path
+        // itself with `openat(O_DIRECTORY|O_NOFOLLOW)` + `readlinkat`, keeping
+        // the parent descriptors on a stack, and creating through the
+        // descriptor the walk returns. `userspace/coreutils/src/bin/tar.rs`
+        // (`Dir::locate`) is the worked example; requests/
+        // b-a-openat2-resolve-beneath-is-fail-open-in-libc-and-unenforceable-in-the-vfs.md
+        // asks lane A for the VFS support that would retire it.
+        errno::set_errno(errno::EXDEV);
+        return -1;
+    }
+    if h.resolve & RESOLVE_NO_SYMLINKS != 0 {
+        // The one place this libc is deliberately stricter than the kernel.
+        // `sys_openat2` *enforces* NO_SYMLINKS, threading it to the VFS
+        // resolver as `OpenFlags::NO_SYMLINKS` so any link in any component is
+        // ELOOP. We cannot reach that: `openat` above flattens `dirfd` and
+        // `path` into one absolute path and calls `open`, whose flag word has
+        // no per-component no-follow bit (`O_NOFOLLOW` is the final component
+        // only). Refusing is the honest answer and the safe one; silently
+        // following is neither.
+        errno::set_errno(errno::EOPNOTSUPP);
         return -1;
     }
 
@@ -9973,6 +10035,145 @@ mod tests {
         // Whatever the open result, errno must NOT be EINVAL from
         // our resolve-bit check.
         assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- Unenforceable restrictions are refused, never silently dropped ----
+    //
+    // The property under test is one thing said four ways: a caller that asks
+    // to be confined must not receive a file descriptor. `openat` carries no
+    // `resolve` word, so a success here would be an unrestricted open wearing
+    // the answer the caller wanted. Each errno matches
+    // `kernel/src/syscall/linux.rs::sys_openat2`, so the native libc and the
+    // Linux ABI cannot drift apart without one of these failing.
+
+    /// Returns the errno a given `resolve` word produces, having first checked
+    /// that it is a refusal *and* that the refusal came from the resolve gate.
+    ///
+    /// The second half matters more than it looks. A host test cannot open
+    /// anything — `open` bottoms out in the stubbed native `SYS_FS_OPEN_MODE`
+    /// — so `ret == -1` is true of every call here and proves nothing on its
+    /// own. Comparing against the `resolve = 0` baseline is what makes these
+    /// tests real: it rules out the case where the errno being asserted is
+    /// simply whatever the stub was going to return anyway, which would leave
+    /// the whole suite passing against a gate that had been deleted.
+    fn refused_resolve(resolve: u64) -> i32 {
+        let call = |resolve: u64| {
+            let how = OpenHow {
+                flags: crate::fcntl::O_RDONLY as u64,
+                mode: 0,
+                resolve,
+            };
+            crate::errno::set_errno(0);
+            let ret = openat2(
+                AT_FDCWD,
+                b"/\0".as_ptr(),
+                &how,
+                core::mem::size_of::<OpenHow>(),
+            );
+            (ret, crate::errno::get_errno())
+        };
+        let (ret, err) = call(resolve);
+        assert_eq!(ret, -1, "resolve={resolve:#x} must not yield a descriptor");
+        assert_ne!(
+            err,
+            call(0).1,
+            "resolve={resolve:#x} must be refused by the gate, \
+             not merely share the unrestricted call's errno"
+        );
+        err
+    }
+
+    #[test]
+    fn test_resolve_beneath_is_refused_not_ignored() {
+        // The bug this pins: RESOLVE_BENEATH used to return a working fd for a
+        // caller asking to be confined below `dirfd`, while the kernel's
+        // Linux-ABI twin refused the same request with EXDEV.
+        assert_eq!(refused_resolve(RESOLVE_BENEATH), crate::errno::EXDEV);
+    }
+
+    #[test]
+    fn test_resolve_in_root_is_refused_not_ignored() {
+        assert_eq!(refused_resolve(RESOLVE_IN_ROOT), crate::errno::EOPNOTSUPP);
+    }
+
+    #[test]
+    fn test_resolve_cached_is_refused_not_ignored() {
+        assert_eq!(refused_resolve(RESOLVE_CACHED), crate::errno::EAGAIN);
+    }
+
+    #[test]
+    fn test_resolve_no_symlinks_is_refused_not_ignored() {
+        // Stricter than the kernel on purpose: `sys_openat2` enforces this via
+        // the VFS resolver, and we have no way to reach that through `open`.
+        assert_eq!(
+            refused_resolve(RESOLVE_NO_SYMLINKS),
+            crate::errno::EOPNOTSUPP
+        );
+    }
+
+    #[test]
+    fn test_unenforceable_bit_refused_even_when_mixed_with_free_ones() {
+        // NO_XDEV and NO_MAGICLINKS pass through unrefused, so a caller could
+        // otherwise hide a real restriction behind them and be told yes.
+        assert_eq!(
+            refused_resolve(RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_BENEATH),
+            crate::errno::EXDEV
+        );
+    }
+
+    #[test]
+    fn test_unknown_resolve_bit_still_outranks_the_unenforceable_ones() {
+        // Ordering: step 4 (EINVAL for unknown bits) runs before step 7, which
+        // is what keeps forward-compat detection working — a caller probing
+        // with a future bit must learn "unknown", not "unsupported".
+        let how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0,
+            resolve: RESOLVE_BENEATH | (1u64 << 40),
+        };
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_free_resolve_bits_do_not_block_an_open() {
+        // The complement of the refusal tests: the two bits we judge trivially
+        // satisfied must not have become a blanket refusal of every resolve
+        // word. Without this, "refuse everything" would pass the suite above.
+        //
+        // Asserted differentially rather than as `ret >= 0`, because no open
+        // can succeed in a host test at all: `open` reaches the filesystem
+        // through `syscall4(SYS_FS_OPEN_MODE, …)`, a SlateOS native syscall
+        // that is stubbed off-target. Comparing against the `resolve = 0`
+        // baseline says precisely the thing under test — that these bits
+        // change nothing — and says it identically on both targets.
+        let call = |resolve: u64| {
+            let how = OpenHow {
+                flags: crate::fcntl::O_RDONLY as u64,
+                mode: 0,
+                resolve,
+            };
+            crate::errno::set_errno(0);
+            let ret = openat2(
+                AT_FDCWD,
+                b"/\0".as_ptr(),
+                &how,
+                core::mem::size_of::<OpenHow>(),
+            );
+            (ret, crate::errno::get_errno())
+        };
+        assert_eq!(
+            call(RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS),
+            call(0),
+            "NO_XDEV/NO_MAGICLINKS must be indistinguishable from no restriction"
+        );
     }
 
     #[test]

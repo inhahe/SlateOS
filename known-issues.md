@@ -15946,7 +15946,8 @@ which we should only do if a real port needs it.
 
 ### TD-OPENAT2-BENEATH-INROOT. `openat2` `RESOLVE_BENEATH`/`RESOLVE_IN_ROOT` are safely refused, not implemented — ACCEPTED LIMITATION 2026-07-22
 
-**Where:** `kernel/src/syscall/linux.rs::sys_openat2` (the resolve-flag gates).
+**Where:** `kernel/src/syscall/linux.rs::sys_openat2` (the resolve-flag gates)
+and, since 2026-08-29, `posix/src/file.rs::openat2` step 7.
 
 **What it is:** `openat2`'s `RESOLVE_BENEATH` (forbid the walk from escaping
 the `dirfd` directory via `..`/absolute paths/escaping symlinks) returns
@@ -15967,6 +15968,42 @@ This must be containment-checked per hop (not just on the input path) to be
 safe against symlinks that point outside the base. Deferred until a real
 consumer (container runtime / sandbox) needs beneath/in-root resolution;
 the current refusal is safe in the meantime.
+
+**Amended 2026-08-29 — "the current refusal is safe" was only ever true of
+half of it.** This entry scoped itself to `kernel/src/syscall/linux.rs`, and
+the ABI has *two* implementations in this tree. libc's `posix/src/file.rs::
+openat2` validated the `resolve` word, discarded it, and delegated to plain
+`openat` — so a native caller asking for `RESOLVE_BENEATH` got a working
+descriptor and no confinement whatsoever, while a Linux-ABI caller making the
+identical request got `EXDEV`. Fail-open on one side, fail-closed on the other,
+for as long as both have existed. Fixed the same day: libc now refuses every
+restriction it cannot enforce, with the kernel's exact errnos (`EAGAIN` /
+`EOPNOTSUPP` / `EXDEV`), so the two agree. Seven tests pin it, each asserting
+the refusal errno *differs from the unrestricted call's* so they cannot pass
+vacuously against a deleted gate.
+
+One deliberate residual divergence: `RESOLVE_NO_SYMLINKS` is **enforced** by
+the kernel (threaded to the VFS resolver as `OpenFlags::NO_SYMLINKS`) but
+**refused** by libc, because libc's `openat` flattens `dirfd` + `path` into one
+absolute path and calls `open`, whose flag word has no per-component no-follow
+bit — `O_NOFOLLOW` covers the final component only. Refusing is safe; it is
+still a capability a native binary cannot reach. The structural fix is a native
+syscall number for `openat2` so libc forwards instead of re-implementing, which
+is what let the two drift apart in the first place. Both that and the VFS work
+are asked for in `requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-
+and-unenforceable-in-the-vfs.md`.
+
+**The generalisable lesson, which is worth more than the bug:** when a syscall
+has two implementations in this tree, a known-limitation note about one of them
+is not a note about the syscall. Nobody re-read the libc side because this
+entry read as though it covered `openat2` rather than `sys_openat2`. The ABI
+surface is exactly where we keep having two implementations.
+
+**Consumer note:** `TD` above says this is deferred "until a real consumer
+needs beneath/in-root resolution". One now does — `userspace/coreutils/src/bin/
+tar.rs` emulates `RESOLVE_BENEATH` in userspace (`Dir::locate`) because neither
+target could supply it. See `design-decisions.md` §702 for why emulating beat
+waiting. The emulation is correct and race-free, so this is still not urgent.
 
 ### D-NETSTACK-TCP-MINIMAL. Userspace `netstack` TCP client is minimal (slirp-only correctness) — DEBT 2026-07-14
 

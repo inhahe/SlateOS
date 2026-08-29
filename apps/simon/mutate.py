@@ -13,6 +13,7 @@ game whose entire interface is four big buttons.
 Usage:  python -u apps/simon/mutate.py [substring ...]
 """
 
+import difflib
 import re
 import subprocess
 import sys
@@ -1230,7 +1231,48 @@ def run_tests():
     return compiled, failed, timed_out, crashed, out
 
 
+def refuse_a_dirty_start():
+    """Stop if a previous run died without restoring the source.
+
+    The `finally` below covers a Ctrl-C, an exception and a full disk, but it
+    cannot cover the two ways a process is *not* asked to clean up: a SIGKILL
+    and the machine going down.  This actually happened -- a restart during a
+    sweep left `main.rs` holding a live mutation (`Layout::avail_h` missing its
+    `pad * 2.0`) and `main.rs.bak` holding the truth.
+
+    That state is dangerous in a quiet way.  Nothing about a mutant fails to
+    compile, so the next run would read it as `original` and mutate *on top of*
+    it: every verdict would then describe a program that was already broken in
+    a second place, and a sweep that reported `[ok]` throughout would have
+    proved nothing.  Restoring the backup automatically is no better -- if the
+    source was edited since the crash (the usual reason to rerun), the restore
+    silently throws those edits away.
+
+    So neither choice is safe to make silently, and the script makes neither.
+    """
+    if not BAK.exists():
+        return
+    src = SRC.read_text(encoding="utf-8", newline="")
+    bak = BAK.read_text(encoding="utf-8", newline="")
+    print(f"{BAK.name} exists: a previous run did not restore the source.")
+    if src == bak:
+        print("The source matches it, so nothing was lost -- removing the backup.")
+        BAK.unlink()
+        return
+    print("\nThe source differs from the backup.  Either the run died holding a")
+    print("mutation, or the source was edited after it died.  Diff (backup -> source):\n")
+    for line in difflib.unified_diff(
+        bak.splitlines(), src.splitlines(), "main.rs.bak", "main.rs", lineterm="", n=2
+    ):
+        print("  " + line)
+    print("\nDecide which one is the real program, then rerun:")
+    print(f"  the backup is  ->  cp {BAK} {SRC} && rm {BAK}")
+    print(f"  the source is  ->  rm {BAK}")
+    sys.exit(2)
+
+
 def main():
+    refuse_a_dirty_start()
     # Written fresh every run and removed at the end.  It exists only so a
     # Ctrl-C mid-mutation leaves the real program on disk.  It must never be
     # *reused* across runs: a stale backup restored over a fixed source silently

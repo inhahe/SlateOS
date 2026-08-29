@@ -49895,6 +49895,28 @@ have it, the skip path is dead code that costs nothing to leave in.
 doing once it is confirmed all three lanes have the binary — at that point the
 skip protects nobody and only hides a regression in the tool's installation.
 
+**REVERSED 2026-08-29 (lane A, Claude autonomous), on the trigger above.** The
+precondition was *verified rather than assumed*: the tool is present in all
+three lane worktrees, and `shellcheck-all.sh warning` exits 0 with zero findings
+over 79/80/79 scripts in each. So no lane is blocked by the change, and from
+here an exit 2 means the binary was **removed** — which must stop the build
+rather than be waved through.
+
+What tipped it was not just the precondition being met but what the intervening
+weeks showed: this is the first of **five** gates since found blind (the D1
+rustfmt-wrapped chain, D1's `from_str_radix`, the wording gate's wrapped
+literals, and D4's brace miscount are the others), and the only one whose
+blindness was *designed in on purpose*. Every one of the other four was
+discovered after it had already cost something. Leaving a deliberate blind spot
+in place, in a file whose other gates now all fail closed, was the least
+defensible of the five.
+
+Small confirmation that the reversal has teeth: the very first run under it
+failed the build, on a comment in the new arm that opened with the tool's own
+name — a `# shellcheck …` line is parsed as a *directive*, and an unparseable
+directive is itself an error (SC1072/SC1073). Under the old arm that would have
+depended on the tool being installed to be noticed at all.
+
 **Where it is:** `check_shellcheck` in `scripts/boot-test.sh`, immediately after
 `check_orphan_modules`. Fulfils
 `requests/b-a-two-cd-calls-ignore-failure-in-shared-scripts.md`, which is also

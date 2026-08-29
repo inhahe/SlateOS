@@ -3447,13 +3447,39 @@ check_shellcheck() {
         return 0
     fi
     if [ "$rc" -eq 2 ]; then
-        echo "=== shellcheck check: skipped (shellcheck not installed) ===" >&2
-        echo "    Install it -- it is one static binary and needs no root:" >&2
+        # DD 630 decision 2, reversed 2026-08-29 now that its precondition holds.
+        #
+        # This arm used to `return 0`, because the tool was not yet installed
+        # in every lane when the gate was written, and a hard failure would
+        # have blocked lanes that had done nothing wrong.  (That sentence
+        # cannot open with the tool's name: a comment whose first word after
+        # `# ` is "shellcheck" is parsed as a *directive*, and an unparseable
+        # one is itself an error -- SC1072/SC1073, which is what the first
+        # draft of this comment tripped.)  That tolerance is
+        # exactly the blindness the gate was written to end: a missing tool made
+        # it report success, so the *entire* bug class -- including the unquoted
+        # expansion that created a stray 'D:\visual' file -- was invisible in
+        # precisely the situation where nobody was looking.  It is the first of
+        # the five gates since found blind, and the only one whose blindness was
+        # designed in on purpose.
+        #
+        # Verified before flipping it, rather than assumed: shellcheck is present
+        # in all three lane worktrees, and `shellcheck-all.sh warning` exits 0
+        # with zero findings over 79/80/79 scripts in each.  So no lane is
+        # blocked by this, and a future exit 2 means the tool was *removed* --
+        # which must stop the build, not be waved through.
+        printf '%s\n' "$out" >&2
+        echo "" >&2
+        echo "ERROR: refusing to build.  shellcheck is not installed, so this" >&2
+        echo "gate cannot see anything -- and a gate that cannot see reports a" >&2
+        echo "clean tree in the same words as a clean tree." >&2
+        echo "" >&2
+        echo "Install it -- it is one static binary and needs no root:" >&2
         echo "      Windows: shellcheck-stable.zip from the koalaman/shellcheck" >&2
         echo "               releases; put shellcheck.exe in ~/bin (MSYS resolves" >&2
         echo "               the .exe suffix, so no rename is needed)." >&2
         echo "      Linux:   shellcheck-stable.linux.x86_64.tar.xz, same place." >&2
-        return 0
+        exit 1
     fi
 
     printf '%s\n' "$out" >&2

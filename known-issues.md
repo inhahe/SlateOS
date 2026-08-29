@@ -93019,7 +93019,7 @@ Filed to lane A as
 
 ---
 
-## `B-XARGS-IS-A-STUB-AND-DASH-ZERO-CANNOT-CARRY-THE-BYTES-IT-EXISTS-FOR` (lane B, 2026-08-29) -- **open**, not yet converted
+## `B-XARGS-IS-A-STUB-AND-DASH-ZERO-CANNOT-CARRY-THE-BYTES-IT-EXISTS-FOR` (lane B, 2026-08-29) -- **FIXED 2026-08-29** (`631783b54`); see "Resolution" at the end
 
 **In short:** `userspace/coreutils/src/bin/xargs.rs` is a 285-line invention, not
 a transcription of GNU findutils' 1755-line `xargs.c`. The worst consequence is
@@ -93124,3 +93124,97 @@ Control run (`OURS=/usr/bin/xargs`): 319 passed, 0 differed.
 **Proper fix:** transcribe `xargs.c` + `buildcmd.c` the way `df`, `du` and `ls`
 were done, carrying argv and stdin as bytes throughout.
 Reference tarball matches the installed binary exactly (findutils 4.9.0).
+
+### Resolution, 2026-08-29 (`631783b54`)
+
+Done as described: `xargs.c` and `buildcmd.c` transcribed into 2309 lines,
+argv and stdin carried as bytes end to end. Every row of the table above now
+agrees with GNU, and `xargs.rs:argv-as-string` is out of
+`scripts/argv-utf8-baseline.txt` (11 findings remain).
+
+**Harness after the rewrite: 334 passed, 0 differed, 2 differ on purpose** --
+up from 319 cases because the transcription exposed a gap in the harness
+itself, described below. Control run (`OURS=/usr/bin/xargs`): 334 passed, 0
+differed, 2 XPASS, which is what the control is supposed to report for the two
+`xfail`s.
+
+**The 126-vs-127 requirement is met the way this entry asked for.** Nothing
+compares against either constant: `Command::spawn()` delegates to libc's
+`PATH` search, so its `io::Error` *is* the `errno` glibc chose, and the code
+branches on `ErrorKind::NotFound` -- which is `ENOENT` -- exactly as
+`xargs.c:1360` branches on `errno == ENOENT`. Re-measured against
+`/usr/bin/xargs` after the rewrite, all four rows agree -- including the
+ambient-`PATH` 126 that `diff-wsl.sh` cannot cover and that is therefore
+recorded only here:
+
+| Case | GNU | ours |
+|---|---|---|
+| `nosuchcmd`, ambient WSL `PATH` | 126, `Permission denied` | 126, `Permission denied` |
+| `nosuchcmd`, `PATH` = one readable dir | 127, `No such file or directory` | 127, same |
+| a mode-644 file found on `PATH` | 126, `Permission denied` | 126, same |
+| `/nonexistent/cmd`, no search at all | 127, `No such file or directory` | 127, same |
+
+#### The gap the harness had: every non-UTF-8 case put the byte in the *input*
+
+This entry is about argv, and the 319-case harness tested the high byte only
+on the side that already worked. Fifteen cases were added for the other side --
+a byte that is not UTF-8 arriving as an INITIAL-ARG, around the `-I` pattern
+(both directions: a non-UTF-8 item into an ASCII argument and an ASCII item
+into a non-UTF-8 one), as `-E`'s logical EOF string, as a raw `-d` delimiter,
+as `--process-slot-var`'s name, and as `-a`'s operand.
+
+That last one is the load-bearing one and it settled a question that had been
+open since `quoting`'s curly marks were introduced: **`-a` on a name that does
+not exist makes the diagnostic quote a name it cannot decode**, and no ASCII
+case can arbitrate what should happen to the undecodable byte. Ours and GNU's
+`Cannot open input file ‘no<0xe9>such’: No such file or directory` agree byte
+for byte, so `Style::locale_quote`'s output is right for this case and not
+merely plausible.
+
+#### Five upstream behaviours kept because they are observable, not because they are correct
+
+Recorded here rather than only in the source, because each is the kind of thing
+a later reader "fixes":
+
+1. **`input_delimiter` is a C `char`, which is signed on x86-64.** `-d` with a
+   byte at 0x80 or above sign-extends to a negative int, which can never equal
+   a `getc` result in 0..255, so **the input never splits at all** and the whole
+   stream arrives as one argument. Verified against GNU at 0xe9 and 0xff (no
+   split, both) and 0x7f (splits, both). Ours stores `(b as i8) as i32` to
+   reproduce it.
+2. **`bc_push_arg` stores with `strcpy` but charges `cmd_argv_chars` the full
+   length**, so an item holding an embedded NUL reaches the child truncated
+   while still consuming its untruncated size against `-s`.
+3. **`--show-limits` subtracts the environment size twice** -- once inside
+   `posix_arg_size_max` and again in the "Maximum length of command we could
+   actually use" line -- so that number is deliberately pessimistic. It also
+   reads the environment *live*, so `--process-slot-var`'s `unsetenv` shrinks it.
+4. **`parse_num` always names the short option letter**, so `--max-lines=0` is
+   reported against `-l`; and its "invalid number" branch exits regardless of
+   the `fatal` argument, because `usage (EXIT_FAILURE)` is followed by an
+   unconditional `exit`. The `-s` "value too large" warning below it is
+   unreachable for the same reason.
+5. **`-i -n1` is excused but `-n1 -i` warns** (savannah patch #1500). The order
+   matters and both orders are in the harness.
+
+#### Five divergences, all forced by Rust rather than chosen
+
+Documented in the module header as well:
+
+- `endbuf` saturates where C does pointer arithmetic past the end of the buffer.
+- `bc_do_insert` copies bytes rather than `strcpy`ing the item, and guards the
+  zero-length match that makes upstream loop forever on `-I ''`.
+- Children are reaped in slot order rather than arrival order.
+- `-o`'s stdin redirect happens in the parent, so a missing `/dev/tty` exits 1
+  with a diagnostic instead of aborting in the child -- which is the upstream
+  `assert (getpid () == parent)` bug this entry already describes, and the
+  reason not copying it was the plan.
+- `--process-slot-var` gives each child an explicit `env` entry instead of
+  `unsetenv`ing the variable in the parent, since `std::env::remove_var` is
+  `unsafe` in edition 2024. The only observable part is the environment size,
+  which `--show-limits` reports and which is decremented to match.
+
+**Not fixed here, and unchanged by this work:** `userspace/xargs/` is a separate
+1109-line implementation of the same utility, one of the 41 duplicated binary
+names blocked on `B-Q7`. It was neither converted nor deleted; the gate covers
+`userspace/coreutils/` only, so the twin is surveyed but not gated.

@@ -8,13 +8,14 @@ overlay with no reachable state in which it showed anything, all under a green
 build.
 """
 
-import re
-import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+
+from mutation_harness import sweep  # noqa: E402  (path set above)
+
 SRC = Path(__file__).parent / "src" / "main.rs"
-BAK = Path(__file__).parent / "src" / "main.rs.bak"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -423,92 +424,5 @@ MUTATIONS = [
     ),
 ]
 
-
-def run_tests():
-    out = subprocess.run(
-        [
-            "python",
-            "scripts/run-timeout.py",
-            "180",
-            "cargo",
-            "test",
-            "-p",
-            "maze",
-            "--target",
-            "x86_64-pc-windows-gnu",
-        ],
-        capture_output=True,
-        text=True,
-        cwd=Path(__file__).parent.parent.parent,
-    )
-    failed = set(re.findall(r"^    tests::(\S+)$", out.stdout, re.M))
-    compiled = "could not compile" not in out.stdout + out.stderr
-    timed_out = out.returncode == 124
-    # A mutant can kill the *harness* rather than a test: the search that
-    # renumbers cells it has already reached queues them again forever, and the
-    # binary dies on a two-gigabyte allocation before any test can report.  The
-    # harness prints no `tests::<name>` line for that, so without this the run
-    # looks exactly like a mutant no test noticed -- which is the opposite of
-    # what happened.  Anything that ends non-zero having named no failing test
-    # and having compiled is a crash, and a crash is a catch.
-    crashed = compiled and not timed_out and not failed and out.returncode != 0
-    return compiled, failed, timed_out, crashed, out
-
-
-def main():
-    # Written fresh every run and removed at the end.  A backup reused across
-    # runs is a source file quietly reverted to whatever the *earlier* run saw:
-    # it happened in `apps/magnifier`, where a second sweep restored a `.bak`
-    # from the first, threw away the test fixes made between the two, and then
-    # reported the same survivors as evidence that the fixes had not worked.
-    original = SRC.read_text(encoding="utf-8", newline="")
-    BAK.write_text(original, encoding="utf-8", newline="")
-    verdicts = []
-    only = sys.argv[1:]
-    try:
-        for name, old, new, expect in MUTATIONS:
-            if only and not any(o in name for o in only):
-                continue
-            if original.count(old) != 1:
-                verdicts.append((name, f"SKIP anchor appears {original.count(old)}x"))
-                print(f"[skip] {name}: anchor appears {original.count(old)} times")
-                continue
-            SRC.write_text(original.replace(old, new), encoding="utf-8", newline="")
-            compiled, failed, timed_out, crashed, out = run_tests()
-            if timed_out:
-                # A mutant that hangs is caught: the test it hangs in is the one
-                # whose whole job is to prove the search terminates.
-                verdicts.append((name, "caught by a hang"))
-                print(f"[ok]   {name}: caught \u2014 the suite hung")
-            elif crashed:
-                verdicts.append((name, "caught by a crash"))
-                print(
-                    f"[ok]   {name}: caught \u2014 the harness died (exit {out.returncode})"
-                )
-            elif not compiled:
-                verdicts.append((name, "SKIP did not compile"))
-                print(f"[skip] {name}: mutant did not compile")
-                print(out.stdout[-2000:])
-            elif set(expect) <= failed:
-                verdicts.append((name, f"caught by {len(failed)} test(s)"))
-                print(f"[ok]   {name}: caught ({', '.join(sorted(failed))})")
-            elif failed:
-                verdicts.append((name, f"WRONG TESTS: {sorted(failed)}"))
-                print(f"[??]   {name}: expected {expect}, got {sorted(failed)}")
-            else:
-                verdicts.append((name, "SURVIVED"))
-                print(f"[BAD]  {name}: SURVIVED \u2014 no test failed")
-            SRC.write_text(original, encoding="utf-8", newline="")
-    finally:
-        # Whatever happens -- a Ctrl-C, an exception, a full disk -- the tree is
-        # left with the real program in it and not a mutant, and with no backup
-        # for the next run to mistake for the truth.
-        SRC.write_text(original, encoding="utf-8", newline="")
-        BAK.unlink(missing_ok=True)
-    print("\n=== summary ===")
-    for name, v in verdicts:
-        print(f"{v:<34} {name}")
-
-
 if __name__ == "__main__":
-    main()
+    sys.exit(sweep(SRC, MUTATIONS, "maze", timeout=180))

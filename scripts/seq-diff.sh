@@ -66,7 +66,7 @@ set -u
 # `seq` so `argv[0]` matches. See `scripts/diff-wsl.sh`. `timeout` is named as a
 # requirement because `seq-probe.sh` bounds every case with it -- `seq 1 inf` is
 # one keystroke away from every case in the generator.
-DIFF_PROG=seq
+DIFF_PROG='seq'
 DIFF_NEED="timeout python3"
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"

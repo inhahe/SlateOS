@@ -66,10 +66,14 @@ use coreutils::filekind;
 // Aliased for the same reason `ere::Syntax` is: `Flags` is far too plain a name
 // to stand unqualified next to grep's own option soup.
 use coreutils::fnmatch::{Flags as FnmatchFlags, fnmatch};
+use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{self, quotef_os};
 use coreutils::stdfd;
+use coreutils::xnum;
+use std::borrow::Cow;
 use std::collections::{BTreeSet, VecDeque};
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -546,7 +550,63 @@ struct Options {
     /// changes what a line *is* while `-Z` alone only changes how a name is
     /// punctuated.
     null_data: bool,
+    /// `--label=NAME`: what standard input is *called* in a prefix or a
+    /// diagnostic, in place of `(standard input)`.
+    ///
+    /// Bytes, because it goes into a prefix beside a file name and a name on
+    /// this system may hold any byte but `/` and NUL. It renames only the
+    /// stream read from fd 0 — an operand spelled `-` is that stream, so
+    /// `grep --label=x foo -` prints `x:`, but a *file* actually named `-`
+    /// cannot be reached either way and is not what this renames.
+    label: Option<Vec<u8>>,
+    /// `--line-buffered`: flush after every printed line.
+    ///
+    /// Accepted and honoured rather than ignored, because the whole point of
+    /// the option is what a *reader on the other end of a pipe* sees, and a
+    /// program that accepted it without flushing would answer the question
+    /// wrongly in exactly the case the caller wrote it for.
+    line_buffered: bool,
+    /// `--binary-files=TYPE`, with `-a` and `-I` as shorthands: what to do with
+    /// a file whose first read holds a NUL. See [`BinaryFiles`].
+    binary_files: BinaryFiles,
 }
+
+/// `--binary-files=TYPE`, and the `-a` / `-I` shorthands for two of its values.
+///
+/// The three values are three behaviours for one question — *this file holds a
+/// NUL; now what?* — and none of them is a filter on the search itself. The
+/// file is searched either way; what changes is what reaches stdout.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum BinaryFiles {
+    /// GNU's default. The selected lines are **not** printed; instead a single
+    /// `grep: F: binary file matches` goes to **stderr** if anything matched,
+    /// and the status is 0 as usual. `-c`, `-l`, `-L` and `-q` are unaffected —
+    /// what is suppressed is the *lines*, so a count is still a count.
+    #[default]
+    Binary,
+    /// `-a`. Print the bytes, NULs and all: the detection is skipped entirely,
+    /// which is also why `-a` is the only way to see a match in a binary file.
+    Text,
+    /// `-I`. The file is treated as not matching at all — no output on either
+    /// stream, and it counts towards `-L` rather than `-l`.
+    WithoutMatch,
+}
+
+/// Bytes read up front and scanned for a NUL before the first line is searched.
+///
+/// Upstream detects binary content **per read buffer**, and only until it has
+/// detected once, so where the NUL falls decides how much output precedes it.
+/// The observable consequence is that a file whose NUL is on line 2 has its
+/// line 1 suppressed as well — measured: `grep ary` over `ary head/mid\0dle/ary
+/// tail` prints nothing at all. Matching that means deciding before printing,
+/// which means looking further ahead than one line.
+///
+/// 32 KiB is upstream's `INITIAL_BUFSIZE`, so for every file at or below that
+/// size the two programs make the decision on exactly the same bytes. Beyond
+/// it, upstream keeps testing each later buffer and we do not — see
+/// `TD-COREUTILS-GREP-DETECTS-BINARY-ONLY-IN-THE-FIRST-BUFFER` in
+/// known-issues.md.
+const BINARY_PROBE: usize = 32 * 1024;
 
 impl Options {
     /// Whether directories are walked — `-r`, `-R` or `-d recurse`.
@@ -667,8 +727,8 @@ struct GrepArgs {
     patterns: Vec<Vec<u8>>,
     /// Files named by `-f`, whose lines are patterns. Read by `main`, so that
     /// argument parsing stays a pure function of argv.
-    pattern_files: Vec<String>,
-    files: Vec<String>,
+    pattern_files: Vec<OsString>,
+    files: Vec<OsString>,
     /// Whether the sole operand is a `.` this parser supplied rather than one
     /// the caller wrote, in which case the walk's names print without their
     /// leading `./`. GNU's `omit_dot_slash`.
@@ -687,134 +747,639 @@ enum Pat {
     Re(Regex),
 }
 
-/// Parse grep's argv.
+/// GNU grep's own `short_options`, copied from `grep.c` rather than derived.
 ///
-/// Clusters of single-letter options are supported, and an option that takes an
-/// argument takes the rest of its cluster or, failing that, the next argument —
-/// so `-m5`, `-m 5`, `-im5` and `-im 5` all mean the same. A bare `-` is the
-/// name of standard input, not a cluster. `--` ends option parsing, which is
-/// how a pattern beginning with `-` is given.
-fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
-    let mut opts = Options::default();
-    let mut patterns: Vec<Vec<u8>> = Vec::new();
-    let mut pattern_files: Vec<String> = Vec::new();
-    let mut positional: Vec<String> = Vec::new();
-    let mut no_more_options = false;
+/// Two things about it are not obvious. The ten digits are options in their own
+/// right — `-2` is `-C 2` — and are handled by [`parse_args`]'s own scan rather
+/// than by a `match` arm, because what a digit means depends on whether the
+/// digit before it was in the same word; see [`DIGIT_LIMIT`]. And options this
+/// grep does not implement are listed anyway, colons included: drop the `X:`
+/// and `grep -X pcre foo f` leaves `pcre` behind as an operand, which is a
+/// wrong answer rather than a refusal.
+const SHORT_OPTIONS: &str = "0123456789A:B:C:D:EFGHIPTUVX:abcd:e:f:hiLlm:noqRrsuvwxyZz";
 
-    let mut i = 0;
-    while let Some(arg) = args.get(i) {
-        i = i.saturating_add(1);
-        if no_more_options || arg == "-" || !arg.starts_with('-') {
-            positional.push(arg.clone());
-            continue;
-        }
-        if arg == "--" {
-            no_more_options = true;
-            continue;
-        }
-        if let Some(long) = arg.strip_prefix("--") {
-            parse_long(
-                long,
-                args,
-                &mut i,
-                &mut opts,
-                &mut patterns,
-                &mut pattern_files,
-            )?;
-            continue;
-        }
+/// GNU grep's `long_options[]`, in **its** order rather than alphabetically.
+///
+/// The order is output: `getopt_long` lists an ambiguous prefix's candidates in
+/// table order, so `grep --n` names `--no-ignore-case` before `--no-filename`.
+/// `scripts/getopt-ambiguity-check.py` compares this table name-for-name
+/// against the readout of `grep --=x`, which is what keeps the two in step.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
+    ("basic-regexp", Takes::Nothing),
+    ("extended-regexp", Takes::Nothing),
+    ("fixed-regexp", Takes::Nothing),
+    ("fixed-strings", Takes::Nothing),
+    ("perl-regexp", Takes::Nothing),
+    ("after-context", Takes::Required),
+    ("before-context", Takes::Required),
+    ("binary-files", Takes::Required),
+    ("byte-offset", Takes::Nothing),
+    ("context", Takes::Required),
+    ("color", Takes::Optional),
+    ("colour", Takes::Optional),
+    ("count", Takes::Nothing),
+    ("devices", Takes::Required),
+    ("directories", Takes::Required),
+    ("exclude", Takes::Required),
+    ("exclude-from", Takes::Required),
+    ("exclude-dir", Takes::Required),
+    ("file", Takes::Required),
+    ("files-with-matches", Takes::Nothing),
+    ("files-without-match", Takes::Nothing),
+    ("group-separator", Takes::Required),
+    ("help", Takes::Nothing),
+    ("include", Takes::Required),
+    ("ignore-case", Takes::Nothing),
+    ("no-ignore-case", Takes::Nothing),
+    ("initial-tab", Takes::Nothing),
+    ("label", Takes::Required),
+    ("line-buffered", Takes::Nothing),
+    ("line-number", Takes::Nothing),
+    ("line-regexp", Takes::Nothing),
+    ("max-count", Takes::Required),
+    ("no-filename", Takes::Nothing),
+    ("no-group-separator", Takes::Nothing),
+    ("no-messages", Takes::Nothing),
+    ("null", Takes::Nothing),
+    ("null-data", Takes::Nothing),
+    ("only-matching", Takes::Nothing),
+    ("quiet", Takes::Nothing),
+    ("recursive", Takes::Nothing),
+    ("dereference-recursive", Takes::Nothing),
+    ("regexp", Takes::Required),
+    ("invert-match", Takes::Nothing),
+    ("silent", Takes::Nothing),
+    ("text", Takes::Nothing),
+    ("binary", Takes::Nothing),
+    ("unix-byte-offsets", Takes::Nothing),
+    ("version", Takes::Nothing),
+    ("with-filename", Takes::Nothing),
+    ("word-regexp", Takes::Nothing),
+];
 
-        // A cluster of short options. `rest` is consumed as we go so that an
-        // option taking an argument can swallow what is left of it.
-        let mut rest = arg.get(1..).unwrap_or("").chars();
-        while let Some(c) = rest.next() {
-            // The digit shorthand: `-2` is `-C 2`, and the digits of `-12`
-            // accumulate into twelve rather than the last one winning. Handled
-            // before `take_arg` exists because it reads `rest` directly, and
-            // the two cannot borrow it at once. Only the *leading* run of
-            // digits belongs to the length — `-1n` is `-C 1 -n`, so the first
-            // non-digit is left in the cluster for the loop above.
-            if let Some(d) = c.to_digit(10) {
-                let mut v = usize::try_from(d).unwrap_or(usize::MAX);
-                while let Some(d) = rest.as_str().chars().next().and_then(|n| n.to_digit(10)) {
-                    rest.next();
-                    v = v
-                        .saturating_mul(10)
-                        .saturating_add(usize::try_from(d).unwrap_or(usize::MAX));
-                }
-                opts.default_context = Some(v);
-                continue;
-            }
-            // The argument of an option that takes one: the remainder of this
-            // cluster if there is any, otherwise the next argv entry.
-            let mut take_arg = |what: char| -> Result<String, String> {
-                let tail: String = rest.by_ref().collect();
-                if !tail.is_empty() {
-                    return Ok(tail);
-                }
-                let next = args.get(i).cloned();
-                i = i.saturating_add(1);
-                next.ok_or_else(|| format!("option requires an argument -- '{what}'"))
-            };
-            match c {
-                'E' => opts.syntax = Syntax::Extended,
-                'F' => opts.syntax = Syntax::Fixed,
-                'G' => opts.syntax = Syntax::Basic,
-                'i' | 'y' => opts.ignore_case = true,
-                'v' => opts.invert = true,
-                'c' => opts.count_only = true,
-                'n' => opts.line_numbers = true,
-                'r' => opts.directories = Directories::Recurse,
-                'R' => {
-                    opts.directories = Directories::Recurse;
-                    opts.deref_links = true;
-                }
-                'w' => opts.word = true,
-                'x' => opts.whole_line = true,
-                'o' => opts.only_matching = true,
-                'l' => opts.files_with_matches = true,
-                'L' => opts.files_without_match = true,
-                'H' => opts.filename = Some(true),
-                'h' => opts.filename = Some(false),
-                'q' => opts.quiet = true,
-                's' => opts.no_messages = true,
-                'Z' => opts.null_name = true,
-                'z' => opts.null_data = true,
-                'b' => opts.byte_offset = true,
-                'T' => opts.align_tabs = true,
-                // Accepted and ignored: this grep does not suppress output for
-                // input it thinks is binary, so there is nothing for `-a` to
-                // turn off. Refusing it would break callers that pass it
-                // defensively, and they are asking for what we already do.
-                'a' => {}
-                'd' => opts.directories = directories_arg(&take_arg('d')?)?,
-                'D' => opts.devices = devices_arg(&take_arg('D')?)?,
-                'A' => opts.after_context = Some(context_len(&take_arg('A')?)?),
-                'B' => opts.before_context = Some(context_len(&take_arg('B')?)?),
-                'C' => opts.default_context = Some(context_len(&take_arg('C')?)?),
-                'e' => patterns.extend(split_arg_patterns(take_arg('e')?.as_bytes())),
-                'f' => pattern_files.push(take_arg('f')?),
-                'm' => {
-                    let v = take_arg('m')?;
-                    let n = v
-                        .parse::<usize>()
-                        .map_err(|_| format!("invalid max count: {v}"))?;
-                    opts.max_count = Some(n);
-                }
-                other => return Err(format!("unknown option: -{other}")),
-            }
+/// The spellings that name **one** option, for the ambiguity rule.
+///
+/// See `getopt::Program::resolve_long_aliased`: without these, `--colo` would
+/// be refused as ambiguous between `--color` and `--colour`, which are the same
+/// option. Upstream judges ambiguity by `struct option`'s `val`, which is what
+/// this stands in for.
+///
+/// `no-group-separator` is here because upstream gives it the same `val` as
+/// `--group-separator` and tells the two apart by whether `optarg` is NULL. No
+/// prefix can match both names, so the pairing changes no output; it is
+/// recorded because this table is a transcription, and leaving the pair out
+/// would make the transcription say something upstream does not.
+const ALIASES: &[(&str, &str)] = &[
+    ("fixed-regexp", "fixed-strings"),
+    ("colour", "color"),
+    ("silent", "quiet"),
+    ("no-group-separator", "group-separator"),
+];
+
+/// grep's usage status is **2**, not the family's 1: it has already spent 1 on
+/// "nothing was selected".
+const GREP: Program = Program::new("grep", 2);
+
+/// What upstream's `usage (EXIT_TROUBLE)` prints.
+///
+/// It is two lines rather than one because grep's diagnostics do not have
+/// `getopt::Error::message`'s shape: upstream puts the `Usage:` summary
+/// *between* the diagnostic and the `Try '…'` referral, so the two halves are
+/// printed by [`run_main`] around it rather than joined by the module.
+const USAGE: &str = "\
+Usage: grep [OPTION]... PATTERNS [FILE]...
+Try 'grep --help' for more information.";
+
+/// What `--help` prints, on **stdout**, exiting 0.
+///
+/// GNU grep 3.11's own text, word for word, minus the four-line
+/// `Report bugs to: …` footer — three of those lines are GNU project addresses
+/// that would send a report about this program to the wrong people, as `ls`
+/// and the rest of this family already drop them.
+///
+/// Verbatim includes the options this grep refuses. `-P` is listed because a
+/// real GNU grep built without PCRE lists it too and then answers
+/// [`perl_unsupported`]; a help text that quietly omitted it would be claiming
+/// to be a *different* grep rather than one without PCRE.
+const HELP: &str = "\
+Usage: grep [OPTION]... PATTERNS [FILE]...
+Search for PATTERNS in each FILE.
+Example: grep -i 'hello world' menu.h main.c
+PATTERNS can contain multiple patterns separated by newlines.
+
+Pattern selection and interpretation:
+  -E, --extended-regexp     PATTERNS are extended regular expressions
+  -F, --fixed-strings       PATTERNS are strings
+  -G, --basic-regexp        PATTERNS are basic regular expressions
+  -P, --perl-regexp         PATTERNS are Perl regular expressions
+  -e, --regexp=PATTERNS     use PATTERNS for matching
+  -f, --file=FILE           take PATTERNS from FILE
+  -i, --ignore-case         ignore case distinctions in patterns and data
+      --no-ignore-case      do not ignore case distinctions (default)
+  -w, --word-regexp         match only whole words
+  -x, --line-regexp         match only whole lines
+  -z, --null-data           a data line ends in 0 byte, not newline
+
+Miscellaneous:
+  -s, --no-messages         suppress error messages
+  -v, --invert-match        select non-matching lines
+  -V, --version             display version information and exit
+      --help                display this help text and exit
+
+Output control:
+  -m, --max-count=NUM       stop after NUM selected lines
+  -b, --byte-offset         print the byte offset with output lines
+  -n, --line-number         print line number with output lines
+      --line-buffered       flush output on every line
+  -H, --with-filename       print file name with output lines
+  -h, --no-filename         suppress the file name prefix on output
+      --label=LABEL         use LABEL as the standard input file name prefix
+  -o, --only-matching       show only nonempty parts of lines that match
+  -q, --quiet, --silent     suppress all normal output
+      --binary-files=TYPE   assume that binary files are TYPE;
+                            TYPE is 'binary', 'text', or 'without-match'
+  -a, --text                equivalent to --binary-files=text
+  -I                        equivalent to --binary-files=without-match
+  -d, --directories=ACTION  how to handle directories;
+                            ACTION is 'read', 'recurse', or 'skip'
+  -D, --devices=ACTION      how to handle devices, FIFOs and sockets;
+                            ACTION is 'read' or 'skip'
+  -r, --recursive           like --directories=recurse
+  -R, --dereference-recursive  likewise, but follow all symlinks
+      --include=GLOB        search only files that match GLOB (a file pattern)
+      --exclude=GLOB        skip files that match GLOB
+      --exclude-from=FILE   skip files that match any file pattern from FILE
+      --exclude-dir=GLOB    skip directories that match GLOB
+  -L, --files-without-match  print only names of FILEs with no selected lines
+  -l, --files-with-matches  print only names of FILEs with selected lines
+  -c, --count               print only a count of selected lines per FILE
+  -T, --initial-tab         make tabs line up (if needed)
+  -Z, --null                print 0 byte after FILE name
+
+Context control:
+  -B, --before-context=NUM  print NUM lines of leading context
+  -A, --after-context=NUM   print NUM lines of trailing context
+  -C, --context=NUM         print NUM lines of output context
+  -NUM                      same as --context=NUM
+      --group-separator=SEP  print SEP on line between matches with context
+      --no-group-separator  do not print separator for matches with context
+      --color[=WHEN],
+      --colour[=WHEN]       use markers to highlight the matching strings;
+                            WHEN is 'always', 'never', or 'auto'
+  -U, --binary              do not strip CR characters at EOL (MSDOS/Windows)
+
+When FILE is '-', read standard input.  With no FILE, read '.' if
+recursive, '-' otherwise.  With fewer than two FILEs, assume -h.
+Exit status is 0 if any line is selected, 1 otherwise;
+if any error occurs and -q is not given, the exit status is 2.";
+
+/// How many digits of the `-NUM` shorthand upstream keeps before it gives up.
+///
+/// `get_nondigit_option` writes into a `char buf[INT_BUFSIZE_BOUND (intmax_t) +
+/// 4]` and stops at `buf + sizeof buf - 4`, which for a 64-bit `intmax_t` is 21
+/// bytes in. Beyond that it appends `...` and lets `context_length_arg` refuse
+/// the result, so a 22-digit run answers
+/// `grep: 123456789012345678901...: invalid context length argument` rather
+/// than silently taking the first 21 digits.
+const DIGIT_LIMIT: usize = 21;
+
+/// What the command line asked for.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum Request {
+    /// `--help` — and also `--color=WHEN` with a `WHEN` upstream does not know,
+    /// which sets the same `show_help` flag rather than reporting anything. So
+    /// `grep --color=bogus foo f` prints the whole help text on **stdout** and
+    /// exits 0. Measured against GNU grep 3.11.
+    Help,
+    /// `-V` / `--version`.
+    Version,
+    /// No pattern at all: upstream's bare `usage (EXIT_TROUBLE)`, which prints
+    /// the two [`USAGE`] lines with no `grep: …` diagnostic above them. A
+    /// variant rather than an [`getopt::Error`] because an `Error` always has a
+    /// sentence, and this one has none.
+    BadUsage,
+    Run(Box<GrepArgs>),
+}
+
+/// One row of upstream's `matchers[]`: the language `-G`, `-E`, `-F`, `-P` and
+/// the undocumented `-X` select between.
+///
+/// A type of its own rather than [`Syntax`] directly, because upstream refuses
+/// a *second, different* matcher — `grep -E -F` is `conflicting matchers
+/// specified` — and that is a question about which row was chosen, not about
+/// the dialect the row maps onto. `grep -E -E` is fine, and so is `grep -X
+/// egrep -E`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Matcher {
+    Grep,
+    Egrep,
+    Fgrep,
+    Awk,
+    Gawk,
+    Posixawk,
+}
+
+impl Matcher {
+    /// The dialect this row compiles patterns in.
+    fn syntax(self) -> Syntax {
+        match self {
+            Matcher::Grep => Syntax::Basic,
+            Matcher::Fgrep => Syntax::Fixed,
+            // `awk`, `gawk` and `posixawk` are three more `RE_SYNTAX_*`
+            // settings upstream, differing from egrep's in details this engine
+            // does not model — whether `\` is special inside a bracket
+            // expression, whether back-references exist. Extended is the
+            // nearest dialect there is; the divergence is recorded in
+            // `known-issues.md` rather than hidden by refusing the names, since
+            // refusing them would be the larger lie.
+            Matcher::Egrep | Matcher::Awk | Matcher::Gawk | Matcher::Posixawk => Syntax::Extended,
         }
     }
+}
+
+/// GNU's `struct option` `val`: the short letter a long option **is**, or one
+/// of the long-only options that have no letter.
+///
+/// Routing both spellings through one value is upstream's design and not a
+/// tidying of it: the option loop is a `switch` over exactly this, which is why
+/// `--ignore-case` and `-i` cannot drift apart.
+#[derive(Clone, Copy)]
+enum Flag {
+    Short(u8),
+    BinaryFiles,
+    Color,
+    Exclude,
+    ExcludeDir,
+    ExcludeFrom,
+    GroupSeparator,
+    NoGroupSeparator,
+    Include,
+    Label,
+    LineBuffered,
+    NoIgnoreCase,
+    Help,
+}
+
+/// The `val` of one long option.
+///
+/// Every name in [`LONG_OPTIONS`] has a line here, because the table's names
+/// are the only strings `getopt` can hand back. The final arm is not dead code
+/// for all that: it is what a name added to the table without a line here lands
+/// on, and printing the list of options is the least wrong thing to do with an
+/// option nobody has finished wiring up.
+fn long_flag(name: &str) -> Flag {
+    match name {
+        "basic-regexp" => Flag::Short(b'G'),
+        "extended-regexp" => Flag::Short(b'E'),
+        "fixed-regexp" | "fixed-strings" => Flag::Short(b'F'),
+        "perl-regexp" => Flag::Short(b'P'),
+        "after-context" => Flag::Short(b'A'),
+        "before-context" => Flag::Short(b'B'),
+        "binary-files" => Flag::BinaryFiles,
+        "byte-offset" => Flag::Short(b'b'),
+        "context" => Flag::Short(b'C'),
+        "color" | "colour" => Flag::Color,
+        "count" => Flag::Short(b'c'),
+        "devices" => Flag::Short(b'D'),
+        "directories" => Flag::Short(b'd'),
+        "exclude" => Flag::Exclude,
+        "exclude-from" => Flag::ExcludeFrom,
+        "exclude-dir" => Flag::ExcludeDir,
+        "file" => Flag::Short(b'f'),
+        "files-with-matches" => Flag::Short(b'l'),
+        "files-without-match" => Flag::Short(b'L'),
+        "group-separator" => Flag::GroupSeparator,
+        "include" => Flag::Include,
+        "ignore-case" => Flag::Short(b'i'),
+        "no-ignore-case" => Flag::NoIgnoreCase,
+        "initial-tab" => Flag::Short(b'T'),
+        "label" => Flag::Label,
+        "line-buffered" => Flag::LineBuffered,
+        "line-number" => Flag::Short(b'n'),
+        "line-regexp" => Flag::Short(b'x'),
+        "max-count" => Flag::Short(b'm'),
+        "no-filename" => Flag::Short(b'h'),
+        "no-group-separator" => Flag::NoGroupSeparator,
+        "no-messages" => Flag::Short(b's'),
+        "null" => Flag::Short(b'Z'),
+        "null-data" => Flag::Short(b'z'),
+        "only-matching" => Flag::Short(b'o'),
+        "quiet" | "silent" => Flag::Short(b'q'),
+        "recursive" => Flag::Short(b'r'),
+        "dereference-recursive" => Flag::Short(b'R'),
+        "regexp" => Flag::Short(b'e'),
+        "invert-match" => Flag::Short(b'v'),
+        "text" => Flag::Short(b'a'),
+        "binary" => Flag::Short(b'U'),
+        "unix-byte-offsets" => Flag::Short(b'u'),
+        "version" => Flag::Short(b'V'),
+        "with-filename" => Flag::Short(b'H'),
+        "word-regexp" => Flag::Short(b'w'),
+        _ => Flag::Help,
+    }
+}
+
+/// The value of an option whose table entry says it takes one.
+///
+/// `getopt` has already refused the command line where it is missing — that is
+/// `option '--file' requires an argument`, printed before this could run — so
+/// the `None` is unreachable. It is spelled as a default rather than an
+/// `expect` because searching for the empty string is a smaller failure than a
+/// panic, and because this family forbids `unwrap`/`expect` outside tests.
+fn required(value: Option<OsString>) -> OsString {
+    value.unwrap_or_default()
+}
+
+/// Upstream's `setmatcher`: choose a pattern language, refusing a second and
+/// different one.
+///
+/// # Errors
+///
+/// `conflicting matchers specified`, exit 2 — upstream's wording and status.
+/// Repeating the *same* matcher is not a conflict.
+fn set_matcher(previous: Option<Matcher>, chosen: Matcher) -> Result<Matcher, getopt::Error> {
+    match previous {
+        Some(p) if p != chosen => Err(GREP.usage("conflicting matchers specified".to_string())),
+        _ => Ok(chosen),
+    }
+}
+
+/// `-X NAME`: upstream's undocumented matcher selector.
+///
+/// # Errors
+///
+/// `invalid matcher NAME`, exit 2 — and, for `perl` alone, the message a build
+/// without PCRE gives instead. See [`perl_unsupported`].
+fn matcher_arg(name: &[u8]) -> Result<Matcher, getopt::Error> {
+    match name {
+        b"grep" => Ok(Matcher::Grep),
+        b"egrep" => Ok(Matcher::Egrep),
+        b"fgrep" => Ok(Matcher::Fgrep),
+        b"awk" => Ok(Matcher::Awk),
+        b"gawk" => Ok(Matcher::Gawk),
+        b"posixawk" => Ok(Matcher::Posixawk),
+        b"perl" => Err(perl_unsupported()),
+        // `%s`, not `quote`: upstream prints the name bare. Lossy, because a
+        // `getopt::Error` carries a `String` — a matcher name that is not UTF-8
+        // matches none of the six above and so is only ever echoed back.
+        other => Err(GREP.usage(format!(
+            "invalid matcher {}",
+            String::from_utf8_lossy(other)
+        ))),
+    }
+}
+
+/// `-P` / `--perl-regexp` / `-X perl`, which this engine cannot do.
+///
+/// The wording is upstream's own, from the `#if !HAVE_LIBPCRE` arm of
+/// `setmatcher` — a real GNU grep built without PCRE says exactly this. That is
+/// deliberate: reporting `-P` as an *unknown option* would tell a script that
+/// its grep is too old, where the truth is that this one has no PCRE. Ubuntu's
+/// grep is built with PCRE, so `scripts/grep-diff.sh` records the case as an
+/// expected difference rather than as a match.
+fn perl_unsupported() -> getopt::Error {
+    GREP.usage("Perl matching not supported in a --disable-perl-regexp build".to_string())
+}
+
+/// Parse grep's argv, exactly as `get_nondigit_option` and the `switch` it
+/// feeds do.
+///
+/// # The digit scan
+///
+/// `-2` is `-C 2`, and `getopt` cannot be told that, because what a digit means
+/// depends on *where it was written*: `-1 -2` is a context of two — the second
+/// run replaces the first — while `-12` is a context of twelve. Upstream
+/// settles it with three variables around the `getopt_long` call, and this is
+/// them: `prev_digit_optind` outlives one run of digits (upstream's `static`),
+/// `was_digit` and the digit buffer do not, and `optind` before and after each
+/// call is what says whether two digits shared a word. Leading zeros are
+/// overwritten rather than accumulated, so `-0005` is a context of five and not
+/// an overflow.
+///
+/// # Errors
+///
+/// Anything upstream's option loop dies on: an unknown option, a missing or
+/// unusable value, or two different `-E`/`-F`/`-G`/`-X` matchers. `--help`,
+/// `--version` and a bare `grep` are [`Request`]s rather than errors, because
+/// upstream reaches them by falling out of the loop rather than by dying in it.
+fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
+    let mut opts = Options::default();
+    let mut patterns: Vec<Vec<u8>> = Vec::new();
+    let mut pattern_files: Vec<OsString> = Vec::new();
+    let mut operands: Vec<OsString> = Vec::new();
+    let mut matcher: Option<Matcher> = None;
+    let mut show_help = false;
+    let mut show_version = false;
+
+    let mut parser = GREP.parse_aliased(argv, SHORT_OPTIONS, LONG_OPTIONS, ALIASES);
+    // Upstream's `static int prev_digit_optind`: it outlives one call to
+    // `get_nondigit_option`, which is the whole mechanism by which `-1 -2` and
+    // `-12` come out different.
+    let mut prev_digit_optind: Option<usize> = None;
+    'scan: loop {
+        let mut digits: Vec<u8> = Vec::new();
+        let mut was_digit = false;
+        let mut this_digit_optind = parser.optind();
+        let item = loop {
+            let Some(next) = parser.next() else {
+                break None;
+            };
+            let opt = next?;
+            let digit = match &opt {
+                Opt::Short(c @ b'0'..=b'9', None) => *c,
+                _ => break Some(opt),
+            };
+            if prev_digit_optind != Some(this_digit_optind) || !was_digit {
+                // A new run: this digit is the first of a fresh number.
+                digits.clear();
+            } else if digits.first() == Some(&b'0') {
+                // Upstream's `p -= buf[0] == '0'`, which overwrites while the
+                // number so far is a single leading zero. Without it
+                // `-00000000000000000000000` would be refused as too long
+                // rather than read as zero.
+                digits.pop();
+            }
+            if digits.len() == DIGIT_LIMIT {
+                digits.extend_from_slice(b"...");
+                break None;
+            }
+            digits.push(digit);
+            was_digit = true;
+            prev_digit_optind = Some(this_digit_optind);
+            this_digit_optind = parser.optind();
+        };
+        if !digits.is_empty() {
+            opts.default_context = Some(context_len(&digits)?);
+        }
+        let Some(item) = item else { break 'scan };
+
+        let (flag, value) = match item {
+            Opt::Operand(word) => {
+                operands.push(word.clone());
+                continue 'scan;
+            }
+            Opt::Short(c, v) => (Flag::Short(c), v),
+            Opt::Long(name, v) => (long_flag(name), v),
+        };
+        match flag {
+            Flag::Short(b'E') => matcher = Some(set_matcher(matcher, Matcher::Egrep)?),
+            Flag::Short(b'F') => matcher = Some(set_matcher(matcher, Matcher::Fgrep)?),
+            Flag::Short(b'G') => matcher = Some(set_matcher(matcher, Matcher::Grep)?),
+            // Before the conflict test, as upstream has it: `setmatcher` looks
+            // the name up in a table `perl` is not in when PCRE is absent, so
+            // `grep -E -P` reports the missing PCRE and not the conflict.
+            Flag::Short(b'P') => return Err(perl_unsupported()),
+            Flag::Short(b'X') => {
+                let chosen = matcher_arg(&quote::os_bytes(&required(value)))?;
+                matcher = Some(set_matcher(matcher, chosen)?);
+            }
+            // `-y` is the old-timers' spelling of `-i`, and upstream still
+            // carries it in the same `case`.
+            Flag::Short(b'i' | b'y') => opts.ignore_case = true,
+            Flag::NoIgnoreCase => opts.ignore_case = false,
+            Flag::Short(b'v') => opts.invert = true,
+            Flag::Short(b'c') => opts.count_only = true,
+            Flag::Short(b'n') => opts.line_numbers = true,
+            Flag::Short(b'r') => opts.directories = Directories::Recurse,
+            Flag::Short(b'R') => {
+                opts.directories = Directories::Recurse;
+                opts.deref_links = true;
+            }
+            Flag::Short(b'w') => opts.word = true,
+            Flag::Short(b'x') => opts.whole_line = true,
+            Flag::Short(b'o') => opts.only_matching = true,
+            Flag::Short(b'l') => opts.files_with_matches = true,
+            Flag::Short(b'L') => opts.files_without_match = true,
+            Flag::Short(b'H') => opts.filename = Some(true),
+            Flag::Short(b'h') => opts.filename = Some(false),
+            Flag::Short(b'q') => opts.quiet = true,
+            Flag::Short(b's') => opts.no_messages = true,
+            Flag::Short(b'Z') => opts.null_name = true,
+            Flag::Short(b'z') => opts.null_data = true,
+            Flag::Short(b'b') => opts.byte_offset = true,
+            Flag::Short(b'T') => opts.align_tabs = true,
+            Flag::Short(b'a') => opts.binary_files = BinaryFiles::Text,
+            Flag::Short(b'I') => opts.binary_files = BinaryFiles::WithoutMatch,
+            Flag::BinaryFiles => {
+                opts.binary_files = binary_files_arg(&quote::os_bytes(&required(value)))?;
+            }
+            // MS-DOS's "do not strip the CR at end of line". Upstream guards it
+            // with `if (O_BINARY)`, which is false on every system this runs
+            // on, so it is accepted and does nothing there too.
+            Flag::Short(b'U') => {}
+            // A warning, not an error: upstream calls `error (0, 0, …)` and
+            // carries on, so the search still happens and the status is still
+            // the search's. Printed here, in argv order, because that is where
+            // upstream prints it.
+            Flag::Short(b'u') => diag!("grep: warning: --unix-byte-offsets (-u) is obsolete"),
+            Flag::Short(b'V') => show_version = true,
+            Flag::Help => show_help = true,
+            Flag::Short(b'd') => {
+                opts.directories = directories_arg(&quote::os_bytes(&required(value)))?;
+            }
+            Flag::Short(b'D') => opts.devices = devices_arg(&quote::os_bytes(&required(value)))?,
+            Flag::Short(b'A') => {
+                opts.after_context = Some(context_len(&quote::os_bytes(&required(value)))?);
+            }
+            Flag::Short(b'B') => {
+                opts.before_context = Some(context_len(&quote::os_bytes(&required(value)))?);
+            }
+            Flag::Short(b'C') => {
+                opts.default_context = Some(context_len(&quote::os_bytes(&required(value)))?);
+            }
+            Flag::Short(b'e') => {
+                patterns.extend(split_arg_patterns(&quote::os_bytes(&required(value))));
+            }
+            Flag::Short(b'f') => pattern_files.push(required(value)),
+            Flag::Short(b'm') => {
+                opts.max_count = max_count_arg(&quote::os_bytes(&required(value)))?
+            }
+            Flag::Include => opts
+                .file_selectors
+                .push(true, quote::os_bytes(&required(value)).into_owned()),
+            Flag::Exclude => opts
+                .file_selectors
+                .push(false, quote::os_bytes(&required(value)).into_owned()),
+            // Trailing slashes are stripped from the *pattern*, so
+            // `--exclude-dir=sub/` and `--exclude-dir=sub` are the same
+            // request. Upstream does it with `strip_trailing_slashes`, and
+            // without it the pattern could never match, because the names it is
+            // compared against never end in one.
+            Flag::ExcludeDir => {
+                let mut pat = quote::os_bytes(&required(value)).into_owned();
+                while pat.len() > 1 && pat.last() == Some(&b'/') {
+                    pat.pop();
+                }
+                opts.dir_selectors.push(false, pat);
+            }
+            Flag::ExcludeFrom => {
+                let path = required(value);
+                let raw = fs::read(&path)
+                    .map_err(|e| GREP.usage(format!("{}: {}", quotef_os(&path), strerror(&e))))?;
+                for pat in split_exclude_file(&raw) {
+                    opts.file_selectors.push(false, pat);
+                }
+            }
+            // `--group-separator=` with nothing after the `=` is a *blank line*
+            // between groups, not a request for no separator — which is why an
+            // empty value is stored rather than folded into `Suppressed`.
+            Flag::GroupSeparator => {
+                opts.group_sep = GroupSep::Custom(quote::os_bytes(&required(value)).into_owned());
+            }
+            Flag::NoGroupSeparator => opts.group_sep = GroupSep::Suppressed,
+            // A `WHEN` upstream does not know is not an error there: it sets
+            // `show_help`, so the whole help text goes to stdout and the status
+            // is 0. Reproduced rather than tidied — a script testing
+            // `grep --color=$var` gets upstream's answer.
+            Flag::Color => match color_when(value.as_deref()) {
+                Some(when) => opts.color_when = when,
+                None => show_help = true,
+            },
+            Flag::Label => opts.label = Some(quote::os_bytes(&required(value)).into_owned()),
+            Flag::LineBuffered => opts.line_buffered = true,
+            // Upstream's `default: usage (EXIT_TROUBLE)`. Unreachable as things
+            // stand — `SHORT_OPTIONS` lists exactly the letters matched above,
+            // and `getopt` refuses any other — but a letter added to that
+            // string without an arm here must be a refusal rather than a silent
+            // no-op.
+            Flag::Short(other) => return Err(GREP.invalid_option(other)),
+        }
+    }
+
+    // Both are tested after the loop rather than inside it, and in this order,
+    // because upstream does: `grep --help --version` prints the version.
+    if show_version {
+        return Ok(Request::Version);
+    }
+    if show_help {
+        return Ok(Request::Help);
+    }
+
+    opts.syntax = matcher.unwrap_or(Matcher::Grep).syntax();
 
     // The first operand is the pattern only when no `-e`/`-f` supplied one;
     // with them, every operand is a file. This is what makes `grep -e -v file`
     // search for the text `-v`.
-    let mut files = positional;
+    let mut files = operands;
     if patterns.is_empty() && pattern_files.is_empty() {
         if files.is_empty() {
-            return Err("missing PATTERN".to_string());
+            return Ok(Request::BadUsage);
         }
-        patterns.extend(split_arg_patterns(files.remove(0).as_bytes()));
+        let first = quote::os_bytes(&files.remove(0)).into_owned();
+        // Upstream strips one backslash from a command-line pattern beginning
+        // `\-`, so that the non-POSIX `grep '\-x'` — written to stop `-x` being
+        // read as an option — does not also earn a stray-backslash warning.
+        // Not under `-F`, where the backslash is a literal character, and not
+        // for `-e`, which upstream leaves alone.
+        let stripped = match first.strip_prefix(b"\\-") {
+            Some(rest) if matcher != Some(Matcher::Fgrep) => {
+                let mut with_dash = vec![b'-'];
+                with_dash.extend_from_slice(rest);
+                with_dash
+            }
+            _ => first,
+        };
+        patterns.extend(split_arg_patterns(&stripped));
     }
 
     // Recursion with no operand walks the working directory, as GNU does;
@@ -828,161 +1393,82 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
     let mut omit_dot_slash = false;
     if files.is_empty() {
         if opts.recursive() {
-            files.push(".".to_string());
+            files.push(OsString::from("."));
             omit_dot_slash = true;
         } else {
-            files.push("-".to_string());
+            files.push(OsString::from("-"));
         }
     }
 
-    Ok(GrepArgs {
+    Ok(Request::Run(Box::new(GrepArgs {
         opts,
         patterns,
         pattern_files,
         files,
         omit_dot_slash,
-    })
+    })))
 }
 
-/// One `--long-option`, with or without an `=value`.
+/// The value of `--binary-files=TYPE`.
 ///
-/// `args` and `i` are threaded through because a long option's value may be the
-/// *next* argv entry rather than the text after an `=`: `grep --regexp foo`,
-/// `--max-count 1` and `--context 1` are all legal, and until 2026-08-25 every
-/// one of them was rejected as a missing argument. GNU's own long options work
-/// this way because `getopt_long` does, and a caller writing them out in full
-/// is exactly the caller least likely to guess that only the `=` form is
-/// accepted.
-fn parse_long(
-    long: &str,
-    args: &[String],
-    i: &mut usize,
-    opts: &mut Options,
-    patterns: &mut Vec<Vec<u8>>,
-    pattern_files: &mut Vec<String>,
-) -> Result<(), String> {
-    let (name, value) = match long.split_once('=') {
-        Some((n, v)) => (n, Some(v)),
-        None => (long, None),
-    };
-    // The value: what followed the `=`, else the next argv entry. An option
-    // that needs one and has neither is reported by name rather than silently
-    // treated as absent.
-    let mut need = |v: Option<&str>| -> Result<String, String> {
-        if let Some(v) = v {
-            return Ok(v.to_string());
-        }
-        let next = args.get(*i).cloned();
-        *i = i.saturating_add(1);
-        next.ok_or_else(|| format!("option '--{name}' requires an argument"))
-    };
-    match name {
-        "extended-regexp" => opts.syntax = Syntax::Extended,
-        "fixed-strings" => opts.syntax = Syntax::Fixed,
-        "basic-regexp" => opts.syntax = Syntax::Basic,
-        "ignore-case" => opts.ignore_case = true,
-        "invert-match" => opts.invert = true,
-        "count" => opts.count_only = true,
-        "line-number" => opts.line_numbers = true,
-        "recursive" => opts.directories = Directories::Recurse,
-        "dereference-recursive" => {
-            opts.directories = Directories::Recurse;
-            opts.deref_links = true;
-        }
-        "directories" => opts.directories = directories_arg(&need(value)?)?,
-        "devices" => opts.devices = devices_arg(&need(value)?)?,
-        "include" => opts.file_selectors.push(true, need(value)?.into_bytes()),
-        "exclude" => opts.file_selectors.push(false, need(value)?.into_bytes()),
-        // Trailing slashes are stripped from the *pattern*, so `--exclude-dir=
-        // sub/` and `--exclude-dir=sub` are the same request. GNU does it with
-        // `strip_trailing_slashes`, and without it the pattern could never
-        // match, because the names it is compared against never end in one.
-        "exclude-dir" => {
-            let mut pat = need(value)?.into_bytes();
-            while pat.len() > 1 && pat.last() == Some(&b'/') {
-                pat.pop();
-            }
-            opts.dir_selectors.push(false, pat);
-        }
-        "exclude-from" => {
-            let path = need(value)?;
-            let raw =
-                fs::read(&path).map_err(|e| format!("{}: {}", quotef_os(&path), strerror(&e)))?;
-            for pat in split_exclude_file(&raw) {
-                opts.file_selectors.push(false, pat);
-            }
-        }
-        "word-regexp" => opts.word = true,
-        "line-regexp" => opts.whole_line = true,
-        "only-matching" => opts.only_matching = true,
-        "files-with-matches" => opts.files_with_matches = true,
-        "files-without-match" => opts.files_without_match = true,
-        "with-filename" => opts.filename = Some(true),
-        "no-filename" => opts.filename = Some(false),
-        "quiet" | "silent" => opts.quiet = true,
-        "no-messages" => opts.no_messages = true,
-        "null" => opts.null_name = true,
-        "null-data" => opts.null_data = true,
-        "byte-offset" => opts.byte_offset = true,
-        "initial-tab" => opts.align_tabs = true,
-        "after-context" => opts.after_context = Some(context_len(&need(value)?)?),
-        "before-context" => opts.before_context = Some(context_len(&need(value)?)?),
-        "context" => opts.default_context = Some(context_len(&need(value)?)?),
-        // `--group-separator=` with nothing after the `=` is a *blank line*
-        // between groups, not a request for no separator — which is why an
-        // empty value is stored rather than folded into `Suppressed`.
-        "group-separator" => opts.group_sep = GroupSep::Custom(need(value)?.into_bytes()),
-        "no-group-separator" => opts.group_sep = GroupSep::Suppressed,
-        // `value`, not `need(value)`: the argument is optional, so `grep
-        // --color foo file` means `auto` and leaves `foo` as the pattern.
-        "color" | "colour" => opts.color_when = color_when(value)?,
-        "text" | "binary-files" => {}
-        "regexp" => patterns.extend(split_arg_patterns(need(value)?.as_bytes())),
-        "file" => pattern_files.push(need(value)?),
-        "max-count" => {
-            let v = need(value)?;
-            let n = v
-                .parse::<usize>()
-                .map_err(|_| format!("invalid max count: {v}"))?;
-            opts.max_count = Some(n);
-        }
-        other => return Err(format!("unknown option: --{other}")),
+/// # Errors
+///
+/// `grep: unknown binary-files type`, exit 2. An **exact** match, not
+/// `argmatch`'s prefix one: upstream compares with `STREQ`, so
+/// `--binary-files=w` is refused where `--directories=r` would be accepted.
+/// Measured, and the value is not named in the message — upstream's choice, not
+/// an omission here.
+fn binary_files_arg(value: &[u8]) -> Result<BinaryFiles, getopt::Error> {
+    match value {
+        b"binary" => Ok(BinaryFiles::Binary),
+        b"text" => Ok(BinaryFiles::Text),
+        b"without-match" => Ok(BinaryFiles::WithoutMatch),
+        _ => Err(GREP.usage("unknown binary-files type".to_string())),
     }
-    Ok(())
+}
+
+/// The value of `-m` / `--max-count`.
+///
+/// `None` is "no limit", which is what upstream's `INTMAX_MAX` default means
+/// and also what a **negative** or overflowing value means: `outleft` starts at
+/// `max_count` and is compared against zero as it counts down, so a negative
+/// one never reaches it. Measured: `grep -m -1 MATCH f` and
+/// `grep -m 99999999999999999999999 MATCH f` both print every match.
+///
+/// # Errors
+///
+/// `grep: invalid max count`, exit 2, for a value that is not a number at all
+/// or that has a trailing character — upstream accepts `LONGINT_OK` and
+/// `LONGINT_OVERFLOW` from `xstrtoimax` and dies on everything else.
+fn max_count_arg(value: &[u8]) -> Result<Option<usize>, getopt::Error> {
+    let (n, status) = xnum::xstrtoimax(value, None);
+    match status {
+        xnum::Status::Ok | xnum::Status::Overflow => Ok(usize::try_from(n).ok().filter(|_| n >= 0)),
+        _ => Err(GREP.usage("invalid max count".to_string())),
+    }
 }
 
 /// The value of `-d` / `--directories`.
 ///
 /// # Errors
 ///
-/// GNU routes this through gnulib's `argmatch`, which prints **seven** lines —
-/// the rejected value, `Valid arguments are:` and the three of them, then
-/// `Usage: …` and `Try 'grep --help' …` — and exits **1**, not grep's usual 2.
-///
-/// The first five are reproduced here exactly, curly quotes included, because
-/// [`quote::quote`] is gnulib's `quote` and those lines say nothing about which
-/// options exist. The last two are not, and cannot be until this family has a
-/// `--help` at all: printing `Try 'grep --help' for more information.` when
-/// `--help` is an unknown option would be a diagnostic that lies. Nor is the
-/// status right, because every parse error in this program funnels through one
-/// `Err(String)` that exits 2. Both belong to
-/// `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, which is the same
-/// defect `--zzz` and `-m x` have, and `scripts/grep-diff.sh` records this case
-/// as a gap against it rather than as a decision about `-d`.
-fn directories_arg(value: &str) -> Result<Directories, String> {
-    match value {
-        "read" => Ok(Directories::Read),
-        "recurse" => Ok(Directories::Recurse),
-        "skip" => Ok(Directories::Skip),
-        _ => Err(format!(
-            "invalid argument {} for {}\nValid arguments are:\n  - {}\n  - {}\n  - {}",
-            quote::quote(value.as_bytes()),
-            quote::quote(b"--directories"),
-            quote::quote(b"read"),
-            quote::quote(b"recurse"),
-            quote::quote(b"skip"),
-        )),
-    }
+/// GNU routes this through gnulib's `argmatch`, so a bad value prints **seven**
+/// lines — the rejected value, `Valid arguments are:` and the three of them,
+/// then `Usage: …` and `Try 'grep --help' …` — and exits **1**, not grep's
+/// usual 2. [`Program::argmatch`] is that function, status included, and
+/// [`run_main`] prints the [`USAGE`] pair below it, so all seven lines and the
+/// status now match. It is also a **prefix** match, which is upstream's
+/// behaviour and not an accident: `grep -d rec` recurses.
+fn directories_arg(value: &[u8]) -> Result<Directories, getopt::Error> {
+    GREP.argmatch(
+        value,
+        "--directories",
+        &[
+            ("read", Directories::Read),
+            ("recurse", Directories::Recurse),
+            ("skip", Directories::Skip),
+        ],
+    )
 }
 
 /// The value of `-D` / `--devices`.
@@ -991,13 +1477,14 @@ fn directories_arg(value: &str) -> Result<Directories, String> {
 ///
 /// `grep: unknown devices method`, exit 2 — GNU's own wording and status, which
 /// this one can reproduce exactly because GNU checks `-D` by hand rather than
-/// through `argmatch`. The value is not named, which is GNU's choice and not an
-/// omission here.
-fn devices_arg(value: &str) -> Result<Devices, String> {
+/// through `argmatch`. So this one is an **exact** comparison where `-d` above
+/// is a prefix one, and the value is not named in the message: both are GNU's
+/// choices and not omissions here.
+fn devices_arg(value: &[u8]) -> Result<Devices, getopt::Error> {
     match value {
-        "read" => Ok(Devices::Read),
-        "skip" => Ok(Devices::Skip),
-        _ => Err("unknown devices method".to_string()),
+        b"read" => Ok(Devices::Read),
+        b"skip" => Ok(Devices::Skip),
+        _ => Err(GREP.usage("unknown devices method".to_string())),
     }
 }
 
@@ -1034,39 +1521,56 @@ fn split_exclude_file(raw: &[u8]) -> Vec<Vec<u8>> {
 /// use: `force`/`yes` for `always`, `none`/`no` for `never`, `tty`/`if-tty` for
 /// `auto`. All six are matched without regard to case, as GNU does.
 ///
-/// # Errors
+/// A `WHEN` that is none of them answers `None`, which is **not** an error:
+/// upstream sets its show-help flag, so `grep --color=bogus foo file` prints the
+/// entire help text on **stdout** and exits 0. That is why this returns an
+/// `Option` rather than a `Result` — there is no diagnostic to carry, and the
+/// caller turns the `None` into [`Request::Help`].
 ///
-/// A `WHEN` that is none of them is *not* an error to GNU: it sets the
-/// show-help flag, so `grep --color=bogus foo file` prints the entire usage
-/// summary on **stdout** and exits 0. We have no usage text to print — and one
-/// listing options we do not implement would be a lie — so this reports it as
-/// an unknown value instead, which `scripts/grep-diff.sh` records as a
-/// deliberate divergence.
-fn color_when(value: Option<&str>) -> Result<ColorWhen, String> {
+/// A missing `WHEN` — `--color` with no `=` — is `auto`, which is what makes
+/// `grep --color foo file` search for `foo` rather than eat the pattern.
+fn color_when(value: Option<&OsStr>) -> Option<ColorWhen> {
     let Some(v) = value else {
-        return Ok(ColorWhen::Auto);
+        return Some(ColorWhen::Auto);
     };
-    let lower = v.to_ascii_lowercase();
-    match lower.as_str() {
-        "always" | "yes" | "force" => Ok(ColorWhen::Always),
-        "never" | "no" | "none" => Ok(ColorWhen::Never),
-        "auto" | "tty" | "if-tty" => Ok(ColorWhen::Auto),
-        _ => Err(format!("invalid argument '{v}' for '--color'")),
+    let lower = quote::os_bytes(v).to_ascii_lowercase();
+    match lower.as_slice() {
+        b"always" | b"yes" | b"force" => Some(ColorWhen::Always),
+        b"never" | b"no" | b"none" => Some(ColorWhen::Never),
+        b"auto" | b"tty" | b"if-tty" => Some(ColorWhen::Auto),
+        _ => None,
     }
 }
 
 /// The value of `-A`, `-B` or `-C`, or the diagnostic GNU gives for one that is
 /// not a count.
 ///
+/// Upstream's `context_length_arg` is `xstrtoimax` followed by
+/// `if (! (0 <= value))`, so a value too large for an `intmax_t` is **accepted**
+/// and clamped — `grep -A 99999999999999999999999` prints the rest of the file
+/// rather than refusing. That is why this reads through [`xnum::xstrtoimax`]
+/// and treats `Overflow` as success rather than parsing to a `usize`, which
+/// would refuse it.
+///
+/// # Errors
+///
 /// The wording is grep's own — `grep: x: invalid context length argument`, exit
 /// 2 — and not the family's `invalid number`, because a script that greps for
 /// the message is greping for that one. A negative value lands here too:
 /// `grep -A -1` takes `-1` as the argument (the option demands one) and then
 /// refuses it, rather than reading it as the digit shorthand.
-fn context_len(value: &str) -> Result<usize, String> {
-    value
-        .parse::<usize>()
-        .map_err(|_| format!("{value}: invalid context length argument"))
+fn context_len(value: &[u8]) -> Result<usize, getopt::Error> {
+    let (n, status) = xnum::xstrtoimax(value, None);
+    let ok = matches!(status, xnum::Status::Ok | xnum::Status::Overflow) && n >= 0;
+    // `Overflow` reports `intmax_t`'s limit as the value, so the `try_from`
+    // succeeds and the clamp is upstream's own.
+    match usize::try_from(n).ok().filter(|_| ok) {
+        Some(n) => Ok(n),
+        None => Err(GREP.usage(format!(
+            "{}: invalid context length argument",
+            String::from_utf8_lossy(value)
+        ))),
+    }
 }
 
 /// The patterns held in the text of a `-f` file.
@@ -1322,11 +1826,19 @@ fn line_selected(line: &[u8], pats: &[Pat], opts: &Options) -> Result<bool, Matc
 /// What a file is called in output. Standard input is spelled `-` on the
 /// command line and *named* `(standard input)` in a diagnostic or a prefix, as
 /// every other grep does — a `-:` prefix reads as part of the line.
-fn display_name(path: &str) -> &str {
+///
+/// `--label` replaces that name and only that name: it is what makes
+/// `cat f | grep -H --label=f pat` print the prefix a caller wanted, and it has
+/// no effect on a file named on the command line. Bytes rather than `str`
+/// because a label, like a path, may hold any byte but NUL.
+fn display_name<'a>(path: &'a OsStr, opts: &'a Options) -> Cow<'a, [u8]> {
     if path == "-" {
-        "(standard input)"
+        match &opts.label {
+            Some(label) => Cow::Borrowed(label),
+            None => Cow::Borrowed(b"(standard input)"),
+        }
     } else {
-        path
+        quote::os_bytes(path)
     }
 }
 
@@ -1359,7 +1871,7 @@ fn wants_filename(explicit: Option<bool>, operands: usize, named_a_directory: bo
 /// true, 2, b'-')` is a call nobody can read, and swapping two of its arguments
 /// compiles.
 struct Prefix<'a> {
-    filename: &'a str,
+    filename: &'a [u8],
     show_filename: bool,
     /// Zero-based internally; printed one-based.
     line_idx: usize,
@@ -1404,7 +1916,7 @@ fn line_prefix(p: &Prefix, opts: &Options) -> Vec<u8> {
         opts.paint(cap, &field)
     };
     if p.show_filename {
-        prefix.extend_from_slice(&opts.paint(&opts.colors.filename, p.filename.as_bytes()));
+        prefix.extend_from_slice(&opts.paint(&opts.colors.filename, p.filename));
         // `-Z`'s NUL is a delimiter for a machine, and GNU leaves it outside
         // the `se` escape — it is the one separator that is not coloured.
         if opts.null_name {
@@ -1543,12 +2055,34 @@ fn main() -> ExitCode {
 
 fn run_main() -> ExitCode {
     stdfd::restore();
-    let args: Vec<String> = env::args().skip(1).collect();
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
     let mut parsed = match parse_args(&args) {
-        Ok(p) => p,
-        Err(e) => {
-            diag!("grep: {e}");
+        Ok(Request::Run(p)) => p,
+        Ok(Request::Help) => {
+            println!("{HELP}");
+            return ExitCode::SUCCESS;
+        }
+        Ok(Request::Version) => {
+            println!("grep (SlateOS coreutils) 0.1.0");
+            return ExitCode::SUCCESS;
+        }
+        // No diagnostic above it: upstream's `usage (EXIT_TROUBLE)` for a
+        // pattern-less command line prints these two lines and nothing else.
+        Ok(Request::BadUsage) => {
+            diag!("{USAGE}");
             return ExitCode::from(2);
+        }
+        Err(e) => {
+            // `e.sentence`, then [`USAGE`] — not `e.message()`, which would
+            // join the sentence to the `Try '…'` referral directly. Upstream
+            // puts the `Usage:` summary between the two, and prints all three
+            // for `argmatch` failures as well, which is why the referral is
+            // spelled inside `USAGE` rather than taken from the error.
+            diag!("grep: {}", e.sentence);
+            if e.referral.is_some() {
+                diag!("{USAGE}");
+            }
+            return ExitCode::from(u8::try_from(e.status).unwrap_or(2));
         }
     };
     resolve_colors(&mut parsed.opts);
@@ -1704,7 +2238,7 @@ impl Run<'_> {
     ///   `grep pat sub` says `Is a directory` and exits 2.
     /// * `--exclude` and `--exclude-dir` are chosen between by what the operand
     ///   *is*, so `grep --exclude=sub -r pat sub` searches `sub` after all.
-    fn operand(&mut self, f: &str) {
+    fn operand(&mut self, f: &OsStr) {
         // Standard input is exempt from every one of these: it is not a name,
         // so no glob can select it, and GNU's tests are all guarded on the
         // descriptor not being stdin. `grep --exclude='*' pat -` reads it.
@@ -1727,7 +2261,7 @@ impl Run<'_> {
         };
         let is_dir = md.is_dir();
 
-        if self.opts.skipped_file(f.as_bytes(), is_dir) {
+        if self.opts.skipped_file(&quote::os_bytes(f), is_dir) {
             return;
         }
 
@@ -1760,7 +2294,7 @@ impl Run<'_> {
     }
 
     /// Search one named file — or standard input, spelled `-`.
-    fn search(&mut self, path: &str) {
+    fn search(&mut self, path: &OsStr) {
         // The size is `-T`'s alone, so it is not asked for without it: an
         // `fstat` per file is cheap but not free, and a `grep -r` over a large
         // tree pays it once per entry.
@@ -1808,9 +2342,9 @@ impl Run<'_> {
             }
         };
 
-        let shown = display_name(path);
+        let shown = display_name(path, self.opts);
         let src = Source {
-            filename: shown,
+            filename: &shown,
             show_filename: self.show_filename,
             width: offset_width(size, self.opts),
         };
@@ -1822,7 +2356,27 @@ impl Run<'_> {
             self.opts,
             &mut self.printed_before,
         ) {
-            Ok(matched) => {
+            Ok(Outcome {
+                matched,
+                binary_match,
+            }) => {
+                // On **stderr**, and worded exactly so. Older grep printed
+                // `Binary file F matches` on stdout; 3.x moved it and lowered
+                // the case, which matters because it is the difference between
+                // a script's pipeline seeing the sentence and not. `-s` does
+                // not silence it: it is not an error about the file, and
+                // upstream routes it around `suppressible_error`.
+                //
+                // Assembled as bytes rather than through `diag!`, because the
+                // name is `input_filename()` unquoted and a name on this system
+                // need not be UTF-8. Formatting it would mean `from_utf8_lossy`
+                // — the exact corruption this file was converted to avoid.
+                if binary_match {
+                    let mut msg = b"grep: ".to_vec();
+                    msg.extend_from_slice(&shown);
+                    msg.extend_from_slice(b": binary file matches\n");
+                    stdfd::diag_bytes(&msg);
+                }
                 if matched {
                     self.any_match = true;
                     if self.opts.quiet {
@@ -1841,15 +2395,14 @@ impl Run<'_> {
                     // is the half of `-Z` that matters: `grep -rlZ | xargs -0`
                     // is the only listing of paths that survives a path
                     // containing a newline, which this system permits.
-                    let painted = self
-                        .opts
-                        .paint(&self.opts.colors.filename, shown.as_bytes());
+                    let painted = self.opts.paint(&self.opts.colors.filename, &shown);
                     let _ = self.out.write_all(&painted);
                     let _ = self.out.write_all(if self.opts.null_name {
                         &b"\0"[..]
                     } else {
                         &b"\n"[..]
                     });
+                    let _ = line_flush(&mut self.out, self.opts);
                 }
             }
             Err(e) => {
@@ -1863,27 +2416,22 @@ impl Run<'_> {
 
     /// Search a file the walk found, rather than one the command line named.
     ///
-    /// `to_string_lossy` is a known defect and not a choice: every path in this
-    /// program is a `String`, so a path holding a byte that is not valid UTF-8
-    /// — which this system permits in a filename — is corrupted on the way in
-    /// and printed back wrong. It is one entry in the argv-UTF-8 backlog
-    /// (`known-issues.md`); fixing it means moving the whole program onto
-    /// `OsString`, which is a change to `search_stream`'s signature and to
-    /// every prefix it builds. Isolated into a named method so that the fix is
-    /// a change to one line, and so that the defect is not silently spelled
-    /// inline in the middle of the walk.
+    /// The name travels as bytes the whole way — `OsStr` in, `OsStr` out —
+    /// because this system permits any byte but `/` and NUL in a filename, and
+    /// an intermediate `String` would replace the ones that are not UTF-8 with
+    /// `U+FFFD`: `grep -rl` would then print a name that cannot be opened.
     fn search_found(&mut self, path: &Path) {
-        let shown = path.to_string_lossy().into_owned();
+        let raw = quote::os_bytes(path.as_os_str());
         // GNU's `filename_prefix_len`: the walk is rooted at a `.` this program
         // supplied, and the names it prints carry no `./`. Applied here rather
         // than at the root because it is a property of how the name is
         // *displayed*, not of where the walk goes.
-        let shown = if self.omit_dot_slash {
-            shown.strip_prefix("./").unwrap_or(&shown).to_string()
+        let shown: &[u8] = if self.omit_dot_slash {
+            raw.strip_prefix(b"./".as_slice()).unwrap_or(&raw)
         } else {
-            shown
+            &raw
         };
-        self.search(&shown);
+        self.search(&quote::os_from_bytes(shown));
     }
 
     /// Walk one directory, searching what it holds, deepest-last and in sorted
@@ -2064,7 +2612,23 @@ fn write_context_line(
     }
     out.write_all(&line_prefix(p, opts))?;
     write_body(out, body, false, pats, opts)?;
-    out.write_all(&[opts.line_sep()])
+    out.write_all(&[opts.line_sep()])?;
+    line_flush(out, opts)
+}
+
+/// `--line-buffered`'s `fflush`, at each of the three places upstream calls it.
+///
+/// Once per *printed line* — so `-o` flushes after the last of a line's matches
+/// rather than after each one — plus once after a `-c` count and once after an
+/// `-l`/`-L` name. It is the point of the option: without it a `grep --color
+/// … | while read` pipeline sees nothing until 4 KiB have accumulated, and a
+/// log follower appears to hang.
+fn line_flush(out: &mut impl Write, opts: &Options) -> io::Result<()> {
+    if opts.line_buffered {
+        out.flush()
+    } else {
+        Ok(())
+    }
 }
 
 /// One line's text, with `--color`'s escapes woven through it.
@@ -2141,15 +2705,34 @@ fn write_body(
 /// are per-run, and `width` in particular is a *measurement* of the file taken
 /// before the first line is read.
 struct Source<'a> {
-    /// The name shown in a prefix — `(standard input)` for `-`.
-    filename: &'a str,
+    /// The name shown in a prefix — `(standard input)` for `-`, or
+    /// `--label`'s value when one was given. Bytes: a path here may hold any
+    /// byte but `/` and NUL.
+    filename: &'a [u8],
     show_filename: bool,
     /// The column `-T` right-aligns numbers in. Meaningless without it.
     width: usize,
 }
 
-/// Search one stream, printing what the options ask for. Returns whether any
-/// line was selected.
+/// What one file's search came to.
+///
+/// Two answers rather than one because the second is a *diagnostic* about the
+/// file, and the name to put in it belongs to the caller: under `--label` and
+/// for `-` the name shown is not the name opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Outcome {
+    /// Whether any line was selected — the run's exit status, and what `-l` and
+    /// `-L` decide on.
+    matched: bool,
+    /// The file held a NUL, its lines were suppressed because of it, and
+    /// something matched anyway: the caller owes a `binary file matches` line on
+    /// stderr. False whenever the lines were never going to be printed —
+    /// `-c`, `-l`, `-L` and `-q` all leave this alone, because what the binary
+    /// rule suppresses is *lines*, and those four print none to begin with.
+    binary_match: bool,
+}
+
+/// Search one stream, printing what the options ask for.
 ///
 /// `printed_before` is the run's memory of whether *anything* has been printed
 /// yet, and it lives outside this function because the group separator does
@@ -2163,24 +2746,50 @@ fn search_stream(
     src: &Source<'_>,
     opts: &Options,
     printed_before: &mut bool,
-) -> io::Result<bool> {
+) -> io::Result<Outcome> {
     let filename = src.filename;
     let show_filename = src.show_filename;
+    let no = Outcome {
+        matched: false,
+        binary_match: false,
+    };
     // `-m 0` is not "no limit", and it is not "stop after the first" either:
     // GNU prints nothing at all — not even the `-c` count line, which is the
     // surprising half — and reports the file as not matching. Answering it
     // before opening a line is also the only way to get that, since the count
     // line below is printed unconditionally.
     if opts.max_count == Some(0) {
-        return Ok(false);
+        return Ok(no);
     }
 
-    let mut buf = BufReader::new(reader);
+    let mut buf = BufReader::with_capacity(BINARY_PROBE, reader);
+    let sep = opts.line_sep();
+    // Under `-z` a NUL is the line terminator, so it cannot also be the mark of
+    // a file that is not text — upstream guards the whole test with `eol &&`.
+    // `-a` skips the look entirely, which is what makes it the way to see a
+    // match in a binary file. The `fill_buf` may come back short of
+    // `BINARY_PROBE` — a pipe hands over whatever has arrived — so this reads
+    // the same bytes upstream's first buffer holds only when the underlying
+    // reads line up; see `BINARY_PROBE`.
+    let looks_binary = opts.binary_files != BinaryFiles::Text && sep != 0;
+    let binary = looks_binary && buf.fill_buf()?.contains(&0);
+    if binary && opts.binary_files == BinaryFiles::WithoutMatch {
+        // Upstream's `return 0`: not "no lines were selected after searching"
+        // but "this file is not searched at all", which is why it counts
+        // towards `-L`.
+        return Ok(no);
+    }
     // Printing nothing means the first selected line settles it, and reading
     // the rest of a file is work whose result is discarded — which for `-q` on
-    // a pipe is also the difference between returning and waiting.
-    let stop_at_first = opts.quiet || opts.files_with_matches || opts.files_without_match;
-    let sep = opts.line_sep();
+    // a pipe is also the difference between returning and waiting. A binary
+    // file joins them: upstream sets `done_on_match` alongside `out_quiet`, so
+    // it stops at the first match too — but *not* under `-c`, which must go on
+    // counting to have a count to print.
+    let quiet_answer = opts.quiet || opts.files_with_matches || opts.files_without_match;
+    let stop_at_first = quiet_answer || (binary && !opts.count_only);
+    // Upstream's restored `out_quiet_0`: the message is owed only when lines
+    // were what the caller asked for and were withheld.
+    let binary_suppressed = binary && !opts.count_only && !quiet_answer;
     // `-c`/`-l`/`-L`/`-q` answer a question about the file, so GNU ignores
     // `-A`/`-B`/`-C` under them entirely — the separator included.
     let show_context = opts.context_printed();
@@ -2256,7 +2865,10 @@ fn search_stream(
         if line_selected(body, pats, opts).map_err(limit_err)? {
             match_count = match_count.saturating_add(1);
             if stop_at_first {
-                return Ok(true);
+                return Ok(Outcome {
+                    matched: true,
+                    binary_match: binary_suppressed,
+                });
             }
             if !opts.count_only {
                 // Where this group of output begins: `out_before` lines back,
@@ -2327,6 +2939,9 @@ fn search_stream(
                     write_body(out, body, true, pats, opts)?;
                     out.write_all(&[sep])?;
                 }
+                // One flush per printed *line*, which under `-o` is after the
+                // last of that line's matches — upstream's `prline` ends here.
+                line_flush(out, opts)?;
                 last_out = Some(lineno);
                 *printed_before = true;
                 pending_after = out_after;
@@ -2352,7 +2967,7 @@ fn search_stream(
 
     if opts.count_only {
         if show_filename {
-            out.write_all(&opts.paint(&opts.colors.filename, filename.as_bytes()))?;
+            out.write_all(&opts.paint(&opts.colors.filename, filename))?;
             // As in a line prefix: `se` paints the `:`, `-Z`'s NUL stays plain.
             if opts.null_name {
                 out.write_all(&[0])?;
@@ -2367,9 +2982,16 @@ fn search_stream(
         // even though every matched line it would otherwise print ends with
         // NUL.
         out.write_all(b"\n")?;
+        line_flush(out, opts)?;
     }
 
-    Ok(match_count > 0)
+    Ok(Outcome {
+        matched: match_count > 0,
+        // Only reachable with `binary_suppressed` false: a binary file that is
+        // not counting stops at its first match above. Written out rather than
+        // hard-coded so that the invariant is not silently load-bearing.
+        binary_match: binary_suppressed && match_count > 0,
+    })
 }
 
 #[cfg(test)]
@@ -2377,8 +2999,30 @@ fn search_stream(
 mod tests {
     use super::*;
 
-    fn s(items: &[&str]) -> Vec<String> {
-        items.iter().map(|x| (*x).to_string()).collect()
+    fn s(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
+    }
+
+    /// [`parse_args`] for the common case: a command line that is a search.
+    ///
+    /// The `panic` is the assertion — a test that spelled `--help` by accident
+    /// should say so rather than quietly examine a default [`Options`].
+    fn parse_ok(argv: &[&str]) -> GrepArgs {
+        match parse_args(&s(argv)) {
+            Ok(Request::Run(p)) => *p,
+            Ok(_) => panic!("expected a search, got a help/version/usage request"),
+            Err(e) => panic!("expected a search, got: {}", e.sentence),
+        }
+    }
+
+    /// The sentence [`parse_args`] refuses `argv` with — without the `grep: `
+    /// prefix `run_main` adds, and without the [`USAGE`] block printed under
+    /// it, so a test asserts on the wording alone.
+    fn parse_err(argv: &[&str]) -> String {
+        match parse_args(&s(argv)) {
+            Ok(_) => panic!("expected a refusal, got a request"),
+            Err(e) => e.sentence,
+        }
     }
 
     /// Compile one pattern under `opts` — most cases have exactly one.
@@ -2403,15 +3047,45 @@ mod tests {
 
     // ---------------- parse_args ----------------
 
+    /// A bare `grep` is not a *diagnostic* upstream — it is `usage
+    /// (EXIT_TROUBLE)`, which prints the two [`USAGE`] lines and nothing above
+    /// them. Asserting on the variant rather than on a sentence is the point:
+    /// this used to report `missing PATTERN`, a message GNU never prints.
     #[test]
-    fn parse_empty_errors() {
-        let err = parse_args(&s(&[])).unwrap_err();
-        assert!(err.contains("missing PATTERN"));
+    fn parse_empty_is_a_usage_error_with_no_sentence() {
+        assert_eq!(parse_args(&s(&[])).unwrap(), Request::BadUsage);
+    }
+
+    #[test]
+    fn parse_help_and_version_are_requests_not_searches() {
+        assert_eq!(parse_args(&s(&["--help"])).unwrap(), Request::Help);
+        assert_eq!(parse_args(&s(&["-V"])).unwrap(), Request::Version);
+        assert_eq!(parse_args(&s(&["--version"])).unwrap(), Request::Version);
+        // Upstream tests `show_version` first, so this is the version.
+        assert_eq!(
+            parse_args(&s(&["--help", "--version"])).unwrap(),
+            Request::Version
+        );
+    }
+
+    /// The first line of [`HELP`] and of [`USAGE`] is GNU's, word for word, so
+    /// that a caller matching on it still matches. Asserted because the rest of
+    /// both blocks is long enough that an edit could drift the first line
+    /// without anyone noticing.
+    #[test]
+    fn usage_and_help_open_with_gnus_own_line() {
+        let gnu = "Usage: grep [OPTION]... PATTERNS [FILE]...";
+        assert_eq!(USAGE.lines().next(), Some(gnu));
+        assert_eq!(HELP.lines().next(), Some(gnu));
+        assert_eq!(
+            USAGE.lines().nth(1),
+            Some("Try 'grep --help' for more information.")
+        );
     }
 
     #[test]
     fn parse_pattern_only_reads_stdin() {
-        let a = parse_args(&s(&["foo"])).unwrap();
+        let a = parse_ok(&["foo"]);
         assert_eq!(a.patterns, vec![b"foo".to_vec()]);
         assert_eq!(a.files, vec!["-"]);
         assert_eq!(a.opts, Options::default());
@@ -2419,14 +3093,14 @@ mod tests {
 
     #[test]
     fn parse_pattern_and_files() {
-        let a = parse_args(&s(&["foo", "a.txt", "b.txt"])).unwrap();
+        let a = parse_ok(&["foo", "a.txt", "b.txt"]);
         assert_eq!(a.patterns, vec![b"foo".to_vec()]);
         assert_eq!(a.files, vec!["a.txt", "b.txt"]);
     }
 
     #[test]
     fn parse_clustered_flags() {
-        let a = parse_args(&s(&["-ivcnr", "foo"])).unwrap();
+        let a = parse_ok(&["-ivcnr", "foo"]);
         assert!(a.opts.ignore_case);
         assert!(a.opts.invert);
         assert!(a.opts.count_only);
@@ -2440,33 +3114,34 @@ mod tests {
         // implemented: an "unknown option" test has to name a letter grep does
         // not have, and every such test is one feature away from asserting the
         // wrong thing.
-        let err = parse_args(&s(&["-Q", "foo"])).unwrap_err();
-        assert!(err.contains("unknown option"), "{err}");
-        assert!(err.contains('Q'), "{err}");
-        let err = parse_args(&s(&["--zzz", "foo"])).unwrap_err();
-        assert!(err.contains("unknown option"), "{err}");
+        //
+        // The wording is glibc's now rather than this program's own: `getopt`
+        // writes `invalid option -- 'Q'` for a letter and `unrecognized option
+        // '--zzz'` for a name, and they are different sentences upstream too.
+        assert_eq!(parse_err(&["-Q", "foo"]), "invalid option -- 'Q'");
+        assert_eq!(parse_err(&["--zzz", "foo"]), "unrecognized option '--zzz'");
     }
 
     #[test]
     fn parse_the_two_null_flags_are_different_flags() {
-        let a = parse_args(&s(&["-Z", "foo"])).unwrap();
+        let a = parse_ok(&["-Z", "foo"]);
         assert!(a.opts.null_name && !a.opts.null_data);
-        let a = parse_args(&s(&["-z", "foo"])).unwrap();
+        let a = parse_ok(&["-z", "foo"]);
         assert!(a.opts.null_data && !a.opts.null_name);
-        let a = parse_args(&s(&["--null", "--null-data", "foo"])).unwrap();
+        let a = parse_ok(&["--null", "--null-data", "foo"]);
         assert!(a.opts.null_name && a.opts.null_data);
     }
 
     #[test]
     fn parse_bare_dash_is_a_filename() {
-        let a = parse_args(&s(&["foo", "-"])).unwrap();
+        let a = parse_ok(&["foo", "-"]);
         assert_eq!(a.files, vec!["-"]);
     }
 
     #[test]
     fn parse_flag_after_pattern_still_a_flag() {
         // Order-insensitive, as GNU is by default: options may follow operands.
-        let a = parse_args(&s(&["foo", "-v", "x.txt"])).unwrap();
+        let a = parse_ok(&["foo", "-v", "x.txt"]);
         assert!(a.opts.invert);
         assert_eq!(a.patterns, vec![b"foo".to_vec()]);
         assert_eq!(a.files, vec!["x.txt"]);
@@ -2476,15 +3151,9 @@ mod tests {
     fn parse_the_options_that_used_to_be_unknown() {
         // Every one of these was `unknown option` until this rewrite, and each
         // is in the failure lane C reported: `grep -E`, `grep -q`, `grep -c --`.
-        assert_eq!(
-            parse_args(&s(&["-E", "a+"])).unwrap().opts.syntax,
-            Syntax::Extended
-        );
-        assert!(parse_args(&s(&["-q", "a"])).unwrap().opts.quiet);
-        assert_eq!(
-            parse_args(&s(&["-F", "a"])).unwrap().opts.syntax,
-            Syntax::Fixed
-        );
+        assert_eq!(parse_ok(&["-E", "a+"]).opts.syntax, Syntax::Extended);
+        assert!(parse_ok(&["-q", "a"]).opts.quiet);
+        assert_eq!(parse_ok(&["-F", "a"]).opts.syntax, Syntax::Fixed);
         for flag in ["-w", "-x", "-o", "-l", "-L", "-H", "-h", "-s", "-a"] {
             assert!(parse_args(&s(&[flag, "a"])).is_ok(), "{flag} rejected");
         }
@@ -2492,7 +3161,7 @@ mod tests {
 
     #[test]
     fn parse_double_dash_ends_the_options() {
-        let a = parse_args(&s(&["-c", "--", "-v", "x.txt"])).unwrap();
+        let a = parse_ok(&["-c", "--", "-v", "x.txt"]);
         assert!(a.opts.count_only);
         assert!(!a.opts.invert, "-v after -- is the pattern, not an option");
         assert_eq!(a.patterns, vec![b"-v".to_vec()]);
@@ -2501,7 +3170,7 @@ mod tests {
 
     #[test]
     fn parse_e_makes_every_operand_a_file() {
-        let a = parse_args(&s(&["-e", "-v", "x.txt"])).unwrap();
+        let a = parse_ok(&["-e", "-v", "x.txt"]);
         assert!(!a.opts.invert);
         assert_eq!(a.patterns, vec![b"-v".to_vec()]);
         assert_eq!(a.files, vec!["x.txt"]);
@@ -2509,80 +3178,55 @@ mod tests {
 
     #[test]
     fn parse_repeated_e_collects_patterns() {
-        let a = parse_args(&s(&["-e", "foo", "-e", "bar"])).unwrap();
+        let a = parse_ok(&["-e", "foo", "-e", "bar"]);
         assert_eq!(a.patterns, vec![b"foo".to_vec(), b"bar".to_vec()]);
     }
 
     #[test]
     fn parse_an_option_argument_may_be_glued_to_its_cluster() {
-        assert_eq!(
-            parse_args(&s(&["-m5", "a"])).unwrap().opts.max_count,
-            Some(5)
-        );
-        assert_eq!(
-            parse_args(&s(&["-m", "5", "a"])).unwrap().opts.max_count,
-            Some(5)
-        );
-        assert_eq!(
-            parse_args(&s(&["-im5", "a"])).unwrap().opts.max_count,
-            Some(5)
-        );
-        assert_eq!(
-            parse_args(&s(&["-efoo"])).unwrap().patterns,
-            vec![b"foo".to_vec()]
-        );
+        assert_eq!(parse_ok(&["-m5", "a"]).opts.max_count, Some(5));
+        assert_eq!(parse_ok(&["-m", "5", "a"]).opts.max_count, Some(5));
+        assert_eq!(parse_ok(&["-im5", "a"]).opts.max_count, Some(5));
+        assert_eq!(parse_ok(&["-efoo"]).patterns, vec![b"foo".to_vec()]);
     }
 
     #[test]
     fn parse_a_missing_option_argument_is_an_error() {
-        assert!(
-            parse_args(&s(&["-e"]))
-                .unwrap_err()
-                .contains("requires an argument")
+        assert_eq!(parse_err(&["-e"]), "option requires an argument -- 'e'");
+        assert_eq!(parse_err(&["-m"]), "option requires an argument -- 'm'");
+        // The long form names the option first rather than last, which is
+        // glibc's shape and not a choice of this program's.
+        assert_eq!(
+            parse_err(&["--regexp"]),
+            "option '--regexp' requires an argument"
         );
-        assert!(
-            parse_args(&s(&["-m"]))
-                .unwrap_err()
-                .contains("requires an argument")
-        );
-        assert!(
-            parse_args(&s(&["-m", "x", "a"]))
-                .unwrap_err()
-                .contains("invalid max count")
-        );
+        assert_eq!(parse_err(&["-m", "x", "a"]), "invalid max count");
     }
 
     #[test]
     fn parse_long_options() {
-        let a = parse_args(&s(&["--ignore-case", "--max-count=2", "--regexp=foo"])).unwrap();
+        let a = parse_ok(&["--ignore-case", "--max-count=2", "--regexp=foo"]);
         assert!(a.opts.ignore_case);
         assert_eq!(a.opts.max_count, Some(2));
         assert_eq!(a.patterns, vec![b"foo".to_vec()]);
-        assert!(
-            parse_args(&s(&["--nope", "a"]))
-                .unwrap_err()
-                .contains("unknown option")
-        );
+        assert_eq!(parse_err(&["--nope", "a"]), "unrecognized option '--nope'");
     }
 
     #[test]
     fn parse_recursive_with_no_operand_walks_here() {
-        let a = parse_args(&s(&["-r", "foo"])).unwrap();
+        let a = parse_ok(&["-r", "foo"]);
         assert_eq!(a.files, vec!["."]);
         // …and prints the names it finds *without* the `./` that walking a `.`
         // would otherwise put on them, which a caller who wrote the `.` gets.
         assert!(a.omit_dot_slash);
-        assert!(!parse_args(&s(&["-r", "foo", "."])).unwrap().omit_dot_slash);
+        assert!(!parse_ok(&["-r", "foo", "."]).omit_dot_slash);
         // Not recursing means no walk to name anything, so the input is stdin
         // and the question never arises.
-        let plain = parse_args(&s(&["foo"])).unwrap();
+        let plain = parse_ok(&["foo"]);
         assert_eq!(plain.files, vec!["-"]);
         assert!(!plain.omit_dot_slash);
         // `-d recurse` reaches the same branch, because it is the same setting.
-        assert_eq!(
-            parse_args(&s(&["-d", "recurse", "foo"])).unwrap().files,
-            vec!["."]
-        );
+        assert_eq!(parse_ok(&["-d", "recurse", "foo"]).files, vec!["."]);
     }
 
     /// `-r`, `-R` and `-d` all write one setting, so the **last** of them wins
@@ -2591,7 +3235,7 @@ mod tests {
     /// exists.
     #[test]
     fn recursion_and_d_are_one_setting_and_the_last_wins() {
-        let d = |a: &[&str]| parse_args(&s(a)).unwrap().opts.directories;
+        let d = |a: &[&str]| parse_ok(a).opts.directories;
         assert_eq!(d(&["foo"]), Directories::Read);
         assert_eq!(d(&["-r", "foo"]), Directories::Recurse);
         assert_eq!(d(&["-d", "skip", "foo"]), Directories::Skip);
@@ -2603,25 +3247,35 @@ mod tests {
         assert_eq!(d(&["--directories=skip", "foo"]), Directories::Skip);
         assert_eq!(d(&["--directories", "skip", "foo"]), Directories::Skip);
         // `-R` sets the same value *and* the dereference flag.
-        let upper = parse_args(&s(&["-R", "foo"])).unwrap().opts;
+        let upper = parse_ok(&["-R", "foo"]).opts;
         assert_eq!(upper.directories, Directories::Recurse);
         assert!(upper.deref_links);
         // …and `-d` does not clear it, because it is a different field. GNU is
         // the same: `-R -d recurse` still follows links met during the walk.
-        let both = parse_args(&s(&["-R", "-d", "recurse", "foo"]))
-            .unwrap()
-            .opts;
+        let both = parse_ok(&["-R", "-d", "recurse", "foo"]).opts;
         assert!(both.deref_links);
 
-        assert!(parse_args(&s(&["-d", "bogus", "foo"])).is_err());
-        assert!(parse_args(&s(&["-d"])).is_err());
+        // A prefix is enough, as it is for a long option's *name*: `argmatch`
+        // is a prefix match, and upstream's `grep -d rec` recurses.
+        assert_eq!(d(&["-d", "rec", "foo"]), Directories::Recurse);
+        // gnulib's `argmatch` lists the valid words and exits **1** rather than
+        // grep's usual 2. The curly quotes are gnulib's `quote`.
+        let bad = parse_args(&s(&["-d", "bogus", "foo"])).unwrap_err();
+        assert_eq!(
+            bad.sentence,
+            "invalid argument \u{2018}bogus\u{2019} for \u{2018}--directories\u{2019}\n\
+             Valid arguments are:\n  - \u{2018}read\u{2019}\n  - \u{2018}recurse\u{2019}\n  - \u{2018}skip\u{2019}"
+        );
+        assert_eq!(bad.status, 1);
+        assert!(bad.referral.is_some());
+        assert_eq!(parse_err(&["-d"]), "option requires an argument -- 'd'");
     }
 
     /// `-D`'s default is neither "read" nor "skip" but a third thing, and the
     /// third thing is the one that keeps `grep -r` from blocking on a FIFO.
     #[test]
     fn devices_default_reads_named_ones_and_skips_found_ones() {
-        let dev = |a: &[&str]| parse_args(&s(a)).unwrap().opts;
+        let dev = |a: &[&str]| parse_ok(a).opts;
 
         let default = dev(&["foo"]);
         assert_eq!(default.devices, Devices::CommandLine);
@@ -2640,10 +3294,10 @@ mod tests {
 
         // GNU checks `-D` by hand rather than through argmatch, so this is its
         // exact wording — and it does not name the offending value.
-        assert_eq!(
-            parse_args(&s(&["-D", "bogus", "foo"])).unwrap_err(),
-            "unknown devices method"
-        );
+        assert_eq!(parse_err(&["-D", "bogus", "foo"]), "unknown devices method");
+        // …and *not* through `argmatch`, so a prefix is refused where `-d rec`
+        // is accepted. Upstream compares with `STREQ`.
+        assert_eq!(parse_err(&["-D", "rea", "foo"]), "unknown devices method");
     }
 
     /// The three steps of gnulib's `excluded_file_name`, each isolated.
@@ -2652,7 +3306,7 @@ mod tests {
         let sel = |opts: &[&str]| {
             let mut a: Vec<&str> = opts.to_vec();
             a.push("foo");
-            parse_args(&s(&a)).unwrap().opts.file_selectors
+            parse_ok(&a).opts.file_selectors
         };
 
         // Nothing at all: everything is searched.
@@ -2705,9 +3359,7 @@ mod tests {
     /// what the name *is*, not two spellings of one list.
     #[test]
     fn directories_have_their_own_selector_list() {
-        let opts = parse_args(&s(&["--exclude=sub", "--exclude-dir=deep", "foo"]))
-            .unwrap()
-            .opts;
+        let opts = parse_ok(&["--exclude=sub", "--exclude-dir=deep", "foo"]).opts;
         assert!(opts.skipped_file(b"sub", false));
         assert!(!opts.skipped_file(b"sub", true));
         assert!(opts.skipped_file(b"deep", true));
@@ -2715,9 +3367,7 @@ mod tests {
 
         // A trailing slash on the *pattern* is stripped; without that it could
         // never match, since no name it is compared against ends in one.
-        let slash = parse_args(&s(&["--exclude-dir=deep//", "foo"]))
-            .unwrap()
-            .opts;
+        let slash = parse_ok(&["--exclude-dir=deep//", "foo"]).opts;
         assert!(slash.skipped_file(b"deep", true));
     }
 
@@ -2780,13 +3430,12 @@ mod tests {
         fs::write(&file, b"*.log\n").expect("write exclude list");
         let name = file.to_string_lossy().into_owned();
 
-        let opts = parse_args(&s(&[
+        let opts = parse_ok(&[
             "--include=*.txt",
             "--exclude=s1*",
             &format!("--exclude-from={name}"),
             "foo",
-        ]))
-        .unwrap()
+        ])
         .opts;
         assert_eq!(opts.file_selectors.segments.len(), 2);
         assert!(opts.file_selectors.excludes(b"a.log"));
@@ -2801,7 +3450,7 @@ mod tests {
             "foo",
         ]))
         .unwrap_err();
-        assert!(err.contains("No such file"), "{err}");
+        assert!(err.sentence.contains("No such file"), "{}", err.sentence);
 
         let _ = fs::remove_file(&file);
         let _ = fs::remove_dir(&dir);
@@ -2814,24 +3463,22 @@ mod tests {
     /// ancestors.
     #[test]
     fn parse_capital_r_is_the_dereferencing_one() {
-        let lower = parse_args(&s(&["-r", "foo"])).unwrap().opts;
+        let lower = parse_ok(&["-r", "foo"]).opts;
         assert!(lower.recursive());
         assert!(!lower.deref_links);
 
-        let upper = parse_args(&s(&["-R", "foo"])).unwrap().opts;
+        let upper = parse_ok(&["-R", "foo"]).opts;
         assert!(upper.recursive());
         assert!(upper.deref_links);
 
         // The long spellings say the same thing at more length, and
         // `--dereference-recursive` implies `--recursive` rather than needing
         // it alongside.
-        let long = parse_args(&s(&["--recursive", "foo"])).unwrap().opts;
+        let long = parse_ok(&["--recursive", "foo"]).opts;
         assert!(long.recursive());
         assert!(!long.deref_links);
 
-        let long_deref = parse_args(&s(&["--dereference-recursive", "foo"]))
-            .unwrap()
-            .opts;
+        let long_deref = parse_ok(&["--dereference-recursive", "foo"]).opts;
         assert!(long_deref.recursive());
         assert!(long_deref.deref_links);
     }
@@ -2846,45 +3493,47 @@ mod tests {
             s(&["-A", "3", "-C", "1", "foo"]),
             s(&["-C", "1", "-A", "3", "foo"]),
         ] {
-            let o = parse_args(&argv).unwrap().opts;
-            assert_eq!(o.out_after(), 3);
-            assert_eq!(o.out_before(), 1);
+            let Ok(Request::Run(p)) = parse_args(&argv) else {
+                panic!("expected a search")
+            };
+            assert_eq!(p.opts.out_after(), 3);
+            assert_eq!(p.opts.out_before(), 1);
         }
 
         // -C alone feeds both sides.
-        let c = parse_args(&s(&["-C", "2", "foo"])).unwrap().opts;
+        let c = parse_ok(&["-C", "2", "foo"]).opts;
         assert_eq!((c.out_before(), c.out_after()), (2, 2));
 
         // …and -A alone leaves the other side at zero without claiming that
         // no context was asked for.
-        let a = parse_args(&s(&["-A", "2", "foo"])).unwrap().opts;
+        let a = parse_ok(&["-A", "2", "foo"]).opts;
         assert_eq!((a.out_before(), a.out_after()), (0, 2));
         assert!(a.context_requested());
 
         // `-A 0` asks for context and gets none, which is not the same state
         // as never having asked: only the first puts `--` between groups.
-        let zero = parse_args(&s(&["-A", "0", "foo"])).unwrap().opts;
+        let zero = parse_ok(&["-A", "0", "foo"]).opts;
         assert!(zero.context_requested());
         assert_eq!(zero.out_after(), 0);
-        assert!(!parse_args(&s(&["foo"])).unwrap().opts.context_requested());
+        assert!(!parse_ok(&["foo"]).opts.context_requested());
     }
 
     #[test]
     fn the_digit_shorthand_accumulates_and_stops_at_the_first_non_digit() {
-        let one = parse_args(&s(&["-1", "foo"])).unwrap().opts;
+        let one = parse_ok(&["-1", "foo"]).opts;
         assert_eq!(one.default_context, Some(1));
 
         // Twelve, not two: the digits of a cluster build one number.
-        let twelve = parse_args(&s(&["-12", "foo"])).unwrap().opts;
+        let twelve = parse_ok(&["-12", "foo"]).opts;
         assert_eq!(twelve.default_context, Some(12));
 
         // A non-digit ends the number and is read as its own option, in
         // either order.
-        let with_n = parse_args(&s(&["-1n", "foo"])).unwrap().opts;
+        let with_n = parse_ok(&["-1n", "foo"]).opts;
         assert_eq!(with_n.default_context, Some(1));
         assert!(with_n.line_numbers);
 
-        let after_n = parse_args(&s(&["-n1", "foo"])).unwrap().opts;
+        let after_n = parse_ok(&["-n1", "foo"]).opts;
         assert_eq!(after_n.default_context, Some(1));
         assert!(after_n.line_numbers);
     }
@@ -2894,17 +3543,25 @@ mod tests {
         // Not the family's `invalid number`: a script matching on the message
         // is matching on this one.
         for argv in [
-            s(&["-A", "x", "foo"]),
-            s(&["-B", "x", "foo"]),
-            s(&["-C", "x", "foo"]),
-            s(&["--context=x", "foo"]),
+            &["-A", "x", "foo"][..],
+            &["-B", "x", "foo"],
+            &["-C", "x", "foo"],
+            &["--context=x", "foo"],
             // `-A -1` is not the digit shorthand — `-A` demands an argument,
             // so `-1` is consumed as one and then refused.
-            s(&["-A", "-1", "foo"]),
+            &["-A", "-1", "foo"],
         ] {
-            let err = parse_args(&argv).unwrap_err();
+            let err = parse_err(argv);
             assert!(err.ends_with(": invalid context length argument"), "{err}");
         }
+        // …but a value too *large* is accepted and clamped, because upstream's
+        // `context_length_arg` treats `xstrtoimax`'s overflow as success.
+        assert!(
+            parse_ok(&["-A", "99999999999999999999999", "foo"])
+                .opts
+                .out_after()
+                > 0
+        );
     }
 
     #[test]
@@ -2912,40 +3569,36 @@ mod tests {
         // getopt_long accepts both spellings, so `--regexp foo` and
         // `--regexp=foo` are one command written two ways. Taking only the
         // `=` form rejected the other as a missing argument.
-        let spaced = parse_args(&s(&["--regexp", "foo", "words"])).unwrap();
-        let equals = parse_args(&s(&["--regexp=foo", "words"])).unwrap();
+        let spaced = parse_ok(&["--regexp", "foo", "words"]);
+        let equals = parse_ok(&["--regexp=foo", "words"]);
         assert_eq!(spaced.patterns, equals.patterns);
         assert_eq!(spaced.files, equals.files);
 
-        let ctx = parse_args(&s(&["--context", "1", "foo"])).unwrap().opts;
+        let ctx = parse_ok(&["--context", "1", "foo"]).opts;
         assert_eq!(ctx.default_context, Some(1));
 
         // The value is consumed, so it is not left behind as an operand.
-        let mc = parse_args(&s(&["--max-count", "2", "foo", "words"])).unwrap();
+        let mc = parse_ok(&["--max-count", "2", "foo", "words"]);
         assert_eq!(mc.opts.max_count, Some(2));
         assert_eq!(mc.files, vec!["words"]);
 
-        let missing = parse_args(&s(&["--context"])).unwrap_err();
+        let missing = parse_err(&["--context"]);
         assert_eq!(missing, "option '--context' requires an argument");
     }
 
     #[test]
     fn an_empty_group_separator_is_a_blank_line_and_not_an_absent_one() {
         // The distinction an `Option<Vec<u8>>` could not carry.
-        let dflt = parse_args(&s(&["foo"])).unwrap().opts;
+        let dflt = parse_ok(&["foo"]).opts;
         assert_eq!(dflt.group_sep.bytes(), Some(&b"--"[..]));
 
-        let empty = parse_args(&s(&["--group-separator=", "foo"])).unwrap().opts;
+        let empty = parse_ok(&["--group-separator=", "foo"]).opts;
         assert_eq!(empty.group_sep.bytes(), Some(&b""[..]));
 
-        let custom = parse_args(&s(&["--group-separator=XX", "foo"]))
-            .unwrap()
-            .opts;
+        let custom = parse_ok(&["--group-separator=XX", "foo"]).opts;
         assert_eq!(custom.group_sep.bytes(), Some(&b"XX"[..]));
 
-        let none = parse_args(&s(&["--no-group-separator", "foo"]))
-            .unwrap()
-            .opts;
+        let none = parse_ok(&["--no-group-separator", "foo"]).opts;
         assert_eq!(none.group_sep.bytes(), None);
     }
 
@@ -3156,11 +3809,25 @@ mod tests {
     }
 
     #[test]
-    fn a_nul_in_the_input_is_data_like_any_other_byte() {
+    fn a_nul_makes_the_input_binary_and_only_dash_a_carries_it_through() {
+        // A NUL is data the searcher handles like any other byte -- it neither
+        // ends a line nor breaks a pattern -- but by default GNU withholds the
+        // *output* of a file that holds one, so the byte's presence is visible
+        // only under `-a`. Both halves are asserted here because passing one
+        // alone would be consistent with the searcher mangling the NUL.
         let o = Options::default();
         let p = pats("x", &o);
-        let (out, _) = run_search(b"a\0x\n", &p, &o, "f", false);
-        assert_eq!(out, b"a\0x\n");
+        let (out, matched) = run_search(b"a\0x\n", &p, &o, "f", false);
+        assert!(matched, "the file matched; what is suppressed is the line");
+        assert_eq!(out, b"", "and under the default it is suppressed");
+
+        let a = Options {
+            binary_files: BinaryFiles::Text,
+            ..Options::default()
+        };
+        let (out, matched) = run_search(b"a\0x\n", &pats("x", &a), &a, "f", false);
+        assert!(matched);
+        assert_eq!(out, b"a\0x\n", "the NUL travels through unaltered");
     }
 
     #[test]
@@ -3187,7 +3854,7 @@ mod tests {
     /// The prefix an assertion about names and line numbers cares about: no
     /// byte offset and no `-T` width, so neither of those two fields can
     /// colour the result of a test that is not about them.
-    fn px(filename: &str, line_idx: usize, show_filename: bool, field: u8) -> Prefix<'_> {
+    fn px(filename: &[u8], line_idx: usize, show_filename: bool, field: u8) -> Prefix<'_> {
         Prefix {
             filename,
             show_filename,
@@ -3200,14 +3867,13 @@ mod tests {
 
     #[test]
     fn standard_input_has_a_name_of_its_own() {
-        assert_eq!(display_name("-"), "(standard input)");
-        assert_eq!(display_name("a.txt"), "a.txt");
+        let o = Options::default();
+        assert_eq!(&*display_name(OsStr::new("-"), &o), b"(standard input)");
+        assert_eq!(&*display_name(OsStr::new("a.txt"), &o), b"a.txt");
         // `grep -H pattern -` printing `-:line` reads as part of the line.
+        let shown = display_name(OsStr::new("-"), &o);
         assert_eq!(
-            line_prefix(
-                &px(display_name("-"), 0, true, b':'),
-                &pfx_opts(false, false)
-            ),
+            line_prefix(&px(&shown, 0, true, b':'), &pfx_opts(false, false)),
             b"(standard input):"
         );
     }
@@ -3231,7 +3897,7 @@ mod tests {
     #[test]
     fn prefix_none() {
         assert_eq!(
-            line_prefix(&px("f", 0, false, b':'), &pfx_opts(false, false)),
+            line_prefix(&px(b"f", 0, false, b':'), &pfx_opts(false, false)),
             b""
         );
     }
@@ -3239,7 +3905,7 @@ mod tests {
     #[test]
     fn prefix_filename_only() {
         assert_eq!(
-            line_prefix(&px("a.txt", 0, true, b':'), &pfx_opts(false, false)),
+            line_prefix(&px(b"a.txt", 0, true, b':'), &pfx_opts(false, false)),
             b"a.txt:"
         );
     }
@@ -3247,11 +3913,11 @@ mod tests {
     #[test]
     fn prefix_line_number_only() {
         assert_eq!(
-            line_prefix(&px("ignored", 0, false, b':'), &pfx_opts(true, false)),
+            line_prefix(&px(b"ignored", 0, false, b':'), &pfx_opts(true, false)),
             b"1:"
         );
         assert_eq!(
-            line_prefix(&px("ignored", 41, false, b':'), &pfx_opts(true, false)),
+            line_prefix(&px(b"ignored", 41, false, b':'), &pfx_opts(true, false)),
             b"42:"
         );
     }
@@ -3259,7 +3925,7 @@ mod tests {
     #[test]
     fn prefix_filename_and_line_number() {
         assert_eq!(
-            line_prefix(&px("a.txt", 9, true, b':'), &pfx_opts(true, false)),
+            line_prefix(&px(b"a.txt", 9, true, b':'), &pfx_opts(true, false)),
             b"a.txt:10:"
         );
     }
@@ -3270,11 +3936,11 @@ mod tests {
         // line number too would make `-nZ` output unparseable, and it is not
         // what GNU does.
         assert_eq!(
-            line_prefix(&px("a.txt", 0, true, b':'), &pfx_opts(false, true)),
+            line_prefix(&px(b"a.txt", 0, true, b':'), &pfx_opts(false, true)),
             b"a.txt\0"
         );
         assert_eq!(
-            line_prefix(&px("a.txt", 9, true, b':'), &pfx_opts(true, true)),
+            line_prefix(&px(b"a.txt", 9, true, b':'), &pfx_opts(true, true)),
             b"a.txt\x0010:"
         );
     }
@@ -3328,7 +3994,7 @@ mod tests {
             ..Options::default()
         };
         let p = |width, show_filename| Prefix {
-            filename: "a.txt",
+            filename: b"a.txt",
             show_filename,
             line_idx: 0,
             byte_pos: 0,
@@ -3417,7 +4083,7 @@ mod tests {
     /// so zero here can never affect an assertion that does not set it.
     fn src(filename: &str, show_filename: bool) -> Source<'_> {
         Source {
-            filename,
+            filename: filename.as_bytes(),
             show_filename,
             width: 0,
         }
@@ -3430,9 +4096,23 @@ mod tests {
         filename: &str,
         show_filename: bool,
     ) -> (Vec<u8>, bool) {
+        let (out, outcome) = run_search_outcome(input, pats, opts, filename, show_filename);
+        (out, outcome.matched)
+    }
+
+    /// [`run_search`] without dropping the second half of the answer, for the
+    /// assertions that are about the `binary file matches` diagnostic — which
+    /// `search_stream` reports rather than prints, so that a test can see it.
+    fn run_search_outcome(
+        input: &[u8],
+        pats: &[Pat],
+        opts: &Options,
+        filename: &str,
+        show_filename: bool,
+    ) -> (Vec<u8>, Outcome) {
         let mut out: Vec<u8> = Vec::new();
         let mut printed_before = false;
-        let matched = search_stream(
+        let outcome = search_stream(
             &mut out,
             input,
             pats,
@@ -3441,7 +4121,7 @@ mod tests {
             &mut printed_before,
         )
         .unwrap();
-        (out, matched)
+        (out, outcome)
     }
 
     fn run(
@@ -3461,6 +4141,128 @@ mod tests {
         let (out, matched) = run(b"foo\nbar\nfoobar\n", "foo", Options::default(), "f", false);
         assert!(matched);
         assert_eq!(out, "foo\nfoobar\n");
+    }
+
+    // ---------------- binary content ----------------
+    //
+    // A NUL after the first match and another match after the NUL, so that
+    // "suppressed from the first line" and "suppressed from the NUL onwards"
+    // give different answers. Every expectation below was measured against GNU
+    // grep 3.11 under `LC_ALL=C.UTF-8`.
+    const BIN: &[u8] = b"one\nary two\0\nthree ary\n";
+
+    fn bin_opts(binary_files: BinaryFiles) -> Options {
+        Options {
+            binary_files,
+            ..Options::default()
+        }
+    }
+
+    #[test]
+    fn a_nul_anywhere_in_the_first_buffer_suppresses_the_whole_files_output() {
+        // Not just the lines from the NUL onwards: GNU decides per *buffer*,
+        // and one buffer holds this whole file, so the match on line 2 -- which
+        // precedes the NUL that is at the end of that same line -- is withheld
+        // too. Getting this wrong is the difference between printing nothing
+        // and printing `ary two`.
+        let o = bin_opts(BinaryFiles::Binary);
+        let (out, outcome) = run_search_outcome(BIN, &pats("ary", &o), &o, "f", false);
+        assert_eq!(out, b"");
+        assert!(outcome.matched, "the status still says the file matched");
+        assert!(outcome.binary_match, "and the caller owes the diagnostic");
+    }
+
+    #[test]
+    fn the_binary_diagnostic_is_owed_only_when_lines_were_what_was_asked_for() {
+        // `-c`, `-l`, `-L` and `-q` print no lines to begin with, so there is
+        // nothing for the binary rule to withhold and GNU says nothing. `-c` is
+        // the one that proves the file is still *searched* to the end: the
+        // count is 2, both matches, the one after the NUL included.
+        let count = Options {
+            count_only: true,
+            ..bin_opts(BinaryFiles::Binary)
+        };
+        let (out, outcome) = run_search_outcome(BIN, &pats("ary", &count), &count, "f", false);
+        assert_eq!(out, b"2\n");
+        assert!(!outcome.binary_match);
+
+        for o in [
+            Options {
+                quiet: true,
+                ..bin_opts(BinaryFiles::Binary)
+            },
+            Options {
+                files_with_matches: true,
+                ..bin_opts(BinaryFiles::Binary)
+            },
+            Options {
+                files_without_match: true,
+                ..bin_opts(BinaryFiles::Binary)
+            },
+        ] {
+            let (_, outcome) = run_search_outcome(BIN, &pats("ary", &o), &o, "f", false);
+            assert!(!outcome.binary_match);
+        }
+    }
+
+    #[test]
+    fn a_binary_file_that_does_not_match_says_nothing_at_all() {
+        let o = bin_opts(BinaryFiles::Binary);
+        let (out, outcome) = run_search_outcome(BIN, &pats("zzz", &o), &o, "f", false);
+        assert_eq!(out, b"");
+        assert!(!outcome.matched);
+        assert!(!outcome.binary_match, "no match, so nothing to report");
+    }
+
+    #[test]
+    fn dash_a_is_the_way_to_see_a_match_in_a_binary_file() {
+        // `-a` does not merely un-suppress the output: it skips the detection,
+        // so the NUL travels through as the ordinary byte it is.
+        let o = bin_opts(BinaryFiles::Text);
+        let (out, outcome) = run_search_outcome(BIN, &pats("ary", &o), &o, "f", false);
+        assert_eq!(out, b"ary two\0\nthree ary\n");
+        assert!(outcome.matched);
+        assert!(!outcome.binary_match);
+    }
+
+    #[test]
+    fn without_match_makes_the_file_not_match_rather_than_not_print() {
+        // The distinction `-l`/`-L` can see and an exit status cannot: `-I`
+        // does not search the file at all, so it is a *non*-matching file and
+        // `-L` would name it. Suppressing the output alone would leave it
+        // matching.
+        let o = bin_opts(BinaryFiles::WithoutMatch);
+        let (out, outcome) = run_search_outcome(BIN, &pats("ary", &o), &o, "f", false);
+        assert_eq!(out, b"");
+        assert!(!outcome.matched);
+        assert!(!outcome.binary_match, "and it is silent about why");
+    }
+
+    #[test]
+    fn under_dash_z_a_nul_is_a_terminator_and_cannot_also_mean_binary() {
+        // Upstream guards the whole test with `eol &&`. Without this a `-z`
+        // search would call every file it was given binary, since NUL is what
+        // separates the records it is there to read.
+        let o = Options {
+            null_data: true,
+            ..bin_opts(BinaryFiles::Binary)
+        };
+        let (out, outcome) = run_search_outcome(BIN, &pats("ary", &o), &o, "f", false);
+        // Two records, not three lines: the NUL splits `one\nary two` from
+        // `\nthree ary\n`, both hold `ary`, and each is printed with the NUL
+        // terminator `-z` also writes on output. Measured: `grep -z ary`.
+        assert_eq!(out, b"one\nary two\0\nthree ary\n\0");
+        assert!(outcome.matched);
+        assert!(!outcome.binary_match);
+
+        // And `-I` must not swallow it either, which is the same guard read
+        // from the other side.
+        let i = Options {
+            null_data: true,
+            ..bin_opts(BinaryFiles::WithoutMatch)
+        };
+        let (_, outcome) = run_search_outcome(BIN, &pats("ary", &i), &i, "f", false);
+        assert!(outcome.matched);
     }
 
     // ---------------- context ----------------
@@ -3954,28 +4756,24 @@ mod tests {
     #[test]
     fn a_multiline_pattern_argument_reaches_the_pattern_list() {
         assert_eq!(
-            parse_args(&s(&["-e", "aaa\nccc", "f"])).unwrap().patterns,
+            parse_ok(&["-e", "aaa\nccc", "f"]).patterns,
             vec![b"aaa".to_vec(), b"ccc".to_vec()]
         );
         assert_eq!(
-            parse_args(&s(&["--regexp=aaa\nccc", "f"]))
-                .unwrap()
-                .patterns,
+            parse_ok(&["--regexp=aaa\nccc", "f"]).patterns,
             vec![b"aaa".to_vec(), b"ccc".to_vec()]
         );
         assert_eq!(
-            parse_args(&s(&["aaa\nccc", "f"])).unwrap().patterns,
+            parse_ok(&["aaa\nccc", "f"]).patterns,
             vec![b"aaa".to_vec(), b"ccc".to_vec()]
         );
         // Splitting the operand must not consume it twice: the file list is
         // what is left after the pattern, however many patterns it held.
-        assert_eq!(parse_args(&s(&["aaa\nccc", "f"])).unwrap().files, vec!["f"]);
+        assert_eq!(parse_ok(&["aaa\nccc", "f"]).files, vec!["f"]);
         // Several `-e` accumulate exactly as one argument holding both would.
         assert_eq!(
-            parse_args(&s(&["-e", "a\n", "-e", "b", "f"]))
-                .unwrap()
-                .patterns,
-            parse_args(&s(&["-e", "a\n\nb", "f"])).unwrap().patterns
+            parse_ok(&["-e", "a\n", "-e", "b", "f"]).patterns,
+            parse_ok(&["-e", "a\n\nb", "f"]).patterns
         );
     }
 
@@ -4098,19 +4896,21 @@ mod tests {
 
     #[test]
     fn a_when_word_is_one_of_three_answers_and_bare_means_auto() {
-        assert_eq!(color_when(None), Ok(ColorWhen::Auto));
+        let w = |word: &str| color_when(Some(OsStr::new(word)));
+        assert_eq!(color_when(None), Some(ColorWhen::Auto));
         for word in ["always", "yes", "force"] {
-            assert_eq!(color_when(Some(word)), Ok(ColorWhen::Always));
+            assert_eq!(w(word), Some(ColorWhen::Always));
         }
         for word in ["never", "no", "none"] {
-            assert_eq!(color_when(Some(word)), Ok(ColorWhen::Never));
+            assert_eq!(w(word), Some(ColorWhen::Never));
         }
         for word in ["auto", "tty", "if-tty"] {
-            assert_eq!(color_when(Some(word)), Ok(ColorWhen::Auto));
+            assert_eq!(w(word), Some(ColorWhen::Auto));
         }
         // The words are matched case-insensitively.
-        assert_eq!(color_when(Some("ALWAYS")), Ok(ColorWhen::Always));
-        assert!(color_when(Some("bogus")).is_err());
+        assert_eq!(w("ALWAYS"), Some(ColorWhen::Always));
+        // An unrecognised WHEN is not an error: GNU prints its help and exits 0.
+        assert_eq!(w("bogus"), None);
     }
 
     #[test]
@@ -4183,7 +4983,7 @@ mod tests {
         assert_eq!(
             line_prefix(
                 &Prefix {
-                    filename: "f",
+                    filename: b"f",
                     show_filename: true,
                     line_idx: 0,
                     byte_pos: 7,
@@ -4215,7 +5015,7 @@ mod tests {
         assert_eq!(
             line_prefix(
                 &Prefix {
-                    filename: "f",
+                    filename: b"f",
                     show_filename: true,
                     line_idx: 0,
                     byte_pos: 0,

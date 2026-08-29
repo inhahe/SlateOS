@@ -100,7 +100,7 @@ set -u
 # diagnostic, is identical on both sides. `DIFF_NO_BINDIR` is deliberately *not*
 # set: that is exactly the arrangement this harness wants, and it used to build
 # an equivalent one by hand.
-DIFF_PROG=write-error
+DIFF_PROG='write-error'
 DIFF_NO_REF=1
 DIFF_NEED="timeout"
 DIFF_BINS="basename cat comm dirname echo expand fold head join logname md5sum

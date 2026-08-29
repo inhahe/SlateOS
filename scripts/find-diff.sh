@@ -65,7 +65,7 @@ set -u
 # decoration: `t/sparse` is the one file where `-size -1` and `-size -2048c`
 # cannot agree, and without `truncate` it would be an ordinary empty file that
 # both sides report identically and wrongly.
-DIFF_PROG=find
+DIFF_PROG='find'
 DIFF_FORWARD=TZ
 DIFF_NEED="dd truncate mkfifo"
 # shellcheck source=diff-wsl.sh

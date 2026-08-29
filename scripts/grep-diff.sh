@@ -92,7 +92,7 @@ set -u
 # both sides at once — the worst kind of difference, because it agrees.
 unset GREP_OPTIONS GREP_COLOR GREP_COLORS POSIXLY_CORRECT
 
-DIFF_PROG=grep
+DIFF_PROG='grep'
 # `sort` normalises the directory order the selector cases would otherwise
 # disagree about, and `timeout` is what stops a device case hanging the run.
 # Both are load-bearing enough that running without them would be worse than
@@ -385,12 +385,12 @@ grep a abc empty
 grep a /nonexistent
 grep -s a /nonexistent
 grep a
-# GNU answers a missing operand with the usage summary and `Try 'grep --help'`;
-# we answer `grep: missing PATTERN`. Ours names the actual fault and GNU's does
-# not, but GNU's is the shape every other utility on the system uses, and a
-# harness is not the place to relitigate it. Tracked with the rest of the
-# getopt-diagnostic shape work in known-issues.md.
-?our missing-operand diagnostic is a sentence, not GNU's usage summary (TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE)|grep
+# A missing operand is the one diagnostic grep does *not* introduce with
+# `grep: `: it is a bare usage summary and `Try 'grep --help'`, with no sentence
+# at all. We printed `grep: missing PATTERN` — a message GNU never emits — until
+# the 2026-08-29 getopt conversion, which is also what removed the `?` marker
+# this line used to carry.
+grep
 
 # --- stdin, which is what "no file" means ---
 grep a < abc
@@ -610,8 +610,70 @@ grep --regexp=foo words
 grep --file pats words
 grep --max-count 1 foo words
 grep --group-separator XX -C 1 HIT ctx
-?ours is `unknown option: --zzz`; GNU is `unrecognized option '--zzz'` plus the usage summary (TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE)|grep --zzz a abc
-?ours names the offending value (`invalid max count: x`); GNU's message does not|grep -m x foo words
+# The three error shapes grep has, which are not one shape: an unrecognised
+# option gets glibc's wording *and* the usage summary; a bad `-m` value gets
+# grep's own one-liner and no summary at all. Both were divergences until the
+# getopt conversion; the split is now driven by whether the error carries a
+# `Try ...` referral.
+grep --zzz a abc
+grep -m x foo words
+# Every remaining getopt shape, so the conversion is measured and not asserted:
+# an unknown short option, a short option whose argument is missing, a *long*
+# option whose argument is missing, and an ambiguous long-option prefix. Only
+# the last is grep-specific — `--reg` is unique but `--l` is not, and getopt
+# lists the candidates in declaration order, which is why the table below is
+# kept in GNU's order rather than sorted.
+grep -Q a abc
+grep -m
+grep --max-count
+grep --l a abc
+grep --reg foo words
+
+# --- the options that were unimplemented until the getopt conversion ---
+#
+# Declaring an option and accepting it are different things: before 2026-08-29
+# these were all `unknown option`, so every line here was a hard error rather
+# than a divergence. -X takes a matcher name and is the long-hand for -G/-E/-F.
+grep -X fixed foo words
+grep -X grep foo words
+grep -X egrep foo words
+grep -X bogus foo words
+grep --binary-files=text a abc
+grep --binary-files=bogus a abc
+# `--binary-files` uses STREQ where `-d` uses argmatch, so an abbreviation that
+# would be accepted for -d is rejected here. That asymmetry is upstream's and
+# the two cases above and below are what pin it.
+grep --binary-files=tex a abc
+grep -I a abc
+grep --binary-files=without-match a abc
+# -P is declared so that it reports the right thing rather than `unknown
+# option`, and the right thing on a build without PCRE is upstream's own
+# refusal. Ubuntu's grep *is* built with PCRE, so this is a divergence about the
+# build and not about the parser.
+!the reference grep is built with PCRE and ours is not; ours prints upstream'\''s --disable-perl-regexp refusal|grep -P 'a+' abc
+!our --help omits GNU'\''s four-line `Report bugs to:` footer, which points at the wrong project for our bugs|grep --help
+!--version names this implementation, which is not GNU grep|grep --version
+!--version names this implementation, which is not GNU grep|grep -V
+# -U is a no-op off MS-DOS and -u is obsolete-but-accepted: both must leave the
+# search untouched, and -u must say so on stderr without changing the status.
+grep -U a abc
+grep -u -b a abc
+# `-i --no-ignore-case` is the only way to *undo* an -i that came earlier on the
+# line — a GREP_OPTIONS-era escape hatch that still works.
+grep -i A mixed
+grep -i --no-ignore-case A mixed
+grep --no-ignore-case -i A mixed
+# --label renames standard input, and only standard input; a named file keeps
+# its own name.
+grep --label=LBL -H a < abc
+grep --label=LBL -H a abc
+grep --label=LBL -Hc a < abc
+# --line-buffered changes when bytes leave, not which bytes: the output must be
+# byte-identical to the unbuffered run.
+grep --line-buffered a abc
+grep --line-buffered -c a abc
+grep --line-buffered -o a abc
+grep --line-buffered -l a abc
 
 # --- recursion ---
 #
@@ -661,15 +723,14 @@ grep --directories=recurse foo sub
 grep --directories=skip foo sub
 # GNU rejects an unknown ACTION with gnulib's argmatch block: the invalid
 # argument, `Valid arguments are:`, the three of them, and then the usage
-# summary and `Try 'grep --help'` that every option error here ends with. We
-# print those first five lines and stop, and we exit 2 where GNU exits 1 —
-# which is not grep being inconsistent, it is `usage()` being reached by a path
-# that does not go through EXIT_TROUBLE. Both halves are the getopt-diagnostic
-# shape debt and neither is about -d.
+# summary and `Try 'grep --help'` — and it exits **1**, not 2, because argmatch
+# dies on its own rather than through grep's `usage(EXIT_TROUBLE)`. That exit
+# status looks like an inconsistency and is not; it is the reason
+# `Program::argmatch` forces status 1 regardless of the program's usage status.
 #
 # `-D bogus` is unmarked below because GNU does not use argmatch for it: it is
 # grep's own one-liner and exits 2, which we reproduce exactly.
-?our argmatch diagnostic stops before GNU's `Usage:`/`Try ...' pair, and exits 2 where GNU exits 1 (TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE)|grep -d bogus foo sub
+grep -d bogus foo sub
 
 # --- -D, and why its default is not a plain boolean ---
 #
@@ -842,13 +903,53 @@ grep -zHc foo zsep
 grep -zl foo zsep
 grep -zZl foo zsep
 grep -z foo words
-!we never suppress binary output; GNU 3.0 sees the NUL and replaces the lines with "Binary file X matches"|grep foo zsep
+# `zsep` read *without* -z: the NULs that are records to the case above are
+# binary content to this one, so nothing reaches stdout and the diagnostic goes
+# to stderr. It is the same file proving that -z is what decides which the NULs
+# are, which is the guard `search_stream` carries as `sep != 0`.
+grep foo zsep
 
 # --- binary ---
-!we never suppress binary output; GNU 3.0 replaces the line with "Binary file X matches"|grep ary binfile
+#
+# The three `--binary-files` types are one setting with three behaviours, and
+# the detection they all turn on is a scan of the first read buffer for a NUL.
+# `binary` (the default) withholds the *lines* and says `grep: X: binary file
+# matches` on **stderr** with status 0; `without-match` / `-I` makes the file
+# not match at all -- silent, status 1, and named by `-L` rather than `-l`;
+# `text` / `-a` skips the detection outright. These five lines were `!` until
+# the detection landed, which is why they are grouped: they were the whole of
+# TD-COREUTILS-GREP-NEVER-DETECTS-BINARY-CONTENT and they turned into XPASS
+# together.
+grep ary binfile
+grep --binary-files=binary ary binfile
+grep -I ary binfile
+grep --binary-files=without-match ary binfile
+grep --binary-files=text ary binfile
 grep -a ary binfile
+# The four output modes that print no lines to begin with, so the `binary` rule
+# has nothing to withhold and GNU stays silent. `-c` is the one that proves the
+# file is still searched to the end rather than abandoned at the NUL.
 grep -c ary binfile
 grep -q ary binfile
+grep -l ary binfile
+grep -L ary binfile
+# Detection is per read buffer and `-o` does not change that: the whole file is
+# suppressed, not just the matches after the NUL.
+grep -o ary binfile
+grep -n ary binfile
+# `-I` counts the file as non-matching, which `-L` can see and an exit status
+# cannot -- the distinction that makes WithoutMatch a third behaviour rather
+# than a quieter spelling of the default.
+grep -Il ary binfile
+grep -IL ary binfile
+# Detection is guarded on there being a match to report: a binary file that
+# matches nothing is silent under every type.
+grep zzz binfile
+grep -I zzz binfile
+# -z again, from the other side: with NUL as the terminator the file is not
+# binary, so `-I` must not swallow it.
+grep -z ary binfile
+grep -zI ary binfile
 
 # --- context, which nothing here had ever exercised ---
 #
@@ -1090,9 +1191,12 @@ GREP_COLOR='01;35' GREP_COLORS='ms=01;36' grep --color=always foo words
 GREP_COLOR='01;35' grep foo words
 GREP_COLOR='01;35' grep --color=never foo words
 # `--color=` with a word that is none of the three is not an error: GNU sets
-# `show_help` and prints the whole usage text on *stdout*, exiting 0. Matching
-# that would mean printing a help text advertising options we do not have.
-!--color=WORD with an unrecognised WORD prints GNU'\''s full usage summary and exits 0; ours has no --help text to print|grep --color=bogus foo words
+# `show_help` and prints the whole help text on *stdout*, exiting 0. We do the
+# same, and print the same text — minus the four-line `Report bugs to:` footer,
+# which names GNU's mailing list and home page. Those addresses would be wrong
+# on a bug in *our* grep, so the footer is dropped on purpose and the two texts
+# differ by exactly it. Same reason marks `--help` below.
+!our help text omits GNU'\''s four-line `Report bugs to:` footer, which points at the wrong project for our bugs|grep --color=bogus foo words
 
 # --- a character that is not one byte, now that the locale is C.UTF-8 ---
 grep -i cafe accent

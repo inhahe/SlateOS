@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window. Without it `main` was `let _app = RushHour::new();` — it built
+# puzzle 1, dropped it and exited, so no car ever reached a screen and no key
+# or click ever arrived.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

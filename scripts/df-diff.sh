@@ -92,7 +92,7 @@ fi
 # `mount` is not in `DIFF_NEED`: without it the harness still runs, it just
 # runs the masked half. `dd` is, because `fs/a`'s Used figure is the whole
 # point of that mount and an empty tmpfs would make several cases vacuous.
-DIFF_PROG=df
+DIFF_PROG='df'
 DIFF_NEED="dd"
 DIFF_FORWARD="DF_DIFF_NS"
 # shellcheck source=diff-wsl.sh

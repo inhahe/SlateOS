@@ -93789,6 +93789,84 @@ Python module, a README generator, or a scratch script into `apps/`, `crates/`,
 -- and the artefact that does it may be one the tool creates on its own, and one
 your VCS is configured not to show you.
 
+### Lesson 67: a test over a branch must prove the branch was entered (lane C, 2026-08-29)
+
+**In short:** rush's `every_string_drawn_is_inside_the_window` measured every
+string the frame drew and asserted it fitted the window. It passed. It could not
+have failed, because at none of the ten window sizes it ran at was any string
+wider than the space it was given — so the two mechanisms that keep a long string
+inside a narrow window, the `max_width` limit and the footer's clip rect, were
+never once the reason the assertion held. The test named them and exercised
+neither. Two more in the same suite were vacuous the same way: the branch that
+drops a car's letter when the glyph is taller than the car was never reached
+(cells were never that small), and no string was ever elided.
+
+**Why it is not the same as an untested line.** An untested line is *visibly*
+untested — coverage says so, and mutating it produces a surviving mutant nobody
+can explain. This is worse, because the test *names* the thing and appears in the
+mutation table opposite it. The table entry "the footer's lines are not clipped
+to the footer → `every_string_drawn_is_inside_the_window`" is a claim that a
+human wrote and a sweep would have to disprove. Here the sweep would have
+disproved it — the mutant survives — but only if the mutation was written in the
+first place, which is exactly the point at which the hole was found. Had the
+mutation table skipped that line as obviously-covered, nothing would ever have
+said otherwise.
+
+**The tell.** The three tests share a shape: an assertion of the form "for every
+X, P(X)", where the interesting case is the one where P is *nearly* false. A
+universally-quantified assertion is satisfied most easily by a fixture set in
+which nothing is close to the boundary — and a fixture set is chosen for
+convenience, so it will drift toward exactly that. The list of window sizes had
+been picked to be "some small, some big"; nothing in it was *narrow*, because
+narrow-and-tall is not a shape anyone reaches for.
+
+**The fix, and it generalises.** Each test now carries a witness that the branch
+was entered, checked after the loop:
+
+```rust
+assert!(
+    cut_somewhere,
+    "no window in the list is narrow enough to cut a single string, so the \
+     clip and the width limits are branches this test never enters"
+);
+```
+
+and a window (170x900) was added in which the footer's second line and the header
+title are each wider than the whole window. The counting form — `dropped > 0` —
+does the same job for the glyph test. **Any test whose subject is a conditional
+should assert, in the test, that the condition was met at least once.** It costs
+one line and it converts a test that cannot fail into one that fails the day
+someone tidies the fixture list.
+
+**And it found a real fault.** The window added to make those three tests real
+immediately exposed one: at 170x900 the header drew its title at the left with no
+width limit while drawing its counters against a flat 120-pixel reservation, so
+the two were painted through each other. The fault had been there since the
+rewrite, in code whose whole stated purpose was to stop text being positioned by
+guessing. The vacuous test was not merely failing to test the mechanism — it was
+concealing a live bug in it, which is the ordinary consequence and worth
+expecting rather than being surprised by.
+
+**Seen four more times the same day, in the same suite, by the sweep.** Once the
+mutation table existed, four more of rush's tests turned out to name something
+they never reached — and the shape was different each time, which is why "add a
+witness" has to be a habit rather than a rule with one fixed form:
+
+| Test | What it never reached |
+|---|---|
+| `ids_are_unique_and_never_a_position_in_the_vector` | Called `game()` and *then* `load_puzzle(i)`. `game()` has already spent the low ids, so every board it looked at had ids well past the index range whatever the counter started at. The one board where a zero-based counter puts id 0 at index 0 is the opening position — the board it skipped. Klotski's fault 14, repeated exactly, in the very next app wired — which is the strongest argument here for the witness being mechanical rather than remembered. |
+| `clicking_past_a_blocker_slides_as_far_as_the_yard_allows` | Aimed at a cell the car could actually reach, so the clamp it is named after had nothing to clamp. It passed identically against a program that never clamps. |
+| `every_centred_string_is_limited_to_the_box_it_is_centred_in` | Guarded its whole body on `max_width.is_some()`, so a string that *lost* its limit was skipped rather than caught. A test whose subject is "X is always there" must not use X's presence as its filter. |
+| `the_board_survives_every_window_a_band_is_dropped_in` | Ran at ten window sizes, none of which dropped the band whose absence the line under test exists to survive. |
+
+The common cause is not carelessness about the assertion — every one of these
+asserts the right thing. It is that **the fixture and the assertion are chosen at
+different moments**: the assertion states the rule while it is fresh, the fixture
+is whatever was already lying around in the test module. That is also the
+argument for the witness being an `assert!` inside the test rather than a note in
+a comment: it is re-checked every run, at the same moment as the assertion it
+guards, so the two cannot drift apart later.
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print
@@ -93857,8 +93935,12 @@ memory and fault directive reads 0 there until the kernel accounts children.
 That is a posix/ gap, not a bug in this transcription.
 
 **Gates cleared by the rewrite:** `time_cmd.rs:argv-as-string` out of
-`scripts/argv-utf8-baseline.txt` (**10 findings remain across 9 files** --
-`diff ed fetch grep logger more patch ps sh tar`, `sh` carrying two);
+`scripts/argv-utf8-baseline.txt` (**11 findings remain across 10 files** --
+`diff ed fetch grep logger more patch ps sh tar`, `sh` carrying two; this line
+said "10 across 9" until 2026-08-29 -- it counted the *files* and forgot that
+`sh` contributes two findings, the same off-by-one commit `631783b54` made.
+`python scripts/argv-utf8.py --check` prints the number and is the authority.
+It became 10 across 9 for real when `grep` left the baseline, below);
 `time_cmd.rs:host-error-text` out of `scripts/host-errmsg-baseline.txt` (8 files
 remain). `scripts/getopt-ambiguity-check.py` no longer lists `time_cmd` in
 `NOT_GNU` -- GNU does ship the program, just not under our file's name, so the
@@ -94094,3 +94176,253 @@ cannot resolve, `-x` appears to do nothing, and the count comes out much
 higher. Lane A hit exactly that and briefly recorded "`-x` does not help" as a
 finding. Trust the number `shellcheck-all.sh` prints, because that is the
 invocation the gate itself uses.
+
+## `B-GREP-READ-ITS-ARGV-AS-A-STRING-AND-ELEVEN-OF-GNUS-OPTIONS-DID-NOT-EXIST` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
+
+**In short:** `grep` collected its command line into `Vec<String>`, so a search
+whose pattern or file name held a byte that is not valid UTF-8 -- a legal file
+name on this OS -- killed the program before it read anything. It also silently
+did not have eleven of GNU grep's options, answering each with `unknown option`.
+Both are fixed: argv is `OsString`/`&[u8]` end to end, the option table is all
+fifty of GNU's long options, and the differential harness went from 467 cases to
+498 with none differing.
+
+**Where it was.** `userspace/coreutils/src/bin/grep.rs`, listed in
+`scripts/argv-utf8-baseline.txt` as `grep.rs:argv-as-string`. It is now out of
+that file; `python scripts/argv-utf8.py --check` prints **10 findings across 9
+files** (`diff ed fetch logger more patch ps sh tar`, `sh` carrying two).
+
+### The bytes half
+
+`main` did `env::args_os().map(|a| a.to_string_lossy().into_owned())`, and the
+hand-written parser worked in `&str` from there. Three consequences, in
+increasing order of how quietly they failed:
+
+1. A non-UTF-8 **operand** became U+FFFD, so `grep pat $'f\xffle'` opened the
+   wrong path or none, reporting `No such file or directory` about a file that
+   exists.
+2. A non-UTF-8 **pattern** was mangled the same way, so the search was not the
+   search that was asked for -- and it *succeeded*, which is worse than failing.
+3. `search_found` -- the recursive walk's per-file entry point -- called
+   `to_string_lossy` on every path it descended into, so the corruption applied
+   to files the user never named. It now works on `quote::os_bytes` and rebuilds
+   the `OsString` with `quote::os_from_bytes`.
+
+`Prefix::filename` and `Source::filename` changed `&'a str` -> `&'a [u8]`,
+which is what carries the name all the way to the write, colouring included.
+
+### The options half
+
+Eleven options were declared to `getopt` for the first time, which is not the
+same as implementing them -- each was checked against GNU grep 3.11 and does
+what upstream does:
+
+| Option | What it now does |
+|---|---|
+| `-P`, `--perl-regexp` | prints upstream's own `Perl matching not supported in a --disable-perl-regexp build` and exits 2 -- the right answer for a build without PCRE, rather than `unknown option` |
+| `-X`, `--matcher=NAME` | long-hand for `-G`/`-E`/`-F`; `grep`, `egrep`, `fgrep`, `awk`, `gawk`, `posixawk`, `perl` |
+| `-I` | `--binary-files=without-match` (see the gap below) |
+| `--binary-files=TYPE` | `binary`/`text`/`without-match`, matched with `STREQ` -- **exact**, where `-d` uses argmatch's prefix matching. The asymmetry is upstream's and is now pinned by a case |
+| `-U`, `--binary` | accepted and ignored; it is a no-op off MS-DOS |
+| `-u`, `--unix-byte-offsets` | warns `grep: warning: --unix-byte-offsets (-u) is obsolete` on stderr, in argv order, and continues |
+| `-V`, `--version` | prints a version and exits 0 |
+| `--help` | GNU 3.11's help text on stdout, exit 0 |
+| `--label=LABEL` | renames standard input only; a named file keeps its name |
+| `--line-buffered` | flushes at GNU's three sites: end of `prline` (so `-o` flushes once per *line*, after the last of that line's matches), after the `-c` count, and after the `-l`/`-L` name |
+| `--no-ignore-case` | undoes an `-i` that came earlier on the same line |
+
+### What the conversion fixed that was not the point of it
+
+Four cases the harness had recorded as expected-to-differ turned green on their
+own, because `coreutils::getopt` produces glibc's and gnulib's diagnostics
+rather than our own wording. They were `grep` with no operand, `grep --zzz`,
+`grep -m x` and `grep -d bogus`. The last is the interesting one: it exits **1**,
+not 2, because gnulib's argmatch dies on its own rather than through grep's
+`usage(EXIT_TROUBLE)` -- which is why `Program::argmatch` forces status 1
+regardless of the program's usage status.
+
+That grep has **three** error shapes and not one was measured, not read:
+
+| command | output | status |
+|---|---|---|
+| `grep` | usage summary + `Try ...`, **no `grep: ` line at all** | 2 |
+| `grep --zzz` / `grep -Q` / `grep -m` | `grep: <glibc sentence>` + usage + `Try ...` | 2 |
+| `grep -d bogus` | argmatch's five lines + usage + `Try ...` | **1** |
+| `grep -D bogus` / `-X bogus` / `-m x` / `-A x` / `--binary-files=bogus` / `-E -F` | `grep: <one line>` and nothing else | 2 |
+
+`run_main` reproduces the split with `if e.referral.is_some()`, which is exactly
+where `getopt` already draws the line between a `sentence()`-built error and a
+`usage()` one. An earlier draft printed the usage summary under *every* error;
+the probe is what caught it.
+
+A wrong test was also removed. `parse_empty_errors` asserted the message
+`missing PATTERN` -- a string GNU grep has never printed. A bare `grep` is
+`usage(EXIT_TROUBLE)` with no diagnostic.
+
+### Gates
+
+- `python scripts/getopt-ambiguity-check.py grep` -> 1 table checked, **0
+  disagreements**. grep was previously outside this check entirely, having no
+  declared table to check. The 50 long options are kept in GNU's declaration
+  order because getopt lists ambiguous candidates in that order, and `grep --l`
+  is ambiguous.
+- `bash scripts/grep-diff.sh` (in WSL) -> **498 passed, 0 differed, 12 on
+  purpose, 0 unexpectedly agreed**, up from 467/0/5/4.
+- 108 unit tests pass; `cargo clippy` clean under the crate's
+  `deny(clippy::all, clippy::pedantic)`.
+
+### The gap this leaves: `TD-COREUTILS-GREP-NEVER-DETECTS-BINARY-CONTENT` -- **FIXED 2026-08-29**, except for the encoding-error half
+
+*(The section below is the gap as it stood when the conversion landed. The NUL
+half of it is now implemented; see* `B-GREP-NEVER-DETECTED-BINARY-CONTENT`
+*further down, which also records what was left behind and why.)*
+
+`--binary-files` is one setting with three behaviours and we implement one.
+`text` -- print the bytes -- is what we always do, so it agrees with GNU. The
+other two need content detection we do not have:
+
+- `binary` (**the default**): GNU writes **nothing to stdout** and prints
+  `grep: F: binary file matches` on **stderr**, exiting 0. We print the lines.
+- `without-match` / `-I`: GNU treats the file as not matching at all -- nothing
+  on either stream, exit 1. We search it normally.
+
+The stream and the wording were measured against the reference host's 3.11
+(`grep ary bf > o 2> e`, then `od -c` on both), not read out of the source, and
+the measurement contradicts the description this entry first carried. Older grep
+printed `Binary file F matches` on **stdout**, and most second-hand accounts of
+the feature still say so; 3.x moved it to stderr and lower-cased it. Note also
+that command substitution loses it -- `$(grep ary bf 2>&1 >/dev/null)` came back
+empty in the first probe, which is what sent the first draft to the wrong
+stream. `-c` and `-l` are unaffected: they print `1` and the file name as usual,
+because what is suppressed is the *lines*, not the file.
+
+The proper fix is upstream's rule, not a heuristic of our own: a file is binary
+if the first buffer holds a NUL, or holds an encoding error in the current
+locale. `-a` / `--binary-files=text` bypasses the check, and `-z` changes it
+(NUL is the line terminator then, so it cannot be the marker). Four cases in
+`scripts/grep-diff.sh` under `# --- binary ---` are marked `!` with this reason
+and should all turn XPASS together when it lands.
+
+## B-GREP-NEVER-DETECTED-BINARY-CONTENT (lane B, 2026-08-29) -- **FIXED 2026-08-29**
+
+**In short:** `grep` had no idea what a binary file was. Searching a `.png` or
+an executable printed screenfuls of terminal-wrecking bytes, where real grep
+prints one line saying the file matched and stops. It now detects binary
+content the way GNU does, and all three `--binary-files` behaviours work. Two
+narrower gaps are left behind and tracked below; neither is reachable without
+first building something else.
+
+`--binary-files=TYPE` names three behaviours for one question -- *this file
+holds a NUL; now what?* -- and we had only the third. What landed:
+
+| | behaviour | stdout | stderr | status |
+|---|---|---|---|---|
+| `binary` (default) | the lines are withheld | nothing | `grep: F: binary file matches` | 0 |
+| `without-match` / `-I` | the file is treated as not matching | nothing | nothing | 1 |
+| `text` / `-a` | detection is skipped entirely | the bytes, NULs and all | nothing | 0 |
+
+Four details that are easy to get wrong and were each measured against the
+reference host's GNU grep 3.11 rather than inferred:
+
+- **The decision is per read buffer, not per line.** A NUL anywhere in the
+  first buffer withholds the *whole file's* output, including matches that
+  physically precede it. `printf 'ary head\nmid\0dle\nary tail\n'` prints
+  nothing at all -- not `ary head`.
+- **The diagnostic goes to stderr, and is owed only when lines were what was
+  asked for.** `-c`, `-l`, `-L` and `-q` print no lines, so there is nothing to
+  withhold and GNU stays silent -- and `-c` still counts the whole file (2 for
+  the fixture above), proving the file is searched to the end rather than
+  abandoned at the NUL. Upstream spells this `out_quiet_0`.
+- **`-I` is a third behaviour, not a quieter default.** It makes the file
+  *non-matching*, so `-L` names it and `-l` does not. Suppressing the output
+  alone would leave it matching, a difference an exit status cannot see.
+- **`-z` disables detection.** NUL is the record terminator then, so it cannot
+  also be the marker; upstream guards the whole test with `eol &&`. Without
+  this, every `-z` search would call its input binary.
+
+Implementation: `BINARY_PROBE` (32 KiB, upstream's `INITIAL_BUFSIZE`) is the
+`BufReader` capacity, and one `fill_buf()` before the first line is searched
+does the scan. `search_stream` returns an `Outcome { matched, binary_match }`
+rather than a bare `bool`, so the *decision* is made where the bytes are and
+the *printing* stays in `Run::search`. The message is assembled as bytes and
+emitted with `stdfd::diag_bytes`, not `diag!`: the file name is unquoted
+`input_filename()`, a name on this system need not be UTF-8, and formatting it
+would mean `from_utf8_lossy` -- the exact corruption the getopt conversion
+above existed to remove. That was nearly written the wrong way here.
+
+Verification:
+
+- `bash scripts/grep-diff.sh` (in WSL) -> **513 passed, 0 differed, 7 on
+  purpose, 0 unexpectedly agreed**, up from 498/0/12/0. The four `!` lines this
+  gap owned all turned XPASS together as predicted, as did a fifth (`grep foo
+  zsep` -- the `-z` fixture read *without* `-z`, whose reason had been written
+  as a separate `-z` matter). Their markers are gone and eleven further cases
+  were added around them: `-l`/`-L`/`-o`/`-n` on a binary file, `-Il`/`-IL` for
+  the matching/non-matching distinction, `-zI`, and a binary file that matches
+  nothing.
+- 114 unit tests pass (six new, plus one rewritten -- see below);
+  `cargo clippy` clean.
+
+One existing test had to be rewritten rather than kept:
+`a_nul_in_the_input_is_data_like_any_other_byte` asserted that `a\0x\n` is
+printed under default options, which was true only because of the bug. It is
+now `a_nul_makes_the_input_binary_and_only_dash_a_carries_it_through`, and
+asserts both halves -- default suppresses, `-a` passes the byte through
+unaltered -- because passing either alone would be consistent with the searcher
+mangling the NUL.
+
+### `TD-COREUTILS-GREP-DETECTS-BINARY-ONLY-IN-THE-FIRST-BUFFER`
+
+Referenced by name from `BINARY_PROBE`'s doc comment in `grep.rs`.
+
+Upstream re-runs the NUL scan on **every** read buffer until the first
+detection; we scan only the first. For any file of 32 KiB or less -- which is
+every fixture, every test, and most text -- the two are identical. Beyond that
+we differ from GNU in one direction only: a file whose first 32 KiB are clean
+but which turns binary later is printed where GNU would have started
+suppressing part-way through.
+
+The fix is not a bigger probe (that just moves the boundary) but moving the
+scan into the read loop: check each refill until `binary` is set, which needs
+`search_stream`'s line reader restructured to see buffer boundaries rather than
+`read_until` hiding them. Left for when that reader is next touched. Low harm
+in the meantime: the failure mode is *too much* output, never a wrong exit
+status or a wrong count.
+
+### `TD-COREUTILS-GREP-DOES-NOT-SUPPRESS-ON-ENCODING-ERRORS` -- blocked on locale support
+
+**In short:** real grep calls a file binary for two separate reasons -- it
+holds a NUL, or its bytes are not valid text in your language setting. We now
+implement the first. The second cannot be implemented yet because coreutils has
+no concept of a language setting at all.
+
+This is a genuinely independent mechanism, not a corner of the NUL rule, and
+the difference was established by measurement (`bin4.sh`) after a first probe
+gave the opposite answer -- `dash`'s `printf` has no `\x` escape, so a `\xff`
+fixture had silently written four literal characters and the file was plain
+ASCII. The byte must be written octal, `\377`.
+
+What GNU does with `printf 'ary a\377b\nary plain\n'` under `C.UTF-8`:
+
+| command | result |
+|---|---|
+| `grep ary enc` | prints only `ary plain`; the bad line is dropped and `grep: enc: binary file matches` goes to stderr |
+| `grep -c ary enc` | `2` -- the count is unaffected |
+| `grep -o ary enc` | prints both `ary`s and no diagnostic: the printed *segment* is valid even though its line is not |
+| `grep -I ary enc` | same as plain `grep` -- **`-I` does not suppress on encoding errors** |
+| `LC_ALL=C grep ary enc` | prints both lines, no diagnostic: in a single-byte locale no byte sequence is invalid |
+
+Upstream's mechanism is `print_line_head` dropping the segment it was about to
+print when it has encoding errors and setting `encoding_error_output`, which
+`finish_grep` then reports with the same message. So it is per printed segment,
+decided at print time -- structurally elsewhere from the per-buffer NUL scan
+that happens before searching.
+
+**The blocker is a real prerequisite, not effort.** `grep -rn 'LC_ALL|LC_CTYPE|
+fn locale' userspace/coreutils/src` finds nothing but doc comments: coreutils
+has no locale plumbing whatsoever. Hardcoding UTF-8 validation would be wrong
+under `LC_ALL=C`, where the correct answer is that *no* byte sequence is
+invalid and the whole mechanism is off -- so implementing this before there is
+something to ask "which locale?" would make the common `LC_ALL=C` case worse,
+not better. Revisit when coreutils grows locale support; the measurements above
+are the acceptance criteria and need no re-taking.

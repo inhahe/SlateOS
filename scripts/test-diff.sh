@@ -78,7 +78,7 @@ set -u
 # The reference is named explicitly because `command -v test` inside a shell
 # finds the *builtin*, which is a different implementation and deliberately not
 # what is compared. `/usr/bin/test` is the real binary.
-DIFF_PROG=test
+DIFF_PROG='test'
 DIFF_REF='/usr/bin/test /bin/test'
 # There is no coreutils way to create a bound unix socket, and `-S` against a
 # path with no socket on it is a case that passes by agreeing the file is

@@ -91,7 +91,7 @@ PROGS=${PROG:-md5sum sha256sum}
 # ambiguous option with directional single quotes under a UTF-8 locale and
 # ASCII apostrophes under `C`, so the whole option-error family would disagree
 # for a reason that has nothing to do with this program.
-DIFF_PROG=digest
+DIFF_PROG='digest'
 DIFF_BINS="md5sum sha256sum"
 DIFF_FORWARD=PROG
 DIFF_NO_REF=1

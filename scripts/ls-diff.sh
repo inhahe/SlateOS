@@ -45,7 +45,7 @@
 # fixture is created in a single burst, so both runs render the same mtimes.
 set -u
 
-DIFF_PROG=ls
+DIFF_PROG='ls'
 DIFF_NO_REF=1
 DIFF_NO_BINDIR=1
 # `GNU` names a reference to use instead of building 9.5; `LS_DIFF_CACHE` says

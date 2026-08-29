@@ -56,7 +56,7 @@ set -u
 # `t/sparse` is the one file where `--apparent-size` and the default cannot
 # agree, and without `truncate` it would silently be an ordinary empty file
 # that both sides report as 0.
-DIFF_PROG=du
+DIFF_PROG='du'
 DIFF_NEED="dd truncate"
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"

@@ -67,7 +67,7 @@ set -u
 # `--output-error=bogus` is rejected by gnulib's `argmatch`, which renders the
 # offending word with `quote()` — directional single quotes under a UTF-8
 # locale, ASCII apostrophes under `C`.
-DIFF_PROG=tee
+DIFF_PROG='tee'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 

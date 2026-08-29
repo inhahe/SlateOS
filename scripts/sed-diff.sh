@@ -39,7 +39,7 @@ set -u
 
 # Into WSL, build ours for Linux, find GNU's, and put both behind the one name
 # `sed` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
-DIFF_PROG=sed
+DIFF_PROG='sed'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 

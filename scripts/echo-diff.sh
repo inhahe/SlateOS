@@ -55,7 +55,7 @@ set -u
 # shell *builtin*, which is not what is being compared here. (echo produces no
 # locale-dependent text of its own, but `write error` comes from `strerror`,
 # which does — so the fixed locale the shared preamble sets matters here too.)
-DIFF_PROG=echo
+DIFF_PROG='echo'
 DIFF_REF="/usr/bin/echo /bin/echo"
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"

@@ -1,27 +1,135 @@
-#![allow(dead_code)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
 
-//! Slate OS Rush Hour -- sliding car puzzle game.
+//! Rush Hour — slide the red car out through the right-hand exit, in a real
+//! window.
 //!
-//! A 6x6 grid contains vehicles (cars occupy 2 cells, trucks occupy 3 cells).
-//! Each vehicle can only slide along its orientation axis (horizontal or
-//! vertical). The goal is to slide the red car (always horizontal on row 2) to
-//! the right exit at column 5. Includes 8 built-in puzzles of varying
-//! difficulty, move counter, undo, puzzle selection, and restart. Uses the
-//! Catppuccin Mocha dark theme.
+//! A 6x6 yard holds one red car on the exit row and a jam of other cars and
+//! trucks, each able to slide only along its own axis. Eight puzzles, keyboard
+//! and pointer, undo, a move counter, and a puzzle sheet.
+//!
+//! # What wiring this up found
+//!
+//! The program could not be played, because `main` was
+//! `let _app = RushHour::new();` — it built puzzle 1, dropped it and exited.
+//! Nothing below was reachable to notice until it had a window on it.
+//!
+//! 1. **The layout was a constant, and the click was read against the
+//!    constant.** `cell_origin`, `cell_at_point`, `grid_origin`,
+//!    `window_width` and `window_height` were all free functions of nothing —
+//!    just `CELL_SIZE = 72.0` and friends. `render` took `width` and `height`
+//!    and opened with `let _ = (width, height); // use layout params if
+//!    needed`, then sized its own background from `window_width()`. So the
+//!    program drew a 476x568 picture into whatever window it was given, and
+//!    `handle_mouse` sent the click through `cell_at_point`, which answered
+//!    from the same constants. In any other window the yard was drawn in one
+//!    place and clicked in another. The layout is now computed from the live
+//!    window size every frame and the hit boxes are recorded by the drawing
+//!    pass, so a car is clickable exactly where its ink is.
+//! 2. **The pointer could select but never play.** `handle_mouse` called
+//!    `select_at_cell` and nothing else: a click could pick a car up and put it
+//!    down again, and sliding, undo, restart, next and the puzzle sheet were
+//!    keyboard-only — advertised by a footer string that was the only evidence
+//!    those keys existed. Clicking an empty cell a selected car can reach now
+//!    slides it there, and every command has a button.
+//! 3. **The win rule never looked at the row.** `check_win` was
+//!    `player.tail_col() >= GRID_SIZE - 1` — column only. It was correct solely
+//!    because every puzzle table happened to put the player on row 2 and no
+//!    vertical car was ever vehicle 0. Meanwhile the exit marker was drawn from
+//!    its own literal `cell_origin(2, 0)`, so "the exit is on row 2" was
+//!    written twice and checked nowhere. `EXIT_ROW` is now named once, and the
+//!    win rule, the exit strip and the loader all read it — the third being
+//!    what makes the puzzle tables unable to disagree at all (see 4). The win
+//!    rule now asks whether the red car *covers the cell the exit opens onto*,
+//!    which is one fact about both axes rather than a column test with a row
+//!    test in front of it that could never fail.
+//! 4. **The player's identity was inferred from its paint.** `is_player()` was
+//!    `self.color_index == 0`, and `load_puzzle` assigned
+//!    `color_index: i % VEHICLE_COLORS.len()`. So "which car wins" was decided
+//!    by the palette: reorder a puzzle table, or put a twelfth colour in the
+//!    array, and the win condition quietly moves to a different car. A puzzle
+//!    now names its player as a *column* (`PuzzleDef::player_col`) — its row is
+//!    `EXIT_ROW` and its length `PLAYER_LENGTH`, neither of which a table gets
+//!    to state — so there is exactly one player, structurally, and `Vehicle`
+//!    carries a `player` flag rather than a colour to be read as one.
+//! 5. **The win was a latch, and undo was refused while it was set.**
+//!    `move_selected` wrote `status = Won` and nothing except loading a puzzle
+//!    ever wrote it back, while `undo` opened with
+//!    `if self.status == Won { return; }`. The winning move was the one move
+//!    you could not take back. Winning is now *derived* from where the red car
+//!    is, so undoing the winning move un-wins, because there is no separate
+//!    fact left to disagree with the yard.
+//! 6. **The victory overlay painted out the yard.** It filled the whole window
+//!    with opaque `0x11111B` under the comment `// Semi-transparent overlay` —
+//!    a comment arguing for a transparency the code did not have, which is an
+//!    assertion nobody checks. The scrim is now genuinely translucent
+//!    (`Color::rgba`, alpha `0xB4`, which `Canvas` composites with
+//!    `Color::over`), so the jam you just cleared is visible behind the panel
+//!    congratulating you on it.
+//! 7. **`UndoAction` stored a vector index in a field, and two fields nothing
+//!    read.** `vehicle_index` was spent as `self.vehicles[action.vehicle_index]`
+//!    — fine only while indices and identities coincide, which nothing
+//!    enforced — and `new_row`/`new_col` were written on every move and never
+//!    read by anything. An undo entry is now a car **id** and one signed
+//!    `delta`: the number the move added, which undo subtracts.
+//! 8. **`can_move` guarded against a car being its own obstacle, which it
+//!    cannot be.** Every cell it tested lay strictly beyond the leading edge,
+//!    so `if let Some(occ) = occupancy[..] && occ != index` had an `occ != index`
+//!    that could never be false — a guard in front of a rule that already
+//!    holds, and so a line no test could ever own (known-issues lesson 51).
+//!    It is gone.
+//! 9. **Text was positioned by guessing its own width.** The move counter and
+//!    the status drew at `total_width - 120.0`; the three victory lines at
+//!    `banner_x + 50`, `+ 60` and `+ 40` — three different hand-tuned "centres"
+//!    for three strings; and every car's letter at `cx + vw / 2.0 - 5.0`, which
+//!    is a claim that the glyph is ten pixels wide. The program already linked
+//!    `guitk::text`. Every string is now placed from its measured width.
+//!    The guess also decided *whether two strings collided*: the title was drawn
+//!    at the left with no width limit while the counters were drawn against that
+//!    120-pixel reservation, so in a window narrower than the two of them the
+//!    header painted them through each other. The counters are measured first
+//!    now, and what is left of the header after them — less a `pad`-wide gap —
+//!    is the width the title is cut to.
+//! 10. **A blanket `#![allow(dead_code)]` sat at the top of the file.** With
+//!     `main` discarding the app almost the whole program was dead, and the
+//!     allow is what let it compile without ever saying so — including
+//!     `is_valid_placement` and `max_slide`, which nothing called at all. The
+//!     allow is gone, `max_slide` is what click-to-slide is built on, and the
+//!     lane gate's `-D dead_code` is what now decides whether a function is
+//!     reachable.
+//! 11. **A puzzle table's orientation column was a byte, and anything that was
+//!     not `b'H'` meant vertical.** `orient_from_byte` had no error case, so a
+//!     typo'd `b'h'` in any of the eight tables was not a mistake but a
+//!     silently different puzzle. The tables now hold the `Orientation` enum.
+//! 12. **The undo cap shuffled the whole vector.** At `MAX_UNDO` entries
+//!     `move_selected` did `undo_stack.remove(0)` — an O(n) shift per move past
+//!     the cap. It is a `VecDeque` now, and the header shows the depth so the
+//!     loss of the oldest move is at least visible.
+//! 13. **The puzzle sheet could not be reached or dismissed by pointer.**
+//!     `handle_mouse` returned early whenever it was open, so the list you were
+//!     looking at was inert under the cursor while still covering the yard.
+//!     It now takes clicks — a row opens that puzzle, anywhere else closes it —
+//!     and, like the victory panel, it calls `Frame::discard_hits` so nothing
+//!     behind it can be pressed through.
+//! 14. **Four arrow-key arms each re-derived the same two facts.** Every arm
+//!     repeated `self.selected < self.vehicles.len()` in its guard and then
+//!     re-fetched the car to check its axis, doing nothing at all when the axis
+//!     was wrong. One arm now turns a key into an axis and a delta, and the
+//!     move rule decides the rest.
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::collections::VecDeque;
+use std::process::ExitCode;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -39,125 +147,160 @@ const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const MAUVE: Color = Color::from_hex(0xCBA6F7);
 const TEAL: Color = Color::from_hex(0x94E2D5);
+const MAROON: Color = Color::from_hex(0xEBA0AC);
+const SAPPHIRE: Color = Color::from_hex(0x74C7EC);
+const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
-// ── Vehicle color palette (distinct from UI colors) ─────────────────
-const VEHICLE_COLORS: [Color; 12] = [
-    Color::from_hex(0xF38BA8), // 0: Red (player car) -- always index 0
-    Color::from_hex(0x89B4FA), // 1: Blue
-    Color::from_hex(0xA6E3A1), // 2: Green
-    Color::from_hex(0xF9E2AF), // 3: Yellow
-    Color::from_hex(0xFAB387), // 4: Peach
-    Color::from_hex(0xCBA6F7), // 5: Mauve
-    Color::from_hex(0x94E2D5), // 6: Teal
-    Color::from_hex(0xB4BEFE), // 7: Lavender
-    Color::from_hex(0xEBA0AC), // 8: Maroon
-    Color::from_hex(0x74C7EC), // 9: Sapphire
-    Color::from_hex(0xF2CDCD), // 10: Flamingo
-    Color::from_hex(0xA6ADC8), // 11: Subtext0
+/// The scrim drawn over the yard by the victory panel and the puzzle sheet.
+///
+/// Genuinely translucent — `Canvas::set` composites it with `Color::over`, so
+/// the position underneath shows through. The version this replaced was opaque
+/// and claimed otherwise in a comment.
+const SCRIM: Color = Color::rgba(0x11, 0x11, 0x1B, 0xB4);
+
+/// The colour of the car you are trying to get out, and of the exit it leaves
+/// through. One constant for both, because the strip on the right-hand edge is
+/// a picture of the car it is waiting for — not a separate decision that could
+/// come to disagree with it.
+const PLAYER_COLOR: Color = RED;
+
+/// The colours the other vehicles are dealt from, in order, wrapping.
+///
+/// `PLAYER_COLOR` is deliberately **not** in this list: the player's car is the
+/// one that ends the game, and a blocker painted the same colour would be a
+/// picture that lies about which car that is.
+const VEHICLE_COLORS: [Color; 11] = [
+    BLUE, GREEN, YELLOW, PEACH, MAUVE, TEAL, LAVENDER, MAROON, SAPPHIRE, FLAMINGO, SUBTEXT0,
 ];
 
-// ── Layout constants ────────────────────────────────────────────────
 const GRID_SIZE: usize = 6;
-const CELL_SIZE: f32 = 72.0;
-const CELL_GAP: f32 = 3.0;
-const PADDING: f32 = 20.0;
-const HEADER_HEIGHT: f32 = 60.0;
-const FOOTER_HEIGHT: f32 = 48.0;
-const EXIT_MARKER_WIDTH: f32 = 16.0;
-const CELL_CORNER_RADIUS: f32 = 6.0;
-const VEHICLE_CORNER_RADIUS: f32 = 8.0;
 
-const HEADER_FONT_SIZE: f32 = 22.0;
-const STATUS_FONT_SIZE: f32 = 14.0;
-const LABEL_FONT_SIZE: f32 = 13.0;
-const VEHICLE_FONT_SIZE: f32 = 16.0;
-const WIN_FONT_SIZE: f32 = 28.0;
+/// The row the player's car sits on and the exit opens onto.
+///
+/// Named once and read by the win rule, the exit strip and the loader. It used
+/// to be written twice — as a literal `2` in `render_exit_marker`, and as the
+/// first field of the first row of all eight puzzle tables — and checked by
+/// neither, while the win rule looked at the column alone.
+const EXIT_ROW: usize = 2;
 
-const MAX_UNDO: usize = 500;
+/// The column the player's car's tail must reach to be out.
+const EXIT_COL: usize = GRID_SIZE - 1;
+
+/// The player's car is two cells long in every puzzle, so the tables do not get
+/// to say otherwise.
+const PLAYER_LENGTH: usize = 2;
+
+/// The letter on the player's car.
+const PLAYER_LABEL: char = 'X';
+
+/// The letters `RushHour::position` deals to the blockers it is handed, in
+/// order. `X` is missing on purpose: it is the player's, and a fixture that
+/// puts a second `X` on the yard is a fixture whose failures are unreadable.
+const BLOCKER_LABELS: &str = "ABCDEFGHIJKLMNOPQRSTUVWYZ";
+
+/// Moves kept for undo. Past this the oldest is dropped and the game can no
+/// longer be unwound to the opening jam — which is why the header shows the
+/// depth.
+const MAX_UNDO: usize = 1000;
+
+const WINDOW_WIDTH: f32 = 640.0;
+const WINDOW_HEIGHT: f32 = 620.0;
+
+/// The fraction of the window height the yard is guaranteed before any band of
+/// chrome is allowed to keep its full height.
+const BOARD_SHARE: f32 = 0.5;
+
+/// Bands give up their height in this order when the window is too short:
+/// footer help first (it repeats what the buttons already say), then the
+/// header's subtitle band, then the controls. The yard never gives up any.
+const BAND_DROP_ORDER: [usize; 3] = [2, 0, 1];
 
 // ── Orientation ─────────────────────────────────────────────────────
+/// The axis a vehicle may slide along. It never turns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Orientation {
+pub enum Orientation {
     Horizontal,
     Vertical,
 }
 
+/// Short names for the puzzle tables below, where the alternative is eleven
+/// rows of `Orientation::Horizontal` per puzzle.
+const H: Orientation = Orientation::Horizontal;
+const V: Orientation = Orientation::Vertical;
+
 // ── Vehicle ─────────────────────────────────────────────────────────
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Vehicle {
-    /// Row of top-left cell.
-    row: usize,
-    /// Column of top-left cell.
-    col: usize,
-    /// Number of cells (2 for car, 3 for truck).
-    length: usize,
-    orientation: Orientation,
-    /// Index into VEHICLE_COLORS. 0 = red/player car.
-    color_index: usize,
-    /// Label character shown on the vehicle.
-    label: char,
+/// One car or truck in the yard.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Vehicle {
+    /// Identity, handed out by a counter that never restarts. Not a position in
+    /// any vector — undo entries and the selection both name a car by this.
+    pub id: usize,
+    /// Row of the topmost cell.
+    pub row: usize,
+    /// Column of the leftmost cell.
+    pub col: usize,
+    /// Cells covered: 2 for a car, 3 for a truck.
+    pub length: usize,
+    pub orientation: Orientation,
+    /// Whether this is the car that has to get out. Carried explicitly, because
+    /// inferring it from the paint is what let the palette decide the rules.
+    pub player: bool,
+    pub color: Color,
+    /// The letter drawn on it.
+    pub label: char,
 }
 
 impl Vehicle {
-    /// Returns all grid cells occupied by this vehicle as (row, col) pairs.
-    fn cells(&self) -> Vec<(usize, usize)> {
-        let mut result = Vec::with_capacity(self.length);
+    /// Every cell this vehicle covers, head first.
+    #[must_use]
+    pub fn cells(&self) -> Vec<(usize, usize)> {
+        let mut out = Vec::with_capacity(self.length);
         for i in 0..self.length {
-            match self.orientation {
-                Orientation::Horizontal => result.push((self.row, self.col + i)),
-                Orientation::Vertical => result.push((self.row + i, self.col)),
+            let cell = match self.orientation {
+                Orientation::Horizontal => self.col.checked_add(i).map(|c| (self.row, c)),
+                Orientation::Vertical => self.row.checked_add(i).map(|r| (r, self.col)),
+            };
+            if let Some(cell) = cell {
+                out.push(cell);
             }
         }
-        result
+        out
     }
 
-    /// Whether this vehicle is the player's red car (always index 0).
-    fn is_player(&self) -> bool {
-        self.color_index == 0
-    }
-
-    /// Whether a given cell (row, col) is occupied by this vehicle.
-    fn occupies(&self, row: usize, col: usize) -> bool {
+    /// The row of the last cell — the same as `row` for a horizontal vehicle.
+    #[must_use]
+    pub fn tail_row(&self) -> usize {
         match self.orientation {
-            Orientation::Horizontal => {
-                self.row == row && col >= self.col && col < self.col + self.length
-            }
-            Orientation::Vertical => {
-                self.col == col && row >= self.row && row < self.row + self.length
-            }
-        }
-    }
-
-    /// The maximum position this vehicle can reach (the tail end).
-    fn tail_row(&self) -> usize {
-        match self.orientation {
-            Orientation::Vertical => self.row + self.length - 1,
             Orientation::Horizontal => self.row,
+            Orientation::Vertical => self.row.saturating_add(self.length).saturating_sub(1),
         }
     }
 
-    fn tail_col(&self) -> usize {
+    /// The column of the last cell — the same as `col` for a vertical vehicle.
+    #[must_use]
+    pub fn tail_col(&self) -> usize {
         match self.orientation {
-            Orientation::Horizontal => self.col + self.length - 1,
+            Orientation::Horizontal => self.col.saturating_add(self.length).saturating_sub(1),
             Orientation::Vertical => self.col,
         }
     }
-}
 
-// ── Undo action ─────────────────────────────────────────────────────
-#[derive(Clone, Debug)]
-struct UndoAction {
-    vehicle_index: usize,
-    old_row: usize,
-    old_col: usize,
-    new_row: usize,
-    new_col: usize,
+    /// Whether `(row, col)` is one of this vehicle's cells.
+    ///
+    /// One rule rather than one per orientation: a vehicle occupies the
+    /// rectangle from its head to its tail, and for either axis that rectangle
+    /// is one cell thick in the other direction because head and tail agree
+    /// there.
+    #[must_use]
+    pub fn occupies(&self, row: usize, col: usize) -> bool {
+        row >= self.row && row <= self.tail_row() && col >= self.col && col <= self.tail_col()
+    }
 }
 
 // ── Difficulty ──────────────────────────────────────────────────────
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Difficulty {
+pub enum Difficulty {
     Beginner,
     Intermediate,
     Advanced,
@@ -165,7 +308,8 @@ enum Difficulty {
 }
 
 impl Difficulty {
-    fn label(self) -> &'static str {
+    #[must_use]
+    pub fn label(self) -> &'static str {
         match self {
             Self::Beginner => "Beginner",
             Self::Intermediate => "Intermediate",
@@ -174,7 +318,8 @@ impl Difficulty {
         }
     }
 
-    fn color(self) -> Color {
+    #[must_use]
+    pub fn color(self) -> Color {
         match self {
             Self::Beginner => GREEN,
             Self::Intermediate => YELLOW,
@@ -184,3071 +329,2280 @@ impl Difficulty {
     }
 }
 
-// ── Game status ─────────────────────────────────────────────────────
+// ── Puzzle definitions ──────────────────────────────────────────────
+/// One puzzle: where the player's car starts, and everything in its way.
+///
+/// The player is a column and nothing else. Its row is `EXIT_ROW` and its
+/// length is `PLAYER_LENGTH`, so a table cannot put the car on a row it could
+/// never win from, and cannot make some *other* entry the player by accident of
+/// ordering or colour.
+pub struct PuzzleDef {
+    pub difficulty: Difficulty,
+    /// The column of the player's car's left end.
+    pub player_col: usize,
+    /// `(row, col, length, orientation, label)` for each blocker.
+    pub blockers: &'static [(usize, usize, usize, Orientation, char)],
+}
+
+/// How many puzzles there are. The array below is declared this long, so the
+/// count is the compiler's to keep rather than a test's.
+pub const PUZZLE_COUNT: usize = 8;
+
+pub static PUZZLES: [PuzzleDef; PUZZLE_COUNT] = [
+    PuzzleDef {
+        difficulty: Difficulty::Beginner,
+        player_col: 0,
+        blockers: &[
+            (0, 0, 2, V, 'A'),
+            (0, 3, 2, H, 'B'),
+            (1, 4, 2, V, 'C'),
+            (3, 2, 2, H, 'D'),
+            (4, 0, 2, H, 'E'),
+            (4, 4, 2, V, 'F'),
+        ],
+    },
+    PuzzleDef {
+        difficulty: Difficulty::Beginner,
+        player_col: 1,
+        blockers: &[
+            (0, 0, 2, H, 'A'),
+            (0, 3, 3, V, 'B'),
+            (1, 0, 2, V, 'C'),
+            (3, 1, 3, H, 'D'),
+            (4, 4, 2, V, 'E'),
+            (5, 0, 2, H, 'F'),
+            (0, 5, 3, V, 'G'),
+        ],
+    },
+    PuzzleDef {
+        difficulty: Difficulty::Intermediate,
+        player_col: 0,
+        blockers: &[
+            (0, 0, 2, V, 'A'),
+            (0, 1, 2, H, 'B'),
+            (0, 4, 2, V, 'C'),
+            (1, 2, 2, V, 'D'),
+            (3, 0, 3, V, 'E'),
+            (3, 3, 2, V, 'F'),
+            (3, 4, 2, H, 'G'),
+            (5, 1, 3, H, 'H'),
+            (4, 5, 2, V, 'I'),
+        ],
+    },
+    PuzzleDef {
+        difficulty: Difficulty::Intermediate,
+        player_col: 1,
+        blockers: &[
+            (0, 0, 2, H, 'A'),
+            (0, 2, 3, H, 'B'),
+            (1, 0, 2, V, 'C'),
+            (1, 5, 2, V, 'D'),
+            (3, 0, 3, H, 'E'),
+            (3, 3, 2, V, 'F'),
+            (5, 4, 2, H, 'G'),
+            (3, 5, 2, V, 'H'),
+        ],
+    },
+    PuzzleDef {
+        difficulty: Difficulty::Advanced,
+        player_col: 1,
+        blockers: &[
+            (0, 0, 3, V, 'A'),
+            (0, 1, 2, H, 'B'),
+            (0, 5, 2, V, 'C'),
+            (1, 3, 2, V, 'D'),
+            (2, 4, 2, V, 'E'),
+            (3, 0, 2, H, 'F'),
+            (3, 2, 3, V, 'G'),
+            (4, 4, 2, H, 'H'),
+            (5, 0, 2, H, 'I'),
+            (5, 3, 2, H, 'J'),
+        ],
+    },
+    PuzzleDef {
+        difficulty: Difficulty::Advanced,
+        player_col: 0,
+        blockers: &[
+            (0, 0, 2, H, 'A'),
+            (0, 2, 2, V, 'B'),
+            (0, 3, 2, H, 'C'),
+            (1, 4, 3, V, 'D'),
+            (0, 5, 2, V, 'E'),
+            (2, 2, 2, V, 'F'),
+            (3, 0, 2, H, 'G'),
+            (4, 0, 3, H, 'H'),
+            (4, 3, 2, V, 'I'),
+            (5, 4, 2, H, 'J'),
+        ],
+    },
+    PuzzleDef {
+        difficulty: Difficulty::Expert,
+        player_col: 0,
+        blockers: &[
+            (0, 0, 2, V, 'A'),
+            (0, 1, 2, H, 'B'),
+            (0, 4, 2, V, 'C'),
+            (0, 5, 2, V, 'D'),
+            (1, 2, 2, H, 'E'),
+            (2, 3, 3, V, 'F'),
+            (3, 0, 3, H, 'G'),
+            (4, 0, 2, V, 'H'),
+            (4, 1, 2, H, 'I'),
+            (5, 3, 2, H, 'J'),
+            (4, 5, 2, V, 'K'),
+        ],
+    },
+    PuzzleDef {
+        difficulty: Difficulty::Expert,
+        player_col: 0,
+        blockers: &[
+            (0, 0, 2, H, 'A'),
+            (0, 2, 3, V, 'B'),
+            (0, 3, 2, H, 'C'),
+            (0, 5, 3, V, 'D'),
+            (1, 3, 2, V, 'E'),
+            (2, 4, 2, V, 'F'),
+            (3, 0, 3, H, 'G'),
+            (3, 3, 3, V, 'H'),
+            (4, 0, 2, V, 'I'),
+            (4, 1, 2, H, 'J'),
+            (5, 1, 2, H, 'K'),
+            (4, 4, 2, V, 'L'),
+        ],
+    },
+];
+
+// ── Undo ────────────────────────────────────────────────────────────
+/// One slide, named by the moved car's **id** and the signed number of cells it
+/// travelled along its own axis.
+///
+/// The version this replaced stored a `Vec` index in a field called
+/// `vehicle_index`, plus an `old_row`/`old_col` pair to restore and a
+/// `new_row`/`new_col` pair nothing ever read. One reversible number says the
+/// same thing and cannot be half-applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GameStatus {
-    Playing,
-    Won,
+pub struct UndoEntry {
+    pub vehicle: usize,
+    pub delta: isize,
 }
 
-// ── Puzzle definition ───────────────────────────────────────────────
-/// A puzzle is defined by a list of vehicle descriptors:
-/// (row, col, length, orientation, label_char).
-/// The first vehicle is always the player's red car.
-struct PuzzleDef {
-    difficulty: Difficulty,
-    /// (row, col, length, orientation, label)
-    vehicles: &'static [(usize, usize, usize, u8, char)],
+// ── Hit targets ─────────────────────────────────────────────────────
+/// Everything the pointer can land on. Recorded by the drawing pass, so a
+/// target exists exactly where the thing it names was painted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// A vehicle, by `Vehicle::id`.
+    Vehicle(usize),
+    /// A grid cell.
+    Cell(usize, usize),
+    Undo,
+    Restart,
+    Prev,
+    Next,
+    /// Open the puzzle sheet.
+    Puzzles,
+    /// A row of the open puzzle sheet.
+    Puzzle(usize),
+    /// Anywhere on the open sheet that is not a row: dismiss it.
+    CloseSheet,
 }
 
-/// Orientation encoding in puzzle defs: b'H' = horizontal, b'V' = vertical.
-fn orient_from_byte(b: u8) -> Orientation {
-    if b == b'H' {
-        Orientation::Horizontal
-    } else {
-        Orientation::Vertical
-    }
+// ── Layout ──────────────────────────────────────────────────────────
+/// Where everything goes in a window of a given size.
+///
+/// Built fresh every frame and never stored on the model. A remembered layout
+/// is one that can disagree with the window it is drawn in, which is how a
+/// click at (60, 90) came to pick up a car that had never been drawn there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    pub window: Rect,
+    /// Title, puzzle name, move counter.
+    pub header: Rect,
+    /// The 6x6 yard, gaps included.
+    pub board: Rect,
+    /// The strip past the right-hand edge of `EXIT_ROW` marking the way out.
+    pub exit: Rect,
+    /// Undo, restart, previous, next, puzzles.
+    pub controls: Rect,
+    /// The keyboard reminder.
+    pub footer: Rect,
+    /// The side of one grid cell.
+    pub cell: f32,
+    /// The gap between adjacent cells.
+    pub gap: f32,
+    pub font: f32,
+    pub small: f32,
+    pub big: f32,
+    pub pad: f32,
 }
 
-// ── Built-in puzzles ────────────────────────────────────────────────
-// 8 puzzles of increasing difficulty. Vehicle 0 is always the red player car.
-// Format: (row, col, length, H/V, label)
+/// Widths and heights the yard needs, per unit of cell size. The gap is a
+/// twentieth of a cell and the exit strip is not quite a quarter of one, so
+/// every board dimension is a multiple of the single number `cell`.
+const GAP_PER_CELL: f32 = 0.05;
+const EXIT_PER_CELL: f32 = 0.22;
 
-const PUZZLE_1: &[(usize, usize, usize, u8, char)] = &[
-    (2, 0, 2, b'H', 'X'), // player car, row 2
-    (0, 0, 2, b'V', 'A'), // car blocking col 0, rows 0-1
-    (0, 3, 2, b'H', 'B'),
-    (1, 4, 2, b'V', 'C'),
-    (3, 2, 2, b'H', 'D'),
-    (4, 0, 2, b'H', 'E'),
-    (4, 4, 2, b'V', 'F'),
+/// The buttons, in the order `Layout::button_rects` lays them out.
+const BUTTONS: [(Target, &str); 5] = [
+    (Target::Undo, "Undo"),
+    (Target::Restart, "Restart"),
+    (Target::Prev, "Prev"),
+    (Target::Next, "Next"),
+    (Target::Puzzles, "Puzzles"),
 ];
 
-const PUZZLE_2: &[(usize, usize, usize, u8, char)] = &[
-    (2, 1, 2, b'H', 'X'), // player car
-    (0, 0, 2, b'H', 'A'),
-    (0, 3, 3, b'V', 'B'),
-    (1, 0, 2, b'V', 'C'),
-    (3, 1, 3, b'H', 'D'),
-    (4, 4, 2, b'V', 'E'),
-    (5, 0, 2, b'H', 'F'),
-    (0, 5, 3, b'V', 'G'),
-];
+impl Layout {
+    /// The layout for a window of the given size.
+    #[must_use]
+    pub fn new(width: f32, height: f32) -> Self {
+        let w = width.max(1.0);
+        let h = height.max(1.0);
+        let font = (h / 38.0).clamp(8.0, 17.0);
+        let small = (font - 2.0).max(7.0);
+        let big = (font * 1.6).clamp(13.0, 28.0);
+        let pad = (w.min(h) * 0.02).clamp(2.0, 10.0);
 
-const PUZZLE_3: &[(usize, usize, usize, u8, char)] = &[
-    (2, 0, 2, b'H', 'X'), // player car
-    (0, 0, 2, b'V', 'A'),
-    (0, 1, 2, b'H', 'B'),
-    (0, 4, 2, b'V', 'C'),
-    (1, 2, 2, b'V', 'D'),
-    (3, 0, 3, b'V', 'E'),
-    (3, 3, 2, b'V', 'F'),
-    (3, 4, 2, b'H', 'G'),
-    (5, 1, 3, b'H', 'H'),
-    (4, 5, 2, b'V', 'I'),
-];
-
-const PUZZLE_4: &[(usize, usize, usize, u8, char)] = &[
-    (2, 1, 2, b'H', 'X'),
-    (0, 0, 2, b'H', 'A'),
-    (0, 2, 3, b'H', 'B'),
-    (1, 0, 2, b'V', 'C'),
-    (1, 5, 2, b'V', 'D'),
-    (3, 0, 3, b'H', 'E'),
-    (3, 3, 2, b'V', 'F'),
-    (5, 4, 2, b'H', 'G'),
-    (3, 5, 2, b'V', 'H'),
-];
-
-const PUZZLE_5: &[(usize, usize, usize, u8, char)] = &[
-    (2, 1, 2, b'H', 'X'),
-    (0, 0, 3, b'V', 'A'),
-    (0, 1, 2, b'H', 'B'),
-    (0, 5, 2, b'V', 'C'),
-    (1, 3, 2, b'V', 'D'),
-    (2, 4, 2, b'V', 'E'),
-    (3, 0, 2, b'H', 'F'),
-    (3, 2, 3, b'V', 'G'),
-    (4, 4, 2, b'H', 'H'),
-    (5, 0, 2, b'H', 'I'),
-    (5, 3, 2, b'H', 'J'),
-];
-
-const PUZZLE_6: &[(usize, usize, usize, u8, char)] = &[
-    (2, 0, 2, b'H', 'X'),
-    (0, 0, 2, b'H', 'A'),
-    (0, 2, 2, b'V', 'B'),
-    (0, 3, 2, b'H', 'C'),
-    (1, 4, 3, b'V', 'D'),
-    (0, 5, 2, b'V', 'E'),
-    (2, 2, 2, b'V', 'F'),
-    (3, 0, 2, b'H', 'G'),
-    (4, 0, 3, b'H', 'H'),
-    (4, 3, 2, b'V', 'I'),
-    (5, 4, 2, b'H', 'J'),
-];
-
-const PUZZLE_7: &[(usize, usize, usize, u8, char)] = &[
-    (2, 0, 2, b'H', 'X'),
-    (0, 0, 2, b'V', 'A'),
-    (0, 1, 2, b'H', 'B'),
-    (0, 4, 2, b'V', 'C'),
-    (0, 5, 2, b'V', 'D'),
-    (1, 2, 2, b'H', 'E'),
-    (2, 3, 3, b'V', 'F'),
-    (3, 0, 3, b'H', 'G'),
-    (4, 0, 2, b'V', 'H'),
-    (4, 1, 2, b'H', 'I'),
-    (5, 3, 2, b'H', 'J'),
-    (4, 5, 2, b'V', 'K'),
-];
-
-const PUZZLE_8: &[(usize, usize, usize, u8, char)] = &[
-    (2, 0, 2, b'H', 'X'),
-    (0, 0, 2, b'H', 'A'),
-    (0, 2, 3, b'V', 'B'),
-    (0, 3, 2, b'H', 'C'),
-    (0, 5, 3, b'V', 'D'),
-    (1, 3, 2, b'V', 'E'),
-    (2, 4, 2, b'V', 'F'),
-    (3, 0, 3, b'H', 'G'),
-    (3, 3, 3, b'V', 'H'),
-    (4, 0, 2, b'V', 'I'),
-    (4, 1, 2, b'H', 'J'),
-    (5, 1, 2, b'H', 'K'),
-    (4, 4, 2, b'V', 'L'),
-];
-
-static PUZZLES: &[PuzzleDef] = &[
-    PuzzleDef {
-        difficulty: Difficulty::Beginner,
-        vehicles: PUZZLE_1,
-    },
-    PuzzleDef {
-        difficulty: Difficulty::Beginner,
-        vehicles: PUZZLE_2,
-    },
-    PuzzleDef {
-        difficulty: Difficulty::Intermediate,
-        vehicles: PUZZLE_3,
-    },
-    PuzzleDef {
-        difficulty: Difficulty::Intermediate,
-        vehicles: PUZZLE_4,
-    },
-    PuzzleDef {
-        difficulty: Difficulty::Advanced,
-        vehicles: PUZZLE_5,
-    },
-    PuzzleDef {
-        difficulty: Difficulty::Advanced,
-        vehicles: PUZZLE_6,
-    },
-    PuzzleDef {
-        difficulty: Difficulty::Expert,
-        vehicles: PUZZLE_7,
-    },
-    PuzzleDef {
-        difficulty: Difficulty::Expert,
-        vehicles: PUZZLE_8,
-    },
-];
-
-// ── Helper: build occupancy grid ────────────────────────────────────
-/// Returns a 6x6 grid where each cell contains `Some(vehicle_index)` or `None`.
-fn build_occupancy(vehicles: &[Vehicle]) -> [[Option<usize>; GRID_SIZE]; GRID_SIZE] {
-    let mut grid = [[None; GRID_SIZE]; GRID_SIZE];
-    for (vi, v) in vehicles.iter().enumerate() {
-        for (r, c) in v.cells() {
-            if r < GRID_SIZE && c < GRID_SIZE {
-                grid[r][c] = Some(vi);
+        // What each band would like, in [header, controls, footer] order.
+        let mut wants = [
+            (h * 0.10).clamp(26.0, 56.0),
+            (h * 0.08).clamp(22.0, 44.0),
+            (h * 0.07).clamp(18.0, 40.0),
+        ];
+        // What is left once the yard has its guaranteed share and the two gaps
+        // that separate it from the chrome above and below. Charging the
+        // padding to the chrome rather than the yard is what keeps a small
+        // window's cells big enough to still hold their letters.
+        let budget = (h - h * BOARD_SHARE - pad * 2.0).max(0.0);
+        for &i in &BAND_DROP_ORDER {
+            if wants.iter().sum::<f32>() <= budget {
+                break;
+            }
+            if let Some(band) = wants.get_mut(i) {
+                *band = 0.0;
             }
         }
-    }
-    grid
-}
+        let [hdr_h, ctl_h, ftr_h] = wants;
 
-/// Check if a vehicle placement is valid (no overlap, within bounds).
-fn is_valid_placement(vehicles: &[Vehicle], index: usize) -> bool {
-    let v = &vehicles[index];
-    // Bounds check
-    for (r, c) in v.cells() {
-        if r >= GRID_SIZE || c >= GRID_SIZE {
-            return false;
-        }
-    }
-    // Overlap check (skip self)
-    for (vi, other) in vehicles.iter().enumerate() {
-        if vi == index {
-            continue;
-        }
-        for (r, c) in v.cells() {
-            if other.occupies(r, c) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-/// Check whether the player car (vehicle 0) has its rightmost cell at column 4
-/// (meaning the car spans columns 4-5, reaching the exit at the right edge).
-fn check_win(vehicles: &[Vehicle]) -> bool {
-    if vehicles.is_empty() {
-        return false;
-    }
-    let player = &vehicles[0];
-    // Player car is horizontal, length 2. Win when tail_col == 5 (rightmost
-    // column, since the exit is at the right side of row 2).
-    player.tail_col() >= GRID_SIZE - 1
-}
-
-/// Can vehicle at `index` move by `delta` steps along its axis?
-/// `delta` is negative for left/up, positive for right/down.
-fn can_move(vehicles: &[Vehicle], index: usize, delta: i32) -> bool {
-    if delta == 0 {
-        return true;
-    }
-    let v = &vehicles[index];
-    let occupancy = build_occupancy(vehicles);
-
-    match v.orientation {
-        Orientation::Horizontal => {
-            if delta < 0 {
-                // Moving left
-                let steps = (-delta) as usize;
-                if v.col < steps {
-                    return false;
-                }
-                for s in 1..=steps {
-                    let check_col = v.col - s;
-                    if let Some(occ) = occupancy[v.row][check_col]
-                        && occ != index
-                    {
-                        return false;
-                    }
-                }
-            } else {
-                // Moving right
-                let steps = delta as usize;
-                if v.col + v.length - 1 + steps >= GRID_SIZE {
-                    return false;
-                }
-                for s in 1..=steps {
-                    let check_col = v.col + v.length - 1 + s;
-                    if let Some(occ) = occupancy[v.row][check_col]
-                        && occ != index
-                    {
-                        return false;
-                    }
-                }
-            }
-            true
-        }
-        Orientation::Vertical => {
-            if delta < 0 {
-                // Moving up
-                let steps = (-delta) as usize;
-                if v.row < steps {
-                    return false;
-                }
-                for s in 1..=steps {
-                    let check_row = v.row - s;
-                    if let Some(occ) = occupancy[check_row][v.col]
-                        && occ != index
-                    {
-                        return false;
-                    }
-                }
-            } else {
-                // Moving down
-                let steps = delta as usize;
-                if v.row + v.length - 1 + steps >= GRID_SIZE {
-                    return false;
-                }
-                for s in 1..=steps {
-                    let check_row = v.row + v.length - 1 + s;
-                    if let Some(occ) = occupancy[check_row][v.col]
-                        && occ != index
-                    {
-                        return false;
-                    }
-                }
-            }
-            true
-        }
-    }
-}
-
-/// Move vehicle at `index` by `delta` steps. Returns true if successful.
-fn try_move(vehicles: &mut [Vehicle], index: usize, delta: i32) -> bool {
-    if !can_move(vehicles, index, delta) {
-        return false;
-    }
-    let v = &mut vehicles[index];
-    match v.orientation {
-        Orientation::Horizontal => {
-            v.col = (v.col as i32 + delta) as usize;
-        }
-        Orientation::Vertical => {
-            v.row = (v.row as i32 + delta) as usize;
-        }
-    }
-    true
-}
-
-/// Compute the maximum number of steps a vehicle can move in a direction.
-/// `direction`: -1 for left/up, +1 for right/down.
-fn max_slide(vehicles: &[Vehicle], index: usize, direction: i32) -> usize {
-    let mut steps: usize = 0;
-    loop {
-        let next_delta = if direction > 0 {
-            (steps + 1) as i32
+        // A dropped band is `Rect::EMPTY`, not a full-width strip nought pixels
+        // tall: the two read alike to anything asking "does this show?", but
+        // only one of them reads alike to anything asking "how wide is it?".
+        let header = if hdr_h > 0.0 {
+            Rect::new(0.0, 0.0, w, hdr_h)
         } else {
-            -((steps + 1) as i32)
+            Rect::EMPTY
         };
-        if can_move(vehicles, index, next_delta) {
-            steps += 1;
+        let footer = if ftr_h > 0.0 {
+            Rect::new(0.0, h - ftr_h, w, ftr_h)
         } else {
-            break;
+            Rect::EMPTY
+        };
+        let lower = if ftr_h > 0.0 { footer.y } else { h };
+        let controls = if ctl_h > 0.0 {
+            Rect::new(0.0, lower - ctl_h, w, ctl_h)
+        } else {
+            Rect::EMPTY
+        };
+
+        let top = hdr_h;
+        // From the height rather than from `controls.y`: a dropped band is
+        // `Rect::EMPTY`, which sits at the origin, so reading its `y` would put
+        // the yard's bottom edge at zero and leave no yard at all.
+        let bottom = if ctl_h > 0.0 { controls.y } else { lower };
+        let band = Rect::new(
+            pad,
+            top + pad,
+            (w - pad * 2.0).max(0.0),
+            (bottom - top - pad * 2.0).max(0.0),
+        );
+
+        // One number decides the whole yard. Solving for it from both
+        // dimensions at once is what stops a square grid from being stretched
+        // to fill a band that is not square — a stretched grid is one whose
+        // cells are no longer where a square hit box says they are. The width
+        // has to carry the exit strip and its gap as well, which is the only
+        // reason the two expressions differ.
+        let side = GRID_SIZE as f32 + (GRID_SIZE as f32 - 1.0) * GAP_PER_CELL;
+        let per_w = side + GAP_PER_CELL + EXIT_PER_CELL;
+        let per_h = side;
+        let cell = (band.w / per_w).min(band.h / per_h).max(0.0);
+        let gap = cell * GAP_PER_CELL;
+
+        let grid = GRID_SIZE as f32 * cell + (GRID_SIZE as f32 - 1.0) * gap;
+        let exit_w = cell * EXIT_PER_CELL;
+        let stack_w = grid + gap + exit_w;
+
+        let (board, exit) = if cell > 0.0 {
+            let bx = band.x + (band.w - stack_w) / 2.0;
+            let by = band.y + (band.h - grid) / 2.0;
+            // The strip sits beside `EXIT_ROW`, which is the row the win rule
+            // reads — a picture of the rule, not an independent guess at where
+            // the way out is.
+            let ey = by + EXIT_ROW as f32 * (cell + gap);
+            (
+                Rect::new(bx, by, grid, grid),
+                Rect::new(bx + grid + gap, ey, exit_w, cell),
+            )
+        } else {
+            (Rect::EMPTY, Rect::EMPTY)
+        };
+
+        Self {
+            window: Rect::new(0.0, 0.0, w, h),
+            header,
+            board,
+            exit,
+            controls,
+            footer,
+            cell,
+            gap,
+            font,
+            small,
+            big,
+            pad,
         }
     }
-    steps
-}
 
-// ── Board geometry ──────────────────────────────────────────────────
-//
-// Every pixel this app paints, and every pixel it reads back from the
-// mouse, comes from the four functions below. That is deliberate: before
-// this section existed, `cell_pixel_pos` returned coordinates *relative to
-// the grid origin*, so all five drawing sites and the click handler each
-// carried their own `gx + cx` fixup, and the span formula
-// `n * CELL_SIZE + (n - 1) * CELL_GAP` was spelled out three separate
-// times (once for the board, twice for vehicle lengths). Each restatement
-// is a place the picture can drift away from what the state believes -- the
-// fault this codebase has now collapsed fourteen times over; see
-// design-decisions.md §475-§487. `cell_origin` returns *window* pixels so
-// nothing downstream has to add an offset, and `cell_at_point` is its
-// exact inverse.
-
-/// The pixel span of `n` cells laid side by side, interior gaps included.
-///
-/// Used for both the board (`n = GRID_SIZE`) and a vehicle's body
-/// (`n = v.length`): a car covering three cells covers the two gaps
-/// between them too, which is why its body is longer than `3 * CELL_SIZE`.
-fn span(n: usize) -> f32 {
-    n as f32 * CELL_SIZE + (n as f32 - 1.0) * CELL_GAP
-}
-
-/// Total pixel size of the grid area.
-fn grid_pixel_size() -> f32 {
-    span(GRID_SIZE)
-}
-
-/// Top-left pixel of cell (row, col), in *window* coordinates.
-fn cell_origin(row: usize, col: usize) -> (f32, f32) {
-    let x = PADDING + col as f32 * (CELL_SIZE + CELL_GAP);
-    let y = PADDING + HEADER_HEIGHT + row as f32 * (CELL_SIZE + CELL_GAP);
-    (x, y)
-}
-
-/// Grid origin (top-left pixel of cell 0,0) in window coordinates.
-fn grid_origin() -> (f32, f32) {
-    cell_origin(0, 0)
-}
-
-/// The grid cell containing the window point (x, y), or `None` if the
-/// point is off the board.
-///
-/// Each interior gap is split down the middle, so a click that lands in
-/// the crack between two cells goes to the nearer one. The old rule gave
-/// the *whole* gap to the cell above/left of it, which made every cell's
-/// right and bottom edge three pixels more forgiving than its left and
-/// top -- invisible in a screenshot, but a real asymmetry under the
-/// cursor. The board's outer edge takes no slop at all: outside the
-/// painted board is outside the board.
-fn cell_at_point(x: f32, y: f32) -> Option<(usize, usize)> {
-    let (gx, gy) = grid_origin();
-    let (rx, ry) = (x - gx, y - gy);
-    let total = grid_pixel_size();
-    if rx < 0.0 || ry < 0.0 || rx >= total || ry >= total {
-        return None;
+    /// The rectangle of grid cell `(row, col)`, or `Rect::EMPTY` when the yard
+    /// has collapsed or the cell is off the grid.
+    #[must_use]
+    pub fn cell_rect(&self, row: usize, col: usize) -> Rect {
+        if self.cell <= 0.0 || row >= GRID_SIZE || col >= GRID_SIZE {
+            return Rect::EMPTY;
+        }
+        Rect::new(
+            self.board.x + col as f32 * (self.cell + self.gap),
+            self.board.y + row as f32 * (self.cell + self.gap),
+            self.cell,
+            self.cell,
+        )
     }
-    let pitch = CELL_SIZE + CELL_GAP;
-    let col = ((rx + CELL_GAP / 2.0) / pitch) as usize;
-    let row = ((ry + CELL_GAP / 2.0) / pitch) as usize;
-    Some((row.min(GRID_SIZE - 1), col.min(GRID_SIZE - 1)))
+
+    /// The rectangle a vehicle covers — its own cells plus the gaps *between*
+    /// them, which belong to the vehicle rather than to the yard once something
+    /// is sitting on them.
+    #[must_use]
+    pub fn vehicle_rect(&self, v: &Vehicle) -> Rect {
+        let head = self.cell_rect(v.row, v.col);
+        if head.is_empty() {
+            return Rect::EMPTY;
+        }
+        let body = v.length as f32 * self.cell + (v.length as f32 - 1.0) * self.gap;
+        match v.orientation {
+            Orientation::Horizontal => Rect::new(head.x, head.y, body, self.cell),
+            Orientation::Vertical => Rect::new(head.x, head.y, self.cell, body),
+        }
+    }
+
+    /// The five control buttons, left to right, sharing the controls band.
+    #[must_use]
+    pub fn button_rects(&self) -> [Rect; BUTTONS.len()] {
+        let mut out = [Rect::EMPTY; BUTTONS.len()];
+        let n = BUTTONS.len() as f32;
+        let inner = (self.controls.w - self.pad * (n + 1.0)).max(0.0);
+        let bw = inner / n;
+        let bh = (self.controls.h - self.pad).max(0.0);
+        // No `controls.is_empty()` bail in front of this: a band that was
+        // dropped has a zero width *and* a zero height, so `inner` clamps to
+        // zero and `bh` clamps to zero, and this test fires anyway. The guard
+        // that used to sit here was a line no mutation could kill.
+        if bw <= 0.0 || bh <= 0.0 {
+            return out;
+        }
+        let y = self.controls.y + (self.controls.h - bh) / 2.0;
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = Rect::new(
+                self.controls.x + self.pad + i as f32 * (bw + self.pad),
+                y,
+                bw,
+                bh,
+            );
+        }
+        out
+    }
+
+    /// The victory panel.
+    #[must_use]
+    pub fn win_panel(&self) -> Rect {
+        let w = (self.window.w * 0.72).min(340.0);
+        let h = (self.window.h * 0.42).min(190.0);
+        Rect::new(
+            (self.window.w - w) / 2.0,
+            (self.window.h - h) / 2.0,
+            w.max(0.0),
+            h.max(0.0),
+        )
+    }
+
+    /// The puzzle sheet's panel.
+    #[must_use]
+    pub fn sheet_panel(&self) -> Rect {
+        let w = (self.window.w * 0.76).min(380.0);
+        let h = (self.window.h * 0.86).min(440.0);
+        Rect::new(
+            (self.window.w - w) / 2.0,
+            (self.window.h - h) / 2.0,
+            w.max(0.0),
+            h.max(0.0),
+        )
+    }
+
+    /// One row per puzzle inside the sheet, top to bottom. Every row is
+    /// `Rect::EMPTY` when the panel has no room for a list.
+    #[must_use]
+    pub fn sheet_rows(&self) -> [Rect; PUZZLE_COUNT] {
+        let mut out = [Rect::EMPTY; PUZZLE_COUNT];
+        let panel = self.sheet_panel();
+        if panel.is_empty() {
+            return out;
+        }
+        let title_h = text::line_height(self.big, FontWeightHint::Bold);
+        let hint_h = text::line_height(self.small, FontWeightHint::Regular);
+        let listing_top = panel.y + self.pad + title_h;
+        let listing_h = (panel.bottom() - self.pad - hint_h - listing_top).max(0.0);
+        let n = PUZZLE_COUNT as f32;
+        let row_h = (listing_h - self.pad * (n - 1.0)) / n;
+        let row_w = (panel.w - self.pad * 2.0).max(0.0);
+        if row_h <= 0.0 || row_w <= 0.0 {
+            return out;
+        }
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = Rect::new(
+                panel.x + self.pad,
+                listing_top + i as f32 * (row_h + self.pad),
+                row_w,
+                row_h,
+            );
+        }
+        out
+    }
 }
 
-/// Width of the window the app draws into.
-fn window_width() -> f32 {
-    grid_pixel_size() + PADDING * 2.0 + EXIT_MARKER_WIDTH
-}
+/// The keyboard reminder, in the order the footer draws it. The second line is
+/// the one dropped first when the footer has room for only one.
+const FOOTER_LINES: [&str; 2] = [
+    "Enter: select   Arrows: slide   Z: undo",
+    "N/Tab: next   B: prev   R: restart   P: puzzles",
+];
 
-/// Height of the window the app draws into.
-fn window_height() -> f32 {
-    HEADER_HEIGHT + grid_pixel_size() + FOOTER_HEIGHT + PADDING * 2.0
-}
-
-// ── Load puzzle ─────────────────────────────────────────────────────
-fn load_puzzle(puzzle_index: usize) -> Vec<Vehicle> {
-    let def = &PUZZLES[puzzle_index % PUZZLES.len()];
-    def.vehicles
-        .iter()
-        .enumerate()
-        .map(|(i, &(row, col, length, orient, label))| Vehicle {
-            row,
-            col,
-            length,
-            orientation: orient_from_byte(orient),
-            color_index: i % VEHICLE_COLORS.len(),
-            label,
-        })
-        .collect()
-}
-
-// ── Main application state ──────────────────────────────────────────
-struct RushHour {
+// ── The game ────────────────────────────────────────────────────────
+pub struct RushHour {
     vehicles: Vec<Vehicle>,
-    /// Currently selected vehicle index.
-    selected: usize,
-    /// Game status.
-    status: GameStatus,
-    /// Current puzzle index.
-    puzzle_index: usize,
-    /// Move counter.
+    /// The selected car's **id**, for the same reason undo entries carry one.
+    selected: Option<usize>,
     moves: usize,
-    /// Undo history.
-    undo_stack: Vec<UndoAction>,
-    /// Whether the puzzle-select overlay is shown.
-    selecting_puzzle: bool,
-    /// Cursor position in the puzzle-select overlay.
-    puzzle_select_cursor: usize,
+    undo_stack: VecDeque<UndoEntry>,
+    current_puzzle: usize,
+    /// The next id to hand out. Starts at 1 and never restarts, so no id is
+    /// ever equal to the position of the vehicle holding it.
+    next_id: usize,
+    sheet_open: bool,
+    sheet_cursor: usize,
+    /// The size the last frame was drawn at, which is the size the next click
+    /// is read against.
+    size_drawn: (f32, f32),
+}
+
+impl Default for RushHour {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RushHour {
-    fn new() -> Self {
-        let vehicles = load_puzzle(0);
-        Self {
-            vehicles,
-            selected: 0,
-            status: GameStatus::Playing,
-            puzzle_index: 0,
+    #[must_use]
+    pub fn new() -> Self {
+        let mut game = Self {
+            vehicles: Vec::new(),
+            selected: None,
             moves: 0,
-            undo_stack: Vec::new(),
-            selecting_puzzle: false,
-            puzzle_select_cursor: 0,
-        }
+            undo_stack: VecDeque::new(),
+            current_puzzle: 0,
+            next_id: 1,
+            sheet_open: false,
+            sheet_cursor: 0,
+            size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
+        };
+        game.load_puzzle(0);
+        game
     }
 
-    /// Load a specific puzzle by index.
-    fn load_puzzle_at(&mut self, index: usize) {
-        self.puzzle_index = index % PUZZLES.len();
-        self.vehicles = load_puzzle(self.puzzle_index);
-        self.selected = 0;
-        self.status = GameStatus::Playing;
+    /// Remember the size the window last drew at.
+    pub fn resize(&mut self, width: f32, height: f32) {
+        self.size_drawn = (width.max(1.0), height.max(1.0));
+    }
+
+    #[must_use]
+    pub fn size_drawn(&self) -> (f32, f32) {
+        self.size_drawn
+    }
+
+    /// The layout for the size last drawn at.
+    #[must_use]
+    pub fn layout(&self) -> Layout {
+        Layout::new(self.size_drawn.0, self.size_drawn.1)
+    }
+
+    /// Load puzzle `index`, resetting the move count, the undo stack and the
+    /// selection. An index past the end of `PUZZLES` does nothing at all —
+    /// wrapping is `next_puzzle`'s and `prev_puzzle`'s business, and doing it
+    /// here as well would be a second answer to the same question.
+    pub fn load_puzzle(&mut self, index: usize) {
+        let Some(def) = PUZZLES.get(index) else {
+            return;
+        };
+        self.current_puzzle = index;
+        self.vehicles = Vec::with_capacity(def.blockers.len().saturating_add(1));
+
+        let mut id = self.next_id;
+        let mut take_id = || {
+            let out = id;
+            id = id.saturating_add(1);
+            out
+        };
+        self.vehicles.push(Vehicle {
+            id: take_id(),
+            row: EXIT_ROW,
+            col: def.player_col,
+            length: PLAYER_LENGTH,
+            orientation: Orientation::Horizontal,
+            player: true,
+            color: PLAYER_COLOR,
+            label: PLAYER_LABEL,
+        });
+        let mut palette = VEHICLE_COLORS.iter().copied().cycle();
+        for &(row, col, length, orientation, label) in def.blockers {
+            self.vehicles.push(Vehicle {
+                id: take_id(),
+                row,
+                col,
+                length,
+                orientation,
+                player: false,
+                // `cycle` over a non-empty array never runs out; the fallback is
+                // the total spelling of that, not a case anything reaches.
+                color: palette.next().unwrap_or(SUBTEXT0),
+                label,
+            });
+        }
+        self.next_id = id;
+
+        self.selected = None;
         self.moves = 0;
         self.undo_stack.clear();
-        self.selecting_puzzle = false;
+        self.sheet_open = false;
+        self.sheet_cursor = index;
     }
 
-    /// Restart current puzzle.
-    fn restart(&mut self) {
-        self.load_puzzle_at(self.puzzle_index);
+    /// Reload the current puzzle from its definition.
+    pub fn restart_puzzle(&mut self) {
+        self.load_puzzle(self.current_puzzle);
     }
 
-    /// Number of vehicles.
-    fn vehicle_count(&self) -> usize {
-        self.vehicles.len()
+    pub fn next_puzzle(&mut self) {
+        let next = self.current_puzzle.saturating_add(1);
+        self.load_puzzle(if next < PUZZLE_COUNT { next } else { 0 });
     }
 
-    /// Move the currently selected vehicle by `delta` steps.
-    /// Returns true if the move was performed.
-    fn move_selected(&mut self, delta: i32) -> bool {
-        if self.status == GameStatus::Won {
-            return false;
-        }
-        if self.selected >= self.vehicles.len() {
-            return false;
-        }
-        let old_row = self.vehicles[self.selected].row;
-        let old_col = self.vehicles[self.selected].col;
-        if try_move(&mut self.vehicles, self.selected, delta) {
-            let new_row = self.vehicles[self.selected].row;
-            let new_col = self.vehicles[self.selected].col;
-            self.undo_stack.push(UndoAction {
-                vehicle_index: self.selected,
-                old_row,
-                old_col,
-                new_row,
-                new_col,
+    pub fn prev_puzzle(&mut self) {
+        let prev = self
+            .current_puzzle
+            .checked_sub(1)
+            .unwrap_or(PUZZLE_COUNT.saturating_sub(1));
+        self.load_puzzle(prev);
+    }
+
+    #[must_use]
+    pub fn current_puzzle(&self) -> usize {
+        self.current_puzzle
+    }
+
+    #[must_use]
+    pub fn difficulty(&self) -> Difficulty {
+        PUZZLES
+            .get(self.current_puzzle)
+            .map_or(Difficulty::Beginner, |p| p.difficulty)
+    }
+
+    #[must_use]
+    pub fn moves(&self) -> usize {
+        self.moves
+    }
+
+    #[must_use]
+    pub fn undo_depth(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    #[must_use]
+    pub fn selected(&self) -> Option<usize> {
+        self.selected
+    }
+
+    #[must_use]
+    pub fn vehicles(&self) -> &[Vehicle] {
+        &self.vehicles
+    }
+
+    #[must_use]
+    pub fn sheet_open(&self) -> bool {
+        self.sheet_open
+    }
+
+    #[must_use]
+    pub fn sheet_cursor(&self) -> usize {
+        self.sheet_cursor
+    }
+
+    /// Put a position in place directly, for tests that need one specific jam.
+    /// Ids keep coming from the same never-restarting counter.
+    pub fn position(&mut self, player_col: usize, blockers: &[(usize, usize, usize, Orientation)]) {
+        self.vehicles.clear();
+        self.selected = None;
+        self.moves = 0;
+        self.undo_stack.clear();
+        let mut id = self.next_id;
+        let mut take_id = || {
+            let out = id;
+            id = id.saturating_add(1);
+            out
+        };
+        self.vehicles.push(Vehicle {
+            id: take_id(),
+            row: EXIT_ROW,
+            col: player_col,
+            length: PLAYER_LENGTH,
+            orientation: Orientation::Horizontal,
+            player: true,
+            color: PLAYER_COLOR,
+            label: PLAYER_LABEL,
+        });
+        let mut palette = VEHICLE_COLORS.iter().copied().cycle();
+        for (i, &(row, col, length, orientation)) in blockers.iter().enumerate() {
+            self.vehicles.push(Vehicle {
+                id: take_id(),
+                row,
+                col,
+                length,
+                orientation,
+                player: false,
+                color: palette.next().unwrap_or(SUBTEXT0),
+                label: BLOCKER_LABELS.chars().nth(i).unwrap_or('?'),
             });
-            if self.undo_stack.len() > MAX_UNDO {
-                self.undo_stack.remove(0);
+        }
+        self.next_id = id;
+    }
+
+    /// Which vehicle, by id, is on each cell.
+    #[must_use]
+    pub fn occupancy(&self) -> [[Option<usize>; GRID_SIZE]; GRID_SIZE] {
+        let mut grid = [[None; GRID_SIZE]; GRID_SIZE];
+        for v in &self.vehicles {
+            for (r, c) in v.cells() {
+                if let Some(row) = grid.get_mut(r)
+                    && let Some(slot) = row.get_mut(c)
+                {
+                    *slot = Some(v.id);
+                }
             }
-            self.moves += 1;
-            // Check win condition
-            if check_win(&self.vehicles) {
-                self.status = GameStatus::Won;
-            }
-            true
+        }
+        grid
+    }
+
+    /// The position in `vehicles` of the vehicle with this id.
+    #[must_use]
+    pub fn index_of(&self, id: usize) -> Option<usize> {
+        self.vehicles.iter().position(|v| v.id == id)
+    }
+
+    #[must_use]
+    pub fn vehicle(&self, id: usize) -> Option<&Vehicle> {
+        self.vehicles.iter().find(|v| v.id == id)
+    }
+
+    /// The id of the vehicle on `(row, col)`, if any.
+    #[must_use]
+    pub fn vehicle_at(&self, row: usize, col: usize) -> Option<usize> {
+        self.vehicles
+            .iter()
+            .find(|v| v.occupies(row, col))
+            .map(|v| v.id)
+    }
+
+    /// The player's car.
+    #[must_use]
+    pub fn player(&self) -> Option<&Vehicle> {
+        self.vehicles.iter().find(|v| v.player)
+    }
+
+    /// Whether the red car is out: whether it is standing on the way out.
+    ///
+    /// Derived every time it is asked, never stored, and stated as one positive
+    /// fact — the player covers the cell the exit opens onto — rather than as a
+    /// column test with a row test guarding it. The guard form would have been
+    /// dead: the loader is the only thing that sets `player`, it builds the car
+    /// horizontal on `EXIT_ROW`, and a horizontal car's slides change only its
+    /// column, so "is it on the right row" could never answer no. `occupies`
+    /// asks about both axes at once and both constants can be got wrong in a way
+    /// a test will see.
+    #[must_use]
+    pub fn is_won(&self) -> bool {
+        self.player()
+            .is_some_and(|v| v.occupies(EXIT_ROW, EXIT_COL))
+    }
+
+    /// Whether the car with this id can slide `delta` cells along its axis.
+    ///
+    /// A question about the yard and nothing else — whether the game has been
+    /// won is `slide`'s business, so that this stays a geometric predicate a
+    /// test can ask in any state.
+    ///
+    /// Asking for `delta` is asking whether the free run in front of the car is
+    /// at least that long, so this measures the run once with `max_slide` rather
+    /// than walking it a second time. The two used to be separate walks of the
+    /// same rule — a rule kept by copying — and `max_slide`'s copy was the one
+    /// no test could reach.
+    #[must_use]
+    pub fn can_slide(&self, id: usize, delta: isize) -> bool {
+        if delta == 0 {
+            return false;
+        }
+        self.max_slide(id, delta.signum()) >= delta.unsigned_abs()
+    }
+
+    /// The furthest the car can slide in `direction` (`-1` back, `+1` on),
+    /// in cells. Zero when it is blocked or the direction is neither.
+    ///
+    /// This is the single place the move rule lives. The walk starts at the
+    /// cell just past the leading edge and stops at the first cell it may not
+    /// enter; everything beyond that cell is behind an obstacle whether or not
+    /// it happens to be free.
+    #[must_use]
+    pub fn max_slide(&self, id: usize, direction: isize) -> usize {
+        if direction == 0 {
+            return 0;
+        }
+        let Some(v) = self.vehicle(id) else {
+            return 0;
+        };
+        let occupancy = self.occupancy();
+        let backwards = direction < 0;
+        // Only the cells *entered* are tested, walking outward from the leading
+        // edge. Those are strictly beyond the car's own body, so a car can never
+        // be its own obstacle and there is no "unless it is me" case — the
+        // version this replaced carried one, and it could never fire.
+        let (lead_row, lead_col) = if backwards {
+            (v.row, v.col)
         } else {
-            false
+            (v.tail_row(), v.tail_col())
+        };
+        let mut reach = 0;
+        // A car `length` long in a yard `GRID_SIZE` wide can travel at most the
+        // difference between them, so that is where the walk ends. The bound
+        // used to be the grid width, which made its last step one no car in any
+        // puzzle could ever take — a step no test could tell the loop had lost.
+        for step in 1..=GRID_SIZE.saturating_sub(v.length) {
+            let cell = match v.orientation {
+                Orientation::Horizontal => {
+                    let moved = if backwards {
+                        lead_col.checked_sub(step)
+                    } else {
+                        lead_col.checked_add(step)
+                    };
+                    moved.map(|c| (lead_row, c))
+                }
+                Orientation::Vertical => {
+                    let moved = if backwards {
+                        lead_row.checked_sub(step)
+                    } else {
+                        lead_row.checked_add(step)
+                    };
+                    moved.map(|r| (r, lead_col))
+                }
+            };
+            // Off the near edge of the yard. `checked_sub` is the form the
+            // overflow lint requires, and its `None` means exactly what the far
+            // edge's `None` means below — there is no third answer here to
+            // test for.
+            let Some((row, col)) = cell else {
+                break;
+            };
+            match occupancy.get(row).and_then(|r| r.get(col)) {
+                // Off the far edge of the yard.
+                None => break,
+                // Another car. The free cells beyond it are not reachable.
+                Some(Some(_)) => break,
+                Some(None) => {}
+            }
+            reach = step;
         }
+        reach
     }
 
-    /// Undo the last move.
-    fn undo(&mut self) {
-        if self.status == GameStatus::Won {
-            return;
+    /// Slide the car `delta` cells. One slide is one move however far it went —
+    /// which is the rule the physical game plays by, and the reason clicking a
+    /// distant cell costs the same as clicking an adjacent one. An arrow key
+    /// slides one cell, so it costs one move too.
+    ///
+    /// A won yard takes no further slides: the win panel is up, and a car that
+    /// moved under it would leave the panel claiming a win the board no longer
+    /// shows. Undo is the way back out — it is a genuine reversal, so the panel
+    /// goes with it.
+    pub fn slide(&mut self, id: usize, delta: isize) -> bool {
+        if self.is_won() {
+            return false;
         }
-        if let Some(action) = self.undo_stack.pop() {
-            self.vehicles[action.vehicle_index].row = action.old_row;
-            self.vehicles[action.vehicle_index].col = action.old_col;
-            if self.moves > 0 {
-                self.moves -= 1;
+        if !self.can_slide(id, delta) {
+            return false;
+        }
+        let Some(index) = self.index_of(id) else {
+            return false;
+        };
+        let Some(v) = self.vehicles.get_mut(index) else {
+            return false;
+        };
+        match v.orientation {
+            Orientation::Horizontal => {
+                let Some(col) = v.col.checked_add_signed(delta) else {
+                    return false;
+                };
+                v.col = col;
+            }
+            Orientation::Vertical => {
+                let Some(row) = v.row.checked_add_signed(delta) else {
+                    return false;
+                };
+                v.row = row;
             }
         }
+        self.undo_stack.push_back(UndoEntry { vehicle: id, delta });
+        if self.undo_stack.len() > MAX_UNDO {
+            self.undo_stack.pop_front();
+        }
+        self.moves = self.moves.saturating_add(1);
+        true
     }
 
-    /// Select the next vehicle (Tab / cycle forward).
-    fn select_next(&mut self) {
-        if self.vehicles.is_empty() {
-            return;
+    /// Take back the last slide. Allowed after a win, because winning is a fact
+    /// about where the red car is and undoing moves it back.
+    pub fn undo(&mut self) -> bool {
+        let Some(entry) = self.undo_stack.pop_back() else {
+            return false;
+        };
+        let Some(index) = self.index_of(entry.vehicle) else {
+            return false;
+        };
+        let Some(v) = self.vehicles.get_mut(index) else {
+            return false;
+        };
+        let back = entry.delta.saturating_neg();
+        match v.orientation {
+            Orientation::Horizontal => {
+                let Some(col) = v.col.checked_add_signed(back) else {
+                    return false;
+                };
+                v.col = col;
+            }
+            Orientation::Vertical => {
+                let Some(row) = v.row.checked_add_signed(back) else {
+                    return false;
+                };
+                v.row = row;
+            }
         }
-        self.selected = (self.selected + 1) % self.vehicles.len();
+        self.moves = self.moves.saturating_sub(1);
+        true
     }
 
-    /// Select the previous vehicle (Shift+Tab / cycle backward).
-    fn select_prev(&mut self) {
-        if self.vehicles.is_empty() {
+    /// Step the selection through the vehicles in order.
+    ///
+    /// The wrap is spelled once, in the fallback: past the end of the vector
+    /// `get` answers `None`, and the answer to "there is no next vehicle" is
+    /// the first one.
+    pub fn cycle_selection(&mut self) {
+        let Some(first) = self.vehicles.first().map(|v| v.id) else {
+            self.selected = None;
             return;
-        }
-        if self.selected == 0 {
-            self.selected = self.vehicles.len() - 1;
+        };
+        self.selected = Some(match self.selected.and_then(|id| self.index_of(id)) {
+            None => first,
+            Some(index) => self
+                .vehicles
+                .get(index.saturating_add(1))
+                .map_or(first, |v| v.id),
+        });
+    }
+
+    /// The slide that would bring this car's body onto `(row, col)`, or `None`
+    /// when the cell is off its axis or already underneath it.
+    ///
+    /// The distance is measured from whichever end is facing the cell, so
+    /// clicking the cell immediately past a car's nose moves it exactly one.
+    ///
+    /// This is the distance *asked for*, which the yard may not grant; the
+    /// click path goes through `reachable_slide`, which clamps it.
+    #[must_use]
+    pub fn slide_towards(&self, id: usize, row: usize, col: usize) -> Option<isize> {
+        let v = self.vehicle(id)?;
+        let (along, head, tail) = match v.orientation {
+            Orientation::Horizontal => {
+                if row != v.row {
+                    return None;
+                }
+                (col, v.col, v.tail_col())
+            }
+            Orientation::Vertical => {
+                if col != v.col {
+                    return None;
+                }
+                (row, v.row, v.tail_row())
+            }
+        };
+        let from = if along < head {
+            head
+        } else if along > tail {
+            tail
         } else {
-            self.selected -= 1;
+            // A cell the car is already sitting on is not somewhere to go.
+            return None;
+        };
+        isize::try_from(along)
+            .ok()
+            .zip(isize::try_from(from).ok())
+            .map(|(a, f)| a.saturating_sub(f))
+    }
+
+    /// The slide a click on `(row, col)` actually performs: the distance asked
+    /// for, clamped by how far the yard lets the car travel.
+    ///
+    /// Clamping rather than refusing is the point. Aiming at the far wall past
+    /// a blocker is how a player says "go as far as you can that way", and the
+    /// version this replaced answered it by doing nothing at all, because it
+    /// demanded the exact cell be reachable.
+    ///
+    /// `None` when the cell is off the car's axis, underneath it, or the car
+    /// cannot travel even one cell that way.
+    #[must_use]
+    pub fn reachable_slide(&self, id: usize, row: usize, col: usize) -> Option<isize> {
+        let wanted = self.slide_towards(id, row, col)?;
+        let direction = wanted.signum();
+        let reach =
+            isize::try_from(self.max_slide(id, direction).min(wanted.unsigned_abs())).ok()?;
+        match direction.saturating_mul(reach) {
+            0 => None,
+            delta => Some(delta),
         }
     }
 
-    /// Select a vehicle by clicking on a cell.
-    fn select_at_cell(&mut self, row: usize, col: usize) {
-        let occupancy = build_occupancy(&self.vehicles);
-        if let Some(vi) = occupancy[row][col] {
-            self.selected = vi;
-        }
-    }
+    // ── Drawing ────────────────────────────────────────────────────
 
-    /// Current puzzle difficulty.
-    fn difficulty(&self) -> Difficulty {
-        PUZZLES[self.puzzle_index % PUZZLES.len()].difficulty
-    }
+    /// The whole picture, and every hit box in it, for a window this size.
+    #[must_use]
+    pub fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let l = Layout::new(width, height);
+        let mut f = Frame::new(width, height);
 
-    // ── Event handling ──────────────────────────────────────────────
-
-    fn handle_event(&mut self, event: &Event) {
-        match event {
-            Event::Key(key_event) if key_event.pressed => {
-                self.handle_key(key_event);
-            }
-            Event::Mouse(mouse_event) => {
-                self.handle_mouse(mouse_event);
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_key(&mut self, key_event: &KeyEvent) {
-        // Puzzle-select overlay intercepts all keys
-        if self.selecting_puzzle {
-            self.handle_puzzle_select_key(key_event);
-            return;
-        }
-
-        // Global keys (work even when won)
-        match key_event.key {
-            Key::P if key_event.modifiers == Modifiers::NONE => {
-                self.selecting_puzzle = true;
-                self.puzzle_select_cursor = self.puzzle_index;
-                return;
-            }
-            Key::R if key_event.modifiers == Modifiers::NONE => {
-                self.restart();
-                return;
-            }
-            Key::N if key_event.modifiers == Modifiers::NONE => {
-                let next = (self.puzzle_index + 1) % PUZZLES.len();
-                self.load_puzzle_at(next);
-                return;
-            }
-            _ => {}
-        }
-
-        if self.status == GameStatus::Won {
-            return;
-        }
-
-        match key_event.key {
-            // Vehicle selection
-            Key::Tab if key_event.modifiers == Modifiers::NONE => self.select_next(),
-            Key::Tab if key_event.modifiers.shift => self.select_prev(),
-
-            // Movement
-            Key::Left
-                if key_event.modifiers == Modifiers::NONE
-                    && self.selected < self.vehicles.len() =>
-            {
-                let v = &self.vehicles[self.selected];
-                match v.orientation {
-                    Orientation::Horizontal => {
-                        self.move_selected(-1);
-                    }
-                    Orientation::Vertical => {} // can't move horizontally
-                }
-            }
-            Key::Right
-                if key_event.modifiers == Modifiers::NONE
-                    && self.selected < self.vehicles.len() =>
-            {
-                let v = &self.vehicles[self.selected];
-                match v.orientation {
-                    Orientation::Horizontal => {
-                        self.move_selected(1);
-                    }
-                    Orientation::Vertical => {}
-                }
-            }
-            Key::Up
-                if key_event.modifiers == Modifiers::NONE
-                    && self.selected < self.vehicles.len() =>
-            {
-                let v = &self.vehicles[self.selected];
-                match v.orientation {
-                    Orientation::Vertical => {
-                        self.move_selected(-1);
-                    }
-                    Orientation::Horizontal => {}
-                }
-            }
-            Key::Down
-                if key_event.modifiers == Modifiers::NONE
-                    && self.selected < self.vehicles.len() =>
-            {
-                let v = &self.vehicles[self.selected];
-                match v.orientation {
-                    Orientation::Vertical => {
-                        self.move_selected(1);
-                    }
-                    Orientation::Horizontal => {}
-                }
-            }
-
-            // Undo
-            Key::Z if key_event.modifiers == Modifiers::NONE => self.undo(),
-
-            _ => {}
-        }
-    }
-
-    fn handle_puzzle_select_key(&mut self, key_event: &KeyEvent) {
-        match key_event.key {
-            Key::Escape => {
-                self.selecting_puzzle = false;
-            }
-            Key::Up if self.puzzle_select_cursor > 0 => {
-                self.puzzle_select_cursor -= 1;
-            }
-            Key::Down if self.puzzle_select_cursor < PUZZLES.len() - 1 => {
-                self.puzzle_select_cursor += 1;
-            }
-            Key::Enter => {
-                self.load_puzzle_at(self.puzzle_select_cursor);
-            }
-            Key::Num1 => self.load_puzzle_at(0),
-            Key::Num2 => self.load_puzzle_at(1),
-            Key::Num3 => self.load_puzzle_at(2),
-            Key::Num4 => self.load_puzzle_at(3),
-            Key::Num5 => self.load_puzzle_at(4),
-            Key::Num6 => self.load_puzzle_at(5),
-            Key::Num7 => self.load_puzzle_at(6),
-            Key::Num8 => self.load_puzzle_at(7),
-            _ => {}
-        }
-    }
-
-    fn handle_mouse(&mut self, mouse_event: &MouseEvent) {
-        if let MouseEventKind::Press(MouseButton::Left) = mouse_event.kind {
-            if self.selecting_puzzle || self.status == GameStatus::Won {
-                return;
-            }
-            if let Some((row, col)) = cell_at_point(mouse_event.x, mouse_event.y) {
-                self.select_at_cell(row, col);
-            }
-        }
-    }
-
-    // ── Rendering ───────────────────────────────────────────────────
-
-    fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-
-        let grid_px = grid_pixel_size();
-        let total_width = window_width();
-        let total_height = window_height();
-
-        let _ = (width, height); // use layout params if needed
-
-        // Full background
-        cmds.push(RenderCommand::FillRect {
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: total_width,
-            height: total_height,
+            width: l.window.w,
+            height: l.window.h,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
-        // Header
-        self.render_header(&mut cmds, total_width);
-
-        // Grid background
-        let (gx, gy) = grid_origin();
-        cmds.push(RenderCommand::FillRect {
-            x: gx - 2.0,
-            y: gy - 2.0,
-            width: grid_px + 4.0,
-            height: grid_px + 4.0,
-            color: CRUST,
-            corner_radii: CornerRadii::all(4.0),
-        });
-
-        // Grid cells (empty squares)
-        self.render_grid_cells(&mut cmds);
-
-        // Exit marker on row 2, right side
-        self.render_exit_marker(&mut cmds);
-
-        // Vehicles
-        self.render_vehicles(&mut cmds);
-
-        // Footer
-        self.render_footer(&mut cmds, total_width, total_height);
-
-        // Win overlay
-        if self.status == GameStatus::Won {
-            self.render_win_overlay(&mut cmds, total_width, total_height);
+        self.draw_header(&mut f, &l);
+        self.draw_board(&mut f, &l);
+        self.draw_controls(&mut f, &l);
+        self.draw_footer(&mut f, &l);
+        if self.is_won() {
+            self.draw_win(&mut f, &l);
         }
-
-        // Puzzle select overlay
-        if self.selecting_puzzle {
-            self.render_puzzle_select(&mut cmds, total_width, total_height);
+        if self.sheet_open {
+            self.draw_sheet(&mut f, &l);
         }
-
-        cmds
+        f
     }
 
-    fn render_header(&self, cmds: &mut Vec<RenderCommand>, total_width: f32) {
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: total_width,
-            height: HEADER_HEIGHT,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.header.is_empty() {
+            return;
+        }
+        fill(f, l.header, MANTLE, CornerRadii::ZERO);
 
-        // Title
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: 10.0,
-            text: "Rush Hour".to_string(),
-            color: LAVENDER,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        let title_h = text::line_height(l.big, FontWeightHint::Bold);
+        let sub_h = text::line_height(l.small, FontWeightHint::Regular);
+        let two_lines = title_h + sub_h <= l.header.h;
 
-        // Puzzle info
-        let diff = self.difficulty();
-        let info = format!("Puzzle {} - {}", self.puzzle_index + 1, diff.label());
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: 35.0,
-            text: info,
-            color: diff.color(),
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        let top = if two_lines {
+            l.header.y + (l.header.h - title_h - sub_h) / 2.0
+        } else {
+            l.header.y + (l.header.h - title_h) / 2.0
+        };
 
-        // Move counter (right side)
+        // The counters are measured first, because what is left of the header
+        // after them is what the title has to fit in. Both used to be drawn at
+        // `total_width - 120.0` — a guess at how wide "Moves: 1234" would turn
+        // out to be — and the title was drawn at the left with no limit at all,
+        // so in a narrow window the two were painted through each other.
         let moves_text = format!("Moves: {}", self.moves);
-        cmds.push(RenderCommand::Text {
-            x: total_width - 120.0,
-            y: 10.0,
-            text: moves_text,
+        let undo_text = format!("Undo: {}", self.undo_stack.len());
+        let moves = Label {
+            text: &moves_text,
+            size: l.font,
+            weight: FontWeightHint::Regular,
             color: TEXT_COLOR,
-            font_size: STATUS_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+        };
+        let undo = Label {
+            text: &undo_text,
+            size: l.small,
+            weight: FontWeightHint::Regular,
+            color: OVERLAY0,
+        };
+        let counters_w = text::measure(moves.text, moves.size, moves.weight).max(if two_lines {
+            text::measure(undo.text, undo.size, undo.weight)
+        } else {
+            0.0
         });
 
-        // Status
-        let status_text = match self.status {
-            GameStatus::Playing => "Playing",
-            GameStatus::Won => "Solved!",
-        };
-        let status_color = match self.status {
-            GameStatus::Playing => SUBTEXT0,
-            GameStatus::Won => GREEN,
-        };
-        cmds.push(RenderCommand::Text {
-            x: total_width - 120.0,
-            y: 30.0,
-            text: status_text.to_string(),
-            color: status_color,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        let left = l.header.x + l.pad;
+        let right = l.header.right() - l.pad;
+        // The gap is `pad` wide, so a title long enough to reach the counters is
+        // cut short of them rather than up against them.
+        let room = (right - counters_w - l.pad - left).max(0.0);
+        label_limited(
+            f,
+            &Label {
+                text: "Rush Hour",
+                size: l.big,
+                weight: FontWeightHint::Bold,
+                color: LAVENDER,
+            },
+            left,
+            top,
+            room,
+        );
+        if two_lines {
+            let difficulty = self.difficulty();
+            let subtitle = format!(
+                "#{}: {}",
+                self.current_puzzle.saturating_add(1),
+                difficulty.label()
+            );
+            label_limited(
+                f,
+                &Label {
+                    text: &subtitle,
+                    size: l.small,
+                    weight: FontWeightHint::Regular,
+                    color: difficulty.color(),
+                },
+                left,
+                top + title_h,
+                room,
+            );
+        }
+
+        label_right(f, &moves, right, top);
+        if two_lines {
+            label_right(f, &undo, right, top + title_h);
+        }
     }
 
-    fn render_grid_cells(&self, cmds: &mut Vec<RenderCommand>) {
+    fn draw_board(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.board.is_empty() {
+            return;
+        }
+        // The yard the cars sit in.
+        fill(
+            f,
+            Rect::new(
+                l.board.x - l.gap,
+                l.board.y - l.gap,
+                l.board.w + l.gap * 2.0,
+                l.board.h + l.gap * 2.0,
+            ),
+            CRUST,
+            CornerRadii::all(l.gap.max(1.0)),
+        );
+
+        // Empty cells first, so a car drawn over one takes the click: the hit
+        // test answers with the *last* target covering the point.
         for row in 0..GRID_SIZE {
             for col in 0..GRID_SIZE {
-                let (cx, cy) = cell_origin(row, col);
-                cmds.push(RenderCommand::FillRect {
-                    x: cx,
-                    y: cy,
-                    width: CELL_SIZE,
-                    height: CELL_SIZE,
-                    color: SURFACE0,
-                    corner_radii: CornerRadii::all(CELL_CORNER_RADIUS),
-                });
+                let r = l.cell_rect(row, col);
+                fill(f, r, SURFACE0, CornerRadii::all(l.gap.max(1.0)));
+                f.hit(Target::Cell(row, col), r);
             }
+        }
+
+        // The way out. Deliberately not a hit target: a control that swallows a
+        // click and does nothing is worse than no control, because the click it
+        // ate would otherwise have reached whatever is beneath.
+        if !l.exit.is_empty() {
+            fill(f, l.exit, PLAYER_COLOR, CornerRadii::all(l.gap.max(1.0)));
+        }
+
+        for v in &self.vehicles {
+            let r = l.vehicle_rect(v);
+            if r.is_empty() {
+                continue;
+            }
+            if self.selected == Some(v.id) {
+                let grow = (l.gap * 0.8).max(1.0);
+                fill(
+                    f,
+                    Rect::new(r.x - grow, r.y - grow, r.w + grow * 2.0, r.h + grow * 2.0),
+                    TEXT_COLOR,
+                    CornerRadii::all(l.cell * 0.12),
+                );
+            }
+            fill(f, r, v.color, CornerRadii::all(l.cell * 0.1));
+
+            let glyph = v.label.to_string();
+            let size = (l.cell * 0.34).clamp(7.0, l.font);
+            if text::line_height(size, FontWeightHint::Bold) <= r.h
+                && text::measure(&glyph, size, FontWeightHint::Bold) <= r.w
+            {
+                label_centred(
+                    f,
+                    &Label {
+                        text: &glyph,
+                        size,
+                        weight: FontWeightHint::Bold,
+                        color: CRUST,
+                    },
+                    r,
+                );
+            }
+            f.hit(Target::Vehicle(v.id), r);
         }
     }
 
-    fn render_exit_marker(&self, cmds: &mut Vec<RenderCommand>) {
-        // Exit is at row 2, right side of the grid
-        let (gx, exit_y) = cell_origin(2, 0);
-        let exit_x = gx + grid_pixel_size() + 2.0;
-
-        // Arrow / exit indicator
-        cmds.push(RenderCommand::FillRect {
-            x: exit_x,
-            y: exit_y + 10.0,
-            width: EXIT_MARKER_WIDTH - 4.0,
-            height: CELL_SIZE - 20.0,
-            color: RED,
-            corner_radii: CornerRadii::all(4.0),
-        });
-
-        // Arrow text
-        cmds.push(RenderCommand::Text {
-            x: exit_x + 1.0,
-            y: exit_y + CELL_SIZE / 2.0 - 8.0,
-            text: ">".to_string(),
-            color: CRUST,
-            font_size: VEHICLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    fn render_vehicles(&self, cmds: &mut Vec<RenderCommand>) {
-        for (vi, v) in self.vehicles.iter().enumerate() {
-            let (cx, cy) = cell_origin(v.row, v.col);
-            let is_selected = vi == self.selected && self.status == GameStatus::Playing;
-
-            // A vehicle covers `length` cells *and* the gaps between them,
-            // which is the same measurement the board itself uses -- hence
-            // `span`, not a second copy of the formula.
-            let body = span(v.length);
-            let (vw, vh) = match v.orientation {
-                Orientation::Horizontal => (body, CELL_SIZE),
-                Orientation::Vertical => (CELL_SIZE, body),
+    fn draw_controls(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.controls.is_empty() {
+            return;
+        }
+        fill(f, l.controls, MANTLE, CornerRadii::ZERO);
+        for ((target, name), r) in BUTTONS.into_iter().zip(l.button_rects()) {
+            if r.is_empty() {
+                continue;
+            }
+            let live = match target {
+                Target::Undo => !self.undo_stack.is_empty(),
+                _ => true,
             };
-
-            let base_color = VEHICLE_COLORS[v.color_index % VEHICLE_COLORS.len()];
-
-            // Selection highlight (slightly larger background)
-            if is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: cx - 3.0,
-                    y: cy - 3.0,
-                    width: vw + 6.0,
-                    height: vh + 6.0,
-                    color: TEXT_COLOR,
-                    corner_radii: CornerRadii::all(VEHICLE_CORNER_RADIUS + 2.0),
-                });
-            }
-
-            // Vehicle body
-            cmds.push(RenderCommand::FillRect {
-                x: cx,
-                y: cy,
-                width: vw,
-                height: vh,
-                color: base_color,
-                corner_radii: CornerRadii::all(VEHICLE_CORNER_RADIUS),
-            });
-
-            // Vehicle label (centered)
-            let label_x = cx + vw / 2.0 - 5.0;
-            let label_y = cy + vh / 2.0 - 9.0;
-            cmds.push(RenderCommand::Text {
-                x: label_x,
-                y: label_y,
-                text: v.label.to_string(),
-                color: CRUST,
-                font_size: VEHICLE_FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
-    }
-
-    fn render_footer(&self, cmds: &mut Vec<RenderCommand>, total_width: f32, total_height: f32) {
-        let footer_y = total_height - FOOTER_HEIGHT;
-
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: footer_y,
-            width: total_width,
-            height: FOOTER_HEIGHT,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Key hints
-        let hints = "Tab:select  Arrows:move  Z:undo  R:restart  P:puzzles  N:next";
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: footer_y + 16.0,
-            text: hints.to_string(),
-            color: OVERLAY0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    fn render_win_overlay(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        total_width: f32,
-        total_height: f32,
-    ) {
-        // Semi-transparent overlay
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: total_width,
-            height: total_height,
-            color: Color::from_hex(0x11111B), // dark overlay
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Win banner background
-        let banner_w = 300.0;
-        let banner_h = 120.0;
-        let banner_x = (total_width - banner_w) / 2.0;
-        let banner_y = (total_height - banner_h) / 2.0;
-
-        cmds.push(RenderCommand::FillRect {
-            x: banner_x,
-            y: banner_y,
-            width: banner_w,
-            height: banner_h,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(12.0),
-        });
-
-        // Win text
-        cmds.push(RenderCommand::Text {
-            x: banner_x + 50.0,
-            y: banner_y + 20.0,
-            text: "Puzzle Solved!".to_string(),
-            color: GREEN,
-            font_size: WIN_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Moves text
-        let moves_msg = format!("Completed in {} moves", self.moves);
-        cmds.push(RenderCommand::Text {
-            x: banner_x + 60.0,
-            y: banner_y + 58.0,
-            text: moves_msg,
-            color: TEXT_COLOR,
-            font_size: STATUS_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Hint
-        cmds.push(RenderCommand::Text {
-            x: banner_x + 40.0,
-            y: banner_y + 85.0,
-            text: "N: next puzzle  R: restart  P: select".to_string(),
-            color: SUBTEXT0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    fn render_puzzle_select(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        total_width: f32,
-        total_height: f32,
-    ) {
-        // Overlay background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: total_width,
-            height: total_height,
-            color: CRUST,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Title
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: 20.0,
-            text: "Select Puzzle".to_string(),
-            color: LAVENDER,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Puzzle list
-        for (i, puzzle) in PUZZLES.iter().enumerate() {
-            let y = 60.0 + i as f32 * 36.0;
-            let is_cursor = i == self.puzzle_select_cursor;
-            let is_current = i == self.puzzle_index;
-
-            // Highlight current selection
-            if is_cursor {
-                cmds.push(RenderCommand::FillRect {
-                    x: PADDING - 4.0,
-                    y: y - 4.0,
-                    width: total_width - PADDING * 2.0 + 8.0,
-                    height: 28.0,
-                    color: SURFACE0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
-            }
-
-            let marker = if is_current { "> " } else { "  " };
-            let label = format!(
-                "{}{}. Puzzle {} - {}",
-                marker,
-                i + 1,
-                i + 1,
-                puzzle.difficulty.label()
+            fill(
+                f,
+                r,
+                if live { SURFACE1 } else { SURFACE0 },
+                CornerRadii::all(l.pad.max(1.0)),
             );
-            let color = if is_cursor {
-                TEXT_COLOR
-            } else {
-                puzzle.difficulty.color()
-            };
+            let size = (r.h * 0.4).clamp(7.0, l.small);
+            if text::line_height(size, FontWeightHint::Regular) <= r.h {
+                label_centred(
+                    f,
+                    &Label {
+                        text: name,
+                        size,
+                        weight: FontWeightHint::Regular,
+                        color: if live { TEXT_COLOR } else { OVERLAY0 },
+                    },
+                    r,
+                );
+            }
+            // Recorded even when it is drawn dim: `undo` on an empty stack
+            // answers `false` and changes nothing, and a target that reports
+            // "nothing happened" is the thing the tests can hold on to.
+            f.hit(target, r);
+        }
+    }
 
-            cmds.push(RenderCommand::Text {
-                x: PADDING + 4.0,
-                y,
-                text: label,
-                color,
-                font_size: STATUS_FONT_SIZE,
-                font_weight: if is_cursor {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
+    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.footer.is_empty() {
+            return;
+        }
+        fill(f, l.footer, MANTLE, CornerRadii::ZERO);
+        let size = l.small;
+        let lh = text::line_height(size, FontWeightHint::Regular);
+        if lh > l.footer.h {
+            return;
+        }
+        let shown = if lh * 2.0 <= l.footer.h { 2 } else { 1 };
+        let top = l.footer.y + (l.footer.h - lh * shown as f32) / 2.0;
+        f.clip(l.footer);
+        for (i, line) in FOOTER_LINES.iter().take(shown).enumerate() {
+            label(
+                f,
+                &Label {
+                    text: line,
+                    size,
+                    weight: FontWeightHint::Regular,
+                    color: if i == 0 { SUBTEXT0 } else { OVERLAY0 },
                 },
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+                l.footer.x + l.pad,
+                top + lh * i as f32,
+            );
+        }
+        f.unclip();
+    }
+
+    fn draw_win(&self, f: &mut Frame<Target>, l: &Layout) {
+        // A translucent scrim, not an opaque one: the cleared jam is the thing
+        // worth looking at, and painting it out to celebrate it was the joke
+        // the old comment was making without meaning to.
+        fill(f, l.window, SCRIM, CornerRadii::ZERO);
+
+        // Nothing behind the panel is clickable any more — a modal that only
+        // *looks* in front is one whose buttons you can press through.
+        f.discard_hits();
+
+        let panel = l.win_panel();
+        if panel.is_empty() {
+            return;
+        }
+        fill(f, panel, SURFACE0, CornerRadii::all(l.pad * 1.2));
+
+        let title_h = text::line_height(l.big, FontWeightHint::Bold);
+        let line_h = text::line_height(l.font, FontWeightHint::Regular);
+        let btn_h = (panel.h * 0.28).clamp(0.0, 44.0);
+        let stack = title_h + line_h + btn_h;
+        if stack > panel.h {
+            return;
+        }
+        let top = panel.y + (panel.h - stack) / 2.0;
+
+        label_centred(
+            f,
+            &Label {
+                text: "Puzzle Solved!",
+                size: l.big,
+                weight: FontWeightHint::Bold,
+                color: GREEN,
+            },
+            Rect::new(panel.x, top, panel.w, title_h),
+        );
+        let tally = format!("Moves: {}", self.moves);
+        label_centred(
+            f,
+            &Label {
+                text: &tally,
+                size: l.font,
+                weight: FontWeightHint::Regular,
+                color: TEXT_COLOR,
+            },
+            Rect::new(panel.x, top + title_h, panel.w, line_h),
+        );
+
+        // Undo, restart and next — the three ways on, all reachable by pointer
+        // rather than only by keys named in a footer the scrim is over.
+        let choices: [(Target, &str); 3] = [
+            (Target::Undo, "Undo"),
+            (Target::Restart, "Restart"),
+            (Target::Next, "Next"),
+        ];
+        let n = choices.len() as f32;
+        let inner = (panel.w - l.pad * (n + 1.0)).max(0.0);
+        let bw = inner / n;
+        if bw <= 0.0 || btn_h <= 0.0 {
+            return;
+        }
+        let by = top + title_h + line_h;
+        for (i, (target, name)) in choices.into_iter().enumerate() {
+            let r = Rect::new(panel.x + l.pad + i as f32 * (bw + l.pad), by, bw, btn_h);
+            fill(f, r, SURFACE1, CornerRadii::all(l.pad.max(1.0)));
+            let size = (r.h * 0.4).clamp(7.0, l.font);
+            if text::line_height(size, FontWeightHint::Regular) <= r.h {
+                label_centred(
+                    f,
+                    &Label {
+                        text: name,
+                        size,
+                        weight: FontWeightHint::Regular,
+                        color: TEXT_COLOR,
+                    },
+                    r,
+                );
+            }
+            f.hit(target, r);
+        }
+    }
+
+    fn draw_sheet(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.window, SCRIM, CornerRadii::ZERO);
+        f.discard_hits();
+
+        // The whole window dismisses the sheet, and the rows drawn after this
+        // take back the part of it they cover. That is one rule with one
+        // exception rather than "the panel closes it, except the rows, except
+        // the title, except the hint" — and it is why the sheet can be got out
+        // of by pointer at all, which the version this replaced could not.
+        f.hit(Target::CloseSheet, l.window);
+
+        let panel = l.sheet_panel();
+        if panel.is_empty() {
+            return;
+        }
+        fill(f, panel, MANTLE, CornerRadii::all(l.pad * 1.2));
+
+        let title_h = text::line_height(l.big, FontWeightHint::Bold);
+        label_centred(
+            f,
+            &Label {
+                text: "Select Puzzle",
+                size: l.big,
+                weight: FontWeightHint::Bold,
+                color: LAVENDER,
+            },
+            Rect::new(panel.x, panel.y + l.pad, panel.w, title_h),
+        );
+
+        for (i, r) in l.sheet_rows().into_iter().enumerate() {
+            if r.is_empty() {
+                continue;
+            }
+            let Some(def) = PUZZLES.get(i) else {
+                continue;
+            };
+            let on_cursor = i == self.sheet_cursor;
+            let current = i == self.current_puzzle;
+            fill(
+                f,
+                r,
+                if on_cursor { SURFACE1 } else { SURFACE0 },
+                CornerRadii::all(l.pad.max(1.0)),
+            );
+            let line = format!(
+                "{}{}. {}",
+                if current { "> " } else { "  " },
+                i.saturating_add(1),
+                def.difficulty.label()
+            );
+            let size = (r.h * 0.44).clamp(7.0, l.font);
+            if text::line_height(size, FontWeightHint::Regular) <= r.h {
+                label_centred(
+                    f,
+                    &Label {
+                        text: &line,
+                        size,
+                        weight: if on_cursor {
+                            FontWeightHint::Bold
+                        } else {
+                            FontWeightHint::Regular
+                        },
+                        color: if on_cursor {
+                            TEXT_COLOR
+                        } else {
+                            def.difficulty.color()
+                        },
+                    },
+                    r,
+                );
+            }
+            f.hit(Target::Puzzle(i), r);
         }
 
-        // Footer hint
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: total_height - 30.0,
-            text: "Up/Down: browse  Enter: select  Esc: cancel  1-8: jump".to_string(),
-            color: OVERLAY0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        let hint_h = text::line_height(l.small, FontWeightHint::Regular);
+        let hint = Rect::new(panel.x, panel.bottom() - l.pad - hint_h, panel.w, hint_h);
+        if hint.y > panel.y {
+            label_centred(
+                f,
+                &Label {
+                    text: "Up/Down: browse   Enter: open   1-8: jump   Esc: close",
+                    size: l.small,
+                    weight: FontWeightHint::Regular,
+                    color: OVERLAY0,
+                },
+                hint,
+            );
+        }
+    }
+
+    // ── Events ─────────────────────────────────────────────────────
+
+    /// Act on `target`. Returns whether anything changed.
+    fn activate(&mut self, target: Target) -> bool {
+        match target {
+            Target::Undo => self.undo(),
+            Target::Restart => {
+                self.restart_puzzle();
+                true
+            }
+            Target::Prev => {
+                self.prev_puzzle();
+                true
+            }
+            Target::Next => {
+                self.next_puzzle();
+                true
+            }
+            Target::Puzzles => {
+                self.sheet_open = true;
+                self.sheet_cursor = self.current_puzzle;
+                true
+            }
+            Target::CloseSheet => {
+                let was = self.sheet_open;
+                self.sheet_open = false;
+                was
+            }
+            Target::Puzzle(index) => {
+                self.load_puzzle(index);
+                true
+            }
+            Target::Vehicle(id) => {
+                self.selected = if self.selected == Some(id) {
+                    None
+                } else {
+                    Some(id)
+                };
+                true
+            }
+            Target::Cell(row, col) => {
+                // An empty cell the selection can travel toward is a slide, as
+                // far along as the yard permits; any other empty cell puts the
+                // car down.
+                if let Some(id) = self.selected
+                    && let Some(delta) = self.reachable_slide(id, row, col)
+                    && self.slide(id, delta)
+                {
+                    return true;
+                }
+                let had = self.selected.is_some();
+                self.selected = None;
+                had
+            }
+        }
+    }
+
+    pub fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
+            return EventResult::Ignored;
+        }
+        let (w, h) = self.size_drawn;
+        match self.frame(w, h).hit_test(ev.x, ev.y) {
+            Some(target) => {
+                self.activate(target);
+                EventResult::Consumed
+            }
+            None => {
+                // Bare background deselects, wherever it is.
+                let had = self.selected.is_some();
+                self.selected = None;
+                if had {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+        }
+    }
+
+    pub fn handle_key(&mut self, ev: &KeyEvent) -> EventResult {
+        // `pressed` decides whether this is a key going down or coming back
+        // up. Reading only `key` runs every binding twice per press.
+        if !ev.pressed {
+            return EventResult::Ignored;
+        }
+        if self.sheet_open {
+            return self.handle_sheet_key(ev);
+        }
+        let plain = ev.modifiers == guitk::event::Modifiers::NONE;
+        if let Some(index) = digit(ev.key)
+            && plain
+        {
+            self.load_puzzle(index);
+            return EventResult::Consumed;
+        }
+        match ev.key {
+            Key::P if plain => {
+                self.sheet_open = true;
+                self.sheet_cursor = self.current_puzzle;
+            }
+            Key::N if plain => self.next_puzzle(),
+            Key::Tab => self.next_puzzle(),
+            Key::B if plain => self.prev_puzzle(),
+            Key::R if plain => self.restart_puzzle(),
+            Key::Z if plain => {
+                self.undo();
+            }
+            Key::Enter | Key::Space => self.cycle_selection(),
+            Key::Escape => self.selected = None,
+            // One arm for all four arrows. Each key names an axis and a
+            // direction; whether the selected car can go that way is the move
+            // rule's business, not four copies of a guard's.
+            Key::Up | Key::Down | Key::Left | Key::Right => {
+                let (axis, delta) = match ev.key {
+                    Key::Up => (Orientation::Vertical, -1),
+                    Key::Down => (Orientation::Vertical, 1),
+                    Key::Left => (Orientation::Horizontal, -1),
+                    _ => (Orientation::Horizontal, 1),
+                };
+                let Some(id) = self.selected else {
+                    return EventResult::Ignored;
+                };
+                if self.vehicle(id).is_none_or(|v| v.orientation != axis) {
+                    return EventResult::Ignored;
+                }
+                self.slide(id, delta);
+            }
+            _ => return EventResult::Ignored,
+        }
+        EventResult::Consumed
+    }
+
+    fn handle_sheet_key(&mut self, ev: &KeyEvent) -> EventResult {
+        if let Some(index) = digit(ev.key) {
+            self.load_puzzle(index);
+            return EventResult::Consumed;
+        }
+        match ev.key {
+            Key::Escape | Key::P => self.sheet_open = false,
+            Key::Up => self.sheet_cursor = self.sheet_cursor.saturating_sub(1),
+            Key::Down => {
+                self.sheet_cursor = self
+                    .sheet_cursor
+                    .saturating_add(1)
+                    .min(PUZZLE_COUNT.saturating_sub(1));
+            }
+            Key::Enter | Key::Space => self.load_puzzle(self.sheet_cursor),
+            _ => return EventResult::Ignored,
+        }
+        EventResult::Consumed
     }
 }
 
-// ── Entry point ─────────────────────────────────────────────────────
-
-fn main() {
-    let _app = RushHour::new();
+/// The puzzle a number key names, counting from zero.
+///
+/// One table, read by both the sheet's key handler and the board's, so the two
+/// cannot come to disagree about which puzzle `3` means.
+fn digit(key: Key) -> Option<usize> {
+    Some(match key {
+        Key::Num1 => 0,
+        Key::Num2 => 1,
+        Key::Num3 => 2,
+        Key::Num4 => 3,
+        Key::Num5 => 4,
+        Key::Num6 => 5,
+        Key::Num7 => 6,
+        Key::Num8 => 7,
+        _ => return None,
+    })
 }
 
-// ── Tests ───────────────────────────────────────────────────────────
+// ── Drawing helpers ─────────────────────────────────────────────────
+
+fn fill(f: &mut Frame<Target>, r: Rect, color: Color, corner_radii: CornerRadii) {
+    if r.is_empty() {
+        return;
+    }
+    f.push(RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii,
+    });
+}
+
+/// One string and everything about how it looks, minus where it goes.
+struct Label<'a> {
+    text: &'a str,
+    size: f32,
+    weight: FontWeightHint,
+    color: Color,
+}
+
+/// The one place a `Text` command is built.
+///
+/// `limit` is passed straight through as `max_width`, so a caller that computed
+/// a width limit gets one the renderer will actually stop at. `TextOverflow`
+/// follows from it and is not a separate choice: no limit means the overflow
+/// question is vacuous, and a limit means the cut is real and had better be
+/// marked.
+fn push_text(f: &mut Frame<Target>, l: &Label, x: f32, y: f32, limit: Option<f32>) {
+    if l.text.is_empty() {
+        return;
+    }
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: l.text.to_string(),
+        color: l.color,
+        font_size: l.size,
+        font_weight: l.weight,
+        max_width: limit,
+        overflow: if limit.is_some() {
+            TextOverflow::Ellipsis
+        } else {
+            TextOverflow::Clip
+        },
+    });
+}
+
+/// Top-left corner at `(x, y)`, with no width limit.
+fn label(f: &mut Frame<Target>, l: &Label, x: f32, y: f32) {
+    push_text(f, l, x, y, None);
+}
+
+/// Top-left corner at `(x, y)`, cut with an ellipsis at `limit`.
+///
+/// No `limit <= 0.0` guard: a caller that has no room to give already passes
+/// `0.0`, and the renderer's answer to a zero limit — draw nothing of the
+/// string — is the answer such a guard would have hard-coded, so the guard
+/// would be a line no test could ever own.
+fn label_limited(f: &mut Frame<Target>, l: &Label, x: f32, y: f32, limit: f32) {
+    push_text(f, l, x, y, Some(limit));
+}
+
+/// Right-aligned at `right`, from the string's measured width.
+fn label_right(f: &mut Frame<Target>, l: &Label, right: f32, y: f32) {
+    let w = text::measure(l.text, l.size, l.weight);
+    push_text(f, l, right - w, y, None);
+}
+
+/// Centred in `r` — horizontally from the measured width, vertically from the
+/// line height — **and limited to `r`**.
+///
+/// The width that decides the centre is the width the renderer is told to stop
+/// at, so the two cannot disagree.
+fn label_centred(f: &mut Frame<Target>, l: &Label, r: Rect) {
+    if l.text.is_empty() || r.is_empty() {
+        return;
+    }
+    let w = text::measure(l.text, l.size, l.weight).min(r.w);
+    let lh = text::line_height(l.size, l.weight);
+    push_text(
+        f,
+        l,
+        r.x + (r.w - w) / 2.0,
+        r.y + (r.h - lh) / 2.0,
+        Some(r.w),
+    );
+}
+
+// ── Window plumbing ─────────────────────────────────────────────────
+
+/// The one body both the window and the test probe drive, so what a click does
+/// in a test is what it does on a screen.
+pub fn handle_event(game: &mut RushHour, event: &Event) -> EventResult {
+    match event {
+        Event::Key(ev) => game.handle_key(ev),
+        Event::Mouse(ev) => game.handle_mouse(ev),
+        Event::Resize { width, height } => {
+            game.resize(*width as f32, *height as f32);
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+impl App for RushHour {
+    fn title(&self) -> String {
+        "Rush Hour".to_string()
+    }
+
+    fn app_id(&self) -> String {
+        "rush".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against — which is the only reason it is stored at all.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for RushHour {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
+    }
+}
+
+fn main() -> ExitCode {
+    let mut game = RushHour::new();
+    app::launch("rush", &mut game)
+}
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::expect_used,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
-    // Indexing and unchecked arithmetic are how a test *asserts*: a fixture
-    // that indexes past the end of the board, or a subtraction that wraps,
-    // is a broken test and should fail loudly right there rather than be
-    // laundered through a `?` into a green run. CLAUDE.md allows both lints
-    // inside `#[cfg(test)]` for exactly this reason; production code above
-    // this line still denies them.
-    #![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
-
     use super::*;
+    use guitk::event::Modifiers;
+    use guitk::probe;
+    use std::collections::HashSet;
 
-    // ── Helper: create key event ────────────────────────────────────
+    /// The window sizes every layout claim is checked at.
+    ///
+    /// The first three are far smaller than the chrome would like — the case
+    /// the old layout never had to survive, because `render` opened with
+    /// `let _ = (width, height);` and drew a 476x568 picture whatever size the
+    /// window was.
+    ///
+    /// `170x900` earns its place separately: it is tall enough to keep every
+    /// band and narrow enough that the footer's second line and the header's
+    /// title are both wider than the whole window. It is the only size at which
+    /// the footer's clip actually cuts anything and the title is actually
+    /// elided, so without it both would be branches no test enters.
+    const WINDOWS: &[(f32, f32)] = &[
+        (140.0, 100.0),
+        (170.0, 900.0),
+        (200.0, 160.0),
+        // The only size in the list short enough to lose the *controls* — the
+        // last band to go. Without it every window keeps a controls band, and
+        // the yard's bottom edge is never read from a band that is not there.
+        (240.0, 50.0),
+        (320.0, 240.0),
+        (400.0, 900.0),
+        (480.0, 700.0),
+        (640.0, 620.0),
+        (900.0, 500.0),
+        (1280.0, 720.0),
+        (1920.0, 1080.0),
+        (2560.0, 1440.0),
+    ];
 
-    fn key_event(key: Key) -> Event {
-        Event::Key(KeyEvent {
-            key,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        })
+    /// The size the probe helpers draw at.
+    const SIZE: (f32, f32) = RushHour::SIZE;
+
+    fn game() -> RushHour {
+        RushHour::new()
     }
 
-    fn key_event_shift(key: Key) -> Event {
-        Event::Key(KeyEvent {
-            key,
-            pressed: true,
-            modifiers: Modifiers::shift(),
-            text: String::new(),
-        })
+    /// An empty yard with the red car one slide short of the way out: cols 3
+    /// and 4 of `EXIT_ROW`, with column 5 clear.
+    fn one_slide_from_winning() -> RushHour {
+        let mut g = game();
+        g.position(EXIT_COL - PLAYER_LENGTH, &[]);
+        g
     }
 
-    fn mouse_click(x: f32, y: f32) -> Event {
-        Event::Mouse(MouseEvent {
-            x,
-            y,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        })
+    /// An empty yard with the red car already out.
+    fn already_won() -> RushHour {
+        let mut g = game();
+        g.position(EXIT_COL - PLAYER_LENGTH + 1, &[]);
+        g
     }
 
-    // ── Vehicle construction ────────────────────────────────────────
-
-    #[test]
-    fn test_vehicle_cells_horizontal() {
-        let v = Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        };
-        assert_eq!(v.cells(), vec![(2, 0), (2, 1)]);
+    fn player_id(g: &RushHour) -> usize {
+        g.player().expect("every position has a player").id
     }
 
-    #[test]
-    fn test_vehicle_cells_vertical() {
-        let v = Vehicle {
-            row: 0,
-            col: 3,
-            length: 3,
-            orientation: Orientation::Vertical,
-            color_index: 1,
-            label: 'A',
-        };
-        assert_eq!(v.cells(), vec![(0, 3), (1, 3), (2, 3)]);
+    /// The id of the vehicle with this label, for tests that name a car the way
+    /// the picture does.
+    fn labelled(g: &RushHour, label: char) -> usize {
+        g.vehicles()
+            .iter()
+            .find(|v| v.label == label)
+            .unwrap_or_else(|| panic!("no vehicle labelled {label}"))
+            .id
     }
 
-    #[test]
-    fn test_vehicle_cells_single_cell() {
-        let v = Vehicle {
-            row: 4,
-            col: 5,
-            length: 1,
-            orientation: Orientation::Horizontal,
-            color_index: 2,
-            label: 'B',
-        };
-        assert_eq!(v.cells(), vec![(4, 5)]);
+    fn text_commands(f: &Frame<Target>) -> Vec<(String, f32, f32, f32, FontWeightHint)> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } => Some((text.clone(), *x, *y, *font_size, *font_weight)),
+                _ => None,
+            })
+            .collect()
     }
 
-    #[test]
-    fn test_vehicle_occupies_horizontal() {
-        let v = Vehicle {
-            row: 2,
-            col: 1,
-            length: 3,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        };
-        assert!(v.occupies(2, 1));
-        assert!(v.occupies(2, 2));
-        assert!(v.occupies(2, 3));
-        assert!(!v.occupies(2, 0));
-        assert!(!v.occupies(2, 4));
-        assert!(!v.occupies(1, 1));
-        assert!(!v.occupies(3, 2));
-    }
-
-    #[test]
-    fn test_vehicle_occupies_vertical() {
-        let v = Vehicle {
-            row: 1,
-            col: 4,
-            length: 2,
-            orientation: Orientation::Vertical,
-            color_index: 3,
-            label: 'C',
-        };
-        assert!(v.occupies(1, 4));
-        assert!(v.occupies(2, 4));
-        assert!(!v.occupies(0, 4));
-        assert!(!v.occupies(3, 4));
-        assert!(!v.occupies(1, 3));
-    }
-
-    #[test]
-    fn test_vehicle_is_player() {
-        let player = Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        };
-        let other = Vehicle {
-            row: 0,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Vertical,
-            color_index: 1,
-            label: 'A',
-        };
-        assert!(player.is_player());
-        assert!(!other.is_player());
-    }
-
-    #[test]
-    fn test_vehicle_tail_col_horizontal() {
-        let v = Vehicle {
-            row: 2,
-            col: 1,
-            length: 3,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        };
-        assert_eq!(v.tail_col(), 3);
-    }
-
-    #[test]
-    fn test_vehicle_tail_row_vertical() {
-        let v = Vehicle {
-            row: 0,
-            col: 2,
-            length: 3,
-            orientation: Orientation::Vertical,
-            color_index: 1,
-            label: 'A',
-        };
-        assert_eq!(v.tail_row(), 2);
-    }
-
-    #[test]
-    fn test_vehicle_tail_col_vertical_same_col() {
-        let v = Vehicle {
-            row: 1,
-            col: 3,
-            length: 2,
-            orientation: Orientation::Vertical,
-            color_index: 2,
-            label: 'B',
-        };
-        assert_eq!(v.tail_col(), 3);
-    }
-
-    #[test]
-    fn test_vehicle_tail_row_horizontal_same_row() {
-        let v = Vehicle {
-            row: 4,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 3,
-            label: 'C',
-        };
-        assert_eq!(v.tail_row(), 4);
-    }
-
-    // ── Orientation helper ──────────────────────────────────────────
-
-    #[test]
-    fn test_orient_from_byte_horizontal() {
-        assert_eq!(orient_from_byte(b'H'), Orientation::Horizontal);
-    }
-
-    #[test]
-    fn test_orient_from_byte_vertical() {
-        assert_eq!(orient_from_byte(b'V'), Orientation::Vertical);
-    }
-
-    #[test]
-    fn test_orient_from_byte_default_vertical() {
-        // Anything not 'H' defaults to Vertical
-        assert_eq!(orient_from_byte(b'X'), Orientation::Vertical);
-    }
-
-    // ── Occupancy grid ──────────────────────────────────────────────
-
-    #[test]
-    fn test_build_occupancy_empty() {
-        let vehicles: Vec<Vehicle> = vec![];
-        let occ = build_occupancy(&vehicles);
-        for row in occ.iter().take(GRID_SIZE) {
-            for cell in row.iter().take(GRID_SIZE) {
-                assert!(cell.is_none());
-            }
-        }
-    }
-
-    #[test]
-    fn test_build_occupancy_single_vehicle() {
-        let vehicles = vec![Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        let occ = build_occupancy(&vehicles);
-        assert_eq!(occ[2][0], Some(0));
-        assert_eq!(occ[2][1], Some(0));
-        assert_eq!(occ[2][2], None);
-        assert_eq!(occ[1][0], None);
-    }
-
-    #[test]
-    fn test_build_occupancy_multiple_vehicles() {
-        let vehicles = vec![
-            Vehicle {
-                row: 2,
-                col: 0,
-                length: 2,
-                orientation: Orientation::Horizontal,
-                color_index: 0,
-                label: 'X',
-            },
-            Vehicle {
-                row: 0,
-                col: 3,
-                length: 3,
-                orientation: Orientation::Vertical,
-                color_index: 1,
-                label: 'A',
-            },
-        ];
-        let occ = build_occupancy(&vehicles);
-        assert_eq!(occ[2][0], Some(0));
-        assert_eq!(occ[2][1], Some(0));
-        assert_eq!(occ[0][3], Some(1));
-        assert_eq!(occ[1][3], Some(1));
-        assert_eq!(occ[2][3], Some(1));
-    }
-
-    // ── Validity checks ─────────────────────────────────────────────
-
-    #[test]
-    fn test_valid_placement_in_bounds() {
-        let vehicles = vec![Vehicle {
-            row: 0,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        assert!(is_valid_placement(&vehicles, 0));
-    }
-
-    #[test]
-    fn test_invalid_placement_out_of_bounds_horizontal() {
-        let vehicles = vec![Vehicle {
-            row: 0,
-            col: 5,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        assert!(!is_valid_placement(&vehicles, 0));
-    }
-
-    #[test]
-    fn test_invalid_placement_out_of_bounds_vertical() {
-        let vehicles = vec![Vehicle {
-            row: 5,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Vertical,
-            color_index: 0,
-            label: 'X',
-        }];
-        assert!(!is_valid_placement(&vehicles, 0));
-    }
-
-    #[test]
-    fn test_invalid_placement_overlap() {
-        let vehicles = vec![
-            Vehicle {
-                row: 2,
-                col: 0,
-                length: 2,
-                orientation: Orientation::Horizontal,
-                color_index: 0,
-                label: 'X',
-            },
-            Vehicle {
-                row: 2,
-                col: 1,
-                length: 2,
-                orientation: Orientation::Horizontal,
-                color_index: 1,
-                label: 'A',
-            },
-        ];
-        // Vehicle 1 overlaps vehicle 0 at (2,1)
-        assert!(!is_valid_placement(&vehicles, 1));
-    }
-
-    // ── Win detection ───────────────────────────────────────────────
-
-    #[test]
-    fn test_check_win_not_yet() {
-        let vehicles = vec![Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        assert!(!check_win(&vehicles));
-    }
-
-    #[test]
-    fn test_check_win_at_exit() {
-        let vehicles = vec![Vehicle {
-            row: 2,
-            col: 4,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        assert!(check_win(&vehicles));
-    }
-
-    #[test]
-    fn test_check_win_empty_vehicles() {
-        let vehicles: Vec<Vehicle> = vec![];
-        assert!(!check_win(&vehicles));
-    }
-
-    #[test]
-    fn test_check_win_at_col3_not_won() {
-        let vehicles = vec![Vehicle {
-            row: 2,
-            col: 3,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        // tail_col == 4, need >= 5
-        assert!(!check_win(&vehicles));
-    }
-
-    // ── Movement ────────────────────────────────────────────────────
-
-    #[test]
-    fn test_can_move_right_free() {
-        let vehicles = vec![Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        assert!(can_move(&vehicles, 0, 1));
-    }
-
-    #[test]
-    fn test_can_move_left_at_edge() {
-        let vehicles = vec![Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        assert!(!can_move(&vehicles, 0, -1));
-    }
-
-    #[test]
-    fn test_can_move_right_blocked_by_wall() {
-        let vehicles = vec![Vehicle {
-            row: 2,
-            col: 4,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        assert!(!can_move(&vehicles, 0, 1));
-    }
-
-    #[test]
-    fn test_can_move_right_blocked_by_vehicle() {
-        let vehicles = vec![
-            Vehicle {
-                row: 2,
-                col: 0,
-                length: 2,
-                orientation: Orientation::Horizontal,
-                color_index: 0,
-                label: 'X',
-            },
-            Vehicle {
-                row: 2,
-                col: 2,
-                length: 2,
-                orientation: Orientation::Horizontal,
-                color_index: 1,
-                label: 'A',
-            },
-        ];
-        assert!(!can_move(&vehicles, 0, 1));
-    }
-
-    #[test]
-    fn test_can_move_down_free() {
-        let vehicles = vec![Vehicle {
-            row: 0,
-            col: 3,
-            length: 2,
-            orientation: Orientation::Vertical,
-            color_index: 1,
-            label: 'A',
-        }];
-        assert!(can_move(&vehicles, 0, 1));
-    }
-
-    #[test]
-    fn test_can_move_up_free() {
-        let vehicles = vec![Vehicle {
-            row: 2,
-            col: 3,
-            length: 2,
-            orientation: Orientation::Vertical,
-            color_index: 1,
-            label: 'A',
-        }];
-        assert!(can_move(&vehicles, 0, -1));
-    }
-
-    #[test]
-    fn test_can_move_up_at_top() {
-        let vehicles = vec![Vehicle {
-            row: 0,
-            col: 3,
-            length: 2,
-            orientation: Orientation::Vertical,
-            color_index: 1,
-            label: 'A',
-        }];
-        assert!(!can_move(&vehicles, 0, -1));
-    }
-
-    #[test]
-    fn test_can_move_down_at_bottom() {
-        let vehicles = vec![Vehicle {
-            row: 4,
-            col: 3,
-            length: 2,
-            orientation: Orientation::Vertical,
-            color_index: 1,
-            label: 'A',
-        }];
-        assert!(!can_move(&vehicles, 0, 1));
-    }
-
-    #[test]
-    fn test_can_move_zero_delta() {
-        let vehicles = vec![Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        assert!(can_move(&vehicles, 0, 0));
-    }
-
-    #[test]
-    fn test_try_move_success() {
-        let mut vehicles = vec![Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        assert!(try_move(&mut vehicles, 0, 1));
-        assert_eq!(vehicles[0].col, 1);
-    }
-
-    #[test]
-    fn test_try_move_failure() {
-        let mut vehicles = vec![Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        assert!(!try_move(&mut vehicles, 0, -1));
-        assert_eq!(vehicles[0].col, 0);
-    }
-
-    #[test]
-    fn test_try_move_vertical_down() {
-        let mut vehicles = vec![Vehicle {
-            row: 0,
-            col: 2,
-            length: 3,
-            orientation: Orientation::Vertical,
-            color_index: 1,
-            label: 'A',
-        }];
-        assert!(try_move(&mut vehicles, 0, 2));
-        assert_eq!(vehicles[0].row, 2);
-    }
-
-    #[test]
-    fn test_try_move_vertical_up() {
-        let mut vehicles = vec![Vehicle {
-            row: 3,
-            col: 2,
-            length: 3,
-            orientation: Orientation::Vertical,
-            color_index: 1,
-            label: 'A',
-        }];
-        assert!(try_move(&mut vehicles, 0, -2));
-        assert_eq!(vehicles[0].row, 1);
-    }
-
-    #[test]
-    fn test_can_move_multiple_steps_horizontal() {
-        let vehicles = vec![Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        assert!(can_move(&vehicles, 0, 3)); // col 0 -> 3, tail at 4
-        assert!(can_move(&vehicles, 0, 4)); // col 0 -> 4, tail at 5
-        assert!(!can_move(&vehicles, 0, 5)); // col 0 -> 5, tail at 6 (OOB)
-    }
-
-    #[test]
-    fn test_can_move_multiple_steps_blocked() {
-        let vehicles = vec![
-            Vehicle {
-                row: 2,
-                col: 0,
-                length: 2,
-                orientation: Orientation::Horizontal,
-                color_index: 0,
-                label: 'X',
-            },
-            Vehicle {
-                row: 2,
-                col: 4,
-                length: 2,
-                orientation: Orientation::Horizontal,
-                color_index: 1,
-                label: 'A',
-            },
-        ];
-        assert!(can_move(&vehicles, 0, 1)); // 0->1 ok
-        assert!(can_move(&vehicles, 0, 2)); // 0->2, tail at 3, ok
-        assert!(!can_move(&vehicles, 0, 3)); // 0->3, tail at 4, blocked by A
-    }
-
-    // ── Max slide ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_max_slide_right_free() {
-        let vehicles = vec![Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        assert_eq!(max_slide(&vehicles, 0, 1), 4); // 0->4, tail at 5
-    }
-
-    #[test]
-    fn test_max_slide_left_at_edge() {
-        let vehicles = vec![Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        assert_eq!(max_slide(&vehicles, 0, -1), 0);
-    }
-
-    #[test]
-    fn test_max_slide_right_blocked() {
-        let vehicles = vec![
-            Vehicle {
-                row: 2,
-                col: 0,
-                length: 2,
-                orientation: Orientation::Horizontal,
-                color_index: 0,
-                label: 'X',
-            },
-            Vehicle {
-                row: 2,
-                col: 3,
-                length: 2,
-                orientation: Orientation::Horizontal,
-                color_index: 1,
-                label: 'A',
-            },
-        ];
-        assert_eq!(max_slide(&vehicles, 0, 1), 1); // can move to col 1, then blocked at col 3
-    }
-
-    #[test]
-    fn test_max_slide_vertical_down() {
-        let vehicles = vec![Vehicle {
-            row: 0,
-            col: 2,
-            length: 2,
-            orientation: Orientation::Vertical,
-            color_index: 1,
-            label: 'A',
-        }];
-        assert_eq!(max_slide(&vehicles, 0, 1), 4); // 0->4, tail at 5
-    }
-
-    #[test]
-    fn test_max_slide_vertical_up() {
-        let vehicles = vec![Vehicle {
-            row: 3,
-            col: 2,
-            length: 2,
-            orientation: Orientation::Vertical,
-            color_index: 1,
-            label: 'A',
-        }];
-        assert_eq!(max_slide(&vehicles, 0, -1), 3); // can go from row 3 to row 0
-    }
-
-    // ── Board geometry ──────────────────────────────────────────────
-    //
-    // These tests are written against the *picture* -- the rectangles
-    // `render` actually emits -- rather than against restatements of the
-    // arithmetic in `cell_origin`. A test that spells out
-    // `PADDING + col * (CELL_SIZE + CELL_GAP)` and compares it to
-    // `cell_origin` is comparing the formula with itself and passes for
-    // every value of every constant in it; three of the tests replaced
-    // here did exactly that. See design-decisions.md §487.
-
-    /// Every `FillRect` the renderer emits, as (x, y, w, h).
-    fn painted_rects(app: &RushHour) -> Vec<(f32, f32, f32, f32)> {
-        app.render(window_width(), window_height())
-            .into_iter()
+    fn fill_rects(f: &Frame<Target>) -> Vec<(Rect, Color)> {
+        f.commands()
+            .iter()
             .filter_map(|c| match c {
                 RenderCommand::FillRect {
                     x,
                     y,
                     width,
                     height,
+                    color,
                     ..
-                } => Some((x, y, width, height)),
+                } => Some((Rect::new(*x, *y, *width, *height), *color)),
                 _ => None,
             })
             .collect()
     }
 
-    /// The `GRID_SIZE * GRID_SIZE` empty-cell squares, in paint order.
-    fn painted_cells(app: &RushHour) -> Vec<(f32, f32, f32, f32)> {
-        painted_rects(app)
-            .into_iter()
-            .filter(|&(_, _, w, h)| (w - CELL_SIZE).abs() < 0.001 && (h - CELL_SIZE).abs() < 0.001)
-            .collect()
-    }
+    // ── The window exists at all ───────────────────────────────────
 
-    fn close(a: f32, b: f32) -> bool {
-        (a - b).abs() < 0.001
+    #[test]
+    fn the_app_reports_a_title_an_id_and_a_size() {
+        let g = game();
+        assert_eq!(g.title(), "Rush Hour");
+        assert_eq!(g.app_id(), "rush");
+        let (w, h) = g.initial_size();
+        assert!(w > 0 && h > 0, "the window opens with no size");
     }
 
     #[test]
-    fn the_painted_cells_form_a_square_even_lattice() {
-        let app = RushHour::new();
-        let cells = painted_cells(&app);
-        assert!(
-            cells.len() >= GRID_SIZE * GRID_SIZE,
-            "expected at least one square per cell, painted {}",
-            cells.len()
-        );
-
-        // Take the first GRID_SIZE^2 -- those are the empty-cell squares,
-        // painted before any vehicle.
-        for row in 0..GRID_SIZE {
-            for col in 0..GRID_SIZE {
-                let (x, y, _, _) = cells[row * GRID_SIZE + col];
-                let (ex, ey) = cell_origin(row, col);
-                assert!(
-                    close(x, ex) && close(y, ey),
-                    "cell ({row},{col}) painted at ({x},{y}), \
-                     but cell_origin says ({ex},{ey})"
-                );
-            }
-        }
-
-        // Even pitch along both axes, and the same pitch on each.
-        let pitch_x = cells[1].0 - cells[0].0;
-        let pitch_y = cells[GRID_SIZE].1 - cells[0].1;
-        assert!(
-            close(pitch_x, pitch_y),
-            "columns are {pitch_x} apart but rows are {pitch_y} apart -- \
-             the board is not square"
-        );
-        for i in 1..GRID_SIZE {
-            let (x, _, _, _) = cells[i];
-            let (px, _, _, _) = cells[i - 1];
-            assert!(
-                close(x - px, pitch_x),
-                "column {i} sits {} from column {}, not {pitch_x}",
-                x - px,
-                i - 1
-            );
-        }
-    }
-
-    #[test]
-    fn the_board_sits_one_padding_from_the_top_and_left() {
-        // Stated as a margin of the painted board, not as a copy of
-        // `PADDING + HEADER_HEIGHT`: the point is where the player sees
-        // the board, and a restatement of the formula cannot notice a
-        // board that is drawn somewhere else.
-        let app = RushHour::new();
-        let cells = painted_cells(&app);
-        let (left, top, _, _) = cells[0];
-        assert!(
-            close(left, PADDING),
-            "left margin is {left}, want {PADDING}"
-        );
-        assert!(
-            close(top - HEADER_HEIGHT, PADDING),
-            "the board starts {} below the header, want {PADDING}",
-            top - HEADER_HEIGHT
-        );
-
-        // Bottom margin: the footer is flush to the window's bottom, so
-        // the gap between the last row and the footer must also be one
-        // PADDING. This is the assertion that would have caught dots'
-        // off-centre board (design-decisions.md §487).
-        let (_, last_y, _, last_h) = cells[GRID_SIZE * GRID_SIZE - 1];
-        let bottom_gap = window_height() - FOOTER_HEIGHT - (last_y + last_h);
-        assert!(
-            close(bottom_gap, PADDING),
-            "the board ends {bottom_gap} above the footer, want {PADDING}"
-        );
-    }
-
-    #[test]
-    fn every_cell_is_clickable_over_its_whole_painted_square() {
-        // Not just the centre: every corner and edge midpoint of the
-        // square the player can see must select that same cell.
-        let app = RushHour::new();
-        let cells = painted_cells(&app);
-        let e = 0.5_f32;
-        for row in 0..GRID_SIZE {
-            for col in 0..GRID_SIZE {
-                let (x, y, w, h) = cells[row * GRID_SIZE + col];
-                for (px, py) in [
-                    (x + e, y + e),
-                    (x + w - e, y + e),
-                    (x + e, y + h - e),
-                    (x + w - e, y + h - e),
-                    (x + w / 2.0, y + e),
-                    (x + w / 2.0, y + h - e),
-                    (x + e, y + h / 2.0),
-                    (x + w - e, y + h / 2.0),
-                    (x + w / 2.0, y + h / 2.0),
-                ] {
-                    assert_eq!(
-                        cell_at_point(px, py),
-                        Some((row, col)),
-                        "({px},{py}) is inside the square painted for \
-                         cell ({row},{col}) but does not select it"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn a_gap_between_two_cells_is_split_evenly_between_them() {
-        // The old rule handed the whole gap to the cell above/left, so
-        // each cell's right edge was CELL_GAP more forgiving than its
-        // left. Assert the symmetry directly.
-        let app = RushHour::new();
-        let cells = painted_cells(&app);
-        let (x0, y0, w, h) = cells[0];
-        let (x1, y1, _, _) = cells[1];
-        let mid_x = f32::midpoint(x0 + w, x1);
+    fn the_probe_draws_at_the_size_the_window_opens_at() {
+        // If these drift apart, every test below checks a window the program
+        // never actually opens.
+        let g = game();
+        let (w, h) = g.initial_size();
         assert_eq!(
-            cell_at_point(mid_x - 0.05, y0 + h / 2.0),
-            Some((0, 0)),
-            "the near half of the gap should belong to the left cell"
+            (w as f32, h as f32),
+            RushHour::SIZE,
+            "the probe and the window disagree about the opening size"
         );
-        assert_eq!(
-            cell_at_point(mid_x + 0.05, y0 + h / 2.0),
-            Some((0, 1)),
-            "the far half of the gap should belong to the right cell"
-        );
-
-        let (_, y_below, _, _) = cells[GRID_SIZE];
-        let mid_y = f32::midpoint(y0 + h, y_below);
-        assert_eq!(cell_at_point(x0 + w / 2.0, mid_y - 0.05), Some((0, 0)));
-        assert_eq!(cell_at_point(x0 + w / 2.0, mid_y + 0.05), Some((1, 0)));
-        let _ = y1;
     }
 
     #[test]
-    fn nothing_outside_the_painted_board_selects_a_cell() {
-        let app = RushHour::new();
-        let cells = painted_cells(&app);
-        let (left, top, _, _) = cells[0];
-        let (last_x, last_y, w, h) = cells[GRID_SIZE * GRID_SIZE - 1];
-        let (right, bottom) = (last_x + w, last_y + h);
-        let mid_x = f32::midpoint(left, right);
-        let mid_y = f32::midpoint(top, bottom);
-
-        for d in [0.05_f32, 1.0, 10.0, 100.0, 10_000.0] {
-            assert_eq!(cell_at_point(left - d, mid_y), None, "left by {d}");
-            assert_eq!(cell_at_point(right + d, mid_y), None, "right by {d}");
-            assert_eq!(cell_at_point(mid_x, top - d), None, "above by {d}");
-            assert_eq!(cell_at_point(mid_x, bottom + d), None, "below by {d}");
-        }
-    }
-
-    #[test]
-    fn a_vehicle_is_painted_over_exactly_the_cells_it_occupies() {
-        // A car of length 3 covers three cells *and* the two gaps between
-        // them; if its body were `3 * CELL_SIZE` it would stop short of
-        // the last cell it is standing on.
-        let app = RushHour::new();
-        let cells = painted_cells(&app);
-        let rects = painted_rects(&app);
-        for v in &app.vehicles {
-            let (fx, fy, _, _) = cells[v.row * GRID_SIZE + v.col];
-            let (lr, lc) = match v.orientation {
-                Orientation::Horizontal => (v.row, v.col + v.length - 1),
-                Orientation::Vertical => (v.row + v.length - 1, v.col),
-            };
-            let (lx, ly, lw, lh) = cells[lr * GRID_SIZE + lc];
-            let (want_w, want_h) = match v.orientation {
-                Orientation::Horizontal => (lx + lw - fx, CELL_SIZE),
-                Orientation::Vertical => (CELL_SIZE, ly + lh - fy),
-            };
-            assert!(
-                rects.iter().any(|&(x, y, w, h)| close(x, fx)
-                    && close(y, fy)
-                    && close(w, want_w)
-                    && close(h, want_h)),
-                "vehicle '{}' at ({},{}) length {} should be painted as \
-                 {want_w}x{want_h} at ({fx},{fy}) -- spanning from its \
-                 first cell to its last -- but no such rect was emitted",
-                v.label,
-                v.row,
-                v.col,
-                v.length
-            );
-        }
-    }
-
-    #[test]
-    fn clicking_a_vehicle_anywhere_on_its_body_selects_it() {
-        let app = RushHour::new();
-        for (vi, v) in app.vehicles.iter().enumerate() {
-            for step in 0..v.length {
-                let (row, col) = match v.orientation {
-                    Orientation::Horizontal => (v.row, v.col + step),
-                    Orientation::Vertical => (v.row + step, v.col),
-                };
-                let (x, y) = cell_origin(row, col);
-                let mut a = RushHour::new();
-                a.selected = usize::MAX;
-                a.handle_event(&mouse_click(x + CELL_SIZE / 2.0, y + CELL_SIZE / 2.0));
-                assert_eq!(
-                    a.selected, vi,
-                    "clicking cell ({row},{col}) -- part of vehicle '{}' -- \
-                     selected {} instead",
-                    v.label, a.selected
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_window_is_exactly_big_enough_for_what_is_painted() {
-        // Every painted rectangle fits, *and* the extreme ones sit where
-        // the layout says they should -- containment alone is satisfied
-        // by an infinite family of wrong layouts (§487).
-        let app = RushHour::new();
-        for (x, y, w, h) in painted_rects(&app) {
-            assert!(
-                x >= -0.001 && y >= -0.001,
-                "a rect starts off-window at ({x},{y})"
-            );
-            assert!(
-                x + w <= window_width() + 0.001 && y + h <= window_height() + 0.001,
-                "a rect at ({x},{y}) size {w}x{h} overflows the \
-                 {}x{} window",
-                window_width(),
-                window_height()
-            );
-        }
-        // The exit marker is the rightmost thing on the board, and the
-        // window reserves EXIT_MARKER_WIDTH plus a PADDING for it.
-        let cells = painted_cells(&app);
-        let (last_x, _, w, _) = cells[GRID_SIZE * GRID_SIZE - 1];
-        let right_of_board = window_width() - (last_x + w);
+    fn the_window_close_request_exits() {
+        let mut g = game();
         assert!(
-            close(right_of_board, PADDING + EXIT_MARKER_WIDTH),
-            "there is {right_of_board} to the right of the board, but the \
-             exit marker plus its padding needs {}",
-            PADDING + EXIT_MARKER_WIDTH
+            matches!(g.on_event(&Event::CloseRequested), Response::Exit),
+            "the close button does not close the window"
         );
     }
 
     #[test]
-    fn a_vehicle_body_covers_its_cells_and_the_gaps_between_them() {
-        assert!(close(span(1), CELL_SIZE), "one cell is just a cell");
-        for n in 2..=GRID_SIZE {
-            let s = span(n);
-            assert!(
-                s > n as f32 * CELL_SIZE,
-                "{n} cells span {s}, which does not include the {} gaps \
-                 between them",
-                n - 1
-            );
-            assert!(
-                close(s - span(n - 1), CELL_SIZE + CELL_GAP),
-                "going from {} cells to {n} should add one cell and one \
-                 gap, but adds {}",
-                n - 1,
-                s - span(n - 1)
-            );
-        }
-    }
-
-    // ── Load puzzle ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_load_puzzle_0() {
-        let vehicles = load_puzzle(0);
-        assert!(!vehicles.is_empty());
-        // First vehicle is always the player car
-        assert_eq!(vehicles[0].color_index, 0);
-        assert_eq!(vehicles[0].label, 'X');
-        assert_eq!(vehicles[0].orientation, Orientation::Horizontal);
-        assert_eq!(vehicles[0].row, 2);
+    fn only_a_handled_event_asks_for_a_repaint() {
+        // A window that repaints on every event it was handed — including the
+        // ones it ignored — is a window that never idles.
+        let mut g = game();
+        assert!(
+            matches!(
+                g.on_event(&Event::Key(probe::press(Key::P))),
+                Response::Redraw
+            ),
+            "opening the puzzle sheet does not ask for a repaint"
+        );
+        assert!(
+            matches!(
+                g.on_event(&Event::Key(probe::press(Key::F5))),
+                Response::Idle
+            ),
+            "a key the game does not use still asks for a repaint"
+        );
     }
 
     #[test]
-    fn test_load_puzzle_all_valid() {
-        for i in 0..PUZZLES.len() {
-            let vehicles = load_puzzle(i);
-            assert!(!vehicles.is_empty(), "Puzzle {i} is empty");
-            // Player is always first
-            assert_eq!(vehicles[0].color_index, 0, "Puzzle {i} player not index 0");
+    fn the_window_opens_on_a_puzzle_already_loaded() {
+        // `main` used to be `let _app = RushHour::new();`, which built this and
+        // then dropped it.
+        let g = game();
+        assert!(!g.vehicles().is_empty(), "the opening yard is empty");
+        assert!(g.player().is_some(), "there is no red car to get out");
+        assert_eq!(g.current_puzzle(), 0);
+    }
+
+    #[test]
+    fn a_resize_event_changes_the_size_clicks_are_read_against() {
+        let mut g = game();
+        handle_event(
+            &mut g,
+            &Event::Resize {
+                width: 900,
+                height: 700,
+            },
+        );
+        assert_eq!(g.size_drawn(), (900.0, 700.0));
+        assert_eq!(g.layout(), Layout::new(900.0, 700.0));
+    }
+
+    #[test]
+    fn drawing_at_a_size_is_what_decides_where_the_next_click_lands() {
+        // `render` stores the size it was given. Without that a window resized
+        // by the compositor — which sends no `Resize` the app has to act on
+        // before its first paint — would be clicked at the old size.
+        let mut g = game();
+        g.render(1024.0, 768.0);
+        assert_eq!(g.size_drawn(), (1024.0, 768.0));
+    }
+
+    // ── Layout ─────────────────────────────────────────────────────
+
+    #[test]
+    fn the_layout_is_a_function_of_the_window_size_alone() {
+        for &(w, h) in WINDOWS {
             assert_eq!(
-                vehicles[0].orientation,
-                Orientation::Horizontal,
-                "Puzzle {i} player not horizontal"
+                Layout::new(w, h),
+                Layout::new(w, h),
+                "the layout at {w}x{h} depends on something other than the size"
             );
-            assert_eq!(vehicles[0].row, 2, "Puzzle {i} player not on row 2");
         }
     }
 
     #[test]
-    fn test_load_puzzle_wraps_index() {
-        let v1 = load_puzzle(0);
-        let v2 = load_puzzle(PUZZLES.len());
-        assert_eq!(v1.len(), v2.len());
-    }
-
-    #[test]
-    fn test_puzzle_count() {
-        assert!(PUZZLES.len() >= 8);
-    }
-
-    // ── RushHour app construction ───────────────────────────────────
-
-    #[test]
-    fn test_new_app() {
-        let app = RushHour::new();
-        assert_eq!(app.puzzle_index, 0);
-        assert_eq!(app.selected, 0);
-        assert_eq!(app.moves, 0);
-        assert_eq!(app.status, GameStatus::Playing);
-        assert!(app.undo_stack.is_empty());
-        assert!(!app.selecting_puzzle);
-    }
-
-    #[test]
-    fn test_load_puzzle_at() {
-        let mut app = RushHour::new();
-        app.moves = 10;
-        app.status = GameStatus::Won;
-        app.load_puzzle_at(3);
-        assert_eq!(app.puzzle_index, 3);
-        assert_eq!(app.moves, 0);
-        assert_eq!(app.status, GameStatus::Playing);
-        assert!(app.undo_stack.is_empty());
-    }
-
-    #[test]
-    fn test_restart() {
-        let mut app = RushHour::new();
-        app.move_selected(1);
-        app.move_selected(1);
-        assert!(app.moves > 0);
-        app.restart();
-        assert_eq!(app.moves, 0);
-        assert_eq!(app.status, GameStatus::Playing);
-    }
-
-    #[test]
-    fn test_vehicle_count() {
-        let app = RushHour::new();
-        assert_eq!(app.vehicle_count(), app.vehicles.len());
-    }
-
-    // ── Selection ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_select_next() {
-        let mut app = RushHour::new();
-        assert_eq!(app.selected, 0);
-        app.select_next();
-        assert_eq!(app.selected, 1);
-    }
-
-    #[test]
-    fn test_select_next_wraps() {
-        let mut app = RushHour::new();
-        let count = app.vehicles.len();
-        for _ in 0..count {
-            app.select_next();
-        }
-        assert_eq!(app.selected, 0);
-    }
-
-    #[test]
-    fn test_select_prev() {
-        let mut app = RushHour::new();
-        app.selected = 2;
-        app.select_prev();
-        assert_eq!(app.selected, 1);
-    }
-
-    #[test]
-    fn test_select_prev_wraps() {
-        let mut app = RushHour::new();
-        assert_eq!(app.selected, 0);
-        app.select_prev();
-        assert_eq!(app.selected, app.vehicles.len() - 1);
-    }
-
-    #[test]
-    fn test_select_at_cell_occupied() {
-        let app_orig = RushHour::new();
-        let mut app = RushHour::new();
-        // Player car occupies row 2, col 0 and 1 in puzzle 0
-        let player_row = app_orig.vehicles[0].row;
-        let player_col = app_orig.vehicles[0].col;
-        app.selected = 3; // something else
-        app.select_at_cell(player_row, player_col);
-        assert_eq!(app.selected, 0);
-    }
-
-    #[test]
-    fn test_select_at_cell_empty() {
-        let mut app = RushHour::new();
-        let prev = app.selected;
-        // Find an unoccupied cell
-        let occ = build_occupancy(&app.vehicles);
-        let mut found = false;
-        for (r, row) in occ.iter().enumerate().take(GRID_SIZE) {
-            for (c, cell) in row.iter().enumerate().take(GRID_SIZE) {
-                if cell.is_none() {
-                    app.select_at_cell(r, c);
-                    assert_eq!(app.selected, prev);
-                    found = true;
-                    break;
+    fn every_band_stays_inside_the_window() {
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            for (name, r) in [
+                ("header", l.header),
+                ("board", l.board),
+                ("exit", l.exit),
+                ("controls", l.controls),
+                ("footer", l.footer),
+            ] {
+                if r.is_empty() {
+                    continue;
                 }
-            }
-            if found {
-                break;
-            }
-        }
-    }
-
-    // ── Moving ──────────────────────────────────────────────────────
-
-    #[test]
-    fn test_move_selected_increments_moves() {
-        let mut app = RushHour::new();
-        // Player car at (2, 0), try to move right if possible
-        if can_move(&app.vehicles, 0, 1) {
-            assert!(app.move_selected(1));
-            assert_eq!(app.moves, 1);
-        }
-    }
-
-    #[test]
-    fn test_move_selected_adds_undo() {
-        let mut app = RushHour::new();
-        if can_move(&app.vehicles, 0, 1) {
-            app.move_selected(1);
-            assert_eq!(app.undo_stack.len(), 1);
-        }
-    }
-
-    #[test]
-    fn test_move_selected_blocked_returns_false() {
-        let mut app = RushHour::new();
-        // Move left at col 0 should fail
-        app.selected = 0;
-        assert!(!app.move_selected(-1));
-        assert_eq!(app.moves, 0);
-    }
-
-    #[test]
-    fn test_move_selected_after_win_returns_false() {
-        let mut app = RushHour::new();
-        app.status = GameStatus::Won;
-        assert!(!app.move_selected(1));
-    }
-
-    #[test]
-    fn test_move_selected_invalid_index() {
-        let mut app = RushHour::new();
-        app.selected = 999;
-        assert!(!app.move_selected(1));
-    }
-
-    // ── Undo ────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_undo_reverses_move() {
-        let mut app = RushHour::new();
-        let orig_col = app.vehicles[0].col;
-        if can_move(&app.vehicles, 0, 1) {
-            app.move_selected(1);
-            assert_eq!(app.vehicles[0].col, orig_col + 1);
-            app.undo();
-            assert_eq!(app.vehicles[0].col, orig_col);
-            assert_eq!(app.moves, 0);
-        }
-    }
-
-    #[test]
-    fn test_undo_empty_stack() {
-        let mut app = RushHour::new();
-        app.undo(); // Should not crash
-        assert_eq!(app.moves, 0);
-    }
-
-    #[test]
-    fn test_undo_multiple() {
-        let mut app = RushHour::new();
-        let orig_col = app.vehicles[0].col;
-        if can_move(&app.vehicles, 0, 1) && can_move(&app.vehicles, 0, 2) {
-            app.move_selected(1);
-            app.move_selected(1);
-            assert_eq!(app.moves, 2);
-            app.undo();
-            app.undo();
-            assert_eq!(app.vehicles[0].col, orig_col);
-            assert_eq!(app.moves, 0);
-        }
-    }
-
-    #[test]
-    fn test_undo_does_nothing_when_won() {
-        let mut app = RushHour::new();
-        app.status = GameStatus::Won;
-        app.undo_stack.push(UndoAction {
-            vehicle_index: 0,
-            old_row: 2,
-            old_col: 0,
-            new_row: 2,
-            new_col: 1,
-        });
-        app.undo(); // Should not undo when won
-        assert_eq!(app.undo_stack.len(), 1);
-    }
-
-    #[test]
-    fn test_undo_stack_max_size() {
-        let mut app = RushHour::new();
-        // Fill undo stack beyond MAX_UNDO
-        // We need to actually move, so create a simple scenario
-        // Just use a single car that can slide all the way
-        app.vehicles = vec![Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        // Slide back and forth many times
-        for _ in 0..MAX_UNDO + 10 {
-            if app.vehicles[0].col < 4 {
-                app.move_selected(1);
-            } else {
-                app.move_selected(-1);
-            }
-        }
-        assert!(app.undo_stack.len() <= MAX_UNDO);
-    }
-
-    // ── Key events ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_key_tab_selects_next() {
-        let mut app = RushHour::new();
-        assert_eq!(app.selected, 0);
-        app.handle_event(&key_event(Key::Tab));
-        assert_eq!(app.selected, 1);
-    }
-
-    #[test]
-    fn test_key_shift_tab_selects_prev() {
-        let mut app = RushHour::new();
-        app.selected = 2;
-        app.handle_event(&key_event_shift(Key::Tab));
-        assert_eq!(app.selected, 1);
-    }
-
-    #[test]
-    fn test_key_z_undo() {
-        let mut app = RushHour::new();
-        let orig = app.vehicles[0].col;
-        if can_move(&app.vehicles, 0, 1) {
-            app.move_selected(1);
-            app.handle_event(&key_event(Key::Z));
-            assert_eq!(app.vehicles[0].col, orig);
-        }
-    }
-
-    #[test]
-    fn test_key_r_restarts() {
-        let mut app = RushHour::new();
-        app.moves = 5;
-        app.handle_event(&key_event(Key::R));
-        assert_eq!(app.moves, 0);
-        assert_eq!(app.status, GameStatus::Playing);
-    }
-
-    #[test]
-    fn test_key_n_next_puzzle() {
-        let mut app = RushHour::new();
-        assert_eq!(app.puzzle_index, 0);
-        app.handle_event(&key_event(Key::N));
-        assert_eq!(app.puzzle_index, 1);
-    }
-
-    #[test]
-    fn test_key_n_wraps_around() {
-        let mut app = RushHour::new();
-        app.puzzle_index = PUZZLES.len() - 1;
-        app.load_puzzle_at(app.puzzle_index);
-        app.handle_event(&key_event(Key::N));
-        assert_eq!(app.puzzle_index, 0);
-    }
-
-    #[test]
-    fn test_key_p_opens_puzzle_select() {
-        let mut app = RushHour::new();
-        app.handle_event(&key_event(Key::P));
-        assert!(app.selecting_puzzle);
-    }
-
-    #[test]
-    fn test_key_escape_closes_puzzle_select() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        app.handle_event(&key_event(Key::Escape));
-        assert!(!app.selecting_puzzle);
-    }
-
-    #[test]
-    fn test_puzzle_select_up_down() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        app.puzzle_select_cursor = 0;
-        app.handle_event(&key_event(Key::Down));
-        assert_eq!(app.puzzle_select_cursor, 1);
-        app.handle_event(&key_event(Key::Up));
-        assert_eq!(app.puzzle_select_cursor, 0);
-    }
-
-    #[test]
-    fn test_puzzle_select_up_at_top() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        app.puzzle_select_cursor = 0;
-        app.handle_event(&key_event(Key::Up));
-        assert_eq!(app.puzzle_select_cursor, 0);
-    }
-
-    #[test]
-    fn test_puzzle_select_down_at_bottom() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        app.puzzle_select_cursor = PUZZLES.len() - 1;
-        app.handle_event(&key_event(Key::Down));
-        assert_eq!(app.puzzle_select_cursor, PUZZLES.len() - 1);
-    }
-
-    #[test]
-    fn test_puzzle_select_enter_loads() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        app.puzzle_select_cursor = 3;
-        app.handle_event(&key_event(Key::Enter));
-        assert_eq!(app.puzzle_index, 3);
-        assert!(!app.selecting_puzzle);
-    }
-
-    #[test]
-    fn test_puzzle_select_number_keys() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        app.handle_event(&key_event(Key::Num5));
-        assert_eq!(app.puzzle_index, 4);
-        assert!(!app.selecting_puzzle);
-    }
-
-    #[test]
-    fn test_puzzle_select_intercepts_all_keys() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        let orig_selected = app.selected;
-        // Tab should not select next vehicle when puzzle select is open
-        app.handle_event(&key_event(Key::Tab));
-        assert_eq!(app.selected, orig_selected);
-    }
-
-    #[test]
-    fn test_key_left_horizontal_vehicle() {
-        let mut app = RushHour::new();
-        app.selected = 0;
-        // Move player car right first, then left
-        if can_move(&app.vehicles, 0, 1) {
-            app.move_selected(1);
-            let col_after_right = app.vehicles[0].col;
-            app.handle_event(&key_event(Key::Left));
-            assert_eq!(app.vehicles[0].col, col_after_right - 1);
-        }
-    }
-
-    #[test]
-    fn test_key_right_horizontal_vehicle() {
-        let mut app = RushHour::new();
-        app.selected = 0;
-        let orig_col = app.vehicles[0].col;
-        if can_move(&app.vehicles, 0, 1) {
-            app.handle_event(&key_event(Key::Right));
-            assert_eq!(app.vehicles[0].col, orig_col + 1);
-        }
-    }
-
-    #[test]
-    fn test_key_up_vertical_vehicle() {
-        let mut app = RushHour::new();
-        // Find a vertical vehicle
-        let vi = app
-            .vehicles
-            .iter()
-            .position(|v| v.orientation == Orientation::Vertical);
-        if let Some(vi) = vi {
-            app.selected = vi;
-            let orig_row = app.vehicles[vi].row;
-            if can_move(&app.vehicles, vi, -1) {
-                app.handle_event(&key_event(Key::Up));
-                assert_eq!(app.vehicles[vi].row, orig_row - 1);
+                assert!(
+                    r.x >= -0.01 && r.y >= -0.01 && r.right() <= w + 0.01 && r.bottom() <= h + 0.01,
+                    "{name} escapes the {w}x{h} window: {r:?}"
+                );
             }
         }
     }
 
     #[test]
-    fn test_key_down_vertical_vehicle() {
-        let mut app = RushHour::new();
-        let vi = app
-            .vehicles
-            .iter()
-            .position(|v| v.orientation == Orientation::Vertical);
-        if let Some(vi) = vi {
-            app.selected = vi;
-            let orig_row = app.vehicles[vi].row;
-            if can_move(&app.vehicles, vi, 1) {
-                app.handle_event(&key_event(Key::Down));
-                assert_eq!(app.vehicles[vi].row, orig_row + 1);
+    fn the_board_never_overlaps_the_chrome() {
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if l.board.is_empty() {
+                continue;
+            }
+            for (name, r) in [
+                ("header", l.header),
+                ("controls", l.controls),
+                ("footer", l.footer),
+            ] {
+                if r.is_empty() {
+                    continue;
+                }
+                assert!(
+                    l.board.intersect(r).is_none(),
+                    "at {w}x{h} the board sits on the {name}: board {:?}, {name} {r:?}",
+                    l.board
+                );
             }
         }
     }
 
     #[test]
-    fn test_key_left_on_vertical_does_nothing() {
-        let mut app = RushHour::new();
-        let vi = app
-            .vehicles
-            .iter()
-            .position(|v| v.orientation == Orientation::Vertical);
-        if let Some(vi) = vi {
-            app.selected = vi;
-            let orig = app.vehicles[vi].col;
-            app.handle_event(&key_event(Key::Left));
-            assert_eq!(app.vehicles[vi].col, orig);
-        }
-    }
-
-    #[test]
-    fn test_key_up_on_horizontal_does_nothing() {
-        let mut app = RushHour::new();
-        app.selected = 0; // player car, horizontal
-        let orig = app.vehicles[0].row;
-        app.handle_event(&key_event(Key::Up));
-        assert_eq!(app.vehicles[0].row, orig);
-    }
-
-    #[test]
-    fn test_keys_ignored_when_won() {
-        let mut app = RushHour::new();
-        app.status = GameStatus::Won;
-        let orig_selected = app.selected;
-        app.handle_event(&key_event(Key::Tab));
-        assert_eq!(app.selected, orig_selected);
-    }
-
-    #[test]
-    fn test_r_works_when_won() {
-        let mut app = RushHour::new();
-        app.status = GameStatus::Won;
-        app.moves = 10;
-        app.handle_event(&key_event(Key::R));
-        assert_eq!(app.moves, 0);
-        assert_eq!(app.status, GameStatus::Playing);
-    }
-
-    #[test]
-    fn test_n_works_when_won() {
-        let mut app = RushHour::new();
-        app.status = GameStatus::Won;
-        app.handle_event(&key_event(Key::N));
-        assert_eq!(app.puzzle_index, 1);
-        assert_eq!(app.status, GameStatus::Playing);
-    }
-
-    #[test]
-    fn test_p_works_when_won() {
-        let mut app = RushHour::new();
-        app.status = GameStatus::Won;
-        app.handle_event(&key_event(Key::P));
-        assert!(app.selecting_puzzle);
-    }
-
-    // ── Mouse events ────────────────────────────────────────────────
-
-    #[test]
-    fn test_mouse_click_selects_vehicle() {
-        let mut app = RushHour::new();
-        app.selected = 999; // Invalid to prove click works
-        let player = &app.vehicles[0];
-        let (cx, cy) = cell_origin(player.row, player.col);
-        let click = mouse_click(cx + CELL_SIZE / 2.0, cy + CELL_SIZE / 2.0);
-        app.handle_event(&click);
-        assert_eq!(app.selected, 0);
-    }
-
-    #[test]
-    fn test_mouse_click_on_empty_cell() {
-        let mut app = RushHour::new();
-        app.selected = 0;
-        let occ = build_occupancy(&app.vehicles);
-        for (r, row) in occ.iter().enumerate().take(GRID_SIZE) {
-            for (c, cell) in row.iter().enumerate().take(GRID_SIZE) {
-                if cell.is_none() {
-                    let (cx, cy) = cell_origin(r, c);
-                    let click = mouse_click(cx + CELL_SIZE / 2.0, cy + CELL_SIZE / 2.0);
-                    app.handle_event(&click);
-                    assert_eq!(app.selected, 0); // unchanged
-                    return;
+    fn the_chrome_bands_do_not_overlap_each_other() {
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            let bands = [
+                ("header", l.header),
+                ("controls", l.controls),
+                ("footer", l.footer),
+            ];
+            for (i, (an, a)) in bands.iter().enumerate() {
+                for (bn, b) in bands.iter().skip(i + 1) {
+                    if a.is_empty() || b.is_empty() {
+                        continue;
+                    }
+                    assert!(a.intersect(*b).is_none(), "at {w}x{h} {an} overlaps {bn}");
                 }
             }
         }
     }
 
     #[test]
-    fn test_mouse_click_outside_grid() {
-        let mut app = RushHour::new();
-        app.selected = 0;
-        let click = mouse_click(0.0, 0.0); // header area
-        app.handle_event(&click);
-        assert_eq!(app.selected, 0);
-    }
-
-    #[test]
-    fn test_mouse_ignored_when_won() {
-        let mut app = RushHour::new();
-        app.status = GameStatus::Won;
-        app.selected = 0;
-        // Click on second vehicle
-        if app.vehicles.len() > 1 {
-            let v = &app.vehicles[1];
-            let (cx, cy) = cell_origin(v.row, v.col);
-            let click = mouse_click(cx + CELL_SIZE / 2.0, cy + CELL_SIZE / 2.0);
-            app.handle_event(&click);
-            assert_eq!(app.selected, 0); // unchanged
+    fn the_board_is_drawn_with_square_cells() {
+        // A 6x6 grid stretched to fill a band that is not square has cells that
+        // no longer match the square hit boxes recorded over them.
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if l.cell <= 0.0 {
+                continue;
+            }
+            let r = l.cell_rect(0, 0);
+            assert!(
+                (r.w - r.h).abs() < 0.001,
+                "at {w}x{h} a cell is {}x{}, not square",
+                r.w,
+                r.h
+            );
         }
     }
 
     #[test]
-    fn test_mouse_ignored_when_selecting_puzzle() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        app.selected = 0;
-        if app.vehicles.len() > 1 {
-            let v = &app.vehicles[1];
-            let (cx, cy) = cell_origin(v.row, v.col);
-            let click = mouse_click(cx + CELL_SIZE / 2.0, cy + CELL_SIZE / 2.0);
-            app.handle_event(&click);
-            assert_eq!(app.selected, 0);
-        }
-    }
-
-    // ── Rendering ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_render_returns_commands() {
-        let app = RushHour::new();
-        let cmds = app.render(800.0, 600.0);
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_win_overlay() {
-        let mut app = RushHour::new();
-        app.status = GameStatus::Won;
-        let cmds = app.render(800.0, 600.0);
-        // Should have more commands due to win overlay
-        let normal_app = RushHour::new();
-        let normal_cmds = normal_app.render(800.0, 600.0);
-        assert!(cmds.len() > normal_cmds.len());
-    }
-
-    #[test]
-    fn test_render_puzzle_select() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        let cmds = app.render(800.0, 600.0);
-        assert!(!cmds.is_empty());
-    }
-
-    // ── Win flow ────────────────────────────────────────────────────
-
-    #[test]
-    fn test_win_detection_on_move() {
-        let mut app = RushHour::new();
-        // Set up a simple winning scenario
-        app.vehicles = vec![Vehicle {
-            row: 2,
-            col: 3,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        app.selected = 0;
-        // Move right by 1 → col 4, tail at 5 → win
-        app.move_selected(1);
-        assert_eq!(app.status, GameStatus::Won);
-    }
-
-    #[test]
-    fn test_no_false_win() {
-        let mut app = RushHour::new();
-        // Move right by 1 if possible; should not win from col 0
-        if can_move(&app.vehicles, 0, 1) {
-            app.move_selected(1);
-            // Player car was at col 0, now at col 1, tail at 2 → not a win
-            assert_eq!(app.status, GameStatus::Playing);
-        }
-    }
-
-    // ── Difficulty ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_difficulty_label() {
-        assert_eq!(Difficulty::Beginner.label(), "Beginner");
-        assert_eq!(Difficulty::Intermediate.label(), "Intermediate");
-        assert_eq!(Difficulty::Advanced.label(), "Advanced");
-        assert_eq!(Difficulty::Expert.label(), "Expert");
-    }
-
-    #[test]
-    fn test_difficulty_color_distinct() {
-        // Colors for different difficulties should differ
-        let b = Difficulty::Beginner.color();
-        let i = Difficulty::Intermediate.color();
-        let a = Difficulty::Advanced.color();
-        let e = Difficulty::Expert.color();
-        // Just check they are not all the same
-        assert!(b != i || i != a || a != e);
-    }
-
-    #[test]
-    fn test_app_difficulty() {
-        let app = RushHour::new();
-        let d = app.difficulty();
-        // Puzzle 0 is Beginner
-        assert_eq!(d, Difficulty::Beginner);
-    }
-
-    // ── Game status ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_game_status_playing() {
-        let app = RushHour::new();
-        assert_eq!(app.status, GameStatus::Playing);
-    }
-
-    #[test]
-    fn test_game_status_won() {
-        let mut app = RushHour::new();
-        app.status = GameStatus::Won;
-        assert_eq!(app.status, GameStatus::Won);
-    }
-
-    // ── Key release ignored ─────────────────────────────────────────
-
-    #[test]
-    fn test_key_release_ignored() {
-        let mut app = RushHour::new();
-        let orig = app.selected;
-        let release = Event::Key(KeyEvent {
-            key: Key::Tab,
-            pressed: false,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        app.handle_event(&release);
-        assert_eq!(app.selected, orig);
-    }
-
-    // ── Full play sequence ──────────────────────────────────────────
-
-    #[test]
-    fn test_full_play_simple() {
-        // Create a simple puzzle: just the player car at col 0, nothing blocking
-        let mut app = RushHour::new();
-        app.vehicles = vec![Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        app.selected = 0;
-
-        // Move right 4 times to reach col 4, tail at 5
-        for _ in 0..4 {
-            assert_eq!(app.status, GameStatus::Playing);
-            app.handle_event(&key_event(Key::Right));
-        }
-        assert_eq!(app.status, GameStatus::Won);
-        assert_eq!(app.moves, 4);
-    }
-
-    #[test]
-    fn test_full_play_with_undo() {
-        let mut app = RushHour::new();
-        app.vehicles = vec![Vehicle {
-            row: 2,
-            col: 0,
-            length: 2,
-            orientation: Orientation::Horizontal,
-            color_index: 0,
-            label: 'X',
-        }];
-        app.selected = 0;
-
-        // Move right, undo, move right again
-        app.handle_event(&key_event(Key::Right));
-        assert_eq!(app.vehicles[0].col, 1);
-        app.handle_event(&key_event(Key::Z));
-        assert_eq!(app.vehicles[0].col, 0);
-        app.handle_event(&key_event(Key::Right));
-        assert_eq!(app.vehicles[0].col, 1);
-    }
-
-    // ── Puzzle select number keys ───────────────────────────────────
-
-    #[test]
-    fn test_puzzle_select_num1() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        app.puzzle_index = 5;
-        app.handle_event(&key_event(Key::Num1));
-        assert_eq!(app.puzzle_index, 0);
-        assert!(!app.selecting_puzzle);
-    }
-
-    #[test]
-    fn test_puzzle_select_num2() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        app.handle_event(&key_event(Key::Num2));
-        assert_eq!(app.puzzle_index, 1);
-    }
-
-    #[test]
-    fn test_puzzle_select_num3() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        app.handle_event(&key_event(Key::Num3));
-        assert_eq!(app.puzzle_index, 2);
-    }
-
-    #[test]
-    fn test_puzzle_select_num4() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        app.handle_event(&key_event(Key::Num4));
-        assert_eq!(app.puzzle_index, 3);
-    }
-
-    #[test]
-    fn test_puzzle_select_num6() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        app.handle_event(&key_event(Key::Num6));
-        assert_eq!(app.puzzle_index, 5);
-    }
-
-    #[test]
-    fn test_puzzle_select_num7() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        app.handle_event(&key_event(Key::Num7));
-        assert_eq!(app.puzzle_index, 6);
-    }
-
-    #[test]
-    fn test_puzzle_select_num8() {
-        let mut app = RushHour::new();
-        app.selecting_puzzle = true;
-        app.handle_event(&key_event(Key::Num8));
-        assert_eq!(app.puzzle_index, 7);
-    }
-
-    // ── Edge cases ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_move_truck_vertical() {
-        let mut vehicles = vec![Vehicle {
-            row: 0,
-            col: 0,
-            length: 3,
-            orientation: Orientation::Vertical,
-            color_index: 1,
-            label: 'A',
-        }];
-        assert!(try_move(&mut vehicles, 0, 1)); // row 0->1
-        assert_eq!(vehicles[0].row, 1);
-        assert!(try_move(&mut vehicles, 0, 1)); // row 1->2
-        assert_eq!(vehicles[0].row, 2);
-        assert!(try_move(&mut vehicles, 0, 1)); // row 2->3, tail at 5
-        assert_eq!(vehicles[0].row, 3);
-        assert!(!try_move(&mut vehicles, 0, 1)); // row 3->4, tail at 6 OOB
-    }
-
-    #[test]
-    fn test_move_truck_horizontal() {
-        let mut vehicles = vec![Vehicle {
-            row: 0,
-            col: 0,
-            length: 3,
-            orientation: Orientation::Horizontal,
-            color_index: 1,
-            label: 'A',
-        }];
-        assert!(try_move(&mut vehicles, 0, 1)); // col 0->1
-        assert!(try_move(&mut vehicles, 0, 1)); // col 1->2
-        assert!(try_move(&mut vehicles, 0, 1)); // col 2->3, tail at 5
-        assert!(!try_move(&mut vehicles, 0, 1)); // col 3->4, tail at 6 OOB
-    }
-
-    #[test]
-    fn test_two_cars_adjacent_no_move_through() {
-        let vehicles = vec![
-            Vehicle {
-                row: 2,
-                col: 0,
-                length: 2,
-                orientation: Orientation::Horizontal,
-                color_index: 0,
-                label: 'X',
-            },
-            Vehicle {
-                row: 2,
-                col: 2,
-                length: 2,
-                orientation: Orientation::Horizontal,
-                color_index: 1,
-                label: 'A',
-            },
-        ];
-        // X at 0-1, A at 2-3. X cannot move right.
-        assert!(!can_move(&vehicles, 0, 1));
-        // A cannot move left.
-        assert!(!can_move(&vehicles, 1, -1));
-    }
-
-    #[test]
-    fn test_vertical_blocked_by_horizontal() {
-        let vehicles = vec![
-            Vehicle {
-                row: 0,
-                col: 2,
-                length: 2,
-                orientation: Orientation::Vertical,
-                color_index: 1,
-                label: 'A',
-            },
-            Vehicle {
-                row: 2,
-                col: 1,
-                length: 3,
-                orientation: Orientation::Horizontal,
-                color_index: 2,
-                label: 'B',
-            },
-        ];
-        // A occupies (0,2) and (1,2). B occupies (2,1),(2,2),(2,3).
-        // A cannot move down because (2,2) is occupied by B.
-        assert!(!can_move(&vehicles, 0, 1));
-    }
-
-    #[test]
-    fn test_select_next_on_empty_vehicles() {
-        let mut app = RushHour::new();
-        app.vehicles.clear();
-        app.select_next(); // Should not panic
-    }
-
-    #[test]
-    fn test_select_prev_on_empty_vehicles() {
-        let mut app = RushHour::new();
-        app.vehicles.clear();
-        app.select_prev(); // Should not panic
-    }
-
-    #[test]
-    fn test_multiple_puzzle_restarts() {
-        let mut app = RushHour::new();
-        for _ in 0..10 {
-            app.restart();
-            assert_eq!(app.moves, 0);
-            assert_eq!(app.status, GameStatus::Playing);
+    fn the_grid_fills_the_board_rect_exactly() {
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if l.cell <= 0.0 {
+                continue;
+            }
+            let last = l.cell_rect(GRID_SIZE - 1, GRID_SIZE - 1);
+            assert!(
+                (last.right() - l.board.right()).abs() < 0.01,
+                "at {w}x{h} the last column stops at {} but the board ends at {}",
+                last.right(),
+                l.board.right()
+            );
+            assert!(
+                (last.bottom() - l.board.bottom()).abs() < 0.01,
+                "at {w}x{h} the last row stops at {} but the board ends at {}",
+                last.bottom(),
+                l.board.bottom()
+            );
         }
     }
 
     #[test]
-    fn test_load_all_puzzles_no_overlap() {
-        for i in 0..PUZZLES.len() {
-            let vehicles = load_puzzle(i);
-            // Check no two vehicles overlap
-            let occ = build_occupancy(&vehicles);
-            let mut cell_count = 0;
-            for row in occ.iter().take(GRID_SIZE) {
-                for cell in row.iter().take(GRID_SIZE) {
-                    if cell.is_some() {
-                        cell_count += 1;
+    fn no_two_cells_overlap() {
+        let l = Layout::new(SIZE.0, SIZE.1);
+        for r1 in 0..GRID_SIZE {
+            for c1 in 0..GRID_SIZE {
+                for r2 in 0..GRID_SIZE {
+                    for c2 in 0..GRID_SIZE {
+                        if (r1, c1) >= (r2, c2) {
+                            continue;
+                        }
+                        assert!(
+                            l.cell_rect(r1, c1).intersect(l.cell_rect(r2, c2)).is_none(),
+                            "cells ({r1},{c1}) and ({r2},{c2}) overlap"
+                        );
                     }
                 }
             }
-            let expected: usize = vehicles.iter().map(|v| v.length).sum();
-            assert_eq!(cell_count, expected, "Puzzle {i} has overlapping vehicles");
         }
     }
 
     #[test]
-    fn test_puzzle_vehicles_in_bounds() {
-        for i in 0..PUZZLES.len() {
-            let vehicles = load_puzzle(i);
-            for (vi, v) in vehicles.iter().enumerate() {
-                for (r, c) in v.cells() {
+    fn cell_rect_answers_empty_off_the_grid() {
+        let l = Layout::new(SIZE.0, SIZE.1);
+        assert!(l.cell_rect(GRID_SIZE, 0).is_empty());
+        assert!(l.cell_rect(0, GRID_SIZE).is_empty());
+        assert!(!l.cell_rect(GRID_SIZE - 1, GRID_SIZE - 1).is_empty());
+    }
+
+    #[test]
+    fn the_exit_strip_sits_beside_the_row_the_win_rule_reads() {
+        // The strip is a picture of `EXIT_ROW`, not a second opinion about
+        // where the way out is. It used to be drawn from its own literal 2.
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if l.exit.is_empty() {
+                continue;
+            }
+            let row = l.cell_rect(EXIT_ROW, EXIT_COL);
+            assert!(
+                (l.exit.y - row.y).abs() < 0.01,
+                "at {w}x{h} the exit is at y {} but row {EXIT_ROW} at {}",
+                l.exit.y,
+                row.y
+            );
+            assert!(
+                (l.exit.h - l.cell).abs() < 0.01,
+                "at {w}x{h} the exit is {} tall but a cell is {}",
+                l.exit.h,
+                l.cell
+            );
+            assert!(
+                l.exit.x >= l.board.right() - 0.01,
+                "at {w}x{h} the exit is not past the right-hand edge of the yard"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dropped_band_is_empty_rather_than_a_zero_height_strip() {
+        // The two read alike to "does this show?" and differently to "how wide
+        // is it?". Only one of them is safe to believe.
+        let mut dropped = 0;
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            for r in [l.header, l.controls, l.footer] {
+                if r.h <= 0.0 {
+                    dropped += 1;
+                    assert_eq!(
+                        r,
+                        Rect::EMPTY,
+                        "at {w}x{h} a band with no height still claims {}x{}",
+                        r.w,
+                        r.h
+                    );
+                }
+            }
+        }
+        assert!(
+            dropped > 0,
+            "no window in WINDOWS is small enough to drop a band, so this \
+             proves nothing"
+        );
+    }
+
+    #[test]
+    fn the_chrome_never_takes_more_than_its_share_of_the_window() {
+        // `BOARD_SHARE` is the whole reason bands are dropped at all. Without
+        // it the budget could be the entire window height and every other
+        // layout assertion would still hold — the yard would simply be squeezed
+        // to whatever the chrome left over.
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            let chrome = l.header.h + l.controls.h + l.footer.h;
+            let budget = (h - h * BOARD_SHARE - l.pad * 2.0).max(0.0);
+            assert!(
+                chrome <= budget + 0.01,
+                "at {w}x{h} the chrome takes {chrome} of the {budget} it is \
+                 allowed, leaving the yard less than its {BOARD_SHARE} share"
+            );
+        }
+    }
+
+    #[test]
+    fn the_footer_is_the_first_chrome_to_go() {
+        // The footer only repeats what the buttons already say, so it is the
+        // band whose loss costs least. Dropping the controls first would take
+        // away the pointer's only route to undo and leave behind a reminder of
+        // the keys that still work.
+        let mut narrow = 0;
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if l.header.is_empty() || l.controls.is_empty() {
+                narrow += 1;
+                assert!(
+                    l.footer.is_empty(),
+                    "at {w}x{h} a band was dropped while the footer was kept"
+                );
+            }
+        }
+        assert!(
+            narrow > 0,
+            "no window in WINDOWS is short enough to drop a band, so this \
+             proves nothing"
+        );
+    }
+
+    #[test]
+    fn the_controls_are_the_last_chrome_to_go() {
+        // They are the only way to reach undo, restart and the puzzle list
+        // without a keyboard.
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if l.controls.is_empty() {
+                assert!(
+                    l.header.is_empty() && l.footer.is_empty(),
+                    "at {w}x{h} the controls went while other chrome stayed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_board_survives_every_window_a_band_is_dropped_in() {
+        // Dropping chrome is only worth doing if it buys the yard room.
+        //
+        // The two witnesses are what stop this being a test of windows that
+        // drop nothing. The yard's top edge is read from the header's *height*
+        // and its bottom edge from the controls' — never from a dropped band's
+        // `y`, which is the origin and would put the bottom edge above the top.
+        // Only a window that has actually lost each band proves that.
+        let mut lost_header = 0;
+        let mut lost_controls = 0;
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            lost_header += usize::from(l.header.is_empty());
+            lost_controls += usize::from(l.controls.is_empty());
+            assert!(l.cell > 0.0, "at {w}x{h} there is no yard left to play in");
+        }
+        assert!(
+            lost_header > 0,
+            "no window in the list drops the header, so the yard's top edge is \
+             never measured against a band that is not there"
+        );
+        assert!(
+            lost_controls > 0,
+            "no window in the list drops the controls, so the yard's bottom \
+             edge is never measured against a band that is not there"
+        );
+    }
+
+    #[test]
+    fn a_degenerate_window_size_produces_a_layout_rather_than_a_panic() {
+        for &(w, h) in &[(0.0, 0.0), (1.0, 1.0), (-40.0, -40.0), (10.0, 4000.0)] {
+            let l = Layout::new(w, h);
+            assert!(l.window.w >= 1.0 && l.window.h >= 1.0);
+            assert!(l.cell >= 0.0, "a {w}x{h} window produced a negative cell");
+            // And drawing it must not panic either.
+            let g = game();
+            let _ = g.frame(w, h);
+        }
+    }
+
+    #[test]
+    fn the_buttons_stay_inside_the_controls_band() {
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if l.controls.is_empty() {
+                assert!(
+                    l.button_rects().into_iter().all(|r| r.is_empty()),
+                    "at {w}x{h} buttons were laid out in a band that is not there"
+                );
+                continue;
+            }
+            for (i, r) in l.button_rects().into_iter().enumerate() {
+                if r.is_empty() {
+                    continue;
+                }
+                assert!(
+                    r.x >= l.controls.x - 0.01
+                        && r.right() <= l.controls.right() + 0.01
+                        && r.y >= l.controls.y - 0.01
+                        && r.bottom() <= l.controls.bottom() + 0.01,
+                    "at {w}x{h} button {i} escapes the controls band: {r:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_two_buttons_overlap() {
+        for &(w, h) in WINDOWS {
+            let rects = Layout::new(w, h).button_rects();
+            for (i, a) in rects.iter().enumerate() {
+                for b in rects.iter().skip(i + 1) {
+                    if a.is_empty() || b.is_empty() {
+                        continue;
+                    }
                     assert!(
-                        r < GRID_SIZE && c < GRID_SIZE,
-                        "Puzzle {i}, vehicle {vi} out of bounds at ({r}, {c})"
+                        a.intersect(*b).is_none(),
+                        "at {w}x{h} two buttons overlap: {a:?} and {b:?}"
                     );
                 }
             }
@@ -3256,23 +2610,1627 @@ mod tests {
     }
 
     #[test]
-    fn test_render_different_puzzles() {
-        for i in 0..PUZZLES.len() {
-            let mut app = RushHour::new();
-            app.load_puzzle_at(i);
-            let cmds = app.render(800.0, 600.0);
-            assert!(!cmds.is_empty(), "Puzzle {i} rendered no commands");
+    fn the_sheet_rows_stay_inside_the_sheet_panel() {
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            let panel = l.sheet_panel();
+            for (i, r) in l.sheet_rows().into_iter().enumerate() {
+                if r.is_empty() {
+                    continue;
+                }
+                assert!(
+                    r.x >= panel.x - 0.01
+                        && r.right() <= panel.right() + 0.01
+                        && r.y >= panel.y - 0.01
+                        && r.bottom() <= panel.bottom() + 0.01,
+                    "at {w}x{h} sheet row {i} escapes the panel: {r:?} in {panel:?}"
+                );
+            }
         }
     }
 
     #[test]
-    fn cell_at_point_is_the_exact_inverse_of_cell_origin() {
-        for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                let (px, py) = cell_origin(r, c);
-                let result = cell_at_point(px + CELL_SIZE / 2.0, py + CELL_SIZE / 2.0);
-                assert_eq!(result, Some((r, c)), "Failed for cell ({r}, {c})");
+    fn no_two_sheet_rows_overlap() {
+        for &(w, h) in WINDOWS {
+            let rows = Layout::new(w, h).sheet_rows();
+            for (i, a) in rows.iter().enumerate() {
+                for b in rows.iter().skip(i + 1) {
+                    if a.is_empty() || b.is_empty() {
+                        continue;
+                    }
+                    assert!(
+                        a.intersect(*b).is_none(),
+                        "at {w}x{h} two sheet rows overlap: {a:?} and {b:?}"
+                    );
+                }
             }
         }
+    }
+
+    #[test]
+    fn the_victory_panel_stays_inside_the_window() {
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            let p = l.win_panel();
+            assert!(
+                p.x >= -0.01 && p.y >= -0.01 && p.right() <= w + 0.01 && p.bottom() <= h + 0.01,
+                "at {w}x{h} the victory panel escapes the window: {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_vehicle_covers_exactly_the_cells_it_sits_on() {
+        let l = Layout::new(SIZE.0, SIZE.1);
+        let mut g = game();
+        g.position(0, &[(0, 0, 3, V), (4, 1, 2, H)]);
+        for v in g.vehicles() {
+            let r = l.vehicle_rect(v);
+            let head = l.cell_rect(v.row, v.col);
+            let tail = l.cell_rect(v.tail_row(), v.tail_col());
+            assert!((r.x - head.x).abs() < 0.01, "{} starts wrong", v.label);
+            assert!((r.y - head.y).abs() < 0.01, "{} starts wrong", v.label);
+            assert!(
+                (r.right() - tail.right()).abs() < 0.01,
+                "{} ends at {} but its tail cell at {}",
+                v.label,
+                r.right(),
+                tail.right()
+            );
+            assert!(
+                (r.bottom() - tail.bottom()).abs() < 0.01,
+                "{} ends at {} but its tail cell at {}",
+                v.label,
+                r.bottom(),
+                tail.bottom()
+            );
+        }
+    }
+
+    #[test]
+    fn a_vehicle_off_the_grid_has_no_rectangle() {
+        let l = Layout::new(SIZE.0, SIZE.1);
+        let v = Vehicle {
+            id: 99,
+            row: GRID_SIZE,
+            col: 0,
+            length: 2,
+            orientation: Orientation::Horizontal,
+            player: false,
+            color: BLUE,
+            label: 'Q',
+        };
+        assert!(l.vehicle_rect(&v).is_empty());
+    }
+
+    // ── Hit boxes ──────────────────────────────────────────────────
+
+    #[test]
+    fn every_cell_is_clickable_where_it_is_drawn() {
+        // The old program read the click against `CELL_SIZE = 72.0` whatever
+        // size the window was, so in any other window the yard was drawn in one
+        // place and clicked in another.
+        let mut g = game();
+        g.position(0, &[]);
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            let f = g.frame(w, h);
+            for row in 0..GRID_SIZE {
+                for col in 0..GRID_SIZE {
+                    if g.vehicle_at(row, col).is_some() {
+                        continue;
+                    }
+                    let (cx, cy) = l.cell_rect(row, col).centre();
+                    assert_eq!(
+                        f.hit_test(cx, cy),
+                        Some(Target::Cell(row, col)),
+                        "at {w}x{h} the click at the middle of ({row},{col}) \
+                         does not land on it"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_car_is_clickable_where_its_ink_is() {
+        let g = game();
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            let f = g.frame(w, h);
+            for v in g.vehicles() {
+                let (cx, cy) = l.vehicle_rect(v).centre();
+                assert_eq!(
+                    f.hit_test(cx, cy),
+                    Some(Target::Vehicle(v.id)),
+                    "at {w}x{h} car {} is not clickable where it is painted",
+                    v.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_car_takes_the_click_from_the_cell_beneath_it() {
+        // Cells are recorded first so that the car painted over one wins the
+        // hit test, which answers with the last target covering the point.
+        let g = game();
+        let l = Layout::new(SIZE.0, SIZE.1);
+        let f = g.frame(SIZE.0, SIZE.1);
+        let p = g.player().unwrap();
+        let (cx, cy) = l.cell_rect(p.row, p.col).centre();
+        assert_eq!(f.hit_test(cx, cy), Some(Target::Vehicle(p.id)));
+    }
+
+    #[test]
+    fn the_hit_box_of_a_car_is_the_rectangle_it_was_painted_in() {
+        let g = game();
+        let l = Layout::new(SIZE.0, SIZE.1);
+        for v in g.vehicles() {
+            let hit = probe::rect_of(&g, Target::Vehicle(v.id)).unwrap();
+            let drawn = l.vehicle_rect(v);
+            assert_eq!(hit, drawn, "car {}'s hit box is not its ink", v.label);
+        }
+    }
+
+    #[test]
+    fn every_button_is_clickable_where_it_is_drawn() {
+        let g = game();
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if l.controls.is_empty() {
+                continue;
+            }
+            let f = g.frame(w, h);
+            for ((target, name), r) in BUTTONS.into_iter().zip(l.button_rects()) {
+                if r.is_empty() {
+                    continue;
+                }
+                let (cx, cy) = r.centre();
+                assert_eq!(
+                    f.hit_test(cx, cy),
+                    Some(target),
+                    "at {w}x{h} the {name} button is not clickable where it is drawn"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_hit_box_escapes_the_window() {
+        let mut g = game();
+        for &(w, h) in WINDOWS {
+            for (label, open) in [("board", false), ("sheet", true)] {
+                g.resize(w, h);
+                if open {
+                    probe::key(&mut g, &probe::press(Key::P));
+                }
+                for (target, r) in g.frame(w, h).hits() {
+                    assert!(
+                        r.x >= -0.01
+                            && r.y >= -0.01
+                            && r.right() <= w + 0.01
+                            && r.bottom() <= h + 0.01,
+                        "at {w}x{h} the {label}'s {target:?} escapes the window: {r:?}"
+                    );
+                }
+                if open {
+                    probe::key(&mut g, &probe::press(Key::Escape));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_exit_strip_is_not_a_hit_target() {
+        // A control that swallows a click and does nothing is worse than no
+        // control, because the click it ate would otherwise have got through.
+        let g = game();
+        let l = Layout::new(SIZE.0, SIZE.1);
+        let (cx, cy) = l.exit.centre();
+        assert_eq!(
+            g.frame(SIZE.0, SIZE.1).hit_test(cx, cy),
+            None,
+            "the exit strip eats clicks"
+        );
+    }
+
+    #[test]
+    fn the_victory_panel_hides_the_yard_from_the_pointer() {
+        let mut g = one_slide_from_winning();
+        let id = player_id(&g);
+        assert!(probe::is_visible(&g, Target::Vehicle(id)));
+        assert!(g.slide(id, 1));
+        assert!(g.is_won());
+        assert!(
+            !probe::is_visible(&g, Target::Vehicle(id)),
+            "the car can still be picked up through the victory panel"
+        );
+        assert!(!probe::is_visible(&g, Target::Cell(0, 0)));
+    }
+
+    #[test]
+    fn the_sheet_hides_the_yard_from_the_pointer() {
+        let mut g = game();
+        probe::key(&mut g, &probe::press(Key::P));
+        assert!(g.sheet_open());
+        assert!(
+            !probe::is_visible(&g, Target::Cell(0, 0)),
+            "the yard can be clicked through the puzzle sheet"
+        );
+        assert!(probe::is_visible(&g, Target::Puzzle(0)));
+    }
+
+    #[test]
+    fn the_scrim_over_a_covered_yard_is_translucent() {
+        // The old victory overlay filled the window with opaque `0x11111B`
+        // under the comment `// Semi-transparent overlay` — an assertion
+        // nobody checked.
+        let mut g = one_slide_from_winning();
+        let id = player_id(&g);
+        assert!(g.slide(id, 1));
+        let f = g.frame(SIZE.0, SIZE.1);
+        // Two window-sized fills: the ground the game is drawn on, and the
+        // scrim laid over it. The last painted is the scrim.
+        let full: Vec<Color> = fill_rects(&f)
+            .into_iter()
+            .filter(|(r, _)| (r.w - SIZE.0).abs() < 0.01 && (r.h - SIZE.1).abs() < 0.01)
+            .map(|(_, c)| c)
+            .collect();
+        assert!(full.len() >= 2, "no scrim was drawn over the won yard");
+        let scrim = *full.last().unwrap();
+        assert!(
+            scrim.a < 0xFF,
+            "the scrim is opaque, so it paints out the jam it is celebrating"
+        );
+    }
+
+    // ── Text ───────────────────────────────────────────────────────
+
+    #[test]
+    fn every_string_drawn_is_inside_the_window() {
+        // There are three ways a string can be kept inside the window, and this
+        // walks the command list so all three are honoured: it can simply be
+        // short enough; it can carry a `max_width` the renderer stops at; or it
+        // can sit inside a clip rect that is itself inside the window. A test
+        // that only measured the string would call the footer's long second line
+        // an escape when the clip around it is exactly what stops it.
+        let mut g = game();
+        let mut cut_somewhere = false;
+        for &(w, h) in WINDOWS {
+            g.resize(w, h);
+            let f = g.frame(w, h);
+            let mut clips: Vec<Rect> = Vec::new();
+            for c in f.commands() {
+                match c {
+                    RenderCommand::PushClip {
+                        x,
+                        y,
+                        width,
+                        height,
+                    } => {
+                        let r = Rect::new(*x, *y, *width, *height);
+                        assert!(
+                            r.x >= -0.01
+                                && r.y >= -0.01
+                                && r.right() <= w + 0.5
+                                && r.bottom() <= h + 0.5,
+                            "at {w}x{h} a clip rect {r:?} is not itself inside the window"
+                        );
+                        clips.push(r);
+                    }
+                    RenderCommand::PopClip => {
+                        assert!(
+                            clips.pop().is_some(),
+                            "a clip was popped that was never pushed"
+                        );
+                    }
+                    RenderCommand::Text {
+                        x,
+                        y,
+                        text,
+                        font_size,
+                        font_weight,
+                        max_width,
+                        ..
+                    } => {
+                        let measured = text::measure(text, *font_size, *font_weight);
+                        // The ink is the shorter of what the string measures and
+                        // what the renderer was told to stop at.
+                        let ink = max_width.map_or(measured, |m| measured.min(m));
+                        let th = text::line_height(*font_size, *font_weight);
+                        if ink + 0.5 < measured {
+                            cut_somewhere = true;
+                        }
+                        let bounds = clips.last().copied().unwrap_or(Rect::new(0.0, 0.0, w, h));
+                        if !clips.is_empty() && measured > bounds.w {
+                            // A clip is a promise the renderer keeps, so the
+                            // string only has to *start* inside one.
+                            cut_somewhere = true;
+                            assert!(
+                                *x >= bounds.x - 0.01 && *y >= bounds.y - 0.01,
+                                "at {w}x{h} {text:?} starts at ({x},{y}), outside the clip {bounds:?} meant to contain it"
+                            );
+                            continue;
+                        }
+                        assert!(
+                            *x >= bounds.x - 0.01
+                                && *y >= bounds.y - 0.01
+                                && *x + ink <= bounds.right() + 0.5
+                                && *y + th <= bounds.bottom() + 0.5,
+                            "at {w}x{h} {text:?} is drawn at ({x},{y}) and does not fit {bounds:?}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                clips.is_empty(),
+                "at {w}x{h} a clip was pushed and never popped"
+            );
+        }
+        assert!(
+            cut_somewhere,
+            "no window in the list is narrow enough to cut a single string, so the \
+             clip and the width limits are branches this test never enters"
+        );
+    }
+
+    #[test]
+    fn the_move_counter_is_right_aligned_from_its_measured_width() {
+        // Both counters used to be drawn at `total_width - 120.0`, a guess at
+        // how wide "Moves: 1234" would turn out to be.
+        let mut g = game();
+        let id = player_id(&g);
+        for _ in 0..3 {
+            g.slide(id, 1);
+            g.slide(id, -1);
+        }
+        let l = Layout::new(SIZE.0, SIZE.1);
+        let f = g.frame(SIZE.0, SIZE.1);
+        let (text, x, _, size, weight) = text_commands(&f)
+            .into_iter()
+            .find(|(t, ..)| t.starts_with("Moves:"))
+            .expect("no move counter was drawn");
+        let right = x + text::measure(&text, size, weight);
+        assert!(
+            (right - (l.header.right() - l.pad)).abs() < 0.5,
+            "{text:?} ends at {right}, not at the header's right margin {}",
+            l.header.right() - l.pad
+        );
+    }
+
+    #[test]
+    fn the_title_gives_way_to_the_counters_rather_than_running_under_them() {
+        // The title used to be drawn at the left with no width limit while the
+        // counters were drawn against a flat 120-pixel reservation, so in a
+        // window narrower than the two of them the header painted one through
+        // the other.
+        let mut g = game();
+        let mut elided_somewhere = false;
+        for &(w, h) in WINDOWS {
+            g.resize(w, h);
+            let f = g.frame(w, h);
+            let commands = f.commands();
+            let text_of = |want: &str| {
+                commands.iter().find_map(|c| match c {
+                    RenderCommand::Text {
+                        x,
+                        text,
+                        font_size,
+                        font_weight,
+                        max_width,
+                        ..
+                    } if text == want => Some((
+                        *x,
+                        text::measure(text, *font_size, *font_weight),
+                        *max_width,
+                    )),
+                    _ => None,
+                })
+            };
+            let Some((title_x, title_w, limit)) = text_of("Rush Hour") else {
+                continue;
+            };
+            let Some((moves_x, ..)) = commands.iter().find_map(|c| match c {
+                RenderCommand::Text { x, text, .. } if text.starts_with("Moves:") => Some((*x,)),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let ink = limit.map_or(title_w, |m| title_w.min(m));
+            if ink + 0.5 < title_w {
+                elided_somewhere = true;
+            }
+            assert!(
+                title_x + ink <= moves_x + 0.5,
+                "at {w}x{h} the title runs from {title_x} for {ink} and the move counter starts at {moves_x}"
+            );
+        }
+        assert!(
+            elided_somewhere,
+            "no window is narrow enough to cut the title, so the limit the header \
+             computes is never the thing that keeps the two apart"
+        );
+    }
+
+    #[test]
+    fn the_header_names_the_puzzle_and_counts_the_moves() {
+        let mut g = game();
+        g.next_puzzle();
+        // Whichever car has somewhere to go — puzzle 2 jams the red one solid,
+        // and a test that assumed otherwise would be asserting on the puzzle
+        // table rather than on the header.
+        let id = g
+            .vehicles()
+            .iter()
+            .map(|v| v.id)
+            .find(|&id| g.max_slide(id, 1) > 0)
+            .expect("no car in puzzle 2 can move at all");
+        assert!(g.slide(id, 1));
+        let drawn: Vec<String> = text_commands(&g.frame(SIZE.0, SIZE.1))
+            .into_iter()
+            .map(|(t, ..)| t)
+            .collect();
+        assert!(drawn.iter().any(|t| t == "Rush Hour"));
+        assert!(
+            drawn.iter().any(|t| t == "#2: Beginner"),
+            "the header does not say which puzzle is on: {drawn:?}"
+        );
+        assert!(drawn.iter().any(|t| t == "Moves: 1"), "{drawn:?}");
+        assert!(
+            drawn.iter().any(|t| t == "Undo: 1"),
+            "the header does not show the undo depth: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn a_cars_letter_is_centred_in_the_car_from_its_measured_width() {
+        // Every letter used to be drawn at `cx + vw / 2.0 - 5.0`, which is a
+        // claim that the glyph is ten pixels wide.
+        let g = game();
+        let l = Layout::new(SIZE.0, SIZE.1);
+        let f = g.frame(SIZE.0, SIZE.1);
+        let commands = text_commands(&f);
+        for v in g.vehicles() {
+            let r = l.vehicle_rect(v);
+            let glyph = v.label.to_string();
+            let (_, x, y, size, weight) = commands
+                .iter()
+                .find(|(t, ..)| *t == glyph)
+                .unwrap_or_else(|| panic!("car {} has no letter", v.label))
+                .clone();
+            let want_x = r.x + (r.w - text::measure(&glyph, size, weight)) / 2.0;
+            let want_y = r.y + (r.h - text::line_height(size, weight)) / 2.0;
+            assert!(
+                (x - want_x).abs() < 0.5 && (y - want_y).abs() < 0.5,
+                "car {}'s letter is at ({x},{y}), not centred at ({want_x},{want_y})",
+                v.label
+            );
+        }
+    }
+
+    #[test]
+    fn a_letter_too_big_for_its_car_is_dropped_rather_than_spilled() {
+        // 60x40 rather than one of `WINDOWS`: at every size in that list the
+        // glyph fits, so the drop branch would never be entered and the test
+        // would pass by never testing anything. Here the cells are under six
+        // pixels tall and the smallest glyph's line height is not.
+        let g = game();
+        let (w, h) = (60.0, 40.0);
+        let l = Layout::new(w, h);
+        let f = g.frame(w, h);
+        let commands = text_commands(&f);
+        let mut dropped = 0;
+        for v in g.vehicles() {
+            let r = l.vehicle_rect(v);
+            let glyph = v.label.to_string();
+            match commands.iter().find(|(t, ..)| *t == glyph) {
+                Some((_, _, _, size, weight)) => assert!(
+                    text::measure(&glyph, *size, *weight) <= r.w + 0.01
+                        && text::line_height(*size, *weight) <= r.h + 0.01,
+                    "car {}'s letter does not fit the car it is drawn on",
+                    v.label
+                ),
+                None => dropped += 1,
+            }
+        }
+        assert!(
+            dropped > 0,
+            "every letter fitted even at {w}x{h}, so nothing here exercises the drop"
+        );
+    }
+
+    #[test]
+    fn every_centred_string_is_limited_to_the_box_it_is_centred_in() {
+        // `label_centred` measures the string against the box to decide where
+        // it starts, then hands the renderer that same box width as the limit.
+        // The width that decided the centre is the width the string is cut at,
+        // so the two cannot disagree — a centred string with *no* limit is one
+        // centred against a box the renderer was never told about, free to run
+        // out of both ends of it.
+        //
+        // The buttons are the check because their box is known independently:
+        // `button_rects` is the same rect `draw_controls` centres the name in.
+        let g = game();
+        let l = Layout::new(SIZE.0, SIZE.1);
+        let f = g.frame(SIZE.0, SIZE.1);
+        let mut checked = 0;
+        for ((_, name), r) in BUTTONS.into_iter().zip(l.button_rects()) {
+            if r.is_empty() {
+                continue;
+            }
+            let found = f.commands().iter().find_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    font_size,
+                    font_weight,
+                    max_width,
+                    overflow,
+                    ..
+                } if text == name => Some((*x, *font_size, *font_weight, *max_width, *overflow)),
+                _ => None,
+            });
+            let Some((x, size, weight, max_width, overflow)) = found else {
+                continue;
+            };
+            checked += 1;
+            assert_eq!(
+                max_width,
+                Some(r.w),
+                "{name:?} is centred in a {}-wide button but limited to {max_width:?}",
+                r.w
+            );
+            assert_eq!(
+                overflow,
+                TextOverflow::Ellipsis,
+                "{name:?} has a width limit but is cut without a mark"
+            );
+            let ink = text::measure(name, size, weight).min(r.w);
+            assert!(
+                (x - (r.x + (r.w - ink) / 2.0)).abs() <= 0.01,
+                "{name:?} starts at {x} rather than centred in its button"
+            );
+        }
+        assert!(
+            checked > 0,
+            "no button name was drawn at {SIZE:?}, so nothing here is centred"
+        );
+    }
+
+    #[test]
+    fn the_footer_drops_its_second_line_before_its_first() {
+        let g = game();
+        let mut seen_one = false;
+        for &(w, h) in WINDOWS {
+            let drawn: Vec<String> = text_commands(&g.frame(w, h))
+                .into_iter()
+                .map(|(t, ..)| t)
+                .collect();
+            let first = drawn.iter().any(|t| t == FOOTER_LINES[0]);
+            let second = drawn.iter().any(|t| t == FOOTER_LINES[1]);
+            assert!(
+                first || !second,
+                "at {w}x{h} the footer's second line is shown without its first"
+            );
+            seen_one |= first && !second;
+        }
+        assert!(
+            seen_one,
+            "no window in WINDOWS is short enough to show one footer line"
+        );
+    }
+
+    #[test]
+    fn a_dropped_band_draws_nothing_at_all() {
+        let g = game();
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if !l.footer.is_empty() {
+                continue;
+            }
+            let drawn: Vec<String> = text_commands(&g.frame(w, h))
+                .into_iter()
+                .map(|(t, ..)| t)
+                .collect();
+            for line in FOOTER_LINES {
+                assert!(
+                    !drawn.contains(&line.to_string()),
+                    "at {w}x{h} the footer is gone but still draws {line:?}"
+                );
+            }
+        }
+    }
+
+    // ── The puzzles ────────────────────────────────────────────────
+
+    #[test]
+    fn there_are_eight_puzzles_and_the_sheet_lists_them_all() {
+        assert_eq!(PUZZLES.len(), PUZZLE_COUNT);
+        let mut g = game();
+        probe::key(&mut g, &probe::press(Key::P));
+        for i in 0..PUZZLE_COUNT {
+            assert!(
+                probe::is_visible(&g, Target::Puzzle(i)),
+                "puzzle {i} is not on the sheet"
+            );
+        }
+    }
+
+    #[test]
+    fn every_puzzle_puts_the_red_car_on_the_exit_row() {
+        for i in 0..PUZZLE_COUNT {
+            let mut g = game();
+            g.load_puzzle(i);
+            let p = g.player().unwrap();
+            assert_eq!(p.row, EXIT_ROW, "puzzle {i} parks the red car off the row");
+            assert_eq!(p.length, PLAYER_LENGTH);
+            assert_eq!(p.orientation, Orientation::Horizontal);
+            assert_eq!(p.label, PLAYER_LABEL);
+            assert_eq!(p.color, PLAYER_COLOR);
+        }
+    }
+
+    #[test]
+    fn exactly_one_vehicle_in_every_puzzle_is_the_player() {
+        // The old `is_player()` was `color_index == 0`, so "which car wins" was
+        // decided by the palette.
+        for i in 0..PUZZLE_COUNT {
+            let mut g = game();
+            g.load_puzzle(i);
+            let players = g.vehicles().iter().filter(|v| v.player).count();
+            assert_eq!(players, 1, "puzzle {i} has {players} red cars");
+        }
+    }
+
+    #[test]
+    fn no_blocker_wears_the_red_cars_colour() {
+        // A blocker painted like the player is a picture that lies about which
+        // car ends the game.
+        assert!(
+            !VEHICLE_COLORS.contains(&PLAYER_COLOR),
+            "the blocker palette contains the player's colour"
+        );
+        for i in 0..PUZZLE_COUNT {
+            let mut g = game();
+            g.load_puzzle(i);
+            for v in g.vehicles().iter().filter(|v| !v.player) {
+                assert_ne!(v.color, PLAYER_COLOR, "puzzle {i} has a red blocker");
+            }
+        }
+    }
+
+    #[test]
+    fn no_blocker_is_labelled_like_the_player() {
+        assert!(!BLOCKER_LABELS.contains(PLAYER_LABEL));
+        for (i, def) in PUZZLES.iter().enumerate() {
+            for &(_, _, _, _, label) in def.blockers {
+                assert_ne!(
+                    label, PLAYER_LABEL,
+                    "puzzle {i} has a second {PLAYER_LABEL}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_puzzle_fits_on_the_yard() {
+        for i in 0..PUZZLE_COUNT {
+            let mut g = game();
+            g.load_puzzle(i);
+            for v in g.vehicles() {
+                assert!(
+                    v.tail_row() < GRID_SIZE && v.tail_col() < GRID_SIZE,
+                    "puzzle {i}'s {} hangs off the yard",
+                    v.label
+                );
+                assert!(
+                    (2..=3).contains(&v.length),
+                    "puzzle {i}'s {} is {} cells long",
+                    v.label,
+                    v.length
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_two_vehicles_in_a_puzzle_share_a_cell() {
+        for i in 0..PUZZLE_COUNT {
+            let mut g = game();
+            g.load_puzzle(i);
+            let mut seen = HashSet::new();
+            for v in g.vehicles() {
+                for cell in v.cells() {
+                    assert!(
+                        seen.insert(cell),
+                        "puzzle {i} parks two vehicles on {cell:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_puzzle_labels_its_vehicles_uniquely() {
+        for i in 0..PUZZLE_COUNT {
+            let mut g = game();
+            g.load_puzzle(i);
+            let mut seen = HashSet::new();
+            for v in g.vehicles() {
+                assert!(
+                    seen.insert(v.label),
+                    "puzzle {i} draws two vehicles with the letter {}",
+                    v.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_puzzle_starts_unsolved_and_blocked() {
+        for i in 0..PUZZLE_COUNT {
+            let mut g = game();
+            g.load_puzzle(i);
+            assert!(!g.is_won(), "puzzle {i} is already solved");
+            // Blocked means the red car cannot reach the way out in one go —
+            // which is a fact about the win rule, not about a number being
+            // smaller than the grid. So drive it as far as it will go and ask.
+            let id = player_id(&g);
+            let reach = g.max_slide(id, 1);
+            if let Ok(delta) = isize::try_from(reach)
+                && delta > 0
+            {
+                assert!(g.slide(id, delta));
+            }
+            assert!(
+                !g.is_won(),
+                "puzzle {i} lets the red car drive straight out"
+            );
+        }
+    }
+
+    #[test]
+    fn ids_are_unique_and_never_a_position_in_the_vector() {
+        // An undo entry and the selection both name a car by id, and the old
+        // `UndoAction` spent a `Vec` index as though the two were the same
+        // thing.
+        //
+        // The *opening* position is checked on its own and first. It is the
+        // only board on which a counter that starts at zero would put id 0 at
+        // index 0: loading a puzzle first spends the low ids on the board that
+        // was thrown away, after which every starting value looks alike.
+        let g = game();
+        let mut seen = HashSet::new();
+        for (index, v) in g.vehicles().iter().enumerate() {
+            assert!(
+                seen.insert(v.id),
+                "the opening position hands out id {} twice",
+                v.id
+            );
+            assert_ne!(
+                v.id, index,
+                "the opening position's id {} is also a position in the vector",
+                v.id
+            );
+        }
+
+        for i in 0..PUZZLE_COUNT {
+            let mut g = game();
+            g.load_puzzle(i);
+            let mut seen = HashSet::new();
+            for (index, v) in g.vehicles().iter().enumerate() {
+                assert!(seen.insert(v.id), "puzzle {i} hands out id {} twice", v.id);
+                assert_ne!(
+                    v.id, index,
+                    "puzzle {i}'s id {} is also a position in the vector",
+                    v.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ids_are_never_reused_after_a_reload() {
+        let mut g = game();
+        let first: HashSet<usize> = g.vehicles().iter().map(|v| v.id).collect();
+        g.restart_puzzle();
+        let second: HashSet<usize> = g.vehicles().iter().map(|v| v.id).collect();
+        assert!(
+            first.is_disjoint(&second),
+            "a reloaded puzzle reuses ids from the one before it"
+        );
+    }
+
+    #[test]
+    fn loading_a_puzzle_past_the_end_does_nothing() {
+        // Wrapping is `next_puzzle`'s and `prev_puzzle`'s business; doing it
+        // here as well would be a second answer to the same question.
+        let mut g = game();
+        g.next_puzzle();
+        let before: Vec<Vehicle> = g.vehicles().to_vec();
+        g.load_puzzle(PUZZLE_COUNT);
+        assert_eq!(g.current_puzzle(), 1);
+        assert_eq!(g.vehicles(), before.as_slice());
+    }
+
+    #[test]
+    fn the_puzzle_list_wraps_at_both_ends() {
+        let mut g = game();
+        g.prev_puzzle();
+        assert_eq!(g.current_puzzle(), PUZZLE_COUNT - 1);
+        g.next_puzzle();
+        assert_eq!(g.current_puzzle(), 0);
+    }
+
+    #[test]
+    fn restart_puts_the_opening_jam_back() {
+        let mut g = game();
+        let opening: Vec<(usize, usize, usize)> = g
+            .vehicles()
+            .iter()
+            .map(|v| (v.row, v.col, v.length))
+            .collect();
+        let id = labelled(&g, 'B');
+        assert!(g.slide(id, 1));
+        g.restart_puzzle();
+        let now: Vec<(usize, usize, usize)> = g
+            .vehicles()
+            .iter()
+            .map(|v| (v.row, v.col, v.length))
+            .collect();
+        assert_eq!(now, opening);
+        assert_eq!(g.moves(), 0);
+        assert_eq!(g.undo_depth(), 0);
+        assert_eq!(g.selected(), None);
+    }
+
+    #[test]
+    fn the_difficulty_shown_is_the_puzzles_own() {
+        for i in 0..PUZZLE_COUNT {
+            let mut g = game();
+            g.load_puzzle(i);
+            assert_eq!(g.difficulty(), PUZZLES[i].difficulty);
+        }
+    }
+
+    // ── Vehicles ───────────────────────────────────────────────────
+
+    #[test]
+    fn a_vehicle_occupies_the_cells_between_its_head_and_its_tail() {
+        for orientation in [Orientation::Horizontal, Orientation::Vertical] {
+            let v = Vehicle {
+                id: 7,
+                row: 1,
+                col: 2,
+                length: 3,
+                orientation,
+                player: false,
+                color: BLUE,
+                label: 'A',
+            };
+            let cells = v.cells();
+            assert_eq!(cells.len(), 3);
+            for row in 0..GRID_SIZE {
+                for col in 0..GRID_SIZE {
+                    assert_eq!(
+                        v.occupies(row, col),
+                        cells.contains(&(row, col)),
+                        "{orientation:?} vehicle disagrees with itself about ({row},{col})"
+                    );
+                }
+            }
+        }
+    }
+
+    // ── Moving ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_car_cannot_slide_nowhere() {
+        let g = one_slide_from_winning();
+        let id = player_id(&g);
+        assert!(!g.can_slide(id, 0));
+    }
+
+    #[test]
+    fn an_unknown_car_cannot_slide() {
+        let mut g = game();
+        assert!(!g.can_slide(9999, 1));
+        assert!(!g.slide(9999, 1));
+        assert_eq!(g.moves(), 0);
+    }
+
+    #[test]
+    fn a_car_cannot_slide_off_the_yard() {
+        // Backwards through the near wall.
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        assert!(
+            !g.can_slide(id, -1),
+            "the red car reversed through the wall"
+        );
+        assert!(g.can_slide(id, 4));
+        assert!(!g.can_slide(id, 5), "the red car drove out past the fence");
+
+        // Forwards through the far wall. From column 0 the walk runs out of
+        // *steps* before it runs out of yard, so the far wall is never reached
+        // and a wall that had stopped stopping cars would not show. From
+        // column 2 the walk reaches column 6, which is not there.
+        let mut g = game();
+        g.position(2, &[]);
+        let id = player_id(&g);
+        assert!(g.can_slide(id, 2), "the red car could not reach column 4");
+        assert!(
+            !g.can_slide(id, 3),
+            "the red car's tail drove out through the far fence"
+        );
+    }
+
+    #[test]
+    fn a_car_cannot_slide_through_another() {
+        let mut g = game();
+        g.position(0, &[(EXIT_ROW, 3, 2, H)]);
+        let id = player_id(&g);
+        assert!(g.can_slide(id, 1));
+        assert!(!g.can_slide(id, 2), "the red car drove through a blocker");
+    }
+
+    #[test]
+    fn a_car_can_slide_further_than_its_own_length() {
+        // Every cell tested lies strictly beyond the leading edge, so a car is
+        // never its own obstacle. The version this replaced carried an
+        // `occ != index` guard for a case that could not arise.
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        assert!(
+            g.can_slide(id, 3),
+            "a car three cells along its own axis blocked itself"
+        );
+        assert!(g.slide(id, 3));
+        assert_eq!(g.player().unwrap().col, 3);
+    }
+
+    #[test]
+    fn a_horizontal_car_moves_along_its_row_only() {
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        assert!(g.slide(id, 2));
+        let p = g.player().unwrap();
+        assert_eq!((p.row, p.col), (EXIT_ROW, 2));
+    }
+
+    #[test]
+    fn a_vertical_car_moves_along_its_column_only() {
+        let mut g = game();
+        g.position(0, &[(0, 4, 2, V)]);
+        let id = labelled(&g, 'A');
+        assert!(g.slide(id, 3));
+        let v = g.vehicle(id).unwrap();
+        assert_eq!((v.row, v.col), (3, 4));
+    }
+
+    #[test]
+    fn max_slide_stops_at_the_first_obstacle() {
+        let mut g = game();
+        g.position(0, &[(EXIT_ROW, 4, 2, H)]);
+        let id = player_id(&g);
+        assert_eq!(
+            g.max_slide(id, 1),
+            2,
+            "the red car should reach columns 2-3"
+        );
+        assert_eq!(g.max_slide(id, -1), 0);
+
+        // And with free cells *beyond* the blocker. This is the fixture that
+        // can tell "stop at the first obstacle" from "skip it and carry on":
+        // with the blocker at columns 2-3 the free run at 4-5 is behind it, so
+        // the answer is nought rather than four.
+        let mut g = game();
+        g.position(0, &[(EXIT_ROW, 2, 2, H)]);
+        let id = player_id(&g);
+        assert_eq!(
+            g.max_slide(id, 1),
+            0,
+            "columns 4 and 5 are free, but they are on the far side of a car"
+        );
+    }
+
+    #[test]
+    fn max_slide_stops_at_the_wall() {
+        let mut g = game();
+        g.position(1, &[]);
+        let id = player_id(&g);
+        assert_eq!(g.max_slide(id, 1), 3);
+        assert_eq!(g.max_slide(id, -1), 1);
+
+        // From the near end of an empty row the car travels the whole width it
+        // can, which is the *last* step the walk's bound allows. A bound one
+        // short would stop the red car one cell from the way out for ever, and
+        // no shorter journey would show it.
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        assert_eq!(
+            g.max_slide(id, 1),
+            GRID_SIZE - PLAYER_LENGTH,
+            "the red car cannot reach the wall of an empty row"
+        );
+    }
+
+    #[test]
+    fn max_slide_in_no_direction_is_nowhere() {
+        let g = one_slide_from_winning();
+        assert_eq!(g.max_slide(player_id(&g), 0), 0);
+    }
+
+    #[test]
+    fn a_slide_costs_one_move_however_far_it_went() {
+        // The rule the physical game plays by, and the reason clicking a
+        // distant cell costs the same as clicking the next one along.
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        assert!(g.slide(id, 3));
+        assert_eq!(g.moves(), 1);
+        assert_eq!(g.undo_depth(), 1);
+    }
+
+    #[test]
+    fn a_refused_slide_records_nothing() {
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        assert!(!g.slide(id, -1));
+        assert_eq!(g.moves(), 0);
+        assert_eq!(g.undo_depth(), 0);
+    }
+
+    #[test]
+    fn undo_puts_the_car_back_and_lowers_the_count() {
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        assert!(g.slide(id, 3));
+        assert!(g.undo());
+        assert_eq!(g.player().unwrap().col, 0);
+        assert_eq!(g.moves(), 0);
+        assert_eq!(g.undo_depth(), 0);
+    }
+
+    #[test]
+    fn undo_unwinds_the_moves_in_the_order_they_were_made() {
+        let mut g = game();
+        g.position(0, &[(0, 5, 2, V)]);
+        let player = player_id(&g);
+        let blocker = labelled(&g, 'A');
+        assert!(g.slide(player, 2));
+        assert!(g.slide(blocker, 1));
+        assert!(g.undo());
+        assert_eq!(g.vehicle(blocker).unwrap().row, 0);
+        assert_eq!(g.player().unwrap().col, 2);
+        assert!(g.undo());
+        assert_eq!(g.player().unwrap().col, 0);
+        assert!(!g.undo());
+    }
+
+    #[test]
+    fn undo_on_an_empty_stack_changes_nothing() {
+        let mut g = game();
+        assert!(!g.undo());
+        assert_eq!(g.moves(), 0);
+    }
+
+    #[test]
+    fn the_undo_stack_forgets_its_oldest_move_at_the_cap() {
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        for _ in 0..MAX_UNDO {
+            assert!(g.slide(id, 1));
+            assert!(g.slide(id, -1));
+        }
+        assert_eq!(g.undo_depth(), MAX_UNDO);
+        assert_eq!(g.moves(), MAX_UNDO * 2);
+    }
+
+    // ── Winning ────────────────────────────────────────────────────
+
+    #[test]
+    fn the_red_car_wins_by_covering_the_way_out() {
+        let mut g = one_slide_from_winning();
+        assert!(!g.is_won());
+        let id = player_id(&g);
+        assert!(g.slide(id, 1));
+        assert!(g.is_won(), "the red car is at the exit and has not won");
+        assert_eq!(g.player().unwrap().tail_col(), EXIT_COL);
+    }
+
+    #[test]
+    fn only_the_red_car_wins() {
+        // The win used to be "vehicle 0's tail is at the last column", which was
+        // right only because the palette happened to make vehicle 0 the player.
+        let mut g = game();
+        g.position(0, &[(EXIT_ROW, 4, 2, H)]);
+        assert!(!g.is_won(), "a blocker parked at the exit ended the game");
+    }
+
+    #[test]
+    fn a_car_on_the_exit_column_but_not_the_exit_row_does_not_win() {
+        let mut g = game();
+        g.position(0, &[(4, 5, 2, V)]);
+        assert!(!g.is_won());
+    }
+
+    #[test]
+    fn winning_is_derived_rather_than_latched() {
+        // `status = Won` was written by the winning move and cleared only by
+        // loading a puzzle, and `undo` opened with `if status == Won { return }`
+        // — so the winning move was the one move you could not take back.
+        let mut g = one_slide_from_winning();
+        let id = player_id(&g);
+        assert!(g.slide(id, 1));
+        assert!(g.is_won());
+        assert!(g.undo(), "the winning move could not be taken back");
+        assert!(!g.is_won(), "the win outlived the position that made it");
+        assert!(
+            g.slide(id, 1),
+            "play could not continue after undoing a win"
+        );
+    }
+
+    #[test]
+    fn a_won_yard_takes_no_further_slides() {
+        let mut g = already_won();
+        let id = player_id(&g);
+        assert!(g.is_won());
+        assert!(!g.slide(id, -1), "a car moved under the victory panel");
+        assert_eq!(g.moves(), 0);
+    }
+
+    #[test]
+    fn loading_a_puzzle_clears_the_win() {
+        let mut g = already_won();
+        assert!(g.is_won());
+        g.load_puzzle(0);
+        assert!(!g.is_won());
+    }
+
+    #[test]
+    fn the_victory_panel_offers_a_way_on() {
+        let mut g = one_slide_from_winning();
+        let id = player_id(&g);
+        assert!(g.slide(id, 1));
+        for target in [Target::Undo, Target::Restart, Target::Next] {
+            assert!(
+                probe::is_visible(&g, target),
+                "the victory panel offers no {target:?}"
+            );
+        }
+        probe::click(&mut g, Target::Next);
+        assert!(!g.is_won());
+        assert_eq!(g.current_puzzle(), 1);
+    }
+
+    // ── The pointer ────────────────────────────────────────────────
+
+    #[test]
+    fn clicking_a_car_picks_it_up_and_clicking_it_again_puts_it_down() {
+        let mut g = game();
+        let id = labelled(&g, 'B');
+        probe::click(&mut g, Target::Vehicle(id));
+        assert_eq!(g.selected(), Some(id));
+        probe::click(&mut g, Target::Vehicle(id));
+        assert_eq!(g.selected(), None);
+    }
+
+    #[test]
+    fn clicking_another_car_moves_the_selection_to_it() {
+        let mut g = game();
+        let a = labelled(&g, 'A');
+        let b = labelled(&g, 'B');
+        probe::click(&mut g, Target::Vehicle(a));
+        probe::click(&mut g, Target::Vehicle(b));
+        assert_eq!(g.selected(), Some(b));
+    }
+
+    #[test]
+    fn clicking_a_cell_the_selection_can_reach_slides_it_there() {
+        // The old `handle_mouse` called `select_at_cell` and nothing else: a
+        // click could pick a car up and put it down, and never move it.
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        probe::click(&mut g, Target::Vehicle(id));
+        probe::click(&mut g, Target::Cell(EXIT_ROW, 3));
+        assert_eq!(
+            g.player().unwrap().col,
+            2,
+            "the click did not slide the car"
+        );
+        assert_eq!(g.moves(), 1);
+    }
+
+    #[test]
+    fn clicking_past_a_blocker_slides_as_far_as_the_yard_allows() {
+        // Aiming at the far wall is how a player says "as far as you can go".
+        // Demanding the exact cell be reachable — which is what the exact-delta
+        // rule did — answers that by doing nothing at all.
+        //
+        // The blocker sits at columns 3-4 so that column 5 is free *beyond*
+        // it: the cell aimed at has to be one the car genuinely cannot reach,
+        // or the clamp has nothing to clamp and the test would pass against a
+        // program that never clamps at all.
+        let mut g = game();
+        g.position(0, &[(EXIT_ROW, 3, 2, H)]);
+        let id = player_id(&g);
+        probe::click(&mut g, Target::Vehicle(id));
+        probe::click(&mut g, Target::Cell(EXIT_ROW, 5));
+        assert_eq!(
+            g.player().unwrap().col,
+            1,
+            "the car stopped short of the blocker it could have reached"
+        );
+        assert_eq!(g.moves(), 1);
+    }
+
+    #[test]
+    fn clicking_a_cell_a_car_cannot_move_towards_puts_it_down() {
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        probe::click(&mut g, Target::Vehicle(id));
+        probe::click(&mut g, Target::Cell(0, 0));
+        assert_eq!(g.selected(), None);
+        assert_eq!(g.moves(), 0);
+    }
+
+    #[test]
+    fn clicking_the_cell_a_car_is_already_on_is_not_somewhere_to_go() {
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        assert_eq!(g.slide_towards(id, EXIT_ROW, 0), None);
+        assert_eq!(g.slide_towards(id, EXIT_ROW, 1), None);
+        assert_eq!(g.slide_towards(id, EXIT_ROW, 2), Some(1));
+    }
+
+    #[test]
+    fn a_slide_is_measured_from_the_end_facing_the_cell() {
+        let mut g = game();
+        g.position(2, &[]);
+        let id = player_id(&g);
+        assert_eq!(g.slide_towards(id, EXIT_ROW, 5), Some(2));
+        assert_eq!(g.slide_towards(id, EXIT_ROW, 0), Some(-2));
+    }
+
+    #[test]
+    fn clicking_the_background_puts_the_car_down() {
+        let mut g = game();
+        let id = labelled(&g, 'B');
+        probe::click(&mut g, Target::Vehicle(id));
+        assert_eq!(probe::click_background(&mut g), EventResult::Consumed);
+        assert_eq!(g.selected(), None);
+        assert_eq!(
+            probe::click_background(&mut g),
+            EventResult::Ignored,
+            "a click on nothing, changing nothing, still claimed to be handled"
+        );
+    }
+
+    #[test]
+    fn a_right_click_is_left_for_something_else() {
+        let mut g = game();
+        let id = labelled(&g, 'B');
+        let out = probe::click_with(&mut g, Target::Vehicle(id), MouseButton::Right);
+        assert_eq!(out, EventResult::Ignored);
+        assert_eq!(g.selected(), None);
+    }
+
+    #[test]
+    fn every_button_does_what_it_says() {
+        let mut g = game();
+        let id = labelled(&g, 'B');
+        assert!(g.slide(id, 1));
+        probe::click(&mut g, Target::Undo);
+        assert_eq!(g.vehicle(id).unwrap().col, 3);
+
+        probe::click(&mut g, Target::Next);
+        assert_eq!(g.current_puzzle(), 1);
+        probe::click(&mut g, Target::Prev);
+        assert_eq!(g.current_puzzle(), 0);
+
+        let moved = labelled(&g, 'B');
+        assert!(g.slide(moved, 1));
+        probe::click(&mut g, Target::Restart);
+        assert_eq!(g.moves(), 0);
+
+        probe::click(&mut g, Target::Puzzles);
+        assert!(g.sheet_open());
+    }
+
+    #[test]
+    fn the_undo_button_is_drawn_dim_until_there_is_something_to_undo() {
+        let mut g = game();
+        let l = Layout::new(SIZE.0, SIZE.1);
+        let slot = l.button_rects()[0];
+        let dim = fill_rects(&g.frame(SIZE.0, SIZE.1))
+            .into_iter()
+            .find(|(r, _)| *r == slot)
+            .map(|(_, c)| c);
+        assert_eq!(dim, Some(SURFACE0), "undo looks live with nothing to undo");
+        let id = labelled(&g, 'B');
+        assert!(g.slide(id, 1));
+        let live = fill_rects(&g.frame(SIZE.0, SIZE.1))
+            .into_iter()
+            .find(|(r, _)| *r == slot)
+            .map(|(_, c)| c);
+        assert_eq!(
+            live,
+            Some(SURFACE1),
+            "undo still looks dead with a move made"
+        );
+    }
+
+    #[test]
+    fn the_undo_button_is_clickable_even_when_it_can_do_nothing() {
+        // A target that reports "nothing happened" is the thing a test can hold
+        // on to; a button that vanishes when it is idle is one that moves the
+        // buttons beside it.
+        let mut g = game();
+        assert_eq!(probe::click(&mut g, Target::Undo), EventResult::Consumed);
+        assert_eq!(g.moves(), 0);
+    }
+
+    // ── The puzzle sheet ───────────────────────────────────────────
+
+    #[test]
+    fn p_opens_the_sheet_on_the_puzzle_being_played() {
+        let mut g = game();
+        g.next_puzzle();
+        probe::key(&mut g, &probe::press(Key::P));
+        assert!(g.sheet_open());
+        assert_eq!(g.sheet_cursor(), 1);
+    }
+
+    #[test]
+    fn the_sheet_cursor_walks_the_list_and_stops_at_the_ends() {
+        let mut g = game();
+        probe::key(&mut g, &probe::press(Key::P));
+        probe::key(&mut g, &probe::press(Key::Up));
+        assert_eq!(g.sheet_cursor(), 0, "the cursor ran off the top");
+        for _ in 0..PUZZLE_COUNT + 3 {
+            probe::key(&mut g, &probe::press(Key::Down));
+        }
+        assert_eq!(
+            g.sheet_cursor(),
+            PUZZLE_COUNT - 1,
+            "the cursor ran off the bottom"
+        );
+    }
+
+    #[test]
+    fn enter_opens_the_puzzle_under_the_cursor_and_closes_the_sheet() {
+        let mut g = game();
+        probe::key(&mut g, &probe::press(Key::P));
+        probe::key(&mut g, &probe::press(Key::Down));
+        probe::key(&mut g, &probe::press(Key::Down));
+        probe::key(&mut g, &probe::press(Key::Enter));
+        assert_eq!(g.current_puzzle(), 2);
+        assert!(!g.sheet_open());
+    }
+
+    #[test]
+    fn escape_closes_the_sheet_and_leaves_the_puzzle_alone() {
+        let mut g = game();
+        probe::key(&mut g, &probe::press(Key::P));
+        probe::key(&mut g, &probe::press(Key::Down));
+        probe::key(&mut g, &probe::press(Key::Escape));
+        assert!(!g.sheet_open());
+        assert_eq!(g.current_puzzle(), 0);
+    }
+
+    #[test]
+    fn clicking_a_row_of_the_sheet_opens_that_puzzle() {
+        // The old `handle_mouse` returned early whenever the sheet was open, so
+        // the list you were looking at was inert under the cursor.
+        let mut g = game();
+        probe::click(&mut g, Target::Puzzles);
+        probe::click(&mut g, Target::Puzzle(4));
+        assert_eq!(g.current_puzzle(), 4);
+        assert!(!g.sheet_open());
+    }
+
+    #[test]
+    fn clicking_beside_the_sheet_dismisses_it() {
+        // Aimed at a corner rather than at the middle of the `CloseSheet` box:
+        // that box is the whole window, and the middle of the window is a row
+        // of the list — which is the one part of it that is *not* a dismissal.
+        let mut g = game();
+        probe::click(&mut g, Target::Puzzles);
+        let (x, y) = (SIZE.0 - 4.0, 4.0);
+        assert_eq!(
+            g.frame(SIZE.0, SIZE.1).hit_test(x, y),
+            Some(Target::CloseSheet),
+            "the corner beside the sheet is not a way out of it"
+        );
+        g.click_at(x, y, MouseButton::Left, SIZE);
+        assert!(!g.sheet_open());
+        assert_eq!(g.current_puzzle(), 0);
+    }
+
+    #[test]
+    fn a_number_key_jumps_to_a_puzzle_from_either_side_of_the_sheet() {
+        let mut g = game();
+        probe::key(&mut g, &probe::press(Key::Num5));
+        assert_eq!(g.current_puzzle(), 4);
+        probe::key(&mut g, &probe::press(Key::P));
+        probe::key(&mut g, &probe::press(Key::Num3));
+        assert_eq!(g.current_puzzle(), 2);
+        assert!(!g.sheet_open(), "opening a puzzle left the sheet up");
+    }
+
+    #[test]
+    fn a_key_the_sheet_does_not_use_is_left_alone() {
+        let mut g = game();
+        probe::key(&mut g, &probe::press(Key::P));
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::R)),
+            EventResult::Ignored
+        );
+        assert!(g.sheet_open());
+    }
+
+    // ── The keyboard ───────────────────────────────────────────────
+
+    #[test]
+    fn an_arrow_slides_the_selected_car_along_its_axis() {
+        let mut g = game();
+        g.position(0, &[(0, 3, 2, V)]);
+        let player = player_id(&g);
+        let blocker = labelled(&g, 'A');
+
+        probe::click(&mut g, Target::Vehicle(player));
+        probe::key(&mut g, &probe::press(Key::Right));
+        assert_eq!(g.player().unwrap().col, 1);
+        probe::key(&mut g, &probe::press(Key::Left));
+        assert_eq!(g.player().unwrap().col, 0);
+
+        probe::click(&mut g, Target::Vehicle(blocker));
+        probe::key(&mut g, &probe::press(Key::Down));
+        assert_eq!(g.vehicle(blocker).unwrap().row, 1);
+        probe::key(&mut g, &probe::press(Key::Up));
+        assert_eq!(g.vehicle(blocker).unwrap().row, 0);
+    }
+
+    #[test]
+    fn an_arrow_across_the_cars_axis_does_nothing() {
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        probe::click(&mut g, Target::Vehicle(id));
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::Down)),
+            EventResult::Ignored
+        );
+        assert_eq!(g.player().unwrap().row, EXIT_ROW);
+        assert_eq!(g.moves(), 0);
+    }
+
+    #[test]
+    fn an_arrow_with_nothing_selected_does_nothing() {
+        let mut g = game();
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::Right)),
+            EventResult::Ignored
+        );
+        assert_eq!(g.moves(), 0);
+    }
+
+    #[test]
+    fn enter_walks_the_selection_through_every_car_and_wraps() {
+        let mut g = game();
+        let ids: Vec<usize> = g.vehicles().iter().map(|v| v.id).collect();
+        for want in &ids {
+            probe::key(&mut g, &probe::press(Key::Enter));
+            assert_eq!(g.selected(), Some(*want));
+        }
+        probe::key(&mut g, &probe::press(Key::Enter));
+        assert_eq!(g.selected(), ids.first().copied());
+    }
+
+    #[test]
+    fn escape_puts_the_selected_car_down() {
+        let mut g = game();
+        probe::key(&mut g, &probe::press(Key::Enter));
+        assert!(g.selected().is_some());
+        probe::key(&mut g, &probe::press(Key::Escape));
+        assert_eq!(g.selected(), None);
+    }
+
+    #[test]
+    fn the_letter_keys_do_what_the_footer_says() {
+        let mut g = game();
+        let id = labelled(&g, 'B');
+        assert!(g.slide(id, 1));
+        probe::key(&mut g, &probe::press(Key::Z));
+        assert_eq!(g.undo_depth(), 0);
+
+        probe::key(&mut g, &probe::press(Key::N));
+        assert_eq!(g.current_puzzle(), 1);
+        probe::key(&mut g, &probe::press(Key::Tab));
+        assert_eq!(g.current_puzzle(), 2);
+        probe::key(&mut g, &probe::press(Key::B));
+        assert_eq!(g.current_puzzle(), 1);
+
+        let moved = labelled(&g, 'A');
+        assert!(g.slide(moved, 1));
+        probe::key(&mut g, &probe::press(Key::R));
+        assert_eq!(g.moves(), 0);
+        assert_eq!(g.current_puzzle(), 1);
+    }
+
+    #[test]
+    fn a_key_coming_back_up_does_nothing() {
+        // Reading only `key` runs every binding twice per press.
+        let mut g = game();
+        let release = KeyEvent {
+            key: Key::N,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        assert_eq!(probe::key(&mut g, &release), EventResult::Ignored);
+        assert_eq!(g.current_puzzle(), 0);
+    }
+
+    #[test]
+    fn a_modified_letter_is_left_for_something_else() {
+        // `Ctrl+N` belongs to whatever opens a new window, not to this.
+        let mut g = game();
+        assert_eq!(
+            probe::key(&mut g, &probe::ctrl(Key::N)),
+            EventResult::Ignored
+        );
+        assert_eq!(g.current_puzzle(), 0);
+        assert_eq!(
+            probe::key(&mut g, &probe::ctrl(Key::Num5)),
+            EventResult::Ignored
+        );
+        assert_eq!(g.current_puzzle(), 0);
+    }
+
+    #[test]
+    fn a_key_nothing_is_bound_to_is_left_alone() {
+        let mut g = game();
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::F5)),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn a_puzzle_can_be_solved_from_end_to_end_by_pointer_alone() {
+        // The whole point of the wiring: a jam, cleared with nothing but
+        // clicks, ending in a victory panel.
+        let mut g = game();
+        g.position(0, &[(EXIT_ROW, 3, 2, H), (0, 5, 2, V)]);
+        let player = player_id(&g);
+        let blocker = labelled(&g, 'A');
+
+        probe::click(&mut g, Target::Vehicle(blocker));
+        assert_eq!(g.selected(), Some(blocker));
+        // The blocker is horizontal on the exit row; it has to get out of the
+        // way by going right, which the vertical car at column 5 does not stop.
+        probe::click(&mut g, Target::Cell(EXIT_ROW, 5));
+        assert_eq!(g.vehicle(blocker).unwrap().col, 4);
+
+        probe::click(&mut g, Target::Vehicle(player));
+        probe::click(&mut g, Target::Cell(EXIT_ROW, 3));
+        assert_eq!(g.player().unwrap().col, 2);
+        assert!(!g.is_won());
     }
 }

@@ -60,7 +60,7 @@
 # and nothing else.
 set -u
 
-DIFF_PROG=bc
+DIFF_PROG='bc'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 

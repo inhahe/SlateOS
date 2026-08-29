@@ -82,7 +82,7 @@
 # shellcheck disable=SC2016,SC2209
 set -u
 
-DIFF_PROG=time
+DIFF_PROG='time'
 # Our binary is `time_cmd`, because `src/bin/time.rs` would collide with Rust's
 # own `std::time` in the doc tooling and reads badly beside it; the symlink
 # `diff-wsl.sh` builds is named `time`, so `argv[0]` is the bare word on both

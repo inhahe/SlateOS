@@ -61,7 +61,7 @@
 
 set -u
 
-DIFF_PROG=extfloat
+DIFF_PROG='extfloat'
 # The subject is an example, not a utility: it exposes a library, and anything
 # in `src/bin/` would be installed into the image. So there is no `--bin` to
 # build, no reference of the same name on `PATH` (`DIFF_NO_REF`), and no pair of

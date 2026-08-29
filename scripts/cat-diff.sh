@@ -36,7 +36,7 @@ set -u
 
 # Into WSL, build ours for Linux, find glibc's, and put both behind the one
 # name `cat` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
-DIFF_PROG=cat
+DIFF_PROG='cat'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 

@@ -60,7 +60,7 @@ set -u
 # bare word `nice` on both sides either way, so the `nice: ` prefix matches; and
 # `nice nice` reaches the *same* side's binary, which is what makes the niceness
 # readback below a test of one implementation rather than a mixture.
-DIFF_PROG=nice
+DIFF_PROG='nice'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 

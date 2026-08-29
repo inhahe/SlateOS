@@ -42,7 +42,7 @@ set -u
 
 # Into WSL, build ours for Linux, find glibc's, and put both behind the one
 # name `cut` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
-DIFF_PROG=cut
+DIFF_PROG='cut'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 

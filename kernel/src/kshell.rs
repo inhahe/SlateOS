@@ -125250,9 +125250,21 @@ fn cmd_kstat(args: &str) {
 
     let samples = crate::kstat::recent(count);
     let total = crate::kstat::total_samples();
+    let skipped = crate::kstat::skipped_samples();
 
     if samples.is_empty() {
         shell_println!("No samples recorded yet (wait at least 1 second).");
+        // Reported here specifically: an empty history with a nonzero skip
+        // count is a different fault from an empty history with a zero one —
+        // the sampler is running and finding a memory lock busy every time,
+        // rather than not running at all.  Without this line the two look
+        // identical.
+        if skipped > 0 {
+            shell_println!(
+                "  ({} sample(s) skipped: a memory lock was held at tick time)",
+                skipped
+            );
+        }
         return;
     }
 
@@ -125261,6 +125273,12 @@ fn cmd_kstat(args: &str) {
         samples.len(),
         total
     );
+    if skipped > 0 {
+        shell_println!(
+            "  {} skipped (memory lock busy at tick time; the sampler never blocks)",
+            skipped
+        );
+    }
     shell_println!("");
     shell_println!(
         "  {:<6} {:>5} {:>5} {:>7} {:>4} {:>4} {:>7} {:>5}",

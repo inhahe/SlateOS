@@ -93044,11 +93044,46 @@ Each row was run, not assumed:
 | 4 | empty input, no `-r` | **runs the command once** (`RAN`) | returns success without running |
 | 5 | child exits 1 | xargs exits **123** | exits 1 |
 | 6 | child exits 255 | xargs exits **124** | exits 1 |
-| 7 | command not found | xargs exits **126** | exits 1 |
+| 7 | command not found | xargs exits **126** (see below) | exits 1 |
 | 8 | `printf 'caf\351\0' \| xargs -0 ...` | passes the raw byte through (`63 61 66 e9`) | cannot represent it |
 
-Note row 7: the measured status is **126**, not the 127 the documentation
-implies. Recorded as measured; do not "correct" it to 127 without re-measuring.
+**Row 7 is 126 because of this machine's `PATH`, not because of `xargs`** --
+established 2026-08-29, after the first measurement recorded the 126 without an
+explanation and warned the next reader off "correcting" it. Both numbers are
+real and the rewrite must produce both:
+
+| `PATH` | status | diagnostic |
+|---|---|---|
+| the ambient WSL one | **126** | `xargs: nosuchcmd: Permission denied` |
+| a single readable directory | **127** | `xargs: nosuchcmd: No such file or directory` |
+
+`xargs.c:1360` is unambiguous -- `_exit (errno == ENOENT ? 127 : 126)` -- so the
+variable is `errno` after `execvp`, and `execvp` is where the choice is made.
+glibc searches every `PATH` entry and, having found nothing executable, reports
+the *most specific* failure it saw rather than the last one: any `EACCES` on the
+way beats the `ENOENT` at the end. This WSL's inherited `PATH` contains three
+Windows-interop directories that are not searchable --
+`/mnt/c/Program Files/Git/usr/local/bin`,
+`/mnt/c/Users/Public/Documents/Embarcadero/Studio/23.0/Bpl/Win64`, and
+`/mnt/c/WINDOWS/system32/config/systemprofile/AppData/Local/Muse Hub/lib` --
+so the search yields `EACCES` and xargs exits 126.
+
+Consequences for the transcription, both of which `scripts/xargs-diff.sh`
+depends on:
+
+- **Do not hard-code either number.** Ours must take the branch on its own
+  `errno`, so that it tracks the reference on any host. A transcription that
+  wrote `126` because that is what was measured here would fail everywhere else,
+  and one that wrote `127` because that is what the source "says" fails here.
+- **The harness sees 127, not 126.** `diff-wsl.sh` runs each side with `PATH`
+  set to a single directory holding one symlink, which is exactly the clean-path
+  row above. That is a feature -- it is the row that is a property of `xargs` --
+  but it means the ambient-`PATH` 126 is *not* covered by the harness and is
+  recorded only here.
+- A non-executable file that *is* found is 126 on any `PATH` (`EACCES` from the
+  file itself), and an absolute path that does not exist is 127 on any `PATH`
+  (no search happens). Those two are the unambiguous cases and both are in the
+  harness.
 
 Row 4 matters more than it looks: the stub behaves as though `-r`
 (`--no-run-if-empty`) were permanently on, so a script relying on the one
@@ -93062,7 +93097,30 @@ on large input. And 15 of 18 long options are missing -- `--arg-file`,
 `--no-run-if-empty`, `--verbose`, `--show-limits`, `--exit`, `--max-procs`,
 `--process-slot-var`, `--open-tty`, `--help`, `--version`.
 
+**One upstream bug found while writing the harness, which we deliberately do not
+copy.** `xargs -o` with no controlling terminal aborts GNU 4.9.0 rather than
+diagnosing: the child's `/dev/tty` open fails, it dies through `die()` -- which
+is `exit()`, not `_exit()` -- and so runs the *parent's* `atexit` hook, whose
+first act is `assert (getpid () == parent)`. Measured:
+
+```
+xargs: '/dev/tty': No such device or address
+xargs: xargs.c:1605: wait_for_proc_all: Assertion `getpid () == parent' failed.
+xargs: echo: terminated by signal 6
+```
+
+The comment at `xargs.c:1600` says in as many words that child processes must
+not call `exit ()` for exactly this reason; this path does. Ours should print
+the first line and exit, and `scripts/xargs-diff.sh` therefore tests `-o` for
+its option parsing only, with the reason written where the cases would be.
+
+**Harness:** `scripts/xargs-diff.sh`, 319 cases. It cannot compare `echo`'s
+output -- `echo` cannot show an empty argument, an argument containing a blank,
+or how many times the command ran -- so both sides run a fixture that prints the
+argument vector raw and NUL-terminated, and the whole stream is compared with
+`od -An -c -v`. Baseline on the stub, 2026-08-29: **62 passed, 257 differed.**
+Control run (`OURS=/usr/bin/xargs`): 319 passed, 0 differed.
+
 **Proper fix:** transcribe `xargs.c` + `buildcmd.c` the way `df`, `du` and `ls`
-were done, carrying argv and stdin as bytes throughout, and add
-`scripts/xargs-diff.sh` in the shape of `df-diff.sh` against `/usr/bin/xargs`.
+were done, carrying argv and stdin as bytes throughout.
 Reference tarball matches the installed binary exactly (findutils 4.9.0).

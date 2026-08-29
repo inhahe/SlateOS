@@ -153,7 +153,6 @@ cmd_policyengine 2
 cmd_power 3
 cmd_powerstat 1
 cmd_prefetch 2
-cmd_printf 5
 cmd_printmgr 2
 cmd_printqueue 1
 cmd_procstat 4

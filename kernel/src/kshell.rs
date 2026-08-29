@@ -20182,8 +20182,446 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_lacks("and no widget is reported added", &out, b"Widget added");
     }
 
+    serial_println!(
+        "  kshell::self_test 100: printf reads C's numerals, says what it could not read, and \
+         stops dropping the arguments the format never reached"
+    );
+    // The silent one, and the reason this site needed a *scanner* rather than
+    // just an error path bolted onto `parse`: `"010".parse::<i64>()` succeeds
+    // and returns TEN where C returns EIGHT. A wrong value that parses cleanly
+    // cannot be diagnosed at all, so no diagnostic would ever have found it.
+    let scan = printf_scan_integer("010");
+    assert_eq!(scan.magnitude, 8, "a leading zero is octal, as in C");
+    assert_eq!(scan.consumed, 3, "and the whole word is consumed");
+    let scan = printf_scan_integer("0x10");
+    assert_eq!(scan.magnitude, 16, "`0x' is hexadecimal");
+    let scan = printf_scan_integer("0b101");
+    assert_eq!(scan.magnitude, 5, "`0b' is binary");
+    // `0x` alone is not a failed hex numeral: it is the octal `0` with an `x`
+    // left over, so one byte converts and the rest is trailing text.
+    let scan = printf_scan_integer("0x");
+    assert_eq!(
+        (scan.magnitude, scan.consumed),
+        (0, 1),
+        "`0x' alone is zero followed by trailing text"
+    );
+    // Nothing readable at all is `endptr == nptr`, which gives the sign back too.
+    let scan = printf_scan_integer("-abc");
+    assert_eq!(scan.consumed, 0, "an unreadable word consumes nothing");
+    let scan = printf_scan_integer("12abc");
+    assert_eq!(
+        (scan.magnitude, scan.consumed),
+        (12, 2),
+        "digits then junk is a partial conversion"
+    );
+
+    // Rust's `{:0>5}` is fill-and-align over the whole rendered value, so it
+    // produced `00-42` where C prints `-0042`.
+    let spec = PrintfSpec {
+        zero: true,
+        width: 5,
+        ..PrintfSpec::default()
+    };
+    assert_eq!(printf_field("42", "-", true, &spec), "-0042");
+    // A width on a hex conversion that is not zero-padded: `%5x` used to drop
+    // the width entirely and print `ff`.
+    let spec = PrintfSpec {
+        width: 5,
+        ..PrintfSpec::default()
+    };
+    assert_eq!(printf_field("ff", "", true, &spec), "   ff");
+    // Left-justification was not parsed at all, and the cost was not only the
+    // padding: `%-4s` echoed the spec literally AND left its argument
+    // unconsumed, which desynchronised every conversion after it.
+    let spec = PrintfSpec {
+        left: true,
+        width: 4,
+        ..PrintfSpec::default()
+    };
+    assert_eq!(printf_field("ab", "", false, &spec), "ab  ");
+    // A precision is a maximum length for a string and a minimum digit count
+    // for a number -- the same syntax meaning opposite things.
+    let spec = PrintfSpec {
+        prec: Some(2),
+        ..PrintfSpec::default()
+    };
+    assert_eq!(printf_field("abcdef", "", false, &spec), "ab");
+    let spec = PrintfSpec {
+        prec: Some(4),
+        ..PrintfSpec::default()
+    };
+    assert_eq!(printf_field("42", "", true, &spec), "0042");
+
+    {
+        // POSIX still prints the zero -- that part was never the defect. The
+        // defect was that it printed *only* the zero: no sentence, and exit 0,
+        // because `cmd_printf` never called `set_exit` on any path. The exact
+        // comparison also pins the ordering decision: with one output stream,
+        // the complaint follows the data instead of splitting it in half.
+        let out = capture_command("printf '%d\\n' zzabc");
+        assert_eq!(
+            out.as_slice(),
+            b"0\nprintf: `zzabc': expected a numeric value\n".as_slice(),
+            "the zero is still printed, and the complaint follows the data"
+        );
+        assert_output_contains(
+            "an unreadable number is named",
+            &out,
+            b"`zzabc': expected a numeric value",
+        );
+        assert_eq!(last_exit(), 1, "`printf '%d' zzabc` errors");
+
+        // Digits and then junk is a different sentence from no digits at all,
+        // because the value that got printed is a partial reading rather than a
+        // pure invention.
+        let out = capture_command("printf '%d\\n' 12zz");
+        assert_output_contains(
+            "a partly-read number says so",
+            &out,
+            b"`12zz': value not completely converted",
+        );
+        assert_eq!(last_exit(), 1, "`printf '%d' 12zz` errors");
+
+        let out = capture_command("printf '%d\\n' 99999999999999999999");
+        assert_output_contains(
+            "a number too large for the conversion says so",
+            &out,
+            b"numerical result out of range",
+        );
+        assert_eq!(last_exit(), 1, "`printf '%d' 99999999999999999999` errors");
+
+        // C's numerals, which `str::parse` reads as ten, refuses, and refuses.
+        let out = capture_command("printf '%d.%d\\n' 010 0x10");
+        assert_eq!(
+            out.as_slice(),
+            b"8.16\n".as_slice(),
+            "a leading zero is octal and `0x' is hexadecimal, as in C"
+        );
+
+        // A leading `-` is not an error for an unsigned conversion: C defines
+        // the result as the negation modulo `UINTMAX_MAX + 1`.
+        let out = capture_command("printf '%u\\n' -1");
+        assert_eq!(
+            out.as_slice(),
+            b"18446744073709551615\n".as_slice(),
+            "`%u' of -1 wraps rather than being guessed as zero"
+        );
+
+        // Three separate layout defects on one line: `%05d` of a negative put
+        // the zeros in front of the sign, `%5x` ignored its width, and `%-4s`
+        // was not recognised at all.
+        let out = capture_command("printf '%05d.%5x.%-4s.\\n' -42 255 ab");
+        assert_eq!(
+            out.as_slice(),
+            b"-0042.   ff.ab  .\n".as_slice(),
+            "sign before the padding zeros, width on a plain hex, left-justification"
+        );
+
+        // The silent data loss: the format is reused until the arguments are
+        // used up. This printed `zzaa.` and dropped `bb`, exiting 0.
+        let out = capture_command("printf 'zz%s.\\n' aa bb");
+        assert_eq!(
+            out.as_slice(),
+            b"zzaa.\nzzbb.\n".as_slice(),
+            "the format is reused until the arguments run out"
+        );
+
+        // ...but a format that consumes nothing runs exactly once, or the reuse
+        // loop would never end.
+        let out = capture_command("printf 'zzonly\\n' aa bb");
+        assert_eq!(
+            out.as_slice(),
+            b"zzonly\n".as_slice(),
+            "a format with no conversions is not repeated"
+        );
+
+        // A missing operand is POSIX's zero and is NOT a fault: nobody mistyped
+        // it, so there is nothing to report. This is what keeps the diagnostic
+        // above meaning "you typed something I could not read".
+        let out = capture_command("printf '%d\\n'");
+        assert_eq!(
+            out.as_slice(),
+            b"0\n".as_slice(),
+            "a missing operand converts to zero in silence"
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
+}
+
+/// What one `strtoimax`/`strtoumax` call read.
+///
+/// The magnitude and the sign are kept apart so that one scanner can serve both
+/// the signed and the unsigned conversion, which disagree about what to do with
+/// a `-` and about where the range ends.
+struct PrintfInt {
+    /// The digits' value, saturated at `u64::MAX`.
+    magnitude: u64,
+    negative: bool,
+    /// Bytes claimed. Zero is `strtol`'s "no conversion could be performed".
+    consumed: usize,
+    /// The magnitude did not fit a `u64`.
+    overflowed: bool,
+}
+
+/// What was wrong with an argument that was supposed to be a number.
+///
+/// Kept apart from its wording because the wording is not printed where the
+/// fault is found — see `cmd_printf` for why the sentences come out after the
+/// data rather than in the middle of it.
+#[derive(Clone, Copy)]
+enum PrintfNumFault {
+    /// `endptr == nptr`: not one digit could be read.
+    NotNumeric,
+    /// Digits were read, and then something else followed them.
+    Trailing,
+    /// The digits do not fit the conversion's type.
+    Range,
+}
+
+/// C's `strtol` family with base 0, in the C locale — the conversion POSIX
+/// `printf` specifies for `%d`, `%i`, `%u`, `%x`, `%X` and `%o`.
+///
+/// Base 0 means the base is read from the numeral: `0x`/`0X` is hexadecimal,
+/// `0b`/`0B` is binary (glibc took this from C23, and it is observable), a
+/// leading `0` is octal, and anything else is decimal. The prefixes only count
+/// when a digit follows, so `0x` alone is not a failed hex numeral — it is the
+/// octal numeral `0` with an `x` left over, which is why `printf '%d' 0x` prints
+/// `0` and complains that the value was not completely converted.
+///
+/// **This has to be written out rather than delegated to `str::parse`, and the
+/// reason is not pedantry.** `"010".parse::<i64>()` *succeeds* and returns ten
+/// where C returns eight. That is a wrong number which parses cleanly, so it
+/// cannot be diagnosed at all — no amount of error reporting bolted onto
+/// `parse` would ever have found it, which is what separates this site from the
+/// rest of the guessed-value burn-down. The other two divergences are merely
+/// loud: `parse` rejects `0x10` outright, and rejects `-1` for an unsigned
+/// conversion where C defines it as the negation modulo `UINTMAX_MAX + 1`.
+///
+/// Mirrors `userspace/coreutils/src/bin/printf.rs`'s `scan_integer`, which lane
+/// B wrote against the same C definition. The two `printf`s must not disagree
+/// about what a numeral means.
+fn printf_scan_integer(s: &str) -> PrintfInt {
+    let bytes = s.as_bytes();
+    let at = |i: usize| bytes.get(i).copied().unwrap_or(0);
+    let mut i = 0usize;
+    while matches!(at(i), b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r') {
+        i = i.saturating_add(1);
+    }
+    let negative = match at(i) {
+        b'-' => {
+            i = i.saturating_add(1);
+            true
+        }
+        b'+' => {
+            i = i.saturating_add(1);
+            false
+        }
+        _ => false,
+    };
+
+    let mut base = 10u32;
+    if at(i) == b'0' {
+        match at(i.saturating_add(1)) {
+            b'x' | b'X' if at(i.saturating_add(2)).is_ascii_hexdigit() => {
+                base = 16;
+                i = i.saturating_add(2);
+            }
+            b'b' | b'B' if matches!(at(i.saturating_add(2)), b'0' | b'1') => {
+                base = 2;
+                i = i.saturating_add(2);
+            }
+            // The leading zero is itself the first octal digit, so `i` stays
+            // where it is and a lone `0` converts to zero.
+            _ => base = 8,
+        }
+    }
+
+    let mut magnitude = 0u64;
+    let mut overflowed = false;
+    let mut digits = 0usize;
+    while let Some(d) = printf_digit_value(at(i), base) {
+        digits = digits.saturating_add(1);
+        magnitude = match magnitude
+            .checked_mul(u64::from(base))
+            .and_then(|m| m.checked_add(u64::from(d)))
+        {
+            Some(v) => v,
+            None => {
+                overflowed = true;
+                u64::MAX
+            }
+        };
+        i = i.saturating_add(1);
+    }
+
+    PrintfInt {
+        magnitude,
+        negative,
+        // No digits is `endptr == nptr`, which means the sign and the leading
+        // whitespace are given back too.
+        consumed: if digits == 0 { 0 } else { i },
+        overflowed,
+    }
+}
+
+/// One digit's value in `base`, or `None` if `c` is not a digit of that base.
+fn printf_digit_value(c: u8, base: u32) -> Option<u32> {
+    let v = match c {
+        b'0'..=b'9' => u32::from(c.wrapping_sub(b'0')),
+        b'a'..=b'z' => u32::from(c.wrapping_sub(b'a')).saturating_add(10),
+        b'A'..=b'Z' => u32::from(c.wrapping_sub(b'A')).saturating_add(10),
+        _ => return None,
+    };
+    if v < base { Some(v) } else { None }
+}
+
+/// Record what was wrong with `s`, if anything.
+///
+/// **Nothing here stops the run.** POSIX says the conversion happens anyway
+/// with the value read so far, which is why `printf '%d %d\n' abc 5` prints
+/// `0 5`; only the exit status records that anything was wrong. An empty
+/// argument is not an error either — there `endptr` *is* the terminator, and it
+/// converts to zero in silence. That silence is what keeps a *missing* operand
+/// (POSIX: treated as zero) distinguishable from an unreadable one.
+fn printf_note_fault(
+    s: &str,
+    consumed: usize,
+    range_error: bool,
+    faults: &mut Vec<(PrintfNumFault, String)>,
+) {
+    let fault = if range_error {
+        PrintfNumFault::Range
+    } else if consumed >= s.len() {
+        return;
+    } else if consumed == 0 {
+        PrintfNumFault::NotNumeric
+    } else {
+        PrintfNumFault::Trailing
+    };
+    faults.push((fault, s.to_string()));
+}
+
+/// `strtoimax(s, &end, 0)`, with C's out-of-range clamp.
+fn printf_strtoimax(s: &str, faults: &mut Vec<(PrintfNumFault, String)>) -> i64 {
+    let scan = printf_scan_integer(s);
+    // `i64::MIN` has a magnitude one larger than `i64::MAX`, so the bound
+    // depends on the sign.
+    let limit = if scan.negative {
+        i64::MAX.unsigned_abs().saturating_add(1)
+    } else {
+        i64::MAX.unsigned_abs()
+    };
+    let out_of_range = scan.overflowed || scan.magnitude > limit;
+    printf_note_fault(s, scan.consumed, out_of_range, faults);
+    if out_of_range {
+        return if scan.negative { i64::MIN } else { i64::MAX };
+    }
+    let magnitude = i128::from(scan.magnitude);
+    let value = if scan.negative {
+        0i128.saturating_sub(magnitude)
+    } else {
+        magnitude
+    };
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// `strtoumax(s, &end, 0)`, with C's out-of-range clamp.
+///
+/// A leading `-` is not an error here: C defines the result as the negation
+/// taken modulo `UINTMAX_MAX + 1`, which is why `printf '%u' -1` prints
+/// `18446744073709551615` and exits 0.
+fn printf_strtoumax(s: &str, faults: &mut Vec<(PrintfNumFault, String)>) -> u64 {
+    let scan = printf_scan_integer(s);
+    printf_note_fault(s, scan.consumed, scan.overflowed, faults);
+    if scan.overflowed {
+        return u64::MAX;
+    }
+    if scan.negative {
+        0u64.wrapping_sub(scan.magnitude)
+    } else {
+        scan.magnitude
+    }
+}
+
+/// Flags, field width and precision for one conversion.
+#[derive(Clone, Copy, Default)]
+struct PrintfSpec {
+    left: bool,
+    zero: bool,
+    plus: bool,
+    alt: bool,
+    width: usize,
+    prec: Option<usize>,
+}
+
+/// Lay one converted value out in its field, the way C does.
+///
+/// `numeric` is what separates `%5s` from `%5d`: only a number has a prefix —
+/// its sign, or `%#x`'s `0x` — that must stay in front of the zero padding, and
+/// only a number reads a precision as a *minimum digit count* rather than a
+/// maximum length.
+fn printf_field(text: &str, prefix: &str, numeric: bool, spec: &PrintfSpec) -> String {
+    let mut body = String::new();
+    if numeric {
+        if let Some(p) = spec.prec {
+            // A precision of zero prints *nothing at all* for a value of zero.
+            let digits = if p == 0 && text == "0" { "" } else { text };
+            for _ in digits.chars().count()..p {
+                body.push('0');
+            }
+            body.push_str(digits);
+        } else {
+            body.push_str(text);
+        }
+    } else if let Some(p) = spec.prec {
+        body.extend(text.chars().take(p));
+    } else {
+        body.push_str(text);
+    }
+
+    let len = prefix.chars().count().saturating_add(body.chars().count());
+    let pad = spec.width.saturating_sub(len);
+    let mut out = String::new();
+    if spec.left {
+        out.push_str(prefix);
+        out.push_str(&body);
+        for _ in 0..pad {
+            out.push(' ');
+        }
+    } else if spec.zero && numeric && spec.prec.is_none() {
+        // The zeros go *after* the sign. C prints `-0042` for `%05d` of -42;
+        // Rust's `{:0>5}` is fill-and-align over the whole rendered value and
+        // produces `00-42`, which is what this shell shipped until 2026-08-29.
+        out.push_str(prefix);
+        for _ in 0..pad {
+            out.push('0');
+        }
+        out.push_str(&body);
+    } else {
+        for _ in 0..pad {
+            out.push(' ');
+        }
+        out.push_str(prefix);
+        out.push_str(&body);
+    }
+    out
+}
+
+/// The next argument, or `""` once they are used up.
+///
+/// Not advancing past the end is what makes `cmd_printf`'s reuse loop
+/// terminate, and `""` is POSIX's value for an operand the format asked for and
+/// did not get: it converts to zero, silently, because nobody mistyped it.
+fn printf_next_arg<'a>(args: &'a [String], idx: &mut usize) -> &'a str {
+    match args.get(*idx) {
+        Some(s) => {
+            *idx = idx.saturating_add(1);
+            s.as_str()
+        }
+        None => "",
+    }
 }
 
 /// `printf FORMAT [ARG ...]` — formatted output (subset of POSIX printf).
@@ -20192,14 +20630,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 ///   `%s` — string
 ///   `%d` / `%i` — signed decimal integer
 ///   `%u` — unsigned decimal integer
-///   `%x` — lowercase hexadecimal
-///   `%X` — uppercase hexadecimal
+///   `%x` / `%X` — hexadecimal, lower- and upper-case
 ///   `%o` — octal
 ///   `%c` — first character of argument
 ///   `%%` — literal percent sign
-///   `%0Nd` — zero-padded to N digits (e.g., `%05d`)
 ///
-/// Escape sequences: `\n`, `\t`, `\\`, `\0`.
+/// Flags `-` (left-justify), `0` (zero-pad), `+` (always sign) and `#`
+/// (alternate form: `0x`/`0X`, or a guaranteed leading `0` for `%o`); a decimal
+/// field width; and a `.N` precision — a maximum length for `%s`, a minimum
+/// digit count for the integer conversions. `% d`'s space flag is deliberately
+/// *not* accepted, so that `printf '100% done\n'` keeps printing `100% done`;
+/// C would read the `% d` there as a conversion and print `100 0one`.
+///
+/// Escape sequences: `\n`, `\t`, `\r`, `\a`, `\b`, `\f`, `\v`, `\\`, `\0`.
+///
+/// Not supported, and echoed literally rather than guessed at: `%b`, `%e`,
+/// `%f`, `%g`, `%q`, and `*` as a width or precision.
+///
+/// **The format is reused until the arguments are used up**, as POSIX requires,
+/// so `printf '%s\n' a b c` prints three lines. It printed one and dropped `b`
+/// and `c` without a word, exiting 0, until 2026-08-29.
 fn cmd_printf(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: printf FORMAT [ARGS...]");
@@ -20236,9 +20686,64 @@ fn cmd_printf(args: &str) {
 
     // Parse arguments (space-separated, quote-aware).
     let arg_list = split_words(rest);
-    let mut arg_iter = arg_list.iter();
+    let mut idx = 0usize;
+    let mut faults: Vec<(PrintfNumFault, String)> = Vec::new();
 
-    // Process format string.
+    loop {
+        let began_at = idx;
+        printf_pass(format, &arg_list, &mut idx, &mut faults);
+        // Stop when the arguments are used up -- and never loop on a format
+        // that consumes none, or `printf hi a` would print `hi` for ever.
+        if idx >= arg_list.len() || idx == began_at {
+            break;
+        }
+    }
+
+    // The faults are reported *after* the whole format rather than where they
+    // were found, and that is forced by kshell having exactly one output
+    // stream: `shell_write_bytes` goes to the capture buffer or to the console,
+    // and there is no `shell_eprintln!` (see known-issues.md,
+    // `A-KSHELL-2334-COMMANDS-PRINTED-PAST-THE-CAPTURE`). Complaining at the
+    // point of the fault would splice the sentence into the data --
+    // `printf '%d-%d' 1 abc` would emit `1-`, then the complaint, then `0`.
+    // GNU gets to interleave harmlessly because its complaint is on stderr;
+    // with one stream the least-bad arrangement is to leave the data contiguous
+    // and put the sentences after it.
+    for (fault, word) in &faults {
+        match *fault {
+            PrintfNumFault::NotNumeric => {
+                shell_println!("printf: `{}': expected a numeric value", word);
+            }
+            PrintfNumFault::Trailing => {
+                shell_println!("printf: `{}': value not completely converted", word);
+            }
+            PrintfNumFault::Range => {
+                shell_println!("printf: `{}': numerical result out of range", word);
+            }
+        }
+    }
+    if !faults.is_empty() {
+        // The wording is lane B's userspace `printf`, word for word, apart from
+        // the quotation marks -- those follow this file's `` `word' ``
+        // convention rather than coreutils' locale quotes, because a reader of
+        // kshell's output sees this file's other diagnostics beside it. What
+        // must not differ between the two `printf`s is the sentence and the
+        // status: `cmd_printf` never called `set_exit` on any path before this
+        // change, so `printf '%d' abc` printed `0` and reported success.
+        set_exit(1);
+    }
+}
+
+/// One pass over `format`. Advances `idx` past every argument the format
+/// consumed, and appends anything unreadable to `faults`.
+fn printf_pass(
+    format: &str,
+    arg_list: &[String],
+    idx: &mut usize,
+    faults: &mut Vec<(PrintfNumFault, String)>,
+) {
+    use alloc::format;
+
     let mut chars = format.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\\' {
@@ -20246,99 +20751,126 @@ fn cmd_printf(args: &str) {
             match chars.next() {
                 Some('n') => shell_print!("\n"),
                 Some('t') => shell_print!("\t"),
+                Some('r') => shell_print!("\r"),
+                Some('a') => shell_print!("\x07"),
+                Some('b') => shell_print!("\x08"),
+                Some('f') => shell_print!("\x0c"),
+                Some('v') => shell_print!("\x0b"),
                 Some('\\') => shell_print!("\\"),
                 Some('0') => shell_print!("\0"),
                 Some(c) => shell_print!("\\{}", c),
                 None => shell_print!("\\"),
             }
-        } else if ch == '%' {
-            // Format specifier.
-            // Check for flags: zero-padding and width.
-            let mut zero_pad = false;
-            let mut width: usize = 0;
+            continue;
+        }
+        if ch != '%' {
+            shell_print!("{}", ch);
+            continue;
+        }
 
-            if chars.peek() == Some(&'0') {
-                zero_pad = true;
-                chars.next();
+        // Flags, in any order and any number, as C allows. An unrecognised one
+        // ends the run, so the conversion falls through to the literal echo at
+        // the bottom with its `%` intact rather than losing a character.
+        let mut spec = PrintfSpec::default();
+        loop {
+            match chars.peek() {
+                Some('-') => spec.left = true,
+                Some('0') => spec.zero = true,
+                Some('+') => spec.plus = true,
+                Some('#') => spec.alt = true,
+                _ => break,
             }
+            chars.next();
+        }
+        while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+            if let Some(d) = chars.next() {
+                spec.width = spec
+                    .width
+                    .saturating_mul(10)
+                    .saturating_add((d as u8).saturating_sub(b'0') as usize);
+            }
+        }
+        if chars.peek() == Some(&'.') {
+            chars.next();
+            let mut prec = 0usize;
             while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
                 if let Some(d) = chars.next() {
-                    width = width
+                    prec = prec
                         .saturating_mul(10)
                         .saturating_add((d as u8).saturating_sub(b'0') as usize);
                 }
             }
+            // A bare `.` is a precision of zero, not an absent one.
+            spec.prec = Some(prec);
+        }
 
-            match chars.next() {
-                Some('s') => {
-                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("");
-                    if width > 0 {
-                        shell_print!("{:>width$}", arg, width = width);
-                    } else {
-                        shell_print!("{}", arg);
-                    }
-                }
-                Some('d') | Some('i') => {
-                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
-                    let val: i64 = arg.parse().unwrap_or(0);
-                    if zero_pad && width > 0 {
-                        shell_print!("{:0>width$}", val, width = width);
-                    } else if width > 0 {
-                        shell_print!("{:>width$}", val, width = width);
-                    } else {
-                        shell_print!("{}", val);
-                    }
-                }
-                Some('u') => {
-                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
-                    let val: u64 = arg.parse().unwrap_or(0);
-                    if zero_pad && width > 0 {
-                        shell_print!("{:0>width$}", val, width = width);
-                    } else if width > 0 {
-                        shell_print!("{:>width$}", val, width = width);
-                    } else {
-                        shell_print!("{}", val);
-                    }
-                }
-                Some('x') => {
-                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
-                    let val: u64 = arg.parse().unwrap_or(0);
-                    if zero_pad && width > 0 {
-                        shell_print!("{:0>width$x}", val, width = width);
-                    } else {
-                        shell_print!("{:x}", val);
-                    }
-                }
-                Some('X') => {
-                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
-                    let val: u64 = arg.parse().unwrap_or(0);
-                    if zero_pad && width > 0 {
-                        shell_print!("{:0>width$X}", val, width = width);
-                    } else {
-                        shell_print!("{:X}", val);
-                    }
-                }
-                Some('o') => {
-                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
-                    let val: u64 = arg.parse().unwrap_or(0);
-                    if zero_pad && width > 0 {
-                        shell_print!("{:0>width$o}", val, width = width);
-                    } else {
-                        shell_print!("{:o}", val);
-                    }
-                }
-                Some('c') => {
-                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("");
-                    if let Some(c) = arg.chars().next() {
-                        shell_print!("{}", c);
-                    }
-                }
-                Some('%') => shell_print!("%"),
-                Some(c) => shell_print!("%{}", c),
-                None => shell_print!("%"),
+        match chars.next() {
+            Some('s') => {
+                let arg = printf_next_arg(arg_list, idx);
+                shell_print!("{}", printf_field(arg, "", false, &spec));
             }
-        } else {
-            shell_print!("{}", ch);
+            Some('d' | 'i') => {
+                let arg = printf_next_arg(arg_list, idx);
+                let val = printf_strtoimax(arg, faults);
+                // The sign travels separately from the digits so that `%05d`
+                // can put the padding zeros between the two.
+                let sign = if val < 0 {
+                    "-"
+                } else if spec.plus {
+                    "+"
+                } else {
+                    ""
+                };
+                let text = val.unsigned_abs().to_string();
+                shell_print!("{}", printf_field(&text, sign, true, &spec));
+            }
+            Some('u') => {
+                let arg = printf_next_arg(arg_list, idx);
+                let val = printf_strtoumax(arg, faults);
+                shell_print!("{}", printf_field(&val.to_string(), "", true, &spec));
+            }
+            Some('x') => {
+                let arg = printf_next_arg(arg_list, idx);
+                let val = printf_strtoumax(arg, faults);
+                // C's `#` adds no prefix to a zero: `0x0` would claim a base the
+                // numeral does not need.
+                let prefix = if spec.alt && val != 0 { "0x" } else { "" };
+                shell_print!(
+                    "{}",
+                    printf_field(&format!("{:x}", val), prefix, true, &spec)
+                );
+            }
+            Some('X') => {
+                let arg = printf_next_arg(arg_list, idx);
+                let val = printf_strtoumax(arg, faults);
+                let prefix = if spec.alt && val != 0 { "0X" } else { "" };
+                shell_print!(
+                    "{}",
+                    printf_field(&format!("{:X}", val), prefix, true, &spec)
+                );
+            }
+            Some('o') => {
+                let arg = printf_next_arg(arg_list, idx);
+                let val = printf_strtoumax(arg, faults);
+                let mut text = format!("{:o}", val);
+                // `%#o` guarantees a leading zero. It goes in the body rather
+                // than the prefix so that the zero padding counts it, which is
+                // what makes `%#08o` eight characters wide and not nine.
+                if spec.alt && !text.starts_with('0') {
+                    text = format!("0{}", text);
+                }
+                shell_print!("{}", printf_field(&text, "", true, &spec));
+            }
+            Some('c') => {
+                let arg = printf_next_arg(arg_list, idx);
+                let text: String = arg.chars().take(1).collect();
+                // C has no precision for `%c`; the width still applies.
+                let spec = PrintfSpec { prec: None, ..spec };
+                shell_print!("{}", printf_field(&text, "", false, &spec));
+            }
+            Some('%') => shell_print!("%"),
+            Some(c) => shell_print!("%{}", c),
+            None => shell_print!("%"),
         }
     }
 }

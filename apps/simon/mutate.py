@@ -13,14 +13,14 @@ game whose entire interface is four big buttons.
 Usage:  python -u apps/simon/mutate.py [substring ...]
 """
 
-import difflib
-import re
-import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+
+from mutation_harness import sweep  # noqa: E402  (path set above)
+
 SRC = Path(__file__).parent / "src" / "main.rs"
-BAK = Path(__file__).parent / "src" / "main.rs.bak"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -1229,148 +1229,5 @@ MUTATIONS = [
     # ── END OF LIST ───────────────────────────────────────────────────────
 ]
 
-
-def run_tests():
-    out = subprocess.run(
-        [
-            "python",
-            "scripts/run-timeout.py",
-            "240",
-            "cargo",
-            "test",
-            "-p",
-            "simon",
-            "--target",
-            "x86_64-pc-windows-gnu",
-        ],
-        capture_output=True,
-        text=True,
-        cwd=Path(__file__).parent.parent.parent,
-    )
-    failed = set(re.findall(r"^    tests::(\S+)$", out.stdout, re.M))
-    compiled = "could not compile" not in out.stdout + out.stderr
-    timed_out = out.returncode == 124
-    # An unbounded loop does not fail a test; it runs until the runner kills it.
-    # A harness that only counted named failures would score that as a mutant
-    # nobody noticed, which is the opposite of the truth: the hang IS the
-    # symptom.  Same for a mutant that aborts before any test can report.
-    crashed = compiled and not timed_out and not failed and out.returncode != 0
-    return compiled, failed, timed_out, crashed, out
-
-
-def refuse_a_dirty_start():
-    """Stop if a previous run died without restoring the source.
-
-    The `finally` below covers a Ctrl-C, an exception and a full disk, but it
-    cannot cover the two ways a process is *not* asked to clean up: a SIGKILL
-    and the machine going down.  This actually happened -- a restart during a
-    sweep left `main.rs` holding a live mutation (`Layout::avail_h` missing its
-    `pad * 2.0`) and `main.rs.bak` holding the truth.
-
-    That state is dangerous in a quiet way.  Nothing about a mutant fails to
-    compile, so the next run would read it as `original` and mutate *on top of*
-    it: every verdict would then describe a program that was already broken in
-    a second place, and a sweep that reported `[ok]` throughout would have
-    proved nothing.  Restoring the backup automatically is no better -- if the
-    source was edited since the crash (the usual reason to rerun), the restore
-    silently throws those edits away.
-
-    So neither choice is safe to make silently, and the script makes neither.
-    """
-    if not BAK.exists():
-        return
-    src = SRC.read_text(encoding="utf-8", newline="")
-    bak = BAK.read_text(encoding="utf-8", newline="")
-    print(f"{BAK.name} exists: a previous run did not restore the source.")
-    if src == bak:
-        print("The source matches it, so nothing was lost -- removing the backup.")
-        BAK.unlink()
-        return
-    print("\nThe source differs from the backup.  Either the run died holding a")
-    print("mutation, or the source was edited after it died.  Diff (backup -> source):\n")
-    for line in difflib.unified_diff(
-        bak.splitlines(), src.splitlines(), "main.rs.bak", "main.rs", lineterm="", n=2
-    ):
-        print("  " + line)
-    print("\nDecide which one is the real program, then rerun:")
-    print(f"  the backup is  ->  cp {BAK} {SRC} && rm {BAK}")
-    print(f"  the source is  ->  rm {BAK}")
-    sys.exit(2)
-
-
-def main():
-    refuse_a_dirty_start()
-    # Written fresh every run and removed at the end.  It exists only so a
-    # Ctrl-C mid-mutation leaves the real program on disk.  It must never be
-    # *reused* across runs: a stale backup restored over a fixed source silently
-    # throws away every fix made since, and then reports the same survivors --
-    # output that looks like evidence and is not.
-    original = SRC.read_text(encoding="utf-8", newline="")
-    BAK.write_text(original, encoding="utf-8", newline="")
-    verdicts = []
-    only = sys.argv[1:]
-    try:
-        for name, old, new, expect in MUTATIONS:
-            if only and not any(o in name for o in only):
-                continue
-            if original.count(old) != 1:
-                verdicts.append((name, f"SKIP anchor appears {original.count(old)}x"))
-                print(f"[skip] {name}: anchor appears {original.count(old)} times")
-                continue
-            SRC.write_text(original.replace(old, new), encoding="utf-8", newline="")
-            compiled, failed, timed_out, crashed, out = run_tests()
-            if timed_out:
-                verdicts.append((name, "caught by a hang"))
-                print(f"[ok]   {name}: caught \u2014 the suite hung")
-            elif crashed:
-                verdicts.append((name, "caught by a crash"))
-                print(
-                    f"[ok]   {name}: caught \u2014 the harness died (exit {out.returncode})"
-                )
-            elif not compiled:
-                verdicts.append((name, "SKIP did not compile"))
-                print(f"[skip] {name}: mutant did not compile")
-                print(out.stdout[-1500:])
-            elif set(expect) <= failed:
-                verdicts.append((name, f"caught by {len(failed)} test(s)"))
-                print(f"[ok]   {name}: caught ({', '.join(sorted(failed))})")
-            elif failed:
-                verdicts.append((name, f"WRONG TESTS: {sorted(failed)}"))
-                print(f"[??]   {name}: expected {expect}, got {sorted(failed)}")
-            else:
-                verdicts.append((name, "SURVIVED"))
-                print(f"[BAD]  {name}: SURVIVED \u2014 no test failed")
-            SRC.write_text(original, encoding="utf-8", newline="")
-    finally:
-        # Whatever happens -- a Ctrl-C, an exception, a full disk -- the tree is
-        # left with the real program in it and not a mutant, and with no backup
-        # for the next run to mistake for the truth.
-        SRC.write_text(original, encoding="utf-8", newline="")
-        BAK.unlink(missing_ok=True)
-    print("\n=== summary ===")
-    for name, v in verdicts:
-        print(f"{v:<34} {name}")
-
-    # The run is green only if every mutation was caught by the tests named for
-    # it.  Until this existed the script printed its verdicts and exited 0
-    # regardless, so a sweep carrying a stale anchor and two wrong-test results
-    # looked exactly like a clean one from the outside -- the three were found
-    # by reading 185 lines of log, which is not a check, it is a habit.
-    #
-    # A `[skip]` counts as a failure and that is the important half.  A survivor
-    # is loud: some test should have failed and none did.  A skip is silent --
-    # the anchor stopped matching because the production code moved under it, so
-    # the mutation was never applied and the coverage it stood for quietly
-    # stopped being verified, inside a run that still ends "0 survived".
-    bad = [(n, v) for n, v in verdicts if not v.startswith("caught")]
-    if bad:
-        print(f"\nFAIL: {len(bad)} of {len(verdicts)} mutation(s) not caught as named:")
-        for name, v in bad:
-            print(f"  {v:<32} {name}")
-        return 1
-    print(f"\nOK: all {len(verdicts)} mutation(s) caught by the tests named for them.")
-    return 0
-
-
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(sweep(SRC, MUTATIONS, "simon", timeout=240))

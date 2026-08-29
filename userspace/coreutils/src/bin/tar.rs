@@ -2304,14 +2304,6 @@ where
     }
 }
 
-/// `mkdir` for a directory *member*, where an existing directory is success.
-///
-/// The `AlreadyExists` is passed through for anything that is not a directory,
-/// so [`create_at`] removes the obstacle and tries again. That is GNU's
-/// behaviour and it matters twice over: a directory member extracted over a
-/// plain file replaces the file (measured, `tar-rules11.sh` case 4), and one
-/// extracted over a **symlink pointing at a directory** replaces the *symlink*
-/// (`tar-rules12.sh`) instead of quietly extracting through it into wherever it
 /// Create a member's missing ancestor directories, GNU's way.
 ///
 /// Not `create_dir_all`. The two agree whenever they succeed, and agree on the

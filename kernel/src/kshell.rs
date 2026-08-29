@@ -16456,7 +16456,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_contains(
             "cpick refuses a coordinate it cannot read",
             &out,
-            b"is not a x coordinate",
+            b"is not a horizontal coordinate",
         );
         assert_eq!(last_exit(), 1, "cpick sample: an unreadable x errors");
         assert_output_lacks("and reports no sample", &out, b"Sampled");
@@ -20013,6 +20013,173 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
         assert_eq!(last_exit(), 1, "`coredump cleanup 5O` errors");
         assert_output_lacks("and nothing is reported cleaned up", &out, b"Cleaned up");
+    }
+
+    serial_println!(
+        "  kshell::self_test 99: five commands whose guessed value was a sentinel meaning \
+         `do the default thing', and one that forged the record it then acted on"
+    );
+    // The thirty-fifth batch off `scripts/option-refusal-ledger.txt` (400 -> 367
+    // sites, 201 -> 195 functions): `cmd_widgets`, `cmd_iperf`, `cmd_swapact`,
+    // `cmd_fsbench`, `cmd_datausage`, `cmd_elog`.
+    //
+    // Rung 98's batch guessed **0 for a pid**, where the harm is that 0 names a
+    // real and important process. This batch is the variant where the guessed
+    // number is not a value at all but a *sentinel* the callee reads as "use the
+    // default":
+    //
+    //   * `iperf client <host> <port> 1O` -> duration 0 -> `tcp_client_test`
+    //     reads 0 as DEFAULT_DURATION_POLLS, runs a full test and prints a
+    //     complete throughput report.
+    //   * `iperf server <port> 3OO` -> the same through `tcp_server_test`.
+    //
+    // That is worse than a wrong number, because the output of the substituted
+    // run is byte-identical to the output of the run the user would have got by
+    // omitting the argument. There is no observable difference between "you
+    // mistyped and I ignored you" and "you said nothing and I used the default",
+    // so the transcript cannot be audited afterwards either. The same shape
+    // covers `elog tail 5O` (twenty events, exactly what a bare `elog tail`
+    // prints) and every `fsbench` iteration count.
+    //
+    // `swapact register` is the batch's forge-then-check pair, the shape first
+    // named in batch 29. `swapact::register` (`fs/swapact.rs`) validates only a
+    // full table and a duplicate name -- it cannot reject anything about what it
+    // is told -- so the arm's `unwrap_or("/dev/sdb1")` did not merely mislabel
+    // an action, it *created* a swap area of 1,000,000 pages named after a
+    // device that does not exist, and said "registered". `swapact list` then
+    // showed it, and `swapact in /dev/sdb1 100` recorded traffic against it. A
+    // guess on a path that cannot fail manufactures the record that makes the
+    // next guess look legitimate.
+    {
+        // As in rung 98, every assertion is a refusal emitted before the
+        // subsystem is reached, so none depends on state a fresh boot may not
+        // have initialised -- the §604 trap.
+        //
+        // For `iperf` that ordering is load-bearing in a second way: the operand
+        // check now runs *before* the DNS resolve, so these cases cannot reach
+        // the network and cannot block on a lookup that has nowhere to go.
+        let out = capture_command("iperf client 10.0.2.2 5001 1O");
+        assert_output_contains(
+            "an unreadable duration is named rather than read as the default",
+            &out,
+            b"`1O' is not a duration in polls",
+        );
+        assert_eq!(last_exit(), 1, "`iperf client … 1O` errors");
+        assert_output_lacks(
+            "and no throughput test is reported run",
+            &out,
+            b"Running TCP throughput test",
+        );
+
+        let out = capture_command("iperf server 5001 3OO");
+        assert_output_contains(
+            "the server's poll budget is refused on the same rule",
+            &out,
+            b"`3OO' is not a poll budget",
+        );
+        assert_eq!(last_exit(), 1, "`iperf server 5001 3OO` errors");
+        assert_output_lacks(
+            "and the server does not start listening",
+            &out,
+            b"Listening on port",
+        );
+
+        // The forge. A bare `register` supplied a name, a type, and a page count
+        // that nobody typed, and `register` accepted all three.
+        let out = capture_command("swapact register");
+        assert_output_contains(
+            "a swap area is not invented from nothing",
+            &out,
+            b"missing area name",
+        );
+        assert_eq!(last_exit(), 1, "a bare `swapact register` errors");
+        assert_output_lacks("and no area is reported registered", &out, b"registered");
+
+        // The catch-all was `_ => Partition`, so a misspelt `zram` registered a
+        // partition -- and the success line said "[partition]", stating the
+        // wrong answer in the vocabulary of a right one.
+        let out = capture_command("swapact register zzarea zrma 100");
+        assert_output_contains(
+            "a misspelt swap type is named rather than replaced with partition",
+            &out,
+            b"`zrma' is not a swap type",
+        );
+        assert_eq!(last_exit(), 1, "`swapact register zzarea zrma 100` errors");
+        assert_output_lacks("and no area is reported registered", &out, b"registered");
+
+        // `pages` is what the command is about, so it is required, not optional:
+        // the help writes it as `<pages>` and the code used to substitute 1.
+        let out = capture_command("swapact in zzarea 1O");
+        assert_output_contains(
+            "an unreadable page count is refused, not recorded as one page",
+            &out,
+            b"`1O' is not a page count",
+        );
+        assert_eq!(last_exit(), 1, "`swapact in zzarea 1O` errors");
+        assert_output_lacks("and no swap-in is reported", &out, b"swap-in");
+
+        // A benchmark is the case where the substituted run looks most like a
+        // real one, because printing a plausible number is the whole output.
+        let out = capture_command("fsbench read /tmp/zznotafile 5OO");
+        assert_output_contains(
+            "an unreadable iteration count is refused before the run",
+            &out,
+            b"`5OO' is not an iteration count",
+        );
+        assert_eq!(last_exit(), 1, "`fsbench read … 5OO` errors");
+        assert_output_lacks(
+            "and no read benchmark is reported",
+            &out,
+            b"Sequential read",
+        );
+
+        // `record_usage` accumulates and has no inverse, so a guessed 0 wrote a
+        // permanent zero-byte receive into the app's running total.
+        let out = capture_command("datausage record zzapp 1O24 512");
+        assert_output_contains(
+            "an unreadable byte count is refused rather than recorded as zero",
+            &out,
+            b"`1O24' is not a byte count",
+        );
+        assert_eq!(last_exit(), 1, "`datausage record zzapp 1O24 512` errors");
+        assert_output_lacks("and nothing is reported recorded", &out, b"Recorded");
+
+        // 80 was never a documented resting value here -- the help writes
+        // `<pct>` unbracketed -- so this was a guess that merely looked like one.
+        let out = capture_command("datausage limit alert zzlimit 9O");
+        assert_output_contains(
+            "an unreadable alert threshold is refused, not set to eighty",
+            &out,
+            b"`9O' is not a percentage",
+        );
+        assert_eq!(last_exit(), 1, "`datausage limit alert zzlimit 9O` errors");
+        assert_output_lacks("and no threshold is reported set", &out, b"Alert threshold");
+
+        // The sentinel shape at its plainest: twenty events is what a bare
+        // `elog tail` prints, so the output could not distinguish a typo from an
+        // omission and the reader believes they are seeing the last fifty.
+        let out = capture_command("elog tail 5O");
+        assert_output_contains(
+            "an unreadable event count is refused rather than silently twenty",
+            &out,
+            b"`5O' is not an event count",
+        );
+        assert_eq!(last_exit(), 1, "`elog tail 5O` errors");
+
+        // Two coordinates that were 100 whatever the user typed. They also pin
+        // the wording fix that went with this batch: `article_for` chooses the
+        // article by spelling, English chooses it by sound, and `cpick` shipped
+        // "is not a x coordinate" until this batch renamed the nouns to
+        // "horizontal"/"vertical" -- the convention `cmd_wsnap` had already
+        // adopted locally for exactly this reason.
+        let out = capture_command("widgets add clock 1OO 200");
+        assert_output_contains(
+            "an unreadable coordinate is named, and named grammatically",
+            &out,
+            b"`1OO' is not a horizontal coordinate",
+        );
+        assert_eq!(last_exit(), 1, "`widgets add clock 1OO 200` errors");
+        assert_output_lacks("and no widget is reported added", &out, b"Widget added");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -30126,7 +30293,18 @@ fn cmd_fsbench(args: &str) {
             } else {
                 PathBuf::from("/tmp/_bench_read")
             };
-            let iters: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(500);
+            // Every operand here is genuinely optional -- the help writes them
+            // all in brackets and the defaults below are the documented resting
+            // values -- so `optional_num` is the right half of the pair.  What it
+            // adds is that `fsbench read /tmp/f 5OO` (letter O) is now refused
+            // rather than quietly benchmarked at 500 iterations and reported as
+            // "Sequential read: 500 iterations", which reads exactly like a run
+            // the operator asked for.
+            let Some(iters) =
+                optional_num::<u64>(&parts, 2, "fsbench", sub, "iteration count", 500)
+            else {
+                return;
+            };
             match bench::bench_sequential_read(&path, iters) {
                 Ok(r) => {
                     shell_println!("Sequential read: {} iterations", r.iterations);
@@ -30149,8 +30327,16 @@ fn cmd_fsbench(args: &str) {
             } else {
                 PathBuf::from("/tmp")
             };
-            let size: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(4096);
-            let iters: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+            let Some(size) =
+                optional_num::<usize>(&parts, 2, "fsbench", sub, "write size in bytes", 4096)
+            else {
+                return;
+            };
+            let Some(iters) =
+                optional_num::<u64>(&parts, 3, "fsbench", sub, "iteration count", 200)
+            else {
+                return;
+            };
             match bench::bench_sequential_write(&dir, size, iters) {
                 Ok(r) => {
                     shell_println!("Sequential write ({}B): {} iterations", size, r.iterations);
@@ -30173,7 +30359,11 @@ fn cmd_fsbench(args: &str) {
             } else {
                 PathBuf::from("/tmp")
             };
-            let iters: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
+            let Some(iters) =
+                optional_num::<u64>(&parts, 2, "fsbench", sub, "iteration count", 200)
+            else {
+                return;
+            };
             match bench::bench_metadata(&dir, iters) {
                 Ok(r) => {
                     shell_println!(
@@ -30204,7 +30394,11 @@ fn cmd_fsbench(args: &str) {
             } else {
                 PathBuf::from("/tmp")
             };
-            let iters: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000);
+            let Some(iters) =
+                optional_num::<u64>(&parts, 2, "fsbench", sub, "iteration count", 1000)
+            else {
+                return;
+            };
             match bench::bench_path_lookup(&path, iters) {
                 Ok(r) => {
                     shell_println!(
@@ -36089,8 +36283,20 @@ fn cmd_widgets(args: &str) {
             // widgets add <kind> [x y]
             let kind_str = parts.get(1).copied().unwrap_or("");
             if let Some(kind) = widgets::WidgetKind::from_str(kind_str) {
-                let x: i32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
-                let y: i32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
+                // "horizontal"/"vertical" rather than "x"/"y" -- the file-wide
+                // convention, set by `cmd_wsnap` and `cmd_a11y` and explained at
+                // `cmd_cpick`: `article_for` reads spelling where English reads
+                // sound, so a bare "x coordinate" prints as "a x coordinate".
+                let Some(x) =
+                    optional_num::<i32>(&parts, 2, "widgets", sub, "horizontal coordinate", 100)
+                else {
+                    return;
+                };
+                let Some(y) =
+                    optional_num::<i32>(&parts, 3, "widgets", sub, "vertical coordinate", 100)
+                else {
+                    return;
+                };
                 match widgets::add(kind, x, y) {
                     Ok(id) => shell_println!("Widget added: id={} kind={}", id, kind.label()),
                     Err(e) => {
@@ -36099,9 +36305,17 @@ fn cmd_widgets(args: &str) {
                     }
                 }
             } else if !kind_str.is_empty() {
-                // Try as custom type
-                let x: i32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
-                let y: i32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
+                // Try as custom type. Same two operands, same nouns as above.
+                let Some(x) =
+                    optional_num::<i32>(&parts, 2, "widgets", sub, "horizontal coordinate", 100)
+                else {
+                    return;
+                };
+                let Some(y) =
+                    optional_num::<i32>(&parts, 3, "widgets", sub, "vertical coordinate", 100)
+                else {
+                    return;
+                };
                 match widgets::add_custom(kind_str, x, y) {
                     Ok(id) => shell_println!("Custom widget added: id={}", id),
                     Err(e) => {
@@ -36329,14 +36543,16 @@ fn cmd_widgets(args: &str) {
                 shell_println!("Usage: widgets regtype <type_id> <name> [width height app]");
                 set_exit(1);
             } else {
-                let w = parts
-                    .get(3)
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(200);
-                let h = parts
-                    .get(4)
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(200);
+                let Some(w) =
+                    optional_num::<u32>(&parts, 3, "widgets", sub, "width in pixels", 200)
+                else {
+                    return;
+                };
+                let Some(h) =
+                    optional_num::<u32>(&parts, 4, "widgets", sub, "height in pixels", 200)
+                else {
+                    return;
+                };
                 let app = parts.get(5).copied().unwrap_or("custom");
                 match widgets::register_type(type_id, name, w, h, app) {
                     Ok(()) => shell_println!("Custom type '{}' registered", type_id),
@@ -39993,9 +40209,13 @@ fn cmd_winsnap(args: &str) {
             // Both coordinates defaulted to 0, so `wsnap detect abc 400`
             // answered about the top-left pixel and printed a zone name --
             // an answer to a question nobody asked.
-            // The nouns are "horizontal"/"vertical" rather than "x"/"y" only
-            // because the helper's message reads "is not a {noun}", and "a x
-            // coordinate" is not a sentence.
+            // The nouns are "horizontal"/"vertical" rather than "x"/"y" because
+            // the helper's message reads "is not a {noun}", and "a x coordinate"
+            // is not a sentence. This was written here as a local dodge; as of
+            // 2026-08-29 it is the file-wide convention, because `cmd_cpick` was
+            // still shipping "a x coordinate" and `cmd_widgets` was about to add
+            // two more sites of it. See `cmd_cpick` for why the escape hatch in
+            // `article_for`'s doc comment does not serve `required_num`.
             let Some(cx) =
                 required_num::<i32>(&parts, 1, "wsnap", "detect", "horizontal coordinate")
             else {
@@ -40493,10 +40713,19 @@ fn cmd_colorpicker(args: &str) {
             // sampled the top-left pixel of the screen and reported it as
             // "Sampled (0,300)" -- the printed coordinate agreed with the
             // colour, which is exactly what made the wrong answer look right.
-            let Some(x) = required_num(&parts, 1, "cpick", sub, "x coordinate") else {
+            // "horizontal"/"vertical", not "x"/"y", matching `cmd_wsnap` and
+            // `cmd_a11y`. This site shipped "is not a x coordinate" until
+            // 2026-08-29: `article_for` picks the article by spelling, English
+            // picks it by sound, and a one-letter word is where those diverge.
+            // Its doc comment offers an escape hatch -- write the article into
+            // the noun -- but that one does not apply to `required_num`, whose
+            // *other* message is "missing {noun}", which the hatch would turn
+            // into "missing an x coordinate". A noun that reads correctly in
+            // both sentences is the fix that does not need a hatch at all.
+            let Some(x) = required_num(&parts, 1, "cpick", sub, "horizontal coordinate") else {
                 return;
             };
-            let Some(y) = required_num(&parts, 2, "cpick", sub, "y coordinate") else {
+            let Some(y) = required_num(&parts, 2, "cpick", sub, "vertical coordinate") else {
                 return;
             };
             let c = colorpicker::sample_screen(x, y);
@@ -55444,8 +55673,21 @@ fn cmd_datausage(args: &str) {
             // datausage record <app_id> <rx> <tx>
             if parts.len() >= 4 {
                 let app_id = parts[1];
-                let rx: u64 = parts[2].parse().unwrap_or(0);
-                let tx: u64 = parts[3].parse().unwrap_or(0);
+                // `rx`/`tx` are the whole content of the record, and 0 is not a
+                // reading of any word -- it is what was left when none could be
+                // read. `datausage record app 1O24 512` (letter O) used to write
+                // a zero-byte receive into the app's running total and print
+                // "Recorded app rx=0 B tx=512 B", which is indistinguishable from
+                // a real record of no traffic. Once written it is not
+                // recoverable: `record_usage` accumulates.
+                let Some(rx) = required_num::<u64>(&parts, 2, "datausage", sub, "byte count")
+                else {
+                    return;
+                };
+                let Some(tx) = required_num::<u64>(&parts, 3, "datausage", sub, "byte count")
+                else {
+                    return;
+                };
                 match datausage::record_usage(app_id, rx, tx) {
                     Ok(()) => shell_println!(
                         "Recorded {} rx={} tx={}",
@@ -55558,8 +55800,28 @@ fn cmd_datausage(args: &str) {
                     // datausage limit add <name> <bytes> [days]
                     if parts.len() >= 4 {
                         let name = parts[2];
-                        let bytes: u64 = parts[3].parse().unwrap_or(0);
-                        let days: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
+                        // A limit of 0 bytes is not a harmless default: it is a
+                        // cap that is already exceeded the moment it exists, so
+                        // a mistyped size used to create a limit that fires
+                        // immediately -- and with `block` set, cuts the
+                        // connection off -- while reporting "Limit 'home' added:
+                        // 0 B over 30 days" and exiting 0. `days` really is
+                        // optional (the help brackets it); the size is not.
+                        let Some(bytes) =
+                            required_num::<u64>(&parts, 3, "datausage", "limit add", "byte count")
+                        else {
+                            return;
+                        };
+                        let Some(days) = optional_num::<u32>(
+                            &parts,
+                            4,
+                            "datausage",
+                            "limit add",
+                            "number of days",
+                            30,
+                        ) else {
+                            return;
+                        };
                         match datausage::add_limit(name, bytes, days) {
                             Ok(()) => shell_println!(
                                 "Limit '{}' added: {} over {} days",
@@ -55621,7 +55883,17 @@ fn cmd_datausage(args: &str) {
                     // datausage limit alert <name> <pct>
                     if parts.len() >= 4 {
                         let name = parts[2];
-                        let pct: u8 = parts[3].parse().unwrap_or(80);
+                        // The help writes `<pct>` without brackets, so 80 was
+                        // never a documented resting value -- it was a guess that
+                        // happened to be plausible, which is the worst kind:
+                        // `datausage limit alert home 9O` printed "Alert
+                        // threshold for 'home': 80%" and the operator has no way
+                        // to see that 90 was not what was set.
+                        let Some(pct) =
+                            required_num::<u8>(&parts, 3, "datausage", "limit alert", "percentage")
+                        else {
+                            return;
+                        };
                         match datausage::set_alert_threshold(name, pct) {
                             Ok(()) => shell_println!("Alert threshold for '{}': {}%", name, pct),
                             Err(e) => {
@@ -63345,7 +63617,17 @@ fn cmd_elog(args: &str) {
             }
         }
         "tail" => {
-            let count: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(20);
+            // `[count]` is bracketed in every one of this command's usage lines,
+            // so 20 is a documented resting value and `optional_num` is right.
+            // The guess it removes is the *present but unreadable* word: `elog
+            // tail 5O` (letter O) printed twenty events and nothing else, and
+            // twenty events is exactly what a bare `elog tail` prints -- so the
+            // output could not distinguish a typo from an omission, and the
+            // operator reading it believes they are looking at the last fifty.
+            let Some(count) = optional_num::<usize>(&parts, 1, "elog", sub, "event count", 20)
+            else {
+                return;
+            };
             let result = eventlog::query(&EventFilter::all(), count.wrapping_add(100));
             // Show the last `count` entries.
             let start = result.events.len().saturating_sub(count);
@@ -63365,7 +63647,10 @@ fn cmd_elog(args: &str) {
                 return;
             }
             let prefix = parts[1];
-            let count: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let Some(count) = optional_num::<usize>(&parts, 2, "elog", sub, "event count", 20)
+            else {
+                return;
+            };
             let result = eventlog::query(&EventFilter::all().namespace(prefix), count);
             shell_println!(
                 "Events matching namespace '{}': {} found",
@@ -63392,7 +63677,10 @@ fn cmd_elog(args: &str) {
                     return;
                 }
             };
-            let count: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let Some(count) = optional_num::<usize>(&parts, 2, "elog", sub, "event count", 20)
+            else {
+                return;
+            };
             let result = eventlog::query(&EventFilter::all().min_severity(sev), count);
             shell_println!(
                 "Events at {} or above: {} found",
@@ -63417,7 +63705,10 @@ fn cmd_elog(args: &str) {
                     return;
                 }
             };
-            let count: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let Some(count) = optional_num::<usize>(&parts, 2, "elog", sub, "event count", 20)
+            else {
+                return;
+            };
             let result = eventlog::query(&EventFilter::all().pid(pid), count);
             shell_println!("Events from PID {}: {} found", pid, result.matched);
             for ev in &result.events {
@@ -63431,7 +63722,10 @@ fn cmd_elog(args: &str) {
                 return;
             }
             let name = parts[1];
-            let count: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let Some(count) = optional_num::<usize>(&parts, 2, "elog", sub, "event count", 20)
+            else {
+                return;
+            };
             let result = eventlog::query(&EventFilter::all().service(name), count);
             shell_println!("Events from service '{}': {} found", name, result.matched);
             for ev in &result.events {
@@ -69975,7 +70269,15 @@ fn cmd_iperf(args: &str) {
             }
             let host_str = parts[1];
             let port_str = parts[2];
-            let duration: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            // 0 is not a duration here, it is `tcp_client_test`'s sentinel for
+            // "use DEFAULT_DURATION_POLLS" -- so a guessed 0 ran the default
+            // test and printed a full result, making a mistyped duration
+            // indistinguishable from having omitted it.
+            let Some(duration) =
+                optional_num::<u32>(&parts, 3, "iperf", sub, "duration in polls", 0)
+            else {
+                return;
+            };
 
             let ip = if let Some(ip) = parse_ipv4(host_str) {
                 ip
@@ -70039,7 +70341,15 @@ fn cmd_iperf(args: &str) {
                     return;
                 }
             };
-            let max_polls: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            // As in the client arm, 0 is not a poll budget -- it is
+            // `tcp_server_test`'s sentinel for DEFAULT_SERVER_POLLS.  Guessing it
+            // meant a mistyped budget listened for the default 3000 polls and
+            // printed a full result, which is indistinguishable from having
+            // omitted the argument entirely.
+            let Some(max_polls) = optional_num::<u32>(&parts, 2, "iperf", sub, "poll budget", 0)
+            else {
+                return;
+            };
 
             shell_println!("Listening on port {}...", port);
             match crate::net::iperf::tcp_server_test(port, max_polls) {
@@ -70074,8 +70384,14 @@ fn cmd_iperf(args: &str) {
             }
             let host_str = parts[1];
             let port_str = parts[2];
-            let count: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
-            let size: usize = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(1400);
+            let Some(count) = optional_num::<u32>(&parts, 3, "iperf", sub, "packet count", 100)
+            else {
+                return;
+            };
+            let Some(size) = optional_num::<usize>(&parts, 4, "iperf", sub, "payload size", 1400)
+            else {
+                return;
+            };
 
             let ip = if let Some(ip) = parse_ipv4(host_str) {
                 ip
@@ -70144,8 +70460,14 @@ fn cmd_iperf(args: &str) {
             }
             let host_str = parts[1];
             let port_str = parts[2];
-            let count: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
-            let size: usize = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(1400);
+            let Some(count) = optional_num::<u32>(&parts, 3, "iperf", sub, "packet count", 100)
+            else {
+                return;
+            };
+            let Some(size) = optional_num::<usize>(&parts, 4, "iperf", sub, "payload size", 1400)
+            else {
+                return;
+            };
 
             let ip6 = match Ipv6Addr::parse(host_str) {
                 Some(addr) => addr,
@@ -103498,20 +103820,51 @@ fn cmd_swapact(args: &str) {
             shell_println!("swapact: initialized");
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("/dev/sdb1");
-            let stype = match parts.get(2).copied().unwrap_or("partition") {
+            // The help one screen below says `register <name> <partition|file|zram>
+            // <pages> [priority]` -- three required operands -- and this arm used
+            // to invent a value for every one of them.  That is worse here than
+            // at a typical guessed-value site because `swapact::register`
+            // (`fs/swapact.rs`) pushes unconditionally: it rejects only a full
+            // table and a duplicate name, and validates nothing about what it is
+            // told.  So a bare `swapact register` *created* an area named
+            // `/dev/sdb1` of 1,000,000 pages and reported success, after which
+            // `swapact list` showed a swap partition that does not exist and
+            // `swapact in /dev/sdb1 100` recorded traffic against it.  A guess on
+            // a path that cannot fail manufactures the record that makes the next
+            // guess look legitimate.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("swapact: {}: missing area name", sub);
+                set_exit(1);
+                return;
+            };
+            let Some(type_word) = parts.get(2).copied() else {
+                shell_println!("swapact: {}: missing swap type", sub);
+                set_exit(1);
+                return;
+            };
+            // The catch-all here was `_ => Partition`, which read a misspelt
+            // `zrma` as a partition and then said "registered … [partition]" --
+            // a wrong answer stated in the vocabulary of a right one.
+            let stype = match type_word {
+                "partition" => swapact::SwapType::Partition,
                 "file" => swapact::SwapType::File,
                 "zram" => swapact::SwapType::Zram,
-                _ => swapact::SwapType::Partition,
+                other => {
+                    shell_println!(
+                        "swapact: {}: `{}' is not a swap type (expected partition, file or zram)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
-            let pages = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1_000_000);
-            let prio = parts
-                .get(4)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(-1);
+            let Some(pages) = required_num::<u64>(&parts, 3, "swapact", sub, "page count") else {
+                return;
+            };
+            let Some(prio) = optional_num::<i32>(&parts, 4, "swapact", sub, "priority", -1) else {
+                return;
+            };
             match swapact::register(name, stype, pages, prio) {
                 Ok(()) => shell_println!(
                     "swapact: registered {} [{}] {} pages prio={}",
@@ -103527,15 +103880,23 @@ fn cmd_swapact(args: &str) {
             }
         }
         "in" => {
-            let name = parts.get(1).copied().unwrap_or("");
-            let pages = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
-            let ns = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(5000);
+            // `pages` is what the command is *about* -- the help writes it as
+            // `in <name> <pages> [ns]`, required -- so a mistyped count that
+            // silently became 1 recorded a swap-in that did not happen, at a
+            // volume nobody asked for, and said "swap-in 1 pages".
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("swapact: {}: missing area name", sub);
+                set_exit(1);
+                return;
+            };
+            let Some(pages) = required_num::<u64>(&parts, 2, "swapact", sub, "page count") else {
+                return;
+            };
+            let Some(ns) =
+                optional_num::<u64>(&parts, 3, "swapact", sub, "duration in nanoseconds", 5000)
+            else {
+                return;
+            };
             match swapact::record_in(name, pages, ns) {
                 Ok(()) => shell_println!("swapact: swap-in {} pages {}ns on {}", pages, ns, name),
                 Err(e) => {
@@ -103545,15 +103906,19 @@ fn cmd_swapact(args: &str) {
             }
         }
         "out" => {
-            let name = parts.get(1).copied().unwrap_or("");
-            let pages = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
-            let ns = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(10000);
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("swapact: {}: missing area name", sub);
+                set_exit(1);
+                return;
+            };
+            let Some(pages) = required_num::<u64>(&parts, 2, "swapact", sub, "page count") else {
+                return;
+            };
+            let Some(ns) =
+                optional_num::<u64>(&parts, 3, "swapact", sub, "duration in nanoseconds", 10000)
+            else {
+                return;
+            };
             match swapact::record_out(name, pages, ns) {
                 Ok(()) => shell_println!("swapact: swap-out {} pages {}ns on {}", pages, ns, name),
                 Err(e) => {

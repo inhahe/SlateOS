@@ -81827,7 +81827,76 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **400 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **367 of 800 remain**
+
+> **Burn-down log.** 2026-08-29 (thirty-fifth batch): `cmd_widgets` (6),
+> `cmd_iperf` (6), `cmd_swapact` (6), `cmd_fsbench` (5), `cmd_datausage` (5) and
+> `cmd_elog` (5) cleared — 400 → 367 across 201 → 195 functions. Pinned by
+> self-test rung 99.
+>
+> **In short:** rung 98's batch guessed **0 for a pid**, and the harm there was
+> that 0 names a real and important process. This batch is the variant where
+> the guessed number is not a value at all but a **sentinel the callee reads as
+> "use the default"** — and that is worse, because the substituted run's output
+> is *byte-identical* to the run the user would have got by omitting the
+> argument entirely.
+>
+> * **The sentinel cases.** `iperf client <host> <port> 1O` (letter O) became
+>   duration 0, which `tcp_client_test` reads as `DEFAULT_DURATION_POLLS`; the
+>   test ran to completion and printed a full throughput report. `iperf server
+>   <port> 3OO` did the same through `tcp_server_test`'s 3000-poll default.
+>   `elog tail 5O` printed twenty events, which is exactly what a bare `elog
+>   tail` prints. Every `fsbench` iteration count is the same shape. **There is
+>   no observable difference between "you mistyped and I ignored you" and "you
+>   said nothing and I used the default"** — so unlike batch 34, where a wrong
+>   pid at least appeared in the output, here the transcript cannot be audited
+>   after the fact either. Nothing anywhere records that a word was discarded.
+> * **`swapact register` is this batch's forge-then-check pair** (the shape
+>   first named in batch 29, and the reason "there is a guard downstream" is not
+>   a defence). `swapact::register` in `kernel/src/fs/swapact.rs:138` rejects
+>   only a full table and a duplicate name — it validates *nothing* about what
+>   it is told. So `unwrap_or("/dev/sdb1")` in the shell arm did not merely
+>   mislabel an action: a bare `swapact register` **created** a swap area of
+>   1,000,000 pages named after a device that does not exist and reported
+>   success. `swapact list` then displayed it, and `swapact in /dev/sdb1 100`
+>   recorded traffic against it. A guess on a path that cannot fail manufactures
+>   the record that makes the next guess look legitimate.
+> * **The `_ => SwapType::Partition` catch-all went with it**, though the gate
+>   does not count those: a misspelt `zrma` registered a *partition*, and the
+>   success line printed `[partition]` — the wrong answer stated in the
+>   vocabulary of a right one.
+> * **`required_num` vs `optional_num` was chosen by meaning, not mechanically.**
+>   Where the operand *names the thing being acted on* it is required —
+>   `swapact`'s `<pages>`, `datausage record`'s `<rx>`/`<tx>`, `limit add`'s
+>   `<bytes>`, `limit alert`'s `<pct>`, all written unbracketed in their own
+>   help. Where the help brackets it and documents a resting value it is
+>   optional — every `fsbench` count, every `elog` `[count]`, `iperf`'s
+>   `[duration]`. Getting this backwards would turn a required operand into an
+>   optional one, which is a behaviour change wearing a bug fix.
+>   `datausage limit alert` is the instructive one: 80 *looked* like a
+>   documented default and was not, so `alert home 9O` printed "Alert threshold
+>   for 'home': 80%" and the operator had no way to see that 90 was not what was
+>   set.
+> * **Four `parts[N]` indexing sites disappeared as a side effect** in
+>   `cmd_datausage` (they were guarded by a `parts.len() >= 4` check, so no
+>   panic was reachable today — but the guard and the index were three lines
+>   apart and only the helper makes that safety local).
+>
+> **A wording defect found and fixed alongside, because this batch was about to
+> make it worse.** `article_for` picks "a"/"an" from the first *letter*; English
+> picks it from the first *sound*; a one-letter noun is precisely where those
+> diverge. `cmd_cpick` shipped **"is not a x coordinate"**, and `cmd_wsnap`
+> carried a comment saying it had renamed its own nouns to
+> "horizontal"/"vertical" *only* to dodge this — so the file held two
+> workarounds and one live defect for a single cause, and `cmd_widgets` was
+> about to add two more sites of it. `article_for`'s doc comment offers an
+> escape hatch (write the article into the noun, `"an x coordinate"`), but that
+> hatch does not serve `required_num`, whose *other* message is
+> `missing {noun}` — which the hatch turns into "missing an x coordinate". A
+> noun that reads correctly in **both** sentences needs no hatch, so
+> "horizontal"/"vertical" is now the file-wide convention and `cmd_wsnap`'s
+> local dodge is recorded as its origin. Rung 99 pins it; the rung-98-era
+> assertion `b"is not a x coordinate"` was updated in the same change.
 
 > **Burn-down log.** 2026-08-29 (thirty-fourth batch): `cmd_pidfd` (5),
 > `cmd_userfault` (5), `cmd_oomkiller` (5), `cmd_prociso` (6), `cmd_coredump`

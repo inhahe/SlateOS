@@ -93923,6 +93923,71 @@ about position within the box. The tell is a test whose name contains *inside*,
 *within*, *stays*, *fits*, or *does not overlap* and whose subject is computed by
 a formula with a division in it.
 
+### Lesson 69: a tool that matches bytes and a table written as text disagree about what ends a line (lane C, 2026-08-29)
+
+**In short:** the mutation harness reported 35 of wordle's 75 anchors as
+appearing "0 times" in a file that plainly contained every one of them. The
+anchors were written in a Python file with `\n` between their lines; the Rust
+file on disk had `\r\n`, because a splice script had written it with
+`pathlib.Path.write_text`, which translates line endings to the platform's on
+the way out. Every single-line anchor matched and every multi-line one did not,
+and the harness printed the same verdict — `SKIP anchor appears 0x` — that it
+prints for an anchor genuinely edited away.
+
+**Why it took a while to see.** The verdict is honest and it is the right
+verdict; it just has two causes with nothing to tell them apart. A sweep whose
+survivors are scattered across nine sections of the program reads as "the suite
+has holes all over", which is a plausible thing for a new suite to be, and it
+sends you off reading tests. The tell — obvious afterwards — is the *shape* of
+the failure: every multi-line anchor failed and no single-line one did. A defect
+that respects a syntactic property of the anchor rather than a semantic one is a
+defect in the matching, not in the tests.
+
+**Two fixes, and both are wanted.**
+
+1. **The file.** `apps/wordle/src/main.rs` was normalised to LF. Nothing in this
+   tree wants CRLF: the committed blobs are LF and `core.autocrlf` is unset, so
+   only the working copy was affected — and only the copy of it a Python script
+   had rewritten.
+2. **The harness.** `scripts/mutation_harness.py` reads and writes the source
+   with `newline=""` so a restore is byte-identical; that is deliberate and must
+   stay. It now also detects the source's line ending once and translates every
+   anchor into it before searching:
+
+   ```python
+   eol = "\r\n" if "\r\n" in original else "\n"
+   ```
+
+   A harness that can only be driven from a file with one particular line ending
+   is a harness that will one day report a clean sweep because it broke nothing
+   at all — which is the failure lesson 66 was written about, arriving by a
+   different road.
+
+**The rule.** *Any Python that rewrites a source file in place must pass
+`newline="\n"`, or read and write bytes.* `write_text` is not a round trip on
+Windows: `read_text` strips the `\r`, `write_text` puts it back, so a script that
+reads a file, changes one line and writes it out rewrites all 3,828 of them. The
+`git diff` looks the same either way — git normalises — which is what lets it
+through review.
+
+**Where else to look.** Every splice or patch helper in `scripts/`, and every
+throwaway `python -c` that edits a `.rs` or `.md` in place. The damage is
+invisible until some other tool matches on bytes.
+
+**How widespread it already is.** Fifty tracked files carry CRLF — `git ls-files`
+plus a byte count finds them — headed by `apps/settings/src/main.rs` (8,227
+lines), `apps/vpnmanager`, `apps/netmanager`, `apps/indexer`, `gui/credentials`,
+`gui/notifications`, and eleven apps that already have windows and suites. In
+every one of them the *committed blob* has the CRLF too, so this is history and
+not a stale checkout, and `git checkout` will not fix it. **They are not being
+normalised**: a fifty-file whitespace-only commit would bury the next few real
+diffs and conflict with anything the other two lanes have in flight, and the
+harness translation above already makes them safe to mutate. The cost of leaving
+them is that a hand-written `grep`/`sed`/`python` one-liner against any of those
+files must still expect `\r\n`; the cost of fixing them is paid by everyone
+reading history for a year. If one is being rewritten wholesale for another
+reason — as wordle was — normalise it in that commit.
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print

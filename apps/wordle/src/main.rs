@@ -2234,6 +2234,18 @@ mod tests {
         }
         assert_eq!(g.streak, 0);
         assert_eq!(g.best_streak, 3, "the best run was forgotten");
+        // The loss alone is not enough to see the difference: it is the *win*
+        // that writes the best streak, so a best streak that merely copied the
+        // current one would still read 3 here and only fall to 1 on the next
+        // win. Start a new run and check the record survives it.
+        g.new_game();
+        set_word(&mut g, "crane");
+        guess(&mut g, "crane");
+        assert_eq!(g.streak, 1, "the new run did not start");
+        assert_eq!(
+            g.best_streak, 3,
+            "the best streak followed the current one back down"
+        );
     }
 
     #[test]
@@ -2376,13 +2388,18 @@ mod tests {
 
     /// A handful of window shapes worth solving the layout for: the default,
     /// a tall thin one, a wide short one, and sizes at the edge of usable.
-    const SHAPES: [(f32, f32); 6] = [
+    /// `140x900` is there because it is tall enough to keep every band and
+    /// narrow enough that the footer has less room than its own text wants —
+    /// the case where a string measured without regard to its box lands off
+    /// the left edge of the window.
+    const SHAPES: [(f32, f32); 7] = [
         (WINDOW_WIDTH, WINDOW_HEIGHT),
         (320.0, 900.0),
         (1400.0, 400.0),
         (200.0, 200.0),
         (2000.0, 1400.0),
         (60.0, 60.0),
+        (140.0, 900.0),
     ];
 
     /// Two layouts of the same window and the same word length must be the
@@ -2550,6 +2567,18 @@ mod tests {
             cramped.key_w > 0.0 && cramped.key_h > 0.0,
             "the keys have no size"
         );
+        // Shrinking is what the keyboard does *instead of* growing through the
+        // bands above it. Below about 26 pixels of window the band it wants is
+        // taller than the room there is, and a keyboard that took what it
+        // asked for would start above the top edge of the window.
+        for h in 10u16..400 {
+            let l = Layout::new(560.0, f32::from(h), 5);
+            assert!(
+                l.keyboard.y >= l.window.y - 0.01,
+                "h={h}: the keyboard starts at {}, above the top of the window",
+                l.keyboard.y
+            );
+        }
     }
 
     /// The grid is square and centred in what the bands leave. A grid solved
@@ -2576,6 +2605,26 @@ mod tests {
                     (last.right() - l.board.right()).abs() <= 0.01
                         && (last.bottom() - l.board.bottom()).abs() <= 0.01,
                     "{at}: the last tile does not reach the far corner of the board"
+                );
+                // The tiles filling the board says nothing about where the
+                // board is. It is centred in what the bands leave over, which
+                // horizontally is the window and vertically is the strip
+                // between the header and the message — the padding above and
+                // below that strip is equal, so its midpoint is theirs.
+                if l.board.is_empty() {
+                    continue;
+                }
+                assert!(
+                    (l.board.centre().0 - l.window.centre().0).abs() <= 0.01,
+                    "{at}: the board is at {}, not centred across the window",
+                    l.board.centre().0
+                );
+                let mid = f32::midpoint(l.header.bottom(), l.message.y);
+                assert!(
+                    (l.board.centre().1 - mid).abs() <= 0.01,
+                    "{at}: the board is at {}, not centred between the header and the message \
+                     at {mid}",
+                    l.board.centre().1
                 );
             }
         }
@@ -2645,6 +2694,34 @@ mod tests {
                 );
             }
         }
+        // Not overlapping is not enough: touching tiles do not overlap either,
+        // and a grid of touching tiles is one solid block with no letters
+        // legible in it. Assert the separation is the gap the layout solved
+        // for, which is the formula rather than a bound on it
+        // (`known-issues.md` lesson 68).
+        for row in 0..MAX_GUESSES {
+            for col in 1..l.cols {
+                let (prev, this) = (l.tile_rect(row, col - 1), l.tile_rect(row, col));
+                assert!(
+                    (this.x - prev.right() - l.gap).abs() <= 0.01,
+                    "row {row} letters {} and {col} are {} apart, not the gap of {}",
+                    col - 1,
+                    this.x - prev.right(),
+                    l.gap
+                );
+            }
+        }
+        for row in 1..MAX_GUESSES {
+            let (prev, this) = (l.tile_rect(row - 1, 0), l.tile_rect(row, 0));
+            assert!(
+                (this.y - prev.bottom() - l.gap).abs() <= 0.01,
+                "rows {} and {row} are {} apart, not the gap of {}",
+                row - 1,
+                this.y - prev.bottom(),
+                l.gap
+            );
+        }
+        assert!(l.gap > 0.0, "the grid was solved with no gap at all");
     }
 
     // ── The on-screen keyboard's geometry ──────────────────────────
@@ -3668,6 +3745,14 @@ mod tests {
                             height,
                             ..
                         } => (*x, *y, *width, *height),
+                        // A string's limit is measured from the box it is
+                        // centred in, not from where the string itself starts,
+                        // so the origin plus the limit legitimately reaches
+                        // past the box. What is never legitimate is the origin
+                        // itself being off the window — that is a string
+                        // centred by a width taken without regard to the box,
+                        // and it is drawn where nobody can read it.
+                        RenderCommand::Text { x, y, .. } => (*x, *y, 0.0, 0.0),
                         _ => continue,
                     };
                     assert!(
@@ -3728,5 +3813,101 @@ mod tests {
                 _ => None,
             })
             .next_back()
+    }
+
+    // ── The window ─────────────────────────────────────────────────
+
+    /// The probe must draw at the size the window opens at, or every layout
+    /// test above measures a window the program never shows.
+    #[test]
+    fn the_probe_draws_at_the_size_the_window_opens_at() {
+        let g = game();
+        let (w, h) = g.initial_size();
+        assert_eq!(
+            (w as f32, h as f32),
+            Wordle::SIZE,
+            "the window opens at {w}x{h} but the probe draws at {:?}",
+            Wordle::SIZE
+        );
+    }
+
+    /// Drawing records the size it drew at, because that is the size the next
+    /// click is read against.
+    #[test]
+    fn rendering_records_the_size_it_drew_at() {
+        let mut g = game();
+        // Deliberately not `SIZE`: a new game already records `SIZE`, so
+        // rendering at `SIZE` and finding `SIZE` afterwards would pass with
+        // `render` having done nothing at all.
+        let odd = (Wordle::SIZE.0 + 137.0, Wordle::SIZE.1 - 61.0);
+        assert!(
+            (odd.0 - g.size_drawn().0).abs() > 0.01,
+            "the fixture size is the size the game already records"
+        );
+        let tree = g.render(odd.0, odd.1);
+        assert!(!tree.commands.is_empty(), "render produced no commands");
+        assert_eq!(g.size_drawn(), odd);
+    }
+
+    /// A resize is a resize whether or not a frame follows it.
+    #[test]
+    fn a_resize_moves_the_layout_the_next_click_is_read_against() {
+        let mut g = game();
+        let before = g.layout().keyboard;
+        assert_eq!(
+            handle_event(
+                &mut g,
+                &Event::Resize {
+                    width: 900,
+                    height: 500
+                }
+            ),
+            EventResult::Consumed
+        );
+        assert_eq!(g.size_drawn(), (900.0, 500.0));
+        assert_ne!(g.layout().keyboard, before, "the layout did not follow");
+    }
+
+    /// A window can be dragged to nothing. The layout must survive it rather
+    /// than divide by the zero it was handed.
+    #[test]
+    fn a_window_squashed_to_nothing_still_lays_out() {
+        let mut g = game();
+        g.resize(0.0, 0.0);
+        assert!(g.size_drawn().0 > 0.0 && g.size_drawn().1 > 0.0);
+        let l = g.layout();
+        assert!(l.window.w > 0.0 && l.window.h > 0.0);
+        assert!(l.tile >= 0.0 && l.key_w >= 0.0 && l.key_h >= 0.0);
+        // And it still draws, without panicking on the way.
+        let _ = g.frame(l.window.w, l.window.h);
+    }
+
+    #[test]
+    fn closing_the_window_exits_and_nothing_else_does() {
+        let mut g = game();
+        assert_eq!(g.on_event(&Event::CloseRequested), Response::Exit);
+        assert_eq!(
+            g.on_event(&Event::FocusIn),
+            Response::Idle,
+            "an event the game does not use should not force a repaint"
+        );
+        assert_eq!(
+            g.on_event(&Event::Key(probe::press(Key::C))),
+            Response::Redraw,
+            "a typed letter must repaint, or the row on screen is a letter behind"
+        );
+        assert_eq!(
+            g.on_event(&Event::Key(release(Key::C))),
+            Response::Idle,
+            "a key coming back up repainted a picture that did not change"
+        );
+    }
+
+    /// The window says what it is, and says the same thing twice.
+    #[test]
+    fn the_window_names_itself() {
+        let g = game();
+        assert_eq!(g.title(), "Wordle");
+        assert_eq!(g.app_id(), "wordle");
     }
 }

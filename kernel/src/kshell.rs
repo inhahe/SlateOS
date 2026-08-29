@@ -20853,6 +20853,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // statically against the dispatch table; this asserts it in the log too,
         // because a message that names the wrong command sends its reader to
         // another command's source.
+        //
+        // Stated positively, and only positively. The first draft added an
+        // `assert_output_lacks(.., b"epollstat")` under this, which reads like
+        // the stronger claim and is in fact the empty one: with the leak fixed,
+        // `cmd_filelock` has no way to print that word, so the assertion could
+        // never fire. check-selftest-wording.py refused the build over it. The
+        // line below already carries the whole property -- a message opening
+        // `filelock: pid:' is not the leaked one -- and it fails loudly if the
+        // name ever regresses, which the negation could not.
         let out = capture_command("filelock pid 1O");
         assert_output_contains(
             "the refusal names filelock, the command it actually came from",
@@ -20860,7 +20869,6 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"filelock: pid: `1O' is not a pid",
         );
         assert_eq!(last_exit(), 1, "`filelock pid 1O` errors");
-        assert_output_lacks("and not the command it was copied from", &out, b"epollstat");
     }
 
     serial_println!("  kshell::self_test PASSED");

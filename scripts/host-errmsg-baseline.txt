@@ -14,25 +14,9 @@
 # which records *why*, not here, which records only *that*.
 
 userspace/coreutils/src/bin/bc.rs:host-error-text
-userspace/coreutils/src/bin/chmod.rs:host-error-text
-userspace/coreutils/src/bin/chown.rs:host-error-text
-userspace/coreutils/src/bin/cmp.rs:host-error-text
-userspace/coreutils/src/bin/dd.rs:host-error-text
-userspace/coreutils/src/bin/df.rs:host-error-text
 userspace/coreutils/src/bin/diff.rs:host-error-text
 userspace/coreutils/src/bin/ed.rs:host-error-text
 userspace/coreutils/src/bin/fetch.rs:host-error-text
-userspace/coreutils/src/bin/find.rs:host-error-text
-userspace/coreutils/src/bin/ls.rs:host-error-text
-userspace/coreutils/src/bin/md5sum.rs:host-error-text
-userspace/coreutils/src/bin/nice.rs:host-error-text
-userspace/coreutils/src/bin/nohup.rs:host-error-text
 userspace/coreutils/src/bin/patch.rs:host-error-text
-userspace/coreutils/src/bin/renice.rs:host-error-text
 userspace/coreutils/src/bin/sh.rs:host-error-text
-userspace/coreutils/src/bin/sha256sum.rs:host-error-text
-userspace/coreutils/src/bin/stat.rs:host-error-text
-userspace/coreutils/src/bin/strings.rs:host-error-text
 userspace/coreutils/src/bin/tar.rs:host-error-text
-userspace/coreutils/src/bin/tee.rs:host-error-text
-userspace/coreutils/src/bin/xargs.rs:host-error-text

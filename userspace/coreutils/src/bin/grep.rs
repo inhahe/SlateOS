@@ -1166,7 +1166,9 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
         let mut was_digit = false;
         let mut this_digit_optind = parser.optind();
         let item = loop {
-            let Some(next) = parser.next() else { break None };
+            let Some(next) = parser.next() else {
+                break None;
+            };
             let opt = next?;
             let digit = match &opt {
                 Opt::Short(c @ b'0'..=b'9', None) => *c,
@@ -1274,7 +1276,9 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
                 patterns.extend(split_arg_patterns(&quote::os_bytes(&required(value))));
             }
             Flag::Short(b'f') => pattern_files.push(required(value)),
-            Flag::Short(b'm') => opts.max_count = max_count_arg(&quote::os_bytes(&required(value)))?,
+            Flag::Short(b'm') => {
+                opts.max_count = max_count_arg(&quote::os_bytes(&required(value)))?
+            }
             Flag::Include => opts
                 .file_selectors
                 .push(true, quote::os_bytes(&required(value)).into_owned()),
@@ -1295,9 +1299,8 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
             }
             Flag::ExcludeFrom => {
                 let path = required(value);
-                let raw = fs::read(&path).map_err(|e| {
-                    GREP.usage(format!("{}: {}", quotef_os(&path), strerror(&e)))
-                })?;
+                let raw = fs::read(&path)
+                    .map_err(|e| GREP.usage(format!("{}: {}", quotef_os(&path), strerror(&e))))?;
                 for pat in split_exclude_file(&raw) {
                     opts.file_selectors.push(false, pat);
                 }
@@ -1425,9 +1428,7 @@ fn binary_files_arg(value: &[u8]) -> Result<BinaryFiles, getopt::Error> {
 fn max_count_arg(value: &[u8]) -> Result<Option<usize>, getopt::Error> {
     let (n, status) = xnum::xstrtoimax(value, None);
     match status {
-        xnum::Status::Ok | xnum::Status::Overflow => {
-            Ok(usize::try_from(n).ok().filter(|_| n >= 0))
-        }
+        xnum::Status::Ok | xnum::Status::Overflow => Ok(usize::try_from(n).ok().filter(|_| n >= 0)),
         _ => Err(GREP.usage("invalid max count".to_string())),
     }
 }
@@ -2588,7 +2589,11 @@ fn write_context_line(
 /// … | while read` pipeline sees nothing until 4 KiB have accumulated, and a
 /// log follower appears to hang.
 fn line_flush(out: &mut impl Write, opts: &Options) -> io::Result<()> {
-    if opts.line_buffered { out.flush() } else { Ok(()) }
+    if opts.line_buffered {
+        out.flush()
+    } else {
+        Ok(())
+    }
 }
 
 /// One line's text, with `--color`'s escapes woven through it.
@@ -3059,15 +3064,9 @@ mod tests {
     fn parse_the_options_that_used_to_be_unknown() {
         // Every one of these was `unknown option` until this rewrite, and each
         // is in the failure lane C reported: `grep -E`, `grep -q`, `grep -c --`.
-        assert_eq!(
-            parse_ok(&["-E", "a+"]).opts.syntax,
-            Syntax::Extended
-        );
+        assert_eq!(parse_ok(&["-E", "a+"]).opts.syntax, Syntax::Extended);
         assert!(parse_ok(&["-q", "a"]).opts.quiet);
-        assert_eq!(
-            parse_ok(&["-F", "a"]).opts.syntax,
-            Syntax::Fixed
-        );
+        assert_eq!(parse_ok(&["-F", "a"]).opts.syntax, Syntax::Fixed);
         for flag in ["-w", "-x", "-o", "-l", "-L", "-H", "-h", "-s", "-a"] {
             assert!(parse_args(&s(&[flag, "a"])).is_ok(), "{flag} rejected");
         }
@@ -3098,22 +3097,10 @@ mod tests {
 
     #[test]
     fn parse_an_option_argument_may_be_glued_to_its_cluster() {
-        assert_eq!(
-            parse_ok(&["-m5", "a"]).opts.max_count,
-            Some(5)
-        );
-        assert_eq!(
-            parse_ok(&["-m", "5", "a"]).opts.max_count,
-            Some(5)
-        );
-        assert_eq!(
-            parse_ok(&["-im5", "a"]).opts.max_count,
-            Some(5)
-        );
-        assert_eq!(
-            parse_ok(&["-efoo"]).patterns,
-            vec![b"foo".to_vec()]
-        );
+        assert_eq!(parse_ok(&["-m5", "a"]).opts.max_count, Some(5));
+        assert_eq!(parse_ok(&["-m", "5", "a"]).opts.max_count, Some(5));
+        assert_eq!(parse_ok(&["-im5", "a"]).opts.max_count, Some(5));
+        assert_eq!(parse_ok(&["-efoo"]).patterns, vec![b"foo".to_vec()]);
     }
 
     #[test]
@@ -3135,10 +3122,7 @@ mod tests {
         assert!(a.opts.ignore_case);
         assert_eq!(a.opts.max_count, Some(2));
         assert_eq!(a.patterns, vec![b"foo".to_vec()]);
-        assert_eq!(
-            parse_err(&["--nope", "a"]),
-            "unrecognized option '--nope'"
-        );
+        assert_eq!(parse_err(&["--nope", "a"]), "unrecognized option '--nope'");
     }
 
     #[test]
@@ -3155,10 +3139,7 @@ mod tests {
         assert_eq!(plain.files, vec!["-"]);
         assert!(!plain.omit_dot_slash);
         // `-d recurse` reaches the same branch, because it is the same setting.
-        assert_eq!(
-            parse_ok(&["-d", "recurse", "foo"]).files,
-            vec!["."]
-        );
+        assert_eq!(parse_ok(&["-d", "recurse", "foo"]).files, vec!["."]);
     }
 
     /// `-r`, `-R` and `-d` all write one setting, so the **last** of them wins
@@ -3184,8 +3165,7 @@ mod tests {
         assert!(upper.deref_links);
         // …and `-d` does not clear it, because it is a different field. GNU is
         // the same: `-R -d recurse` still follows links met during the walk.
-        let both = parse_ok(&["-R", "-d", "recurse", "foo"])
-            .opts;
+        let both = parse_ok(&["-R", "-d", "recurse", "foo"]).opts;
         assert!(both.deref_links);
 
         // A prefix is enough, as it is for a long option's *name*: `argmatch`
@@ -3292,8 +3272,7 @@ mod tests {
     /// what the name *is*, not two spellings of one list.
     #[test]
     fn directories_have_their_own_selector_list() {
-        let opts = parse_ok(&["--exclude=sub", "--exclude-dir=deep", "foo"])
-            .opts;
+        let opts = parse_ok(&["--exclude=sub", "--exclude-dir=deep", "foo"]).opts;
         assert!(opts.skipped_file(b"sub", false));
         assert!(!opts.skipped_file(b"sub", true));
         assert!(opts.skipped_file(b"deep", true));
@@ -3301,8 +3280,7 @@ mod tests {
 
         // A trailing slash on the *pattern* is stripped; without that it could
         // never match, since no name it is compared against ends in one.
-        let slash = parse_ok(&["--exclude-dir=deep//", "foo"])
-            .opts;
+        let slash = parse_ok(&["--exclude-dir=deep//", "foo"]).opts;
         assert!(slash.skipped_file(b"deep", true));
     }
 
@@ -3413,8 +3391,7 @@ mod tests {
         assert!(long.recursive());
         assert!(!long.deref_links);
 
-        let long_deref = parse_ok(&["--dereference-recursive", "foo"])
-            .opts;
+        let long_deref = parse_ok(&["--dereference-recursive", "foo"]).opts;
         assert!(long_deref.recursive());
         assert!(long_deref.deref_links);
     }
@@ -3531,12 +3508,10 @@ mod tests {
         let empty = parse_ok(&["--group-separator=", "foo"]).opts;
         assert_eq!(empty.group_sep.bytes(), Some(&b""[..]));
 
-        let custom = parse_ok(&["--group-separator=XX", "foo"])
-            .opts;
+        let custom = parse_ok(&["--group-separator=XX", "foo"]).opts;
         assert_eq!(custom.group_sep.bytes(), Some(&b"XX"[..]));
 
-        let none = parse_ok(&["--no-group-separator", "foo"])
-            .opts;
+        let none = parse_ok(&["--no-group-separator", "foo"]).opts;
         assert_eq!(none.group_sep.bytes(), None);
     }
 
@@ -4548,8 +4523,7 @@ mod tests {
             vec![b"aaa".to_vec(), b"ccc".to_vec()]
         );
         assert_eq!(
-            parse_ok(&["--regexp=aaa\nccc", "f"])
-                .patterns,
+            parse_ok(&["--regexp=aaa\nccc", "f"]).patterns,
             vec![b"aaa".to_vec(), b"ccc".to_vec()]
         );
         assert_eq!(
@@ -4561,8 +4535,7 @@ mod tests {
         assert_eq!(parse_ok(&["aaa\nccc", "f"]).files, vec!["f"]);
         // Several `-e` accumulate exactly as one argument holding both would.
         assert_eq!(
-            parse_ok(&["-e", "a\n", "-e", "b", "f"])
-                .patterns,
+            parse_ok(&["-e", "a\n", "-e", "b", "f"]).patterns,
             parse_ok(&["-e", "a\n\nb", "f"]).patterns
         );
     }

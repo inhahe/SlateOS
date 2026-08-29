@@ -16456,7 +16456,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_contains(
             "cpick refuses a coordinate it cannot read",
             &out,
-            b"is not a x coordinate",
+            b"is not a horizontal coordinate",
         );
         assert_eq!(last_exit(), 1, "cpick sample: an unreadable x errors");
         assert_output_lacks("and reports no sample", &out, b"Sampled");
@@ -20015,8 +20015,613 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_lacks("and nothing is reported cleaned up", &out, b"Cleaned up");
     }
 
+    serial_println!(
+        "  kshell::self_test 99: five commands whose guessed value was a sentinel meaning \
+         `do the default thing', and one that forged the record it then acted on"
+    );
+    // The thirty-fifth batch off `scripts/option-refusal-ledger.txt` (400 -> 367
+    // sites, 201 -> 195 functions): `cmd_widgets`, `cmd_iperf`, `cmd_swapact`,
+    // `cmd_fsbench`, `cmd_datausage`, `cmd_elog`.
+    //
+    // Rung 98's batch guessed **0 for a pid**, where the harm is that 0 names a
+    // real and important process. This batch is the variant where the guessed
+    // number is not a value at all but a *sentinel* the callee reads as "use the
+    // default":
+    //
+    //   * `iperf client <host> <port> 1O` -> duration 0 -> `tcp_client_test`
+    //     reads 0 as DEFAULT_DURATION_POLLS, runs a full test and prints a
+    //     complete throughput report.
+    //   * `iperf server <port> 3OO` -> the same through `tcp_server_test`.
+    //
+    // That is worse than a wrong number, because the output of the substituted
+    // run is byte-identical to the output of the run the user would have got by
+    // omitting the argument. There is no observable difference between "you
+    // mistyped and I ignored you" and "you said nothing and I used the default",
+    // so the transcript cannot be audited afterwards either. The same shape
+    // covers `elog tail 5O` (twenty events, exactly what a bare `elog tail`
+    // prints) and every `fsbench` iteration count.
+    //
+    // `swapact register` is the batch's forge-then-check pair, the shape first
+    // named in batch 29. `swapact::register` (`fs/swapact.rs`) validates only a
+    // full table and a duplicate name -- it cannot reject anything about what it
+    // is told -- so the arm's `unwrap_or("/dev/sdb1")` did not merely mislabel
+    // an action, it *created* a swap area of 1,000,000 pages named after a
+    // device that does not exist, and said "registered". `swapact list` then
+    // showed it, and `swapact in /dev/sdb1 100` recorded traffic against it. A
+    // guess on a path that cannot fail manufactures the record that makes the
+    // next guess look legitimate.
+    {
+        // As in rung 98, every assertion is a refusal emitted before the
+        // subsystem is reached, so none depends on state a fresh boot may not
+        // have initialised -- the §604 trap.
+        //
+        // For `iperf` that ordering is load-bearing in a second way: the operand
+        // check now runs *before* the DNS resolve, so these cases cannot reach
+        // the network and cannot block on a lookup that has nowhere to go.
+        let out = capture_command("iperf client 10.0.2.2 5001 1O");
+        assert_output_contains(
+            "an unreadable duration is named rather than read as the default",
+            &out,
+            b"`1O' is not a duration in polls",
+        );
+        assert_eq!(last_exit(), 1, "`iperf client … 1O` errors");
+        assert_output_lacks(
+            "and no throughput test is reported run",
+            &out,
+            b"Running TCP throughput test",
+        );
+
+        let out = capture_command("iperf server 5001 3OO");
+        assert_output_contains(
+            "the server's poll budget is refused on the same rule",
+            &out,
+            b"`3OO' is not a poll budget",
+        );
+        assert_eq!(last_exit(), 1, "`iperf server 5001 3OO` errors");
+        assert_output_lacks(
+            "and the server does not start listening",
+            &out,
+            b"Listening on port",
+        );
+
+        // The forge. A bare `register` supplied a name, a type, and a page count
+        // that nobody typed, and `register` accepted all three.
+        let out = capture_command("swapact register");
+        assert_output_contains(
+            "a swap area is not invented from nothing",
+            &out,
+            b"missing area name",
+        );
+        assert_eq!(last_exit(), 1, "a bare `swapact register` errors");
+        assert_output_lacks("and no area is reported registered", &out, b"registered");
+
+        // The catch-all was `_ => Partition`, so a misspelt `zram` registered a
+        // partition -- and the success line said "[partition]", stating the
+        // wrong answer in the vocabulary of a right one.
+        let out = capture_command("swapact register zzarea zrma 100");
+        assert_output_contains(
+            "a misspelt swap type is named rather than replaced with partition",
+            &out,
+            b"`zrma' is not a swap type",
+        );
+        assert_eq!(last_exit(), 1, "`swapact register zzarea zrma 100` errors");
+        assert_output_lacks("and no area is reported registered", &out, b"registered");
+
+        // `pages` is what the command is about, so it is required, not optional:
+        // the help writes it as `<pages>` and the code used to substitute 1.
+        let out = capture_command("swapact in zzarea 1O");
+        assert_output_contains(
+            "an unreadable page count is refused, not recorded as one page",
+            &out,
+            b"`1O' is not a page count",
+        );
+        assert_eq!(last_exit(), 1, "`swapact in zzarea 1O` errors");
+        assert_output_lacks("and no swap-in is reported", &out, b"swap-in");
+
+        // A benchmark is the case where the substituted run looks most like a
+        // real one, because printing a plausible number is the whole output.
+        let out = capture_command("fsbench read /tmp/zznotafile 5OO");
+        assert_output_contains(
+            "an unreadable iteration count is refused before the run",
+            &out,
+            b"`5OO' is not an iteration count",
+        );
+        assert_eq!(last_exit(), 1, "`fsbench read … 5OO` errors");
+        assert_output_lacks(
+            "and no read benchmark is reported",
+            &out,
+            b"Sequential read",
+        );
+
+        // `record_usage` accumulates and has no inverse, so a guessed 0 wrote a
+        // permanent zero-byte receive into the app's running total.
+        let out = capture_command("datausage record zzapp 1O24 512");
+        assert_output_contains(
+            "an unreadable byte count is refused rather than recorded as zero",
+            &out,
+            b"`1O24' is not a byte count",
+        );
+        assert_eq!(last_exit(), 1, "`datausage record zzapp 1O24 512` errors");
+        assert_output_lacks("and nothing is reported recorded", &out, b"Recorded");
+
+        // 80 was never a documented resting value here -- the help writes
+        // `<pct>` unbracketed -- so this was a guess that merely looked like one.
+        let out = capture_command("datausage limit alert zzlimit 9O");
+        assert_output_contains(
+            "an unreadable alert threshold is refused, not set to eighty",
+            &out,
+            b"`9O' is not a percentage",
+        );
+        assert_eq!(last_exit(), 1, "`datausage limit alert zzlimit 9O` errors");
+        assert_output_lacks("and no threshold is reported set", &out, b"Alert threshold");
+
+        // The sentinel shape at its plainest: twenty events is what a bare
+        // `elog tail` prints, so the output could not distinguish a typo from an
+        // omission and the reader believes they are seeing the last fifty.
+        let out = capture_command("elog tail 5O");
+        assert_output_contains(
+            "an unreadable event count is refused rather than silently twenty",
+            &out,
+            b"`5O' is not an event count",
+        );
+        assert_eq!(last_exit(), 1, "`elog tail 5O` errors");
+
+        // Two coordinates that were 100 whatever the user typed. They also pin
+        // the wording fix that went with this batch: `article_for` chooses the
+        // article by spelling, English chooses it by sound, and `cpick` shipped
+        // "is not a x coordinate" until this batch renamed the nouns to
+        // "horizontal"/"vertical" -- the convention `cmd_wsnap` had already
+        // adopted locally for exactly this reason.
+        let out = capture_command("widgets add clock 1OO 200");
+        assert_output_contains(
+            "an unreadable coordinate is named, and named grammatically",
+            &out,
+            b"`1OO' is not a horizontal coordinate",
+        );
+        assert_eq!(last_exit(), 1, "`widgets add clock 1OO 200` errors");
+        assert_output_lacks("and no widget is reported added", &out, b"Widget added");
+    }
+
+    serial_println!(
+        "  kshell::self_test 100: printf reads C's numerals, says what it could not read, and \
+         stops dropping the arguments the format never reached"
+    );
+    // The silent one, and the reason this site needed a *scanner* rather than
+    // just an error path bolted onto `parse`: `"010".parse::<i64>()` succeeds
+    // and returns TEN where C returns EIGHT. A wrong value that parses cleanly
+    // cannot be diagnosed at all, so no diagnostic would ever have found it.
+    let scan = printf_scan_integer("010");
+    assert_eq!(scan.magnitude, 8, "a leading zero is octal, as in C");
+    assert_eq!(scan.consumed, 3, "and the whole word is consumed");
+    let scan = printf_scan_integer("0x10");
+    assert_eq!(scan.magnitude, 16, "`0x' is hexadecimal");
+    let scan = printf_scan_integer("0b101");
+    assert_eq!(scan.magnitude, 5, "`0b' is binary");
+    // `0x` alone is not a failed hex numeral: it is the octal `0` with an `x`
+    // left over, so one byte converts and the rest is trailing text.
+    let scan = printf_scan_integer("0x");
+    assert_eq!(
+        (scan.magnitude, scan.consumed),
+        (0, 1),
+        "`0x' alone is zero followed by trailing text"
+    );
+    // Nothing readable at all is `endptr == nptr`, which gives the sign back too.
+    let scan = printf_scan_integer("-abc");
+    assert_eq!(scan.consumed, 0, "an unreadable word consumes nothing");
+    let scan = printf_scan_integer("12abc");
+    assert_eq!(
+        (scan.magnitude, scan.consumed),
+        (12, 2),
+        "digits then junk is a partial conversion"
+    );
+
+    // Rust's `{:0>5}` is fill-and-align over the whole rendered value, so it
+    // produced `00-42` where C prints `-0042`.
+    let spec = PrintfSpec {
+        zero: true,
+        width: 5,
+        ..PrintfSpec::default()
+    };
+    assert_eq!(printf_field("42", "-", true, &spec), "-0042");
+    // A width on a hex conversion that is not zero-padded: `%5x` used to drop
+    // the width entirely and print `ff`.
+    let spec = PrintfSpec {
+        width: 5,
+        ..PrintfSpec::default()
+    };
+    assert_eq!(printf_field("ff", "", true, &spec), "   ff");
+    // Left-justification was not parsed at all, and the cost was not only the
+    // padding: `%-4s` echoed the spec literally AND left its argument
+    // unconsumed, which desynchronised every conversion after it.
+    let spec = PrintfSpec {
+        left: true,
+        width: 4,
+        ..PrintfSpec::default()
+    };
+    assert_eq!(printf_field("ab", "", false, &spec), "ab  ");
+    // A precision is a maximum length for a string and a minimum digit count
+    // for a number -- the same syntax meaning opposite things.
+    let spec = PrintfSpec {
+        prec: Some(2),
+        ..PrintfSpec::default()
+    };
+    assert_eq!(printf_field("abcdef", "", false, &spec), "ab");
+    let spec = PrintfSpec {
+        prec: Some(4),
+        ..PrintfSpec::default()
+    };
+    assert_eq!(printf_field("42", "", true, &spec), "0042");
+
+    {
+        // POSIX still prints the zero -- that part was never the defect. The
+        // defect was that it printed *only* the zero: no sentence, and exit 0,
+        // because `cmd_printf` never called `set_exit` on any path. The exact
+        // comparison also pins the ordering decision: with one output stream,
+        // the complaint follows the data instead of splitting it in half.
+        let out = capture_command("printf '%d\\n' zzabc");
+        assert_eq!(
+            out.as_slice(),
+            b"0\nprintf: `zzabc': expected a numeric value\n".as_slice(),
+            "the zero is still printed, and the complaint follows the data"
+        );
+        assert_output_contains(
+            "an unreadable number is named",
+            &out,
+            b"`zzabc': expected a numeric value",
+        );
+        assert_eq!(last_exit(), 1, "`printf '%d' zzabc` errors");
+
+        // Digits and then junk is a different sentence from no digits at all,
+        // because the value that got printed is a partial reading rather than a
+        // pure invention.
+        let out = capture_command("printf '%d\\n' 12zz");
+        assert_output_contains(
+            "a partly-read number says so",
+            &out,
+            b"`12zz': value not completely converted",
+        );
+        assert_eq!(last_exit(), 1, "`printf '%d' 12zz` errors");
+
+        let out = capture_command("printf '%d\\n' 99999999999999999999");
+        assert_output_contains(
+            "a number too large for the conversion says so",
+            &out,
+            b"numerical result out of range",
+        );
+        assert_eq!(last_exit(), 1, "`printf '%d' 99999999999999999999` errors");
+
+        // C's numerals, which `str::parse` reads as ten, refuses, and refuses.
+        let out = capture_command("printf '%d.%d\\n' 010 0x10");
+        assert_eq!(
+            out.as_slice(),
+            b"8.16\n".as_slice(),
+            "a leading zero is octal and `0x' is hexadecimal, as in C"
+        );
+
+        // A leading `-` is not an error for an unsigned conversion: C defines
+        // the result as the negation modulo `UINTMAX_MAX + 1`.
+        let out = capture_command("printf '%u\\n' -1");
+        assert_eq!(
+            out.as_slice(),
+            b"18446744073709551615\n".as_slice(),
+            "`%u' of -1 wraps rather than being guessed as zero"
+        );
+
+        // Three separate layout defects on one line: `%05d` of a negative put
+        // the zeros in front of the sign, `%5x` ignored its width, and `%-4s`
+        // was not recognised at all.
+        let out = capture_command("printf '%05d.%5x.%-4s.\\n' -42 255 ab");
+        assert_eq!(
+            out.as_slice(),
+            b"-0042.   ff.ab  .\n".as_slice(),
+            "sign before the padding zeros, width on a plain hex, left-justification"
+        );
+
+        // The silent data loss: the format is reused until the arguments are
+        // used up. This printed `zzaa.` and dropped `bb`, exiting 0.
+        let out = capture_command("printf 'zz%s.\\n' aa bb");
+        assert_eq!(
+            out.as_slice(),
+            b"zzaa.\nzzbb.\n".as_slice(),
+            "the format is reused until the arguments run out"
+        );
+
+        // ...but a format that consumes nothing runs exactly once, or the reuse
+        // loop would never end.
+        let out = capture_command("printf 'zzonly\\n' aa bb");
+        assert_eq!(
+            out.as_slice(),
+            b"zzonly\n".as_slice(),
+            "a format with no conversions is not repeated"
+        );
+
+        // A missing operand is POSIX's zero and is NOT a fault: nobody mistyped
+        // it, so there is nothing to report. This is what keeps the diagnostic
+        // above meaning "you typed something I could not read".
+        let out = capture_command("printf '%d\\n'");
+        assert_eq!(
+            out.as_slice(),
+            b"0\n".as_slice(),
+            "a missing operand converts to zero in silence"
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
+}
+
+/// What one `strtoimax`/`strtoumax` call read.
+///
+/// The magnitude and the sign are kept apart so that one scanner can serve both
+/// the signed and the unsigned conversion, which disagree about what to do with
+/// a `-` and about where the range ends.
+struct PrintfInt {
+    /// The digits' value, saturated at `u64::MAX`.
+    magnitude: u64,
+    negative: bool,
+    /// Bytes claimed. Zero is `strtol`'s "no conversion could be performed".
+    consumed: usize,
+    /// The magnitude did not fit a `u64`.
+    overflowed: bool,
+}
+
+/// What was wrong with an argument that was supposed to be a number.
+///
+/// Kept apart from its wording because the wording is not printed where the
+/// fault is found — see `cmd_printf` for why the sentences come out after the
+/// data rather than in the middle of it.
+#[derive(Clone, Copy)]
+enum PrintfNumFault {
+    /// `endptr == nptr`: not one digit could be read.
+    NotNumeric,
+    /// Digits were read, and then something else followed them.
+    Trailing,
+    /// The digits do not fit the conversion's type.
+    Range,
+}
+
+/// C's `strtol` family with base 0, in the C locale — the conversion POSIX
+/// `printf` specifies for `%d`, `%i`, `%u`, `%x`, `%X` and `%o`.
+///
+/// Base 0 means the base is read from the numeral: `0x`/`0X` is hexadecimal,
+/// `0b`/`0B` is binary (glibc took this from C23, and it is observable), a
+/// leading `0` is octal, and anything else is decimal. The prefixes only count
+/// when a digit follows, so `0x` alone is not a failed hex numeral — it is the
+/// octal numeral `0` with an `x` left over, which is why `printf '%d' 0x` prints
+/// `0` and complains that the value was not completely converted.
+///
+/// **This has to be written out rather than delegated to `str::parse`, and the
+/// reason is not pedantry.** `"010".parse::<i64>()` *succeeds* and returns ten
+/// where C returns eight. That is a wrong number which parses cleanly, so it
+/// cannot be diagnosed at all — no amount of error reporting bolted onto
+/// `parse` would ever have found it, which is what separates this site from the
+/// rest of the guessed-value burn-down. The other two divergences are merely
+/// loud: `parse` rejects `0x10` outright, and rejects `-1` for an unsigned
+/// conversion where C defines it as the negation modulo `UINTMAX_MAX + 1`.
+///
+/// Mirrors `userspace/coreutils/src/bin/printf.rs`'s `scan_integer`, which lane
+/// B wrote against the same C definition. The two `printf`s must not disagree
+/// about what a numeral means.
+fn printf_scan_integer(s: &str) -> PrintfInt {
+    let bytes = s.as_bytes();
+    let at = |i: usize| bytes.get(i).copied().unwrap_or(0);
+    let mut i = 0usize;
+    while matches!(at(i), b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r') {
+        i = i.saturating_add(1);
+    }
+    let negative = match at(i) {
+        b'-' => {
+            i = i.saturating_add(1);
+            true
+        }
+        b'+' => {
+            i = i.saturating_add(1);
+            false
+        }
+        _ => false,
+    };
+
+    let mut base = 10u32;
+    if at(i) == b'0' {
+        match at(i.saturating_add(1)) {
+            b'x' | b'X' if at(i.saturating_add(2)).is_ascii_hexdigit() => {
+                base = 16;
+                i = i.saturating_add(2);
+            }
+            b'b' | b'B' if matches!(at(i.saturating_add(2)), b'0' | b'1') => {
+                base = 2;
+                i = i.saturating_add(2);
+            }
+            // The leading zero is itself the first octal digit, so `i` stays
+            // where it is and a lone `0` converts to zero.
+            _ => base = 8,
+        }
+    }
+
+    let mut magnitude = 0u64;
+    let mut overflowed = false;
+    let mut digits = 0usize;
+    while let Some(d) = printf_digit_value(at(i), base) {
+        digits = digits.saturating_add(1);
+        magnitude = match magnitude
+            .checked_mul(u64::from(base))
+            .and_then(|m| m.checked_add(u64::from(d)))
+        {
+            Some(v) => v,
+            None => {
+                overflowed = true;
+                u64::MAX
+            }
+        };
+        i = i.saturating_add(1);
+    }
+
+    PrintfInt {
+        magnitude,
+        negative,
+        // No digits is `endptr == nptr`, which means the sign and the leading
+        // whitespace are given back too.
+        consumed: if digits == 0 { 0 } else { i },
+        overflowed,
+    }
+}
+
+/// One digit's value in `base`, or `None` if `c` is not a digit of that base.
+fn printf_digit_value(c: u8, base: u32) -> Option<u32> {
+    let v = match c {
+        b'0'..=b'9' => u32::from(c.wrapping_sub(b'0')),
+        b'a'..=b'z' => u32::from(c.wrapping_sub(b'a')).saturating_add(10),
+        b'A'..=b'Z' => u32::from(c.wrapping_sub(b'A')).saturating_add(10),
+        _ => return None,
+    };
+    if v < base { Some(v) } else { None }
+}
+
+/// Record what was wrong with `s`, if anything.
+///
+/// **Nothing here stops the run.** POSIX says the conversion happens anyway
+/// with the value read so far, which is why `printf '%d %d\n' abc 5` prints
+/// `0 5`; only the exit status records that anything was wrong. An empty
+/// argument is not an error either — there `endptr` *is* the terminator, and it
+/// converts to zero in silence. That silence is what keeps a *missing* operand
+/// (POSIX: treated as zero) distinguishable from an unreadable one.
+fn printf_note_fault(
+    s: &str,
+    consumed: usize,
+    range_error: bool,
+    faults: &mut Vec<(PrintfNumFault, String)>,
+) {
+    let fault = if range_error {
+        PrintfNumFault::Range
+    } else if consumed >= s.len() {
+        return;
+    } else if consumed == 0 {
+        PrintfNumFault::NotNumeric
+    } else {
+        PrintfNumFault::Trailing
+    };
+    faults.push((fault, s.to_string()));
+}
+
+/// `strtoimax(s, &end, 0)`, with C's out-of-range clamp.
+fn printf_strtoimax(s: &str, faults: &mut Vec<(PrintfNumFault, String)>) -> i64 {
+    let scan = printf_scan_integer(s);
+    // `i64::MIN` has a magnitude one larger than `i64::MAX`, so the bound
+    // depends on the sign.
+    let limit = if scan.negative {
+        i64::MAX.unsigned_abs().saturating_add(1)
+    } else {
+        i64::MAX.unsigned_abs()
+    };
+    let out_of_range = scan.overflowed || scan.magnitude > limit;
+    printf_note_fault(s, scan.consumed, out_of_range, faults);
+    if out_of_range {
+        return if scan.negative { i64::MIN } else { i64::MAX };
+    }
+    let magnitude = i128::from(scan.magnitude);
+    let value = if scan.negative {
+        0i128.saturating_sub(magnitude)
+    } else {
+        magnitude
+    };
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// `strtoumax(s, &end, 0)`, with C's out-of-range clamp.
+///
+/// A leading `-` is not an error here: C defines the result as the negation
+/// taken modulo `UINTMAX_MAX + 1`, which is why `printf '%u' -1` prints
+/// `18446744073709551615` and exits 0.
+fn printf_strtoumax(s: &str, faults: &mut Vec<(PrintfNumFault, String)>) -> u64 {
+    let scan = printf_scan_integer(s);
+    printf_note_fault(s, scan.consumed, scan.overflowed, faults);
+    if scan.overflowed {
+        return u64::MAX;
+    }
+    if scan.negative {
+        0u64.wrapping_sub(scan.magnitude)
+    } else {
+        scan.magnitude
+    }
+}
+
+/// Flags, field width and precision for one conversion.
+#[derive(Clone, Copy, Default)]
+struct PrintfSpec {
+    left: bool,
+    zero: bool,
+    plus: bool,
+    alt: bool,
+    width: usize,
+    prec: Option<usize>,
+}
+
+/// Lay one converted value out in its field, the way C does.
+///
+/// `numeric` is what separates `%5s` from `%5d`: only a number has a prefix —
+/// its sign, or `%#x`'s `0x` — that must stay in front of the zero padding, and
+/// only a number reads a precision as a *minimum digit count* rather than a
+/// maximum length.
+fn printf_field(text: &str, prefix: &str, numeric: bool, spec: &PrintfSpec) -> String {
+    let mut body = String::new();
+    if numeric {
+        if let Some(p) = spec.prec {
+            // A precision of zero prints *nothing at all* for a value of zero.
+            let digits = if p == 0 && text == "0" { "" } else { text };
+            for _ in digits.chars().count()..p {
+                body.push('0');
+            }
+            body.push_str(digits);
+        } else {
+            body.push_str(text);
+        }
+    } else if let Some(p) = spec.prec {
+        body.extend(text.chars().take(p));
+    } else {
+        body.push_str(text);
+    }
+
+    let len = prefix.chars().count().saturating_add(body.chars().count());
+    let pad = spec.width.saturating_sub(len);
+    let mut out = String::new();
+    if spec.left {
+        out.push_str(prefix);
+        out.push_str(&body);
+        for _ in 0..pad {
+            out.push(' ');
+        }
+    } else if spec.zero && numeric && spec.prec.is_none() {
+        // The zeros go *after* the sign. C prints `-0042` for `%05d` of -42;
+        // Rust's `{:0>5}` is fill-and-align over the whole rendered value and
+        // produces `00-42`, which is what this shell shipped until 2026-08-29.
+        out.push_str(prefix);
+        for _ in 0..pad {
+            out.push('0');
+        }
+        out.push_str(&body);
+    } else {
+        for _ in 0..pad {
+            out.push(' ');
+        }
+        out.push_str(prefix);
+        out.push_str(&body);
+    }
+    out
+}
+
+/// The next argument, or `""` once they are used up.
+///
+/// Not advancing past the end is what makes `cmd_printf`'s reuse loop
+/// terminate, and `""` is POSIX's value for an operand the format asked for and
+/// did not get: it converts to zero, silently, because nobody mistyped it.
+fn printf_next_arg<'a>(args: &'a [String], idx: &mut usize) -> &'a str {
+    match args.get(*idx) {
+        Some(s) => {
+            *idx = idx.saturating_add(1);
+            s.as_str()
+        }
+        None => "",
+    }
 }
 
 /// `printf FORMAT [ARG ...]` — formatted output (subset of POSIX printf).
@@ -20025,14 +20630,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 ///   `%s` — string
 ///   `%d` / `%i` — signed decimal integer
 ///   `%u` — unsigned decimal integer
-///   `%x` — lowercase hexadecimal
-///   `%X` — uppercase hexadecimal
+///   `%x` / `%X` — hexadecimal, lower- and upper-case
 ///   `%o` — octal
 ///   `%c` — first character of argument
 ///   `%%` — literal percent sign
-///   `%0Nd` — zero-padded to N digits (e.g., `%05d`)
 ///
-/// Escape sequences: `\n`, `\t`, `\\`, `\0`.
+/// Flags `-` (left-justify), `0` (zero-pad), `+` (always sign) and `#`
+/// (alternate form: `0x`/`0X`, or a guaranteed leading `0` for `%o`); a decimal
+/// field width; and a `.N` precision — a maximum length for `%s`, a minimum
+/// digit count for the integer conversions. `% d`'s space flag is deliberately
+/// *not* accepted, so that `printf '100% done\n'` keeps printing `100% done`;
+/// C would read the `% d` there as a conversion and print `100 0one`.
+///
+/// Escape sequences: `\n`, `\t`, `\r`, `\a`, `\b`, `\f`, `\v`, `\\`, `\0`.
+///
+/// Not supported, and echoed literally rather than guessed at: `%b`, `%e`,
+/// `%f`, `%g`, `%q`, and `*` as a width or precision.
+///
+/// **The format is reused until the arguments are used up**, as POSIX requires,
+/// so `printf '%s\n' a b c` prints three lines. It printed one and dropped `b`
+/// and `c` without a word, exiting 0, until 2026-08-29.
 fn cmd_printf(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: printf FORMAT [ARGS...]");
@@ -20069,9 +20686,64 @@ fn cmd_printf(args: &str) {
 
     // Parse arguments (space-separated, quote-aware).
     let arg_list = split_words(rest);
-    let mut arg_iter = arg_list.iter();
+    let mut idx = 0usize;
+    let mut faults: Vec<(PrintfNumFault, String)> = Vec::new();
 
-    // Process format string.
+    loop {
+        let began_at = idx;
+        printf_pass(format, &arg_list, &mut idx, &mut faults);
+        // Stop when the arguments are used up -- and never loop on a format
+        // that consumes none, or `printf hi a` would print `hi` for ever.
+        if idx >= arg_list.len() || idx == began_at {
+            break;
+        }
+    }
+
+    // The faults are reported *after* the whole format rather than where they
+    // were found, and that is forced by kshell having exactly one output
+    // stream: `shell_write_bytes` goes to the capture buffer or to the console,
+    // and there is no `shell_eprintln!` (see known-issues.md,
+    // `A-KSHELL-2334-COMMANDS-PRINTED-PAST-THE-CAPTURE`). Complaining at the
+    // point of the fault would splice the sentence into the data --
+    // `printf '%d-%d' 1 abc` would emit `1-`, then the complaint, then `0`.
+    // GNU gets to interleave harmlessly because its complaint is on stderr;
+    // with one stream the least-bad arrangement is to leave the data contiguous
+    // and put the sentences after it.
+    for (fault, word) in &faults {
+        match *fault {
+            PrintfNumFault::NotNumeric => {
+                shell_println!("printf: `{}': expected a numeric value", word);
+            }
+            PrintfNumFault::Trailing => {
+                shell_println!("printf: `{}': value not completely converted", word);
+            }
+            PrintfNumFault::Range => {
+                shell_println!("printf: `{}': numerical result out of range", word);
+            }
+        }
+    }
+    if !faults.is_empty() {
+        // The wording is lane B's userspace `printf`, word for word, apart from
+        // the quotation marks -- those follow this file's `` `word' ``
+        // convention rather than coreutils' locale quotes, because a reader of
+        // kshell's output sees this file's other diagnostics beside it. What
+        // must not differ between the two `printf`s is the sentence and the
+        // status: `cmd_printf` never called `set_exit` on any path before this
+        // change, so `printf '%d' abc` printed `0` and reported success.
+        set_exit(1);
+    }
+}
+
+/// One pass over `format`. Advances `idx` past every argument the format
+/// consumed, and appends anything unreadable to `faults`.
+fn printf_pass(
+    format: &str,
+    arg_list: &[String],
+    idx: &mut usize,
+    faults: &mut Vec<(PrintfNumFault, String)>,
+) {
+    use alloc::format;
+
     let mut chars = format.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\\' {
@@ -20079,99 +20751,126 @@ fn cmd_printf(args: &str) {
             match chars.next() {
                 Some('n') => shell_print!("\n"),
                 Some('t') => shell_print!("\t"),
+                Some('r') => shell_print!("\r"),
+                Some('a') => shell_print!("\x07"),
+                Some('b') => shell_print!("\x08"),
+                Some('f') => shell_print!("\x0c"),
+                Some('v') => shell_print!("\x0b"),
                 Some('\\') => shell_print!("\\"),
                 Some('0') => shell_print!("\0"),
                 Some(c) => shell_print!("\\{}", c),
                 None => shell_print!("\\"),
             }
-        } else if ch == '%' {
-            // Format specifier.
-            // Check for flags: zero-padding and width.
-            let mut zero_pad = false;
-            let mut width: usize = 0;
+            continue;
+        }
+        if ch != '%' {
+            shell_print!("{}", ch);
+            continue;
+        }
 
-            if chars.peek() == Some(&'0') {
-                zero_pad = true;
-                chars.next();
+        // Flags, in any order and any number, as C allows. An unrecognised one
+        // ends the run, so the conversion falls through to the literal echo at
+        // the bottom with its `%` intact rather than losing a character.
+        let mut spec = PrintfSpec::default();
+        loop {
+            match chars.peek() {
+                Some('-') => spec.left = true,
+                Some('0') => spec.zero = true,
+                Some('+') => spec.plus = true,
+                Some('#') => spec.alt = true,
+                _ => break,
             }
+            chars.next();
+        }
+        while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+            if let Some(d) = chars.next() {
+                spec.width = spec
+                    .width
+                    .saturating_mul(10)
+                    .saturating_add((d as u8).saturating_sub(b'0') as usize);
+            }
+        }
+        if chars.peek() == Some(&'.') {
+            chars.next();
+            let mut prec = 0usize;
             while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
                 if let Some(d) = chars.next() {
-                    width = width
+                    prec = prec
                         .saturating_mul(10)
                         .saturating_add((d as u8).saturating_sub(b'0') as usize);
                 }
             }
+            // A bare `.` is a precision of zero, not an absent one.
+            spec.prec = Some(prec);
+        }
 
-            match chars.next() {
-                Some('s') => {
-                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("");
-                    if width > 0 {
-                        shell_print!("{:>width$}", arg, width = width);
-                    } else {
-                        shell_print!("{}", arg);
-                    }
-                }
-                Some('d') | Some('i') => {
-                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
-                    let val: i64 = arg.parse().unwrap_or(0);
-                    if zero_pad && width > 0 {
-                        shell_print!("{:0>width$}", val, width = width);
-                    } else if width > 0 {
-                        shell_print!("{:>width$}", val, width = width);
-                    } else {
-                        shell_print!("{}", val);
-                    }
-                }
-                Some('u') => {
-                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
-                    let val: u64 = arg.parse().unwrap_or(0);
-                    if zero_pad && width > 0 {
-                        shell_print!("{:0>width$}", val, width = width);
-                    } else if width > 0 {
-                        shell_print!("{:>width$}", val, width = width);
-                    } else {
-                        shell_print!("{}", val);
-                    }
-                }
-                Some('x') => {
-                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
-                    let val: u64 = arg.parse().unwrap_or(0);
-                    if zero_pad && width > 0 {
-                        shell_print!("{:0>width$x}", val, width = width);
-                    } else {
-                        shell_print!("{:x}", val);
-                    }
-                }
-                Some('X') => {
-                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
-                    let val: u64 = arg.parse().unwrap_or(0);
-                    if zero_pad && width > 0 {
-                        shell_print!("{:0>width$X}", val, width = width);
-                    } else {
-                        shell_print!("{:X}", val);
-                    }
-                }
-                Some('o') => {
-                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
-                    let val: u64 = arg.parse().unwrap_or(0);
-                    if zero_pad && width > 0 {
-                        shell_print!("{:0>width$o}", val, width = width);
-                    } else {
-                        shell_print!("{:o}", val);
-                    }
-                }
-                Some('c') => {
-                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("");
-                    if let Some(c) = arg.chars().next() {
-                        shell_print!("{}", c);
-                    }
-                }
-                Some('%') => shell_print!("%"),
-                Some(c) => shell_print!("%{}", c),
-                None => shell_print!("%"),
+        match chars.next() {
+            Some('s') => {
+                let arg = printf_next_arg(arg_list, idx);
+                shell_print!("{}", printf_field(arg, "", false, &spec));
             }
-        } else {
-            shell_print!("{}", ch);
+            Some('d' | 'i') => {
+                let arg = printf_next_arg(arg_list, idx);
+                let val = printf_strtoimax(arg, faults);
+                // The sign travels separately from the digits so that `%05d`
+                // can put the padding zeros between the two.
+                let sign = if val < 0 {
+                    "-"
+                } else if spec.plus {
+                    "+"
+                } else {
+                    ""
+                };
+                let text = val.unsigned_abs().to_string();
+                shell_print!("{}", printf_field(&text, sign, true, &spec));
+            }
+            Some('u') => {
+                let arg = printf_next_arg(arg_list, idx);
+                let val = printf_strtoumax(arg, faults);
+                shell_print!("{}", printf_field(&val.to_string(), "", true, &spec));
+            }
+            Some('x') => {
+                let arg = printf_next_arg(arg_list, idx);
+                let val = printf_strtoumax(arg, faults);
+                // C's `#` adds no prefix to a zero: `0x0` would claim a base the
+                // numeral does not need.
+                let prefix = if spec.alt && val != 0 { "0x" } else { "" };
+                shell_print!(
+                    "{}",
+                    printf_field(&format!("{:x}", val), prefix, true, &spec)
+                );
+            }
+            Some('X') => {
+                let arg = printf_next_arg(arg_list, idx);
+                let val = printf_strtoumax(arg, faults);
+                let prefix = if spec.alt && val != 0 { "0X" } else { "" };
+                shell_print!(
+                    "{}",
+                    printf_field(&format!("{:X}", val), prefix, true, &spec)
+                );
+            }
+            Some('o') => {
+                let arg = printf_next_arg(arg_list, idx);
+                let val = printf_strtoumax(arg, faults);
+                let mut text = format!("{:o}", val);
+                // `%#o` guarantees a leading zero. It goes in the body rather
+                // than the prefix so that the zero padding counts it, which is
+                // what makes `%#08o` eight characters wide and not nine.
+                if spec.alt && !text.starts_with('0') {
+                    text = format!("0{}", text);
+                }
+                shell_print!("{}", printf_field(&text, "", true, &spec));
+            }
+            Some('c') => {
+                let arg = printf_next_arg(arg_list, idx);
+                let text: String = arg.chars().take(1).collect();
+                // C has no precision for `%c`; the width still applies.
+                let spec = PrintfSpec { prec: None, ..spec };
+                shell_print!("{}", printf_field(&text, "", false, &spec));
+            }
+            Some('%') => shell_print!("%"),
+            Some(c) => shell_print!("%{}", c),
+            None => shell_print!("%"),
         }
     }
 }
@@ -30126,7 +30825,18 @@ fn cmd_fsbench(args: &str) {
             } else {
                 PathBuf::from("/tmp/_bench_read")
             };
-            let iters: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(500);
+            // Every operand here is genuinely optional -- the help writes them
+            // all in brackets and the defaults below are the documented resting
+            // values -- so `optional_num` is the right half of the pair.  What it
+            // adds is that `fsbench read /tmp/f 5OO` (letter O) is now refused
+            // rather than quietly benchmarked at 500 iterations and reported as
+            // "Sequential read: 500 iterations", which reads exactly like a run
+            // the operator asked for.
+            let Some(iters) =
+                optional_num::<u64>(&parts, 2, "fsbench", sub, "iteration count", 500)
+            else {
+                return;
+            };
             match bench::bench_sequential_read(&path, iters) {
                 Ok(r) => {
                     shell_println!("Sequential read: {} iterations", r.iterations);
@@ -30149,8 +30859,16 @@ fn cmd_fsbench(args: &str) {
             } else {
                 PathBuf::from("/tmp")
             };
-            let size: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(4096);
-            let iters: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+            let Some(size) =
+                optional_num::<usize>(&parts, 2, "fsbench", sub, "write size in bytes", 4096)
+            else {
+                return;
+            };
+            let Some(iters) =
+                optional_num::<u64>(&parts, 3, "fsbench", sub, "iteration count", 200)
+            else {
+                return;
+            };
             match bench::bench_sequential_write(&dir, size, iters) {
                 Ok(r) => {
                     shell_println!("Sequential write ({}B): {} iterations", size, r.iterations);
@@ -30173,7 +30891,11 @@ fn cmd_fsbench(args: &str) {
             } else {
                 PathBuf::from("/tmp")
             };
-            let iters: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
+            let Some(iters) =
+                optional_num::<u64>(&parts, 2, "fsbench", sub, "iteration count", 200)
+            else {
+                return;
+            };
             match bench::bench_metadata(&dir, iters) {
                 Ok(r) => {
                     shell_println!(
@@ -30204,7 +30926,11 @@ fn cmd_fsbench(args: &str) {
             } else {
                 PathBuf::from("/tmp")
             };
-            let iters: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000);
+            let Some(iters) =
+                optional_num::<u64>(&parts, 2, "fsbench", sub, "iteration count", 1000)
+            else {
+                return;
+            };
             match bench::bench_path_lookup(&path, iters) {
                 Ok(r) => {
                     shell_println!(
@@ -36089,8 +36815,20 @@ fn cmd_widgets(args: &str) {
             // widgets add <kind> [x y]
             let kind_str = parts.get(1).copied().unwrap_or("");
             if let Some(kind) = widgets::WidgetKind::from_str(kind_str) {
-                let x: i32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
-                let y: i32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
+                // "horizontal"/"vertical" rather than "x"/"y" -- the file-wide
+                // convention, set by `cmd_wsnap` and `cmd_a11y` and explained at
+                // `cmd_cpick`: `article_for` reads spelling where English reads
+                // sound, so a bare "x coordinate" prints as "a x coordinate".
+                let Some(x) =
+                    optional_num::<i32>(&parts, 2, "widgets", sub, "horizontal coordinate", 100)
+                else {
+                    return;
+                };
+                let Some(y) =
+                    optional_num::<i32>(&parts, 3, "widgets", sub, "vertical coordinate", 100)
+                else {
+                    return;
+                };
                 match widgets::add(kind, x, y) {
                     Ok(id) => shell_println!("Widget added: id={} kind={}", id, kind.label()),
                     Err(e) => {
@@ -36099,9 +36837,17 @@ fn cmd_widgets(args: &str) {
                     }
                 }
             } else if !kind_str.is_empty() {
-                // Try as custom type
-                let x: i32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
-                let y: i32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
+                // Try as custom type. Same two operands, same nouns as above.
+                let Some(x) =
+                    optional_num::<i32>(&parts, 2, "widgets", sub, "horizontal coordinate", 100)
+                else {
+                    return;
+                };
+                let Some(y) =
+                    optional_num::<i32>(&parts, 3, "widgets", sub, "vertical coordinate", 100)
+                else {
+                    return;
+                };
                 match widgets::add_custom(kind_str, x, y) {
                     Ok(id) => shell_println!("Custom widget added: id={}", id),
                     Err(e) => {
@@ -36329,14 +37075,16 @@ fn cmd_widgets(args: &str) {
                 shell_println!("Usage: widgets regtype <type_id> <name> [width height app]");
                 set_exit(1);
             } else {
-                let w = parts
-                    .get(3)
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(200);
-                let h = parts
-                    .get(4)
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(200);
+                let Some(w) =
+                    optional_num::<u32>(&parts, 3, "widgets", sub, "width in pixels", 200)
+                else {
+                    return;
+                };
+                let Some(h) =
+                    optional_num::<u32>(&parts, 4, "widgets", sub, "height in pixels", 200)
+                else {
+                    return;
+                };
                 let app = parts.get(5).copied().unwrap_or("custom");
                 match widgets::register_type(type_id, name, w, h, app) {
                     Ok(()) => shell_println!("Custom type '{}' registered", type_id),
@@ -39993,9 +40741,13 @@ fn cmd_winsnap(args: &str) {
             // Both coordinates defaulted to 0, so `wsnap detect abc 400`
             // answered about the top-left pixel and printed a zone name --
             // an answer to a question nobody asked.
-            // The nouns are "horizontal"/"vertical" rather than "x"/"y" only
-            // because the helper's message reads "is not a {noun}", and "a x
-            // coordinate" is not a sentence.
+            // The nouns are "horizontal"/"vertical" rather than "x"/"y" because
+            // the helper's message reads "is not a {noun}", and "a x coordinate"
+            // is not a sentence. This was written here as a local dodge; as of
+            // 2026-08-29 it is the file-wide convention, because `cmd_cpick` was
+            // still shipping "a x coordinate" and `cmd_widgets` was about to add
+            // two more sites of it. See `cmd_cpick` for why the escape hatch in
+            // `article_for`'s doc comment does not serve `required_num`.
             let Some(cx) =
                 required_num::<i32>(&parts, 1, "wsnap", "detect", "horizontal coordinate")
             else {
@@ -40493,10 +41245,19 @@ fn cmd_colorpicker(args: &str) {
             // sampled the top-left pixel of the screen and reported it as
             // "Sampled (0,300)" -- the printed coordinate agreed with the
             // colour, which is exactly what made the wrong answer look right.
-            let Some(x) = required_num(&parts, 1, "cpick", sub, "x coordinate") else {
+            // "horizontal"/"vertical", not "x"/"y", matching `cmd_wsnap` and
+            // `cmd_a11y`. This site shipped "is not a x coordinate" until
+            // 2026-08-29: `article_for` picks the article by spelling, English
+            // picks it by sound, and a one-letter word is where those diverge.
+            // Its doc comment offers an escape hatch -- write the article into
+            // the noun -- but that one does not apply to `required_num`, whose
+            // *other* message is "missing {noun}", which the hatch would turn
+            // into "missing an x coordinate". A noun that reads correctly in
+            // both sentences is the fix that does not need a hatch at all.
+            let Some(x) = required_num(&parts, 1, "cpick", sub, "horizontal coordinate") else {
                 return;
             };
-            let Some(y) = required_num(&parts, 2, "cpick", sub, "y coordinate") else {
+            let Some(y) = required_num(&parts, 2, "cpick", sub, "vertical coordinate") else {
                 return;
             };
             let c = colorpicker::sample_screen(x, y);
@@ -55444,8 +56205,21 @@ fn cmd_datausage(args: &str) {
             // datausage record <app_id> <rx> <tx>
             if parts.len() >= 4 {
                 let app_id = parts[1];
-                let rx: u64 = parts[2].parse().unwrap_or(0);
-                let tx: u64 = parts[3].parse().unwrap_or(0);
+                // `rx`/`tx` are the whole content of the record, and 0 is not a
+                // reading of any word -- it is what was left when none could be
+                // read. `datausage record app 1O24 512` (letter O) used to write
+                // a zero-byte receive into the app's running total and print
+                // "Recorded app rx=0 B tx=512 B", which is indistinguishable from
+                // a real record of no traffic. Once written it is not
+                // recoverable: `record_usage` accumulates.
+                let Some(rx) = required_num::<u64>(&parts, 2, "datausage", sub, "byte count")
+                else {
+                    return;
+                };
+                let Some(tx) = required_num::<u64>(&parts, 3, "datausage", sub, "byte count")
+                else {
+                    return;
+                };
                 match datausage::record_usage(app_id, rx, tx) {
                     Ok(()) => shell_println!(
                         "Recorded {} rx={} tx={}",
@@ -55558,8 +56332,28 @@ fn cmd_datausage(args: &str) {
                     // datausage limit add <name> <bytes> [days]
                     if parts.len() >= 4 {
                         let name = parts[2];
-                        let bytes: u64 = parts[3].parse().unwrap_or(0);
-                        let days: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
+                        // A limit of 0 bytes is not a harmless default: it is a
+                        // cap that is already exceeded the moment it exists, so
+                        // a mistyped size used to create a limit that fires
+                        // immediately -- and with `block` set, cuts the
+                        // connection off -- while reporting "Limit 'home' added:
+                        // 0 B over 30 days" and exiting 0. `days` really is
+                        // optional (the help brackets it); the size is not.
+                        let Some(bytes) =
+                            required_num::<u64>(&parts, 3, "datausage", "limit add", "byte count")
+                        else {
+                            return;
+                        };
+                        let Some(days) = optional_num::<u32>(
+                            &parts,
+                            4,
+                            "datausage",
+                            "limit add",
+                            "number of days",
+                            30,
+                        ) else {
+                            return;
+                        };
                         match datausage::add_limit(name, bytes, days) {
                             Ok(()) => shell_println!(
                                 "Limit '{}' added: {} over {} days",
@@ -55621,7 +56415,17 @@ fn cmd_datausage(args: &str) {
                     // datausage limit alert <name> <pct>
                     if parts.len() >= 4 {
                         let name = parts[2];
-                        let pct: u8 = parts[3].parse().unwrap_or(80);
+                        // The help writes `<pct>` without brackets, so 80 was
+                        // never a documented resting value -- it was a guess that
+                        // happened to be plausible, which is the worst kind:
+                        // `datausage limit alert home 9O` printed "Alert
+                        // threshold for 'home': 80%" and the operator has no way
+                        // to see that 90 was not what was set.
+                        let Some(pct) =
+                            required_num::<u8>(&parts, 3, "datausage", "limit alert", "percentage")
+                        else {
+                            return;
+                        };
                         match datausage::set_alert_threshold(name, pct) {
                             Ok(()) => shell_println!("Alert threshold for '{}': {}%", name, pct),
                             Err(e) => {
@@ -63345,7 +64149,17 @@ fn cmd_elog(args: &str) {
             }
         }
         "tail" => {
-            let count: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(20);
+            // `[count]` is bracketed in every one of this command's usage lines,
+            // so 20 is a documented resting value and `optional_num` is right.
+            // The guess it removes is the *present but unreadable* word: `elog
+            // tail 5O` (letter O) printed twenty events and nothing else, and
+            // twenty events is exactly what a bare `elog tail` prints -- so the
+            // output could not distinguish a typo from an omission, and the
+            // operator reading it believes they are looking at the last fifty.
+            let Some(count) = optional_num::<usize>(&parts, 1, "elog", sub, "event count", 20)
+            else {
+                return;
+            };
             let result = eventlog::query(&EventFilter::all(), count.wrapping_add(100));
             // Show the last `count` entries.
             let start = result.events.len().saturating_sub(count);
@@ -63365,7 +64179,10 @@ fn cmd_elog(args: &str) {
                 return;
             }
             let prefix = parts[1];
-            let count: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let Some(count) = optional_num::<usize>(&parts, 2, "elog", sub, "event count", 20)
+            else {
+                return;
+            };
             let result = eventlog::query(&EventFilter::all().namespace(prefix), count);
             shell_println!(
                 "Events matching namespace '{}': {} found",
@@ -63392,7 +64209,10 @@ fn cmd_elog(args: &str) {
                     return;
                 }
             };
-            let count: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let Some(count) = optional_num::<usize>(&parts, 2, "elog", sub, "event count", 20)
+            else {
+                return;
+            };
             let result = eventlog::query(&EventFilter::all().min_severity(sev), count);
             shell_println!(
                 "Events at {} or above: {} found",
@@ -63417,7 +64237,10 @@ fn cmd_elog(args: &str) {
                     return;
                 }
             };
-            let count: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let Some(count) = optional_num::<usize>(&parts, 2, "elog", sub, "event count", 20)
+            else {
+                return;
+            };
             let result = eventlog::query(&EventFilter::all().pid(pid), count);
             shell_println!("Events from PID {}: {} found", pid, result.matched);
             for ev in &result.events {
@@ -63431,7 +64254,10 @@ fn cmd_elog(args: &str) {
                 return;
             }
             let name = parts[1];
-            let count: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let Some(count) = optional_num::<usize>(&parts, 2, "elog", sub, "event count", 20)
+            else {
+                return;
+            };
             let result = eventlog::query(&EventFilter::all().service(name), count);
             shell_println!("Events from service '{}': {} found", name, result.matched);
             for ev in &result.events {
@@ -69975,7 +70801,15 @@ fn cmd_iperf(args: &str) {
             }
             let host_str = parts[1];
             let port_str = parts[2];
-            let duration: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            // 0 is not a duration here, it is `tcp_client_test`'s sentinel for
+            // "use DEFAULT_DURATION_POLLS" -- so a guessed 0 ran the default
+            // test and printed a full result, making a mistyped duration
+            // indistinguishable from having omitted it.
+            let Some(duration) =
+                optional_num::<u32>(&parts, 3, "iperf", sub, "duration in polls", 0)
+            else {
+                return;
+            };
 
             let ip = if let Some(ip) = parse_ipv4(host_str) {
                 ip
@@ -70039,7 +70873,15 @@ fn cmd_iperf(args: &str) {
                     return;
                 }
             };
-            let max_polls: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            // As in the client arm, 0 is not a poll budget -- it is
+            // `tcp_server_test`'s sentinel for DEFAULT_SERVER_POLLS.  Guessing it
+            // meant a mistyped budget listened for the default 3000 polls and
+            // printed a full result, which is indistinguishable from having
+            // omitted the argument entirely.
+            let Some(max_polls) = optional_num::<u32>(&parts, 2, "iperf", sub, "poll budget", 0)
+            else {
+                return;
+            };
 
             shell_println!("Listening on port {}...", port);
             match crate::net::iperf::tcp_server_test(port, max_polls) {
@@ -70074,8 +70916,14 @@ fn cmd_iperf(args: &str) {
             }
             let host_str = parts[1];
             let port_str = parts[2];
-            let count: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
-            let size: usize = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(1400);
+            let Some(count) = optional_num::<u32>(&parts, 3, "iperf", sub, "packet count", 100)
+            else {
+                return;
+            };
+            let Some(size) = optional_num::<usize>(&parts, 4, "iperf", sub, "payload size", 1400)
+            else {
+                return;
+            };
 
             let ip = if let Some(ip) = parse_ipv4(host_str) {
                 ip
@@ -70144,8 +70992,14 @@ fn cmd_iperf(args: &str) {
             }
             let host_str = parts[1];
             let port_str = parts[2];
-            let count: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
-            let size: usize = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(1400);
+            let Some(count) = optional_num::<u32>(&parts, 3, "iperf", sub, "packet count", 100)
+            else {
+                return;
+            };
+            let Some(size) = optional_num::<usize>(&parts, 4, "iperf", sub, "payload size", 1400)
+            else {
+                return;
+            };
 
             let ip6 = match Ipv6Addr::parse(host_str) {
                 Some(addr) => addr,
@@ -103498,20 +104352,51 @@ fn cmd_swapact(args: &str) {
             shell_println!("swapact: initialized");
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("/dev/sdb1");
-            let stype = match parts.get(2).copied().unwrap_or("partition") {
+            // The help one screen below says `register <name> <partition|file|zram>
+            // <pages> [priority]` -- three required operands -- and this arm used
+            // to invent a value for every one of them.  That is worse here than
+            // at a typical guessed-value site because `swapact::register`
+            // (`fs/swapact.rs`) pushes unconditionally: it rejects only a full
+            // table and a duplicate name, and validates nothing about what it is
+            // told.  So a bare `swapact register` *created* an area named
+            // `/dev/sdb1` of 1,000,000 pages and reported success, after which
+            // `swapact list` showed a swap partition that does not exist and
+            // `swapact in /dev/sdb1 100` recorded traffic against it.  A guess on
+            // a path that cannot fail manufactures the record that makes the next
+            // guess look legitimate.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("swapact: {}: missing area name", sub);
+                set_exit(1);
+                return;
+            };
+            let Some(type_word) = parts.get(2).copied() else {
+                shell_println!("swapact: {}: missing swap type", sub);
+                set_exit(1);
+                return;
+            };
+            // The catch-all here was `_ => Partition`, which read a misspelt
+            // `zrma` as a partition and then said "registered … [partition]" --
+            // a wrong answer stated in the vocabulary of a right one.
+            let stype = match type_word {
+                "partition" => swapact::SwapType::Partition,
                 "file" => swapact::SwapType::File,
                 "zram" => swapact::SwapType::Zram,
-                _ => swapact::SwapType::Partition,
+                other => {
+                    shell_println!(
+                        "swapact: {}: `{}' is not a swap type (expected partition, file or zram)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
-            let pages = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1_000_000);
-            let prio = parts
-                .get(4)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(-1);
+            let Some(pages) = required_num::<u64>(&parts, 3, "swapact", sub, "page count") else {
+                return;
+            };
+            let Some(prio) = optional_num::<i32>(&parts, 4, "swapact", sub, "priority", -1) else {
+                return;
+            };
             match swapact::register(name, stype, pages, prio) {
                 Ok(()) => shell_println!(
                     "swapact: registered {} [{}] {} pages prio={}",
@@ -103527,15 +104412,23 @@ fn cmd_swapact(args: &str) {
             }
         }
         "in" => {
-            let name = parts.get(1).copied().unwrap_or("");
-            let pages = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
-            let ns = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(5000);
+            // `pages` is what the command is *about* -- the help writes it as
+            // `in <name> <pages> [ns]`, required -- so a mistyped count that
+            // silently became 1 recorded a swap-in that did not happen, at a
+            // volume nobody asked for, and said "swap-in 1 pages".
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("swapact: {}: missing area name", sub);
+                set_exit(1);
+                return;
+            };
+            let Some(pages) = required_num::<u64>(&parts, 2, "swapact", sub, "page count") else {
+                return;
+            };
+            let Some(ns) =
+                optional_num::<u64>(&parts, 3, "swapact", sub, "duration in nanoseconds", 5000)
+            else {
+                return;
+            };
             match swapact::record_in(name, pages, ns) {
                 Ok(()) => shell_println!("swapact: swap-in {} pages {}ns on {}", pages, ns, name),
                 Err(e) => {
@@ -103545,15 +104438,19 @@ fn cmd_swapact(args: &str) {
             }
         }
         "out" => {
-            let name = parts.get(1).copied().unwrap_or("");
-            let pages = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
-            let ns = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(10000);
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("swapact: {}: missing area name", sub);
+                set_exit(1);
+                return;
+            };
+            let Some(pages) = required_num::<u64>(&parts, 2, "swapact", sub, "page count") else {
+                return;
+            };
+            let Some(ns) =
+                optional_num::<u64>(&parts, 3, "swapact", sub, "duration in nanoseconds", 10000)
+            else {
+                return;
+            };
             match swapact::record_out(name, pages, ns) {
                 Ok(()) => shell_println!("swapact: swap-out {} pages {}ns on {}", pages, ns, name),
                 Err(e) => {

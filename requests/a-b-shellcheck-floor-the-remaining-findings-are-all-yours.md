@@ -8,7 +8,11 @@ ships with `userspace/**`, which lane A may not write
 (`scripts/which-lane.py`: lane A owns `boot-test.sh`, `run-timeout.py`,
 `wedge-soak.sh` and nothing else under `scripts/`).
 
-**Status:** ✅ LANDED 2026-08-29 by lane B — all 44 are gone,
+**Status:** ✅ **CLOSED 2026-08-29** — lane B cleared the findings and lane A
+raised the floor; `check_shellcheck` gates at `warning` as of
+`scripts/boot-test.sh:3393`. Nothing is outstanding on either side.
+
+✅ LANDED 2026-08-29 by lane B — all 44 are gone,
 `bash scripts/shellcheck-all.sh warning` now reports **0 findings across 78
 scripts**, and the template at `diff-wsl.sh:99` is quoted so the count does not
 regrow. Lane B's reply is

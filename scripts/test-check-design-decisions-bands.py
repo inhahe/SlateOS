@@ -340,6 +340,50 @@ def test_a_new_heading_below_its_bands_high_water_mark_is_rejected(mod):
                any("but below 630" in e for e in found))
 
 
+def test_two_new_sections_in_one_change_are_fine_if_they_ascend(mod):
+    """One batch of work can settle two questions, so one diff can add two
+    sections. The high-water mark is therefore taken over what was *already
+    established* -- the baseline, plus any new heading standing above this one
+    in the file -- and not over new headings further down.
+
+    Without that carve-out the earlier and lower of the pair is reported as
+    backfilling below the later and higher one, and the change can never be
+    made to pass by writing it correctly. That is not hypothetical: it fired on
+    631 and 632 the first time two lane-A sections landed together.
+    """
+    lines = doc(section(600, "A"), section(631, "A"), section(632, "A"))
+    check("a new pair written in ascending order passes",
+          errs(mod, lines, {600: 1}), [])
+
+
+def test_but_a_new_pair_written_out_of_order_is_still_rejected(mod):
+    """The carve-out above is scoped to *file order*, so it takes nothing away.
+
+    A run of new sections still has to be written lowest-first, which is what
+    keeps a band's single insertion point at its tail. Here 632 stands above
+    631, so 631 is backfilling below something already written.
+    """
+    lines = doc(section(600, "A"), section(632, "A"), section(631, "A"))
+    found = errs(mod, lines, {600: 1})
+    check_true("the lower of a descending new pair is reported",
+               any("section 631 is new but below 632" in e for e in found))
+
+
+def test_a_new_section_below_a_baselined_one_further_down_is_rejected(mod):
+    """And the carve-out is scoped to *new* headings, so history still binds.
+
+    File order is what excuses a new heading above; a baselined heading counts
+    wherever it sits, because it is a number that has genuinely been spent.
+    Here 610 is new and 630 is old, and 610 backfills below it even though 630
+    comes later in the file. (The out-of-order 630 is a second, separate
+    complaint -- this asserts only that the backfill is caught.)
+    """
+    lines = doc(section(600, "A"), section(610, "A"), section(630, "A"))
+    found = errs(mod, lines, {600: 1, 630: 1})
+    check_true("a new number below a spent one is reported wherever it sits",
+               any("section 610 is new but below 630" in e for e in found))
+
+
 def test_an_existing_heading_is_not_judged_by_rules_invented_today(mod):
     """Grandfathering is per *number*, not per line.
 

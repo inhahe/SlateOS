@@ -49819,6 +49819,43 @@ name deliberately carries no number, because the count moves: it was 43 across
 `xargs-diff.sh` merged from `main` carrying the same unquoted idiom as its 36
 predecessors.
 
+***Reversed the same day: the floor is `warning` as of 2026-08-29.*** Lane B
+cleared all 44 within hours of the request and replied in
+`requests/b-a-shellcheck-is-clean-at-warning-raise-the-floor.md`; the sweep
+reports `78 script(s), 0 with findings at severity warning`, verified in lane
+A's own worktree before the flip. Decision 1 above is therefore superseded, and
+it is worth being precise about what that means: **it was not wrong, it was
+temporary and said so.** The condition it set — clean at `warning`, no
+suppression list, no baseline file — is exactly the condition that was met, so
+the gate is still a clean-tree test and still has no baseline to drift. What
+changed is only which severity the tree happens to be clean at.
+
+The flip matters more than one word suggests: until today the gate **could not
+have caught its own founding incident.** SC2086 — the unquoted expansion that
+word-splits on a space, which is what created the stray `D:\visual` file — is
+severity `warning`, so at `error` the gate was blind to the precise bug class it
+was written for. It is now not.
+
+Lane B also did the part that stops the backlog regrowing, which the request
+asked for as the one thing worth doing above all the others: `diff-wsl.sh`'s
+"Using it" header — the block every new harness is copied from — showed the
+unquoted `DIFF_PROG=cat`, and now shows it quoted. All 50 harnesses were
+quoted, not just the 37 the tool flagged, so the set is uniform and a reader
+cannot tell which ones shellcheck happened to recognise as command names.
+
+*A trap recorded here because it is a repository-wide hazard, not a lane-B
+one:* **a comment whose first word is `shellcheck` is parsed as a directive.**
+Lane B wrote one line of English beginning `# shellcheck cannot tell ...` into
+`diff-wsl.sh`; it failed to parse (SC1073/SC1072), and because all 50 harnesses
+*source* that file under `-x`, every one of them then reported SC1094 and
+**silently lost its `-x` suppressions**. The count went from 44 to 227 across 50
+files nobody had touched. Two things follow. `diff-wsl.sh` is a blast radius: a
+parse error in it degrades every dependant at once and does so quietly. And
+`shellcheck -S warning diff-wsl.sh` alone would *not* have found it, because the
+directive error is severity `error` — only the whole sweep shows it. That is the
+fourth instance in this entry of the same shape: a check whose answer depends on
+how it is invoked.
+
 *One more measurement worth writing down, because it nearly produced a fourth
 wrong statement in this entry.* `shellcheck-all.sh` runs `shellcheck -x` from
 inside `scripts/`, and `-x` is load-bearing: it follows the harnesses'
@@ -49934,6 +49971,22 @@ written to remove. A heading that starts with a number but parses as neither
 style is rejected rather than skipped, for the same reason: a heading the gate
 cannot number is invisible to every check in it.
 
+**Amended 2026-08-29, the day after: the high-water mark is taken over what was
+already *established*, not over every heading in the band.** As first written,
+the no-backfill rule compared a new section against every other section in its
+band — including other sections new in the same change. That made a change that
+adds *two* sections to one band impossible to write correctly: the earlier and
+lower of the pair is always "below" the later and higher one, so it was reported
+as backfilling. This was not a hypothetical shape and it fired the first time it
+arose, on §631 and §632 (the pair being: this entry, and the one for a
+`printf` batch that settled a second question the same afternoon). One batch of
+work can settle two questions. The comparison is now against the baseline plus
+any new heading standing *above* this one in the file, which loses nothing —
+numbers still only ever go up, both against history and down the page, so a run
+of new sections must still be written lowest-first, and a new number below a
+*spent* one is still rejected wherever in the file that spent one sits. Three
+tests pin the three cases.
+
 **What it does not do.** It does not check that a section's *content* belongs
 to the lane that claims it, and it cannot: `**Lane:**` is self-declared. Its
 value is that a lane writing into another's band now produces a one-line
@@ -49941,7 +49994,7 @@ contradiction in the diff instead of a silent collision six weeks later.
 
 **Where it lives:** `scripts/check-design-decisions-bands.py`,
 `scripts/design-decisions-baseline.json`,
-`scripts/test-check-design-decisions-bands.py` (35 assertions), wired as
+`scripts/test-check-design-decisions-bands.py` (38 assertions), wired as
 `check_design_decisions_bands` in `scripts/boot-test.sh` immediately after
 `check_python_suites`. Fulfils
 `requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`.
@@ -49951,6 +50004,78 @@ baseline and the checker are inert without it. To re-baseline after a
 deliberate renumber: `python scripts/check-design-decisions-bands.py
 --update-baseline`, and say so in the commit message — a dropped count means a
 section that something may still cite has stopped existing.
+
+---
+
+## 632. kshell's `printf` complains after the data, not where the fault is, because kshell has exactly one output stream
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous, lane A)
+**Lane:** A
+
+**In short:** When you mistype a number — `printf '%d-%d' 1 abc` — the shell
+now says so. The question was *where in the output* the complaint goes. On
+Linux the data goes to one place ("standard output", the stream a `$(...)`
+captures) and complaints go to another ("standard error", which is *not*
+captured), so a complaint can appear at the exact moment the fault is noticed
+without ever getting mixed into the data. The kernel shell has only one place
+to write, so a complaint printed at the moment of the fault would land *inside*
+the data — `1-`, then the sentence, then `0`. The decision is to hold the
+complaints until the whole line has been printed and put them after it, so the
+data stays in one piece.
+
+**The constraint is real and is recorded elsewhere.** kshell has
+`shell_println!` (goes to whichever of the capture buffer or the console is
+active) and `crate::console_println!` (always the console, never captured), and
+no `shell_eprintln!` — see `known-issues.md`,
+`A-KSHELL-2334-COMMANDS-PRINTED-PAST-THE-CAPTURE`, where the conclusion was
+that the split between the two macros was never a stdout/stderr distinction but
+drift, and that terminal interaction (prompts, `read`, xtrace) is what
+legitimately bypasses the capture. A diagnostic is *not* terminal interaction:
+kshell's self-test §17 deliberately asserts that command diagnostics appear in
+`$(...)` captures. So `printf`'s complaint must go through `shell_println!`,
+into the same stream as its data, and the only freedom left is ordering.
+
+**The options.**
+
+| | *What changes:* |
+|---|---|
+| **A. Complain where the fault is found** | `printf '%d-%d' 1 abc` prints `1-`, then `printf: \`abc': expected a numeric value`, then `0`. A captured result contains a sentence wedged into the middle of the value. |
+| **B (chosen). Collect and complain after the format** | The same command prints `1-0`, then the sentence on its own line. The data is contiguous; a capture that greps for the value still finds it. |
+| **C. Complain on the console only** | The sentence never appears in a capture — so a script can never see why it failed, and the self-test could not assert it either. Rejected: it recreates exactly the bug `A-KSHELL-2334` was filed about, from the other direction. |
+
+**Why B and not A.** Neither is what GNU does, because GNU is not forced to
+choose — its two streams are interleaved on a terminal and separated in a
+capture, so it gets both properties. With one stream the properties are in
+conflict and the data's integrity is worth more than the complaint's position.
+A caller who runs `x=$(printf '%d' "$n")` and gets a value with an English
+sentence in the middle of it has a corrupted value; one who gets the value
+followed by a sentence has a value with a suffix, and a non-zero exit status
+telling them to look. The cost of B is real and is accepted: with a reused
+format (`printf '%d\n' a b c`) all the complaints arrive together at the end,
+so the reader must match them to their operands by the quoted word rather than
+by position. The word is in every sentence for that reason.
+
+**A smaller decision recorded in the same place: the quotation marks diverge
+from lane B's `printf` and the sentences do not.** The three sentences —
+`expected a numeric value`, `value not completely converted`, `numerical result
+out of range` — are lane B's `userspace/coreutils/src/bin/printf.rs` wording
+byte for byte, because a script that greps one shell's diagnostic must find the
+other's. The quoting is not: kshell uses `` `word' `` where coreutils uses the
+locale's quotes, because a reader of kshell's output sees this file's other
+diagnostics beside it and a single command quoting differently from its
+neighbours reads as a bug. Sentence and exit status are the contract; the
+punctuation around the operand is house style.
+
+**How to reverse:** if kshell ever grows a real second stream, option A becomes
+available at no cost and is then the better one — the `faults` vector in
+`cmd_printf` exists only to defer the printing, so the reversal is to print at
+the `printf_note_fault` call site and delete the vector.
+
+**Where it is:** `cmd_printf` and `printf_note_fault` in `kernel/src/kshell.rs`;
+pinned by self-test rung 100, which asserts the exact bytes
+`0\nprintf: \`zzabc': expected a numeric value\n` so that the ordering cannot
+be changed without the assertion failing.
 
 ---
 

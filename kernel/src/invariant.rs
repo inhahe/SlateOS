@@ -233,6 +233,66 @@ fn check_pressure_range() -> InvariantResult {
     }
 }
 
+/// Metrics sampler: the non-blocking snapshot is not refusing every tick.
+///
+/// `kstat::sample()` runs in the timer softirq and must never take a blocking
+/// lock, so it queries memory through `mm::try_memory_info()` and abandons the
+/// sample when a lock is busy.  That is the right behaviour under momentary
+/// contention — and it is also what a *broken* try-chain looks like: one that
+/// can never return `Some` drops every sample and says nothing, leaving the
+/// metrics history silently empty.
+///
+/// The distinguishing signal is the pair of counters, not either alone:
+///
+/// - `total == 0 && skipped == 0` — the sampler simply has not ticked yet.
+///   Not a fault, and deliberately not failed: this check runs at whatever
+///   point in boot the battery reaches it.
+/// - `total == 0 && skipped > 0` — every single attempt was refused. That is
+///   the regression, and the only case failed here.
+/// - `total > 0` — the chain works; the skip count is reported for interest.
+fn check_metrics_sampling() -> InvariantResult {
+    let total = crate::kstat::total_samples();
+    let skipped = crate::kstat::skipped_samples();
+
+    if !crate::kstat::is_enabled() {
+        return InvariantResult {
+            name: "metrics_sampling",
+            category: "kernel",
+            passed: true,
+            message: Some(alloc::format!(
+                "OK: sampling disabled ({} recorded, {} skipped)",
+                total,
+                skipped
+            )),
+        };
+    }
+
+    if total == 0 && skipped > 0 {
+        return InvariantResult {
+            name: "metrics_sampling",
+            category: "kernel",
+            passed: false,
+            message: Some(alloc::format!(
+                "every one of {} sampling attempts was refused by \
+                 mm::try_memory_info() -- a memory lock is permanently busy, or \
+                 the try-chain can no longer succeed",
+                skipped
+            )),
+        };
+    }
+
+    InvariantResult {
+        name: "metrics_sampling",
+        category: "kernel",
+        passed: true,
+        message: Some(alloc::format!(
+            "OK: {} sample(s) recorded, {} skipped (lock busy)",
+            total,
+            skipped
+        )),
+    }
+}
+
 /// IPC: no negative operation counts.
 fn check_ipc_counters() -> InvariantResult {
     // All fields are u64, so they can't be negative.
@@ -290,6 +350,7 @@ pub fn check_all() -> CheckResults {
         check_pressure_range,
         check_sched_balance,
         check_object_balance,
+        check_metrics_sampling,
         check_ipc_counters,
         check_cap_audit,
     ];

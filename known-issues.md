@@ -63746,7 +63746,8 @@ against `dst_len` before copying anything. Both Limine paths use it;
 `min(fb.width, self.width) - x_start`. Commit `b050e0bd5`.
 
 **Why it discards rather than errors:** same reasoning as
-`design-decisions.md` §271 — an over-wide rectangle now yields a visibly
+`design-decisions.md` §271 (*non-contiguous framebuffer*) — an over-wide
+rectangle now yields a visibly
 clipped picture, which gets reported as a display bug, rather than corruption
 in whatever the firmware mapped after the framebuffer, which gets blamed on a
 subsystem three layers away.
@@ -64595,14 +64596,16 @@ library crate is not dead code as far as `rustc` is concerned — something
 outside the crate might call it. Several also carried `#[allow(dead_code)]`.
 Nothing in the toolchain separates "exported for callers" from "exported and
 forgotten", so the predicate had to be written down: see
-`scripts/check-self-tests-wired.py` and design-decisions.md §273.
+`scripts/check-self-tests-wired.py` and design-decisions.md §273
+(*a self-test the build cannot reach is a build failure*).
 
 **A caveat that is not fixed, and is not this bug.** A further **258**
 self-tests are reachable *only* from `kshell.rs`, as interactive `test`
 subcommands of the kernel shell. They are runnable but the boot test never runs
 them, so a regression in one is caught only if a human happens to type the
 command. The checker reports that count on every run rather than failing on it
-— see §273 for why. Shrinking it is open work, not a defect with a fix.
+— see §273 (*unreachable self-tests*) for why. Shrinking it is open work, not a
+defect with a fix.
 
 ## B-A-CHANGE-JOURNAL-REPORTED-ITS-OWN-BOOKKEEPING-AS-CHANGES (lane A, 2026-08-22) — FIXED 2026-08-22
 
@@ -71547,7 +71550,8 @@ appends ` — N section(s) SKIPPED` to the summary line), `classify()` (the
 `Ready`/`Unsupported`/`Failed` split — only `NotSupported`,
 `ReadOnlyFilesystem` and `NoSuchDevice` mean "this system cannot"), and
 `is_mounted()`/`is_mounted_rw()` (the commonest looked-up fact). The rationale
-is written up in `design-decisions.md` §270.
+is written up in `design-decisions.md` §270 (*a self-test may skip, but only on
+a fact it looked up*).
 
 Three sites were more than reporting fixes, because removing the skip exposed
 what the skip had been hiding: `fs/mime` now fails when `detect()` errors
@@ -71777,7 +71781,8 @@ returns a `Display` adaptor (`SkipSuffix`) instead of a `String`, so all ~26
 `serial_println!("… PASSED{}", skips.suffix())` call sites are unchanged.
 Overflow past `MAX_SKIPS` (16) is **counted, not dropped** — a dropped skip
 would restore exactly the silence §270 exists to prevent, while still printing
-a number, and the number would be wrong. See `design-decisions.md` §271.
+a number, and the number would be wrong. See `design-decisions.md` §271 (*the
+fixed-capacity skip ledger* — not the framebuffer §271).
 
 **Regression test.** `fs::selftest::self_test()`, called from `main.rs`
 immediately after `mm::heap::init` — the earliest point in boot where
@@ -75704,7 +75709,8 @@ Two independent causes, both genuine:
    violation landing in the same window, and would leave the self-test's own
    assertions with nothing to check.
 
-See `design-decisions.md` §273 for the alternatives weighed on both.
+See `design-decisions.md` §273 (*lockdep's `try_lock` edge* — not the
+unreachable-self-tests §273) for the alternatives weighed on both.
 
 **Two lessons, and the second is the general one.**
 
@@ -93165,6 +93171,377 @@ direct enumeration of the three placements that can ever carry the run. The
 whole gate now runs in 19 s; the sibling's verdict on kshell is unchanged
 (502 assertions, 7 allowed).
 
+---
+
+## `A-KSTAT-SAMPLE-CALLS-MEMORY-INFO-FROM-THE-TIMER-SOFTIRQ` (lane A's code, filed by lane B, 2026-08-29) — ✅ FIXED 2026-08-29 (`07e5d617b`), and the reported lock list was wrong in both directions
+
+**In short:** the periodic metrics sampler runs inside the timer interrupt and
+calls a heavyweight memory query that takes ordinary blocking locks. When the
+timer lands on a CPU that already holds one of those locks, the interrupt
+handler spins for a lock only the code it just suspended could release. The
+kernel detects the recursive acquire and panics instead of hanging. Observed on
+`mm::swap::SWAP`, but `SWAP` is only the lock that lost the race -- the same
+path takes at least three others.
+
+**Where:** `kernel/src/kstat.rs:140` (`sample()` -> `mm::memory_pressure()`),
+`kernel/src/mm/mod.rs:428` (`memory_pressure()` -> `memory_info()`),
+`kernel/src/mm/mod.rs:286` (`memory_info()` -> `swap::summary()`),
+`kernel/src/mm/swap.rs:1149` (`SWAP.lock()`). Panic raised at
+`kernel/src/sync.rs:969`.
+
+**The path:**
+
+```
+sync::Mutex::lock        <- blocks forever
+mm::swap::summary        <- SWAP.lock()        swap.rs:1149
+mm::memory_info          <- swap::summary()    mm/mod.rs:286
+mm::memory_pressure      <- memory_info()      mm/mod.rs:428
+kstat::sample            <- memory_pressure()  kstat.rs:140
+softirq::handle_timer / process_pending / handle_timer_irq / idt::dispatch_vector
+```
+
+The interrupted context was inside `lockdep::lock_release`, i.e. mid-release of
+`SWAP` when the timer fired. That few-instruction window is why this is
+intermittent rather than every boot.
+
+**It is a real deadlock, not a lockdep false positive.** `fail_if_recursive` is
+reached only from `lock_contended` -- *after* `try_acquire` has already failed --
+so the lock word was genuinely still held, not merely still recorded as held.
+The owner check compares against `sched::current_task_id()`, which in softirq
+context is the interrupted task (task 0, idle). Hardware state and ownership
+bookkeeping agree.
+
+**The tell.** `kstat::sample()` already knows it must not block, and applies
+that discipline inconsistently fifteen lines apart:
+
+| Line | Call | Locking |
+|---|---|---|
+| `kstat.rs:125` | `mm::frame::try_stats()` | try-lock; comment reads `--- Memory stats (lock-free query) ---` |
+| `kstat.rs:140` | `mm::memory_pressure()` | blocking, and reaches four different locks |
+
+Blocking locks reachable from `memory_info()` — **as reported by lane B, and
+wrong in both directions; see the corrected list under "Fixed" below**:
+`frame::stats()` (`mm/mod.rs:274` *and* `:296` -- the blocking `stats()`, though
+`try_stats()` exists at `frame.rs:2692`), `swap::summary()` (`:286`),
+`heap::stats()` (`:283`), and
+`kswapd::is_running()`/`reclaim_cycles()`/`total_reclaimed()` (`:290-292`).
+Fixing only `SWAP` moves the panic rather than removing it.
+
+**Proper fix:** give `memory_info` a non-blocking twin -- `swap::try_summary()`,
+`try_memory_info()`, `try_memory_pressure()`, each returning `None` when any
+lock is busy -- and have `kstat::sample()` skip the sample rather than block. A
+dropped metrics sample costs nothing; the next tick gets it. This is exactly the
+shape `frame::try_stats()` already has. Alternatives (defer sampling to a kernel
+thread; make the locks IRQ-safe) are set out in the request file.
+
+**Reproduce:** not deterministic. Seen on `./scripts/boot-test.sh` against
+`lane-b` @ `8340fe48b`, debug profile, QEMU TCG; panic at serial log line 43907,
+during the `sysdiag` self-tests. `boot-history` reports 508 boots, 387 clean --
+this class of intermittent failure is not new, though how many of the 121 are
+this specific bug is unknown.
+
+**Frequency: 1 in 2 so far.** The next boot test, same debug/TCG configuration
+on `ca0a25d96` (same tree plus lane A's two kshell commits), passed clean in
+897 s. The window is narrow enough to miss on a retry and wide enough to hit on
+a first try -- the worst shape for a race. The passing re-run is not evidence
+against the bug; it was run only to establish intermittency.
+
+**Not a lane-B regression:** the lane-B diff for that merge touches no
+`kernel/`, `drivers/`, `fs/` or `net/` file (`design-decisions.md`,
+`requests/`, `scripts/argv-utf8-baseline.txt`, `scripts/df-diff.sh`,
+`userspace/coreutils/{df,du,strings}.rs`, `userspace/coreutils/src/human.rs`).
+Filed to lane A as
+`requests/b-a-kstat-sample-calls-memory-info-from-the-timer-softirq-and-self-deadlocks-on-swap.md`.
+
+### ✅ Fixed 2026-08-29 — `07e5d617b`
+
+The diagnosis was right and the proposed fix was the right one; the *audit*
+underneath it was not, in both directions, so taking the list on trust would
+have left the panic reachable.
+
+**Two of the four reported blocking leaves take no lock at all.** `heap::stats()`
+(`mm/heap.rs:1473`) reads `PCPU_SLAB_CACHES` plainly and loads its counters
+`Ordering::Relaxed`; `kswapd::is_running()`/`reclaim_cycles()`/
+`total_reclaimed()` are relaxed atomic loads. Neither can block anything.
+
+**Two that do block were missed.** `frame::zero_pool_count()` takes
+`ZERO_POOL.lock()`, and `accounting::tracked_count()` takes
+`ACCOUNTING.lock_irqsave()`. Lane B's own sentence applies to lane B's report:
+*fixing only `SWAP` would move the panic, not remove it* — and a fix built from
+their list would have done exactly that, on `ZERO_POOL`.
+
+The corrected list of what `memory_info()` reaches:
+
+| Call | Lock | Softirq-safe? |
+|---|---|---|
+| `frame::stats()` | `ALLOCATOR` | no → `try_stats()` (already existed) |
+| `frame::zero_pool_count()` | `ZERO_POOL` | no → **new** `try_zero_pool_count()` |
+| `swap::summary()` | `SWAP` | no → **new** `try_summary()` |
+| `accounting::tracked_count()` | `ACCOUNTING` (`lock_irqsave`) | cannot self-deadlock; **new** `try_tracked_count()` anyway, see below |
+| `heap::stats()` | none (relaxed atomics) | yes |
+| `kswapd::*` | none (relaxed atomics) | yes |
+
+**`ACCOUNTING` is a latency fix, not a correctness one, and the entry should
+not blur the two.** `lock_irqsave` masks interrupts for the duration, so a
+same-CPU timer cannot land inside the critical section and there is no
+self-deadlock to have. It got a try-variant because the body is an O(n) scan of
+the whole 256-entry address-space table, and a softirq that *waits* for another
+CPU to finish one is a latency spike on every tick.
+
+**`try_lock` on each leaf was not sufficient on its own.** It stops *us*
+blocking; it does not stop a nested interrupt landing while we hold one of these
+locks and re-entering it — deadlocking one level further in. So the whole
+try-chain in `mm::try_memory_info()` runs inside `crate::cpu::without_interrupts`,
+which is the construct `frame::stats()` already uses for the same reason. That
+was preferred over adding a `Mutex::try_lock_irqsave` primitive: one
+clearly-correct construct at one site beats a new primitive used at four.
+
+**Shipped:** `swap::try_summary()`, `frame::try_zero_pool_count()`,
+`accounting::try_tracked_count()`, `mm::try_memory_info()`,
+`mm::try_memory_pressure()`, and `mm::pressure_from_info()` (public, so a caller
+holding a snapshot scores *that* rather than taking every lock a second time —
+which is what `kstat::sample()` now does, halving its lock acquisitions rather
+than merely making them non-blocking). `sample()` abandons the whole sample and
+returns when any lock is busy: a record of zeros is indistinguishable from an
+idle system, and a *missing* record is not.
+
+**A silently-skipping sampler looks identical to one with nothing to report,**
+so the skips are counted (`kstat::skipped_samples()`), surfaced by `kshell`'s
+`kstat` command, and asserted by a new invariant (`invariant.rs`,
+`check_metrics_sampling`). The invariant fails **only** on `total == 0 &&
+skipped > 0` — every attempt refused, i.e. a try-chain that can no longer
+succeed. `total == 0 && skipped == 0` is "the sampler has not ticked yet", which
+is not a fault and depends only on where in boot the battery runs.
+
+**Fixed in passing:** `memory_info()` called `frame::stats()` twice, paying for
+`ALLOCATOR` twice and letting the order histogram come from a different instant
+than the free count printed beside it. Both now come from one snapshot, via a
+shared `assemble_memory_info()` body that `memory_info()` and `try_memory_info()`
+both call — so the blocking and non-blocking twins cannot drift into reporting
+different numbers from the same state.
+
+**Regression test:** `swap::self_test()` holds `SWAP` and asserts the whole
+chain refuses — `try_summary()`, `try_memory_info()` *and* `try_memory_pressure()`.
+Asserting only about the leaf would pass a fix that made `try_summary()`
+non-blocking while some caller in the middle still took a blocking lock, which
+is the exact shape of the bug. The positive direction (releases and succeeds) is
+a bounded 1000-iteration retry, not a single assert: the negative direction is
+deterministic because we hold the lock ourselves, but the positive one races
+every other CPU and `ALLOCATOR` is hot — a single-shot assert there would be an
+intermittent boot failure, i.e. this bug's own failure mode reintroduced by its
+own test. A bounded retry still fails a chain that is *permanently* `None`.
+
+**Verified:** boot test PASSED in 1132 s; `[swap]   Softirq-safe try_* chain: OK
+(refuses while SWAP held)` at serial line 490. The only `SELF-DEADLOCK` strings
+in the log are lockdep's own intentional self-test. All static gates green.
+
+---
+
+## `B-XARGS-IS-A-STUB-AND-DASH-ZERO-CANNOT-CARRY-THE-BYTES-IT-EXISTS-FOR` (lane B, 2026-08-29) -- **FIXED 2026-08-29** (`631783b54`); see "Resolution" at the end
+
+**In short:** `userspace/coreutils/src/bin/xargs.rs` is a 285-line invention, not
+a transcription of GNU findutils' 1755-line `xargs.c`. The worst consequence is
+that `xargs -0` -- the mode whose entire purpose is carrying arbitrary bytes from
+`find -print0` -- reads stdin with `read_to_string` and so fails on exactly the
+non-UTF-8 filenames it exists to handle. `find . -print0 | xargs -0 rm` is broken
+for the case `-0` was invented for.
+
+**Where:** `userspace/coreutils/src/bin/xargs.rs` -- `run_main()` line 34
+(`env::args().skip(1).collect::<Vec<String>>()`), line 42
+(`io::stdin().read_to_string`), `split_items()` line 152, `parse_args()` line 108.
+Listed in `scripts/argv-utf8-baseline.txt` as `xargs.rs:argv-as-string`.
+
+**Measured against `/usr/bin/xargs` (GNU findutils 4.9.0) on the dev machine.**
+Each row was run, not assumed:
+
+| # | Case | GNU 4.9.0 | Our stub |
+|---|---|---|---|
+| 1 | `printf "a'b c'd\n" \| xargs echo` | `ab cd` (one item; quotes are syntax) | `a'b c'd` (two items, quotes literal) |
+| 2 | `printf 'x\ y\n' \| xargs echo` | `x y` (backslash escapes the space) | two items |
+| 3 | `printf "a'b\n" \| xargs echo` | diagnoses `unmatched single quote` | accepted silently |
+| 4 | empty input, no `-r` | **runs the command once** (`RAN`) | returns success without running |
+| 5 | child exits 1 | xargs exits **123** | exits 1 |
+| 6 | child exits 255 | xargs exits **124** | exits 1 |
+| 7 | command not found | xargs exits **126** (see below) | exits 1 |
+| 8 | `printf 'caf\351\0' \| xargs -0 ...` | passes the raw byte through (`63 61 66 e9`) | cannot represent it |
+
+**Row 7 is 126 because of this machine's `PATH`, not because of `xargs`** --
+established 2026-08-29, after the first measurement recorded the 126 without an
+explanation and warned the next reader off "correcting" it. Both numbers are
+real and the rewrite must produce both:
+
+| `PATH` | status | diagnostic |
+|---|---|---|
+| the ambient WSL one | **126** | `xargs: nosuchcmd: Permission denied` |
+| a single readable directory | **127** | `xargs: nosuchcmd: No such file or directory` |
+
+`xargs.c:1360` is unambiguous -- `_exit (errno == ENOENT ? 127 : 126)` -- so the
+variable is `errno` after `execvp`, and `execvp` is where the choice is made.
+glibc searches every `PATH` entry and, having found nothing executable, reports
+the *most specific* failure it saw rather than the last one: any `EACCES` on the
+way beats the `ENOENT` at the end. This WSL's inherited `PATH` contains three
+Windows-interop directories that are not searchable --
+`/mnt/c/Program Files/Git/usr/local/bin`,
+`/mnt/c/Users/Public/Documents/Embarcadero/Studio/23.0/Bpl/Win64`, and
+`/mnt/c/WINDOWS/system32/config/systemprofile/AppData/Local/Muse Hub/lib` --
+so the search yields `EACCES` and xargs exits 126.
+
+Consequences for the transcription, both of which `scripts/xargs-diff.sh`
+depends on:
+
+- **Do not hard-code either number.** Ours must take the branch on its own
+  `errno`, so that it tracks the reference on any host. A transcription that
+  wrote `126` because that is what was measured here would fail everywhere else,
+  and one that wrote `127` because that is what the source "says" fails here.
+- **The harness sees 127, not 126.** `diff-wsl.sh` runs each side with `PATH`
+  set to a single directory holding one symlink, which is exactly the clean-path
+  row above. That is a feature -- it is the row that is a property of `xargs` --
+  but it means the ambient-`PATH` 126 is *not* covered by the harness and is
+  recorded only here.
+- A non-executable file that *is* found is 126 on any `PATH` (`EACCES` from the
+  file itself), and an absolute path that does not exist is 127 on any `PATH`
+  (no search happens). Those two are the unambiguous cases and both are in the
+  harness.
+
+Row 4 matters more than it looks: the stub behaves as though `-r`
+(`--no-run-if-empty`) were permanently on, so a script relying on the one
+guaranteed invocation silently gets none.
+
+**Also entirely absent:** `ARG_MAX` splitting. GNU's whole reason for existing is
+building command lines up to the system limit (gnulib `lib/buildcmd.c`, 638
+lines); our default path appends every item to a single command and will `E2BIG`
+on large input. And 15 of 18 long options are missing -- `--arg-file`,
+`--delimiter`, `--eof`, `--max-lines`, `--max-chars`, `--interactive`,
+`--no-run-if-empty`, `--verbose`, `--show-limits`, `--exit`, `--max-procs`,
+`--process-slot-var`, `--open-tty`, `--help`, `--version`.
+
+**One upstream bug found while writing the harness, which we deliberately do not
+copy.** `xargs -o` with no controlling terminal aborts GNU 4.9.0 rather than
+diagnosing: the child's `/dev/tty` open fails, it dies through `die()` -- which
+is `exit()`, not `_exit()` -- and so runs the *parent's* `atexit` hook, whose
+first act is `assert (getpid () == parent)`. Measured:
+
+```
+xargs: '/dev/tty': No such device or address
+xargs: xargs.c:1605: wait_for_proc_all: Assertion `getpid () == parent' failed.
+xargs: echo: terminated by signal 6
+```
+
+The comment at `xargs.c:1600` says in as many words that child processes must
+not call `exit ()` for exactly this reason; this path does. Ours should print
+the first line and exit, and `scripts/xargs-diff.sh` therefore tests `-o` for
+its option parsing only, with the reason written where the cases would be.
+
+**Harness:** `scripts/xargs-diff.sh`, 319 cases. It cannot compare `echo`'s
+output -- `echo` cannot show an empty argument, an argument containing a blank,
+or how many times the command ran -- so both sides run a fixture that prints the
+argument vector raw and NUL-terminated, and the whole stream is compared with
+`od -An -c -v`. Baseline on the stub, 2026-08-29: **62 passed, 257 differed.**
+Control run (`OURS=/usr/bin/xargs`): 319 passed, 0 differed.
+
+**Proper fix:** transcribe `xargs.c` + `buildcmd.c` the way `df`, `du` and `ls`
+were done, carrying argv and stdin as bytes throughout.
+Reference tarball matches the installed binary exactly (findutils 4.9.0).
+
+### Resolution, 2026-08-29 (`631783b54`)
+
+Done as described: `xargs.c` and `buildcmd.c` transcribed into 2309 lines,
+argv and stdin carried as bytes end to end. Every row of the table above now
+agrees with GNU, and `xargs.rs:argv-as-string` is out of
+`scripts/argv-utf8-baseline.txt`. **12 findings remain across 11 files** --
+`diff ed fetch grep logger more patch ps sh tar time_cmd`, where `sh` carries
+two of them (`argv-as-string` and `env-as-string`). The two numbers are easy
+to confuse and `631783b54`'s commit message got it wrong, saying "11
+findings"; `python scripts/argv-utf8.py --check` is the authority and prints
+the finding count, not the file count.
+
+**Harness after the rewrite: 334 passed, 0 differed, 2 differ on purpose** --
+up from 319 cases because the transcription exposed a gap in the harness
+itself, described below. Control run (`OURS=/usr/bin/xargs`): 334 passed, 0
+differed, 2 XPASS, which is what the control is supposed to report for the two
+`xfail`s.
+
+**The 126-vs-127 requirement is met the way this entry asked for.** Nothing
+compares against either constant: `Command::spawn()` delegates to libc's
+`PATH` search, so its `io::Error` *is* the `errno` glibc chose, and the code
+branches on `ErrorKind::NotFound` -- which is `ENOENT` -- exactly as
+`xargs.c:1360` branches on `errno == ENOENT`. Re-measured against
+`/usr/bin/xargs` after the rewrite, all four rows agree -- including the
+ambient-`PATH` 126 that `diff-wsl.sh` cannot cover and that is therefore
+recorded only here:
+
+| Case | GNU | ours |
+|---|---|---|
+| `nosuchcmd`, ambient WSL `PATH` | 126, `Permission denied` | 126, `Permission denied` |
+| `nosuchcmd`, `PATH` = one readable dir | 127, `No such file or directory` | 127, same |
+| a mode-644 file found on `PATH` | 126, `Permission denied` | 126, same |
+| `/nonexistent/cmd`, no search at all | 127, `No such file or directory` | 127, same |
+
+#### The gap the harness had: every non-UTF-8 case put the byte in the *input*
+
+This entry is about argv, and the 319-case harness tested the high byte only
+on the side that already worked. Fifteen cases were added for the other side --
+a byte that is not UTF-8 arriving as an INITIAL-ARG, around the `-I` pattern
+(both directions: a non-UTF-8 item into an ASCII argument and an ASCII item
+into a non-UTF-8 one), as `-E`'s logical EOF string, as a raw `-d` delimiter,
+as `--process-slot-var`'s name, and as `-a`'s operand.
+
+That last one is the load-bearing one and it settled a question that had been
+open since `quoting`'s curly marks were introduced: **`-a` on a name that does
+not exist makes the diagnostic quote a name it cannot decode**, and no ASCII
+case can arbitrate what should happen to the undecodable byte. Ours and GNU's
+`Cannot open input file ‘no<0xe9>such’: No such file or directory` agree byte
+for byte, so `Style::locale_quote`'s output is right for this case and not
+merely plausible.
+
+#### Five upstream behaviours kept because they are observable, not because they are correct
+
+Recorded here rather than only in the source, because each is the kind of thing
+a later reader "fixes":
+
+1. **`input_delimiter` is a C `char`, which is signed on x86-64.** `-d` with a
+   byte at 0x80 or above sign-extends to a negative int, which can never equal
+   a `getc` result in 0..255, so **the input never splits at all** and the whole
+   stream arrives as one argument. Verified against GNU at 0xe9 and 0xff (no
+   split, both) and 0x7f (splits, both). Ours stores `(b as i8) as i32` to
+   reproduce it.
+2. **`bc_push_arg` stores with `strcpy` but charges `cmd_argv_chars` the full
+   length**, so an item holding an embedded NUL reaches the child truncated
+   while still consuming its untruncated size against `-s`.
+3. **`--show-limits` subtracts the environment size twice** -- once inside
+   `posix_arg_size_max` and again in the "Maximum length of command we could
+   actually use" line -- so that number is deliberately pessimistic. It also
+   reads the environment *live*, so `--process-slot-var`'s `unsetenv` shrinks it.
+4. **`parse_num` always names the short option letter**, so `--max-lines=0` is
+   reported against `-l`; and its "invalid number" branch exits regardless of
+   the `fatal` argument, because `usage (EXIT_FAILURE)` is followed by an
+   unconditional `exit`. The `-s` "value too large" warning below it is
+   unreachable for the same reason.
+5. **`-i -n1` is excused but `-n1 -i` warns** (savannah patch #1500). The order
+   matters and both orders are in the harness.
+
+#### Five divergences, all forced by Rust rather than chosen
+
+Documented in the module header as well:
+
+- `endbuf` saturates where C does pointer arithmetic past the end of the buffer.
+- `bc_do_insert` copies bytes rather than `strcpy`ing the item, and guards the
+  zero-length match that makes upstream loop forever on `-I ''`.
+- Children are reaped in slot order rather than arrival order.
+- `-o`'s stdin redirect happens in the parent, so a missing `/dev/tty` exits 1
+  with a diagnostic instead of aborting in the child -- which is the upstream
+  `assert (getpid () == parent)` bug this entry already describes, and the
+  reason not copying it was the plan.
+- `--process-slot-var` gives each child an explicit `env` entry instead of
+  `unsetenv`ing the variable in the parent, since `std::env::remove_var` is
+  `unsafe` in edition 2024. The only observable part is the environment size,
+  which `--show-limits` reports and which is decremented to match.
+
+**Not fixed here, and unchanged by this work:** `userspace/xargs/` is a separate
+1109-line implementation of the same utility, one of the 41 duplicated binary
+names blocked on `B-Q7`. It was neither converted nor deleted; the gate covers
+`userspace/coreutils/` only, so the twin is surveyed but not gated.
+
 ### Lesson 65: a check that reuses the assumption it is checking will agree with itself (lane C, 2026-08-29)
 
 **In short:** a script converted thirteen `mutate.py` files to a shared harness,
@@ -93266,3 +93643,153 @@ Python module, a README generator, or a scratch script into `apps/`, `crates/`,
 `packages/*` or any other globbed member directory can add a member to the build
 -- and the artefact that does it may be one the tool creates on its own, and one
 your VCS is configured not to show you.
+
+## `A-DESIGN-DECISIONS-NINE-DUPLICATE-SECTION-NUMBERS` (lane A, 2026-08-29) — ⚠️ RECORDED, NOT FIXED (deliberately); the *recurrence* is fixed
+
+**In short:** `design-decisions.md` numbers its sections, and other files cite
+those numbers the way you'd cite a footnote. Nine numbers — §268 through §276 —
+each label **two different sections**, and have done for weeks. Three of the
+nine (§270, §271, §273) are cited from source comments and from this file in
+ways that resolve to *different entries depending on which citation you follow*.
+The duplicates are **not being renumbered**, for the reason given below; what is
+fixed is that a tenth cannot now be created.
+
+**Found by:** writing `scripts/check-design-decisions-bands.py` (landed
+`0c6937afb`). Not by any symptom — that is the point of the entry.
+
+### Why nobody had noticed
+
+`design-decisions.md` uses two heading styles interchangeably:
+
+```
+## §270 — A page flip may not change the resolution, and `SETCRTC` is the call that may
+## 270. A self-test may skip, but only on a fact it looked up -- and it must say so in the report
+```
+
+Every hand-check ever run against this file matched only the second form. That
+includes the `^## 62[4-9]\.` grep that caught the §626 collision on 2026-08-27,
+and the regex lane A published in
+`requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`
+as the one the gate would use. **That regex sees 201 of the file's 527
+headings.** The other 326 were invisible to inspection, so a duplicate spanning
+the two styles could not be seen by the only method anyone was using. Every one
+of these nine is exactly that: one section-sign heading and one plain heading.
+
+That is also why §626 *was* caught and these were not — §626 was a collision
+between two plain headings, the only kind the grep could see.
+
+### The nine
+
+Both members of each pair are real, distinct, still-live decisions.
+
+| № | The `§N —` entry | The `N.` entry |
+|---|---|---|
+| 268 | virtio-gpu render resource is not a GEM object (line 31572) | the bootable USB image is built by our own Python (line 30819) |
+| 269 | three capability types for clock/ports/rlimits (31639) | hrtimer uses a binary min-heap over a slot slab (33722) |
+| **270** | a page flip may not change resolution; `SETCRTC` may (31726) | a self-test may skip, but only on a fact it looked up (40071) |
+| **271** | a non-contiguous framebuffer exposes no base pointer (34553) | the skip ledger is fixed-capacity and allocation-free (40184) |
+| 272 | `/dev` grows subdirectories and a chardev entry type (34619) | an unreadable Path-Z fixture fails the rung (40617) |
+| **273** | a self-test the build cannot reach is a build failure (36455) | lockdep records no incoming edge for a `try_lock` (40699) |
+| 274 | a self-deadlocking lock panics immediately (36532) | a health check that never passed gets a new question (40787) |
+| 275 | a dying thread steps off its page tables first (36613) | a command that can fail to *look* gets three exit statuses (42716) |
+| 276 | a CPU hands off the task it just left (36710) | `tr`'s classes are ASCII-only and code-point-ordered (43960) |
+
+### The three that are actually ambiguous today
+
+The other six happen to be cited in only one of their two senses. These three
+are cited in **both**, so following a citation can land you on the wrong entry:
+
+- **§270** — `kernel/src/drm/mod.rs:409,665,782`, `kernel/src/drm/atomic.rs:375`,
+  `kernel/src/drm/ati/backend.rs:382` and two `requests/` files all mean the
+  *page-flip* entry. `kernel/src/syscall/dispatch.rs:3535` ("which is why the
+  checker cannot see it") and `known-issues.md:71553,71753,71783` (the
+  `fs::selftest::Skips` ledger) all mean the *self-test skip* entry. Twenty-one
+  citations, split across two unrelated subsystems.
+- **§271** — `known-issues.md:63749` ("an over-wide rectangle now yields a
+  visibly…") means the framebuffer entry; `known-issues.md:71784` means the skip
+  ledger.
+- **§273** — `known-issues.md:64599,64607` (next to
+  `scripts/check-self-tests-wired.py`) mean the unreachable-self-test entry;
+  `known-issues.md:75712` (lockdep's own self-test violations tallied
+  separately) means the `try_lock` entry.
+
+(Those line numbers are of this file *after* the annotation pass described at
+the end of this entry, and they will drift again as it grows — they are a
+starting point for a grep, not an address.)
+
+### Why they are not being renumbered
+
+This is the same call already made twice in this project, and it is recorded in
+`design-decisions.md`'s own header both times: **§217–§220** (four lane-C
+entries mis-numbered into lane A's band) and **§626** (lane A vs lane B). The
+reasoning holds here and is stronger:
+
+1. **The citations are the only reason the numbers exist.** Renumbering nine
+   sections means finding and rewriting ~64 citations, in three lanes' trees.
+   Miss one and it becomes a *dangling* reference, which is worse than an
+   ambiguous one: an ambiguous citation lands you on one of two real entries and
+   you notice; a dangling one lands you nowhere and reads like the document is
+   incomplete.
+2. **It cannot be done from one lane.** §270's citations are in
+   `kernel/src/drm/` (lane A) and `known-issues.md` (shared); §275's are in
+   `kernel/src/kshell.rs` (lane A) and this file. §268's are in a lane-C
+   request. A renumber would require either a cross-lane edit — forbidden — or
+   three coordinated commits landing together, for a cosmetic gain.
+3. **A renumber changes what published text means.** Both `main` and all three
+   lane branches carry these numbers; any of them may be quoted in a request
+   another lane has already read.
+
+So the numbers stay, they are never reissued, and the pairs are recorded here
+and in the baseline (`scripts/design-decisions-baseline.json`, which records
+each of the nine as legitimately borne by exactly two headings).
+
+### What *is* fixed
+
+`scripts/check-design-decisions-bands.py`, run by `scripts/boot-test.sh` before
+the build, matches **both** heading styles, rejects a heading that starts with a
+number but parses as neither, and refuses a tenth duplicate. It grandfathers
+these nine and nothing else. `scripts/test-check-design-decisions-bands.py`
+asserts against the *real* document that both styles are still in use and that
+neither is a rounding error — so a future reader "simplifying" the regex back to
+the plain form fails the suite rather than silently reintroducing the blindness.
+
+### The general lesson
+
+**A file with two equivalent surface forms has a hidden third state: the things
+your tooling can only see in one of them.** Nothing here was a bug in the
+document's *rule*; the rule was fine and everyone followed it. The failure was
+entirely in the checking, and it was invisible because the checker's blind spot
+and the reader's blind spot were the same blind spot — both were the same grep.
+The fix that matters is not the gate, it is that the gate's own test suite pins
+the *document's* two-styleness as a fact, so the blindness cannot be
+reintroduced by someone tidying up.
+
+### Reducing the ambiguity without renumbering — done for lane A's sites
+
+The cheap, lane-local option nobody has to coordinate: make the **citing** site
+unambiguous rather than the cited one, so the reader does not need this entry to
+know which §270 was meant.
+
+**Done, as its own commit after the gate landed**, for every ambiguous citation
+in lane A's tree and in lane A's entries in this file — each now reads
+`§271 (*non-contiguous framebuffer*)`, `§273 (*unreachable self-tests*)`,
+`§270 (*a self-test may skip, but only on a fact it looked up*)` and so on. Where
+the two senses sit close enough together to be confused on one screen, the
+annotation names the *other* sense too (`§271 (*the fixed-capacity skip ledger*
+— not the framebuffer §271)`), because a disambiguator that only names one sense
+still leaves the reader wondering whether there is a second.
+
+Deliberately not a rule and not gated: this is a readability annotation on a
+citation, and a gate that demanded one on every `§N` would fire on 500 unambiguous
+citations to make nine legible.
+
+**Two are left, and they are lane C's to make**, because they sit inside lane C
+entries in this file and lane A does not edit another lane's entries:
+
+| Site | Entry | Which §270 it means |
+|---|---|---|
+| `known-issues.md:33817` | `TD-COMPOSITOR-CANNOT-CHANGE-MODE` (lane C) | *page flip* |
+| `known-issues.md:33907` | `BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB` (found by lane C) | *page flip* |
+
+Both are one-word edits — ``§270 (page flip)`` — and neither blocks anything;
+they are listed so the count is honest rather than because they are urgent.

@@ -37,7 +37,20 @@
 # grow for the same reason — a quiet self-test window stretches with everything
 # else — but not proportionally, since a true wedge is silent forever.
 set -u
-cd "$(dirname "$0")/.."
+# `cd` failing does not stop a script that lacks `set -e`, and this one lacks it
+# deliberately (a soak must survive individual boots failing).  So the failure
+# has to be handled here, and it has to be fatal rather than reported, because
+# of what the next line does: ROOT is read from `pwd` *after* the cd, so a failed
+# cd does not yield a wrong-but-obviously-wrong path -- it yields a perfectly
+# valid ROOT pointing at whatever directory the operator happened to be in.  The
+# soak would then create build/hang-catches there and run QEMU against a tree
+# that is not the repository, silently, with the output landing somewhere nobody
+# looks.  Found by shellcheck SC2164 (lane B, requests/b-a-two-cd-calls-*).
+cd "$(dirname "$0")/.." || {
+    echo "wedge-soak: cannot cd to the repository root from $0 -- refusing to" >&2
+    echo "  soak in $(pwd), which is not the tree you meant to test." >&2
+    exit 1
+}
 ROOT="$(pwd)"
 OUTDIR="$ROOT/build/hang-catches"
 mkdir -p "$OUTDIR"

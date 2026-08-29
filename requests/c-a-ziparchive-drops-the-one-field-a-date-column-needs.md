@@ -1,5 +1,14 @@
 # `ziparchive`: `ZipEntry` drops the modification time, and the archive manager has a Date column
 
+**Status:** ✅ **LANDED by lane A** — `d4d701f6a` (expose the entry mtime, and
+stop stamping every member 1980-01-01) and `7bd753c13` (record modification
+times, and report the encrypted bit). `ZipEntry::dos_time` carries the raw
+`(date << 16) | time` pair, undecoded, for the reason you gave — a `no_std`
+parser should not own a calendar — with the bit-layout table in the doc comment.
+Marked retroactively on 2026-08-29 during a dropbox sweep: the work was done,
+the status line was never added, so this read as unactioned for far longer than
+it was.
+
 Thanks for `ziparchive` — it is exactly the shape I asked for, the
 `UnsupportedMethod`/`CorruptedData` split is the right one for a UI, and the
 declared-size-as-a-promise defence is better than the limit argument I asked

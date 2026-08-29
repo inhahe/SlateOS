@@ -105,6 +105,14 @@ static TOTAL_SAMPLES: AtomicU64 = AtomicU64::new(0);
 /// Whether sampling is enabled.
 static ENABLED: AtomicU64 = AtomicU64::new(1);
 
+/// Samples abandoned because a memory lock was busy at tick time.
+///
+/// Counted rather than silently dropped: skipping is the correct response to
+/// contention (see [`sample`]), but a sampler that quietly stopped recording
+/// because some lock is *permanently* contended would look identical to one
+/// with nothing to report.  A rising count here says which it is.
+static SKIPPED_SAMPLES: AtomicU64 = AtomicU64::new(0);
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -114,6 +122,20 @@ static ENABLED: AtomicU64 = AtomicU64::new(1);
 /// Called from the timer softirq on the BSP every SAMPLE_INTERVAL_TICKS.
 /// Must be fast — no allocations, no lock acquisitions (uses only
 /// lock-free atomics and `try_*` queries).
+///
+/// **That last clause is a hard requirement, not a performance note.** This
+/// runs in the timer softirq, on whatever CPU the tick landed on, interrupting
+/// whatever that CPU was doing.  A *blocking* acquire of a lock the
+/// interrupted code already holds can never succeed: the only thing that could
+/// release it is the code this interrupt just suspended.  `sync.rs` catches
+/// the recursive acquire and panics rather than hanging.  Every query below is
+/// therefore either a lock-free atomic read or a `try_*` that reports busy.
+///
+/// When the memory snapshot is unavailable the whole sample is abandoned
+/// rather than partially filled: a record with zeros where the real numbers
+/// should be is indistinguishable to a reader from a genuinely empty system,
+/// and one missing record is not.  The next tick gets it.
+#[allow(clippy::cast_possible_truncation)]
 pub fn sample() {
     if ENABLED.load(Ordering::Relaxed) == 0 {
         return;
@@ -121,10 +143,21 @@ pub fn sample() {
 
     let tick = crate::apic::tick_count();
 
-    // --- Memory stats (lock-free query) ---
-    let (free_frames, total_frames) = crate::mm::frame::try_stats()
-        .map_or((0, 0), |s| (s.free_frames as u32, s.total_frames as u32));
+    // --- Memory stats and pressure, from ONE non-blocking snapshot ---
+    //
+    // One call, not two: the frame counts recorded here and the pressure score
+    // beside them now describe the same instant.  Previously the counts came
+    // from `frame::try_stats()` and the score from a *blocking*
+    // `memory_pressure()` that re-read everything — which is the call that
+    // deadlocked (lane B, requests/b-a-kstat-sample-calls-memory-info-*).
+    let Some(info) = crate::mm::try_memory_info() else {
+        SKIPPED_SAMPLES.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    let free_frames = info.free_frames as u32;
+    let total_frames = info.total_frames as u32;
 
+    // Lock-free: the heap's byte counters are plain relaxed atomics.
     let heap_bytes = crate::mm::heap::stats().bytes_in_use as u32;
 
     // --- Scheduler stats ---
@@ -136,9 +169,9 @@ pub fn sample() {
     // The sched_stats exposes state counts if available.
     let blocked = 0u16; // Simplified; full version would query per-state counts.
 
-    // --- Memory pressure ---
-    let pressure = crate::mm::memory_pressure();
-    let pressure_score = pressure.score;
+    // --- Memory pressure --- scored from the snapshot already taken above, so
+    // this adds no lock acquisition at all.
+    let pressure_score = crate::mm::pressure_from_info(&info).score;
 
     // --- Per-CPU utilization ---
     let mut cpu_util = [0u8; 4];
@@ -220,6 +253,18 @@ pub fn recent(count: usize) -> alloc::vec::Vec<Sample> {
 #[must_use]
 pub fn total_samples() -> u64 {
     TOTAL_SAMPLES.load(Ordering::Relaxed)
+}
+
+/// Number of samples abandoned because a memory lock was busy at tick time.
+///
+/// Expected to be small and to stop rising: it counts ticks that landed inside
+/// somebody else's short critical section.  A count that climbs steadily means
+/// a memory lock is held for a large fraction of wall time, which is a problem
+/// worth chasing in its own right — this counter is how it becomes visible
+/// instead of silently thinning the metrics history.
+#[must_use]
+pub fn skipped_samples() -> u64 {
+    SKIPPED_SAMPLES.load(Ordering::Relaxed)
 }
 
 /// Enable or disable periodic sampling.

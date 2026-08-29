@@ -1511,6 +1511,18 @@ pub fn zero_pool_count() -> usize {
     ZERO_POOL.lock().count
 }
 
+/// Non-blocking variant of [`zero_pool_count()`] for interrupt/softirq context.
+///
+/// Returns `None` when ZERO_POOL is held rather than waiting for it.  Same
+/// hazard as [`try_stats()`]: this counter is read by `mm::memory_info()`,
+/// which the timer softirq reaches, and ZERO_POOL is taken by the allocation
+/// path that the softirq may have interrupted mid-hold.  A blocking acquire
+/// there waits for a release that the suspended code cannot perform.
+#[must_use]
+pub fn try_zero_pool_count() -> Option<usize> {
+    Some(ZERO_POOL.try_lock()?.count)
+}
+
 /// Get zero pool hit/miss statistics.
 ///
 /// Returns `(hits, misses)` — the number of `alloc_frame_zeroed()` calls

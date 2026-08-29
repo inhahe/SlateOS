@@ -31,16 +31,30 @@ Format for each entry:
 
 ## Numbering and file order
 
-Sections are numbered by lane, and **the file is ordered by section number,
-not by date.** Insert your entry among its numeric neighbours; do not append
-at end-of-file unless your number happens to be the highest.
+Sections are numbered by lane, and **each lane's band ascends in file order.**
+Take the next unused number in your own open band, and insert your entry
+**immediately after the last entry already in that band** — the line the gate
+prints for you (see below). Do not append at end-of-file unless yours is the
+last band; do not order by date.
 
-| Band | Owner | Region of this file |
-|---|---|---|
-| §1–§127 | single-agent history | the head — never renumber these |
-| §200–§299 | **lane A** | contiguous, after the history |
-| §300–§399 | **lane B** | contiguous, after A's band |
-| §400–§499 | **lane C** | contiguous, to end of file |
+**This table is machine-read** by `scripts/check-design-decisions-bands.py`,
+which parses each `§lo–§hi` row for its owning lane and for the word `open` or
+`closed`. Keep the shape; the gate fails loudly if it stops matching, rather
+than silently believing there are no bands.
+
+| Band | Owner | Status | Region of this file |
+|---|---|---|---|
+| §1–§127 | single-agent history | closed | the head — never renumber these |
+| §200–§299 | **lane A** | closed — full at §299 | after the history |
+| §300–§399 | **lane B** | closed — full at §360 | after A's first band |
+| §400–§499 | **lane C** | closed — full at §498 | after B's first band |
+| §500–§599 | **lane C** | **open** | interleaved with A's §600s; C's own run ascends |
+| §600–§699 | **lane A** | **open** | interleaved with C's §500s; A's own run ascends |
+| §700–§799 | **lane B** | **open** | the tail — B alone still appends at EOF |
+
+Bands 200–499 are closed but **not free**: every number in them is spent, and
+spent numbers are never reissued (see §217–§220 and §626 below). A new entry
+always extends an *open* band upward.
 
 **One exception, settled 2026-08-17: §217–§220 are lane C's, permanently.**
 Four lane-C entries about the AMD display engine were numbered in lane A's
@@ -68,6 +82,64 @@ overflow, and do not extend into §500–§599. (Entries from §499 onward drop 
 above (noted 2026-08-25).** §200–§299 ran out at §299; the first overflow entry
 is 600, at end of file. No coordination was needed — lane C had already
 allotted the band — which is what the paragraph above was for.
+
+**Lane B's band filled too, lane B spent several entries inside lane A's
+overflow band, and on 2026-08-27 the two lanes duplicated a number (noted
+2026-08-29).** §300–§399 ran out at §360, and the next lane-B entries — the
+`ziparchive`, `cal`, `renice`, `free` and `dd` ones — were written into
+§600–§699, which the paragraph above had already allotted to lane A. That is
+not a harmless overlap: lane B's `dd` entry and lane A's `diskquota` entry
+were both written as **§626**, from the same base commit, hours apart, neither
+lane aware of the other. Lane A discovered it while resolving the merge — the
+only reason it was caught is that lane A grepped `^## 62[4-9]\.` afterwards,
+because git reports a 350-line `CONFLICT (content)` and never says "these two
+have the same number". Lane A kept B's 626 (already published on `main`, with
+two `known-issues.md` cross-references resolving to it) and renumbered its own
+to 627. The account is
+`requests/a-bc-design-decisions-numbering-it-happened-b-and-i-both-wrote-626.md`.
+
+**Lane B takes §700–§799 from here on, as invited above.** With C on
+§500–§599, A on §600–§699 and B on §700–§799, the three bands are disjoint and
+none is full, which for the first time gives each lane a distinct insertion
+point. **The rule is "immediately after the last entry in your own band" —
+*not* "before the first heading of the next band", which this paragraph
+originally said and which was already false when it was written.** The §500s
+and the §600s are thoroughly interleaved by four months of merges: the first
+§600 heading is at line 44741, but §554–§573 all sit *after* it, the last of
+them ~2 900 lines further down. A lane C entry placed "before the first §600"
+would land in the middle of lane A's run, out of numeric order with C's own
+neighbours, and — the part that matters — at the *same* offset lane A is
+editing, which is the one outcome the bands exist to prevent. Following your
+own band's tail is correct under any amount of interleaving, because it is a
+statement about your entries and nobody else's. The gate prints the exact line
+for each lane, so nobody has to work it out. The entries already in the 600s keep their
+numbers on the §217–§220 precedent — they are cited from source comments and
+from each other (626 cites 622 and 623), so renumbering would trade a cosmetic
+inconsistency for dangling citations. Every number below 700 that exists is
+spent, by whichever lane wrote it, and is never reissued.
+
+**The gate landed 2026-08-29: `scripts/check-design-decisions-bands.py`,** run
+by `scripts/boot-test.sh` before it builds anything. It requires each *new*
+heading to sit inside an open band, to be above that band's high-water mark, to
+be unique, and to carry a `**Lane:**` field matching the band's owner; it
+requires each open band to ascend in file order; and it warns when a band
+passes 80% spent. Existing sections are grandfathered by
+`scripts/design-decisions-baseline.json`. Run it directly for the per-band
+summary — it prints each lane's next number and the line to insert after.
+
+Writing it found that **the §626 collision was not the only one.** Nine numbers
+— §268 through §276 — are each borne by *two* live sections, and had been for
+weeks. The mechanism is that this file uses two heading styles, `## §268 —
+title` and `## 268. title`, and every hand-check ever run against it (including
+the `^## 62[4-9]\.` grep that caught §626, and the regex lane A originally
+specified for this gate) matched only the second, which is 201 of the 527
+headings. The other 326 were invisible to inspection. The nine duplicates keep
+their numbers on the §217–§220 precedent and are recorded in `known-issues.md`
+under `A-DESIGN-DECISIONS-NINE-DUPLICATE-SECTION-NUMBERS`; three of them are
+cited from source and resolve ambiguously, which is logged there. The gate
+matches both styles and rejects any heading that starts with a number but
+matches neither, because a heading it cannot number is a heading no check can
+see.
 
 The numeric *order* is what makes the bands physically disjoint, and that —
 not the numbering by itself — is what makes this file merge cleanly between
@@ -49667,3 +49739,295 @@ information that was missing was the wire/not-wire split, and that is one bit.
 `kernel/src/fs/netdev.rs` and `sys_net_stat` in
 `kernel/src/syscall/handlers.rs`. Full account in `known-issues.md` →
 `A-NET-INTERFACE-COUNTERS-CONFLATE-THE-NIC-WITH-EVERY-VETH-PAIR`.
+
+## 630. The shellcheck gate stops the build on a finding but waves it through when the tool is missing
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous)
+
+**In short:** We now run a shell-script linter over `scripts/` before the
+kernel build, and refuse to build if it complains. But not every one of the
+three lanes has the linter installed — it is a third-party program, not part of
+the toolchain — and a lane that lacks it would otherwise be unable to build the
+kernel at all. So when the tool is absent the check prints how to install it and
+carries on. That means the check is *mandatory where it can run and advisory
+where it cannot*, which is a weaker promise than a gate normally makes, and the
+reason it is written down here rather than just done.
+
+**Context.** `scripts/shellcheck-all.sh` existed for two days referenced by
+nothing, and was unrunnable in lane A because the binary was never installed
+there. Wiring it into `boot-test.sh` raised two choices that both have a real
+case on either side.
+
+**Decision 1 — gate at `error`, not `warning`.**
+
+*For `error`:* the tree already has zero findings at that floor, so the gate is a
+clean-tree test with no baseline file. It can only ever fire on something the
+change in hand introduced, which makes a failure unambiguous and actionable and
+means nothing has to be paid down before it can be turned on.
+
+*For `warning`:* it catches strictly more, including SC2086 (unquoted expansion)
+— which is the class that produced the `D:\visual` stray-file incident, i.e. the
+single most expensive shell bug this project has had. Gating at `error` does
+**not** catch that class. This is the genuine cost of the choice and it should be
+stated plainly rather than buried.
+
+*Why `error` won anyway:* `warning` has 48 findings today, ~35 of them one false
+positive (SC2209 on `DIFF_PROG=<name>`, where the tool cannot tell a bare command
+name from a forgotten `$(...)`) in **lane B's and lane C's** differential
+harnesses. Turning it on would require either 34 cross-lane edits I may not make,
+or a baseline file — converting a clean-tree test into a ratchet whose baseline
+then drifts and whose entries nobody revisits. A gate that must be introduced
+alongside a 48-line suppression list starts its life being ignored.
+
+*How to reverse:* raise the floor to `warning` once lane B quotes the
+`DIFF_PROG` assignments (they have already done `dd-diff.sh`; the rest are
+one-line, behaviour-free edits). That is the right end state and the only thing
+standing in its way is cross-lane ownership, not disagreement.
+
+**Decision 2 — a missing tool skips rather than fails.**
+
+*For skipping:* the alternative is that installing a third-party binary becomes a
+precondition for building the kernel. A lane that pulls `main`, runs the boot
+test and is told it cannot build until it downloads something from GitHub has
+been handed a worse problem than the one the gate solves. The skip is loud and
+prints platform-specific install instructions, so it is a prompt rather than
+silence.
+
+*Against skipping:* it reproduces in miniature exactly the defect being fixed. A
+check that silently does nothing in some environments is how `shellcheck-all.sh`
+came to sit unrun for two days in the first place, and a lane could stay in the
+skip state indefinitely without any consequence.
+
+*Why skip won:* the failure modes are asymmetric. A false skip costs delayed
+detection of a lint finding. A false hard-fail costs a lane its ability to build
+and boot-test the kernel, which is the thing every other gate in the file is
+protecting. Given the tool is a single static binary with no root requirement,
+the install prompt is very likely to be acted on; and the day all three lanes
+have it, the skip path is dead code that costs nothing to leave in.
+
+*How to reverse:* change the `rc -eq 2` arm from `return 0` to `exit 1`. Worth
+doing once it is confirmed all three lanes have the binary — at that point the
+skip protects nobody and only hides a regression in the tool's installation.
+
+**Where it is:** `check_shellcheck` in `scripts/boot-test.sh`, immediately after
+`check_orphan_modules`. Fulfils
+`requests/b-a-two-cd-calls-ignore-failure-in-shared-scripts.md`, which is also
+where the install note for the Windows build is recorded.
+
+---
+
+## 631. The numbering bands are enforced by a gate that grandfathers everything already here, and reads the band table out of this file
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous, lane A) — lanes B and C both asked for it
+**Lane:** A
+
+**In short:** This document is written by three parallel agents. Each takes
+section numbers from its own reserved range so the three of them edit three
+different places in the file and never collide. That rule was kept by nothing
+but attention, and attention lost twice: two lanes wrote a section 626 on the
+same day, and — discovered while writing this gate — nine *other* numbers
+(268 through 276) each label two different sections and have done for weeks.
+`scripts/boot-test.sh` now refuses to build if a newly-added section breaks the
+rule. Nothing already in the file is touched or renumbered.
+
+**Why a gate at all.** The cost of the failure is not the conflict; it is that
+git cannot report it. When lanes A and B both wrote 626, git produced a
+350-line `CONFLICT (content)` that named the file and the lines and never
+mentioned that two sections now had the same number. It was caught because lane
+A ran a grep afterwards, on a hunch. The nine duplicates at 268–276 are what
+happens when nobody has the hunch: they merged cleanly, because they were
+written far enough apart in the file that git had nothing to complain about at
+all. Three of them are cited from source comments, and those citations are now
+genuinely ambiguous — `known-issues.md` →
+`A-DESIGN-DECISIONS-NINE-DUPLICATE-SECTION-NUMBERS` has the list.
+
+**Four decisions inside it, each with a real alternative.**
+
+*1. Grandfather, don't renumber.* The alternative — fix the nine duplicates and
+the numbering becomes clean — was rejected on the precedent already set twice
+in this file's header (§217–§220, and §626). The numbers are cited from source
+comments, from `known-issues.md`, and from each other; renumbering trades a
+cosmetic inconsistency for dangling citations, and the citations are the only
+reason the numbers exist. Two of the nine are cited from `kernel/src/drm/`,
+which lane C cannot edit, so a lane-C renumber could not even be completed. The
+baseline (`scripts/design-decisions-baseline.json`) records each number and how
+many headings legitimately bear it, so the nine pass and a tenth does not.
+Cost: the file permanently contains nine ambiguous numbers, and a reader who
+follows one of those citations may land on the wrong entry. That cost is real
+and is why the duplicates are logged rather than merely tolerated.
+
+*2. Parse the band table out of this document rather than hardcoding it.* The
+bands have already moved three times (400s → 500s → 600s → 700s), each time
+because a lane ran out. A gate whose idea of the bands is a constant in a
+script would go quietly wrong the fourth time — and "quietly wrong gate" is the
+exact failure being fixed. So the table above is the source of truth and the
+gate reads it, which costs a parser and a format the table must keep. It fails
+loudly if the table stops matching, rather than concluding there are no bands.
+
+*3. The order rule is "insert after your band's last entry", not "before the
+next band's first".* The header said the latter, and it was already false when
+written: the §500s and §600s are thoroughly interleaved by four months of
+merges, so lane C following it literally would have inserted ~2 900 lines above
+its own neighbours, in the middle of lane A's run — at the one offset the bands
+exist to keep it away from. "After my own band's tail" is a statement about a
+lane's own entries and stays true under any amount of interleaving. The gate
+prints the line for each lane, so nobody has to work it out.
+
+*4. Both heading styles are matched, and a heading matching neither is an
+error.* This file uses `## §268 — title` and `## 268. title` interchangeably;
+the header calls the drift "not meaning". Lane A's own published plan for this
+gate specified `^## (\d+)\.`, which sees 201 of 527 headings — and that
+blindness, shared by every hand-check ever run against this file including the
+grep that caught 626, is the most plausible mechanism by which nine duplicates
+survived. Matching one style would have shipped a gate with the defect it was
+written to remove. A heading that starts with a number but parses as neither
+style is rejected rather than skipped, for the same reason: a heading the gate
+cannot number is invisible to every check in it.
+
+**What it does not do.** It does not check that a section's *content* belongs
+to the lane that claims it, and it cannot: `**Lane:**` is self-declared. Its
+value is that a lane writing into another's band now produces a one-line
+contradiction in the diff instead of a silent collision six weeks later.
+
+**Where it lives:** `scripts/check-design-decisions-bands.py`,
+`scripts/design-decisions-baseline.json`,
+`scripts/test-check-design-decisions-bands.py` (35 assertions), wired as
+`check_design_decisions_bands` in `scripts/boot-test.sh` immediately after
+`check_python_suites`. Fulfils
+`requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`.
+
+**How to reverse:** delete the `check_design_decisions_bands` call. The
+baseline and the checker are inert without it. To re-baseline after a
+deliberate renumber: `python scripts/check-design-decisions-bands.py
+--update-baseline`, and say so in the commit message — a dropped count means a
+section that something may still cite has stopped existing.
+
+---
+
+## 700. `df` follows upstream GNU where the distribution's `df` has been patched — the reference binary is evidence, not authority
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** `df` is the command that reports how full each disk is. Ours is
+now a line-by-line transcription of GNU coreutils 9.4, checked case by case
+against the `df` installed on the dev machine. On 37 of those cases the two
+disagreed in exactly one way: ours printed a row for `/dev` and the reference
+did not. The reference turned out to be right about *its own* machine and wrong
+about GNU — Ubuntu patches `df` to hide two filesystem types that upstream does
+not hide. The decision is to **match upstream and not the binary we compare
+against**, and to teach the comparison harness to drop those rows from both
+sides rather than to introduce the patch into our source.
+
+### Context
+
+`df` decides which mount points to print by classifying some of them as
+"dummy" — pseudo-filesystems that exist for the kernel's convenience and would
+be noise in a disk-usage table. gnulib's `mountlist.c` spells the list out:
+
+```c
+#define ME_DUMMY_0(Fs_name, Fs_type)            \
+  (strcmp (Fs_type, "autofs") == 0              \
+   || strcmp (Fs_type, "proc") == 0             \
+   || strcmp (Fs_type, "subfs") == 0            \
+   ...
+   || strcmp (Fs_type, "kernfs") == 0           \
+   || strcmp (Fs_type, "ignore") == 0)
+```
+
+`devtmpfs` — the type `/dev` is mounted with — is **not** in it, in 9.4 or in
+gnulib master. Our transcription therefore prints `/dev`, and the reference
+`df` does not.
+
+Establishing which side was wrong took the whole chain of elimination, because
+every cheap explanation was false: the mount was in `/proc/self/mountinfo`; its
+device number collided with nothing (checked against all five other mounts on
+the same `st_dev`); a Python reimplementation of `filter_mount_list` kept it;
+`statvfs("/dev")` reported non-zero blocks, so it was not dropped by the
+`fsu_blocks == 0` rule. What settled it was interposing `stat` with
+`LD_PRELOAD` and watching the reference `df` run: it never `stat`s `/dev` at
+all, which means the row is gone *before* the stat — i.e. classified dummy.
+And then:
+
+```text
+$ strings -a /usr/bin/df | grep -n devtmpfs
+devtmpfs
+$ # sitting inside the run of dummy-type literals, next to squashfs
+```
+
+Debian and Ubuntu carry a patch adding `devtmpfs` and `squashfs` to
+`ME_DUMMY_0`. `squashfs` is why a machine with snaps installed does not get
+twenty `/snap/...` rows from `df`.
+
+### Decision
+
+1. **`df.rs` implements upstream's list, unpatched.** `/dev` prints, and a
+   `squashfs` mount would print.
+2. **`scripts/df-diff.sh` removes the divergence from the comparison rather
+   than from the subject.** It reads `/proc/self/mountinfo` for every mount
+   whose type is `devtmpfs` or `squashfs`, and deletes rows naming those mount
+   points from *both* programs' output before diffing (`drop_hidden`).
+3. **A case that is *about* one of those file systems opts out** with the
+   harness's `=` marker — `=~df /dev` compares the `/dev` row in full, because
+   deleting it would leave nothing to compare.
+4. **A case with no `target` column and no operand stays an xfail**
+   (`df --output=source`), because the mount point is the only thing
+   `drop_hidden` can identify a row by. It is kept deliberately, as the
+   harness's own standing record that the divergence is still there.
+
+### Rationale
+
+The reference binary is a *measurement instrument*, and the whole value of the
+differential harness is that it settles arguments about what GNU does. That
+only holds while the instrument is understood. Copying the patch would make 37
+cases go green while making the source wrong about the thing it claims to be a
+transcription of — and wrong invisibly, since the comment above the list would
+still cite gnulib. The next person to compare our list against `mountlist.c`
+would find a discrepancy with no explanation attached.
+
+There is also a substantive argument for upstream's behaviour on *this* OS.
+The Ubuntu patch is a workaround for two conditions we do not share: `/dev` on
+`devtmpfs` is a Linux-ism, and the `squashfs` noise is created by snap, which
+this OS does not have. Adopting a distribution's workaround for a problem the
+system does not have is how a transcription accumulates cruft that nobody
+later dares remove.
+
+### Alternatives considered
+
+- **Add `devtmpfs` and `squashfs` to our dummy list.** Rejected above: it
+  makes the harness green by making the source wrong, and it imports a
+  distribution policy under a comment citing gnulib. If we ever *want* to hide
+  these — a reasonable thing for a desktop OS to want — it should be a
+  documented decision of ours with its own section, not a silent copy.
+- **Compare against a locally-built pristine coreutils 9.4 instead.**
+  Genuinely correct, and rejected only on cost/benefit: it means building
+  coreutils inside the WSL environment as a harness prerequisite, and every
+  other `*-diff.sh` in `scripts/` compares against the installed binary. One
+  harness with a different reference is a trap for whoever reads two of them.
+  If a *second* distribution patch is ever found, this becomes the right
+  answer and should be revisited for all the harnesses at once.
+- **Mask the `/dev` row with the existing `~` digit mask.** Does not work:
+  the difference is a whole extra line, not a digit, so the outputs differ in
+  line count however the digits are rewritten.
+- **Drop the affected cases from the harness.** Rejected — 37 cases is most of
+  the whole-table coverage, and they test far more than the one row.
+
+### Where it lives
+
+- `userspace/coreutils/src/bin/df.rs` — `me_dummy_0`, with the upstream list
+  and a comment recording that the distribution's is longer.
+- `scripts/df-diff.sh` — `hidden_mounts`, `drop_hidden`, and the `=` marker
+  documented in the marker table at the head of the case list.
+- The xfail line `!Ubuntu hides devtmpfs; with no target column the extra row
+  cannot be dropped|~df --output=source`.
+
+### How to reverse
+
+If the operator wants a desktop-quiet `df`, add the two types to `me_dummy_0`
+behind a comment citing *this* section rather than gnulib, delete
+`drop_hidden` and its call sites from the harness, and turn the `=` markers
+and the `--output=source` xfail back into ordinary cases — they should then
+pass unmodified, which is the check that the change was complete.

@@ -34,7 +34,11 @@ xxd "$WORK/usr/lib/x86_64-linux-gnu/crt1.o" 2>/dev/null | head -4
 
 echo "=== run tcc under strace (host glibc, using image's tcc) ==="
 printf 'extern int puts(const char *s);\nint main(void){puts("SLATE_TCC_HOSTED_OK");return 0;}\n' > /tmp/hosted.c
-cd "$WORK"
+# tcc resolves some of its search paths relative to the working directory, so a
+# failed cd would not merely relocate the output -- it would change what this
+# strace is a trace *of*, which is the entire point of the script.  Fatal, not
+# reported.  Found by shellcheck SC2164 (lane B, requests/b-a-two-cd-calls-*).
+cd "$WORK" || { echo "NO WORKDIR $WORK"; exit 1; }
 # Run the image tcc with explicit search paths matching SlateOS layout
 "$STRACE" -f -e trace=openat,open,read,pread64,lseek,mmap,fstat,close,write \
     "$WORK/tcc" -o /tmp/hosted /tmp/hosted.c 2> /tmp/strace.out

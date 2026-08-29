@@ -1370,11 +1370,39 @@ def git_commit():
 
 
 def load_history(path):
-    """Read history.jsonl, skipping any record that fails to parse.
+    """Read history.jsonl in chronological order, skipping unparseable records.
 
     A corrupt line must not destroy the rest of the history: this file is
     appended to by every benchmark boot and is the only longitudinal record we
-    have, so partial recovery beats an exception.
+    have, so partial recovery beats an exception. "Unparseable" covers two
+    things -- a line that is not JSON, and a line that is JSON but not an
+    object; both are dropped with a message naming the line number, because a
+    non-object survives the loader only to crash a caller several frames away.
+
+    **The sort is a correctness requirement, not tidiness.** `bench/history.jsonl`
+    is marked `merge=union` in `.gitattributes` so concurrent appends from three
+    lanes stop conflicting, and union merge concatenates without sorting: it
+    emits our lines then theirs, so a file merged after two lanes benchmarked in
+    the same window need not end with the latest run.
+
+    `previous_for_host` returns `window[-1]`, i.e. it reads "most recent" out of
+    file position. Off by one record that is *older* than the current run, every
+    delta it reports is measured against the wrong baseline -- and a benchmark
+    diff that is quietly wrong is worse than one that fails, because it is
+    reported as a regression or an improvement that nobody can reproduce.
+
+    This half was not in lane B's report (which covered `boot-history.jsonl`);
+    the two files have the same shape, the same three writers and the same
+    end-of-file assumption, so fixing one and not the other would just move the
+    problem to the log nobody was looking at. The key differs -- `timestamp`
+    here, `ts` there -- which is the only reason this is a second edit and not a
+    shared helper.
+
+    Sorted as strings: all 129 records carry an ISO-8601 `+00:00` offset, and
+    same-offset ISO-8601 sorts correctly lexicographically. Missing, null or
+    non-string timestamps sort first, the safe direction -- they cannot displace
+    the genuinely-latest record from the end. Stable, so a same-second tie keeps
+    its file order.
     """
     records = []
     try:
@@ -1384,18 +1412,45 @@ def load_history(path):
                 if not line:
                     continue
                 try:
-                    records.append(json.loads(line))
+                    record = json.loads(line)
                 except json.JSONDecodeError:
                     print(
                         f"bench-history: skipping malformed record at "
                         f"{path}:{lineno}",
                         file=sys.stderr,
                     )
+                    continue
+                # Valid JSON is not the same thing as a record. A line that
+                # parses to a bare string or number -- which is what a
+                # half-written or mis-merged line often is -- used to be kept,
+                # and then took out the whole run at the first `record.get(...)`
+                # several frames away (an AttributeError from
+                # `measurement_mismatch` naming neither the file nor the line).
+                # That defeats the per-line recovery this loader exists for, so
+                # it is rejected here, where the lineno is still in hand to say
+                # which line to go and look at.
+                if not isinstance(record, dict):
+                    print(
+                        f"bench-history: skipping non-object record at "
+                        f"{path}:{lineno} ({type(record).__name__})",
+                        file=sys.stderr,
+                    )
+                    continue
+                records.append(record)
     except FileNotFoundError:
         return []
     except OSError as exc:
         print(f"bench-history: cannot read {path}: {exc}", file=sys.stderr)
         return []
+    # See the docstring: this is what licenses `merge=union` on the file.
+    #
+    # `str(... or "")` rather than a bare `r.get("timestamp", "")`: a record
+    # whose `timestamp` is JSON `null`, or a number, would otherwise make the
+    # sort raise TypeError comparing None/int against str -- destroying the
+    # whole history over one damaged line, which is precisely what the per-line
+    # recovery above exists to prevent. Coercing sorts such a record early
+    # instead, the same safe direction as a missing timestamp.
+    records.sort(key=lambda r: str(r.get("timestamp") or ""))
     return records
 
 

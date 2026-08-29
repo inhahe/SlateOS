@@ -466,6 +466,23 @@ pub fn tracked_count() -> usize {
     table.iter().filter(|e| e.pml4_phys != 0).count()
 }
 
+/// Non-blocking variant of [`tracked_count()`] for interrupt/softirq context.
+///
+/// Returns `None` when ACCOUNTING is held rather than waiting for it.
+///
+/// Unlike SWAP and ZERO_POOL, this lock is already taken with interrupts
+/// masked everywhere ([`lock_irqsave`](crate::sync::Mutex::lock_irqsave)), so
+/// it cannot *self*-deadlock against a same-CPU interrupt.  The reason it still
+/// needs a try-variant is latency, not correctness: the body is an O(n) scan of
+/// the whole address-space table, and blocking on a *remote* CPU's holder from
+/// the timer softirq stalls the tick for as long as that scan takes.  Callers
+/// that must not block use this and skip the field.
+#[must_use]
+pub fn try_tracked_count() -> Option<usize> {
+    let table = ACCOUNTING.try_lock()?;
+    Some(table.iter().filter(|e| e.pml4_phys != 0).count())
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------

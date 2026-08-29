@@ -64,13 +64,13 @@ impl Opts {
     pub const GROUP_DIGITS: Self = Self(4);
     /// Print `1K` rather than `1.0K`: drop a decimal point followed by a zero.
     ///
-    /// **No coreutils caller passes this, and an earlier version of this
-    /// comment claiming `df -h` and `du -h` did was wrong.** The claim was
-    /// reasoned from `df -h`'s `16G` rather than measured, and `16G` is not
-    /// evidence: 16 is at or above ten, where the decimal is dropped by the
-    /// rule above whatever this bit says. Measured on GNU coreutils 9.4, on
-    /// inputs that are *exactly* a power of the base — the only inputs that can
-    /// tell the two apart:
+    /// **No coreutils caller passes this when formatting a *size*, and an
+    /// earlier version of this comment claiming `df -h` and `du -h` did was
+    /// wrong.** The claim was reasoned from `df -h`'s `16G` rather than
+    /// measured, and `16G` is not evidence: 16 is at or above ten, where the
+    /// decimal is dropped by the rule above whatever this bit says. Measured on
+    /// GNU coreutils 9.4, on inputs that are *exactly* a power of the base —
+    /// the only inputs that can tell the two apart:
     ///
     /// ```text
     /// $ du -h --apparent-size k1     ->  1.0K      (1024-byte file)
@@ -79,11 +79,23 @@ impl Opts {
     /// $ ls -l --block-size=human-readable k1  ->  1.0K
     /// ```
     ///
-    /// So `du.rs` must **not** set it, and neither must `ls` or `df`; the
-    /// option is here because gnulib's `human_readable` has it and this is a
-    /// port of that function rather than of its coreutils call sites. If a
-    /// caller is ever found — upstream `tar` is the likely one — record the
-    /// measurement here rather than the inference.
+    /// So `du.rs` must **not** set it, and neither must `ls`, nor `df` for the
+    /// numbers in its table.
+    ///
+    /// **There is exactly one measured caller: `df`'s column heading.**
+    /// `df.c`'s `get_header` renders `output_block_size` with
+    /// `human_suppress_point_zero | human_autoscale | human_SI`, so the
+    /// heading over the size column is `1K-blocks` and not `1.0K-blocks`:
+    ///
+    /// ```text
+    /// $ df -B K --output=size /      ->  1K-blocks
+    /// $ df -B 1048576 --output=size / -> 1M-blocks
+    /// ```
+    ///
+    /// That is a *label* for a block size the user chose, where a `.0` would be
+    /// noise; it is not the formatting of a measured quantity, which is why the
+    /// same program does not set the bit for its own cells. See
+    /// `scaled_block_size` in `bin/df.rs`.
     pub const SUPPRESS_POINT_ZERO: Self = Self(8);
     /// Divide by the base until the value is below it, and report the
     /// exponent as a letter. Without this the value is printed whole.
@@ -694,8 +706,10 @@ mod tests {
     /// `SUPPRESS_POINT_ZERO` drops the `.0` and nothing else.
     ///
     /// It is exercised through a synthetic option set rather than a named
-    /// utility's, because — see [`Opts::SUPPRESS_POINT_ZERO`] — no coreutils
-    /// utility passes it. The last two assertions are the ones that matter:
+    /// utility's, because — see [`Opts::SUPPRESS_POINT_ZERO`] — the one
+    /// coreutils caller that passes it, `df`'s column heading, applies it to a
+    /// block size rather than to a measured quantity, and `df.rs` covers that
+    /// path in its own tests. The last two assertions are the ones that matter:
     /// they pin the *only* inputs on which the bit is observable at all, which
     /// is why an earlier version of this test naming `df` and `16G` proved
     /// nothing.

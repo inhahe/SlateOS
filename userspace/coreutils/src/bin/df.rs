@@ -3391,7 +3391,10 @@ mod tests {
         let heading = |args: &[&str]| {
             let (out, _, _) = go(args, &one_disk());
             let line = out.lines().next().unwrap_or_default().to_string();
-            line.split_whitespace().nth(1).unwrap_or_default().to_string()
+            line.split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string()
         };
         assert_eq!(heading(&["-B", "1M"]), "1M-blocks");
         assert_eq!(heading(&["-B", "1MB"]), "1MB-blocks");

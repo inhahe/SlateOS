@@ -81827,7 +81827,152 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **400 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **362 of 800 remain**
+
+> **Burn-down log.** 2026-08-29 (thirty-sixth batch): `cmd_printf` (5) cleared —
+> 367 → 362 across 195 → 194 functions. Pinned by self-test rung 100.
+>
+> **In short:** every batch before this one was the same shape — a word could
+> not be read, a value was invented, and the fix was to refuse. **This one is
+> not that shape, in both halves.** The parser was wrong even on words it read
+> *successfully*, so a diagnostic bolted onto it would never have found the
+> worst case; and the fix is not a refusal, because POSIX requires `printf` to
+> print the substituted value anyway. What was missing was the sentence and the
+> exit status, not the substitution.
+>
+> * **The case no error path could ever have caught.** `printf '%d' 010`
+>   printed **10**. C prints **8** — `printf`'s integer operands are
+>   `strtoimax(s, &end, 0)`, base 0, where a leading zero is octal. The site
+>   read `.parse::<i64>().unwrap_or(0)`, and `"010".parse::<i64>()` *succeeds*.
+>   Verified on the host, not assumed. **A wrong value that parses cleanly
+>   cannot be diagnosed**, so the whole burn-down technique — find the
+>   `unwrap_or`, add a refusal — was blind to it. It required replacing the
+>   parser. The other two divergences are merely loud, because `parse` errors
+>   and so the guessed 0 was at least reachable by a diagnostic: `0x10` is 16 in
+>   C and was rejected by `parse`, and `%u` of `-1` is
+>   `18446744073709551615` in C (the negation modulo `UINTMAX_MAX + 1`) and was
+>   likewise rejected. `printf_scan_integer` now implements base 0 outright —
+>   whitespace, sign, `0x`/`0X`, `0b`/`0B`, leading-`0` octal, and `endptr`
+>   semantics — mirroring lane B's `userspace/coreutils/src/bin/printf.rs`
+>   `scan_integer`, which was written against the same C definition. The two
+>   `printf`s must not disagree about what a numeral means.
+> * **The fix is diagnose-and-still-print, not refuse.** POSIX: the conversion
+>   happens with the value read so far, and only the exit status records the
+>   fault. `printf '%d %d\n' abc 5` must print `0 5`. So the zero was never the
+>   defect — the defect was that it was *only* the zero. `cmd_printf` never
+>   called `set_exit` on any path, so `printf '%d' abc` printed `0` and reported
+>   **success**. Three sentences now distinguish the three C conditions:
+>   `expected a numeric value` (`endptr == nptr`), `value not completely
+>   converted` (digits then junk), `numerical result out of range`. Wording is
+>   lane B's, byte for byte, so a script grepping one shell's diagnostic finds
+>   the other's.
+> * **A *missing* operand stays silent, and that is load-bearing.** POSIX treats
+>   it as zero; `""` scans with `consumed == 0 == s.len()`, so
+>   `printf_note_fault` returns early. Without that carve-out the diagnostic
+>   would fire on `printf '%d\n'` and stop meaning "you typed something I could
+>   not read".
+> * **The diagnostics are printed after the whole format, not where the fault
+>   is found** — forced by kshell having exactly one output stream. See
+>   `design-decisions.md` §632; the short version is that
+>   `printf '%d-%d' 1 abc` would otherwise emit `1-`, then the complaint, then
+>   `0`, splicing a sentence into the middle of the data. GNU interleaves
+>   harmlessly only because its complaint is on stderr.
+> * **Three layout defects surfaced once the specifier parser was rewritten**,
+>   none of them guessed values, all of them silent wrong output:
+>   `%05d` of −42 printed `00-42` (Rust's `{:0>5}` is fill-and-align over the
+>   whole *rendered* value, sign included; C puts the zeros after the sign and
+>   prints `-0042`); `%5x`, `%5X` and `%5o` **dropped the field width entirely**
+>   unless zero-padding was also asked for, so `%5x` of 255 printed `ff`; and
+>   `-` (left-justify) and `.N` (precision) **were not parsed at all** — the
+>   specifier was echoed literally *and* its argument left unconsumed, which
+>   desynchronised every conversion after it on the same line. The layout now
+>   goes through one `printf_field`, which is what makes the sign/padding order
+>   and the two opposite meanings of `.N` (maximum length for `%s`, minimum
+>   digit count for `%d`) statable in one place.
+> * **Silent data loss, unrelated to any guess.** POSIX reuses the format until
+>   the operands are used up: `printf '%s\n' a b c` prints three lines. This
+>   printed one and discarded `b` and `c` without a word, exit 0. The reuse loop
+>   stops when a pass consumes no argument, or `printf hi a` would print `hi`
+>   for ever.
+> * **C's space flag is deliberately not accepted.** `% d` is a conversion in C,
+>   so `printf '100% done\n'` prints `100 0one` there. Accepting it would have
+>   been C-correct and a surprising regression in a shell where that string is
+>   overwhelmingly a literal percent sign; `%`-then-space falls through to the
+>   literal echo instead, and the doc comment says so rather than leaving the
+>   omission to look like an oversight.
+> * **The ledger line vanished rather than shrinking.** The new code contains no
+>   `.parse()` at all, so `check-option-refusal.py`'s D1 regex has nothing to
+>   match and `cmd_printf 5` was deleted from
+>   `scripts/option-refusal-ledger.txt` outright.
+
+> **Burn-down log.** 2026-08-29 (thirty-fifth batch): `cmd_widgets` (6),
+> `cmd_iperf` (6), `cmd_swapact` (6), `cmd_fsbench` (5), `cmd_datausage` (5) and
+> `cmd_elog` (5) cleared — 400 → 367 across 201 → 195 functions. Pinned by
+> self-test rung 99.
+>
+> **In short:** rung 98's batch guessed **0 for a pid**, and the harm there was
+> that 0 names a real and important process. This batch is the variant where
+> the guessed number is not a value at all but a **sentinel the callee reads as
+> "use the default"** — and that is worse, because the substituted run's output
+> is *byte-identical* to the run the user would have got by omitting the
+> argument entirely.
+>
+> * **The sentinel cases.** `iperf client <host> <port> 1O` (letter O) became
+>   duration 0, which `tcp_client_test` reads as `DEFAULT_DURATION_POLLS`; the
+>   test ran to completion and printed a full throughput report. `iperf server
+>   <port> 3OO` did the same through `tcp_server_test`'s 3000-poll default.
+>   `elog tail 5O` printed twenty events, which is exactly what a bare `elog
+>   tail` prints. Every `fsbench` iteration count is the same shape. **There is
+>   no observable difference between "you mistyped and I ignored you" and "you
+>   said nothing and I used the default"** — so unlike batch 34, where a wrong
+>   pid at least appeared in the output, here the transcript cannot be audited
+>   after the fact either. Nothing anywhere records that a word was discarded.
+> * **`swapact register` is this batch's forge-then-check pair** (the shape
+>   first named in batch 29, and the reason "there is a guard downstream" is not
+>   a defence). `swapact::register` in `kernel/src/fs/swapact.rs:138` rejects
+>   only a full table and a duplicate name — it validates *nothing* about what
+>   it is told. So `unwrap_or("/dev/sdb1")` in the shell arm did not merely
+>   mislabel an action: a bare `swapact register` **created** a swap area of
+>   1,000,000 pages named after a device that does not exist and reported
+>   success. `swapact list` then displayed it, and `swapact in /dev/sdb1 100`
+>   recorded traffic against it. A guess on a path that cannot fail manufactures
+>   the record that makes the next guess look legitimate.
+> * **The `_ => SwapType::Partition` catch-all went with it**, though the gate
+>   does not count those: a misspelt `zrma` registered a *partition*, and the
+>   success line printed `[partition]` — the wrong answer stated in the
+>   vocabulary of a right one.
+> * **`required_num` vs `optional_num` was chosen by meaning, not mechanically.**
+>   Where the operand *names the thing being acted on* it is required —
+>   `swapact`'s `<pages>`, `datausage record`'s `<rx>`/`<tx>`, `limit add`'s
+>   `<bytes>`, `limit alert`'s `<pct>`, all written unbracketed in their own
+>   help. Where the help brackets it and documents a resting value it is
+>   optional — every `fsbench` count, every `elog` `[count]`, `iperf`'s
+>   `[duration]`. Getting this backwards would turn a required operand into an
+>   optional one, which is a behaviour change wearing a bug fix.
+>   `datausage limit alert` is the instructive one: 80 *looked* like a
+>   documented default and was not, so `alert home 9O` printed "Alert threshold
+>   for 'home': 80%" and the operator had no way to see that 90 was not what was
+>   set.
+> * **Four `parts[N]` indexing sites disappeared as a side effect** in
+>   `cmd_datausage` (they were guarded by a `parts.len() >= 4` check, so no
+>   panic was reachable today — but the guard and the index were three lines
+>   apart and only the helper makes that safety local).
+>
+> **A wording defect found and fixed alongside, because this batch was about to
+> make it worse.** `article_for` picks "a"/"an" from the first *letter*; English
+> picks it from the first *sound*; a one-letter noun is precisely where those
+> diverge. `cmd_cpick` shipped **"is not a x coordinate"**, and `cmd_wsnap`
+> carried a comment saying it had renamed its own nouns to
+> "horizontal"/"vertical" *only* to dodge this — so the file held two
+> workarounds and one live defect for a single cause, and `cmd_widgets` was
+> about to add two more sites of it. `article_for`'s doc comment offers an
+> escape hatch (write the article into the noun, `"an x coordinate"`), but that
+> hatch does not serve `required_num`, whose *other* message is
+> `missing {noun}` — which the hatch turns into "missing an x coordinate". A
+> noun that reads correctly in **both** sentences needs no hatch, so
+> "horizontal"/"vertical" is now the file-wide convention and `cmd_wsnap`'s
+> local dodge is recorded as its origin. Rung 99 pins it; the rung-98-era
+> assertion `b"is not a x coordinate"` was updated in the same change.
 
 > **Burn-down log.** 2026-08-29 (thirty-fourth batch): `cmd_pidfd` (5),
 > `cmd_userfault` (5), `cmd_oomkiller` (5), `cmd_prociso` (6), `cmd_coredump`

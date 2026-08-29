@@ -49667,3 +49667,78 @@ information that was missing was the wire/not-wire split, and that is one bit.
 `kernel/src/fs/netdev.rs` and `sys_net_stat` in
 `kernel/src/syscall/handlers.rs`. Full account in `known-issues.md` →
 `A-NET-INTERFACE-COUNTERS-CONFLATE-THE-NIC-WITH-EVERY-VETH-PAIR`.
+
+## 630. The shellcheck gate stops the build on a finding but waves it through when the tool is missing
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous)
+
+**In short:** We now run a shell-script linter over `scripts/` before the
+kernel build, and refuse to build if it complains. But not every one of the
+three lanes has the linter installed — it is a third-party program, not part of
+the toolchain — and a lane that lacks it would otherwise be unable to build the
+kernel at all. So when the tool is absent the check prints how to install it and
+carries on. That means the check is *mandatory where it can run and advisory
+where it cannot*, which is a weaker promise than a gate normally makes, and the
+reason it is written down here rather than just done.
+
+**Context.** `scripts/shellcheck-all.sh` existed for two days referenced by
+nothing, and was unrunnable in lane A because the binary was never installed
+there. Wiring it into `boot-test.sh` raised two choices that both have a real
+case on either side.
+
+**Decision 1 — gate at `error`, not `warning`.**
+
+*For `error`:* the tree already has zero findings at that floor, so the gate is a
+clean-tree test with no baseline file. It can only ever fire on something the
+change in hand introduced, which makes a failure unambiguous and actionable and
+means nothing has to be paid down before it can be turned on.
+
+*For `warning`:* it catches strictly more, including SC2086 (unquoted expansion)
+— which is the class that produced the `D:\visual` stray-file incident, i.e. the
+single most expensive shell bug this project has had. Gating at `error` does
+**not** catch that class. This is the genuine cost of the choice and it should be
+stated plainly rather than buried.
+
+*Why `error` won anyway:* `warning` has 48 findings today, ~35 of them one false
+positive (SC2209 on `DIFF_PROG=<name>`, where the tool cannot tell a bare command
+name from a forgotten `$(...)`) in **lane B's and lane C's** differential
+harnesses. Turning it on would require either 34 cross-lane edits I may not make,
+or a baseline file — converting a clean-tree test into a ratchet whose baseline
+then drifts and whose entries nobody revisits. A gate that must be introduced
+alongside a 48-line suppression list starts its life being ignored.
+
+*How to reverse:* raise the floor to `warning` once lane B quotes the
+`DIFF_PROG` assignments (they have already done `dd-diff.sh`; the rest are
+one-line, behaviour-free edits). That is the right end state and the only thing
+standing in its way is cross-lane ownership, not disagreement.
+
+**Decision 2 — a missing tool skips rather than fails.**
+
+*For skipping:* the alternative is that installing a third-party binary becomes a
+precondition for building the kernel. A lane that pulls `main`, runs the boot
+test and is told it cannot build until it downloads something from GitHub has
+been handed a worse problem than the one the gate solves. The skip is loud and
+prints platform-specific install instructions, so it is a prompt rather than
+silence.
+
+*Against skipping:* it reproduces in miniature exactly the defect being fixed. A
+check that silently does nothing in some environments is how `shellcheck-all.sh`
+came to sit unrun for two days in the first place, and a lane could stay in the
+skip state indefinitely without any consequence.
+
+*Why skip won:* the failure modes are asymmetric. A false skip costs delayed
+detection of a lint finding. A false hard-fail costs a lane its ability to build
+and boot-test the kernel, which is the thing every other gate in the file is
+protecting. Given the tool is a single static binary with no root requirement,
+the install prompt is very likely to be acted on; and the day all three lanes
+have it, the skip path is dead code that costs nothing to leave in.
+
+*How to reverse:* change the `rc -eq 2` arm from `return 0` to `exit 1`. Worth
+doing once it is confirmed all three lanes have the binary — at that point the
+skip protects nobody and only hides a regression in the tool's installation.
+
+**Where it is:** `check_shellcheck` in `scripts/boot-test.sh`, immediately after
+`check_orphan_modules`. Fulfils
+`requests/b-a-two-cd-calls-ignore-failure-in-shared-scripts.md`, which is also
+where the install note for the Windows build is recorded.

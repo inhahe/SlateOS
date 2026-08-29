@@ -20491,6 +20491,181 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_lacks("and no set is reported created", &out, b"created");
     }
 
+    serial_println!(
+        "  kshell::self_test 102: the hexadecimal spelling of the guessed value is \
+         refused too -- an address, a port, a device id or a permission mask that \
+         cannot be read is named, not replaced with zero or with everything"
+    );
+    // This rung exists because of how its sites were found, which matters more
+    // than the sites themselves.
+    //
+    // `scripts/check-option-refusal.py` matched a literal `.parse()`, so the
+    // base-16 spelling of the identical defect --
+    // `u16::from_str_radix(v, 16).unwrap_or(0)` -- was invisible to it. The gate
+    // had been green for months across 19 sites it could not see, and the
+    // burn-down total it printed was therefore an undercount, not a measurement.
+    // Nothing regressed to cause that; the detector simply never looked. It is
+    // the same failure shape as design-decisions.md 630's shellcheck floor: a
+    // gate reporting success because it cannot see the thing it is for.
+    //
+    // The tell was not the total, which looked fine. It was that `cmd_pciids`
+    // and `cmd_sysrq` contained the defect and appeared nowhere in the ledger --
+    // not exempted, absent. A count can only be audited by checking a function
+    // that should be in it.
+    //
+    // As in rungs 98, 100 and 101, every assertion below is a refusal emitted
+    // before the subsystem is reached, so none depends on state a fresh boot may
+    // not have initialised -- the 604 trap.
+    {
+        // The severest of the batch, and a continuation of rung 101's theme: the
+        // guessed value was the one that enforces nothing. `fs/sysrq.rs:205`
+        // documents `0x7F` as "All categories enabled", and the only reason to
+        // run `sysrq mask` at all is to *narrow* what the magic key may do -- so
+        // a typo enabled every category, reboot and crash included, and printed
+        // the mask as though it had been asked for.
+        let out = capture_command("sysrq mask 0xZZ");
+        assert_output_contains(
+            "an unreadable category mask is refused rather than opening all of them",
+            &out,
+            b"`0xZZ' is not a category mask",
+        );
+        assert_eq!(last_exit(), 1, "`sysrq mask 0xZZ` errors");
+        assert_output_lacks("and no mask is reported set", &out, b"mask set to");
+
+        // Not a parse failure at all, and worse for it: the operand was read
+        // with `chars().next()`, which takes the first letter and discards the
+        // rest. The sysrq keys name destructive actions, so `sysrq trigger boot`
+        // was obeyed as `b` -- reboot -- and `sysrq trigger info` as `i`, kill
+        // every process. The letter acted on is one the operator really typed,
+        // which is exactly what made the result look intended.
+        let out = capture_command("sysrq trigger boot");
+        assert_output_contains(
+            "a word is not truncated to the destructive key it happens to start with",
+            &out,
+            b"expected a single character",
+        );
+        assert_eq!(last_exit(), 1, "`sysrq trigger boot` errors");
+        assert_output_lacks("and nothing is reported triggered", &out, b"triggered");
+
+        // An address operand: the guess was 0, which is a real address, so the
+        // probe was installed -- on the null page -- and the success line
+        // carried a genuine id, which is what let the mistake survive unnoticed.
+        let out = capture_command("kprobes register zzprobe 0xZZZ");
+        assert_output_contains(
+            "an unreadable probe address is refused rather than becoming zero",
+            &out,
+            b"`0xZZZ' is not a probe address",
+        );
+        assert_eq!(last_exit(), 1, "`kprobes register zzprobe 0xZZZ` errors");
+        assert_output_lacks("and no probe is reported registered", &out, b"Registered");
+
+        // The wrong-object mutation, as in rung 101's `cpuset destroy`: base 0
+        // is a region that exists, so this unregistered it and reported
+        // "unregistered 0x0" in the same hexadecimal just mistyped.
+        let out = capture_command("iomem unregister 0xFFFG");
+        assert_output_contains(
+            "an unreadable base address is refused rather than resolving to zero",
+            &out,
+            b"`0xFFFG' is not a base address",
+        );
+        assert_eq!(last_exit(), 1, "`iomem unregister 0xFFFG' errors");
+        assert_output_lacks(
+            "and nothing is reported unregistered",
+            &out,
+            b"unregistered",
+        );
+
+        // Port 0 is likewise a real port, not a placeholder.
+        let out = capture_command("ioport in 0xGG 1");
+        assert_output_contains(
+            "an unreadable port number is refused rather than becoming port zero",
+            &out,
+            b"`0xGG' is not a port number",
+        );
+        assert_eq!(last_exit(), 1, "`ioport in 0xGG 1` errors");
+
+        // A query rather than a mutation, and the reason queries matter here:
+        // the guessed id produced a confident "Unknown", which is a real answer
+        // about a vendor that was never asked about -- and is indistinguishable
+        // from the correct answer for a vendor genuinely not in the database.
+        let out = capture_command("pciids lookup 8O86:1234");
+        assert_output_contains(
+            "an unreadable vendor id is refused rather than answered about vendor zero",
+            &out,
+            b"`8O86' is not a vendor id",
+        );
+        assert_eq!(last_exit(), 1, "`pciids lookup 8O86:1234` errors");
+        assert_output_lacks("and no vendor line is printed", &out, b"Vendor:");
+
+        // `None` is not "unset" in a USB rule: fs/usbpolicy.rs:203 matches with
+        // `rule.vendor_id.is_none_or(|v| v == vid)`, so None means *every*
+        // vendor. The old `.ok()` turned a mistyped `vid=` into a rule aimed at
+        // all USB devices instead of one -- the same "guess that restricts
+        // nothing" as the firewall in rung 101, reached by a different idiom,
+        // and one the gate still cannot see because it never spells
+        // `unwrap_or`.
+        let out = capture_command("usbpolicy add zzrule deny vid=1O5b");
+        assert_output_contains(
+            "an unreadable vendor id is refused, not widened to every vendor",
+            &out,
+            b"`1O5b' is not a vendor id",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "`usbpolicy add zzrule deny vid=1O5b` errors"
+        );
+        assert_output_lacks("and no rule is reported added", &out, b"Added rule");
+
+        // The catch-all twin of the same command: `_ => Decision::AskUser` meant
+        // a misspelt `deny` installed an *ask* rule and reported it as added.
+        let out = capture_command("usbpolicy add zzrule denny");
+        assert_output_contains(
+            "a misspelt decision is named rather than downgraded to ask",
+            &out,
+            b"unknown decision `denny'",
+        );
+        assert_eq!(last_exit(), 1, "`usbpolicy add zzrule denny` errors");
+        assert_output_lacks("and no rule is reported added", &out, b"Added rule");
+
+        // `_ => UsbClass::Other` was not a fallback but a different class that
+        // real devices belong to, so the rule silently governed the wrong one.
+        let out = capture_command("usbpolicy add zzrule deny class=stroage");
+        assert_output_contains(
+            "a misspelt class is named rather than silently becoming Other",
+            &out,
+            b"unknown USB class `stroage'",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "`usbpolicy add zzrule deny class=stroage` errors"
+        );
+
+        // A wrong-process mutation: the guessed pid 0 unmapped from a process
+        // the operator did not name.
+        let out = capture_command("vmmap unmap 1O 0x1000");
+        assert_output_contains(
+            "an unreadable process id is refused rather than resolving to pid zero",
+            &out,
+            b"`1O' is not a process id",
+        );
+        assert_eq!(last_exit(), 1, "`vmmap unmap 1O 0x1000` errors");
+        assert_output_lacks("and nothing is reported unmapped", &out, b"Unmapped");
+
+        // The whole output of `gpu fill` is the screen, so a wrong colour is
+        // indistinguishable from a right one; both the bad-hex and the
+        // unknown-name routes used to end at the same default blue.
+        let out = capture_command("gpu fill purple");
+        assert_output_contains(
+            "an unknown colour name is refused rather than filled with the default",
+            &out,
+            b"unknown colour `purple'",
+        );
+        assert_eq!(last_exit(), 1, "`gpu fill purple` errors");
+        assert_output_lacks("and no fill is reported", &out, b"Filled display");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -45992,7 +46167,43 @@ macro_rules! impl_from_hex_str {
         }
     )*};
 }
-impl_from_hex_str!(u16, u32, u64);
+impl_from_hex_str!(u8, u16, u32, u64);
+
+/// A hexadecimal operand that must be present and must be readable.
+///
+/// [`required_num`] in base 16. Most of the operands that reach it are
+/// *addresses* and *identifiers* — an I/O port, an MMIO base, a PCI vendor id —
+/// where the guessed value was overwhelmingly `0`, and `0` is not a harmless
+/// placeholder in any of those spaces: it is a real port, a real base address
+/// and a real vendor id. `iomem unregister 0xFFFG` did not fail; it went and
+/// unregistered whatever was at base `0` and reported `unregistered 0x0` in the
+/// same hexadecimal the operator had just mistyped.
+fn required_hex<T: FromHexStr>(
+    parts: &[&str],
+    idx: usize,
+    cmd: &str,
+    sub: &str,
+    noun: &str,
+) -> Option<T> {
+    let Some(word) = parts.get(idx) else {
+        shell_println!("{}: {}: missing {}", cmd, sub, noun);
+        set_exit(1);
+        return None;
+    };
+    let Some(v) = T::from_hex_str(word) else {
+        shell_println!(
+            "{}: {}: `{}' is not {}{} (expected hexadecimal)",
+            cmd,
+            sub,
+            word,
+            article_for(noun),
+            noun
+        );
+        set_exit(1);
+        return None;
+    };
+    Some(v)
+}
 
 /// A hexadecimal operand that may be omitted, in which case `default` stands
 /// in — but which is refused when a word *is* present and cannot be read.
@@ -46033,6 +46244,47 @@ fn optional_hex<T: FromHexStr>(
         return None;
     };
     Some(v)
+}
+
+/// A single-character operand that must be present and must be *exactly* one
+/// character.
+///
+/// The idiom this replaces, `parts.get(1).and_then(|s| s.chars().next())`, does
+/// not read a character — it reads the first character and throws the rest
+/// away, so a whole word became whichever letter happened to start it. That is
+/// worse than guessing, because the letter it produces is one the operator did
+/// type, which is what makes the result look deliberate.
+///
+/// `sysrq` is the case that makes it dangerous rather than merely wrong: its
+/// keys are single letters naming destructive actions, so `sysrq trigger boot`
+/// silently became `b` (reboot) and `sysrq trigger info` became `i` (kill every
+/// process). Neither word is a key; both were obeyed as one.
+///
+/// The same shape was already fixed once, for `find -type` (search this file for
+/// "used to take the first character"), where the valid set is closed and a
+/// whitelist sufficed. Here it is open — handlers are registered at runtime — so
+/// the check is on the *shape* of the operand, and validity is left to the
+/// callee, which already reports an unknown key as an error.
+fn required_key(parts: &[&str], idx: usize, cmd: &str, sub: &str, noun: &str) -> Option<char> {
+    let Some(word) = parts.get(idx) else {
+        shell_println!("{}: {}: missing {}", cmd, sub, noun);
+        set_exit(1);
+        return None;
+    };
+    let mut chars = word.chars();
+    let (Some(c), None) = (chars.next(), chars.next()) else {
+        shell_println!(
+            "{}: {}: `{}' is not {}{} (expected a single character)",
+            cmd,
+            sub,
+            word,
+            article_for(noun),
+            noun
+        );
+        set_exit(1);
+        return None;
+    };
+    Some(c)
 }
 
 /// What a `<cmd> <setting> [on|off]` arm was asked to do: report the setting, or
@@ -66540,19 +66792,37 @@ fn cmd_pciids(args: &str) {
                 return;
             }
             let arg = parts.get(1).copied().unwrap_or("");
+            // Both halves used to fall back to `0`, and this arm reports its
+            // answer as "Unknown" when the id is not in the database. So a
+            // mistyped id produced a confident "Vendor: Unknown" — which is a
+            // real answer to a different question, and indistinguishable from
+            // the correct answer for a vendor that genuinely is not listed.
+            // A lookup that could not read the thing being looked up has to say
+            // so, or its output cannot be trusted for either outcome.
             if let Some((v, d)) = arg.split_once(':') {
-                let vid = u16::from_str_radix(v, 16).unwrap_or(0);
-                let did = u16::from_str_radix(d, 16).unwrap_or(0);
+                let halves = [v, d];
+                let Some(vid) = required_hex::<u16>(&halves, 0, "pciids", sub, "vendor id") else {
+                    return;
+                };
+                let Some(did) = required_hex::<u16>(&halves, 1, "pciids", sub, "device id") else {
+                    return;
+                };
                 shell_println!("Vendor: {}", pciids::vendor_name(vid).unwrap_or("Unknown"));
                 shell_println!(
                     "Device: {}",
                     pciids::device_name(vid, did).unwrap_or("Unknown")
                 );
             } else if let Some((c, s)) = arg.split_once('.') {
-                let cls = u8::from_str_radix(c, 16).unwrap_or(0);
-                let sub = u8::from_str_radix(s, 16).unwrap_or(0);
+                let halves = [c, s];
+                let Some(cls) = required_hex::<u8>(&halves, 0, "pciids", sub, "class id") else {
+                    return;
+                };
+                let Some(subcls) = required_hex::<u8>(&halves, 1, "pciids", sub, "subclass id")
+                else {
+                    return;
+                };
                 shell_println!("Class:    {}", pciids::class_name(cls));
-                shell_println!("Subclass: {}", pciids::subclass_name(cls, sub));
+                shell_println!("Subclass: {}", pciids::subclass_name(cls, subcls));
             } else {
                 shell_println!("Usage: pciids lookup <vendor:device | class.subclass>");
                 set_exit(1);
@@ -86102,9 +86372,21 @@ fn cmd_usbpolicy(args: &str) {
                 set_exit(1);
                 return;
             }
-            let vid = u16::from_str_radix(parts[1].trim_start_matches("0x"), 16).unwrap_or(0);
-            let pid = u16::from_str_radix(parts[2].trim_start_matches("0x"), 16).unwrap_or(0);
-            let class = parse_usb_class(parts[3]);
+            // `usbpolicy check` exists to predict whether a device would be
+            // admitted. A mistyped id used to be read as 0 and the prediction
+            // made for *that* device, so the operator was told "Allow" about a
+            // device they had not asked about -- the one failure this command
+            // must not have, since its only product is the answer.
+            let Some(vid) = required_hex::<u16>(&parts, 1, "usbpolicy", sub, "vendor id") else {
+                return;
+            };
+            let Some(pid) = required_hex::<u16>(&parts, 2, "usbpolicy", sub, "product id") else {
+                return;
+            };
+            let Some(class) = parse_usb_class(parts[3]) else {
+                usb_class_refusal("usbpolicy", sub, parts[3]);
+                return;
+            };
             let name = parts[4..].join(" ");
             match usbpolicy::check_device(vid, pid, class, &name) {
                 Ok(d) => shell_println!(
@@ -86130,19 +86412,54 @@ fn cmd_usbpolicy(args: &str) {
                 return;
             }
             let name = parts[1];
-            let decision = parse_usb_decision(parts[2]);
+            let Some(decision) = parse_usb_decision(parts[2]) else {
+                shell_println!(
+                    "usbpolicy: {}: unknown decision `{}'; expected allow, deny, ask or readonly",
+                    sub,
+                    parts[2]
+                );
+                set_exit(1);
+                return;
+            };
+            // `None` is not "unset" here: fs/usbpolicy.rs:203 matches with
+            // `rule.vendor_id.is_none_or(|v| v == vid)`, so None means *match
+            // every vendor*. The old `...from_str_radix(..).ok()` turned a
+            // mistyped `vid=` into exactly that -- a rule aimed at one device
+            // silently became a rule matching all of them, and with
+            // `decision=deny` that is every USB device on the machine. The
+            // guessed value was, once again, the one that restricts nothing.
             let mut class = None;
             let mut vid = None;
             let mut pid = None;
             for p in &parts[3..] {
                 if let Some(v) = p.strip_prefix("class=") {
-                    class = Some(parse_usb_class(v));
-                }
-                if let Some(v) = p.strip_prefix("vid=") {
-                    vid = u16::from_str_radix(v.trim_start_matches("0x"), 16).ok();
-                }
-                if let Some(v) = p.strip_prefix("pid=") {
-                    pid = u16::from_str_radix(v.trim_start_matches("0x"), 16).ok();
+                    let Some(c) = parse_usb_class(v) else {
+                        usb_class_refusal("usbpolicy", sub, v);
+                        return;
+                    };
+                    class = Some(c);
+                } else if let Some(v) = p.strip_prefix("vid=") {
+                    let words = [v];
+                    let Some(n) = required_hex::<u16>(&words, 0, "usbpolicy", sub, "vendor id")
+                    else {
+                        return;
+                    };
+                    vid = Some(n);
+                } else if let Some(v) = p.strip_prefix("pid=") {
+                    let words = [v];
+                    let Some(n) = required_hex::<u16>(&words, 0, "usbpolicy", sub, "product id")
+                    else {
+                        return;
+                    };
+                    pid = Some(n);
+                } else {
+                    shell_println!(
+                        "usbpolicy: {}: unknown option `{}'; expected class=, vid= or pid=",
+                        sub,
+                        p
+                    );
+                    set_exit(1);
+                    return;
                 }
             }
             match usbpolicy::add_rule(name, vid, pid, class, decision) {
@@ -86174,7 +86491,19 @@ fn cmd_usbpolicy(args: &str) {
         }
         "default" => {
             if let Some(d) = parts.get(1) {
-                let decision = parse_usb_decision(d);
+                // This is the decision every device that matches no rule gets,
+                // so the old `_ => AskUser` fallback meant a misspelt `deny`
+                // reopened the machine's whole USB default and said so in a
+                // line the operator had no reason to reread.
+                let Some(decision) = parse_usb_decision(d) else {
+                    shell_println!(
+                        "usbpolicy: {}: unknown decision `{}'; expected allow, deny, ask or readonly",
+                        sub,
+                        d
+                    );
+                    set_exit(1);
+                    return;
+                };
                 match usbpolicy::set_default(decision) {
                     Ok(()) => shell_println!("Default decision: {}", decision.label()),
                     Err(e) => {
@@ -86226,10 +86555,10 @@ fn cmd_usbpolicy(args: &str) {
             }
         }
         "log" => {
-            let max = parts
-                .get(1)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(10);
+            let Some(max) = optional_num::<usize>(&parts, 1, "usbpolicy", sub, "event count", 10)
+            else {
+                return;
+            };
             let log = usbpolicy::get_log(max);
             if log.is_empty() {
                 shell_println!("No events logged");
@@ -86275,9 +86604,15 @@ fn cmd_usbpolicy(args: &str) {
     }
 }
 
-fn parse_usb_class(s: &str) -> crate::fs::usbpolicy::UsbClass {
+/// Returns `None` for a word that names no class.
+///
+/// This used to end in `_ => UsbClass::Other`, which is not a fallback but a
+/// *different class that real devices belong to* -- so `class=stroage` produced
+/// a rule that silently governed the Other class instead of Storage. `Other` is
+/// still reachable, by spelling it.
+fn parse_usb_class(s: &str) -> Option<crate::fs::usbpolicy::UsbClass> {
     use crate::fs::usbpolicy::UsbClass;
-    match s.to_lowercase().as_str() {
+    Some(match s.to_lowercase().as_str() {
         "storage" | "stor" => UsbClass::Storage,
         "hid" | "humaninterface" => UsbClass::HumanInterface,
         "audio" => UsbClass::Audio,
@@ -86287,19 +86622,37 @@ fn parse_usb_class(s: &str) -> crate::fs::usbpolicy::UsbClass {
         "wireless" => UsbClass::Wireless,
         "smartcard" => UsbClass::SmartCard,
         "hub" => UsbClass::Hub,
-        _ => UsbClass::Other,
-    }
+        "other" => UsbClass::Other,
+        _ => return None,
+    })
 }
 
-fn parse_usb_decision(s: &str) -> crate::fs::usbpolicy::Decision {
+/// The one refusal message for an unreadable USB class, shared by the arms that
+/// accept one so the list of spellings cannot drift between them.
+fn usb_class_refusal(cmd: &str, sub: &str, word: &str) {
+    shell_println!(
+        "{}: {}: unknown USB class `{}'; expected storage, hid, audio, video, printer, \
+         network, wireless, smartcard, hub or other",
+        cmd,
+        sub,
+        word
+    );
+    set_exit(1);
+}
+
+/// Returns `None` for a word that names no decision.
+///
+/// The old `_ => Decision::AskUser` meant `usbpolicy add r denny` installed an
+/// *ask* rule where a *deny* was intended, and reported it as added.
+fn parse_usb_decision(s: &str) -> Option<crate::fs::usbpolicy::Decision> {
     use crate::fs::usbpolicy::Decision;
-    match s.to_lowercase().as_str() {
+    Some(match s.to_lowercase().as_str() {
         "allow" => Decision::Allow,
         "deny" | "block" => Decision::Deny,
         "ask" | "askuser" => Decision::AskUser,
         "readonly" | "ro" => Decision::ReadOnly,
-        _ => Decision::AskUser,
-    }
+        _ => return None,
+    })
 }
 
 /// `applaunch` / `alaunch` — search-based application launcher.
@@ -95068,7 +95421,9 @@ fn cmd_sysrq(args: &str) {
         }
         "trigger" => {
             sysrq::init_defaults();
-            let key = parts.get(1).and_then(|s| s.chars().next()).unwrap_or('h');
+            let Some(key) = required_key(&parts, 1, "sysrq", sub, "handler key") else {
+                return;
+            };
             match sysrq::trigger(key) {
                 Ok(()) => shell_println!("SysRq '{}' triggered.", key),
                 Err(e) => {
@@ -95079,7 +95434,9 @@ fn cmd_sysrq(args: &str) {
         }
         "register" => {
             sysrq::init_defaults();
-            let key = parts.get(1).and_then(|s| s.chars().next()).unwrap_or('z');
+            let Some(key) = required_key(&parts, 1, "sysrq", sub, "handler key") else {
+                return;
+            };
             let desc: alloc::string::String = parts
                 .get(2..)
                 .map_or(alloc::string::String::from("custom handler"), |p| {
@@ -95094,7 +95451,9 @@ fn cmd_sysrq(args: &str) {
             }
         }
         "unregister" | "rm" => {
-            let key = parts.get(1).and_then(|s| s.chars().next()).unwrap_or('z');
+            let Some(key) = required_key(&parts, 1, "sysrq", sub, "handler key") else {
+                return;
+            };
             match sysrq::unregister(key) {
                 Ok(()) => shell_println!("Unregistered SysRq '{}'.", key),
                 Err(e) => {
@@ -95104,7 +95463,9 @@ fn cmd_sysrq(args: &str) {
             }
         }
         "enable" => {
-            let key = parts.get(1).and_then(|s| s.chars().next()).unwrap_or('h');
+            let Some(key) = required_key(&parts, 1, "sysrq", sub, "handler key") else {
+                return;
+            };
             match sysrq::set_handler_enabled(key, true) {
                 Ok(()) => shell_println!("SysRq '{}' enabled.", key),
                 Err(e) => {
@@ -95114,7 +95475,9 @@ fn cmd_sysrq(args: &str) {
             }
         }
         "disable" => {
-            let key = parts.get(1).and_then(|s| s.chars().next()).unwrap_or('h');
+            let Some(key) = required_key(&parts, 1, "sysrq", sub, "handler key") else {
+                return;
+            };
             match sysrq::set_handler_enabled(key, false) {
                 Ok(()) => shell_println!("SysRq '{}' disabled.", key),
                 Err(e) => {
@@ -95125,8 +95488,18 @@ fn cmd_sysrq(args: &str) {
         }
         "mask" => {
             sysrq::init_defaults();
-            if let Some(val) = parts.get(1) {
-                let mask = u32::from_str_radix(val.trim_start_matches("0x"), 16).unwrap_or(0x7F);
+            if parts.get(1).is_some() {
+                // The guess this replaces was `unwrap_or(0x7F)`, and `0x7F` is
+                // documented at fs/sysrq.rs:205 as "All categories enabled".
+                // The only reason to run `sysrq mask` with an operand is to
+                // *narrow* what the magic key can do, so a mistyped mask used
+                // to do the exact opposite of what was asked — enable every
+                // category, including the reboot and crash ones — and then
+                // print the new mask as if it had been requested.
+                let Some(mask) = required_hex::<u32>(&parts, 1, "sysrq", sub, "category mask")
+                else {
+                    return;
+                };
                 match sysrq::set_enabled_mask(mask) {
                     Ok(()) => shell_println!("SysRq mask set to 0x{:x}", mask),
                     Err(e) => {
@@ -98913,12 +99286,14 @@ fn cmd_vmmap(args: &str) {
         }
         "show" => {
             vmmap::init_defaults();
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            // The empty result is the trap: a mistyped pid used to become 0
+            // and print "No VMAs for pid 0 (or not tracked)", which reads as an
+            // answer about the process asked for rather than about a different
+            // one -- and the parenthetical made even the wrong answer sound
+            // expected.
+            let Some(pid) = required_num::<u32>(&parts, 1, "vmmap", sub, "process id") else {
+                return;
+            };
             let vmas = vmmap::list_vmas(pid);
             if vmas.is_empty() {
                 shell_println!("No VMAs for pid {} (or not tracked).", pid);
@@ -98939,27 +99314,15 @@ fn cmd_vmmap(args: &str) {
         }
         "map" => {
             vmmap::init_defaults();
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let start = u64::from_str_radix(
-                parts
-                    .get(2)
-                    .copied()
-                    .unwrap_or("0")
-                    .trim_start_matches("0x"),
-                16,
-            )
-            .unwrap_or(0);
-            let size = parts
-                .get(3)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u64>()
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "vmmap", sub, "process id") else {
+                return;
+            };
+            let Some(start) = required_hex::<u64>(&parts, 2, "vmmap", sub, "start address") else {
+                return;
+            };
+            let Some(size) = required_num::<u64>(&parts, 3, "vmmap", sub, "size in bytes") else {
+                return;
+            };
             let perm = vmmap::VmaPerm {
                 read: true,
                 write: true,
@@ -98976,21 +99339,12 @@ fn cmd_vmmap(args: &str) {
         }
         "unmap" => {
             vmmap::init_defaults();
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let start = u64::from_str_radix(
-                parts
-                    .get(2)
-                    .copied()
-                    .unwrap_or("0")
-                    .trim_start_matches("0x"),
-                16,
-            )
-            .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "vmmap", sub, "process id") else {
+                return;
+            };
+            let Some(start) = required_hex::<u64>(&parts, 2, "vmmap", sub, "start address") else {
+                return;
+            };
             match vmmap::remove_vma(pid, start) {
                 Ok(()) => shell_println!("Unmapped {:#x} for pid {}.", start, pid),
                 Err(e) => {
@@ -99703,9 +100057,20 @@ fn cmd_kprobes(args: &str) {
             }
         }
         "register" | "reg" => {
-            let name = parts.get(1).copied().unwrap_or("unknown");
-            let addr = parts.get(2).copied().unwrap_or("0");
-            let addr_val = u64::from_str_radix(addr.trim_start_matches("0x"), 16).unwrap_or(0);
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("kprobes: {}: missing probe name", sub);
+                set_exit(1);
+                return;
+            };
+            // A mistyped address used to become 0, so the shell installed a
+            // probe on the null address and answered "Registered probe id=N".
+            // The id in that line is real, which is what made the failure
+            // survive: the operator has a probe, it is simply not on the
+            // function they named, and nothing in the output says so.
+            let Some(addr_val) = required_hex::<u64>(&parts, 2, "kprobes", sub, "probe address")
+            else {
+                return;
+            };
             match kprobes::register(kprobes::ProbeType::Kprobe, name, addr_val) {
                 Ok(id) => shell_println!("Registered probe id={}", id),
                 Err(e) => {
@@ -99715,12 +100080,9 @@ fn cmd_kprobes(args: &str) {
             }
         }
         "unregister" | "unreg" => {
-            let id = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "kprobes", sub, "probe id") else {
+                return;
+            };
             match kprobes::unregister(id) {
                 Ok(()) => shell_println!("Unregistered probe {}", id),
                 Err(e) => {
@@ -99730,12 +100092,9 @@ fn cmd_kprobes(args: &str) {
             }
         }
         "enable" => {
-            let id = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "kprobes", sub, "probe id") else {
+                return;
+            };
             match kprobes::set_enabled(id, true) {
                 Ok(()) => shell_println!("Probe {} enabled", id),
                 Err(e) => {
@@ -99745,12 +100104,9 @@ fn cmd_kprobes(args: &str) {
             }
         }
         "disable" => {
-            let id = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "kprobes", sub, "probe id") else {
+                return;
+            };
             match kprobes::set_enabled(id, false) {
                 Ok(()) => shell_println!("Probe {} disabled", id),
                 Err(e) => {
@@ -99761,11 +100117,21 @@ fn cmd_kprobes(args: &str) {
         }
         "type" => {
             let ty = match parts.get(1).copied().unwrap_or("kprobe") {
+                "kprobe" => kprobes::ProbeType::Kprobe,
                 "kretprobe" => kprobes::ProbeType::Kretprobe,
                 "tracepoint" => kprobes::ProbeType::Tracepoint,
                 "uprobe" => kprobes::ProbeType::Uprobe,
                 "uretprobe" => kprobes::ProbeType::Uretprobe,
-                _ => kprobes::ProbeType::Kprobe,
+                other => {
+                    shell_println!(
+                        "kprobes: {}: unknown probe type `{}'; expected kprobe, kretprobe, \
+                         tracepoint, uprobe or uretprobe",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             for p in kprobes::by_type(ty) {
                 shell_println!(
@@ -103407,15 +103773,17 @@ fn cmd_ioport(args: &str) {
             shell_println!("ioport: initialized");
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("PORT");
-            let base = parts
-                .get(2)
-                .and_then(|s| u16::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                .unwrap_or(0);
-            let len = parts
-                .get(3)
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or(1);
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("ioport: {}: missing region name", sub);
+                set_exit(1);
+                return;
+            };
+            let Some(base) = required_hex::<u16>(&parts, 2, "ioport", sub, "port number") else {
+                return;
+            };
+            let Some(len) = optional_num::<u16>(&parts, 3, "ioport", sub, "port count", 1) else {
+                return;
+            };
             match ioport::register_region(name, base, len) {
                 Ok(()) => {
                     shell_println!("ioport: registered {} at 0x{:04x} len={}", name, base, len)
@@ -103427,14 +103795,13 @@ fn cmd_ioport(args: &str) {
             }
         }
         "in" => {
-            let port = parts
-                .get(1)
-                .and_then(|s| u16::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                .unwrap_or(0);
-            let size = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            let Some(port) = required_hex::<u16>(&parts, 1, "ioport", sub, "port number") else {
+                return;
+            };
+            let Some(size) = optional_num::<u32>(&parts, 2, "ioport", sub, "access width", 1)
+            else {
+                return;
+            };
             match ioport::record_in(port, size) {
                 Ok(()) => shell_println!("ioport: in port=0x{:04x} size={}", port, size),
                 Err(e) => {
@@ -103444,14 +103811,13 @@ fn cmd_ioport(args: &str) {
             }
         }
         "out" => {
-            let port = parts
-                .get(1)
-                .and_then(|s| u16::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                .unwrap_or(0);
-            let size = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            let Some(port) = required_hex::<u16>(&parts, 1, "ioport", sub, "port number") else {
+                return;
+            };
+            let Some(size) = optional_num::<u32>(&parts, 2, "ioport", sub, "access width", 1)
+            else {
+                return;
+            };
             match ioport::record_out(port, size) {
                 Ok(()) => shell_println!("ioport: out port=0x{:04x} size={}", port, size),
                 Err(e) => {
@@ -104930,15 +105296,17 @@ fn cmd_iomem(args: &str) {
             shell_println!("iomem: initialized");
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("DEV");
-            let base = parts
-                .get(2)
-                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                .unwrap_or(0);
-            let size = parts
-                .get(3)
-                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                .unwrap_or(0x1000);
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("iomem: {}: missing region name", sub);
+                set_exit(1);
+                return;
+            };
+            let Some(base) = required_hex::<u64>(&parts, 2, "iomem", sub, "base address") else {
+                return;
+            };
+            let Some(size) = optional_hex::<u64>(&parts, 3, "iomem", sub, "size", 0x1000) else {
+                return;
+            };
             match iomem::register(name, base, size, false, false) {
                 Ok(()) => shell_println!(
                     "iomem: registered {} at 0x{:x} size=0x{:x}",
@@ -104953,10 +105321,9 @@ fn cmd_iomem(args: &str) {
             }
         }
         "unregister" => {
-            let base = parts
-                .get(1)
-                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                .unwrap_or(0);
+            let Some(base) = required_hex::<u64>(&parts, 1, "iomem", sub, "base address") else {
+                return;
+            };
             match iomem::unregister(base) {
                 Ok(()) => shell_println!("iomem: unregistered 0x{:x}", base),
                 Err(e) => {
@@ -104966,10 +105333,9 @@ fn cmd_iomem(args: &str) {
             }
         }
         "read" => {
-            let base = parts
-                .get(1)
-                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                .unwrap_or(0);
+            let Some(base) = required_hex::<u64>(&parts, 1, "iomem", sub, "base address") else {
+                return;
+            };
             match iomem::record_read(base) {
                 Ok(()) => shell_println!("iomem: read at 0x{:x}", base),
                 Err(e) => {
@@ -104979,10 +105345,9 @@ fn cmd_iomem(args: &str) {
             }
         }
         "write" => {
-            let base = parts
-                .get(1)
-                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                .unwrap_or(0);
+            let Some(base) = required_hex::<u64>(&parts, 1, "iomem", sub, "base address") else {
+                return;
+            };
             match iomem::record_write(base) {
                 Ok(()) => shell_println!("iomem: write at 0x{:x}", base),
                 Err(e) => {
@@ -111038,14 +111403,26 @@ fn cmd_gpu(args: &str) {
             }
         }
         "fill" => {
-            if !crate::virtio::gpu::is_available() {
-                shell_println!("virtio-gpu not available");
-                return;
-            }
+            // The colour is read before the device is consulted, deliberately.
+            // A word the shell cannot read is wrong on a machine with no GPU
+            // exactly as it is on one with a GPU, and ordering the hardware
+            // check first would make the diagnostic depend on what is plugged
+            // in — including in the self-test, which must not assume QEMU was
+            // started with `-device virtio-gpu-pci`.
+            //
             // Parse optional color argument (default: blue).
+            // Both halves of this used to end at the same default blue: a
+            // mistyped `0x` literal and an unlisted colour name alike filled
+            // the screen with 0xFF0044AA and reported that colour as the one
+            // asked for. On a command whose entire output is the screen, a
+            // wrong fill is indistinguishable from a right one.
             let color_str = args.split_whitespace().nth(1).unwrap_or("0xFF0044AA");
-            let color = if let Some(hex) = color_str.strip_prefix("0x") {
-                u32::from_str_radix(hex, 16).unwrap_or(0xFF_0044AA)
+            let color = if color_str.starts_with("0x") {
+                let words = [color_str];
+                let Some(c) = required_hex::<u32>(&words, 0, "gpu", sub, "ARGB colour") else {
+                    return;
+                };
+                c
             } else {
                 match color_str {
                     "red" => 0xFF_FF0000,
@@ -111053,9 +111430,22 @@ fn cmd_gpu(args: &str) {
                     "blue" => 0xFF_0000FF,
                     "white" => 0xFF_FFFFFF,
                     "black" => 0xFF_000000,
-                    _ => 0xFF_0044AA,
+                    other => {
+                        shell_println!(
+                            "gpu: {}: unknown colour `{}'; expected red, green, blue, \
+                             white, black or a 0x-prefixed ARGB value",
+                            sub,
+                            other
+                        );
+                        set_exit(1);
+                        return;
+                    }
                 }
             };
+            if !crate::virtio::gpu::is_available() {
+                shell_println!("virtio-gpu not available");
+                return;
+            }
             match crate::virtio::gpu::fill(color) {
                 Ok(()) => shell_println!("Filled display with color {:#010x}", color),
                 Err(e) => {

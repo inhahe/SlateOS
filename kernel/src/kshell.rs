@@ -46031,6 +46031,77 @@ fn article_for(noun: &str) -> &'static str {
     }
 }
 
+/// A word that is *present* and must be readable as a number — refused, by
+/// name, when it is not.
+///
+/// This is the half of [`required_num`] that is about the word rather than
+/// about the operand's position, and it exists because a third shape of
+/// design-decisions.md §600's defect turned out to be commoner than either of
+/// the two the gate was built to count. [`optional_num`] covers "the operand
+/// may be omitted, and a default stands in". This covers "the operand may be
+/// omitted, and something else entirely happens" — `mkeys play` acts on the
+/// active session while `mkeys play 3` acts on session 3. Neither of the other
+/// two fits: `required_num` would refuse a legitimate omission, and
+/// `optional_num` has no default to offer because the absent case is not a
+/// value at all.
+///
+/// What the call sites wrote instead was
+///
+/// ```ignore
+/// if let Some(word) = parts.get(1) {
+///     if let Ok(id) = word.parse::<u32>() {
+///         act_on(id);
+///     }
+/// } else {
+///     act_on_the_active_one();
+/// }
+/// ```
+///
+/// — where an unreadable word falls out of *both* branches. Nothing is printed,
+/// no default is substituted, and `set_exit` is never called, so the shell
+/// reports **success** for a command it did not run. That is a worse failure
+/// than the guessed value this file has spent thirty-eight batches removing: a
+/// guess at least does something, and it at least leaves a wrong number on
+/// screen for the operator to notice. `ptime enable zzz` printed nothing at all
+/// and exited 0, so neither a person nor a script could tell it from a
+/// configuration that really had been enabled.
+///
+/// Returns `None` for the refusal, so callers use the same
+/// `let Some(v) = … else { return; };` shape as the rest of the family.
+fn readable_num<T: core::str::FromStr>(word: &str, cmd: &str, sub: &str, noun: &str) -> Option<T> {
+    let Ok(v) = word.parse::<T>() else {
+        shell_println!(
+            "{}: {}: `{}' is not {}{}",
+            cmd,
+            sub,
+            word,
+            article_for(noun),
+            noun
+        );
+        set_exit(1);
+        return None;
+    };
+    Some(v)
+}
+
+/// [`readable_num`] in base 16 — a word that is present and must be readable as
+/// hexadecimal.
+fn readable_hex<T: FromHexStr>(word: &str, cmd: &str, sub: &str, noun: &str) -> Option<T> {
+    let Some(v) = T::from_hex_str(word) else {
+        shell_println!(
+            "{}: {}: `{}' is not {}{} (expected hexadecimal)",
+            cmd,
+            sub,
+            word,
+            article_for(noun),
+            noun
+        );
+        set_exit(1);
+        return None;
+    };
+    Some(v)
+}
+
 /// A numeric operand that the subcommand cannot do without: both an absent word
 /// and an unreadable one are refused.
 ///
@@ -46082,19 +46153,7 @@ fn required_num<T: core::str::FromStr>(
         set_exit(1);
         return None;
     };
-    let Ok(v) = word.parse::<T>() else {
-        shell_println!(
-            "{}: {}: `{}' is not {}{}",
-            cmd,
-            sub,
-            word,
-            article_for(noun),
-            noun
-        );
-        set_exit(1);
-        return None;
-    };
-    Some(v)
+    readable_num(word, cmd, sub, noun)
 }
 
 /// A numeric operand that may legitimately be omitted, in which case `default`
@@ -46132,19 +46191,7 @@ fn optional_num<T: core::str::FromStr>(
     let Some(word) = parts.get(idx) else {
         return Some(default);
     };
-    let Ok(v) = word.parse::<T>() else {
-        shell_println!(
-            "{}: {}: `{}' is not {}{}",
-            cmd,
-            sub,
-            word,
-            article_for(noun),
-            noun
-        );
-        set_exit(1);
-        return None;
-    };
-    Some(v)
+    readable_num(word, cmd, sub, noun)
 }
 
 /// A width that can be read from a hexadecimal operand.
@@ -46190,19 +46237,7 @@ fn required_hex<T: FromHexStr>(
         set_exit(1);
         return None;
     };
-    let Some(v) = T::from_hex_str(word) else {
-        shell_println!(
-            "{}: {}: `{}' is not {}{} (expected hexadecimal)",
-            cmd,
-            sub,
-            word,
-            article_for(noun),
-            noun
-        );
-        set_exit(1);
-        return None;
-    };
-    Some(v)
+    readable_hex(word, cmd, sub, noun)
 }
 
 /// A hexadecimal operand that may be omitted, in which case `default` stands
@@ -46231,19 +46266,7 @@ fn optional_hex<T: FromHexStr>(
     let Some(word) = parts.get(idx) else {
         return Some(default);
     };
-    let Some(v) = T::from_hex_str(word) else {
-        shell_println!(
-            "{}: {}: `{}' is not {}{} (expected hexadecimal)",
-            cmd,
-            sub,
-            word,
-            article_for(noun),
-            noun
-        );
-        set_exit(1);
-        return None;
-    };
-    Some(v)
+    readable_hex(word, cmd, sub, noun)
 }
 
 /// A single-character operand that must be present and must be *exactly* one

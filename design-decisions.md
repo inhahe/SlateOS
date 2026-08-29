@@ -49780,10 +49780,54 @@ or a baseline file — converting a clean-tree test into a ratchet whose baselin
 then drifts and whose entries nobody revisits. A gate that must be introduced
 alongside a 48-line suppression list starts its life being ignored.
 
-*How to reverse:* raise the floor to `warning` once lane B quotes the
-`DIFF_PROG` assignments (they have already done `dd-diff.sh`; the rest are
-one-line, behaviour-free edits). That is the right end state and the only thing
-standing in its way is cross-lane ownership, not disagreement.
+*How to reverse:* raise the floor to `warning` once the tree is clean at that
+floor. That is the right end state and the only thing standing in its way is
+cross-lane ownership, not disagreement.
+
+*Correction, 2026-08-29 — the condition above originally read "once lane B
+quotes the `DIFF_PROG` assignments", and that was wrong.* It named one of the
+two blockers, so it would have read as satisfied while the reversal still broke
+the build — the same failure shape as the `design-decisions.md` insertion rule
+corrected in §631: a condition that looks met when it is not is worse than one
+nobody has met, because it invites the action it is supposed to gate. Measured
+today, `warning` has **43 findings across 37 of 76 scripts**, and they are in
+three groups, not one:
+
+| Group | Count | Whose | State |
+|---|---|---|---|
+| SC2209 on `DIFF_PROG=<name>` | 36, one per `*-diff.sh` | lane B | outstanding |
+| SC2191/SC2258/SC2010/SC2034 in `gen-chmod-fixture.sh`, `paste-diff.sh`, `split-diff.sh` | 7 | lane B | outstanding, and **not** the same false positive — these need reading, not quoting |
+| SC2154/SC2054 ×2 in `boot-test.sh`, SC2034 ×3 in `test-boot-lock.sh` | 6 | lane A | **done** — annotated with `# shellcheck disable=` plus the reason each is a false positive |
+
+Lane A's six were the half of the blocker the original condition did not
+mention, and they are cleared: `_floor_val` is assigned through an `eval`
+shellcheck cannot follow (and its suggested "fix" would compare the floor's
+*name* against the digits, silently disabling the very check that loop
+performs); the two SC2054s are QEMU's own `,` property separator inside a single
+`-device` argument; the three SC2034s are inputs to a lock region sourced from a
+file extracted at run time. None was a real defect, but each had to be looked at
+to know that, which is the work the condition was hiding.
+
+So the accurate condition is: **43 findings to go, 36 of them one mechanical
+edit and 7 of them genuine reading, all of them lane B's** — the paragraph
+above said "lane B's and lane C's", and that was wrong too: every one of the 37
+flagged scripts is a differential harness for `userspace/**`, and lane C owns
+none of them. Filed as
+`requests/a-b-shellcheck-floor-the-last-43-findings-are-yours.md`.
+
+*One more measurement worth writing down, because it nearly produced a fourth
+wrong statement in this entry.* `shellcheck-all.sh` runs `shellcheck -x` from
+inside `scripts/`, and `-x` is load-bearing: it follows the harnesses'
+`# shellcheck source=diff-wsl.sh` directives and thereby suppresses ~3 findings
+per harness (SC2034 on `DIFF_PROG`/`DIFF_NEED`, SC2154 on `bindir`) that a bare
+`shellcheck scripts/paste-diff.sh` from the repo root still reports. Run from
+the wrong directory the relative `source=` cannot resolve and `-x` appears to
+do nothing — which is what lane A saw, and briefly recorded as "`-x` does not
+help, the hypothesis is dead". It was the cwd, not the flag. This is the same
+defect shape a third time: **a check whose answer depends on how it is invoked
+will be believed on whichever invocation you happened to run.** The number to
+trust is the one `shellcheck-all.sh` prints, because that is the invocation the
+gate uses.
 
 **Decision 2 — a missing tool skips rather than fails.**
 

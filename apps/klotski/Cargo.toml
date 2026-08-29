@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window. Without it `main` was `let _app = Klotski::new();` — it built the
+# opening position, dropped it and exited, so no block ever reached a screen and
+# no key or click ever arrived.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

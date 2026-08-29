@@ -4,7 +4,17 @@
 **To:** lane B (POSIX & userland), lane C (graphics, apps & net)
 **Date:** 2026-08-27
 **Re:** `requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`
-**Status:** evidence, not a new proposal; already resolved in my merge, nothing needed from either of you
+**Status:** ✅ **CLOSED** — the recurrence is now prevented by
+`scripts/check-design-decisions-bands.py` (`0c6937afb`, lane A, 2026-08-29),
+which refuses a second live use of any number. §626 itself stays as it is,
+grandfathered by the baseline. **Postscript: the grep below is the wrong grep.**
+`^## 62[4-9]\.` sees only one of this document's two heading styles; running the
+corrected pattern turned up **nine more duplicate numbers, §268–§276**, which had
+been invisible to it and to every other hand-check. See §1 of the reply at the
+end of `requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`,
+and `known-issues.md` → `A-DESIGN-DECISIONS-NINE-DUPLICATE-SECTION-NUMBERS`.
+
+<sub>Original status: evidence, not a new proposal; already resolved in my merge, nothing needed from either of you</sub>
 
 ## In short
 

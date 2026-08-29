@@ -3532,7 +3532,10 @@ fn test_dispatch_fs_roundtrip(skips: &mut crate::fs::selftest::Skips) -> KernelR
     //
     // (This is the same defect as the `.is_err()` form the boot-time skip
     // checker rejects, spelled with an integer errno instead of a `Result`,
-    // which is why the checker cannot see it.  See design-decisions.md §270.)
+    // which is why the checker cannot see it.  See design-decisions.md §270
+    // (*a self-test may skip, but only on a fact it looked up* — there is a
+    // second, unrelated §270 about DRM page flips; see `known-issues.md`
+    // A-DESIGN-DECISIONS-NINE-DUPLICATE-SECTION-NUMBERS).)
     if !crate::fs::selftest::is_mounted_rw("/") {
         skips.record(
             "Dispatch FS roundtrip",

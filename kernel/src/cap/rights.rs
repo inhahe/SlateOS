@@ -132,8 +132,9 @@ impl Rights {
     /// separately. Same argument as [`SET_CREDENTIALS`](Self::SET_CREDENTIALS)
     /// and [`DEBUG`](Self::DEBUG): `Rights` is a `u64` with bits to spare, and
     /// a bit that means two things is a bit that gets granted for one of them.
-    /// See design-decisions.md §269 (this bit) and §350 (lane B's projection
-    /// of it onto `CAP_IPC_LOCK`).
+    /// See design-decisions.md §269 (*the capability types* — not the hrtimer
+    /// §269; this bit) and §350 (lane B's projection of it onto
+    /// `CAP_IPC_LOCK`).
     pub const MEMORY_LOCK: Self = Self(1 << 19);
 
     /// Every distinct right, in declaration order.

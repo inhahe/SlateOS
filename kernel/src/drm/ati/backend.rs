@@ -379,7 +379,7 @@ impl AtiBackend {
     /// this. The reason is not tidiness: a page flip that silently changes the
     /// resolution is indistinguishable, to the client issuing it, from one that
     /// does not, and the other two backends answered the same call by cropping
-    /// and by doing nothing. See `design-decisions.md` §270.
+    /// and by doing nothing. See `design-decisions.md` §270 (*page flip*).
     ///
     /// The mode is validated by [`ModeSetPlan::new`], which is the same
     /// authority [`Self::enumerate`] filters the advertised mode list through —

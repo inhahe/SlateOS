@@ -372,7 +372,9 @@ pub fn atomic_commit(dev: &mut DrmDevice, state: &AtomicState) -> KernelResult<(
     // became dangerous the moment `DrmDevice::page_flip` started trusting
     // `crtc.mode` to decide whether a framebuffer is the right size, because a
     // fabricated mode would make it wave through a buffer the display engine
-    // reads with a different stride. See `design-decisions.md` §270.
+    // reads with a different stride. See `design-decisions.md` §270 (*page
+    // flip*; there is a second §270 about self-test skips — see
+    // `known-issues.md` A-DESIGN-DECISIONS-NINE-DUPLICATE-SECTION-NUMBERS).
     for cs in &state.crtc_changes {
         if let Some(mode_opt) = &cs.mode {
             let (fb_id, x, y, conns) = if mode_opt.is_some() {

@@ -307,8 +307,9 @@ pub enum ResourceType {
     /// Unlike most types here this names no per-open instance: it exists so
     /// that "may set the time" is derived from a held object rather than
     /// asserted.  §312 projects `CAP_SYS_TIME` from it; see design-decisions.md
-    /// §269 for why this is its own type, and §350 for the projection (lane B's
-    /// request `b-a-three-resource-types-for-clock-ports-and-rlimits`).
+    /// §269 (*three capability types for clock, ports and rlimits* — not the
+    /// hrtimer §269) for why this is its own type, and §350 for the projection
+    /// (lane B's request `b-a-three-resource-types-for-clock-ports-and-rlimits`).
     SystemClock = 27,
 
     /// Authority to bind a local port that the system reserves.

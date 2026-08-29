@@ -92843,3 +92843,40 @@ identifier. The tell is a key expression and a value expression that mention the
 same variable in two different forms. The test that catches it is always the
 same shape -- ask twice in both orders and require the same answer, and ask once
 for something that cannot succeed and then once for something that can.
+
+
+## `C-THIRTEEN-COPIES-OF-THE-MUTATION-HARNESS` (lane C, 2026-08-29) -- **open**, tech debt
+
+**What it is.** Every app wired in this campaign carries its own
+`apps/<app>/mutate.py`, and there are thirteen of them. Only the `MUTATIONS`
+table at the top is genuinely per-app; everything below it -- `run_tests`, the
+compile/hang/crash classification, the `[ok]`/`[??]`/`[BAD]` verdicts, the
+backup, the `try/finally` restore and the summary -- is the same harness copied
+thirteen times.
+
+**Why it matters, concretely.** On 2026-08-29 a machine restart killed a sweep
+mid-mutation and left `apps/simon/src/main.rs` holding a live mutation, with the
+real program in `main.rs.bak`. The `finally` that exists to prevent exactly this
+cannot run when the process is never asked to clean up. The fix -- refuse to
+start when a backup survives, print the diff, name the two recoveries and exit 2
+-- went into `apps/simon/mutate.py` only. **The other twelve still have the
+gap**, and will keep it until each is edited by hand.
+
+That is `known-issues.md` lesson 63 in its own tooling: a rule kept only by
+copying is a rule that will be dropped. The failure mode is quiet and it
+poisons evidence rather than crashing -- a mutant compiles, so the next run
+reads it as `original` and mutates on top of it, and a sweep reporting `[ok]`
+throughout then proves nothing at all.
+
+**What the proper fix looks like.** Extract the harness into one module -- say
+`apps/mutation_harness.py` -- exposing a `sweep(src_path, mutations)` entry
+point, and reduce each `apps/<app>/mutate.py` to its docstring, its `MUTATIONS`
+table and a two-line call. The startup guard, the restore and the verdict
+classification then exist once. The tables must stay per-app: they are the part
+that is genuinely different, and they are the part worth reading.
+
+**Why it is not done yet.** The extraction rewrites all thirteen files at once,
+and a sweep is the one thing that cannot be run while its own harness is being
+edited. It should be done between apps, not during one, and re-verified by
+running one previously-green app's sweep to completion against the shared
+harness before the other twelve are switched over.

@@ -355,9 +355,7 @@ fn exit_status(waitstatus: i32) -> u8 {
         // "shouldn't happen", says upstream, and it is right — but the branch
         // is here rather than folded into one of the others because folding it
         // would invent a status for a state neither of them describes.
-        stdfd::diag_line(&format!(
-            "time: unknown status from command ({waitstatus})"
-        ));
+        stdfd::diag_line(&format!("time: unknown status from command ({waitstatus})"));
         1
     }
 }
@@ -1184,17 +1182,19 @@ mod tests {
         // compares the format pointer, so `-p` and an identical `-f` differ.
         assert_eq!(settings(&["-p", "true"]).format, Format::Posix);
         assert!(settings(&["-p", "true"]).format.is_posix());
-        assert!(
-            !settings(&["-f", POSIX_FORMAT, "true"])
-                .format
-                .is_posix()
-        );
+        assert!(!settings(&["-f", POSIX_FORMAT, "true"]).format.is_posix());
     }
 
     #[test]
     fn the_last_of_dash_f_and_dash_p_wins() {
-        assert_eq!(settings(&["-p", "-f", "e=%e", "true"]).format.text(), b"e=%e");
-        assert_eq!(settings(&["-f", "e=%e", "-p", "true"]).format, Format::Posix);
+        assert_eq!(
+            settings(&["-p", "-f", "e=%e", "true"]).format.text(),
+            b"e=%e"
+        );
+        assert_eq!(
+            settings(&["-f", "e=%e", "-p", "true"]).format,
+            Format::Posix
+        );
     }
 
     #[test]
@@ -1243,7 +1243,10 @@ mod tests {
     #[test]
     fn a_double_dash_ends_the_options() {
         assert_eq!(settings(&["--", "true"]).command, args(&["true"]));
-        assert_eq!(settings(&["--", "echo", "-p"]).command, args(&["echo", "-p"]));
+        assert_eq!(
+            settings(&["--", "echo", "-p"]).command,
+            args(&["echo", "-p"])
+        );
         assert_eq!(settings(&["--", "-"]).command, args(&["-"]));
     }
 
@@ -1324,7 +1327,10 @@ mod tests {
 
     #[test]
     fn plain_text_gets_a_closing_newline() {
-        assert_eq!(render("no sequences at all", &sample()), "no sequences at all\n");
+        assert_eq!(
+            render("no sequences at all", &sample()),
+            "no sequences at all\n"
+        );
         assert_eq!(render("", &sample()), "\n");
     }
 

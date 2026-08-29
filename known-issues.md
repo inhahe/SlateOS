@@ -92799,3 +92799,77 @@ alignment existing under a different split was silently missed. Replaced with
 direct enumeration of the three placements that can ever carry the run. The
 whole gate now runs in 19 s; the sibling's verdict on kshell is unchanged
 (502 assertions, 7 allowed).
+
+---
+
+## `A-KSTAT-SAMPLE-CALLS-MEMORY-INFO-FROM-THE-TIMER-SOFTIRQ` (lane A's code, filed by lane B, 2026-08-29) -- **open**, intermittent boot panic
+
+**In short:** the periodic metrics sampler runs inside the timer interrupt and
+calls a heavyweight memory query that takes ordinary blocking locks. When the
+timer lands on a CPU that already holds one of those locks, the interrupt
+handler spins for a lock only the code it just suspended could release. The
+kernel detects the recursive acquire and panics instead of hanging. Observed on
+`mm::swap::SWAP`, but `SWAP` is only the lock that lost the race -- the same
+path takes at least three others.
+
+**Where:** `kernel/src/kstat.rs:140` (`sample()` -> `mm::memory_pressure()`),
+`kernel/src/mm/mod.rs:428` (`memory_pressure()` -> `memory_info()`),
+`kernel/src/mm/mod.rs:286` (`memory_info()` -> `swap::summary()`),
+`kernel/src/mm/swap.rs:1149` (`SWAP.lock()`). Panic raised at
+`kernel/src/sync.rs:969`.
+
+**The path:**
+
+```
+sync::Mutex::lock        <- blocks forever
+mm::swap::summary        <- SWAP.lock()        swap.rs:1149
+mm::memory_info          <- swap::summary()    mm/mod.rs:286
+mm::memory_pressure      <- memory_info()      mm/mod.rs:428
+kstat::sample            <- memory_pressure()  kstat.rs:140
+softirq::handle_timer / process_pending / handle_timer_irq / idt::dispatch_vector
+```
+
+The interrupted context was inside `lockdep::lock_release`, i.e. mid-release of
+`SWAP` when the timer fired. That few-instruction window is why this is
+intermittent rather than every boot.
+
+**It is a real deadlock, not a lockdep false positive.** `fail_if_recursive` is
+reached only from `lock_contended` -- *after* `try_acquire` has already failed --
+so the lock word was genuinely still held, not merely still recorded as held.
+The owner check compares against `sched::current_task_id()`, which in softirq
+context is the interrupted task (task 0, idle). Hardware state and ownership
+bookkeeping agree.
+
+**The tell.** `kstat::sample()` already knows it must not block, and applies
+that discipline inconsistently fifteen lines apart:
+
+| Line | Call | Locking |
+|---|---|---|
+| `kstat.rs:125` | `mm::frame::try_stats()` | try-lock; comment reads `--- Memory stats (lock-free query) ---` |
+| `kstat.rs:140` | `mm::memory_pressure()` | blocking, and reaches four different locks |
+
+Blocking locks reachable from `memory_info()`: `frame::stats()` (`mm/mod.rs:274`
+*and* `:296` -- the blocking `stats()`, though `try_stats()` exists at
+`frame.rs:2692`), `swap::summary()` (`:286`), `heap::stats()` (`:283`), and
+`kswapd::is_running()`/`reclaim_cycles()`/`total_reclaimed()` (`:290-292`).
+Fixing only `SWAP` moves the panic rather than removing it.
+
+**Proper fix:** give `memory_info` a non-blocking twin -- `swap::try_summary()`,
+`try_memory_info()`, `try_memory_pressure()`, each returning `None` when any
+lock is busy -- and have `kstat::sample()` skip the sample rather than block. A
+dropped metrics sample costs nothing; the next tick gets it. This is exactly the
+shape `frame::try_stats()` already has. Alternatives (defer sampling to a kernel
+thread; make the locks IRQ-safe) are set out in the request file.
+
+**Reproduce:** not deterministic. Seen on `./scripts/boot-test.sh` against
+`lane-b` @ `8340fe48b`, debug profile, QEMU TCG; panic at serial log line 43907,
+during the `sysdiag` self-tests. `boot-history` reports 508 boots, 387 clean --
+this class of intermittent failure is not new, though how many of the 121 are
+this specific bug is unknown.
+
+**Not a lane-B regression:** the lane-B diff for that merge touches no
+`kernel/`, `drivers/`, `fs/` or `net/` file (`design-decisions.md`,
+`requests/`, `scripts/argv-utf8-baseline.txt`, `scripts/df-diff.sh`,
+`userspace/coreutils/{df,du,strings}.rs`, `userspace/coreutils/src/human.rs`).
+Filed to lane A as
+`requests/b-a-kstat-sample-calls-memory-info-from-the-timer-softirq-and-self-deadlocks-on-swap.md`.

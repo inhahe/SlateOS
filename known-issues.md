@@ -94506,3 +94506,259 @@ invalid and the whole mechanism is off -- so implementing this before there is
 something to ask "which locale?" would make the common `LC_ALL=C` case worse,
 not better. Revisit when coreutils grows locale support; the measurements above
 are the acceptance criteria and need no re-taking.
+
+## `B-tar-READ-EVERY-PATH-AS-UTF-8` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
+
+**In short:** on this OS a filename may hold any byte except `/` and NUL, so a
+file can perfectly legally be called `café.txt` in Latin-1 -- a name that is not
+valid UTF-8. `tar` assumed every name was UTF-8 in three places, and each one
+lost data rather than complaining: naming such a file on the command line
+**aborted the program**; archiving a directory containing one **stored it under
+a different name**, so the archive was not a copy of the tree; and extracting an
+archive that contained one **wrote it to disk under a different name**. All
+three are fixed -- `tar` now carries names as bytes from argv to the syscall and
+back.
+
+### What it actually did (measured, 2026-08-29, against the commit before the fix)
+
+Fixture: `src/plain.txt`, `src/café.txt` (the `é` is the single byte `\351`),
+`src/sub/<FF><FE>.bin`. `\351` alone is not valid UTF-8; `\377` can never appear
+in UTF-8 at all.
+
+| | before | after |
+|---|---|---|
+| `tar -cf x.tar 'src/café.txt'` | **panic, SIGABRT (rc 134)**: `called Result::unwrap() on an Err value: "src/caf\xE9.txt"` | archives it, rc 0 |
+| `tar -cf a.tar src`, then `tar -tf a.tar` **with GNU tar** | GNU reads back `src/caf\357\277\275.txt` -- U+FFFD, three bytes, **stored in the archive** | GNU reads back `src/caf\351.txt` |
+| our `tar -xf` of a **GNU-made** archive of that tree | writes `caf<U+FFFD>.txt` and `<U+FFFD><U+FFFD>.bin` to disk | writes the original names |
+| `diff -r src extracted` | `Only in src: café.txt` / `Only in o/src: caf<U+FFFD>.txt` | `IDENTICAL` |
+
+Two things are worth separating out of that table.
+
+**The corruption was at *create* time, not only at display time.** It is easy to
+read "lossy decode" as a printing problem. It was not: the U+FFFD went into the
+100-byte `name` field of the header, which is why *GNU* tar reads the wrong name
+out of our archive. An archive made by the old binary is permanently wrong and
+no extractor can recover the name.
+
+**It was not reversible even in principle.** `<FF><FE>.bin` -- two bytes --
+became six, one U+FFFD per bad byte, and distinct bad bytes all collapse onto
+the same replacement character. There is no mapping back.
+
+### The three sites
+
+1. **`main`/`parse_args`** took `env::args()` (`Vec<String>`), whose iterator
+   `unwrap`s on a non-UTF-8 argument -- hence the abort, which happened before
+   `tar` had looked at anything. Now `env::args_os()` into `Vec<OsString>`, and
+   the option scan walks a cluster **byte by byte** rather than `char` by
+   `char`. `-f` and `-C` values and all operands are kept as `OsString` and
+   handed to `File`/`set_current_dir`/`Path` untouched.
+2. **`add_directory_recursive`** built each child's member name with
+   `e.file_name().to_string_lossy().into_owned()`. This is the *create*-side
+   corruption above: the lossy copy was both what went into the header and what
+   the recursion descended with. Now `os_bytes(&e.file_name()).into_owned()`,
+   collected as `Vec<u8>` and sorted by bytes (so the ordering stays stable for
+   names that no longer survive a round trip).
+3. **`extract_string`** ran the raw header field through
+   `String::from_utf8_lossy`, and it is what read the `name` field, so *every*
+   member name passed through it before anything else saw it. That is the
+   *extract*- and *list*-side corruption. It is now `field_bytes`, which borrows
+   the used part of the field and decodes nothing.
+
+`sanitize_member_name` follows from (3) and is the part that mattered most for
+security rather than fidelity: it took `&str`, which meant the `..` check was
+being made about a string that had already been altered and was **not** the name
+that would be written. It now takes and returns bytes, so the check and the
+write are about the same thing. (No traversal escape was found through the old
+arrangement -- U+FFFD cannot become `..` -- but "the guard inspects a different
+value than the one used" is not a property worth relying on.)
+
+Supporting changes: `TarHeader::set_name(&[u8])`; a `report_member(&[u8])`
+helper that goes through `stdfd::diag_bytes`, because `diag!` routes through
+`format!` and would have reintroduced a lossy decode for `-v`; `list_archive`
+writing the name with `write_all` rather than `writeln!`, so `tar -tf` output
+can be fed back to whatever extracts it; and `parse_octal` doing
+`str::from_utf8().ok()` -- a field that is not ASCII is not a number either, so
+it lands on the same 0 that `"garbage"` already did.
+
+### One deliberate message change
+
+`tar -Z` said `unknown option: -Z`. The byte is now rendered with `quoteaf`,
+which always quotes, so keeping that shape would have produced the odd `-'Z'`.
+It reads `invalid option -- 'Z'` instead, which is byte-for-byte what GNU tar
+1.35 prints (measured: `tar -Q`). `quoteaf` and not `char::from` because the
+byte comes from the command line, and rendering it raw would let a crafted
+argument forge a line of `tar`'s stderr.
+
+### Verification
+
+- 51 host unit tests pass, up from 44. The seven new ones are the point of the
+  change: a non-UTF-8 operand, `-f` value and `-C` value through `parse_args`;
+  a non-UTF-8 name through `sanitize_member_name` both when it is legal and
+  when it sits beside a `..`; `field_bytes` not decoding; and `list_archive`
+  writing the raw bytes.
+- End-to-end round trip on the fixture above: our archive extracted by **GNU**
+  tar is `diff -r`-identical to the source tree, and a **GNU**-made archive
+  extracted by ours is likewise identical. Both directions, because a bug that
+  renamed on create *and* on extract could have cancelled itself out in a
+  self-to-self test.
+- `scripts/argv-utf8.py --check` drops from 10 findings to 9;
+  `userspace/coreutils/src/bin/tar.rs:argv-as-string` is removed from the
+  baseline ratchet.
+- `cargo +nightly clippy -p coreutils --bin tar --tests` clean for the target.
+
+### Why `tar` still does not use `coreutils::getopt`
+
+Every other converted bin moved to `coreutils::getopt` at the same time as it
+moved to bytes, so the exception needs stating: **GNU tar does not use
+`getopt_long`.** It uses `argp`, and `tar --=x` reports **175** long options
+including `--usage`, `--program-name` and `--HANG`. Two consequences:
+
+- `scripts/getopt-ambiguity-check.py` auto-discovers any bin with a
+  `const LONG_OPTIONS` table and diffs it *as a sequence* against
+  `<util> --=x`. Adding a table to `tar` would therefore create an obligation to
+  transcribe all 175 argp entries -- a table describing a parser we are not
+  emulating.
+- GNU tar's *old option format* (`tar cvf x.tar` -- a leading cluster with no
+  dash) cannot be expressed in getopt at all, and this tar would need it to
+  accept the spelling most scripts actually use.
+
+So the byte conversion was done with tar's own parser. This is a scope
+judgment, not a deferral of the bug: the argv corruption above is fixed either
+way, and adopting getopt would not have fixed anything additional. Whether
+this tar should grow long options and the old option format is a separate
+question and is not currently blocking anything -- it accepts `-c/-x/-t/-v/-f/-C`
+and treats `--anything` as a file operand, which is what it did before.
+
+---
+
+## B-more-STOPPED-PAGING-AT-THE-FIRST-NON-UTF8-BYTE (lane B, 2026-08-29) -- **FIXED 2026-08-29**
+
+**In short:** `more` is the program you use to look at a file. This one would
+show you *part* of a file and stop, with nothing on screen saying there was
+more, and exit as if it had succeeded. Three separate causes, each of which
+silently truncated the output: one stray non-text byte anywhere in the file
+ended the display there; sending the output anywhere other than a terminal
+(`more big.txt | grep x`, `more big.txt > copy`) cut it off after one
+screenful; and a file whose name was not valid text crashed the program
+outright. It also mislabelled what it did show -- a file's name was announced
+in a banner that was one character too narrow, was printed even for files that
+could not be opened, and was left off in the one case util-linux prints it.
+All of it is fixed and `more` is now byte-for-byte identical to util-linux
+`more` 2.39.3 across 44 measured cases.
+
+### The four truncations, measured
+
+Each row is our binary and util-linux's, run side by side on the same file,
+stdin `/dev/null`, stdout a pipe.
+
+| case | before | after |
+|---|---|---|
+| `more bad.txt` -- a `\377` byte on line 2 of 3 | printed line 1 only, exit **0** | all three lines, byte-identical to util-linux |
+| `more sixty.txt \| cat` with `LINES=10` | printed **9** lines of 60, exit **0** | all 60 |
+| `more caf<0xE9>.txt` | `panicked ... called Result::unwrap() on an Err value: "caf\xE9.txt"`, exit **134** | pages it, exit 0 |
+| file with no final newline | added one | reproduces the file exactly |
+
+The first is the `argv-utf8` gate's entry for this bin and the reason it was
+picked up. The loop read with `BufRead::lines`, which yields `String` and so
+*fails* on a line that is not valid UTF-8 -- and the failure arm was
+`Err(_) => break`, which is end-of-file's arm. A byte the program could not
+decode and the end of the file were the same event. Reconstructing each line
+into a `String` and printing it with `writeln!` is what appended the newline
+the file did not have.
+
+The second is the same class of bug reached from the other side. `more` paged
+unconditionally, so into a pipe it printed a screenful, wrote `--More--`, and
+read a keystroke from stdin -- which was `/dev/null`, so the read returned
+0 bytes, which `read_key` maps to `Key::Quit`. The pipeline got one screen of
+a file the user asked for all of, with status 0. A pager must page only when
+stdout is a terminal.
+
+The third was `env::args()` (the `String` iterator, which panics on an
+undecodable argument) rather than `env::args_os()`.
+
+### The labelling, also measured
+
+`more` announces each file inside a banner of colons. Three things were wrong
+with ours, all found by running the two binaries side by side rather than by
+reading the code:
+
+- The banner was **thirteen** colons. util-linux prints **fourteen**.
+- It was printed **before** the `open`, so `more good.txt nosuch.txt`
+  announced `nosuch.txt` and then showed nothing under it. util-linux opens
+  first and never names a file it cannot show.
+- It was printed on **operand count alone** (`files.len() > 1`). The real rule,
+  established over the full `{1,2 files} x {stdin tty, pipe} x {stdout tty,
+  pipe}` matrix, is `operands > 1 || !isatty(0)` -- keyed on **stdin**, which
+  is what tells `more` that nobody is going to answer a prompt. That is why
+  `more f > out` labels its output and `more f` at a terminal does not.
+
+A directory operand was also wrong. `File::open` on a directory *succeeds*; it
+is the read that fails with `EISDIR`, so we printed a banner promising a file
+and then a diagnostic. util-linux stats first and writes `\n*** dir: directory
+***\n\n` to **stdout** -- in-band, where the reader is looking -- and carries
+on with status 0. We now do the same.
+
+Finally, the diagnostic itself. Ours was
+`more: nosuch.txt: No such file or directory (os error 2)`; util-linux's is
+`more: cannot open nosuch.txt: No such file or directory`. Both halves are
+fixed: the `cannot open` wording, and `coreutils::errmsg::strerror` in place of
+the host's `io::Error` text, which removes this bin from the
+`host-errmsg-baseline.txt` ratchet as well.
+
+### Where the keystrokes come from now
+
+Paging happens only when stdout is a terminal. When it is but stdin has been
+redirected, commands cannot come from stdin -- that descriptor is somebody's
+data and reading it for keystrokes would consume it -- so the controlling
+terminal is reopened, as util-linux does. If there is no `/dev/tty`, the
+fallback is *not to page*, which shows the whole file rather than a truncated
+one. Verified: `LINES=5 more sixty.txt < /dev/null` on a pty stops at
+`--More--` after four lines, and does not stop at all through a pipe.
+
+The `--More--` prompt moved from descriptor 2 to stdout at the same time.
+Descriptor 2 was chosen when `more` paged unconditionally; now that paging
+implies stdout *is* the terminal, stdout is where the pager's screen is, and
+on descriptor 2 the prompt vanished under `more f 2>/dev/null`, leaving a
+pager that looked hung.
+
+### The one deliberate divergence
+
+util-linux has no `-` convention: `more -` reports
+`cannot open -: No such file or directory`. Ours reads stdin, because every
+other utility in this tree spells stdin `-` and a pager that alone refused it
+would be the surprise. Stdin is never given a banner either way, which is also
+what util-linux does with its own stdin copy.
+
+### Verification, and why none of it was caught before
+
+`more` had **no differential harness**, unlike `cat`, `cut`, `comm` and the
+rest. Four independent truncations survived in a two-hundred-line program for
+exactly that reason: not one of them is visible by eye in the source, and every
+one of them is a single line of a hex dump. So the fix is not only the code --
+`scripts/more-diff.sh` now exists, and `scripts/all-diff.sh` picks it up by
+glob.
+
+It compares stdout (as `od -An -tx1`), stderr as *text*, and the exit status,
+over: the plain copy (plain, empty, NUL and `0xff`, CRLF, blank lines, no final
+newline, invalid UTF-8, 60 lines); names (a nested path, a non-UTF-8 name); the
+banner (two files, three files, the same file twice, an empty file between two
+others); operands that do not open (missing, good+missing, missing+good, two
+missing, unreadable, unreadable+good); and directories (alone, first, last, two
+of them). Every one of those runs **twice**, at `LINES=1000` and at `LINES=10`
+-- the second is the value under which our `more` used to emit one screenful
+and stop, so running it is what makes "stdout is not a terminal, therefore copy
+it all" a claim rather than an assumption. Three further cases put stdin on a
+pty via `script`, which is the only way to reach the other half of the banner
+rule, and two write to `/dev/full`. **53 passed, 0 differed, 1 differs on
+purpose** (the `-` operand above).
+
+`OURS=/usr/bin/more scripts/more-diff.sh` runs util-linux against itself and
+reports the one xfail as an XPASS and nothing else, which is the check that the
+harness discriminates at all.
+
+What is deliberately *not* compared is the interactive screen: with stdout a
+terminal, util-linux drives it through terminfo
+(`ESC[7m--More--(Next file: x)ESC[27mESC[K`) and ours writes a plain
+`--More--`. Those cannot match byte for byte without porting terminfo into a
+pager. The decision to pause, and the keystroke handling, are covered by unit
+tests in `more.rs` instead.

@@ -58,7 +58,14 @@ the same failure, which is worse than one wrong one. So a file is in the
 baseline or it is not, and a 52-line baseline is a baseline someone will read
 where a 139-line one is not.
 
-`--check` fails only on a file that is not in `scripts/host-errmsg-baseline.txt`.
+`--check` fails on a file that is not in `scripts/host-errmsg-baseline.txt` --
+and on a baseline line that names a file which no longer has the defect. A
+ratchet only ratchets if it shrinks when the work is done: 17 of the 24 lines
+here had been fixed and left listed, and every one of them was a bin that could
+have regressed all the way back with the gate still green. Regenerating is one
+command, `--write-baseline`, and it can only ever remove lines, because a file
+that still has the defect is still found.
+
 A genuine false positive belongs in `IGNORE` below, which records *why*, rather
 than in the baseline, which records only *that*.
 
@@ -371,6 +378,18 @@ def load_baseline() -> set[str]:
     return out
 
 
+def stale_entries(known: set[str], gated: set[str]) -> list[str]:
+    """Baseline lines naming a finding that is no longer there.
+
+    A function rather than an expression in `main` only so that `--selftest`
+    can reach it. That is not ceremony: this guard fails toward *silence* in
+    the same way the detector does -- a version of it that never fires looks
+    exactly like a baseline that happens to be exact, which is what let this
+    very ratchet accumulate 17 dead lines unnoticed.
+    """
+    return sorted(known - gated)
+
+
 def selftest() -> int:
     """Check the rule that decides what this tool reports.
 
@@ -523,7 +542,30 @@ def selftest() -> int:
         expect("sites", len(sites(p)), 2)
         expect("findings", len(analyse(p)), 1)
 
-    # 7. The gated tree must really be there. Every case above proves the rule
+    # 7. The staleness guard. It fails toward silence exactly as the detector
+    #    does -- a version of it that never fires is indistinguishable from a
+    #    baseline that happens to be exact -- so it needs its own cases. This
+    #    is the ratchet that carried 17 dead lines, so the guard is not
+    #    hypothetical here.
+    rule("baseline-staleness")
+    expect("stale/exact-baseline-is-clean",
+           stale_entries({f"a.rs:{RULE}"}, {f"a.rs:{RULE}"}), [])
+    expect("stale/fixed-finding-is-reported",
+           stale_entries({f"a.rs:{RULE}", f"b.rs:{RULE}"}, {f"a.rs:{RULE}"}),
+           [f"b.rs:{RULE}"])
+    # A *new* finding is the other ratchet direction and is not staleness; it
+    # must not leak into this list, or the fix advice printed would be wrong.
+    expect("stale/new-finding-is-not-stale",
+           stale_entries({f"a.rs:{RULE}"}, {f"a.rs:{RULE}", f"c.rs:{RULE}"}),
+           [])
+    expect("stale/empty-baseline-is-clean",
+           stale_entries(set(), {f"a.rs:{RULE}"}), [])
+    # Several dead lines come back sorted, because they are printed in order.
+    expect("stale/multiple-are-sorted",
+           stale_entries({f"z.rs:{RULE}", f"a.rs:{RULE}", f"m.rs:{RULE}"}, set()),
+           [f"a.rs:{RULE}", f"m.rs:{RULE}", f"z.rs:{RULE}"])
+
+    # 8. The gated tree must really be there. Every case above proves the rule
     #    classifies a *given* file; none would notice `GATED` pointing at a
     #    directory that had been renamed away, which would make `--check` pass
     #    forever while looking at nothing.
@@ -592,6 +634,7 @@ def main() -> int:
 
     known = load_baseline()
     new = sorted(k for k in gated if k not in known)
+    stale = stale_entries(known, set(gated))
 
     to_show = new if check else sorted(gated)
     for key in to_show:
@@ -600,9 +643,24 @@ def main() -> int:
         mark = "NEW " if key in set(new) else "    "
         print(f"{mark}{path}:{line}  {text}")
 
-    print(f"\n{len(gated)} file(s) affected; {len(new)} not in the baseline.")
-    if new and check:
-        print(f"\n  {RULE}: {FIX}")
+    for key in stale:
+        print(f"FIXED {key}  -- in the baseline but no longer found")
+
+    print(
+        f"\n{len(gated)} file(s) affected; {len(new)} not in the baseline; "
+        f"{len(stale)} baseline line(s) now stale."
+    )
+    if check and (new or stale):
+        if new:
+            print(f"\n  {RULE}: {FIX}")
+        if stale:
+            print(
+                "\n  The baseline lines above name files that are already "
+                "fixed. Shrink it:\n"
+                f"      python {_relpath(Path(__file__))} --write-baseline\n"
+                "  It cannot lose a real finding -- a file that still has the "
+                "defect is still found."
+            )
         return 1
     return 0
 

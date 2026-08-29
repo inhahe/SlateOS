@@ -99,6 +99,26 @@ NOT_GNU = {
     "minishell",
 }
 
+# Bins that have no `LONG_OPTIONS` table on purpose, and the reason. Without
+# this the sweep prints "not yet converted to coreutils::getopt?" for them,
+# which reads as a pending task and invites someone to do work that has already
+# been considered and declined. The question mark is the problem: it is a guess,
+# and for these the answer is recorded.
+#
+# Distinct from NOT_GNU, which is "we cannot compare this". These *could* be
+# compared; the point is that the table they would be compared against is the
+# wrong table.
+NOT_GETOPT = {
+    "tar": (
+        "GNU tar uses argp, not getopt_long: `tar --=x` lists 175 long options "
+        "including --usage/--program-name/--HANG, and its old option format "
+        "(`tar cvf x.tar`) cannot be expressed in getopt at all. A table here "
+        "would describe a parser we are not emulating, and this gate would "
+        "then demand all 175 entries. tar reads argv as bytes with its own "
+        "parser; see known-issues.md -> B-tar-READ-EVERY-PATH-AS-UTF-8."
+    ),
+}
+
 # Bins whose source file is named something other than the program, because the
 # obvious name is taken. Checking these under `path.stem` would probe a command
 # that does not exist and read as "utility missing?"; skipping them instead
@@ -473,6 +493,20 @@ def main() -> int:
             t.util = stem
             tables.append(t)
 
+    # A NOT_GETOPT entry is a claim about the tree, so it has to be able to go
+    # stale. If the bin grew a table after all, the recorded reason is now
+    # false and the exemption is silently suppressing a real comparison --
+    # which is the same failure the `];` regex bug caused, and reads the same
+    # way: reassuringly quiet. Checked over the whole tree, not just `wanted`,
+    # so a push that does not touch the bin still catches it.
+    stale_exemptions = [
+        name
+        for name in sorted(NOT_GETOPT)
+        for p in BIN_DIR.rglob("*.rs")
+        if (p.stem if p.stem != "main" else p.parent.name) == name
+        and parse_table(p) is not None
+    ]
+
     if wanted:
         # Three reasons a requested name may not be checked, and only the last
         # is worth a warning. The pre-push hook passes whichever bins a push
@@ -485,6 +519,13 @@ def main() -> int:
                 for p in BIN_DIR.rglob("*.rs")
             ):
                 continue  # not a coreutils bin at all
+            if m in NOT_GETOPT:
+                print(
+                    f"note: {m} has no LONG_OPTIONS table by decision, not by "
+                    f"omission -- {NOT_GETOPT[m]}",
+                    file=sys.stderr,
+                )
+                continue
             print(
                 f"note: {m} has no LONG_OPTIONS table, so there is nothing to "
                 f"compare (not yet converted to coreutils::getopt?)",
@@ -492,6 +533,15 @@ def main() -> int:
             )
 
     problems: list[str] = []
+    for name in stale_exemptions:
+        line = (
+            f"{name}: listed in NOT_GETOPT, but it now has a LONG_OPTIONS "
+            f"table. Remove the exemption so the table is actually compared, "
+            f"and delete the recorded reason -- it is no longer true."
+        )
+        print(line, flush=True)
+        problems.append(line)
+
     for t in tables:
         # Printed per table rather than at the end: a full sweep is minutes of
         # WSL round trips, and a finding you can see at minute two is worth

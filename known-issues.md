@@ -81821,8 +81821,65 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **432 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **400 of 800 remain**
 
+> **Burn-down log.** 2026-08-29 (thirty-fourth batch): `cmd_pidfd` (5),
+> `cmd_userfault` (5), `cmd_oomkiller` (5), `cmd_prociso` (6), `cmd_coredump`
+> (5) and `cmd_devfreq` (5) cleared — 431 → 400 across 207 → 201 functions.
+> Pinned by self-test rung 98. (The 432 → 431 step is `cmd_energysaver`, cleared
+> in passing by the toggle sweep of 2026-08-29 and logged under
+> `A-KSHELL-A-TOGGLE-WORD-IT-DOES-NOT-RECOGNISE-MEANS-OFF` rather than here;
+> the heading above was left reading 432 at the time, and is corrected now.)
+>
+> **In short:** all thirty-one sites were the same statement —
+> `parts.get(N).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0)` — and in
+> twenty of them the operand was a **pid**. `unwrap_or(0)` there is not a
+> default. It is a placeholder, chosen because it looked inert, and it is not:
+> pid 0 is the idle task.
+>
+> * **The success line launders the substitution.** Every one of these arms
+>   prints the number it used. `pidfd signal l23` printed `pidfd: signal to pid
+>   0` — a sentence that is true about what happened and reads as confirmation
+>   of what was asked. There is no wording in which a substituted value and a
+>   supplied one look different, which is why the fix has to be a refusal and
+>   cannot be a better message.
+> * **`oomkiller kill` is the sharp end.** A pid the shell could not read
+>   became a request to the out-of-memory killer to kill pid 0. Nothing in the
+>   transcript distinguishes that from having typed `0`.
+> * **`prociso` is the instructive one, and it is why "there is already a guard"
+>   is not a defence.** Its six sites *did* refuse an unreadable word. But only
+>   as a coincidence: the word became 0, and 0 happened to be an invalid id, so
+>   a downstream `if id == 0` caught it — and then printed `Usage: prociso
+>   attach <pid> <ns_id>`, blaming the synopsis rather than naming which of the
+>   two operands was unreadable. A refusal that rests on a fact about the value
+>   space stops refusing the day that fact changes, silently and with no test
+>   failing. This is the second shape (after batch 29's forge-then-check pairs)
+>   where the *absence* of a visible bug today is load-bearing on an accident.
+> * **Three catch-all `match` arms went with them, though the gate does not
+>   count those.** `userfault fault <pid> mnor` recorded a *missing*-page fault;
+>   `userfault resolve <pid> <ns> cpy` recorded a *zero-page* resolution when
+>   `copy` was meant; `devfreq governor <id> powersace` set **ondemand**. Each
+>   then named the substitute in its success line. These are §600's second
+>   prohibited shape in `match` clothing: the `_ =>` arm is an answer, and a
+>   catch-all that returns a value cannot say "I did not understand you".
+> * **`oomkiller exempt` was the toggle defect hiding in this batch.**
+>   `parts.get(2).copied().unwrap_or("true") != "false"` meant every word that
+>   was not exactly `false` **shielded the process from the killer**. That is
+>   the failure direction that wedges a machine rather than the one that loses a
+>   process, and it is the same asymmetry rung 97 documented for `vpn
+>   killswitch`.
+> * **One destructive arm.** `coredump cleanup 5O` deleted every dump but the
+>   newest **ten** and reported `keeping 10`, which reads as a statement of what
+>   was done rather than as a correction of what was asked.
+>
+> Helper choice was made per site by meaning, not mechanically: `required_num`
+> where the operand names the thing being acted on (a pid, an id), and
+> `optional_num` only where the help documents a resting value — `coredump
+> cleanup`'s keep count, `devfreq register`'s frequency bounds, `coredump
+> record`'s synthetic-dump fields. Getting that split wrong would turn a
+> required operand into an optional one, which is a behaviour change wearing a
+> bug fix.
+>
 > **Burn-down log.** 2026-08-26 (thirty-third batch): `cmd_prochistory` (6)
 > cleared — 438 → 432 across 209 → 208 functions. Not pinned by a rung.
 >

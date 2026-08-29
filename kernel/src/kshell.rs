@@ -19893,6 +19893,128 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_lacks("and nothing is reported stored", &out, b"Set zzapp.zzkey");
     }
 
+    serial_println!(
+        "  kshell::self_test 98: six commands that answered an unreadable pid with pid 0, and \
+         three catch-all arms that answered an unreadable word with a different setting"
+    );
+    // Rungs 79 and 97 were about *booleans*. This one is the numeric half of
+    // the same rule, and the first batch off the counted backlog in
+    // `scripts/option-refusal-ledger.txt` (431 -> 400 sites, 207 -> 201
+    // functions).
+    //
+    // The shape was `parts.get(1).and_then(|s| s.parse::<u32>().ok())
+    // .unwrap_or(0)`, thirty-one times. `unwrap_or(0)` there is not a default;
+    // it is a placeholder, and pid 0 is not an inert one -- it is the idle
+    // task. So `oomkiller kill l23` asked the out-of-memory killer to kill the
+    // idle task and `pidfd signal l23` recorded a signal against it, each
+    // reporting the outcome with the substituted number in it, which reads as
+    // confirmation of what was typed rather than as a substitution for it.
+    //
+    // `prociso` is the instructive one. Its six sites *did* refuse -- but only
+    // because 0 happened to be an invalid id, so the guard downstream caught
+    // it and blamed the synopsis. A refusal that rests on a coincidence about
+    // the value space stops refusing the day that value becomes legal, and it
+    // cannot say which of two operands was the unreadable one.
+    {
+        // Every assertion here is a refusal, emitted before the subsystem is
+        // reached, so none of them depends on state a fresh boot may not have
+        // initialised -- the §604 trap that a success assertion would walk
+        // into.
+        let out = capture_command("pidfd signal l23");
+        assert_output_contains("an unreadable pid is named", &out, b"`l23' is not a pid");
+        assert_eq!(last_exit(), 1, "`pidfd signal l23` errors");
+        assert_output_lacks(
+            "and no signal is reported against the idle task",
+            &out,
+            b"signal to pid 0",
+        );
+
+        // Absence was the same event as unreadability here: both became 0.
+        let out = capture_command("pidfd create");
+        assert_output_contains("an omitted pid is reported missing", &out, b"missing pid");
+        assert_eq!(last_exit(), 1, "a bare `pidfd create` errors");
+        assert_output_lacks("and nothing is reported created", &out, b"created for pid");
+
+        let out = capture_command("oomkiller kill l23");
+        assert_output_contains(
+            "the out-of-memory killer will not take a pid it could not read",
+            &out,
+            b"`l23' is not a pid",
+        );
+        assert_eq!(last_exit(), 1, "`oomkiller kill l23` errors");
+        assert_output_lacks("and nothing is reported killed", &out, b"Killed PID");
+
+        // `!= "false"` meant every word that was not exactly `false` shielded
+        // the process from the killer -- the direction that wedges a machine.
+        let out = capture_command("oomkiller exempt 7 fasle");
+        assert_output_contains(
+            "a misspelt `false' no longer means exempt",
+            &out,
+            b"`fasle' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "`oomkiller exempt 7 fasle` errors");
+        assert_output_lacks("and no exemption is reported set", &out, b"exempt=");
+
+        // Two catch-all `match` arms that substituted a *different* event for
+        // the one asked for, and then named the substitute in the success line.
+        let out = capture_command("userfault fault 7 mnor");
+        assert_output_contains(
+            "a misspelt fault type is named rather than replaced",
+            &out,
+            b"`mnor' is not a fault type",
+        );
+        assert_eq!(last_exit(), 1, "`userfault fault 7 mnor` errors");
+        assert_output_lacks("and no fault is reported recorded", &out, b"fault recorded");
+
+        let out = capture_command("userfault resolve 7 5000 cpy");
+        assert_output_contains(
+            "a misspelt `copy' does not silently mean zero-page",
+            &out,
+            b"`cpy' is not a resolution",
+        );
+        assert_eq!(last_exit(), 1, "`userfault resolve 7 5000 cpy` errors");
+        assert_output_lacks(
+            "and no resolve is reported recorded",
+            &out,
+            b"resolve recorded",
+        );
+
+        let out = capture_command("devfreq governor 0 powersace");
+        assert_output_contains(
+            "a misspelt governor is named rather than replaced with ondemand",
+            &out,
+            b"`powersace' is not a governor",
+        );
+        assert_eq!(last_exit(), 1, "`devfreq governor 0 powersace` errors");
+
+        // The blame moves off the synopsis and onto the word: this used to
+        // print `Usage: prociso attach <pid> <ns_id>`, which says nothing about
+        // which of the two operands was the unreadable one. That string is now
+        // absent from the file entirely, so there is nothing left to assert it
+        // is missing -- the wording gate rejects a `lacks` on text no command
+        // can print, and it is right to: an assertion that can never fire is
+        // not evidence. The `contains` above carries the claim instead.
+        let out = capture_command("prociso attach zzpid 5");
+        assert_output_contains(
+            "the unreadable operand is named, not the synopsis reprinted",
+            &out,
+            b"`zzpid' is not a pid",
+        );
+        assert_eq!(last_exit(), 1, "`prociso attach zzpid 5` errors");
+        assert_output_lacks("and nothing is reported attached", &out, b"Attached PID");
+
+        // The one destructive arm in the batch. `cleanup 5O` deleted all but
+        // the newest ten and said "keeping 10", which reads as a report.
+        let out = capture_command("coredump cleanup 5O");
+        assert_output_contains(
+            "a destructive keep-count is not silently replaced",
+            &out,
+            b"`5O' is not a keep count",
+        );
+        assert_eq!(last_exit(), 1, "`coredump cleanup 5O` errors");
+        assert_output_lacks("and nothing is reported cleaned up", &out, b"Cleaned up");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -92791,10 +92913,9 @@ fn cmd_coredump(args: &str) {
             }
         }
         "get" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "coredump", sub, "dump id") else {
+                return;
+            };
             match coredump::get_dump(id) {
                 Some(d) => {
                     shell_println!("Core dump #{}:", d.id);
@@ -92811,15 +92932,20 @@ fn cmd_coredump(args: &str) {
         }
         "record" => {
             coredump::init_defaults();
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            // `record` is the synthetic-dump arm, so its operands really do
+            // have documented resting values -- but only when *omitted*.
+            // Typed and unreadable they were replaced just as quietly, so
+            // `coredump record 4l zsh 4O96` filed a dump against pid 1 (init)
+            // sized 4096 bytes and reported `Recorded core dump #3`, naming
+            // neither of the two words it had thrown away.
+            let Some(pid) = optional_num::<u32>(&parts, 1, "coredump", sub, "pid", 1) else {
+                return;
+            };
             let name = parts.get(2).copied().unwrap_or("test_process");
-            let size = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
+            let Some(size) = optional_num::<u64>(&parts, 3, "coredump", sub, "size in bytes", 4096)
+            else {
+                return;
+            };
             match coredump::record_dump(pid, name, coredump::DumpReason::Segfault, size, 11) {
                 Ok(id) => shell_println!("Recorded core dump #{}", id),
                 Err(e) => {
@@ -92829,10 +92955,9 @@ fn cmd_coredump(args: &str) {
             }
         }
         "delete" | "rm" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "coredump", sub, "dump id") else {
+                return;
+            };
             match coredump::delete_dump(id) {
                 Ok(()) => shell_println!("Deleted dump {}.", id),
                 Err(e) => {
@@ -92843,10 +92968,14 @@ fn cmd_coredump(args: &str) {
         }
         "cleanup" => {
             coredump::init_defaults();
-            let keep = parts
-                .get(1)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(10);
+            // The one destructive arm in this command, and the one whose guess
+            // was hardest to notice: `coredump cleanup 5O` deleted everything
+            // but the newest *ten* and said "keeping 10", which reads as a
+            // report rather than as a correction of what was asked for.
+            let Some(keep) = optional_num::<usize>(&parts, 1, "coredump", sub, "keep count", 10)
+            else {
+                return;
+            };
             match coredump::cleanup(keep) {
                 Ok(n) => shell_println!("Cleaned up {} old dumps (keeping {}).", n, keep),
                 Err(e) => {
@@ -94322,10 +94451,14 @@ fn cmd_oomkiller(args: &str) {
             }
         }
         "score" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // The four `unwrap_or(0)`s in this command were placeholders, not
+            // defaults, and the `kill` arm is why they matter most here: an
+            // unreadable pid resolved to 0 and `oomkiller kill l23` asked the
+            // out-of-memory killer to kill the idle task, reporting the
+            // outcome as though pid 0 were what had been named.
+            let Some(pid) = required_num::<u32>(&parts, 1, "oomkiller", sub, "pid") else {
+                return;
+            };
             match oomkiller::get_score(pid) {
                 Some(s) => {
                     let eff = (s.score + s.adj).max(0);
@@ -94343,14 +94476,15 @@ fn cmd_oomkiller(args: &str) {
             }
         }
         "adjust" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let adj = parts
-                .get(2)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "oomkiller", sub, "pid") else {
+                return;
+            };
+            // `adjust` with no adjustment is a no-op wearing a success line,
+            // so the score is required rather than defaulted to 0.
+            let Some(adj) = required_num::<i32>(&parts, 2, "oomkiller", sub, "score adjustment")
+            else {
+                return;
+            };
             match oomkiller::adjust_score(pid, adj) {
                 Ok(()) => shell_println!("Set PID {} adj to {}", pid, adj),
                 Err(e) => {
@@ -94360,11 +94494,17 @@ fn cmd_oomkiller(args: &str) {
             }
         }
         "exempt" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let exempt = parts.get(2).copied().unwrap_or("true") != "false";
+            let Some(pid) = required_num::<u32>(&parts, 1, "oomkiller", sub, "pid") else {
+                return;
+            };
+            // `!= "false"` made every word that was not exactly `false` mean
+            // *exempt this process from being killed* -- so `oomkiller exempt
+            // 7 fasle` shielded pid 7 from the out-of-memory killer and
+            // printed `exempt=true`, which is the failure direction that
+            // wedges a machine rather than one that loses a process.
+            let Some(exempt) = optional_toggle(&parts, 2, "oomkiller", sub, true) else {
+                return;
+            };
             match oomkiller::set_exempt(pid, exempt) {
                 Ok(()) => shell_println!("PID {} exempt={}", pid, exempt),
                 Err(e) => {
@@ -94389,10 +94529,9 @@ fn cmd_oomkiller(args: &str) {
             }
         }
         "kill" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "oomkiller", sub, "pid") else {
+                return;
+            };
             match oomkiller::kill(pid) {
                 Ok(freed) => shell_println!("Killed PID {}, freed {} bytes.", pid, freed),
                 Err(e) => {
@@ -95392,13 +95531,16 @@ fn cmd_prociso(args: &str) {
             }
         }
         "delete" => {
-            let id_str = parts.get(1).copied().unwrap_or("0");
-            let id = id_str.parse::<u32>().unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: prociso delete <ns_id>");
-                set_exit(1);
+            // These six sites *did* refuse, but only as a side effect: an
+            // unreadable word became 0 and 0 happened to be an invalid id, so
+            // the guard below caught it and blamed the synopsis rather than
+            // the word. That refusal is load-bearing on a coincidence -- the
+            // day an id of 0 becomes legal it silently stops refusing -- and
+            // it tells the user nothing about which of their two operands was
+            // the unreadable one. `required_num` names the word instead.
+            let Some(id) = required_num::<u32>(&parts, 1, "prociso", sub, "namespace id") else {
                 return;
-            }
+            };
             prociso::init_defaults();
             match prociso::delete_namespace(id) {
                 Ok(()) => shell_println!("Deleted namespace #{}", id),
@@ -95409,15 +95551,12 @@ fn cmd_prociso(args: &str) {
             }
         }
         "attach" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let ns_str = parts.get(2).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            let ns_id = ns_str.parse::<u32>().unwrap_or(0);
-            if pid == 0 || ns_id == 0 {
-                shell_println!("Usage: prociso attach <pid> <ns_id>");
-                set_exit(1);
+            let Some(pid) = required_num::<u32>(&parts, 1, "prociso", sub, "pid") else {
                 return;
-            }
+            };
+            let Some(ns_id) = required_num::<u32>(&parts, 2, "prociso", sub, "namespace id") else {
+                return;
+            };
             prociso::init_defaults();
             match prociso::attach(pid, ns_id) {
                 Ok(()) => shell_println!("Attached PID {} to namespace #{}", pid, ns_id),
@@ -95428,15 +95567,12 @@ fn cmd_prociso(args: &str) {
             }
         }
         "detach" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let ns_str = parts.get(2).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            let ns_id = ns_str.parse::<u32>().unwrap_or(0);
-            if pid == 0 || ns_id == 0 {
-                shell_println!("Usage: prociso detach <pid> <ns_id>");
-                set_exit(1);
+            let Some(pid) = required_num::<u32>(&parts, 1, "prociso", sub, "pid") else {
                 return;
-            }
+            };
+            let Some(ns_id) = required_num::<u32>(&parts, 2, "prociso", sub, "namespace id") else {
+                return;
+            };
             prociso::init_defaults();
             match prociso::detach(pid, ns_id) {
                 Ok(()) => shell_println!("Detached PID {} from namespace #{}", pid, ns_id),
@@ -95482,13 +95618,15 @@ fn cmd_prociso(args: &str) {
                     }
                 }
                 "delete" => {
-                    let id_str = parts.get(2).copied().unwrap_or("0");
-                    let id = id_str.parse::<u32>().unwrap_or(0);
-                    if id == 0 {
-                        shell_println!("Usage: prociso container delete <id>");
-                        set_exit(1);
+                    let Some(id) = required_num::<u32>(
+                        &parts,
+                        2,
+                        "prociso",
+                        "container delete",
+                        "container id",
+                    ) else {
                         return;
-                    }
+                    };
                     prociso::init_defaults();
                     match prociso::delete_container(id) {
                         Ok(()) => shell_println!("Deleted container #{}", id),
@@ -101746,14 +101884,30 @@ fn cmd_devfreq(args: &str) {
         }
         "register" => {
             let name = parts.get(1).copied().unwrap_or("unnamed");
-            let min = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(100_000);
-            let max = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1_000_000);
+            // The success line prints the range, so a guessed bound looks like
+            // a report of what was asked for: `devfreq register gpu 3OO000
+            // 1500000` printed `100000-1500000 kHz` and nothing said the
+            // lower bound was not the one typed.
+            let Some(min) = optional_num::<u64>(
+                &parts,
+                2,
+                "devfreq",
+                sub,
+                "minimum frequency in kHz",
+                100_000,
+            ) else {
+                return;
+            };
+            let Some(max) = optional_num::<u64>(
+                &parts,
+                3,
+                "devfreq",
+                sub,
+                "maximum frequency in kHz",
+                1_000_000,
+            ) else {
+                return;
+            };
             match devfreq::register(name, min, max) {
                 Ok(id) => shell_println!(
                     "devfreq: registered '{}' {}-{} kHz → id {}",
@@ -101769,14 +101923,14 @@ fn cmd_devfreq(args: &str) {
             }
         }
         "transition" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let freq = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(500_000);
+            let Some(id) = required_num::<u32>(&parts, 1, "devfreq", sub, "device id") else {
+                return;
+            };
+            let Some(freq) =
+                optional_num::<u64>(&parts, 2, "devfreq", sub, "frequency in kHz", 500_000)
+            else {
+                return;
+            };
             match devfreq::record_transition(id, freq) {
                 Ok(()) => shell_println!("devfreq: {} → {} kHz", id, freq),
                 Err(e) => {
@@ -101786,16 +101940,29 @@ fn cmd_devfreq(args: &str) {
             }
         }
         "governor" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let gov = match parts.get(2).copied().unwrap_or("ondemand") {
-                "performance" | "perf" => devfreq::Governor::Performance,
-                "powersave" | "save" => devfreq::Governor::PowerSave,
-                "userspace" | "user" => devfreq::Governor::Userspace,
-                "simple" => devfreq::Governor::Simple,
-                _ => devfreq::Governor::OnDemand,
+            let Some(id) = required_num::<u32>(&parts, 1, "devfreq", sub, "device id") else {
+                return;
+            };
+            // The catch-all arm turned `devfreq governor 0 powersace` into
+            // *ondemand* -- neither the governor asked for nor the one that
+            // was in force -- and the success line named `ondemand`, which
+            // reads as confirmation rather than substitution.
+            let gov = match parts.get(2).copied() {
+                None | Some("ondemand" | "demand") => devfreq::Governor::OnDemand,
+                Some("performance" | "perf") => devfreq::Governor::Performance,
+                Some("powersave" | "save") => devfreq::Governor::PowerSave,
+                Some("userspace" | "user") => devfreq::Governor::Userspace,
+                Some("simple") => devfreq::Governor::Simple,
+                Some(other) => {
+                    shell_println!(
+                        "devfreq: {}: `{}' is not a governor (expected ondemand, performance, \
+                         powersave, userspace or simple)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match devfreq::set_governor(id, gov) {
                 Ok(()) => shell_println!("devfreq: {} → {}", id, gov.label()),
@@ -102012,10 +102179,12 @@ fn cmd_userfault(args: &str) {
             shell_println!("userfault: initialized");
         }
         "register" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // Same placeholder-as-default as `pidfd`: an unreadable or missing
+            // pid became pid 0 -- the idle task -- and the arm then reported
+            // success against it.
+            let Some(pid) = required_num::<u32>(&parts, 1, "userfault", sub, "pid") else {
+                return;
+            };
             match userfault::register(pid) {
                 Ok(()) => shell_println!("userfault: registered pid {}", pid),
                 Err(e) => {
@@ -102025,10 +102194,9 @@ fn cmd_userfault(args: &str) {
             }
         }
         "unregister" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "userfault", sub, "pid") else {
+                return;
+            };
             match userfault::unregister(pid) {
                 Ok(()) => shell_println!("userfault: unregistered pid {}", pid),
                 Err(e) => {
@@ -102038,14 +102206,28 @@ fn cmd_userfault(args: &str) {
             }
         }
         "fault" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let ft = match parts.get(2).copied().unwrap_or("") {
-                "wp" => userfault::FaultType::WriteProtect,
-                "minor" => userfault::FaultType::Minor,
-                _ => userfault::FaultType::Missing,
+            let Some(pid) = required_num::<u32>(&parts, 1, "userfault", sub, "pid") else {
+                return;
+            };
+            // The catch-all arm meant `userfault fault 7 mnor` recorded a
+            // *missing*-page fault and said so, which is a different event
+            // from the one asked for and indistinguishable in the output from
+            // having asked for it. An omitted type still means `missing`,
+            // which is a documented default; a typed word that is not one of
+            // the three is refused.
+            let ft = match parts.get(2).copied() {
+                None | Some("missing") => userfault::FaultType::Missing,
+                Some("wp") => userfault::FaultType::WriteProtect,
+                Some("minor") => userfault::FaultType::Minor,
+                Some(other) => {
+                    shell_println!(
+                        "userfault: {}: `{}' is not a fault type (expected missing, wp or minor)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match userfault::record_fault(pid, ft) {
                 Ok(()) => {
@@ -102058,15 +102240,29 @@ fn cmd_userfault(args: &str) {
             }
         }
         "resolve" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let ns = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(5000);
-            let is_copy = parts.get(3).copied().unwrap_or("copy") == "copy";
+            let Some(pid) = required_num::<u32>(&parts, 1, "userfault", sub, "pid") else {
+                return;
+            };
+            let Some(ns) = optional_num::<u64>(&parts, 2, "userfault", sub, "duration in ns", 5000)
+            else {
+                return;
+            };
+            // `== "copy"` gave every unrecognised word the *zero-page*
+            // resolution, so `userfault resolve 7 5000 cpy` recorded the
+            // opposite of the intent under a line that mentions neither.
+            let is_copy = match parts.get(3).copied() {
+                None | Some("copy") => true,
+                Some("zero") => false,
+                Some(other) => {
+                    shell_println!(
+                        "userfault: {}: `{}' is not a resolution (expected copy or zero)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
+            };
             match userfault::record_resolve(pid, ns, is_copy) {
                 Ok(()) => shell_println!("userfault: resolve recorded pid={} ns={}", pid, ns),
                 Err(e) => {
@@ -104251,10 +104447,15 @@ fn cmd_pidfd(args: &str) {
             shell_println!("pidfd: initialized");
         }
         "create" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // `unwrap_or(0)` here was not a default, it was a placeholder:
+            // every one of these six arms answered an unreadable *or absent*
+            // pid with pid 0, then reported success against it. Pid 0 is not
+            // an inert sentinel either -- it is the idle task -- so `pidfd
+            // signal l23` printed `signal to pid 0` and recorded a signal
+            // against the one process on the machine you least meant.
+            let Some(pid) = required_num::<u32>(&parts, 1, "pidfd", sub, "pid") else {
+                return;
+            };
             match pidfd::record_create(pid) {
                 Ok(()) => shell_println!("pidfd: created for pid {}", pid),
                 Err(e) => {
@@ -104264,10 +104465,9 @@ fn cmd_pidfd(args: &str) {
             }
         }
         "poll" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "pidfd", sub, "pid") else {
+                return;
+            };
             match pidfd::record_poll(pid) {
                 Ok(()) => shell_println!("pidfd: polled pid {}", pid),
                 Err(e) => {
@@ -104277,10 +104477,9 @@ fn cmd_pidfd(args: &str) {
             }
         }
         "signal" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "pidfd", sub, "pid") else {
+                return;
+            };
             match pidfd::record_signal(pid) {
                 Ok(()) => shell_println!("pidfd: signal to pid {}", pid),
                 Err(e) => {
@@ -104290,10 +104489,9 @@ fn cmd_pidfd(args: &str) {
             }
         }
         "wait" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "pidfd", sub, "pid") else {
+                return;
+            };
             match pidfd::record_wait(pid) {
                 Ok(()) => shell_println!("pidfd: wait on pid {}", pid),
                 Err(e) => {
@@ -104303,10 +104501,9 @@ fn cmd_pidfd(args: &str) {
             }
         }
         "close" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "pidfd", sub, "pid") else {
+                return;
+            };
             match pidfd::record_close(pid) {
                 Ok(()) => shell_println!("pidfd: closed for pid {}", pid),
                 Err(e) => {

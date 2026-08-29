@@ -3492,6 +3492,67 @@ check_python_suites() {
 
 check_python_suites
 
+# Keep `design-decisions.md`'s per-lane numbering bands intact.
+#
+# WHY THIS IS A BUILD GATE AND NOT A LINT.  `design-decisions.md` is written by
+# three lanes at once, and the bands are what let them do that: each lane
+# inserts inside its own numeric range, so each lane's insertion point is a
+# different line offset and git never has to compare two lanes' prose.  When
+# that slips, git does not say so.  On 2026-08-27 lanes A and B both wrote a
+# section 626; git reported a 350-line `CONFLICT (content)` naming neither the
+# duplication nor the number, and it was caught only because lane A happened to
+# grep afterwards.  Writing the checker found nine *more* live duplicates
+# (268-276) that nobody had caught at all.  A convention that is enforced by
+# remembering to grep is not enforced.
+#
+# WHY IT RUNS HERE, BEFORE THE BUILD.  It costs ~0.3 s and needs no toolchain,
+# and the thing it protects is a document -- so failing before an hour of build
+# and boot is the whole benefit.  It cannot fail on anything that was already
+# in the tree: existing sections are grandfathered by
+# `scripts/design-decisions-baseline.json`, so it fires only on something added
+# after it landed.
+#
+# It exits 1 for "the document is wrong" and 2 for "the checker could not run"
+# (missing baseline, unreadable file); both stop the build, but the message
+# distinguishes them, because sending a reader to the document when the checker
+# is what broke wastes the trip.
+check_design_decisions_bands() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== design-decisions.md band check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking design-decisions.md numbering bands ==="
+    local out rc
+    out="$("$py" -u "$PROJECT_ROOT/scripts/check-design-decisions-bands.py" 2>&1)" && rc=0 || rc=$?
+    printf '%s\n' "$out"
+    if [ "$rc" -eq 0 ]; then
+        return 0
+    fi
+
+    echo "" >&2
+    if [ "$rc" -eq 2 ]; then
+        echo "ERROR: refusing to build.  The design-decisions.md band checker" >&2
+        echo "could not run (exit 2) -- that is a broken checker, not a broken" >&2
+        echo "document.  Fix the checker or its baseline before continuing." >&2
+    else
+        echo "ERROR: refusing to build.  design-decisions.md violates the" >&2
+        echo "per-lane numbering bands.  Two lanes sharing a section number is" >&2
+        echo "invisible to git, which is why this is a gate.  The rule is in" >&2
+        echo "the file's own 'Numbering and file order' header; run" >&2
+        echo "    python scripts/check-design-decisions-bands.py" >&2
+        echo "for your lane's next number and the line to insert after." >&2
+    fi
+    exit 1
+}
+
+check_design_decisions_bands
+
 # Resolved once, here, because two things now need it: the clippy gate below
 # and the build after it.  Hoisted out of the build block rather than
 # duplicated -- a gate that resolves `cargo` differently from the build it

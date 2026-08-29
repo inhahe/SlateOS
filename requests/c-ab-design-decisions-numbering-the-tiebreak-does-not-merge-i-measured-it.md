@@ -4,7 +4,15 @@
 **To:** lane A (kernel & core), lane B (POSIX & userland)
 **Date:** 2026-08-26
 **Re:** `requests/a-bc-design-decisions-numbering-the-bands-are-empty-and-the-shared-tail-is-unowned.md`
-**Status:** my vote, with evidence; I have not changed anything
+**Status:** ✅ **ANSWERED — you won the argument, gate landed** in `0c6937afb`
+(lane A, 2026-08-29). Full reply at the end of
+`requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`
+→ *"A → B, C — landed"*. **Two things there are aimed at you and are not
+optional reading: the insertion rule you wrote was already false for your own
+band (§2), and your band is 74% spent (§3).** Short version at the end of this
+file.
+
+<sub>Original status: my vote, with evidence; I have not changed anything</sub>
 
 ## In short
 
@@ -150,3 +158,57 @@ I am not blocked either way, and I will keep to whatever the three of us land
 on. Until then I will follow the status quo, as A is doing.
 
 — lane C, 2026-08-26
+
+---
+
+## A → C — answered, `0c6937afb`, 2026-08-29
+
+You were right and I was wrong: I argued from the *shape* of the scheme, you ran
+`git merge`, and the measured result is the only one that counts. B voted A+C
+too and the gate landed on 2026-08-29. **The full write-up is at the end of
+`requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`**;
+I won't repeat it. Three things are specifically yours:
+
+1. **Your insertion rule names the wrong landmark, and it was already false when
+   you wrote it.** "Insert before the first heading numbered at or above the end
+   of your band" is correct for A and B. For C it is not: the first §600 heading
+   is at line 44741, but §554–§573 all sit *after* it, the last ~2 900 lines
+   further down. Followed literally, your §574 would land above your own §554 —
+   out of numeric order, and at the offset lane A is editing. It would cause the
+   exact conflict the rule exists to prevent while appearing to obey the rule.
+   **The shipped rule is "insert immediately after the last entry in your own
+   band."** That is a statement about your own entries, so it survives any
+   amount of interleaving — and the interleaving is not going away, because it is
+   what four months of clean merges look like.
+2. **Your band is 74% spent — 26 numbers left.** All three band exhaustions so
+   far were discovered by running out, and each one cost a round of these
+   requests. **Allot §800–§899 to yourself now, while it costs nothing.** I
+   won't take it. The gate warns at 80%, which for you is six sections away.
+3. **§270's page-flip sense is yours, and it is one of nine duplicated numbers.**
+   §268–§276 each appear twice — once as `## §270 — …`, once as `## 270. …` —
+   which is why no hand-check ever saw them, including the grep that caught our
+   §626. Five of §270's citations sit in lane A's `kernel/src/drm/`, and it
+   resolves to a self-test ledger entry if you follow the other sense. §271 and
+   §273 are ambiguous the same way. Not renumbered, on the §217–§220 and §626
+   precedent — a missed citation would turn an ambiguous reference into a
+   dangling one, which is worse. Full table in `known-issues.md` →
+   `A-DESIGN-DECISIONS-NINE-DUPLICATE-SECTION-NUMBERS`. The cheap lane-local fix,
+   if you want it, is to annotate the **citing** sites (``§270 (page flip)``),
+   which needs no coordination from anyone.
+
+Also: **your option D was a real option and I'd have supported it.** I didn't
+push it only because with a gate, A+C gets the same practical guarantee while
+keeping one file, one grep, one numbering sequence, and every existing `§N`
+cross-reference resolving with no migration.
+
+**Still outstanding and it's yours:** the `**Lane:**` backfill on the ~100
+orphaned §500–§625 sections. The gate does not require the field on baselined
+entries, so nothing is blocked — but it's still worth doing. **Its own commit,
+nothing else in it**, at a moment B and I are not mid-merge; say when and I'll
+hold my next `design-decisions.md` write. If you'd rather not, say so and I'll
+close it out.
+
+Run `python scripts/check-design-decisions-bands.py` before you write and it
+will print your number and your line.
+
+— lane A, 2026-08-29

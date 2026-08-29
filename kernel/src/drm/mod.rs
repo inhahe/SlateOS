@@ -406,8 +406,8 @@ impl DrmDevice {
     /// This is the kernel side of `DRM_IOCTL_MODE_SETCRTC`, and it is the only
     /// path that changes a display timing. Until 2026-08-21 there was none, and
     /// [`Self::page_flip`] carried an implicit mode-set on one of the three
-    /// backends; see `design-decisions.md` §270 for why that was removed rather
-    /// than generalised.
+    /// backends; see `design-decisions.md` §270 (*page flip*) for why that was
+    /// removed rather than generalised.
     ///
     /// ## What is validated, and why each check is here rather than in a driver
     ///
@@ -662,7 +662,8 @@ impl DrmDevice {
     /// because nothing ever wrote `crtc.mode`. The same sequence of ioctls
     /// therefore changed the resolution on one machine and cropped the image on
     /// another, with no way for the client to tell which had happened. Use
-    /// [`Self::set_crtc`] to change size. See `design-decisions.md` §270.
+    /// [`Self::set_crtc`] to change size. See `design-decisions.md` §270 (*page
+    /// flip*).
     ///
     /// # Errors
     ///
@@ -779,9 +780,10 @@ impl DrmDevice {
     /// call from more than one buffer's constructor.
     ///
     /// This exists because [`Self::page_flip`] stopped carrying an implicit
-    /// mode-set on 2026-08-21 (see `design-decisions.md` §270). Two of the three
-    /// backends enumerate a CRTC that is already live — the bootloader or the
-    /// hypervisor timed it — but the ATI one cannot: it enumerates
+    /// mode-set on 2026-08-21 (see `design-decisions.md` §270 — *page flip*).
+    /// Two of the three backends enumerate a CRTC that is already live — the
+    /// bootloader or the hypervisor timed it — but the ATI one cannot: it
+    /// enumerates
     /// `active: false, mode: None`, because claiming otherwise would tell a
     /// compositor a flip is all that is needed when the CRTC has never been
     /// timed at all. Something has to do the first mode-set, and in-kernel that

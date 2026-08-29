@@ -3,9 +3,21 @@
 **From:** lane A (kernel & core)
 **To:** lane B (POSIX & userland), lane C (graphics, apps & net)
 **Date:** 2026-08-27
-**Status:** needs a joint decision; I have not changed anything
-**Action needed:** agree on one of the three options below, then one of us
-edits the `roadmap.md` table (a shared prose section, so it needs all three)
+**Status:** ✅ **SETTLED AND LANDED** — `0c6937afb` (lane A, 2026-08-29). All
+three lanes voted **option A + option C** (bands, plus a required `**Lane:**`
+field); I withdrew my own option B after lane C measured it, and the decision is
+now enforced by `scripts/check-design-decisions-bands.py` in the boot test.
+Read the reply at the end of
+`requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`
+rather than this file: **three of the claims below are wrong**, including the
+heading regex, which saw 201 of 527 headings and had been hiding nine duplicate
+section numbers. The decision itself is recorded in `design-decisions.md` §631.
+
+<sub>Original status: needs a joint decision; I have not changed anything.
+Original action needed: agree on one of the three options below, then one of us
+edits the `roadmap.md` table (a shared prose section, so it needs all three) —
+done, and the `roadmap.md` rule-3 row now carries lane C's wording with the
+insertion landmark corrected.</sub>
 
 ## In short
 

@@ -20666,6 +20666,102 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_lacks("and no fill is reported", &out, b"Filled display");
     }
 
+    {
+        // Rung 103 -- the operand dropped in *silence*, which is the third
+        // shape of §600 and the worst of the three. The two shapes above both
+        // leave evidence: a guessed value puts a wrong number on screen, a
+        // catch-all arm installs a visibly-wrong rule. This one leaves none.
+        // `if let Ok(id) = w.parse()` nested inside `if let Some(w) =
+        // parts.get(1)` with no `else` dropped the unreadable word out of both
+        // branches -- nothing printed, no default substituted, `set_exit` never
+        // called. `ptime enable zzz` printed nothing and exited 0, which is
+        // indistinguishable, to a person or a script, from a configuration that
+        // really had been enabled.
+        //
+        // So every assertion here is a *pair*: the refusal is named, and the
+        // success message is asserted absent. Checking only the first would
+        // pass against code that refuses and then acts anyway.
+        let out = capture_command("ptime enable zzz");
+        assert_output_contains(
+            "an unreadable config id is refused rather than silently dropped",
+            &out,
+            b"`zzz' is not a config id",
+        );
+        assert_eq!(last_exit(), 1, "`ptime enable zzz` errors");
+        assert_output_lacks("and nothing is reported enabled", &out, b"enabled.");
+
+        // The same arm's second defect, which only came into view once the
+        // first was fixed: `set_active(id, true).ok()` discarded the `Result`,
+        // so a *readable* id that names no config was announced as enabled.
+        // A fix that refused `zzz` but still said "Config 999 enabled." would
+        // have satisfied the assertion above.
+        let out = capture_command("ptime enable 4294967295");
+        assert_output_lacks(
+            "an id that names no config is not announced as enabled",
+            &out,
+            b"enabled.",
+        );
+        assert_eq!(last_exit(), 1, "`ptime enable 4294967295` errors");
+
+        // `mkeys play` acts on the active session and `mkeys play 3` on session
+        // 3, so the operand selects between two actions rather than carrying a
+        // default. That is why this needed a third helper: `required_num` would
+        // refuse the legitimate omission and `optional_num` has no default to
+        // offer.
+        let out = capture_command("mkeys play zzz");
+        assert_output_contains(
+            "an unreadable session id is refused",
+            &out,
+            b"`zzz' is not a session id",
+        );
+        assert_eq!(last_exit(), 1, "`mkeys play zzz` errors");
+        assert_output_lacks("and no session is reported playing", &out, b"Playing");
+
+        // `qs set` guessed both operands as 0 and then reused the id's guess as
+        // its sentinel for "absent", so a mistyped value set the tile to 0%
+        // and reported "Set to 0%" as the value asked for.
+        let out = capture_command("qs set 1 zzz");
+        assert_output_contains(
+            "a mistyped tile value is refused rather than set to zero",
+            &out,
+            b"`zzz' is not a value",
+        );
+        assert_eq!(last_exit(), 1, "`qs set 1 zzz` errors");
+        assert_output_lacks("and no percentage is reported set", &out, b"Set to 0%");
+
+        // A resource limit is the worst place in the file for a dropped word:
+        // the value silently substituted is the *absence* of the limit asked
+        // for, and the container is created and reported anyway.
+        let out = capture_command("container create zzctr cpu=1O0");
+        assert_output_contains(
+            "an unreadable CPU quota is refused before the container exists",
+            &out,
+            b"`1O0' is not a CPU quota",
+        );
+        assert_eq!(last_exit(), 1, "`container create zzctr cpu=1O0` errors");
+        assert_output_lacks(
+            "and no container is reported created",
+            &out,
+            b"Created container",
+        );
+
+        // The `net=` sub-options assigned `parse_ipv4_octets`'s `None` straight
+        // into the field, so a mistyped gateway did not fail to take effect --
+        // it *removed* the gateway, and said nothing.
+        let out = capture_command("container create zzctr2 net=10.88.0.2,gw=10.88.0.1O");
+        assert_output_contains(
+            "a mistyped gateway is refused rather than clearing the gateway",
+            &out,
+            b"is not an IPv4 address",
+        );
+        assert_eq!(last_exit(), 1, "a mistyped `gw=' errors");
+        assert_output_lacks(
+            "and no container is reported created",
+            &out,
+            b"Created container",
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -75142,9 +75238,17 @@ fn cmd_parentaltime(args: &str) {
             // unreadable word but still lying about the unknown id would have
             // fixed the half that is easy to see.
             match parentaltime::set_active(id, on) {
-                Ok(()) => {
-                    shell_println!("Config {} {}.", id, if on { "enabled" } else { "disabled" })
-                }
+                // Two literal messages rather than one with the verb
+                // interpolated. `check-selftest-wording.py` reads a command's
+                // printable text from the string literals it contains, so
+                // `"Config {} {}."` put neither "enabled" nor "disabled" in the
+                // pool -- and rung 103's `assert_output_lacks(.., b"enabled.")`,
+                // the half that proves the refusal did not go on to act anyway,
+                // silently became an assertion that could never fire. The gate
+                // said so; without it the rung would have looked green while
+                // testing nothing.
+                Ok(()) if on => shell_println!("Config {} enabled.", id),
+                Ok(()) => shell_println!("Config {} disabled.", id),
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
                     set_exit(1);
@@ -75301,27 +75405,23 @@ fn cmd_mediakeys(args: &str) {
         // between two different actions. That is the shape `readable_num`
         // exists for: absent is legitimate, unreadable is not.
         "play" | "pause" => {
-            let (state, key, verb, name) = if sub == "play" {
-                (
-                    mediakeys::PlaybackState::Playing,
-                    mediakeys::MediaKey::Play,
-                    "Playing",
-                    "Play",
-                )
+            let playing = sub == "play";
+            let (state, key) = if playing {
+                (mediakeys::PlaybackState::Playing, mediakeys::MediaKey::Play)
             } else {
-                (
-                    mediakeys::PlaybackState::Paused,
-                    mediakeys::MediaKey::Pause,
-                    "Paused",
-                    "Pause",
-                )
+                (mediakeys::PlaybackState::Paused, mediakeys::MediaKey::Pause)
             };
             if let Some(id_str) = parts.get(1) {
                 let Some(id) = readable_num::<u32>(id_str, "mkeys", sub, "session id") else {
                     return;
                 };
+                // Literal per state, for the reason spelled out on
+                // `ptime enable`: an interpolated verb is not in the command's
+                // printable-text pool, so rung 103's `assert_output_lacks(..,
+                // b"Playing")` could never fire.
                 match mediakeys::set_playback_state(id, state) {
-                    Ok(()) => shell_println!("Session {} → {}", id, verb),
+                    Ok(()) if playing => shell_println!("Session {} → Playing", id),
+                    Ok(()) => shell_println!("Session {} → Paused", id),
                     Err(e) => {
                         shell_println!("Error: {:?}", e);
                         set_exit(1);
@@ -75329,7 +75429,8 @@ fn cmd_mediakeys(args: &str) {
                 }
             } else {
                 match mediakeys::handle_key(key) {
-                    Ok(()) => shell_println!("{} (active session)", name),
+                    Ok(()) if playing => shell_println!("Play (active session)"),
+                    Ok(()) => shell_println!("Pause (active session)"),
                     Err(e) => {
                         shell_println!("Error: {:?}", e);
                         set_exit(1);

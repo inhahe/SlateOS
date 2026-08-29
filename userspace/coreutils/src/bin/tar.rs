@@ -268,9 +268,7 @@ fn main() {
         // `invalid option` rather than being told twice that they typed
         // nothing. The status is 2, not argp's 64 — this is not a malformed
         // command line, it is a well-formed one that asked for no operation.
-        diag!(
-            "tar: You must specify one of the '-Acdtrux', '--delete' or '--test-label' options"
-        );
+        diag!("tar: You must specify one of the '-Acdtrux', '--delete' or '--test-label' options");
         diag!("{TRY_HELP}");
         EXIT_FATAL
     };
@@ -844,10 +842,7 @@ impl Creator<'_> {
     /// first and `..` becomes nothing, which is stored as `.` and listed as
     /// `./`. Appending first would have stripped the slash back off again.
     fn stored_name(&mut self, name: &[u8], dir: bool) -> Vec<u8> {
-        let mut stored = self
-            .prefixes
-            .strip(name, PrefixKind::MemberNames)
-            .to_vec();
+        let mut stored = self.prefixes.strip(name, PrefixKind::MemberNames).to_vec();
         if dir {
             stored.push(b'/');
         }
@@ -1353,7 +1348,10 @@ fn decode_member(block: &[u8; BLOCK_SIZE]) -> Member {
         &[]
     };
     let mut name = Vec::with_capacity(
-        prefix.len().saturating_add(name_field.len()).saturating_add(1),
+        prefix
+            .len()
+            .saturating_add(name_field.len())
+            .saturating_add(1),
     );
     if !prefix.is_empty() {
         name.extend_from_slice(prefix);
@@ -2006,7 +2004,14 @@ fn make_device(path: &Path, mode: u32, block: bool, major: u64, minor: u64) -> i
     let kind = if block { S_IFBLK } else { S_IFCHR };
     // SAFETY: as `make_fifo`. The mode carries the `S_IFMT` bits `mknod`
     // requires, and `dev` is a plain integer.
-    if unsafe { mknod(cpath.as_ptr(), kind | (mode & 0o7777), make_dev(major, minor)) } == 0 {
+    if unsafe {
+        mknod(
+            cpath.as_ptr(),
+            kind | (mode & 0o7777),
+            make_dev(major, minor),
+        )
+    } == 0
+    {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
@@ -2158,10 +2163,7 @@ fn do_extract(
         // Nothing below may use `raw_name` as a path. It is attacker-chosen,
         // and stripping a prefix does not make a `..` in the middle safe.
         if contains_dot_dot(raw_name) {
-            diag!(
-                "tar: {}: Member name contains '..'",
-                escape(raw_name)
-            );
+            diag!("tar: {}: Member name contains '..'", escape(raw_name));
             status = EXIT_FATAL;
             return Handled::Skip;
         }
@@ -3182,8 +3184,14 @@ mod tests {
         let mut p = PrefixNotice::new();
         // Critical: `Path::join` with an absolute path throws the base away, so
         // an unstripped name would ignore `-C` entirely.
-        assert_eq!(p.strip(b"/etc/passwd", PrefixKind::MemberNames), b"etc/passwd");
-        assert_eq!(p.strip(b"///etc/passwd", PrefixKind::MemberNames), b"etc/passwd");
+        assert_eq!(
+            p.strip(b"/etc/passwd", PrefixKind::MemberNames),
+            b"etc/passwd"
+        );
+        assert_eq!(
+            p.strip(b"///etc/passwd", PrefixKind::MemberNames),
+            b"etc/passwd"
+        );
         // Non-UTF-8 bytes survive: the name is what gets created on disk, so
         // any alteration here is a silent rename.
         assert_eq!(p.strip(b"/\xff\xfe", PrefixKind::MemberNames), b"\xff\xfe");
@@ -3223,7 +3231,10 @@ mod tests {
         // nowhere it was not already, which is why `tar -cf - .` round-trips
         // through `./f` unaltered.
         let mut p = PrefixNotice::new();
-        assert_eq!(p.strip(b"./a//b/./c", PrefixKind::MemberNames), b"./a//b/./c");
+        assert_eq!(
+            p.strip(b"./a//b/./c", PrefixKind::MemberNames),
+            b"./a//b/./c"
+        );
         assert_eq!(p.strip(b"a/b/c.txt", PrefixKind::MemberNames), b"a/b/c.txt");
         assert!(p.names.is_empty());
     }
@@ -3586,7 +3597,10 @@ mod tests {
         assert_eq!(strip_leading(b"/d/../e"), (&b"/d/../"[..], &b"e"[..]));
         assert_eq!(strip_leading(b"a/../base"), (&b"a/../"[..], &b"base"[..]));
         // The cut lands past the *last* one, not the first.
-        assert_eq!(strip_leading(b"a/../b/../c"), (&b"a/../b/../"[..], &b"c"[..]));
+        assert_eq!(
+            strip_leading(b"a/../b/../c"),
+            (&b"a/../b/../"[..], &b"c"[..])
+        );
     }
 
     #[test]
@@ -3936,7 +3950,16 @@ mod tests {
     fn long_format_renders_every_member_type() {
         let mut input: Vec<u8> = Vec::new();
         input.extend_from_slice(&make_full_header(
-            b"t/", 0o755, 1000, 1000, 0, 1_577_934_245, b'5', b"", b"", b"",
+            b"t/",
+            0o755,
+            1000,
+            1000,
+            0,
+            1_577_934_245,
+            b'5',
+            b"",
+            b"",
+            b"",
         ));
         input.extend_from_slice(&make_full_header(
             b"t/fifo",
@@ -3975,7 +3998,16 @@ mod tests {
             b"",
         ));
         input.extend_from_slice(&make_full_header(
-            b"t/su", 0o4755, 1000, 1000, 3, 1_577_934_245, b'0', b"", b"", b"",
+            b"t/su",
+            0o4755,
+            1000,
+            1000,
+            3,
+            1_577_934_245,
+            b'0',
+            b"",
+            b"",
+            b"",
         ));
         input.extend_from_slice(&[0u8; BLOCK_SIZE]);
         input.extend_from_slice(&[0u8; BLOCK_SIZE]);

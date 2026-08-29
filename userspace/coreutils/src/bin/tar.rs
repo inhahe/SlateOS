@@ -33,6 +33,7 @@
 //! be created, exits 2 (GNU's fatal-error status), not 0.
 
 use coreutils::diag;
+use coreutils::errmsg::strerror;
 use coreutils::quote::{os_bytes, os_from_bytes, quoteaf, quotef, quotef_os};
 use coreutils::stdfd;
 use std::env;
@@ -46,6 +47,42 @@ use std::process;
 /// that leaves the archive or the extracted tree incomplete, because a caller
 /// that only sees 0 has no way to discover that half its files are missing.
 const EXIT_FATAL: i32 = 2;
+
+/// GNU tar's exit status for a *command line* that could not be parsed.
+///
+/// Not 2, and not 1: tar's argument parser is argp, and argp exits with
+/// `EX_USAGE` (64) when an option is unknown or its argument is missing.
+/// Measured: `tar -Q; echo $?` and `tar -cf; echo $?` both print 64, while
+/// every runtime failure prints 2. The distinction is worth keeping because it
+/// is the one a wrapper script can act on — 64 means "I typed it wrong", 2
+/// means "the archive or the filesystem was the problem".
+const EXIT_USAGE: i32 = 64;
+
+/// The second line argp prints after any usage error, verbatim.
+const TRY_HELP: &str = "Try 'tar --help' or 'tar --usage' for more information.";
+
+/// Close out a run that had at least one non-fatal failure.
+///
+/// GNU prints this once, at exit, in addition to whatever was said about the
+/// individual member — so a log that scrolled past the specific complaint still
+/// ends with the fact that the run did not do what was asked. Returns the
+/// status so call sites can `return failed_with_previous_errors()`.
+fn failed_with_previous_errors() -> i32 {
+    diag!("tar: Exiting with failure status due to previous errors");
+    EXIT_FATAL
+}
+
+/// Close out a run that could not continue at all.
+///
+/// The distinction from [`failed_with_previous_errors`] is GNU's and is not
+/// cosmetic: "previous errors" means the rest of the archive was processed and
+/// some members were not, while this one means processing stopped where it was.
+/// A reader of the log can tell from the last line alone whether the output is
+/// partial or merely incomplete.
+fn fatal() -> i32 {
+    diag!("tar: Error is not recoverable: exiting now");
+    EXIT_FATAL
+}
 
 // ============================================================================
 // argv parsing — pure, cross-platform
@@ -67,6 +104,12 @@ struct TarArgs {
 /// consume the following argv element as their value (even when
 /// clustered as e.g. `-xvf`, in which case the next argv is the value
 /// of `f`).  Unknown short flags return an error.
+///
+/// The error strings are argp's, verbatim, less the `tar: ` prefix the caller
+/// adds: `invalid option -- 'Q'` and `option requires an argument -- 'f'`. They
+/// used to read `option -f requires an argument`, which says the same thing in
+/// a word order nothing else in the system uses — and a caller matching tar's
+/// stderr is matching the real tar's, not ours.
 ///
 /// The scan is over **bytes**, and the values and operands come out as
 /// `OsString` unchanged. Every one of them is a path — the archive, the `-C`
@@ -102,14 +145,14 @@ fn parse_args(args: &[OsString]) -> Result<TarArgs, String> {
                         i = i.saturating_add(1);
                         let v = args
                             .get(i)
-                            .ok_or_else(|| "option -f requires an argument".to_string())?;
+                            .ok_or_else(|| "option requires an argument -- 'f'".to_string())?;
                         out.archive_file = Some(v.clone());
                     }
                     b'C' => {
                         i = i.saturating_add(1);
                         let v = args
                             .get(i)
-                            .ok_or_else(|| "option -C requires an argument".to_string())?;
+                            .ok_or_else(|| "option requires an argument -- 'C'".to_string())?;
                         out.directory = Some(v.clone());
                     }
                     other => {
@@ -143,7 +186,8 @@ fn main() {
         Ok(p) => p,
         Err(e) => {
             diag!("tar: {e}");
-            process::exit(1);
+            diag!("{TRY_HELP}");
+            process::exit(EXIT_USAGE);
         }
     };
 
@@ -174,8 +218,17 @@ fn main() {
     } else if parsed.list {
         do_list_main(parsed.archive_file.as_deref())
     } else {
-        diag!("tar: must specify -c, -x, or -t");
-        1
+        // GNU's own sentence, listing options this tar does not have. That is
+        // deliberate: the message tells the reader what the *format* accepts,
+        // and a user who reaches for `-r` after reading it gets a specific
+        // `invalid option` rather than being told twice that they typed
+        // nothing. The status is 2, not argp's 64 — this is not a malformed
+        // command line, it is a well-formed one that asked for no operation.
+        diag!(
+            "tar: You must specify one of the '-Acdtrux', '--delete' or '--test-label' options"
+        );
+        diag!("{TRY_HELP}");
+        EXIT_FATAL
     };
 
     process::exit(status);
@@ -366,18 +419,26 @@ fn sanitize_member_name(raw: &[u8]) -> Result<Vec<u8>, String> {
             continue;
         }
         if component == b".." || component.split(|&b| b == b'\\').any(|p| p == b"..") {
+            // GNU's sentence, and GNU's quoting of the `..` inside it. Ours
+            // said "refusing to extract X: member name escapes the destination
+            // directory", which is the same refusal described in words no other
+            // tar uses; the name is what the reader needs, and it is already
+            // there. The member is skipped either way.
             return Err(format!(
-                "refusing to extract {}: member name escapes the destination directory",
-                quoteaf(raw)
+                "{}: Member name contains '..'",
+                quotef(raw)
             ));
         }
         parts.push(component);
     }
     if parts.is_empty() {
-        return Err(format!(
-            "refusing to extract {}: empty member name",
-            quoteaf(raw)
-        ));
+        // A name that is only slashes and dots (`/`, `./.`) survives every rule
+        // above and then names nothing. This wording is ours, not measured from
+        // GNU, because GNU's own answer here depends on which of several
+        // stripping passes runs out of name first; what matters is that such a
+        // member is refused rather than resolved to `.`, which is the directory
+        // being extracted into.
+        return Err(format!("{}: Cannot extract: empty member name", quotef(raw)));
     }
     Ok(parts.join(&b'/'))
 }
@@ -388,8 +449,8 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: bool) ->
         Some(path) => match File::create(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                diag!("tar: {}: {e}", quotef_os(path));
-                return EXIT_FATAL;
+                diag!("tar: {}: Cannot open: {}", quotef_os(path), strerror(&e));
+                return fatal();
             }
         },
         None => Box::new(io::stdout()),
@@ -402,7 +463,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: bool) ->
         match out.write_all(buf) {
             Ok(()) => true,
             Err(e) => {
-                diag!("tar: write error: {e}");
+                diag!("tar: Cannot write: {}", strerror(&e));
                 *status = EXIT_FATAL;
                 false
             }
@@ -416,7 +477,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: bool) ->
         let meta = match fs::metadata(path) {
             Ok(m) => m,
             Err(e) => {
-                diag!("tar: {}: {e}", quotef(name));
+                diag!("tar: {}: Cannot stat: {}", quotef(name), strerror(&e));
                 *status = EXIT_FATAL;
                 return;
             }
@@ -432,7 +493,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: bool) ->
         let mut f = match File::open(path) {
             Ok(f) => f,
             Err(e) => {
-                diag!("tar: {}: {e}", quotef(name));
+                diag!("tar: {}: Cannot open: {}", quotef(name), strerror(&e));
                 *status = EXIT_FATAL;
                 return;
             }
@@ -475,7 +536,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: bool) ->
                     Ok(n) => filled = filled.saturating_add(n),
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                     Err(e) => {
-                        diag!("tar: {}: {e}", quotef(name));
+                        diag!("tar: {}: Cannot read: {}", quotef(name), strerror(&e));
                         *status = EXIT_FATAL;
                         short = true;
                     }
@@ -536,7 +597,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: bool) ->
             Err(e) => {
                 // Previously `if let Ok(entries)`, so an unreadable directory
                 // produced an archive silently missing its whole subtree.
-                diag!("tar: {}: {e}", quotef(prefix));
+                diag!("tar: {}: Cannot open: {}", quotef(prefix), strerror(&e));
                 *status = EXIT_FATAL;
                 return;
             }
@@ -557,7 +618,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: bool) ->
             match entry {
                 Ok(e) => children.push((os_bytes(&e.file_name()).into_owned(), e.path())),
                 Err(e) => {
-                    diag!("tar: {}: {e}", quotef(prefix));
+                    diag!("tar: {}: Cannot read: {}", quotef(prefix), strerror(&e));
                     *status = EXIT_FATAL;
                 }
             }
@@ -594,10 +655,14 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: bool) ->
     // The end-of-archive marker is the last thing written, so a flush that
     // fails here loses precisely the bytes that make the file a valid archive.
     if let Err(e) = out.flush() {
-        diag!("tar: write error: {e}");
+        diag!("tar: Cannot write: {}", strerror(&e));
         status = EXIT_FATAL;
     }
-    status
+    if status == 0 {
+        0
+    } else {
+        failed_with_previous_errors()
+    }
 }
 
 /// Number of 512-byte blocks a member of `size` bytes occupies.
@@ -625,8 +690,8 @@ fn do_extract(archive_file: Option<&OsStr>, directory: Option<&OsStr>, verbose: 
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                diag!("tar: {}: {e}", quotef_os(path));
-                return EXIT_FATAL;
+                diag!("tar: {}: Cannot open: {}", quotef_os(path), strerror(&e));
+                return fatal();
             }
         },
         None => Box::new(io::stdin()),
@@ -635,12 +700,13 @@ fn do_extract(archive_file: Option<&OsStr>, directory: Option<&OsStr>, verbose: 
     if let Some(dir) = directory
         && let Err(e) = env::set_current_dir(dir)
     {
-        diag!("tar: {}: {e}", quotef_os(dir));
-        return EXIT_FATAL;
+        diag!("tar: {}: Cannot chdir: {}", quotef_os(dir), strerror(&e));
+        return fatal();
     }
 
     let mut status = 0;
     let mut warned_absolute = false;
+    let mut warned_dotdot = false;
 
     loop {
         let mut header_buf = [0u8; BLOCK_SIZE];
@@ -661,9 +727,28 @@ fn do_extract(archive_file: Option<&OsStr>, directory: Option<&OsStr>, verbose: 
         }
 
         // GNU prints this once, not once per member, and only when it applies.
+        // The quoting is GNU's own — a grave accent opening and an apostrophe
+        // closing — and not this project's `'...'`. It is copied rather than
+        // normalised because the line is an interface: a script grepping for
+        // it is grepping for tar's wording, not for ours.
         if raw_name.first() == Some(&b'/') && !warned_absolute {
-            diag!("tar: Removing leading '/' from member names");
+            diag!("tar: Removing leading `/' from member names");
             warned_absolute = true;
+        }
+        // And the same once-only notice for a name that starts by climbing out.
+        // GNU prints it *and then still refuses the member*, which reads like a
+        // contradiction until you see that the two come from different places:
+        // the notice is about the prefix it would have stripped, the refusal is
+        // about the `..` still in the name. Both lines are reproduced because
+        // both are what a caller comparing stderr will see.
+        if raw_name
+            .split(|&b| b == b'/')
+            .find(|c| !c.is_empty())
+            .is_some_and(|c| c == b"..")
+            && !warned_dotdot
+        {
+            diag!("tar: Removing leading `../' from member names");
+            warned_dotdot = true;
         }
 
         // Nothing below may use `raw_name` as a path. It is attacker-chosen.
@@ -686,7 +771,7 @@ fn do_extract(archive_file: Option<&OsStr>, directory: Option<&OsStr>, verbose: 
         match typeflag {
             b'5' | b'\0' if raw_name.last() == Some(&b'/') => {
                 if let Err(e) = fs::create_dir_all(os_from_bytes(&name)) {
-                    diag!("tar: {}: {e}", quotef(&name));
+                    diag!("tar: {}: Cannot mkdir: {}", quotef(&name), strerror(&e));
                     status = EXIT_FATAL;
                 }
             }
@@ -717,7 +802,11 @@ fn do_extract(archive_file: Option<&OsStr>, directory: Option<&OsStr>, verbose: 
             }
         }
     }
-    status
+    if status == 0 {
+        0
+    } else {
+        failed_with_previous_errors()
+    }
 }
 
 /// Stream one regular member out of `input` into `name`. Returns false when
@@ -738,7 +827,7 @@ fn extract_regular_file(input: &mut dyn Read, name: &[u8], size: u64, status: &m
         && !parent.as_os_str().is_empty()
         && let Err(e) = fs::create_dir_all(parent)
     {
-        diag!("tar: {}: {e}", quotef_os(parent));
+        diag!("tar: {}: Cannot mkdir: {}", quotef_os(parent), strerror(&e));
         *status = EXIT_FATAL;
         return skip_data(input, size);
     }
@@ -748,7 +837,7 @@ fn extract_regular_file(input: &mut dyn Read, name: &[u8], size: u64, status: &m
         Err(e) => {
             // Still consume the data: the archive may hold members after this
             // one, and abandoning the stream would lose them too.
-            diag!("tar: {}: {e}", quotef(name));
+            diag!("tar: {}: Cannot open: {}", quotef(name), strerror(&e));
             *status = EXIT_FATAL;
             None
         }
@@ -758,7 +847,7 @@ fn extract_regular_file(input: &mut dyn Read, name: &[u8], size: u64, status: &m
     let mut block = [0u8; BLOCK_SIZE];
     for _ in 0..data_blocks(size) {
         if input.read_exact(&mut block).is_err() {
-            diag!("tar: {}: unexpected end of archive", quotef(name));
+            diag!("tar: Unexpected EOF in archive");
             *status = EXIT_FATAL;
             return false;
         }
@@ -769,7 +858,7 @@ fn extract_regular_file(input: &mut dyn Read, name: &[u8], size: u64, status: &m
         if let Some(f) = file.as_mut()
             && let Err(e) = f.write_all(block.get(..take).unwrap_or(&[]))
         {
-            diag!("tar: {}: {e}", quotef(name));
+            diag!("tar: {}: Cannot write: {}", quotef(name), strerror(&e));
             *status = EXIT_FATAL;
             // Drop the handle so the rest of the member is only skipped, but
             // keep reading so the following headers stay aligned.
@@ -782,7 +871,7 @@ fn extract_regular_file(input: &mut dyn Read, name: &[u8], size: u64, status: &m
     if let Some(mut f) = file
         && let Err(e) = f.flush()
     {
-        diag!("tar: {}: {e}", quotef(name));
+        diag!("tar: {}: Cannot write: {}", quotef(name), strerror(&e));
         *status = EXIT_FATAL;
     }
     true
@@ -793,8 +882,8 @@ fn do_list_main(archive_file: Option<&OsStr>) -> i32 {
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                diag!("tar: {}: {e}", quotef_os(path));
-                return EXIT_FATAL;
+                diag!("tar: {}: Cannot open: {}", quotef_os(path), strerror(&e));
+                return fatal();
             }
         },
         None => Box::new(io::stdin()),
@@ -808,8 +897,8 @@ fn do_list_main(archive_file: Option<&OsStr>) -> i32 {
         if e.kind() == io::ErrorKind::BrokenPipe {
             return 0;
         }
-        diag!("tar: 'standard output': {e}");
-        return EXIT_FATAL;
+        diag!("tar: 'standard output': Cannot write: {}", strerror(&e));
+        return fatal();
     }
     0
 }
@@ -973,14 +1062,16 @@ mod tests {
 
     #[test]
     fn parse_missing_f_value_errors() {
+        // argp's wording, byte for byte: `tar -cf` says exactly this and exits
+        // 64. See `scripts/tar-diff.sh`, case "-f with no argument".
         let err = parse_args(&s(&["-f"])).unwrap_err();
-        assert!(err.contains("-f requires"));
+        assert_eq!(err, "option requires an argument -- 'f'");
     }
 
     #[test]
     fn parse_missing_c_value_errors() {
         let err = parse_args(&s(&["-C"])).unwrap_err();
-        assert!(err.contains("-C requires"));
+        assert_eq!(err, "option requires an argument -- 'C'");
     }
 
     #[test]

@@ -279,8 +279,17 @@ L="$TMPROOT/l9"; fresh "$L"
 (
     set -u
     PROJECT_ROOT="$PROJECT_ROOT"
+    # SC2034 (appears unused): these three are the *input* to the boot-lock
+    # region sourced on the next line, which is extracted from boot-test.sh at
+    # run time and so cannot be followed (the same reason SC1090 is disabled
+    # below).  They are read, not dead.  Note also that sourcing the region is
+    # what *acquires* the lock -- without that, this case reads as a release
+    # with no acquire, which is not what it tests.
+    # shellcheck disable=SC2034
     BOOT_LOCK_DIR="$L"
+    # shellcheck disable=SC2034
     BOOT_LOCK_OWNER=""
+    # shellcheck disable=SC2034
     BOOT_LOCK_WAIT=0
     # shellcheck disable=SC1090
     . "$REGION"

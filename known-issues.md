@@ -93722,6 +93722,92 @@ argument for the witness being an `assert!` inside the test rather than a note i
 a comment: it is re-checked every run, at the same moment as the assertion it
 guards, so the two cannot drift apart later.
 
+## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
+
+**In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print
+`real 0m1.23s / user … / sys …` -- the shape bash's built-in `time` keyword
+prints. But the program a user reaches by typing `/usr/bin/time` is a different
+program entirely: GNU Time 1.9, which prints
+`1.23user 0.45system 1:15.25elapsed 2%CPU (0avgtext+0avgdata 1152maxresident)k`
+and takes options (`-f`, `-o`, `-p`, `-v`, `-a`, `-q`) the keyword has never
+heard of. Nothing shared: not one option, not one format directive, not one
+line of output. The stub answered to the name and to nothing else.
+
+It also read argv as `String`, so an argument holding a byte that is not valid
+UTF-8 -- a legal filename on this OS -- panicked before the child ever ran.
+
+**Fixed by transcribing GNU Time 1.9's `src/time.c`** into 1063 lines, argv
+carried as `OsString`/`&[u8]` end to end. `scripts/time-diff.sh` (174 cases,
+committed first at `278b32426`) reports **169 passed, 0 differed, 5 differ on
+purpose**, and `cargo test --bin time_cmd` runs 52 unit tests.
+
+**The five `xfail`s, and why each is deliberate:**
+
+| Case | Why it must differ |
+|---|---|
+| `--help` (and the `--hel` abbreviation) | upstream's last three lines refer the reader to `bug-time@gnu.org` and the GNU project's web pages. This is not the GNU project. Everything above those lines is byte-identical, typos included -- "Commonly usaged", the double space in `-h,  --help`, and the literal `real %%e`. |
+| `--version` (and `--vers`) | names SlateOS coreutils, as every other bin here does. |
+| `-f 'ab\'` | upstream walks **past the format's terminating NUL**: it prints `ab?\`, then the NUL itself, then whatever follows it in memory -- measured as `ab?\<NUL>true`, i.e. it read into `argv[2]`. Ours prints `ab?\` and stops. Reproducing an out-of-bounds read to match its output byte for byte is not a compatibility goal. |
+
+**Three upstream quirks that ARE reproduced, because a script can depend on
+them:**
+
+1. **A format ending in a bare `%` loses the closing newline.** `case '\0'` in
+   upstream's `%` switch is a `return`, not a `break`, so it skips both the
+   trailing `putc ('\n')` *and* the `ferror` check that would have reported a
+   write failure. `time -f 'abc%' true 2>/dev/full` therefore exits **0** where
+   every other format exits 1.
+2. **`-p` suppresses `Command exited with non-zero status N`; `-f` with the
+   identical string does not.** `summarize` compares the format *pointer*
+   against `posix_format`, not its contents. `Format::Posix` is a distinct enum
+   variant here for exactly this reason, and two unit tests pin the split.
+3. **`-h` is not an option.** The getopt string is `"+af:o:pqvV"`; only the long
+   `--help` reaches `case 'h'`. `time -h true` is an "invalid option" error.
+
+**The stderr/file exit-code asymmetry, which is the subtlest thing here.**
+Measured on GNU: `time true 2>&-` → 1, `time /nope 2>&-` → 1 (*not* 127),
+`time true 2>/dev/full` → 1, but `time -o /dev/full true` → **0**. The reason is
+buffering: stderr is unbuffered, so `summarize`'s per-directive
+`if (ferror (fp)) error (1, errno, "write error")` fires immediately; a `-o FILE`
+stream is block-buffered, so nothing is written inside `summarize` at all and
+the only flush is `main`'s **unchecked** `fflush (outfp)`. The port reproduces
+this structurally rather than by special-casing the exit code: `Sink::Standard`
+writes straight through, `Sink::File` buffers 4096 bytes.
+
+**Note there is no gnulib `close_stdout` in GNU time** -- `time --help >&-`
+exits 0 in silence and `time --help >/dev/full` exits 0. That is the opposite of
+`nice`'s rule, so the sibling ports must not be copied here; `run` discards the
+help/version stream's `finish()` on purpose, with a comment saying so.
+
+**Where the numbers come from.** Upstream calls `wait3`, which hands back the
+reaped child's rusage directly. Rust's `Child::wait` has no such variant, so the
+port calls `getrusage(RUSAGE_CHILDREN)` after the single `wait` -- identical as
+long as exactly one child is ever reaped, which is the case. On Linux
+`RUSAGE_MEM_TO_KB` is the identity (`GETRUSAGE_RETURNS_KB`, confirmed from
+`rusage-kb.h`), so no page-size conversion is needed. **On SlateOS itself,
+`posix::resource::getrusage` leaves `RUSAGE_CHILDREN` all-zero**, so every
+memory and fault directive reads 0 there until the kernel accounts children.
+That is a posix/ gap, not a bug in this transcription.
+
+**Gates cleared by the rewrite:** `time_cmd.rs:argv-as-string` out of
+`scripts/argv-utf8-baseline.txt` (**11 findings remain across 10 files** --
+`diff ed fetch grep logger more patch ps sh tar`, `sh` carrying two; this line
+said "10 across 9" until 2026-08-29 -- it counted the *files* and forgot that
+`sh` contributes two findings, the same off-by-one commit `631783b54` made.
+`python scripts/argv-utf8.py --check` prints the number and is the authority.
+It became 10 across 9 for real when `grep` left the baseline, below);
+`time_cmd.rs:host-error-text` out of `scripts/host-errmsg-baseline.txt` (8 files
+remain). `scripts/getopt-ambiguity-check.py` no longer lists `time_cmd` in
+`NOT_GNU` -- GNU does ship the program, just not under our file's name, so the
+script gained a `GNU_NAME` override table (`time_cmd` → `time`) and a
+`Table.gnu` property. Full sweep: 59 tables checked, 0 disagreements.
+
+**The name is still `time_cmd`, and nothing renames it on installation.** The
+old module doc claimed "the binary is installed as `time`"; that was false --
+`scripts/create-ext4-rootfs.sh` does not install the Rust coreutils bins at all.
+`src/bin/time.rs` would collide with Rust's own `time` crate, which is the only
+reason for the suffix. The diff harness symlinks both sides as `time` so that
+`argv[0]`-derived text matches.
 ## `A-DESIGN-DECISIONS-NINE-DUPLICATE-SECTION-NUMBERS` (lane A, 2026-08-29) — ⚠️ RECORDED, NOT FIXED (deliberately); the *recurrence* is fixed
 
 **In short:** `design-decisions.md` numbers its sections, and other files cite
@@ -93871,3 +93957,199 @@ entries in this file and lane A does not edit another lane's entries:
 
 Both are one-word edits — ``§270 (page flip)`` — and neither blocks anything;
 they are listed so the count is honest rather than because they are urgent.
+
+---
+
+## `A-THE-SHELLCHECK-GATE-DOES-NOT-CATCH-THE-BUG-CLASS-IT-WAS-BUILT-FOR` (lane A, 2026-08-29) — **open**, coverage gap with a named remedy
+
+**What it is.** `check_shellcheck` in `scripts/boot-test.sh` refuses to build
+when `scripts/shellcheck-all.sh` reports a finding — but it asks for findings
+at severity **`error`**, and `error` is a bar almost nothing clears. It catches
+shell that will not parse. It does **not** catch the unquoted-expansion class,
+which is severity `warning`, and the unquoted-expansion class is the one that
+has actually cost this project money: see
+`A-A-STRAY-D-VISUAL-TURNED-EVERY-WORD-SPLIT-OF-OUR-OWN-PATH-INTO-A-SILENT-SUCCESS`
+above, where `D:\visual studio projects` split on its space and every consumer
+of the fragment silently succeeded on the wrong path.
+
+So the gate as it stands would not have caught the bug that motivated having a
+gate. It is not useless — a parse error caught before a 900-second QEMU window
+is worth the ~40 s it costs — but its headline claim is broader than its reach,
+and that gap should be written down rather than discovered later by someone
+trusting it.
+
+**Why it is not simply raised.** The tree is not clean at `warning`. As of
+`bc1965e3f`:
+
+```
+78 script(s), 38 with findings at severity warning, 44 finding(s) total
+```
+
+All 44 are in lane B's differential harnesses (`scripts/*-diff.sh` and
+`gen-chmod-fixture.sh`, which ship with `userspace/**`). Lane A may not edit
+them — `scripts/which-lane.py` gives lane A exactly `boot-test.sh`,
+`run-timeout.py` and `wedge-soak.sh` under `scripts/` — and a 37-file
+mechanical sweep is the worst possible shape of cross-lane change, touching
+everything and conflicting with whatever lane B has in flight.
+
+**What is already done.** Lane A's own six findings are cleared, each with a
+per-line `# shellcheck disable=` and a written reason (`ce784e028`). None was a
+real defect; each had to be read to establish that. Those six were the half of
+the blocker that the original reversal condition in `design-decisions.md` §630
+failed to mention, which is why the condition read as satisfied while the
+reversal would still have broken the build.
+
+**The remedy, and who holds it.**
+`requests/a-b-shellcheck-floor-the-remaining-findings-are-all-yours.md` gives
+lane B every site as `file:line`, the command to regenerate the list, and the
+seven findings that need reading rather than quoting. 37 of the 44 are one
+character each: `DIFF_PROG=awk` → `DIFF_PROG='awk'`. `dd-diff.sh:107` is
+already quoted and is the one harness of the set with no finding, so the fix is
+proven, not proposed.
+
+**It gets worse with time, slowly.** The count is not fixed. It was 43 across
+76 scripts when the request was drafted and 44 across 78 an hour later, because
+`xargs-diff.sh` merged from `main` carrying the same unquoted idiom as its 36
+predecessors. Every new harness adds one. The highest-value single action is
+therefore not the sweep but fixing the template lane B copies from.
+
+**How to close this.** When `bash scripts/shellcheck-all.sh warning` exits 0,
+change one word at `scripts/boot-test.sh` in `check_shellcheck`:
+
+```sh
+out="$(bash "$PROJECT_ROOT/scripts/shellcheck-all.sh" warning 2>&1)" && rc=0 || rc=$?
+```
+
+That file is lane A's, so lane B should not make the change — it should say
+the tree is clean and lane A will.
+
+**One trap for whoever measures this.** `shellcheck-all.sh` runs `shellcheck
+-x` from *inside* `scripts/`, and `-x` is load-bearing: it resolves the
+harnesses' `# shellcheck source=diff-wsl.sh` and suppresses about three
+findings per harness. Run by hand from the repo root the relative `source=`
+cannot resolve, `-x` appears to do nothing, and the count comes out much
+higher. Lane A hit exactly that and briefly recorded "`-x` does not help" as a
+finding. Trust the number `shellcheck-all.sh` prints, because that is the
+invocation the gate itself uses.
+
+## `B-GREP-READ-ITS-ARGV-AS-A-STRING-AND-ELEVEN-OF-GNUS-OPTIONS-DID-NOT-EXIST` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
+
+**In short:** `grep` collected its command line into `Vec<String>`, so a search
+whose pattern or file name held a byte that is not valid UTF-8 -- a legal file
+name on this OS -- killed the program before it read anything. It also silently
+did not have eleven of GNU grep's options, answering each with `unknown option`.
+Both are fixed: argv is `OsString`/`&[u8]` end to end, the option table is all
+fifty of GNU's long options, and the differential harness went from 467 cases to
+498 with none differing.
+
+**Where it was.** `userspace/coreutils/src/bin/grep.rs`, listed in
+`scripts/argv-utf8-baseline.txt` as `grep.rs:argv-as-string`. It is now out of
+that file; `python scripts/argv-utf8.py --check` prints **10 findings across 9
+files** (`diff ed fetch logger more patch ps sh tar`, `sh` carrying two).
+
+### The bytes half
+
+`main` did `env::args_os().map(|a| a.to_string_lossy().into_owned())`, and the
+hand-written parser worked in `&str` from there. Three consequences, in
+increasing order of how quietly they failed:
+
+1. A non-UTF-8 **operand** became U+FFFD, so `grep pat $'f\xffle'` opened the
+   wrong path or none, reporting `No such file or directory` about a file that
+   exists.
+2. A non-UTF-8 **pattern** was mangled the same way, so the search was not the
+   search that was asked for -- and it *succeeded*, which is worse than failing.
+3. `search_found` -- the recursive walk's per-file entry point -- called
+   `to_string_lossy` on every path it descended into, so the corruption applied
+   to files the user never named. It now works on `quote::os_bytes` and rebuilds
+   the `OsString` with `quote::os_from_bytes`.
+
+`Prefix::filename` and `Source::filename` changed `&'a str` -> `&'a [u8]`,
+which is what carries the name all the way to the write, colouring included.
+
+### The options half
+
+Eleven options were declared to `getopt` for the first time, which is not the
+same as implementing them -- each was checked against GNU grep 3.11 and does
+what upstream does:
+
+| Option | What it now does |
+|---|---|
+| `-P`, `--perl-regexp` | prints upstream's own `Perl matching not supported in a --disable-perl-regexp build` and exits 2 -- the right answer for a build without PCRE, rather than `unknown option` |
+| `-X`, `--matcher=NAME` | long-hand for `-G`/`-E`/`-F`; `grep`, `egrep`, `fgrep`, `awk`, `gawk`, `posixawk`, `perl` |
+| `-I` | `--binary-files=without-match` (see the gap below) |
+| `--binary-files=TYPE` | `binary`/`text`/`without-match`, matched with `STREQ` -- **exact**, where `-d` uses argmatch's prefix matching. The asymmetry is upstream's and is now pinned by a case |
+| `-U`, `--binary` | accepted and ignored; it is a no-op off MS-DOS |
+| `-u`, `--unix-byte-offsets` | warns `grep: warning: --unix-byte-offsets (-u) is obsolete` on stderr, in argv order, and continues |
+| `-V`, `--version` | prints a version and exits 0 |
+| `--help` | GNU 3.11's help text on stdout, exit 0 |
+| `--label=LABEL` | renames standard input only; a named file keeps its name |
+| `--line-buffered` | flushes at GNU's three sites: end of `prline` (so `-o` flushes once per *line*, after the last of that line's matches), after the `-c` count, and after the `-l`/`-L` name |
+| `--no-ignore-case` | undoes an `-i` that came earlier on the same line |
+
+### What the conversion fixed that was not the point of it
+
+Four cases the harness had recorded as expected-to-differ turned green on their
+own, because `coreutils::getopt` produces glibc's and gnulib's diagnostics
+rather than our own wording. They were `grep` with no operand, `grep --zzz`,
+`grep -m x` and `grep -d bogus`. The last is the interesting one: it exits **1**,
+not 2, because gnulib's argmatch dies on its own rather than through grep's
+`usage(EXIT_TROUBLE)` -- which is why `Program::argmatch` forces status 1
+regardless of the program's usage status.
+
+That grep has **three** error shapes and not one was measured, not read:
+
+| command | output | status |
+|---|---|---|
+| `grep` | usage summary + `Try ...`, **no `grep: ` line at all** | 2 |
+| `grep --zzz` / `grep -Q` / `grep -m` | `grep: <glibc sentence>` + usage + `Try ...` | 2 |
+| `grep -d bogus` | argmatch's five lines + usage + `Try ...` | **1** |
+| `grep -D bogus` / `-X bogus` / `-m x` / `-A x` / `--binary-files=bogus` / `-E -F` | `grep: <one line>` and nothing else | 2 |
+
+`run_main` reproduces the split with `if e.referral.is_some()`, which is exactly
+where `getopt` already draws the line between a `sentence()`-built error and a
+`usage()` one. An earlier draft printed the usage summary under *every* error;
+the probe is what caught it.
+
+A wrong test was also removed. `parse_empty_errors` asserted the message
+`missing PATTERN` -- a string GNU grep has never printed. A bare `grep` is
+`usage(EXIT_TROUBLE)` with no diagnostic.
+
+### Gates
+
+- `python scripts/getopt-ambiguity-check.py grep` -> 1 table checked, **0
+  disagreements**. grep was previously outside this check entirely, having no
+  declared table to check. The 50 long options are kept in GNU's declaration
+  order because getopt lists ambiguous candidates in that order, and `grep --l`
+  is ambiguous.
+- `bash scripts/grep-diff.sh` (in WSL) -> **498 passed, 0 differed, 12 on
+  purpose, 0 unexpectedly agreed**, up from 467/0/5/4.
+- 108 unit tests pass; `cargo clippy` clean under the crate's
+  `deny(clippy::all, clippy::pedantic)`.
+
+### The gap this leaves: `TD-COREUTILS-GREP-NEVER-DETECTS-BINARY-CONTENT`
+
+`--binary-files` is one setting with three behaviours and we implement one.
+`text` -- print the bytes -- is what we always do, so it agrees with GNU. The
+other two need content detection we do not have:
+
+- `binary` (**the default**): GNU writes **nothing to stdout** and prints
+  `grep: F: binary file matches` on **stderr**, exiting 0. We print the lines.
+- `without-match` / `-I`: GNU treats the file as not matching at all -- nothing
+  on either stream, exit 1. We search it normally.
+
+The stream and the wording were measured against the reference host's 3.11
+(`grep ary bf > o 2> e`, then `od -c` on both), not read out of the source, and
+the measurement contradicts the description this entry first carried. Older grep
+printed `Binary file F matches` on **stdout**, and most second-hand accounts of
+the feature still say so; 3.x moved it to stderr and lower-cased it. Note also
+that command substitution loses it -- `$(grep ary bf 2>&1 >/dev/null)` came back
+empty in the first probe, which is what sent the first draft to the wrong
+stream. `-c` and `-l` are unaffected: they print `1` and the file name as usual,
+because what is suppressed is the *lines*, not the file.
+
+The proper fix is upstream's rule, not a heuristic of our own: a file is binary
+if the first buffer holds a NUL, or holds an encoding error in the current
+locale. `-a` / `--binary-files=text` bypasses the check, and `-z` changes it
+(NUL is the line terminator then, so it cannot be the marker). Four cases in
+`scripts/grep-diff.sh` under `# --- binary ---` are marked `!` with this reason
+and should all turn XPASS together when it lands.

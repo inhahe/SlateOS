@@ -1403,6 +1403,12 @@ done
 # stop, so it must not be reintroduced by the floor itself.
 for _floor_var in MIN_FREE_GB MIN_FREE_TEMP_GB; do
     eval "_floor_val=\$$_floor_var"
+    # SC2154 (referenced but not assigned): the assignment is the `eval` on the
+    # line above, which shellcheck does not follow.  It suggests `_floor_var`,
+    # which is the loop variable and would compare the floor's *name* against
+    # the digits -- i.e. the suggested "fix" silently disables the check this
+    # loop exists to perform.
+    # shellcheck disable=SC2154
     case "$_floor_val" in
         # Empty MIN_FREE_TEMP_GB is the documented "use the default" value and
         # is resolved just below; empty MIN_FREE_GB is not, it has a default.
@@ -1836,6 +1842,11 @@ if [ "$MONITOR_ENABLED" -eq 1 ]; then
     echo "=== Diagnostic HMP monitor ENABLED (tcp:127.0.0.1:$MONITOR_PORT, $MONITOR_PORT_SRC) ==="
 fi
 if [ "$HARD_LOCKUP_WATCHDOG" -eq 1 ]; then
+    # SC2054 (use spaces, not commas, between array elements): the comma is
+    # QEMU's own property separator inside a single `-device` argument, not a
+    # separator between two of ours.  Splitting on it would pass `id=hwdog0` as
+    # a standalone argument and QEMU would reject the command line.
+    # shellcheck disable=SC2054
     WATCHDOG_ARGS=(-device i6300esb,id=hwdog0 -action "watchdog=$WATCHDOG_ACTION")
     echo "=== Hard-lockup watchdog ENABLED (i6300esb -> $WATCHDOG_ACTION) ==="
     if [ "$MONITOR_ENABLED" -ne 1 ]; then
@@ -4008,6 +4019,9 @@ if [ "$NO_ROOTFS" -eq 0 ] && [ -f "$ROOTFS_IMG" ]; then
     # check_rootfs_freshness: the image's timestamp now records when it was
     # last *packed*, which is what every other staleness check in this script
     # assumes about the files it compares.
+    # SC2054: as with WATCHDOG_ARGS above, the comma is QEMU's property
+    # separator within one `-device` argument, not a separator between ours.
+    # shellcheck disable=SC2054
     ROOTFS_ARGS=(
         -device virtio-blk-pci,drive=rootfs-disk
         -drive "id=rootfs-disk,if=none,format=raw,snapshot=on,file=$ROOTFS_IMG_WIN"

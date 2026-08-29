@@ -96,8 +96,20 @@ NOT_GNU = {
     "bc",  # GNU bc exists but is not coreutils and has a different option set
     "fetch",
     "logger",
-    "time_cmd",
     "minishell",
+}
+
+# Bins whose source file is named something other than the program, because the
+# obvious name is taken. Checking these under `path.stem` would probe a command
+# that does not exist and read as "utility missing?"; skipping them instead
+# would lose a real comparison, since GNU does ship the program -- just under
+# the other name.
+GNU_NAME = {
+    # `src/bin/time.rs` would collide with Rust's own `time` crate, and the
+    # program it transcribes is GNU Time 1.9's /usr/bin/time. Note that this is
+    # *not* the shell's `time` keyword: the probe runs the name through "$1",
+    # which bash expands after keyword recognition, so PATH is consulted.
+    "time_cmd": "time",
 }
 
 # Only the *head* of the declaration is matched by regex; the body is then
@@ -131,6 +143,16 @@ class Table:
     util: str
     names: list[str]
     aliases: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def gnu(self) -> str:
+        """The name to *run* on the GNU side.
+
+        `util` names our source file and is what every message says, because
+        that is the name a reader has to go and edit. Only the subprocess needs
+        the other one.
+        """
+        return GNU_NAME.get(self.util, self.util)
 
     def identity(self, name: str) -> str:
         return self.aliases.get(name, name)
@@ -390,7 +412,7 @@ cd /; rmdir "$d" 2>/dev/null || true
 
 def check(table: Table, runner: list[str]) -> list[str]:
     """Every way this bin's table disagrees with GNU's."""
-    theirs_table = gnu_table(runner, table.util)
+    theirs_table = gnu_table(runner, table.gnu)
     if theirs_table is None:
         return [f"{table.util}: could not read GNU's table (utility missing?)"]
     if mismatch := compare_tables(table, theirs_table):
@@ -407,7 +429,7 @@ def check(table: Table, runner: list[str]) -> list[str]:
     )
     if not prefixes:
         return []
-    theirs = gnu_verdicts(runner, table.util, prefixes)
+    theirs = gnu_verdicts(runner, table.gnu, prefixes)
     if not theirs:
         return [f"{table.util}: no GNU verdicts came back (utility missing?)"]
 

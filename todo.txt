@@ -55049,3 +55049,32 @@ TRIGGER
   Adding any pane key binding that selects or activates a notification card.
   The `drop(...)` call in `handle_hotkey` is the exact line to revisit; its doc
   comment points here.
+
+================================================================================
+PROGRESS 2026-08-29 (lane B): time_cmd is now GNU Time 1.9, not bash's keyword
+================================================================================
+
+`userspace/coreutils/src/bin/time_cmd.rs` was a stub that printed bash's `time`
+keyword output (`real 0m1.23s`).  The program users actually reach by that path
+is GNU Time 1.9, which shares nothing with the keyword -- not an option, not a
+format directive, not a line of output.  Replaced with a transcription of
+`time-1.9/src/time.c`, argv carried as bytes throughout.
+
+  scripts/time-diff.sh   174 cases: 169 passed, 0 differed, 5 differ on purpose
+  cargo test --bin time_cmd   52 passed
+
+Full write-up, including the five xfails, the three upstream quirks reproduced
+on purpose, and the stderr-vs-`-o`-file exit-code asymmetry, is in
+known-issues.md -> `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME`.
+
+CARRIED FORWARD -- a posix/ gap this exposed
+  `posix::resource::getrusage` leaves RUSAGE_CHILDREN entirely zero, so on
+  SlateOS every memory and fault directive (%M %K %X %D %p %t %F %R %W %c %w
+  ...) reads 0.  The transcription is correct; the data is not there.  Fixing
+  it means the kernel accounting reaped children's usage into the parent, which
+  is a kernel-side change (lane A) plus the posix/ plumbing (lane B).  Not
+  filed as a request yet because nothing depends on it beyond cosmetics.
+
+REMAINING argv-utf8 BACKLOG -- 10 findings across 9 files
+  diff ed fetch grep logger more patch ps sh tar   (`sh` carries two: argv and
+  env).  `python scripts/argv-utf8.py --check` is the authority.

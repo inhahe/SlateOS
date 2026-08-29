@@ -81827,7 +81827,87 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **362 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **346 of 800 remain**
+
+> **Burn-down log.** 2026-08-29 (thirty-seventh batch): `cmd_firewall` (4),
+> `cmd_parentaltime` (4), `cmd_service_limits` (4) and `cmd_cpuset` (4) cleared —
+> 362 → 346 across 194 → 190 functions. Pinned by self-test rung 101.
+>
+> **In short:** these four were batched together because they share a property
+> no previous batch had, and it is the one that makes this class dangerous
+> rather than merely untidy. **In all four, the value that was guessed is the
+> setting that enforces nothing.** A firewall rule with no port matches every
+> port; a screen-time limit of zero minutes is not a strict limit but an absent
+> one; a service quota of zero is printed by the command itself as
+> `unlimited`. So the substitution did not produce a *wrong* restriction, which
+> a user might eventually notice — it produced *no* restriction, and then
+> printed the success line that says the restriction was applied.
+>
+> * **`cmd_firewall` is the most severe instance found in thirty-seven
+>   batches**, and the severity was verified in the subsystem rather than
+>   assumed. `net/firewall.rs:146` documents `dst_port: 0` as "any port",
+>   `:142` documents `src_ip` `0.0.0.0` as "any", and the matcher at `:1467`
+>   reads `if rule.dst_port != 0 && rule.dst_port != port` — it honours both.
+>   Therefore `fw allow in tcp port 8O8O` (letter O) did not install a rule for
+>   a wrong port and did not fail: **it opened every inbound TCP port** and
+>   printed `Rule 3 added`. There were four distinct ways to reach that state,
+>   not one: the unreadable port; the unreadable address (`ip 10.0.0.256` →
+>   accept from anywhere); `prefix_part.parse().unwrap_or(32)`; and — the
+>   quietest — `_ => { i += 1; }`, which discarded an unrecognised keyword *and*
+>   left its operand to be re-read as a keyword, so `fw allow in tcp prot 80`
+>   (for `port`) threw away both words and installed an any-port rule. Every
+>   defect existed twice, because the IPv6 arm is a hand-copied twin; the gate
+>   is what found the second copy, after the first was fixed and it reported
+>   `2 fewer than expected` instead of 4.
+> * **A prefix-length ceiling that never existed.** `/33` on an IPv4 rule (or
+>   `/129` on IPv6) parsed as a `u8` and was stored. What a matcher does with a
+>   prefix wider than its address is undefined by anything written down here, so
+>   this was not a guessed value but an unchecked one — found while fixing the
+>   arm, and fixed with it. `0` remains legal: it is "any address" said
+>   deliberately, which is exactly the distinction the rest of this batch is
+>   about.
+> * **`cmd_service_limits` is the clearest instance anywhere in kshell**,
+>   because the proof is in the same function. The `set` arm read
+>   `val.parse().unwrap_or(0)` four times; the `list` arm, forty lines above,
+>   renders a limit of `0` as the literal string `"unlimited"`. So
+>   `slimit set web rss=1O24` removed the limit and then printed the limits back
+>   with `unlimited` in the column the operator had just tried to fill.
+> * **`cmd_parentaltime` is the one where nobody is placed to notice.** A
+>   parental control restricts one person and is read by another, so a silent
+>   failure has no observer. `parentaltime::record_usage` gates enforcement on
+>   `daily_limit_minutes > 0`, so `ptime limit 1 6O` printed
+>   `Daily limit set to 0 min` — a line that reads like a total lockout and
+>   means the opposite. Its `use` operand is the inverse case and is refused for
+>   the opposite reason: usage *accumulates*, so a mistyped `ptime use 1 4O`
+>   charged 30 minutes that were never spent and reported the invented number as
+>   fact.
+> * **`cmd_cpuset` is the variant, and is included to mark the boundary.** Its
+>   four `id` operands defaulted to `0`, which is not a wider setting but a
+>   *different object* — set 0 exists, `cpuset init` creates it, and
+>   `cpuset destroy 1O` destroyed it while printing `destroyed id=0`. Its two
+>   mask operands are the widening case proper: an unreadable mask became `0xF`,
+>   four CPUs nobody asked for, echoed back in the same hex the operator had
+>   just typed.
+> * **A new shared helper, `optional_hex`.** The mask sites used
+>   `…and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()).unwrap_or(0xF)`,
+>   an idiom with **8 further occurrences** still in the file. `from_str_radix`
+>   is an inherent method rather than a trait one, so there was nothing in
+>   `core` to bound a generic on; a three-line `FromHexStr` trait with a macro
+>   impl for `u16`/`u32`/`u64` supplies it. Future batches inherit the tool.
+> * **An incidental find, fixed in place: fifteen diagnostics named a command
+>   that routes elsewhere.** Every usage and error line in `cmd_firewall` said
+>   `firewall`, but the dispatcher sends `firewall` to `cmd_fwsettings` — a
+>   different subsystem (`fs::fwsettings`) with no `allow`/`deny` at all. The
+>   command is `fw`, which is what its own help arm has always printed. So a
+>   user who followed the usage text verbatim reached the wrong command. Not a
+>   guessed value, but the same failure mode one layer up: output stating
+>   something untrue with complete confidence.
+>
+> **Not fixed here, and deliberately.** The `direction` and `protocol` operands
+> of a firewall rule already refuse (`_ =>` prints usage and returns), so they
+> were never in this class. And `cmd_fwsettings` — the *other* firewall command
+> — was not audited in this batch; it is `fs::fwsettings`, a separate subsystem,
+> and pulling it in would have made the batch about two things.
 
 > **Burn-down log.** 2026-08-29 (thirty-sixth batch): `cmd_printf` (5) cleared —
 > 367 → 362 across 195 → 194 functions. Pinned by self-test rung 100.

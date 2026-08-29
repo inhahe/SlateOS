@@ -20346,6 +20346,151 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!(
+        "  kshell::self_test 101: a mistyped word in a firewall rule, a screen-time \
+         limit or a service quota is refused, because the value it used to be \
+         replaced with was the one that enforces nothing"
+    );
+    // Every batch before this one could say that a guessed value was *wrong*.
+    // These four functions are the ones where the guessed value was
+    // specifically the **least restrictive setting the command can express**,
+    // so the substitution did not weaken the answer -- it removed the control,
+    // and then printed the line that says the control was applied.
+    //
+    // The proof is not inferred in any of the four. `net/firewall.rs:146`
+    // documents `dst_port: 0` as "any port" and the matcher at `:1467` honours
+    // it; `parentaltime::record_usage` gates enforcement on
+    // `daily_limit_minutes > 0`; and `cmd_service_limits`' own `list` arm
+    // renders a limit of `0` as the literal word "unlimited" forty lines above
+    // the `unwrap_or(0)` that produced it.
+    //
+    // As in rungs 98 and 100, every assertion is a refusal emitted before the
+    // subsystem is reached, so none depends on state a fresh boot may not have
+    // initialised -- the §604 trap.
+    {
+        // The four ways to widen an IPv4 rule by mistyping one word. Note the
+        // command is `fw`: `firewall` reaches `cmd_fwsettings`, which is why
+        // the usage lines that said "firewall" were corrected in this batch.
+        let out = capture_command("fw allow in tcp port 8O8O");
+        assert_output_contains(
+            "an unreadable port is named, not left as the any-port sentinel",
+            &out,
+            b"`8O8O' is not a port number",
+        );
+        assert_eq!(last_exit(), 1, "`fw allow in tcp port 8O8O` errors");
+        assert_output_lacks("and no rule is reported added", &out, b"added");
+
+        let out = capture_command("fw allow in tcp ip 10.0.0.256");
+        assert_output_contains(
+            "an out-of-range octet is refused, not left as any-address",
+            &out,
+            b"`10.0.0.256' is not an IPv4 address",
+        );
+        assert_eq!(last_exit(), 1, "`fw allow in tcp ip 10.0.0.256` errors");
+        assert_output_lacks("and no rule is reported added", &out, b"added");
+
+        // The ceiling that never existed: `/33` parsed as a `u8` and was stored.
+        let out = capture_command("fw allow in tcp ip 10.0.0.1/33");
+        assert_output_contains(
+            "a prefix wider than the address is refused",
+            &out,
+            b"prefix length 33 is above 32",
+        );
+        assert_eq!(last_exit(), 1, "`fw allow in tcp ip 10.0.0.1/33` errors");
+        assert_output_lacks("and no rule is reported added", &out, b"added");
+
+        // The quietest of the four: the old `_ => { i += 1; }` threw away the
+        // misspelt keyword *and* its operand, leaving an any-port rule.
+        let out = capture_command("fw allow in tcp prot 80");
+        assert_output_contains(
+            "a misspelt modifier is named rather than skipped",
+            &out,
+            b"unknown option `prot'",
+        );
+        assert_eq!(last_exit(), 1, "`fw allow in tcp prot 80` errors");
+        assert_output_lacks("and no rule is reported added", &out, b"added");
+
+        // The IPv6 twin carried all four defects; its prefix ceiling is 128.
+        let out = capture_command("fw allow6 in tcp port 8O8O");
+        assert_output_contains(
+            "the IPv6 rule parser refuses on the same rule",
+            &out,
+            b"`8O8O' is not a port number",
+        );
+        assert_eq!(last_exit(), 1, "`fw allow6 in tcp port 8O8O` errors");
+        assert_output_lacks("and no rule is reported added", &out, b"added");
+
+        let out = capture_command("fw allow6 in tcp ip ::1/129");
+        assert_output_contains(
+            "and at 128, not 32",
+            &out,
+            b"prefix length 129 is above 128",
+        );
+        assert_eq!(last_exit(), 1, "`fw allow6 in tcp ip ::1/129` errors");
+
+        // A parental control is the case where nobody is placed to notice: the
+        // person the limit restricts is not the person who reads the output.
+        // `0` minutes is not a strict limit, it is no limit at all.
+        let out = capture_command("ptime limit 1 6O");
+        assert_output_contains(
+            "an unreadable screen-time limit is refused, not set to zero",
+            &out,
+            b"`6O' is not a duration in minutes",
+        );
+        assert_eq!(last_exit(), 1, "`ptime limit 1 6O` errors");
+        assert_output_lacks("and no limit is reported set", &out, b"Daily limit set");
+
+        // Optional, so an omitted operand still takes the documented 120 --
+        // what is refused is a word that is present and unreadable.
+        let out = capture_command("ptime create zzptuser 12O");
+        assert_output_contains(
+            "a present-but-unreadable daily limit is refused",
+            &out,
+            b"`12O' is not a daily limit",
+        );
+        assert_eq!(last_exit(), 1, "`ptime create zzptuser 12O` errors");
+        assert_output_lacks(
+            "and no config is reported created",
+            &out,
+            b"Created time config",
+        );
+
+        // The self-evident one: this command prints the word "unlimited" for a
+        // limit of 0, which is what the typo used to produce.
+        let out = capture_command("slimit set zzsvc rss=1O24");
+        assert_output_contains(
+            "an unreadable RSS limit is refused rather than becoming unlimited",
+            &out,
+            b"`1O24' is not a frame count",
+        );
+        assert_eq!(last_exit(), 1, "`slimit set zzsvc rss=1O24` errors");
+        assert_output_lacks("and no limits are reported set", &out, b"Limits set for");
+
+        // cpuset is the variant: the guess was not a wider setting but a
+        // *different object*. Set 0 exists -- `cpuset init` creates it -- so
+        // this destroyed a real set and printed "destroyed id=0".
+        let out = capture_command("cpuset destroy 1O");
+        assert_output_contains(
+            "an unreadable set id is refused, not resolved to set zero",
+            &out,
+            b"`1O' is not a set id",
+        );
+        assert_eq!(last_exit(), 1, "`cpuset destroy 1O` errors");
+        assert_output_lacks("and nothing is reported destroyed", &out, b"destroyed");
+
+        // The hex half of the same command, and the reason `optional_hex`
+        // exists: a mistyped mask silently became 0xF, four CPUs nobody asked
+        // for, reported back in the same hex the operator had just typed.
+        let out = capture_command("cpuset create zzcset 0xZZ");
+        assert_output_contains(
+            "an unreadable CPU mask is refused rather than becoming 0xF",
+            &out,
+            b"`0xZZ' is not a CPU mask",
+        );
+        assert_eq!(last_exit(), 1, "`cpuset create zzcset 0xZZ` errors");
+        assert_output_lacks("and no set is reported created", &out, b"created");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -45815,6 +45960,69 @@ fn optional_num<T: core::str::FromStr>(
     let Ok(v) = word.parse::<T>() else {
         shell_println!(
             "{}: {}: `{}' is not {}{}",
+            cmd,
+            sub,
+            word,
+            article_for(noun),
+            noun
+        );
+        set_exit(1);
+        return None;
+    };
+    Some(v)
+}
+
+/// A width that can be read from a hexadecimal operand.
+///
+/// This exists only because `from_str_radix` is an *inherent* method on each
+/// integer type rather than a trait method, so there is nothing in `core` to
+/// bound a generic on. The alternative was one `optional_hex_u16`,
+/// `optional_hex_u64`, … per width, which is the duplication `optional_num`'s
+/// doc comment already argues against.
+trait FromHexStr: Sized {
+    fn from_hex_str(s: &str) -> Option<Self>;
+}
+
+macro_rules! impl_from_hex_str {
+    ($($t:ty),*) => {$(
+        impl FromHexStr for $t {
+            fn from_hex_str(s: &str) -> Option<Self> {
+                <$t>::from_str_radix(s.trim_start_matches("0x"), 16).ok()
+            }
+        }
+    )*};
+}
+impl_from_hex_str!(u16, u32, u64);
+
+/// A hexadecimal operand that may be omitted, in which case `default` stands
+/// in — but which is refused when a word *is* present and cannot be read.
+///
+/// [`optional_num`] in base 16, and it exists for a sharper reason than
+/// symmetry. The idiom it replaces,
+/// `…and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()).unwrap_or(0xF)`,
+/// hides its guess behind two combinators and a radix conversion, and the
+/// values being guessed are *bitmasks* — where a wrong answer is not a wrong
+/// number but a wrong set of CPUs, ports or vectors. `cpuset create hot 0xFF`
+/// with a mistyped mask silently became `0xF`, and the success line printed
+/// `cpus=0xf` in the same hex the operator had just typed, which is exactly the
+/// shape that reads as confirmation.
+///
+/// Note the leading `0x` is stripped, not required: both `0xF` and `F` are
+/// accepted, matching the behaviour of every call site this replaced.
+fn optional_hex<T: FromHexStr>(
+    parts: &[&str],
+    idx: usize,
+    cmd: &str,
+    sub: &str,
+    noun: &str,
+    default: T,
+) -> Option<T> {
+    let Some(word) = parts.get(idx) else {
+        return Some(default);
+    };
+    let Some(v) = T::from_hex_str(word) else {
+        shell_println!(
+            "{}: {}: `{}' is not {}{} (expected hexadecimal)",
             cmd,
             sub,
             word,
@@ -74525,40 +74733,53 @@ fn cmd_parentaltime(args: &str) {
                 }
             }
         }
+        // Every refusal below is here because a limit of `0` means *no limit*
+        // (`parentaltime::record_usage` gates on `daily_limit_minutes > 0`), so
+        // an unreadable word did not fall back to something merely wrong -- it
+        // fell back to the restriction being switched off, and printed
+        // "Created" or "Daily limit set to 0 min" either way. This is a
+        // parental control: the person it restricts is not the person who reads
+        // the output, so nobody is placed to notice that the typo disabled it.
         "create" | "add" => {
             let user = parts.get(1).copied().unwrap_or("");
-            let daily = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(120);
-            let weekly = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
             if user.is_empty() {
                 shell_println!("Usage: ptime create <user> [daily_min] [weekly_min]");
                 set_exit(1);
-            } else {
-                match parentaltime::create_config(user, daily, weekly) {
-                    Ok(id) => shell_println!(
-                        "Created time config for '{}' (id={}, daily={}m)",
-                        user,
-                        id,
-                        daily
-                    ),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+                return;
+            }
+            // Optional, not required: `ptime create bob` is a documented use
+            // with a 120-minute default. What is refused is a word that is
+            // *present* and unreadable -- see `optional_num`.
+            let Some(daily) = optional_num::<u32>(&parts, 2, "ptime", sub, "daily limit", 120)
+            else {
+                return;
+            };
+            let Some(weekly) = optional_num::<u32>(&parts, 3, "ptime", sub, "weekly limit", 0)
+            else {
+                return;
+            };
+            match parentaltime::create_config(user, daily, weekly) {
+                Ok(id) => shell_println!(
+                    "Created time config for '{}' (id={}, daily={}m)",
+                    user,
+                    id,
+                    daily
+                ),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
         "use" | "record" => {
             let id_str = parts.get(1).copied().unwrap_or("");
-            let mins = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(30);
+            // Refused rather than guessed for the opposite reason to the limits
+            // above: usage *accumulates*, so a mistyped `ptime use 1 4O` did not
+            // switch anything off -- it charged 30 minutes that were never spent,
+            // and did it while reporting the invented number as fact.
+            let Some(mins) = optional_num::<u32>(&parts, 2, "ptime", sub, "duration", 30) else {
+                return;
+            };
             if let Ok(id) = id_str.parse::<u32>() {
                 match parentaltime::record_usage(id, mins) {
                     Ok(status) => {
@@ -74596,10 +74817,14 @@ fn cmd_parentaltime(args: &str) {
         }
         "limit" => {
             let id_str = parts.get(1).copied().unwrap_or("");
-            let mins = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // Required, unlike the two in `create`: the usage line is
+            // `ptime limit <id> <minutes>` with no optional bracket, and the
+            // guessed value here was `0` -- the one number that means the limit
+            // is not enforced at all.
+            let Some(mins) = required_num::<u32>(&parts, 2, "ptime", sub, "duration in minutes")
+            else {
+                return;
+            };
             if let Ok(id) = id_str.parse::<u32>() {
                 match parentaltime::set_daily_limit(id, mins) {
                     Ok(()) => shell_println!("Daily limit set to {} min", mins),
@@ -103391,16 +103616,20 @@ fn cmd_cpuset(args: &str) {
             cpuset::init_defaults();
             shell_println!("cpuset: initialized");
         }
+        // The four `id` operands below defaulted to `0` when unreadable, which
+        // in this command is not a widening but a *substitution*: set 0 exists,
+        // it is the one `init` creates, and `cpuset destroy 1O` (letter O)
+        // destroyed it while printing "destroyed id=0". The two masks are the
+        // widening case -- an unreadable mask became 0xF, four CPUs the caller
+        // never asked for.
         "create" => {
             let name = parts.get(1).copied().unwrap_or("set0");
-            let cpu_mask = parts
-                .get(2)
-                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                .unwrap_or(0xF);
-            let mem_mask = parts
-                .get(3)
-                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                .unwrap_or(0x1);
+            let Some(cpu_mask) = optional_hex(&parts, 2, "cpuset", sub, "CPU mask", 0xF) else {
+                return;
+            };
+            let Some(mem_mask) = optional_hex(&parts, 3, "cpuset", sub, "memory mask", 0x1) else {
+                return;
+            };
             let excl = parts.get(4).copied().unwrap_or("") == "excl";
             match cpuset::create(name, cpu_mask, mem_mask, excl) {
                 Ok(id) => shell_println!("cpuset: created '{}' id={}", name, id),
@@ -103411,10 +103640,9 @@ fn cmd_cpuset(args: &str) {
             }
         }
         "destroy" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "cpuset", sub, "set id") else {
+                return;
+            };
             match cpuset::destroy(id) {
                 Ok(()) => shell_println!("cpuset: destroyed id={}", id),
                 Err(e) => {
@@ -103424,10 +103652,9 @@ fn cmd_cpuset(args: &str) {
             }
         }
         "assign" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "cpuset", sub, "set id") else {
+                return;
+            };
             match cpuset::assign(id) {
                 Ok(()) => shell_println!("cpuset: process assigned to set {}", id),
                 Err(e) => {
@@ -103437,10 +103664,9 @@ fn cmd_cpuset(args: &str) {
             }
         }
         "remove" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "cpuset", sub, "set id") else {
+                return;
+            };
             match cpuset::remove_process(id) {
                 Ok(()) => shell_println!("cpuset: process removed from set {}", id),
                 Err(e) => {
@@ -103450,10 +103676,9 @@ fn cmd_cpuset(args: &str) {
             }
         }
         "affinity" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "cpuset", sub, "set id") else {
+                return;
+            };
             match cpuset::record_affinity_change(id) {
                 Ok(()) => shell_println!("cpuset: affinity change recorded for set {}", id),
                 Err(e) => {
@@ -111482,7 +111707,7 @@ fn cmd_firewall(args: &str) {
             Some("accept") => firewall::set_default_policy(firewall::DefaultPolicy::Accept),
             Some("drop") => firewall::set_default_policy(firewall::DefaultPolicy::Drop),
             _ => {
-                shell_println!("Usage: firewall policy accept|drop");
+                shell_println!("Usage: fw policy accept|drop");
                 set_exit(1);
             }
         },
@@ -111490,7 +111715,7 @@ fn cmd_firewall(args: &str) {
             Some("accept") => firewall::set_default_policy6(firewall::DefaultPolicy::Accept),
             Some("drop") => firewall::set_default_policy6(firewall::DefaultPolicy::Drop),
             _ => {
-                shell_println!("Usage: firewall policy6 accept|drop");
+                shell_println!("Usage: fw policy6 accept|drop");
                 set_exit(1);
             }
         },
@@ -111510,7 +111735,7 @@ fn cmd_firewall(args: &str) {
                     Some("both") => firewall::Direction::Both,
                     _ => {
                         shell_println!(
-                            "Usage: firewall {} in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]",
+                            "Usage: fw {} in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]",
                             cmd
                         );
                         set_exit(1);
@@ -111525,7 +111750,7 @@ fn cmd_firewall(args: &str) {
                     Some("any") | Some("all") => firewall::Protocol::Any,
                     _ => {
                         shell_println!(
-                            "Usage: firewall {} in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]",
+                            "Usage: fw {} in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]",
                             cmd
                         );
                         set_exit(1);
@@ -111539,40 +111764,114 @@ fn cmd_firewall(args: &str) {
                 let mut src_prefix: u8 = 0;
                 let mut priority: u16 = 100;
 
+                // Every arm below refuses rather than substituting, and in this
+                // command that is not the usual argument-hygiene point. **The
+                // resting values of these three variables are the widest rule
+                // expressible**: `dst_port` 0 is "any port" and `src_ip`
+                // 0.0.0.0 is "any address" (both documented as such at
+                // `net/firewall.rs:142` and `:146`, and honoured by the matcher
+                // at `:1467`). So a word this parser could not read did not
+                // narrow the rule or drop it -- it left the rule matching
+                // *everything*, and printed the success line. `fw allow in tcp
+                // port 8O8O` (letter O) opened every inbound TCP port, and
+                // `fw allow in tcp ip 10.0.0.256` accepted from every address.
+                // Batch 35 named this shape -- a guess that lands on a
+                // sentinel meaning "no restriction" -- and the reslimit
+                // commands were called the sharpest case of it in
+                // `optional_num`'s own doc comment. They are not: a mistyped
+                // resource limit costs a runaway process, and a mistyped
+                // firewall word costs the firewall.
                 let mut i = 3;
                 while i < parts.len() {
                     match parts[i] {
                         "port" => {
-                            if let Some(p) = parts.get(i + 1) {
-                                if let Ok(port) = p.parse::<u16>() {
-                                    dst_port = port;
-                                }
-                            }
+                            // Required once the keyword is present: `port` with
+                            // nothing after it is a truncated command, not a
+                            // request for "any port".
+                            let Some(port) =
+                                required_num::<u16>(parts, i + 1, "fw", cmd, "port number")
+                            else {
+                                return;
+                            };
+                            dst_port = port;
                             i += 2;
                         }
                         "ip" => {
-                            if let Some(ip_str) = parts.get(i + 1) {
-                                // Parse IP[/prefix].
-                                if let Some((ip_part, prefix_part)) = ip_str.split_once('/') {
-                                    if let Some(ip) = parse_ipv4(ip_part) {
-                                        src_ip = ip;
-                                        src_prefix = prefix_part.parse::<u8>().unwrap_or(32);
+                            let Some(ip_str) = parts.get(i + 1) else {
+                                shell_println!("fw: {}: missing address", cmd);
+                                set_exit(1);
+                                return;
+                            };
+                            // Parse IP[/prefix].
+                            let (ip_part, prefix_part) = match ip_str.split_once('/') {
+                                Some((a, p)) => (a, Some(p)),
+                                None => (*ip_str, None),
+                            };
+                            let Some(ip) = parse_ipv4(ip_part) else {
+                                shell_println!("fw: {}: `{}' is not an IPv4 address", cmd, ip_part);
+                                set_exit(1);
+                                return;
+                            };
+                            src_ip = ip;
+                            src_prefix = match prefix_part {
+                                None => 32,
+                                Some(p) => {
+                                    let Ok(n) = p.parse::<u8>() else {
+                                        shell_println!(
+                                            "fw: {}: `{}' is not a prefix length",
+                                            cmd,
+                                            p
+                                        );
+                                        set_exit(1);
+                                        return;
+                                    };
+                                    // Checked because it never was: a `/33` or
+                                    // worse parsed as a `u8` and was stored, and
+                                    // what a matcher does with a prefix wider
+                                    // than the address is undefined by anything
+                                    // written down. 0 is legitimate -- it is
+                                    // "any address", said deliberately.
+                                    if n > 32 {
+                                        shell_println!(
+                                            "fw: {}: prefix length {} is above 32",
+                                            cmd,
+                                            n
+                                        );
+                                        set_exit(1);
+                                        return;
                                     }
-                                } else if let Some(ip) = parse_ipv4(ip_str) {
-                                    src_ip = ip;
-                                    src_prefix = 32;
+                                    n
                                 }
-                            }
+                            };
                             i += 2;
                         }
                         "prio" | "priority" => {
-                            if let Some(p) = parts.get(i + 1) {
-                                priority = p.parse::<u16>().unwrap_or(100);
-                            }
+                            let Some(p) = required_num::<u16>(parts, i + 1, "fw", cmd, "priority")
+                            else {
+                                return;
+                            };
+                            priority = p;
                             i += 2;
                         }
-                        _ => {
-                            i += 1;
+                        other => {
+                            // Silently skipping an unrecognised word was the
+                            // fourth way to get a wider rule than was asked for:
+                            // `fw allow in tcp prot 80` (for `port`) threw away
+                            // both words and installed an any-port rule.
+                            //
+                            // The diagnostics in this arm say `fw`, not
+                            // `firewall`, and that was a fix in itself: every
+                            // usage line here named `firewall`, which the
+                            // dispatcher routes to `cmd_fwsettings` -- a
+                            // different subsystem with no `allow` at all. The
+                            // help arm has always printed "Usage: fw".
+                            shell_println!(
+                                "fw: {}: unknown option `{}'; expected port, ip or prio",
+                                cmd,
+                                other
+                            );
+                            set_exit(1);
+                            return;
                         }
                     }
                 }
@@ -111645,39 +111944,84 @@ fn cmd_firewall(args: &str) {
                 let mut src_prefix: u8 = 0;
                 let mut priority: u16 = 100;
 
+                // The IPv6 twin of the loop in `case` above, defect for defect:
+                // the same four ways to widen a rule by mistyping a word, with
+                // the same resting values meaning "any port" and "any address".
+                // It is fixed identically rather than factored into one helper
+                // because the two differ in their address type, their prefix
+                // ceiling (128, not 32) and their `Rule` struct, and the shared
+                // part -- three keywords and a refusal each -- is smaller than
+                // the generic wrapper that would carry the differences.
                 let mut i = 3;
                 while i < parts.len() {
                     match parts[i] {
                         "port" => {
-                            if let Some(p) = parts.get(i + 1) {
-                                if let Ok(port) = p.parse::<u16>() {
-                                    dst_port = port;
-                                }
-                            }
+                            let Some(port) =
+                                required_num::<u16>(parts, i + 1, "fw", cmd, "port number")
+                            else {
+                                return;
+                            };
+                            dst_port = port;
                             i += 2;
                         }
                         "ip" => {
-                            if let Some(ip_str) = parts.get(i + 1) {
-                                if let Some((ip_part, prefix_part)) = ip_str.split_once('/') {
-                                    if let Some(ip) = Ipv6Addr::parse(ip_part) {
-                                        src_ip = ip;
-                                        src_prefix = prefix_part.parse::<u8>().unwrap_or(128);
+                            let Some(ip_str) = parts.get(i + 1) else {
+                                shell_println!("fw: {}: missing address", cmd);
+                                set_exit(1);
+                                return;
+                            };
+                            let (ip_part, prefix_part) = match ip_str.split_once('/') {
+                                Some((a, p)) => (a, Some(p)),
+                                None => (*ip_str, None),
+                            };
+                            let Some(ip) = Ipv6Addr::parse(ip_part) else {
+                                shell_println!("fw: {}: `{}' is not an IPv6 address", cmd, ip_part);
+                                set_exit(1);
+                                return;
+                            };
+                            src_ip = ip;
+                            src_prefix = match prefix_part {
+                                None => 128,
+                                Some(p) => {
+                                    let Ok(n) = p.parse::<u8>() else {
+                                        shell_println!(
+                                            "fw: {}: `{}' is not a prefix length",
+                                            cmd,
+                                            p
+                                        );
+                                        set_exit(1);
+                                        return;
+                                    };
+                                    if n > 128 {
+                                        shell_println!(
+                                            "fw: {}: prefix length {} is above 128",
+                                            cmd,
+                                            n
+                                        );
+                                        set_exit(1);
+                                        return;
                                     }
-                                } else if let Some(ip) = Ipv6Addr::parse(ip_str) {
-                                    src_ip = ip;
-                                    src_prefix = 128;
+                                    n
                                 }
-                            }
+                            };
                             i += 2;
                         }
                         "prio" | "priority" => {
-                            if let Some(p) = parts.get(i + 1) {
-                                priority = p.parse::<u16>().unwrap_or(100);
-                            }
+                            let Some(p) = required_num::<u16>(parts, i + 1, "fw", cmd, "priority")
+                            else {
+                                return;
+                            };
+                            priority = p;
                             i += 2;
                         }
-                        _ => {
-                            i += 1;
+                        other => {
+                            shell_println!(
+                                "fw: {}: unknown option `{}'; expected port, ip or prio",
+                                cmd,
+                                other
+                            );
+                            set_exit(1);
+                            return;
                         }
                     }
                 }
@@ -111717,11 +112061,11 @@ fn cmd_firewall(args: &str) {
                             }
                         }
                     } else {
-                        shell_println!("Usage: firewall remove <index>");
+                        shell_println!("Usage: fw remove <index>");
                         set_exit(1);
                     }
                 } else {
-                    shell_println!("Usage: firewall remove <index>");
+                    shell_println!("Usage: fw remove <index>");
                     set_exit(1);
                 }
             }
@@ -111740,11 +112084,11 @@ fn cmd_firewall(args: &str) {
                             }
                         }
                     } else {
-                        shell_println!("Usage: firewall remove6 <index>");
+                        shell_println!("Usage: fw remove6 <index>");
                         set_exit(1);
                     }
                 } else {
-                    shell_println!("Usage: firewall remove6 <index>");
+                    shell_println!("Usage: fw remove6 <index>");
                     set_exit(1);
                 }
             }
@@ -112374,15 +112718,45 @@ fn cmd_service_limits(args: &str) {
             let name = parts[1];
             let mut limits = service_limits::get_service_limits(name).unwrap_or_default();
 
+            // The `unwrap_or(0)` these four replace is the clearest instance of
+            // the guessed-value defect anywhere in kshell, because the proof is
+            // forty lines up in this same function: the `list` arm renders a
+            // limit of `0` as the literal word "unlimited". So
+            // `slimit set web rss=1O24` (letter O) did not set a wrong limit --
+            // it removed the limit, and then printed the new limits back with
+            // "unlimited" in the column the operator had just tried to fill.
+            //
+            // Parsed through a named binding rather than inline so the width
+            // comes from the field being assigned, as before.
             for &param in &parts[2..] {
                 if let Some(val) = param.strip_prefix("rss=") {
-                    limits.max_rss_frames = val.parse().unwrap_or(0);
+                    let Ok(v) = val.parse() else {
+                        shell_println!("slimit: set: `{}' is not a frame count", val);
+                        set_exit(1);
+                        return;
+                    };
+                    limits.max_rss_frames = v;
                 } else if let Some(val) = param.strip_prefix("cpu=") {
-                    limits.cpu_quota_pct = val.parse().unwrap_or(0);
+                    let Ok(v) = val.parse() else {
+                        shell_println!("slimit: set: `{}' is not a CPU percentage", val);
+                        set_exit(1);
+                        return;
+                    };
+                    limits.cpu_quota_pct = v;
                 } else if let Some(val) = param.strip_prefix("thr=") {
-                    limits.max_threads = val.parse().unwrap_or(0);
+                    let Ok(v) = val.parse() else {
+                        shell_println!("slimit: set: `{}' is not a thread count", val);
+                        set_exit(1);
+                        return;
+                    };
+                    limits.max_threads = v;
                 } else if let Some(val) = param.strip_prefix("hdl=") {
-                    limits.max_handles = val.parse().unwrap_or(0);
+                    let Ok(v) = val.parse() else {
+                        shell_println!("slimit: set: `{}' is not a handle count", val);
+                        set_exit(1);
+                        return;
+                    };
+                    limits.max_handles = v;
                 } else {
                     shell_println!("Unknown parameter: {} (use rss=, cpu=, thr=, hdl=)", param);
                     set_exit(1);

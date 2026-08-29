@@ -53,7 +53,7 @@ set -u
 
 # Into WSL, build ours for Linux, find glibc's, and put both behind the one
 # name `split` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
-DIFF_PROG=split
+DIFF_PROG='split'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -95,7 +95,9 @@ printf 'a:b:c:d:e:' > colons.txt
 # 700 one-character records. 700 crosses the alphabetic widening point at 650,
 # the numeric one at 90 and the hex one at 240, so one fixture drives all three
 # name_case runs.
-for i in $(seq 1 700); do printf 'z'; done > wide.txt
+# `_` rather than a named variable: this is a counted repeat and the counter is
+# never read, which shellcheck flags (SC2034) as an unused assignment.
+for _ in $(seq 1 700); do printf 'z'; done > wide.txt
 
 # --- machinery ----------------------------------------------------------------
 
@@ -146,8 +148,20 @@ manifest() {
 }
 
 # The names alone, for the cases that produce hundreds of files.
+#
+# A glob rather than `ls | grep -v | sort | tr`, which is the same idiom the
+# dump above already uses. Today the two agree -- the directory holds nothing
+# but `split`'s own `xNN` output and `in.txt` -- but this is a harness whose
+# whole purpose elsewhere is to push unusual bytes through a tool, and the `tr`
+# was the part that would have silently flattened a newline inside a name into
+# a separator. The glob is already sorted, so the `sort` goes too.
 names() {
-  ( cd "$1" || return 0; ls | grep -v '^in\.txt$' | sort | tr '\n' ' ' )
+  ( cd "$1" || return 0
+    for f in *; do
+      # `*` with no matches expands to itself; `in.txt` is the input, not output.
+      case $f in '*') [ -e "$f" ] || continue ;; in.txt) continue ;; esac
+      printf '%s ' "$f"
+    done )
 }
 
 # $1 = fixture (or `-` for none), $2 = `full` or `names`, $3 = stdin redirect

@@ -56,7 +56,7 @@ set -u
 
 # Into WSL, build ours for Linux, find glibc's, and put both behind the one
 # name `head` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
-DIFF_PROG=head
+DIFF_PROG='head'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 

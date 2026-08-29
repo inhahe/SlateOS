@@ -350,6 +350,11 @@ if [ "$argv_failed" = "1" ]; then
 
 pre-push: REFUSING to push — a utility above dies on a legal filename.
 
+(Unless every line above is marked FIXED. Those are baseline lines for bins
+that are already repaired, and a ratchet that does not shrink when the work is
+done is a standing permission for those bins to regress unnoticed. None of the
+advice below applies to them — run the --write-baseline the checker printed.)
+
 It reads its command line (or the environment) as \`String\`. Rust's \`String\`
 cannot hold a byte sequence that is not UTF-8, and a path on this OS can, so
 the program panics before reaching its own first statement. A user sees a Rust
@@ -573,6 +578,11 @@ if [ "$errmsg_failed" = "1" ]; then
     cat >&2 <<EOF
 
 pre-push: REFUSING to push — a utility above prints the host's error text.
+
+(Unless every line above is marked FIXED. Those are baseline lines for bins
+that are already repaired, and a ratchet that does not shrink when the work is
+done is a standing permission for those bins to regress unnoticed. None of the
+advice below applies to them — run the --write-baseline the checker printed.)
 
 An \`io::Error\` is being formatted with \`{e}\`, which prints whatever the
 platform's C library said. That is strerror(3) on SlateOS and on Linux, and

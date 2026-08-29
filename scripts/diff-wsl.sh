@@ -96,8 +96,24 @@
 #
 # Set the knobs, then source it, before anything else in the harness:
 #
-#     DIFF_PROG=cat
+#     DIFF_PROG='cat'
 #     . "$(dirname "$0")/diff-wsl.sh"
+#
+# **Quote the value**, as above. It is a string and never a command to run,
+# but shellcheck cannot tell a deliberate bare command *name* from a forgotten
+# `$(...)`, so an unquoted `DIFF_PROG=cat` is SC2209 at severity `warning` --
+# the severity `boot-test.sh`'s `check_shellcheck` gates at. This line is the
+# one every new harness is copied from, so it was 37 of the 44 findings that
+# stood between the tree and that gate (A->B request
+# `a-b-shellcheck-floor-the-remaining-findings-are-all-yours.md`). All 50
+# harnesses now quote it; keep it that way and the count stays at zero.
+#
+# (Careful when editing this header: a comment line whose *first word* is
+# `shellcheck` is parsed as a directive, not prose. Getting that wrong here
+# does not fail this file's own check -- it emits SC1073 and then every one of
+# the 50 harnesses reports SC1094 "parsing of sourced file failed" and loses
+# the `-x` suppressions, which turned 44 findings into 227. Keep such a word
+# off the start of a line.)
 #
 # The harness's own arguments survive the re-exec, so a harness may parse `$@`
 # after sourcing this as if it had never left the host.

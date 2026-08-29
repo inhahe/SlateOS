@@ -72,7 +72,7 @@ set -u
 # building `$bindir`. That is also why `DIFF_NO_BINDIR` is *not* set — the
 # multi-binary `$bindir`, one symlink per side per name, is exactly what this
 # harness needs, and it used to build a byte-identical one of its own.
-DIFF_PROG=interleave
+DIFF_PROG='interleave'
 DIFF_NO_REF=1
 DIFF_BINS="cat comm expand fold head join md5sum nl paste sha256sum tsort
            unexpand wc"

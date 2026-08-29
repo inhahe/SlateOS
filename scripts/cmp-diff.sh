@@ -75,7 +75,7 @@ set -u
 # would then fall back to `C` and say `char` where we -- reading the
 # environment variable, having no `setlocale` -- would say `byte`. Both are
 # covered below, the second only if the system really has the locale.
-DIFF_PROG=cmp
+DIFF_PROG='cmp'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 

@@ -72,7 +72,7 @@ set -u
 
 # Into WSL, build ours for Linux, find gawk, and put both behind the one name
 # `awk` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
-DIFF_PROG=awk
+DIFF_PROG='awk'
 # `command -v awk` is not good enough: on a Debian-family system `/usr/bin/awk`
 # is whatever `update-alternatives` last pointed at, and mawk is a legitimate
 # answer. mawk is not the reference — it has no `--posix`, no `ENVIRON`

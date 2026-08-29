@@ -34,11 +34,17 @@ that; a ratchet will.
 
 # The ratchet
 
-`--check` fails only on a finding that is *not* in
-`scripts/argv-utf8-baseline.txt`. The baseline records the backlog that existed
-when this landed and is only ever meant to shrink. A genuine false positive
-belongs in `IGNORE` below, which records *why*, rather than in the baseline,
-which records only *that*.
+`--check` fails on a finding that is *not* in `scripts/argv-utf8-baseline.txt`
+-- and on a baseline line naming a finding that is no longer there. The
+baseline records the backlog that existed when this landed and is only ever
+meant to shrink; "meant to" is not a mechanism, and its sibling ratchet
+`host-errmsg-baseline.txt` was found carrying 17 already-fixed lines, each of
+which was a standing permission for that bin to regress with the gate still
+green. Shrinking is one command, `--write-baseline`, and it cannot lose a real
+finding, because a bin that still has the defect is still found.
+
+A genuine false positive belongs in `IGNORE` below, which records *why*, rather
+than in the baseline, which records only *that*.
 
 # Scope, stated rather than assumed
 
@@ -235,6 +241,18 @@ def load_baseline() -> set[str]:
     return out
 
 
+def stale_entries(known: set[str], gated: set[str]) -> list[str]:
+    """Baseline lines naming a finding that is no longer there.
+
+    A function rather than an expression in `main` only so that `--selftest`
+    can reach it. That is not ceremony: this guard fails toward *silence* in
+    the same way the detector does -- a version of it that never fires looks
+    exactly like a baseline that happens to be exact, which is what let the
+    sibling ratchet accumulate 17 dead lines unnoticed.
+    """
+    return sorted(known - gated)
+
+
 def selftest() -> int:
     """Check the rules that decide what this tool reports.
 
@@ -378,7 +396,38 @@ fn main() {
         {"argv-as-string", "to_str-unwrap"},
     )
 
-    # 7. The gated tree must be non-empty, and it is the one rule that cannot
+    # 7. The staleness guard. It fails toward silence exactly as the detector
+    #    does -- a version of it that never fires is indistinguishable from a
+    #    baseline that happens to be exact -- so it needs its own cases.
+    rule("baseline-staleness")
+    expect(
+        "stale/exact-baseline-is-clean",
+        stale_entries({"a.rs:argv-as-string"}, {"a.rs:argv-as-string"}),
+        [],
+    )
+    expect(
+        "stale/fixed-finding-is-reported",
+        stale_entries({"a.rs:argv-as-string", "b.rs:to_str-unwrap"},
+                      {"a.rs:argv-as-string"}),
+        ["b.rs:to_str-unwrap"],
+    )
+    # A *new* finding is the other ratchet direction and is not staleness; it
+    # must not leak into this list, or the fix advice printed would be wrong.
+    expect(
+        "stale/new-finding-is-not-stale",
+        stale_entries({"a.rs:argv-as-string"},
+                      {"a.rs:argv-as-string", "c.rs:argv-as-string"}),
+        [],
+    )
+    expect("stale/empty-baseline-is-clean", stale_entries(set(), {"a.rs:x"}), [])
+    # Several dead lines come back sorted, because they are printed in order.
+    expect(
+        "stale/multiple-are-sorted",
+        stale_entries({"z.rs:x", "a.rs:x", "m.rs:x"}, set()),
+        ["a.rs:x", "m.rs:x", "z.rs:x"],
+    )
+
+    # 8. The gated tree must be non-empty, and it is the one rule that cannot
     #    be written against synthetic input.
     #
     #    Every case above proves the rules classify a *given* file correctly.
@@ -461,6 +510,7 @@ def main() -> int:
 
     known = load_baseline()
     new = sorted(k for k in gated if k not in known)
+    stale = stale_entries(known, set(gated))
 
     # Under --check this runs in a push hook, where the baselined backlog is not
     # news. Print only what is actually new. Without --check a human is asking
@@ -472,12 +522,27 @@ def main() -> int:
         mark = "NEW " if key in set(new) else "    "
         print(f"{mark}{path}:{line}  [{rule}]  {text}")
 
-    print(f"\n{len(gated)} finding(s); {len(new)} not in the baseline.")
-    if new and check:
+    for key in stale:
+        print(f"FIXED {key}  -- in the baseline but no longer found")
+
+    print(
+        f"\n{len(gated)} finding(s); {len(new)} not in the baseline; "
+        f"{len(stale)} baseline line(s) now stale."
+    )
+    if check and (new or stale):
         fixes = {name: fix for name, _p, fix in RULES}
-        print()
-        for key in new:
-            print(f"  {key.rsplit(':', 1)[1]}: {fixes[key.rsplit(':', 1)[1]]}")
+        if new:
+            print()
+            for key in new:
+                print(f"  {key.rsplit(':', 1)[1]}: {fixes[key.rsplit(':', 1)[1]]}")
+        if stale:
+            print(
+                "\n  The baseline lines above name findings that are already "
+                "fixed. Shrink it:\n"
+                f"      python {_relpath(Path(__file__))} --write-baseline\n"
+                "  It cannot lose a real finding -- a bin that still has the "
+                "defect is still found."
+            )
         return 1
     return 0
 

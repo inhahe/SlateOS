@@ -52,7 +52,7 @@ set -u
 #
 # util-linux's `script` is required rather than optional: every isatty-guarded
 # branch needs it, and a run without it would be green and meaningless.
-DIFF_PROG=nohup
+DIFF_PROG='nohup'
 DIFF_NEED=script
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"

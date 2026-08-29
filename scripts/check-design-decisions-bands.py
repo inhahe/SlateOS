@@ -373,12 +373,27 @@ def check(lines, baseline):
             continue
 
         # Number must extend the band, never backfill it.
-        others = [x.number for x in headings
-                  if band.contains(x.number) and x is not h]
-        if others and h.number < max(others):
+        #
+        # The high-water mark is taken over the sections that were *already
+        # established* when this one was written -- everything in the baseline,
+        # plus any other new heading that stands above it in the file. A new
+        # heading further *down* the file is deliberately not counted, and that
+        # is not a loosening: without the carve-out a single change that adds
+        # two sections to one band could never pass, because the earlier and
+        # lower of the two would be reported as backfilling below the later and
+        # higher one. That is a real shape -- one batch of work can settle two
+        # questions -- and it was hit the first time it arose (631 and 632,
+        # 2026-08-29). The rule that matters is preserved in full: numbers still
+        # only ever go up, both against history and down the page, so a run of
+        # new sections must be written in ascending order and none of them may
+        # reissue a number below anything that already existed.
+        established = [x.number for x in headings
+                       if band.contains(x.number) and x is not h
+                       and (x.number in baseline or x.lineno < h.lineno)]
+        if established and h.number < max(established):
             errors.append(
                 f"design-decisions.md:{h.lineno}: section {h.number} is new "
-                f"but below {max(others)}, the highest number already in "
+                f"but below {max(established)}, the highest number already in "
                 f"{band.label}. New entries extend their band; a gap below the "
                 f"high-water mark may be a number that was spent and "
                 f"withdrawn, and reissuing it makes an existing citation "

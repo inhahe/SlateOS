@@ -60,7 +60,7 @@ set -u
 # Into WSL, build ours for Linux, find glibc's, and put both behind the one
 # name `paste` so `argv[0]` matches. See `scripts/diff-wsl.sh`.  `timeout` is
 # named because every invocation below is bounded with it; see `run_side`.
-DIFF_PROG=paste
+DIFF_PROG='paste'
 DIFF_NEED=timeout
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
@@ -224,7 +224,7 @@ run_case -s long.txt long.txt
 # --- the delimiter list, and its cycle ---------------------------------------
 # A one-character list is the easy case; the point of `-d` is that a longer one
 # cycles *within* a line and restarts at the next.
-for d in , : ',;' ',;:' 'xyz' '..' ; do
+for d in ',' : ',;' ',;:' 'xyz' '..' ; do
   run_case -d "$d" a.txt b.txt c.txt
   run_case -d "$d" a.txt b.txt
   run_case -s -d "$d" a.txt b.txt

@@ -81827,7 +81827,152 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **400 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **362 of 800 remain**
+
+> **Burn-down log.** 2026-08-29 (thirty-sixth batch): `cmd_printf` (5) cleared —
+> 367 → 362 across 195 → 194 functions. Pinned by self-test rung 100.
+>
+> **In short:** every batch before this one was the same shape — a word could
+> not be read, a value was invented, and the fix was to refuse. **This one is
+> not that shape, in both halves.** The parser was wrong even on words it read
+> *successfully*, so a diagnostic bolted onto it would never have found the
+> worst case; and the fix is not a refusal, because POSIX requires `printf` to
+> print the substituted value anyway. What was missing was the sentence and the
+> exit status, not the substitution.
+>
+> * **The case no error path could ever have caught.** `printf '%d' 010`
+>   printed **10**. C prints **8** — `printf`'s integer operands are
+>   `strtoimax(s, &end, 0)`, base 0, where a leading zero is octal. The site
+>   read `.parse::<i64>().unwrap_or(0)`, and `"010".parse::<i64>()` *succeeds*.
+>   Verified on the host, not assumed. **A wrong value that parses cleanly
+>   cannot be diagnosed**, so the whole burn-down technique — find the
+>   `unwrap_or`, add a refusal — was blind to it. It required replacing the
+>   parser. The other two divergences are merely loud, because `parse` errors
+>   and so the guessed 0 was at least reachable by a diagnostic: `0x10` is 16 in
+>   C and was rejected by `parse`, and `%u` of `-1` is
+>   `18446744073709551615` in C (the negation modulo `UINTMAX_MAX + 1`) and was
+>   likewise rejected. `printf_scan_integer` now implements base 0 outright —
+>   whitespace, sign, `0x`/`0X`, `0b`/`0B`, leading-`0` octal, and `endptr`
+>   semantics — mirroring lane B's `userspace/coreutils/src/bin/printf.rs`
+>   `scan_integer`, which was written against the same C definition. The two
+>   `printf`s must not disagree about what a numeral means.
+> * **The fix is diagnose-and-still-print, not refuse.** POSIX: the conversion
+>   happens with the value read so far, and only the exit status records the
+>   fault. `printf '%d %d\n' abc 5` must print `0 5`. So the zero was never the
+>   defect — the defect was that it was *only* the zero. `cmd_printf` never
+>   called `set_exit` on any path, so `printf '%d' abc` printed `0` and reported
+>   **success**. Three sentences now distinguish the three C conditions:
+>   `expected a numeric value` (`endptr == nptr`), `value not completely
+>   converted` (digits then junk), `numerical result out of range`. Wording is
+>   lane B's, byte for byte, so a script grepping one shell's diagnostic finds
+>   the other's.
+> * **A *missing* operand stays silent, and that is load-bearing.** POSIX treats
+>   it as zero; `""` scans with `consumed == 0 == s.len()`, so
+>   `printf_note_fault` returns early. Without that carve-out the diagnostic
+>   would fire on `printf '%d\n'` and stop meaning "you typed something I could
+>   not read".
+> * **The diagnostics are printed after the whole format, not where the fault
+>   is found** — forced by kshell having exactly one output stream. See
+>   `design-decisions.md` §632; the short version is that
+>   `printf '%d-%d' 1 abc` would otherwise emit `1-`, then the complaint, then
+>   `0`, splicing a sentence into the middle of the data. GNU interleaves
+>   harmlessly only because its complaint is on stderr.
+> * **Three layout defects surfaced once the specifier parser was rewritten**,
+>   none of them guessed values, all of them silent wrong output:
+>   `%05d` of −42 printed `00-42` (Rust's `{:0>5}` is fill-and-align over the
+>   whole *rendered* value, sign included; C puts the zeros after the sign and
+>   prints `-0042`); `%5x`, `%5X` and `%5o` **dropped the field width entirely**
+>   unless zero-padding was also asked for, so `%5x` of 255 printed `ff`; and
+>   `-` (left-justify) and `.N` (precision) **were not parsed at all** — the
+>   specifier was echoed literally *and* its argument left unconsumed, which
+>   desynchronised every conversion after it on the same line. The layout now
+>   goes through one `printf_field`, which is what makes the sign/padding order
+>   and the two opposite meanings of `.N` (maximum length for `%s`, minimum
+>   digit count for `%d`) statable in one place.
+> * **Silent data loss, unrelated to any guess.** POSIX reuses the format until
+>   the operands are used up: `printf '%s\n' a b c` prints three lines. This
+>   printed one and discarded `b` and `c` without a word, exit 0. The reuse loop
+>   stops when a pass consumes no argument, or `printf hi a` would print `hi`
+>   for ever.
+> * **C's space flag is deliberately not accepted.** `% d` is a conversion in C,
+>   so `printf '100% done\n'` prints `100 0one` there. Accepting it would have
+>   been C-correct and a surprising regression in a shell where that string is
+>   overwhelmingly a literal percent sign; `%`-then-space falls through to the
+>   literal echo instead, and the doc comment says so rather than leaving the
+>   omission to look like an oversight.
+> * **The ledger line vanished rather than shrinking.** The new code contains no
+>   `.parse()` at all, so `check-option-refusal.py`'s D1 regex has nothing to
+>   match and `cmd_printf 5` was deleted from
+>   `scripts/option-refusal-ledger.txt` outright.
+
+> **Burn-down log.** 2026-08-29 (thirty-fifth batch): `cmd_widgets` (6),
+> `cmd_iperf` (6), `cmd_swapact` (6), `cmd_fsbench` (5), `cmd_datausage` (5) and
+> `cmd_elog` (5) cleared — 400 → 367 across 201 → 195 functions. Pinned by
+> self-test rung 99.
+>
+> **In short:** rung 98's batch guessed **0 for a pid**, and the harm there was
+> that 0 names a real and important process. This batch is the variant where
+> the guessed number is not a value at all but a **sentinel the callee reads as
+> "use the default"** — and that is worse, because the substituted run's output
+> is *byte-identical* to the run the user would have got by omitting the
+> argument entirely.
+>
+> * **The sentinel cases.** `iperf client <host> <port> 1O` (letter O) became
+>   duration 0, which `tcp_client_test` reads as `DEFAULT_DURATION_POLLS`; the
+>   test ran to completion and printed a full throughput report. `iperf server
+>   <port> 3OO` did the same through `tcp_server_test`'s 3000-poll default.
+>   `elog tail 5O` printed twenty events, which is exactly what a bare `elog
+>   tail` prints. Every `fsbench` iteration count is the same shape. **There is
+>   no observable difference between "you mistyped and I ignored you" and "you
+>   said nothing and I used the default"** — so unlike batch 34, where a wrong
+>   pid at least appeared in the output, here the transcript cannot be audited
+>   after the fact either. Nothing anywhere records that a word was discarded.
+> * **`swapact register` is this batch's forge-then-check pair** (the shape
+>   first named in batch 29, and the reason "there is a guard downstream" is not
+>   a defence). `swapact::register` in `kernel/src/fs/swapact.rs:138` rejects
+>   only a full table and a duplicate name — it validates *nothing* about what
+>   it is told. So `unwrap_or("/dev/sdb1")` in the shell arm did not merely
+>   mislabel an action: a bare `swapact register` **created** a swap area of
+>   1,000,000 pages named after a device that does not exist and reported
+>   success. `swapact list` then displayed it, and `swapact in /dev/sdb1 100`
+>   recorded traffic against it. A guess on a path that cannot fail manufactures
+>   the record that makes the next guess look legitimate.
+> * **The `_ => SwapType::Partition` catch-all went with it**, though the gate
+>   does not count those: a misspelt `zrma` registered a *partition*, and the
+>   success line printed `[partition]` — the wrong answer stated in the
+>   vocabulary of a right one.
+> * **`required_num` vs `optional_num` was chosen by meaning, not mechanically.**
+>   Where the operand *names the thing being acted on* it is required —
+>   `swapact`'s `<pages>`, `datausage record`'s `<rx>`/`<tx>`, `limit add`'s
+>   `<bytes>`, `limit alert`'s `<pct>`, all written unbracketed in their own
+>   help. Where the help brackets it and documents a resting value it is
+>   optional — every `fsbench` count, every `elog` `[count]`, `iperf`'s
+>   `[duration]`. Getting this backwards would turn a required operand into an
+>   optional one, which is a behaviour change wearing a bug fix.
+>   `datausage limit alert` is the instructive one: 80 *looked* like a
+>   documented default and was not, so `alert home 9O` printed "Alert threshold
+>   for 'home': 80%" and the operator had no way to see that 90 was not what was
+>   set.
+> * **Four `parts[N]` indexing sites disappeared as a side effect** in
+>   `cmd_datausage` (they were guarded by a `parts.len() >= 4` check, so no
+>   panic was reachable today — but the guard and the index were three lines
+>   apart and only the helper makes that safety local).
+>
+> **A wording defect found and fixed alongside, because this batch was about to
+> make it worse.** `article_for` picks "a"/"an" from the first *letter*; English
+> picks it from the first *sound*; a one-letter noun is precisely where those
+> diverge. `cmd_cpick` shipped **"is not a x coordinate"**, and `cmd_wsnap`
+> carried a comment saying it had renamed its own nouns to
+> "horizontal"/"vertical" *only* to dodge this — so the file held two
+> workarounds and one live defect for a single cause, and `cmd_widgets` was
+> about to add two more sites of it. `article_for`'s doc comment offers an
+> escape hatch (write the article into the noun, `"an x coordinate"`), but that
+> hatch does not serve `required_num`, whose *other* message is
+> `missing {noun}` — which the hatch turns into "missing an x coordinate". A
+> noun that reads correctly in **both** sentences needs no hatch, so
+> "horizontal"/"vertical" is now the file-wide convention and `cmd_wsnap`'s
+> local dodge is recorded as its origin. Rung 99 pins it; the rung-98-era
+> assertion `b"is not a x coordinate"` was updated in the same change.
 
 > **Burn-down log.** 2026-08-29 (thirty-fourth batch): `cmd_pidfd` (5),
 > `cmd_userfault` (5), `cmd_oomkiller` (5), `cmd_prociso` (6), `cmd_coredump`
@@ -94182,7 +94327,11 @@ A wrong test was also removed. `parse_empty_errors` asserted the message
 - 108 unit tests pass; `cargo clippy` clean under the crate's
   `deny(clippy::all, clippy::pedantic)`.
 
-### The gap this leaves: `TD-COREUTILS-GREP-NEVER-DETECTS-BINARY-CONTENT`
+### The gap this leaves: `TD-COREUTILS-GREP-NEVER-DETECTS-BINARY-CONTENT` -- **FIXED 2026-08-29**, except for the encoding-error half
+
+*(The section below is the gap as it stood when the conversion landed. The NUL
+half of it is now implemented; see* `B-GREP-NEVER-DETECTED-BINARY-CONTENT`
+*further down, which also records what was left behind and why.)*
 
 `--binary-files` is one setting with three behaviours and we implement one.
 `text` -- print the bytes -- is what we always do, so it agrees with GNU. The
@@ -94209,3 +94358,383 @@ locale. `-a` / `--binary-files=text` bypasses the check, and `-z` changes it
 (NUL is the line terminator then, so it cannot be the marker). Four cases in
 `scripts/grep-diff.sh` under `# --- binary ---` are marked `!` with this reason
 and should all turn XPASS together when it lands.
+
+## B-GREP-NEVER-DETECTED-BINARY-CONTENT (lane B, 2026-08-29) -- **FIXED 2026-08-29**
+
+**In short:** `grep` had no idea what a binary file was. Searching a `.png` or
+an executable printed screenfuls of terminal-wrecking bytes, where real grep
+prints one line saying the file matched and stops. It now detects binary
+content the way GNU does, and all three `--binary-files` behaviours work. Two
+narrower gaps are left behind and tracked below; neither is reachable without
+first building something else.
+
+`--binary-files=TYPE` names three behaviours for one question -- *this file
+holds a NUL; now what?* -- and we had only the third. What landed:
+
+| | behaviour | stdout | stderr | status |
+|---|---|---|---|---|
+| `binary` (default) | the lines are withheld | nothing | `grep: F: binary file matches` | 0 |
+| `without-match` / `-I` | the file is treated as not matching | nothing | nothing | 1 |
+| `text` / `-a` | detection is skipped entirely | the bytes, NULs and all | nothing | 0 |
+
+Four details that are easy to get wrong and were each measured against the
+reference host's GNU grep 3.11 rather than inferred:
+
+- **The decision is per read buffer, not per line.** A NUL anywhere in the
+  first buffer withholds the *whole file's* output, including matches that
+  physically precede it. `printf 'ary head\nmid\0dle\nary tail\n'` prints
+  nothing at all -- not `ary head`.
+- **The diagnostic goes to stderr, and is owed only when lines were what was
+  asked for.** `-c`, `-l`, `-L` and `-q` print no lines, so there is nothing to
+  withhold and GNU stays silent -- and `-c` still counts the whole file (2 for
+  the fixture above), proving the file is searched to the end rather than
+  abandoned at the NUL. Upstream spells this `out_quiet_0`.
+- **`-I` is a third behaviour, not a quieter default.** It makes the file
+  *non-matching*, so `-L` names it and `-l` does not. Suppressing the output
+  alone would leave it matching, a difference an exit status cannot see.
+- **`-z` disables detection.** NUL is the record terminator then, so it cannot
+  also be the marker; upstream guards the whole test with `eol &&`. Without
+  this, every `-z` search would call its input binary.
+
+Implementation: `BINARY_PROBE` (32 KiB, upstream's `INITIAL_BUFSIZE`) is the
+`BufReader` capacity, and one `fill_buf()` before the first line is searched
+does the scan. `search_stream` returns an `Outcome { matched, binary_match }`
+rather than a bare `bool`, so the *decision* is made where the bytes are and
+the *printing* stays in `Run::search`. The message is assembled as bytes and
+emitted with `stdfd::diag_bytes`, not `diag!`: the file name is unquoted
+`input_filename()`, a name on this system need not be UTF-8, and formatting it
+would mean `from_utf8_lossy` -- the exact corruption the getopt conversion
+above existed to remove. That was nearly written the wrong way here.
+
+Verification:
+
+- `bash scripts/grep-diff.sh` (in WSL) -> **513 passed, 0 differed, 7 on
+  purpose, 0 unexpectedly agreed**, up from 498/0/12/0. The four `!` lines this
+  gap owned all turned XPASS together as predicted, as did a fifth (`grep foo
+  zsep` -- the `-z` fixture read *without* `-z`, whose reason had been written
+  as a separate `-z` matter). Their markers are gone and eleven further cases
+  were added around them: `-l`/`-L`/`-o`/`-n` on a binary file, `-Il`/`-IL` for
+  the matching/non-matching distinction, `-zI`, and a binary file that matches
+  nothing.
+- 114 unit tests pass (six new, plus one rewritten -- see below);
+  `cargo clippy` clean.
+
+One existing test had to be rewritten rather than kept:
+`a_nul_in_the_input_is_data_like_any_other_byte` asserted that `a\0x\n` is
+printed under default options, which was true only because of the bug. It is
+now `a_nul_makes_the_input_binary_and_only_dash_a_carries_it_through`, and
+asserts both halves -- default suppresses, `-a` passes the byte through
+unaltered -- because passing either alone would be consistent with the searcher
+mangling the NUL.
+
+### `TD-COREUTILS-GREP-DETECTS-BINARY-ONLY-IN-THE-FIRST-BUFFER`
+
+Referenced by name from `BINARY_PROBE`'s doc comment in `grep.rs`.
+
+Upstream re-runs the NUL scan on **every** read buffer until the first
+detection; we scan only the first. For any file of 32 KiB or less -- which is
+every fixture, every test, and most text -- the two are identical. Beyond that
+we differ from GNU in one direction only: a file whose first 32 KiB are clean
+but which turns binary later is printed where GNU would have started
+suppressing part-way through.
+
+The fix is not a bigger probe (that just moves the boundary) but moving the
+scan into the read loop: check each refill until `binary` is set, which needs
+`search_stream`'s line reader restructured to see buffer boundaries rather than
+`read_until` hiding them. Left for when that reader is next touched. Low harm
+in the meantime: the failure mode is *too much* output, never a wrong exit
+status or a wrong count.
+
+### `TD-COREUTILS-GREP-DOES-NOT-SUPPRESS-ON-ENCODING-ERRORS` -- blocked on locale support
+
+**In short:** real grep calls a file binary for two separate reasons -- it
+holds a NUL, or its bytes are not valid text in your language setting. We now
+implement the first. The second cannot be implemented yet because coreutils has
+no concept of a language setting at all.
+
+This is a genuinely independent mechanism, not a corner of the NUL rule, and
+the difference was established by measurement (`bin4.sh`) after a first probe
+gave the opposite answer -- `dash`'s `printf` has no `\x` escape, so a `\xff`
+fixture had silently written four literal characters and the file was plain
+ASCII. The byte must be written octal, `\377`.
+
+What GNU does with `printf 'ary a\377b\nary plain\n'` under `C.UTF-8`:
+
+| command | result |
+|---|---|
+| `grep ary enc` | prints only `ary plain`; the bad line is dropped and `grep: enc: binary file matches` goes to stderr |
+| `grep -c ary enc` | `2` -- the count is unaffected |
+| `grep -o ary enc` | prints both `ary`s and no diagnostic: the printed *segment* is valid even though its line is not |
+| `grep -I ary enc` | same as plain `grep` -- **`-I` does not suppress on encoding errors** |
+| `LC_ALL=C grep ary enc` | prints both lines, no diagnostic: in a single-byte locale no byte sequence is invalid |
+
+Upstream's mechanism is `print_line_head` dropping the segment it was about to
+print when it has encoding errors and setting `encoding_error_output`, which
+`finish_grep` then reports with the same message. So it is per printed segment,
+decided at print time -- structurally elsewhere from the per-buffer NUL scan
+that happens before searching.
+
+**The blocker is a real prerequisite, not effort.** `grep -rn 'LC_ALL|LC_CTYPE|
+fn locale' userspace/coreutils/src` finds nothing but doc comments: coreutils
+has no locale plumbing whatsoever. Hardcoding UTF-8 validation would be wrong
+under `LC_ALL=C`, where the correct answer is that *no* byte sequence is
+invalid and the whole mechanism is off -- so implementing this before there is
+something to ask "which locale?" would make the common `LC_ALL=C` case worse,
+not better. Revisit when coreutils grows locale support; the measurements above
+are the acceptance criteria and need no re-taking.
+
+## `B-tar-READ-EVERY-PATH-AS-UTF-8` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
+
+**In short:** on this OS a filename may hold any byte except `/` and NUL, so a
+file can perfectly legally be called `café.txt` in Latin-1 -- a name that is not
+valid UTF-8. `tar` assumed every name was UTF-8 in three places, and each one
+lost data rather than complaining: naming such a file on the command line
+**aborted the program**; archiving a directory containing one **stored it under
+a different name**, so the archive was not a copy of the tree; and extracting an
+archive that contained one **wrote it to disk under a different name**. All
+three are fixed -- `tar` now carries names as bytes from argv to the syscall and
+back.
+
+### What it actually did (measured, 2026-08-29, against the commit before the fix)
+
+Fixture: `src/plain.txt`, `src/café.txt` (the `é` is the single byte `\351`),
+`src/sub/<FF><FE>.bin`. `\351` alone is not valid UTF-8; `\377` can never appear
+in UTF-8 at all.
+
+| | before | after |
+|---|---|---|
+| `tar -cf x.tar 'src/café.txt'` | **panic, SIGABRT (rc 134)**: `called Result::unwrap() on an Err value: "src/caf\xE9.txt"` | archives it, rc 0 |
+| `tar -cf a.tar src`, then `tar -tf a.tar` **with GNU tar** | GNU reads back `src/caf\357\277\275.txt` -- U+FFFD, three bytes, **stored in the archive** | GNU reads back `src/caf\351.txt` |
+| our `tar -xf` of a **GNU-made** archive of that tree | writes `caf<U+FFFD>.txt` and `<U+FFFD><U+FFFD>.bin` to disk | writes the original names |
+| `diff -r src extracted` | `Only in src: café.txt` / `Only in o/src: caf<U+FFFD>.txt` | `IDENTICAL` |
+
+Two things are worth separating out of that table.
+
+**The corruption was at *create* time, not only at display time.** It is easy to
+read "lossy decode" as a printing problem. It was not: the U+FFFD went into the
+100-byte `name` field of the header, which is why *GNU* tar reads the wrong name
+out of our archive. An archive made by the old binary is permanently wrong and
+no extractor can recover the name.
+
+**It was not reversible even in principle.** `<FF><FE>.bin` -- two bytes --
+became six, one U+FFFD per bad byte, and distinct bad bytes all collapse onto
+the same replacement character. There is no mapping back.
+
+### The three sites
+
+1. **`main`/`parse_args`** took `env::args()` (`Vec<String>`), whose iterator
+   `unwrap`s on a non-UTF-8 argument -- hence the abort, which happened before
+   `tar` had looked at anything. Now `env::args_os()` into `Vec<OsString>`, and
+   the option scan walks a cluster **byte by byte** rather than `char` by
+   `char`. `-f` and `-C` values and all operands are kept as `OsString` and
+   handed to `File`/`set_current_dir`/`Path` untouched.
+2. **`add_directory_recursive`** built each child's member name with
+   `e.file_name().to_string_lossy().into_owned()`. This is the *create*-side
+   corruption above: the lossy copy was both what went into the header and what
+   the recursion descended with. Now `os_bytes(&e.file_name()).into_owned()`,
+   collected as `Vec<u8>` and sorted by bytes (so the ordering stays stable for
+   names that no longer survive a round trip).
+3. **`extract_string`** ran the raw header field through
+   `String::from_utf8_lossy`, and it is what read the `name` field, so *every*
+   member name passed through it before anything else saw it. That is the
+   *extract*- and *list*-side corruption. It is now `field_bytes`, which borrows
+   the used part of the field and decodes nothing.
+
+`sanitize_member_name` follows from (3) and is the part that mattered most for
+security rather than fidelity: it took `&str`, which meant the `..` check was
+being made about a string that had already been altered and was **not** the name
+that would be written. It now takes and returns bytes, so the check and the
+write are about the same thing. (No traversal escape was found through the old
+arrangement -- U+FFFD cannot become `..` -- but "the guard inspects a different
+value than the one used" is not a property worth relying on.)
+
+Supporting changes: `TarHeader::set_name(&[u8])`; a `report_member(&[u8])`
+helper that goes through `stdfd::diag_bytes`, because `diag!` routes through
+`format!` and would have reintroduced a lossy decode for `-v`; `list_archive`
+writing the name with `write_all` rather than `writeln!`, so `tar -tf` output
+can be fed back to whatever extracts it; and `parse_octal` doing
+`str::from_utf8().ok()` -- a field that is not ASCII is not a number either, so
+it lands on the same 0 that `"garbage"` already did.
+
+### One deliberate message change
+
+`tar -Z` said `unknown option: -Z`. The byte is now rendered with `quoteaf`,
+which always quotes, so keeping that shape would have produced the odd `-'Z'`.
+It reads `invalid option -- 'Z'` instead, which is byte-for-byte what GNU tar
+1.35 prints (measured: `tar -Q`). `quoteaf` and not `char::from` because the
+byte comes from the command line, and rendering it raw would let a crafted
+argument forge a line of `tar`'s stderr.
+
+### Verification
+
+- 51 host unit tests pass, up from 44. The seven new ones are the point of the
+  change: a non-UTF-8 operand, `-f` value and `-C` value through `parse_args`;
+  a non-UTF-8 name through `sanitize_member_name` both when it is legal and
+  when it sits beside a `..`; `field_bytes` not decoding; and `list_archive`
+  writing the raw bytes.
+- End-to-end round trip on the fixture above: our archive extracted by **GNU**
+  tar is `diff -r`-identical to the source tree, and a **GNU**-made archive
+  extracted by ours is likewise identical. Both directions, because a bug that
+  renamed on create *and* on extract could have cancelled itself out in a
+  self-to-self test.
+- `scripts/argv-utf8.py --check` drops from 10 findings to 9;
+  `userspace/coreutils/src/bin/tar.rs:argv-as-string` is removed from the
+  baseline ratchet.
+- `cargo +nightly clippy -p coreutils --bin tar --tests` clean for the target.
+
+### Why `tar` still does not use `coreutils::getopt`
+
+Every other converted bin moved to `coreutils::getopt` at the same time as it
+moved to bytes, so the exception needs stating: **GNU tar does not use
+`getopt_long`.** It uses `argp`, and `tar --=x` reports **175** long options
+including `--usage`, `--program-name` and `--HANG`. Two consequences:
+
+- `scripts/getopt-ambiguity-check.py` auto-discovers any bin with a
+  `const LONG_OPTIONS` table and diffs it *as a sequence* against
+  `<util> --=x`. Adding a table to `tar` would therefore create an obligation to
+  transcribe all 175 argp entries -- a table describing a parser we are not
+  emulating.
+- GNU tar's *old option format* (`tar cvf x.tar` -- a leading cluster with no
+  dash) cannot be expressed in getopt at all, and this tar would need it to
+  accept the spelling most scripts actually use.
+
+So the byte conversion was done with tar's own parser. This is a scope
+judgment, not a deferral of the bug: the argv corruption above is fixed either
+way, and adopting getopt would not have fixed anything additional. Whether
+this tar should grow long options and the old option format is a separate
+question and is not currently blocking anything -- it accepts `-c/-x/-t/-v/-f/-C`
+and treats `--anything` as a file operand, which is what it did before.
+
+---
+
+## B-more-STOPPED-PAGING-AT-THE-FIRST-NON-UTF8-BYTE (lane B, 2026-08-29) -- **FIXED 2026-08-29**
+
+**In short:** `more` is the program you use to look at a file. This one would
+show you *part* of a file and stop, with nothing on screen saying there was
+more, and exit as if it had succeeded. Three separate causes, each of which
+silently truncated the output: one stray non-text byte anywhere in the file
+ended the display there; sending the output anywhere other than a terminal
+(`more big.txt | grep x`, `more big.txt > copy`) cut it off after one
+screenful; and a file whose name was not valid text crashed the program
+outright. It also mislabelled what it did show -- a file's name was announced
+in a banner that was one character too narrow, was printed even for files that
+could not be opened, and was left off in the one case util-linux prints it.
+All of it is fixed and `more` is now byte-for-byte identical to util-linux
+`more` 2.39.3 across 44 measured cases.
+
+### The four truncations, measured
+
+Each row is our binary and util-linux's, run side by side on the same file,
+stdin `/dev/null`, stdout a pipe.
+
+| case | before | after |
+|---|---|---|
+| `more bad.txt` -- a `\377` byte on line 2 of 3 | printed line 1 only, exit **0** | all three lines, byte-identical to util-linux |
+| `more sixty.txt \| cat` with `LINES=10` | printed **9** lines of 60, exit **0** | all 60 |
+| `more caf<0xE9>.txt` | `panicked ... called Result::unwrap() on an Err value: "caf\xE9.txt"`, exit **134** | pages it, exit 0 |
+| file with no final newline | added one | reproduces the file exactly |
+
+The first is the `argv-utf8` gate's entry for this bin and the reason it was
+picked up. The loop read with `BufRead::lines`, which yields `String` and so
+*fails* on a line that is not valid UTF-8 -- and the failure arm was
+`Err(_) => break`, which is end-of-file's arm. A byte the program could not
+decode and the end of the file were the same event. Reconstructing each line
+into a `String` and printing it with `writeln!` is what appended the newline
+the file did not have.
+
+The second is the same class of bug reached from the other side. `more` paged
+unconditionally, so into a pipe it printed a screenful, wrote `--More--`, and
+read a keystroke from stdin -- which was `/dev/null`, so the read returned
+0 bytes, which `read_key` maps to `Key::Quit`. The pipeline got one screen of
+a file the user asked for all of, with status 0. A pager must page only when
+stdout is a terminal.
+
+The third was `env::args()` (the `String` iterator, which panics on an
+undecodable argument) rather than `env::args_os()`.
+
+### The labelling, also measured
+
+`more` announces each file inside a banner of colons. Three things were wrong
+with ours, all found by running the two binaries side by side rather than by
+reading the code:
+
+- The banner was **thirteen** colons. util-linux prints **fourteen**.
+- It was printed **before** the `open`, so `more good.txt nosuch.txt`
+  announced `nosuch.txt` and then showed nothing under it. util-linux opens
+  first and never names a file it cannot show.
+- It was printed on **operand count alone** (`files.len() > 1`). The real rule,
+  established over the full `{1,2 files} x {stdin tty, pipe} x {stdout tty,
+  pipe}` matrix, is `operands > 1 || !isatty(0)` -- keyed on **stdin**, which
+  is what tells `more` that nobody is going to answer a prompt. That is why
+  `more f > out` labels its output and `more f` at a terminal does not.
+
+A directory operand was also wrong. `File::open` on a directory *succeeds*; it
+is the read that fails with `EISDIR`, so we printed a banner promising a file
+and then a diagnostic. util-linux stats first and writes `\n*** dir: directory
+***\n\n` to **stdout** -- in-band, where the reader is looking -- and carries
+on with status 0. We now do the same.
+
+Finally, the diagnostic itself. Ours was
+`more: nosuch.txt: No such file or directory (os error 2)`; util-linux's is
+`more: cannot open nosuch.txt: No such file or directory`. Both halves are
+fixed: the `cannot open` wording, and `coreutils::errmsg::strerror` in place of
+the host's `io::Error` text, which removes this bin from the
+`host-errmsg-baseline.txt` ratchet as well.
+
+### Where the keystrokes come from now
+
+Paging happens only when stdout is a terminal. When it is but stdin has been
+redirected, commands cannot come from stdin -- that descriptor is somebody's
+data and reading it for keystrokes would consume it -- so the controlling
+terminal is reopened, as util-linux does. If there is no `/dev/tty`, the
+fallback is *not to page*, which shows the whole file rather than a truncated
+one. Verified: `LINES=5 more sixty.txt < /dev/null` on a pty stops at
+`--More--` after four lines, and does not stop at all through a pipe.
+
+The `--More--` prompt moved from descriptor 2 to stdout at the same time.
+Descriptor 2 was chosen when `more` paged unconditionally; now that paging
+implies stdout *is* the terminal, stdout is where the pager's screen is, and
+on descriptor 2 the prompt vanished under `more f 2>/dev/null`, leaving a
+pager that looked hung.
+
+### The one deliberate divergence
+
+util-linux has no `-` convention: `more -` reports
+`cannot open -: No such file or directory`. Ours reads stdin, because every
+other utility in this tree spells stdin `-` and a pager that alone refused it
+would be the surprise. Stdin is never given a banner either way, which is also
+what util-linux does with its own stdin copy.
+
+### Verification, and why none of it was caught before
+
+`more` had **no differential harness**, unlike `cat`, `cut`, `comm` and the
+rest. Four independent truncations survived in a two-hundred-line program for
+exactly that reason: not one of them is visible by eye in the source, and every
+one of them is a single line of a hex dump. So the fix is not only the code --
+`scripts/more-diff.sh` now exists, and `scripts/all-diff.sh` picks it up by
+glob.
+
+It compares stdout (as `od -An -tx1`), stderr as *text*, and the exit status,
+over: the plain copy (plain, empty, NUL and `0xff`, CRLF, blank lines, no final
+newline, invalid UTF-8, 60 lines); names (a nested path, a non-UTF-8 name); the
+banner (two files, three files, the same file twice, an empty file between two
+others); operands that do not open (missing, good+missing, missing+good, two
+missing, unreadable, unreadable+good); and directories (alone, first, last, two
+of them). Every one of those runs **twice**, at `LINES=1000` and at `LINES=10`
+-- the second is the value under which our `more` used to emit one screenful
+and stop, so running it is what makes "stdout is not a terminal, therefore copy
+it all" a claim rather than an assumption. Three further cases put stdin on a
+pty via `script`, which is the only way to reach the other half of the banner
+rule, and two write to `/dev/full`. **53 passed, 0 differed, 1 differs on
+purpose** (the `-` operand above).
+
+`OURS=/usr/bin/more scripts/more-diff.sh` runs util-linux against itself and
+reports the one xfail as an XPASS and nothing else, which is the check that the
+harness discriminates at all.
+
+What is deliberately *not* compared is the interactive screen: with stdout a
+terminal, util-linux drives it through terminfo
+(`ESC[7m--More--(Next file: x)ESC[27mESC[K`) and ours writes a plain
+`--More--`. Those cannot match byte for byte without porting terminfo into a
+pager. The decision to pause, and the keystroke handling, are covered by unit
+tests in `more.rs` instead.

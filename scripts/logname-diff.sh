@@ -41,7 +41,7 @@
 set -u
 
 # shellcheck disable=SC2209  # the subject's *name*, not a call to logname(1)
-DIFF_PROG=logname
+DIFF_PROG='logname'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 

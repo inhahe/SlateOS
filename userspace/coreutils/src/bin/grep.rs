@@ -566,32 +566,47 @@ struct Options {
     /// program that accepted it without flushing would answer the question
     /// wrongly in exactly the case the caller wrote it for.
     line_buffered: bool,
-    /// `-I` / `--binary-files=without-match`: skip a file that looks binary.
-    ///
-    /// This grep has no other binary handling — it never suppresses output for
-    /// input it thinks is binary — so `binary` and `text` are the same setting
-    /// here and only `without-match` does anything. See [`BinaryFiles`].
+    /// `--binary-files=TYPE`, with `-a` and `-I` as shorthands: what to do with
+    /// a file whose first read holds a NUL. See [`BinaryFiles`].
     binary_files: BinaryFiles,
 }
 
 /// `--binary-files=TYPE`, and the `-a` / `-I` shorthands for two of its values.
 ///
-/// GNU has three behaviours; this grep has two, because it never replaces a
-/// matching line with `Binary file F matches`. So `Binary` and `Text` are
-/// indistinguishable here and `WithoutMatch` is the only value that changes
-/// anything. The three are still kept apart rather than collapsed into a
-/// `bool`, because the *option* has three values and a caller who writes
-/// `--binary-files=binary` after `-I` is turning the skipping back off.
+/// The three values are three behaviours for one question — *this file holds a
+/// NUL; now what?* — and none of them is a filter on the search itself. The
+/// file is searched either way; what changes is what reaches stdout.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 enum BinaryFiles {
-    /// GNU's default, and the only one that differs from `Text` upstream.
+    /// GNU's default. The selected lines are **not** printed; instead a single
+    /// `grep: F: binary file matches` goes to **stderr** if anything matched,
+    /// and the status is 0 as usual. `-c`, `-l`, `-L` and `-q` are unaffected —
+    /// what is suppressed is the *lines*, so a count is still a count.
     #[default]
     Binary,
-    /// `-a`. Identical to [`BinaryFiles::Binary`] here.
+    /// `-a`. Print the bytes, NULs and all: the detection is skipped entirely,
+    /// which is also why `-a` is the only way to see a match in a binary file.
     Text,
-    /// `-I`. A file holding a NUL in its first read is skipped entirely.
+    /// `-I`. The file is treated as not matching at all — no output on either
+    /// stream, and it counts towards `-L` rather than `-l`.
     WithoutMatch,
 }
+
+/// Bytes read up front and scanned for a NUL before the first line is searched.
+///
+/// Upstream detects binary content **per read buffer**, and only until it has
+/// detected once, so where the NUL falls decides how much output precedes it.
+/// The observable consequence is that a file whose NUL is on line 2 has its
+/// line 1 suppressed as well — measured: `grep ary` over `ary head/mid\0dle/ary
+/// tail` prints nothing at all. Matching that means deciding before printing,
+/// which means looking further ahead than one line.
+///
+/// 32 KiB is upstream's `INITIAL_BUFSIZE`, so for every file at or below that
+/// size the two programs make the decision on exactly the same bytes. Beyond
+/// it, upstream keeps testing each later buffer and we do not — see
+/// `TD-COREUTILS-GREP-DETECTS-BINARY-ONLY-IN-THE-FIRST-BUFFER` in
+/// known-issues.md.
+const BINARY_PROBE: usize = 32 * 1024;
 
 impl Options {
     /// Whether directories are walked — `-r`, `-R` or `-d recurse`.
@@ -2341,7 +2356,27 @@ impl Run<'_> {
             self.opts,
             &mut self.printed_before,
         ) {
-            Ok(matched) => {
+            Ok(Outcome {
+                matched,
+                binary_match,
+            }) => {
+                // On **stderr**, and worded exactly so. Older grep printed
+                // `Binary file F matches` on stdout; 3.x moved it and lowered
+                // the case, which matters because it is the difference between
+                // a script's pipeline seeing the sentence and not. `-s` does
+                // not silence it: it is not an error about the file, and
+                // upstream routes it around `suppressible_error`.
+                //
+                // Assembled as bytes rather than through `diag!`, because the
+                // name is `input_filename()` unquoted and a name on this system
+                // need not be UTF-8. Formatting it would mean `from_utf8_lossy`
+                // — the exact corruption this file was converted to avoid.
+                if binary_match {
+                    let mut msg = b"grep: ".to_vec();
+                    msg.extend_from_slice(&shown);
+                    msg.extend_from_slice(b": binary file matches\n");
+                    stdfd::diag_bytes(&msg);
+                }
                 if matched {
                     self.any_match = true;
                     if self.opts.quiet {
@@ -2679,8 +2714,25 @@ struct Source<'a> {
     width: usize,
 }
 
-/// Search one stream, printing what the options ask for. Returns whether any
-/// line was selected.
+/// What one file's search came to.
+///
+/// Two answers rather than one because the second is a *diagnostic* about the
+/// file, and the name to put in it belongs to the caller: under `--label` and
+/// for `-` the name shown is not the name opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Outcome {
+    /// Whether any line was selected — the run's exit status, and what `-l` and
+    /// `-L` decide on.
+    matched: bool,
+    /// The file held a NUL, its lines were suppressed because of it, and
+    /// something matched anyway: the caller owes a `binary file matches` line on
+    /// stderr. False whenever the lines were never going to be printed —
+    /// `-c`, `-l`, `-L` and `-q` all leave this alone, because what the binary
+    /// rule suppresses is *lines*, and those four print none to begin with.
+    binary_match: bool,
+}
+
+/// Search one stream, printing what the options ask for.
 ///
 /// `printed_before` is the run's memory of whether *anything* has been printed
 /// yet, and it lives outside this function because the group separator does
@@ -2694,24 +2746,50 @@ fn search_stream(
     src: &Source<'_>,
     opts: &Options,
     printed_before: &mut bool,
-) -> io::Result<bool> {
+) -> io::Result<Outcome> {
     let filename = src.filename;
     let show_filename = src.show_filename;
+    let no = Outcome {
+        matched: false,
+        binary_match: false,
+    };
     // `-m 0` is not "no limit", and it is not "stop after the first" either:
     // GNU prints nothing at all — not even the `-c` count line, which is the
     // surprising half — and reports the file as not matching. Answering it
     // before opening a line is also the only way to get that, since the count
     // line below is printed unconditionally.
     if opts.max_count == Some(0) {
-        return Ok(false);
+        return Ok(no);
     }
 
-    let mut buf = BufReader::new(reader);
+    let mut buf = BufReader::with_capacity(BINARY_PROBE, reader);
+    let sep = opts.line_sep();
+    // Under `-z` a NUL is the line terminator, so it cannot also be the mark of
+    // a file that is not text — upstream guards the whole test with `eol &&`.
+    // `-a` skips the look entirely, which is what makes it the way to see a
+    // match in a binary file. The `fill_buf` may come back short of
+    // `BINARY_PROBE` — a pipe hands over whatever has arrived — so this reads
+    // the same bytes upstream's first buffer holds only when the underlying
+    // reads line up; see `BINARY_PROBE`.
+    let looks_binary = opts.binary_files != BinaryFiles::Text && sep != 0;
+    let binary = looks_binary && buf.fill_buf()?.contains(&0);
+    if binary && opts.binary_files == BinaryFiles::WithoutMatch {
+        // Upstream's `return 0`: not "no lines were selected after searching"
+        // but "this file is not searched at all", which is why it counts
+        // towards `-L`.
+        return Ok(no);
+    }
     // Printing nothing means the first selected line settles it, and reading
     // the rest of a file is work whose result is discarded — which for `-q` on
-    // a pipe is also the difference between returning and waiting.
-    let stop_at_first = opts.quiet || opts.files_with_matches || opts.files_without_match;
-    let sep = opts.line_sep();
+    // a pipe is also the difference between returning and waiting. A binary
+    // file joins them: upstream sets `done_on_match` alongside `out_quiet`, so
+    // it stops at the first match too — but *not* under `-c`, which must go on
+    // counting to have a count to print.
+    let quiet_answer = opts.quiet || opts.files_with_matches || opts.files_without_match;
+    let stop_at_first = quiet_answer || (binary && !opts.count_only);
+    // Upstream's restored `out_quiet_0`: the message is owed only when lines
+    // were what the caller asked for and were withheld.
+    let binary_suppressed = binary && !opts.count_only && !quiet_answer;
     // `-c`/`-l`/`-L`/`-q` answer a question about the file, so GNU ignores
     // `-A`/`-B`/`-C` under them entirely — the separator included.
     let show_context = opts.context_printed();
@@ -2787,7 +2865,10 @@ fn search_stream(
         if line_selected(body, pats, opts).map_err(limit_err)? {
             match_count = match_count.saturating_add(1);
             if stop_at_first {
-                return Ok(true);
+                return Ok(Outcome {
+                    matched: true,
+                    binary_match: binary_suppressed,
+                });
             }
             if !opts.count_only {
                 // Where this group of output begins: `out_before` lines back,
@@ -2904,7 +2985,13 @@ fn search_stream(
         line_flush(out, opts)?;
     }
 
-    Ok(match_count > 0)
+    Ok(Outcome {
+        matched: match_count > 0,
+        // Only reachable with `binary_suppressed` false: a binary file that is
+        // not counting stops at its first match above. Written out rather than
+        // hard-coded so that the invariant is not silently load-bearing.
+        binary_match: binary_suppressed && match_count > 0,
+    })
 }
 
 #[cfg(test)]
@@ -3722,11 +3809,25 @@ mod tests {
     }
 
     #[test]
-    fn a_nul_in_the_input_is_data_like_any_other_byte() {
+    fn a_nul_makes_the_input_binary_and_only_dash_a_carries_it_through() {
+        // A NUL is data the searcher handles like any other byte -- it neither
+        // ends a line nor breaks a pattern -- but by default GNU withholds the
+        // *output* of a file that holds one, so the byte's presence is visible
+        // only under `-a`. Both halves are asserted here because passing one
+        // alone would be consistent with the searcher mangling the NUL.
         let o = Options::default();
         let p = pats("x", &o);
-        let (out, _) = run_search(b"a\0x\n", &p, &o, "f", false);
-        assert_eq!(out, b"a\0x\n");
+        let (out, matched) = run_search(b"a\0x\n", &p, &o, "f", false);
+        assert!(matched, "the file matched; what is suppressed is the line");
+        assert_eq!(out, b"", "and under the default it is suppressed");
+
+        let a = Options {
+            binary_files: BinaryFiles::Text,
+            ..Options::default()
+        };
+        let (out, matched) = run_search(b"a\0x\n", &pats("x", &a), &a, "f", false);
+        assert!(matched);
+        assert_eq!(out, b"a\0x\n", "the NUL travels through unaltered");
     }
 
     #[test]
@@ -3995,9 +4096,23 @@ mod tests {
         filename: &str,
         show_filename: bool,
     ) -> (Vec<u8>, bool) {
+        let (out, outcome) = run_search_outcome(input, pats, opts, filename, show_filename);
+        (out, outcome.matched)
+    }
+
+    /// [`run_search`] without dropping the second half of the answer, for the
+    /// assertions that are about the `binary file matches` diagnostic — which
+    /// `search_stream` reports rather than prints, so that a test can see it.
+    fn run_search_outcome(
+        input: &[u8],
+        pats: &[Pat],
+        opts: &Options,
+        filename: &str,
+        show_filename: bool,
+    ) -> (Vec<u8>, Outcome) {
         let mut out: Vec<u8> = Vec::new();
         let mut printed_before = false;
-        let matched = search_stream(
+        let outcome = search_stream(
             &mut out,
             input,
             pats,
@@ -4006,7 +4121,7 @@ mod tests {
             &mut printed_before,
         )
         .unwrap();
-        (out, matched)
+        (out, outcome)
     }
 
     fn run(
@@ -4026,6 +4141,128 @@ mod tests {
         let (out, matched) = run(b"foo\nbar\nfoobar\n", "foo", Options::default(), "f", false);
         assert!(matched);
         assert_eq!(out, "foo\nfoobar\n");
+    }
+
+    // ---------------- binary content ----------------
+    //
+    // A NUL after the first match and another match after the NUL, so that
+    // "suppressed from the first line" and "suppressed from the NUL onwards"
+    // give different answers. Every expectation below was measured against GNU
+    // grep 3.11 under `LC_ALL=C.UTF-8`.
+    const BIN: &[u8] = b"one\nary two\0\nthree ary\n";
+
+    fn bin_opts(binary_files: BinaryFiles) -> Options {
+        Options {
+            binary_files,
+            ..Options::default()
+        }
+    }
+
+    #[test]
+    fn a_nul_anywhere_in_the_first_buffer_suppresses_the_whole_files_output() {
+        // Not just the lines from the NUL onwards: GNU decides per *buffer*,
+        // and one buffer holds this whole file, so the match on line 2 -- which
+        // precedes the NUL that is at the end of that same line -- is withheld
+        // too. Getting this wrong is the difference between printing nothing
+        // and printing `ary two`.
+        let o = bin_opts(BinaryFiles::Binary);
+        let (out, outcome) = run_search_outcome(BIN, &pats("ary", &o), &o, "f", false);
+        assert_eq!(out, b"");
+        assert!(outcome.matched, "the status still says the file matched");
+        assert!(outcome.binary_match, "and the caller owes the diagnostic");
+    }
+
+    #[test]
+    fn the_binary_diagnostic_is_owed_only_when_lines_were_what_was_asked_for() {
+        // `-c`, `-l`, `-L` and `-q` print no lines to begin with, so there is
+        // nothing for the binary rule to withhold and GNU says nothing. `-c` is
+        // the one that proves the file is still *searched* to the end: the
+        // count is 2, both matches, the one after the NUL included.
+        let count = Options {
+            count_only: true,
+            ..bin_opts(BinaryFiles::Binary)
+        };
+        let (out, outcome) = run_search_outcome(BIN, &pats("ary", &count), &count, "f", false);
+        assert_eq!(out, b"2\n");
+        assert!(!outcome.binary_match);
+
+        for o in [
+            Options {
+                quiet: true,
+                ..bin_opts(BinaryFiles::Binary)
+            },
+            Options {
+                files_with_matches: true,
+                ..bin_opts(BinaryFiles::Binary)
+            },
+            Options {
+                files_without_match: true,
+                ..bin_opts(BinaryFiles::Binary)
+            },
+        ] {
+            let (_, outcome) = run_search_outcome(BIN, &pats("ary", &o), &o, "f", false);
+            assert!(!outcome.binary_match);
+        }
+    }
+
+    #[test]
+    fn a_binary_file_that_does_not_match_says_nothing_at_all() {
+        let o = bin_opts(BinaryFiles::Binary);
+        let (out, outcome) = run_search_outcome(BIN, &pats("zzz", &o), &o, "f", false);
+        assert_eq!(out, b"");
+        assert!(!outcome.matched);
+        assert!(!outcome.binary_match, "no match, so nothing to report");
+    }
+
+    #[test]
+    fn dash_a_is_the_way_to_see_a_match_in_a_binary_file() {
+        // `-a` does not merely un-suppress the output: it skips the detection,
+        // so the NUL travels through as the ordinary byte it is.
+        let o = bin_opts(BinaryFiles::Text);
+        let (out, outcome) = run_search_outcome(BIN, &pats("ary", &o), &o, "f", false);
+        assert_eq!(out, b"ary two\0\nthree ary\n");
+        assert!(outcome.matched);
+        assert!(!outcome.binary_match);
+    }
+
+    #[test]
+    fn without_match_makes_the_file_not_match_rather_than_not_print() {
+        // The distinction `-l`/`-L` can see and an exit status cannot: `-I`
+        // does not search the file at all, so it is a *non*-matching file and
+        // `-L` would name it. Suppressing the output alone would leave it
+        // matching.
+        let o = bin_opts(BinaryFiles::WithoutMatch);
+        let (out, outcome) = run_search_outcome(BIN, &pats("ary", &o), &o, "f", false);
+        assert_eq!(out, b"");
+        assert!(!outcome.matched);
+        assert!(!outcome.binary_match, "and it is silent about why");
+    }
+
+    #[test]
+    fn under_dash_z_a_nul_is_a_terminator_and_cannot_also_mean_binary() {
+        // Upstream guards the whole test with `eol &&`. Without this a `-z`
+        // search would call every file it was given binary, since NUL is what
+        // separates the records it is there to read.
+        let o = Options {
+            null_data: true,
+            ..bin_opts(BinaryFiles::Binary)
+        };
+        let (out, outcome) = run_search_outcome(BIN, &pats("ary", &o), &o, "f", false);
+        // Two records, not three lines: the NUL splits `one\nary two` from
+        // `\nthree ary\n`, both hold `ary`, and each is printed with the NUL
+        // terminator `-z` also writes on output. Measured: `grep -z ary`.
+        assert_eq!(out, b"one\nary two\0\nthree ary\n\0");
+        assert!(outcome.matched);
+        assert!(!outcome.binary_match);
+
+        // And `-I` must not swallow it either, which is the same guard read
+        // from the other side.
+        let i = Options {
+            null_data: true,
+            ..bin_opts(BinaryFiles::WithoutMatch)
+        };
+        let (_, outcome) = run_search_outcome(BIN, &pats("ary", &i), &i, "f", false);
+        assert!(outcome.matched);
     }
 
     // ---------------- context ----------------

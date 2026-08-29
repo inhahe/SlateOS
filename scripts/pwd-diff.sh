@@ -60,7 +60,7 @@
 # discriminates: it should report every xfail as XPASS and nothing else.
 set -u
 
-DIFF_PROG=pwd
+DIFF_PROG='pwd'
 # `command -v pwd` finds the shell builtin, which is not what is being compared.
 DIFF_REF="/usr/bin/pwd /bin/pwd"
 # shellcheck source=diff-wsl.sh

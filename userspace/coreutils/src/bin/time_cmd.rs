@@ -1404,10 +1404,15 @@ mod tests {
 
     #[test]
     fn percent_cpu_falls_back_to_microseconds_then_to_a_question_mark() {
-        let mut resp = Resuse::default();
-        resp.elapsed_usec = 400;
-        resp.usage.utime_usec = 100;
-        resp.usage.stime_usec = 100;
+        let resp = Resuse {
+            elapsed_usec: 400,
+            usage: Usage {
+                utime_usec: 100,
+                stime_usec: 100,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         assert_eq!(render("%P", &resp), "50%\n");
 
         assert_eq!(render("%P", &Resuse::default()), "?%\n");

@@ -65,7 +65,7 @@ set -u
 # Into WSL, build ours for Linux, find glibc's, and put both behind the one
 # name `tsort` so `argv[0]` matches. See `scripts/diff-wsl.sh`.  `timeout` is
 # named because every invocation below is bounded with it; see `run_side`.
-DIFF_PROG=tsort
+DIFF_PROG='tsort'
 DIFF_NEED=timeout
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"

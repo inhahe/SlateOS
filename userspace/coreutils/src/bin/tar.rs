@@ -33,8 +33,10 @@
 //! be created, exits 2 (GNU's fatal-error status), not 0.
 
 use coreutils::diag;
-use coreutils::quote::{quoteaf, quotef_os};
+use coreutils::quote::{os_bytes, os_from_bytes, quoteaf, quotef, quotef_os};
+use coreutils::stdfd;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -56,36 +58,54 @@ struct TarArgs {
     extract: bool,
     list: bool,
     verbose: bool,
-    archive_file: Option<String>,
-    directory: Option<String>,
-    files: Vec<String>,
+    archive_file: Option<OsString>,
+    directory: Option<OsString>,
+    files: Vec<OsString>,
 }
 
 /// Parse tar's argv.  Supports clustered short flags; `f` and `C`
 /// consume the following argv element as their value (even when
 /// clustered as e.g. `-xvf`, in which case the next argv is the value
 /// of `f`).  Unknown short flags return an error.
-fn parse_args(args: &[String]) -> Result<TarArgs, String> {
+///
+/// The scan is over **bytes**, and the values and operands come out as
+/// `OsString` unchanged. Every one of them is a path — the archive, the `-C`
+/// destination, and each file to add — and on this OS a path may hold any byte
+/// but `/` and NUL. Reading argv as `String` made `tar -cf a.tar <name>` abort
+/// before doing anything at all when the name was not valid UTF-8, which is a
+/// legal name here. See `known-issues.md` → `B-tar-READ-EVERY-PATH-AS-UTF-8`.
+///
+/// A cluster is walked byte by byte rather than `char` by `char`. That is not
+/// merely the byte-safe spelling of the same loop: a multi-byte character in a
+/// cluster used to be reported whole (`unknown option: -é`), and now reports
+/// its first byte. Since no such cluster is ever valid, the difference is only
+/// in the wording of a refusal — but the byte version cannot panic on a cluster
+/// that is not UTF-8 at all, which the `char` version could not even reach.
+fn parse_args(args: &[OsString]) -> Result<TarArgs, String> {
     let mut out = TarArgs::default();
     let mut i: usize = 0;
 
     while let Some(arg) = args.get(i) {
-        if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") {
-            let rest = arg.get(1..).unwrap_or("");
-            for c in rest.chars() {
+        let bytes = os_bytes(arg);
+        // `--anything` is not an option here: this tar has no long options, and
+        // treating `--` as the start of a cluster would read each of its letters
+        // as a flag. It falls through to the operand branch, as it always has.
+        if bytes.first() == Some(&b'-') && bytes.len() > 1 && bytes.get(1) != Some(&b'-') {
+            let rest = bytes.get(1..).unwrap_or(&[]);
+            for &c in rest {
                 match c {
-                    'c' => out.create = true,
-                    'x' => out.extract = true,
-                    't' => out.list = true,
-                    'v' => out.verbose = true,
-                    'f' => {
+                    b'c' => out.create = true,
+                    b'x' => out.extract = true,
+                    b't' => out.list = true,
+                    b'v' => out.verbose = true,
+                    b'f' => {
                         i = i.saturating_add(1);
                         let v = args
                             .get(i)
                             .ok_or_else(|| "option -f requires an argument".to_string())?;
                         out.archive_file = Some(v.clone());
                     }
-                    'C' => {
+                    b'C' => {
                         i = i.saturating_add(1);
                         let v = args
                             .get(i)
@@ -93,7 +113,18 @@ fn parse_args(args: &[String]) -> Result<TarArgs, String> {
                         out.directory = Some(v.clone());
                     }
                     other => {
-                        return Err(format!("unknown option: -{other}"));
+                        // `quoteaf` rather than `char::from`: `other` is an
+                        // arbitrary byte from the command line, and rendering it
+                        // raw would let a crafted argument forge a line of
+                        // tar's stderr.
+                        //
+                        // The wording is GNU's, measured: `tar -Q` says
+                        // `tar: invalid option -- 'Q'`. It used to read
+                        // `unknown option: -Q`, and since `quoteaf` always
+                        // quotes, keeping that shape would have produced the
+                        // odd `-'Q'` — so the message moved to the one it
+                        // should have had anyway.
+                        return Err(format!("invalid option -- {}", quoteaf(&[other])));
                     }
                 }
             }
@@ -107,7 +138,7 @@ fn parse_args(args: &[String]) -> Result<TarArgs, String> {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
     let parsed = match parse_args(&args) {
         Ok(p) => p,
         Err(e) => {
@@ -123,7 +154,11 @@ fn main() {
     let status = if parsed.create {
         #[cfg(unix)]
         {
-            do_create(&parsed.archive_file, &parsed.files, parsed.verbose)
+            do_create(
+                parsed.archive_file.as_deref(),
+                &parsed.files,
+                parsed.verbose,
+            )
         }
         #[cfg(not(unix))]
         {
@@ -132,12 +167,12 @@ fn main() {
         }
     } else if parsed.extract {
         do_extract(
-            &parsed.archive_file,
+            parsed.archive_file.as_deref(),
             parsed.directory.as_deref(),
             parsed.verbose,
         )
     } else if parsed.list {
-        do_list_main(&parsed.archive_file)
+        do_list_main(parsed.archive_file.as_deref())
     } else {
         diag!("tar: must specify -c, -x, or -t");
         1
@@ -198,8 +233,15 @@ impl TarHeader {
         }
     }
 
-    fn set_name(&mut self, name: &str) {
-        let bytes = name.as_bytes();
+    /// Copy a member name into the header's 100-byte `name` field.
+    ///
+    /// Bytes, not `&str`: the field is 100 bytes of whatever the filesystem
+    /// gave us, and ustar has never required it to be text. The truncation at
+    /// 99 is the field's own limit and is unchanged — but note that it now cuts
+    /// at a byte boundary in the honest sense rather than pretending the input
+    /// was characters. See the module's "not supported" note about names > 255.
+    fn set_name(&mut self, name: &[u8]) {
+        let bytes = name;
         let len = bytes.len().min(99);
         if let (Some(dst), Some(src)) = (self.name.get_mut(..len), bytes.get(..len)) {
             dst.copy_from_slice(src);
@@ -254,6 +296,20 @@ impl TarHeader {
     }
 }
 
+/// Announce one member name under `-v`, unquoted and as bytes.
+///
+/// `diag!` cannot do this: it goes through `format!`, which takes a `&str`, so
+/// the name would have to pass through `from_utf8_lossy` first — and the whole
+/// point of the byte conversion is that a name is carried intact. Unquoted
+/// because that is what the previous `diag!("{name}")` printed and what GNU
+/// prints; the *diagnostics* quote, the listing does not.
+fn report_member(name: &[u8]) {
+    let mut line = Vec::with_capacity(name.len().saturating_add(1));
+    line.extend_from_slice(name);
+    line.push(b'\n');
+    stdfd::diag_bytes(&line);
+}
+
 /// Reduce an archive member name to a path that cannot escape the current
 /// directory, or refuse it.
 ///
@@ -283,29 +339,51 @@ impl TarHeader {
 /// legitimately containing a backslash keeps its name; the sole casualty is a
 /// file with a literal `..\` component, which is refused rather than silently
 /// renamed.
-fn sanitize_member_name(raw: &str) -> Result<String, String> {
-    let mut parts: Vec<&str> = Vec::new();
-    for component in raw.split('/') {
-        if component.is_empty() || component == "." {
+///
+/// Operates on **bytes**, because the name it is given is 100 bytes out of an
+/// archive header and nothing guarantees they are text. The previous version
+/// took `&str`, which meant the name had already been through
+/// `String::from_utf8_lossy` before this function saw it — and that is not just
+/// a display problem here, it is a correctness one in both directions:
+///
+/// * A member legitimately named with a non-UTF-8 byte was **extracted under a
+///   different name**, with each bad byte replaced by U+FFFD. Silent data
+///   corruption of exactly the kind rule 7 of `CLAUDE.md` names.
+/// * Worse, the replacement happened *before* the `..` test, so the guarantee
+///   this function exists to provide was being made about a string that was no
+///   longer the name being written. Comparing bytes to bytes removes a whole
+///   class of question about whether the check and the write agree.
+///
+/// The error messages quote the raw name with `quoteaf`, since it is
+/// attacker-chosen and rendering it raw would let a crafted archive forge a
+/// line of tar's stderr.
+fn sanitize_member_name(raw: &[u8]) -> Result<Vec<u8>, String> {
+    let mut parts: Vec<&[u8]> = Vec::new();
+    for component in raw.split(|&b| b == b'/') {
+        if component.is_empty() || component == b"." {
             // A leading empty component is the absolute-path `/`; an interior
             // one is a doubled slash. Both are dropped.
             continue;
         }
-        if component == ".." || component.split('\\').any(|p| p == "..") {
+        if component == b".." || component.split(|&b| b == b'\\').any(|p| p == b"..") {
             return Err(format!(
-                "refusing to extract '{raw}': member name escapes the destination directory"
+                "refusing to extract {}: member name escapes the destination directory",
+                quoteaf(raw)
             ));
         }
         parts.push(component);
     }
     if parts.is_empty() {
-        return Err(format!("refusing to extract '{raw}': empty member name"));
+        return Err(format!(
+            "refusing to extract {}: empty member name",
+            quoteaf(raw)
+        ));
     }
-    Ok(parts.join("/"))
+    Ok(parts.join(&b'/'))
 }
 
 #[cfg(unix)]
-fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> i32 {
+fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: bool) -> i32 {
     let mut out: Box<dyn Write> = match archive_file {
         Some(path) => match File::create(path) {
             Ok(f) => Box::new(f),
@@ -331,12 +409,14 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
         }
     }
 
-    fn add_file(path: &Path, name: &str, out: &mut dyn Write, verbose: bool, status: &mut i32) {
+    /// `name` is the member name as it will be stored, in bytes. It is derived
+    /// from `path` and so is as arbitrary as any file name on this system.
+    fn add_file(path: &Path, name: &[u8], out: &mut dyn Write, verbose: bool, status: &mut i32) {
         use std::os::unix::fs::MetadataExt;
         let meta = match fs::metadata(path) {
             Ok(m) => m,
             Err(e) => {
-                diag!("tar: {}: {e}", quotef_os(name));
+                diag!("tar: {}: {e}", quotef(name));
                 *status = EXIT_FATAL;
                 return;
             }
@@ -352,7 +432,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
         let mut f = match File::open(path) {
             Ok(f) => f,
             Err(e) => {
-                diag!("tar: {}: {e}", quotef_os(name));
+                diag!("tar: {}: {e}", quotef(name));
                 *status = EXIT_FATAL;
                 return;
             }
@@ -374,7 +454,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
         }
 
         if verbose {
-            diag!("{name}");
+            report_member(name);
         }
 
         let mut remaining = declared;
@@ -395,7 +475,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
                     Ok(n) => filled = filled.saturating_add(n),
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                     Err(e) => {
-                        diag!("tar: {}: {e}", quotef_os(name));
+                        diag!("tar: {}: {e}", quotef(name));
                         *status = EXIT_FATAL;
                         short = true;
                     }
@@ -415,21 +495,24 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
             // remaining blocks were padded, but it no longer holds the file.
             diag!(
                 "tar: {}: file shorter than expected; padded with zeros",
-                quotef_os(name)
+                quotef(name)
             );
             *status = EXIT_FATAL;
         }
     }
 
+    /// `prefix` is the directory's own member name in bytes, without the
+    /// trailing slash the header carries.
     fn add_directory_recursive(
         dir: &Path,
-        prefix: &str,
+        prefix: &[u8],
         out: &mut dyn Write,
         verbose: bool,
         status: &mut i32,
     ) {
         let mut header = TarHeader::new();
-        let name = format!("{prefix}/");
+        let mut name = prefix.to_vec();
+        name.push(b'/');
         header.set_name(&name);
         TarHeader::set_octal(&mut header.mode, 0o755);
         TarHeader::set_octal(&mut header.uid, 0);
@@ -445,7 +528,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
         }
 
         if verbose {
-            diag!("{name}");
+            report_member(&name);
         }
 
         let entries = match fs::read_dir(dir) {
@@ -453,26 +536,37 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
             Err(e) => {
                 // Previously `if let Ok(entries)`, so an unreadable directory
                 // produced an archive silently missing its whole subtree.
-                diag!("tar: {}: {e}", quotef_os(prefix));
+                diag!("tar: {}: {e}", quotef(prefix));
                 *status = EXIT_FATAL;
                 return;
             }
         };
         // Sorted so that archiving the same tree twice produces the same
         // bytes; `read_dir` order is whatever the filesystem feels like.
-        let mut children: Vec<(String, std::path::PathBuf)> = Vec::new();
+        //
+        // The names are collected as bytes. `to_string_lossy().into_owned()`
+        // was here, and it did not merely misprint a name under `-v`: the
+        // lossy copy was what got stored in the header *and* what the recursion
+        // descended with, so a directory entry whose name is not UTF-8 — legal
+        // on this OS — was archived under a different name than it has on disk,
+        // and restoring the archive would not restore the tree. Sorting by
+        // bytes rather than by `String` also keeps the ordering stable for
+        // names that no longer survive a lossy round trip.
+        let mut children: Vec<(Vec<u8>, std::path::PathBuf)> = Vec::new();
         for entry in entries {
             match entry {
-                Ok(e) => children.push((e.file_name().to_string_lossy().into_owned(), e.path())),
+                Ok(e) => children.push((os_bytes(&e.file_name()).into_owned(), e.path())),
                 Err(e) => {
-                    diag!("tar: {}: {e}", quotef_os(prefix));
+                    diag!("tar: {}: {e}", quotef(prefix));
                     *status = EXIT_FATAL;
                 }
             }
         }
         children.sort();
         for (file_name, entry_path) in children {
-            let entry_name = format!("{prefix}/{file_name}");
+            let mut entry_name = prefix.to_vec();
+            entry_name.push(b'/');
+            entry_name.extend_from_slice(&file_name);
             if entry_path.is_dir() {
                 add_directory_recursive(&entry_path, &entry_name, out, verbose, status);
             } else {
@@ -482,12 +576,15 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
     }
 
     let mut status = 0;
-    for path_str in files {
-        let path = Path::new(path_str);
+    for operand in files {
+        let path = Path::new(operand);
+        // The member name is the operand exactly as typed, byte for byte —
+        // which is what GNU stores too.
+        let name = os_bytes(operand);
         if path.is_dir() {
-            add_directory_recursive(path, path_str, &mut out, verbose, &mut status);
+            add_directory_recursive(path, &name, &mut out, verbose, &mut status);
         } else {
-            add_file(path, path_str, &mut out, verbose, &mut status);
+            add_file(path, &name, &mut out, verbose, &mut status);
         }
     }
 
@@ -521,7 +618,7 @@ fn skip_data(input: &mut dyn Read, size: u64) -> bool {
     true
 }
 
-fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: bool) -> i32 {
+fn do_extract(archive_file: Option<&OsStr>, directory: Option<&OsStr>, verbose: bool) -> i32 {
     // The archive is opened before the `-C` chdir, so its own path is resolved
     // against the directory the user was standing in, as GNU does.
     let mut input: Box<dyn Read> = match archive_file {
@@ -555,7 +652,7 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
             break;
         }
 
-        let raw_name = extract_string(header_buf.get(..100).unwrap_or(&[]));
+        let raw_name = field_bytes(header_buf.get(..100).unwrap_or(&[]));
         let size = parse_octal(header_buf.get(124..136).unwrap_or(&[]));
         let typeflag = header_buf.get(156).copied().unwrap_or(0);
 
@@ -564,13 +661,13 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
         }
 
         // GNU prints this once, not once per member, and only when it applies.
-        if raw_name.starts_with('/') && !warned_absolute {
+        if raw_name.first() == Some(&b'/') && !warned_absolute {
             diag!("tar: Removing leading '/' from member names");
             warned_absolute = true;
         }
 
         // Nothing below may use `raw_name` as a path. It is attacker-chosen.
-        let name = match sanitize_member_name(&raw_name) {
+        let name = match sanitize_member_name(raw_name) {
             Ok(n) => n,
             Err(e) => {
                 diag!("tar: {e}");
@@ -583,13 +680,13 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
         };
 
         if verbose {
-            diag!("{name}");
+            report_member(&name);
         }
 
         match typeflag {
-            b'5' | b'\0' if raw_name.ends_with('/') => {
-                if let Err(e) = fs::create_dir_all(&name) {
-                    diag!("tar: {}: {e}", quotef_os(&name));
+            b'5' | b'\0' if raw_name.last() == Some(&b'/') => {
+                if let Err(e) = fs::create_dir_all(os_from_bytes(&name)) {
+                    diag!("tar: {}: {e}", quotef(&name));
                     status = EXIT_FATAL;
                 }
             }
@@ -610,7 +707,7 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
                 // stderr; `quoteaf` renders that byte as `''$'\n'`.
                 diag!(
                     "tar: {}: unsupported entry type {}; skipped",
-                    quotef_os(&name),
+                    quotef(&name),
                     quoteaf(&[other])
                 );
                 status = EXIT_FATAL;
@@ -631,8 +728,13 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
 /// whose header claimed 2^40 bytes made this program try to reserve a
 /// terabyte before reading a single block — a one-line denial of service
 /// costing the attacker 512 bytes of file.
-fn extract_regular_file(input: &mut dyn Read, name: &str, size: u64, status: &mut i32) -> bool {
-    if let Some(parent) = Path::new(name).parent()
+fn extract_regular_file(input: &mut dyn Read, name: &[u8], size: u64, status: &mut i32) -> bool {
+    // `name` has been through `sanitize_member_name`, so it is a relative path
+    // of `/`-separated non-`..` components — but its bytes are still the
+    // archive's, and are turned back into a path without inspecting them.
+    let path = os_from_bytes(name);
+    let path = Path::new(&path);
+    if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
         && let Err(e) = fs::create_dir_all(parent)
     {
@@ -641,12 +743,12 @@ fn extract_regular_file(input: &mut dyn Read, name: &str, size: u64, status: &mu
         return skip_data(input, size);
     }
 
-    let mut file = match File::create(name) {
+    let mut file = match File::create(path) {
         Ok(f) => Some(f),
         Err(e) => {
             // Still consume the data: the archive may hold members after this
             // one, and abandoning the stream would lose them too.
-            diag!("tar: {}: {e}", quotef_os(name));
+            diag!("tar: {}: {e}", quotef(name));
             *status = EXIT_FATAL;
             None
         }
@@ -656,7 +758,7 @@ fn extract_regular_file(input: &mut dyn Read, name: &str, size: u64, status: &mu
     let mut block = [0u8; BLOCK_SIZE];
     for _ in 0..data_blocks(size) {
         if input.read_exact(&mut block).is_err() {
-            diag!("tar: {}: unexpected end of archive", quotef_os(name));
+            diag!("tar: {}: unexpected end of archive", quotef(name));
             *status = EXIT_FATAL;
             return false;
         }
@@ -667,7 +769,7 @@ fn extract_regular_file(input: &mut dyn Read, name: &str, size: u64, status: &mu
         if let Some(f) = file.as_mut()
             && let Err(e) = f.write_all(block.get(..take).unwrap_or(&[]))
         {
-            diag!("tar: {}: {e}", quotef_os(name));
+            diag!("tar: {}: {e}", quotef(name));
             *status = EXIT_FATAL;
             // Drop the handle so the rest of the member is only skipped, but
             // keep reading so the following headers stay aligned.
@@ -680,13 +782,13 @@ fn extract_regular_file(input: &mut dyn Read, name: &str, size: u64, status: &mu
     if let Some(mut f) = file
         && let Err(e) = f.flush()
     {
-        diag!("tar: {}: {e}", quotef_os(name));
+        diag!("tar: {}: {e}", quotef(name));
         *status = EXIT_FATAL;
     }
     true
 }
 
-fn do_list_main(archive_file: &Option<String>) -> i32 {
+fn do_list_main(archive_file: Option<&OsStr>) -> i32 {
     let input: Box<dyn Read> = match archive_file {
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
@@ -728,7 +830,7 @@ fn list_archive(mut input: impl Read, out: &mut impl Write) -> io::Result<()> {
             break;
         }
 
-        let name = extract_string(header_buf.get(..100).unwrap_or(&[]));
+        let name = field_bytes(header_buf.get(..100).unwrap_or(&[]));
         let size = parse_octal(header_buf.get(124..136).unwrap_or(&[]));
 
         if name.is_empty() {
@@ -738,7 +840,15 @@ fn list_archive(mut input: impl Read, out: &mut impl Write) -> io::Result<()> {
         // Listing shows the name as stored, not the sanitized one: the point
         // of `tar -t` is to tell you what is in the archive, and a member
         // called `../../etc/passwd` is exactly what you want to be shown.
-        writeln!(out, "{name}")?;
+        //
+        // Written as bytes, not through `writeln!`: `tar -tf a.tar` must be
+        // usable as input to the thing that extracts it, so a name that is not
+        // UTF-8 has to come out as the bytes that are actually in the header
+        // rather than as U+FFFD. That the name is untrusted is fine here for
+        // the same reason `cat` may print arbitrary bytes — this is the file's
+        // content, on stdout, not a diagnostic claiming to come from tar.
+        out.write_all(name)?;
+        out.write_all(b"\n")?;
 
         for _ in 0..data_blocks(size) {
             let mut block = [0u8; BLOCK_SIZE];
@@ -750,18 +860,35 @@ fn list_archive(mut input: impl Read, out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
-/// Decode a NUL-terminated string out of a fixed-size header field.
-fn extract_string(buf: &[u8]) -> String {
+/// Take the used part of a fixed-size, NUL-padded header field.
+///
+/// Borrows rather than decoding. This was `extract_string`, which ran the
+/// bytes through `String::from_utf8_lossy` — and since it is what read the
+/// 100-byte `name` field, every member name in the archive passed through it
+/// before anything else saw it. A member legitimately named with a byte that
+/// is not UTF-8 (legal on this OS: any byte but `/` and NUL) was therefore
+/// *listed* under a different name by `-t` and *extracted* under a different
+/// name by `-x`, with each offending byte replaced by U+FFFD — silent
+/// renaming, not a display quirk, and irreversible. See `known-issues.md` →
+/// `B-tar-READ-EVERY-PATH-AS-UTF-8`.
+fn field_bytes(buf: &[u8]) -> &[u8] {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    String::from_utf8_lossy(buf.get(..end).unwrap_or(&[])).to_string()
+    buf.get(..end).unwrap_or(&[])
 }
 
 /// Parse a NUL/space-padded octal field into a `u64`.  Non-octal input
 /// silently parses as 0 (matching common tar implementations on
 /// malformed archives).
+///
+/// A field that is not ASCII is not octal either, so the `from_utf8` failure
+/// path lands on the same 0 as `"garbage"` does; the lossy decode this used to
+/// go through could only ever have turned one non-number into another.
 fn parse_octal(buf: &[u8]) -> u64 {
-    let s = extract_string(buf);
-    u64::from_str_radix(s.trim(), 8).unwrap_or(0)
+    let trimmed = field_bytes(buf).trim_ascii();
+    str::from_utf8(trimmed)
+        .ok()
+        .and_then(|s| u64::from_str_radix(s, 8).ok())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -769,12 +896,18 @@ fn parse_octal(buf: &[u8]) -> u64 {
 mod tests {
     use super::*;
 
-    fn s(items: &[&str]) -> Vec<String> {
-        items.iter().map(|x| (*x).to_string()).collect()
+    fn s(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(|x| OsString::from(*x)).collect()
+    }
+
+    /// Build an argv out of raw byte strings, so a test can pass an argument
+    /// that no `&str` can hold.
+    fn b(items: &[&[u8]]) -> Vec<OsString> {
+        items.iter().map(|x| os_from_bytes(x)).collect()
     }
 
     /// Build a single tar header block with the given name and size.
-    fn make_header(name: &str, size: u64, typeflag: u8) -> [u8; BLOCK_SIZE] {
+    fn make_header(name: &[u8], size: u64, typeflag: u8) -> [u8; BLOCK_SIZE] {
         let mut h = TarHeader::new();
         h.set_name(name);
         TarHeader::set_octal(&mut h.mode, 0o644);
@@ -801,8 +934,8 @@ mod tests {
     fn parse_create_with_file() {
         let a = parse_args(&s(&["-c", "-f", "out.tar", "a", "b"])).unwrap();
         assert!(a.create);
-        assert_eq!(a.archive_file.as_deref(), Some("out.tar"));
-        assert_eq!(a.files, vec!["a", "b"]);
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
+        assert_eq!(a.files, s(&["a", "b"]));
     }
 
     #[test]
@@ -811,30 +944,31 @@ mod tests {
         let a = parse_args(&s(&["-cvf", "out.tar", "a"])).unwrap();
         assert!(a.create);
         assert!(a.verbose);
-        assert_eq!(a.archive_file.as_deref(), Some("out.tar"));
-        assert_eq!(a.files, vec!["a"]);
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
+        assert_eq!(a.files, s(&["a"]));
     }
 
     #[test]
     fn parse_extract_with_directory() {
         let a = parse_args(&s(&["-x", "-C", "/tmp", "-f", "in.tar"])).unwrap();
         assert!(a.extract);
-        assert_eq!(a.directory.as_deref(), Some("/tmp"));
-        assert_eq!(a.archive_file.as_deref(), Some("in.tar"));
+        assert_eq!(a.directory.as_deref(), Some(OsStr::new("/tmp")));
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("in.tar")));
     }
 
     #[test]
     fn parse_list() {
         let a = parse_args(&s(&["-tf", "x.tar"])).unwrap();
         assert!(a.list);
-        assert_eq!(a.archive_file.as_deref(), Some("x.tar"));
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("x.tar")));
     }
 
     #[test]
     fn parse_unknown_flag_errors() {
         let err = parse_args(&s(&["-Z"])).unwrap_err();
-        assert!(err.contains("unknown option"));
-        assert!(err.contains("-Z"));
+        // Byte for byte what GNU tar 1.35 says for `tar -Q`, less the
+        // `tar: ` prefix the caller adds.
+        assert_eq!(err, "invalid option -- 'Z'");
     }
 
     #[test]
@@ -854,7 +988,50 @@ mod tests {
         // Bare positional arg starting with non-dash is a file.
         let a = parse_args(&s(&["-c", "f1", "f2"])).unwrap();
         assert!(a.create);
-        assert_eq!(a.files, vec!["f1", "f2"]);
+        assert_eq!(a.files, s(&["f1", "f2"]));
+    }
+
+    // The point of the byte conversion: every one of these arguments is a
+    // legal filename on this OS (`design.txt`: any byte but `/` and NUL), and
+    // every one of them made `tar` abort at startup, before touching an
+    // archive, when argv was read as `String`. See `known-issues.md` ->
+    // `B-tar-READ-EVERY-PATH-AS-UTF-8`.
+
+    #[test]
+    fn parse_keeps_an_operand_that_is_not_utf8() {
+        let a = parse_args(&b(&[b"-c", b"caf\xe9", b"ok"])).unwrap();
+        assert!(a.create);
+        assert_eq!(a.files, b(&[b"caf\xe9", b"ok"]));
+        // Not merely "did not crash": the bytes are the ones passed in, so the
+        // file that gets archived is the file that was named.
+        assert_eq!(os_bytes(&a.files[0]).as_ref(), b"caf\xe9");
+    }
+
+    #[test]
+    fn parse_keeps_a_dash_f_value_that_is_not_utf8() {
+        let a = parse_args(&b(&[b"-cf", b"\xff\xfe.tar", b"x"])).unwrap();
+        let f = a.archive_file.unwrap();
+        assert_eq!(os_bytes(&f).as_ref(), b"\xff\xfe.tar");
+    }
+
+    #[test]
+    fn parse_keeps_a_dash_c_value_that_is_not_utf8() {
+        let a = parse_args(&b(&[b"-x", b"-C", b"/tmp/d\x80r"])).unwrap();
+        assert!(a.extract);
+        let d = a.directory.unwrap();
+        assert_eq!(os_bytes(&d).as_ref(), b"/tmp/d\x80r");
+    }
+
+    #[test]
+    fn parse_refuses_a_cluster_byte_that_is_not_an_option_without_panicking() {
+        // A cluster is walked byte by byte, so a `-` followed by something
+        // that is not UTF-8 at all is refused like any other unknown flag
+        // rather than being a case the parser cannot represent.
+        let err = parse_args(&b(&[b"-\xe9"])).unwrap_err();
+        assert!(err.contains("invalid option"), "{err}");
+        // `quoteaf` renders the byte rather than emitting it raw, so the
+        // message cannot forge a line of tar's stderr.
+        assert!(!err.as_bytes().contains(&0xe9), "{err}");
     }
 
     // ---------------- sanitize_member_name ----------------
@@ -865,69 +1042,91 @@ mod tests {
 
     #[test]
     fn sanitize_plain_relative_name_unchanged() {
-        assert_eq!(sanitize_member_name("a/b/c.txt").unwrap(), "a/b/c.txt");
-        assert_eq!(sanitize_member_name("file.txt").unwrap(), "file.txt");
+        assert_eq!(sanitize_member_name(b"a/b/c.txt").unwrap(), b"a/b/c.txt");
+        assert_eq!(sanitize_member_name(b"file.txt").unwrap(), b"file.txt");
     }
 
     #[test]
     fn sanitize_strips_leading_slash() {
         // Critical: `Path::join` with an absolute path throws the base away,
         // so an unstripped name would ignore `-C` entirely.
-        assert_eq!(sanitize_member_name("/etc/passwd").unwrap(), "etc/passwd");
-        assert_eq!(sanitize_member_name("///etc/passwd").unwrap(), "etc/passwd");
+        assert_eq!(sanitize_member_name(b"/etc/passwd").unwrap(), b"etc/passwd");
+        assert_eq!(
+            sanitize_member_name(b"///etc/passwd").unwrap(),
+            b"etc/passwd"
+        );
     }
 
     #[test]
     fn sanitize_drops_dot_and_doubled_slashes() {
-        assert_eq!(sanitize_member_name("./a//b/./c").unwrap(), "a/b/c");
+        assert_eq!(sanitize_member_name(b"./a//b/./c").unwrap(), b"a/b/c");
     }
 
     #[test]
     fn sanitize_refuses_leading_dotdot() {
-        assert!(sanitize_member_name("../../etc/passwd").is_err());
+        assert!(sanitize_member_name(b"../../etc/passwd").is_err());
     }
 
     #[test]
     fn sanitize_refuses_interior_dotdot() {
         // `a/../b` is only equivalent to `b` if `a` is a real directory and
         // not a symlink -- which the archive is the last thing to trust about.
-        assert!(sanitize_member_name("a/../../etc/passwd").is_err());
-        assert!(sanitize_member_name("a/../b").is_err());
+        assert!(sanitize_member_name(b"a/../../etc/passwd").is_err());
+        assert!(sanitize_member_name(b"a/../b").is_err());
     }
 
     #[test]
     fn sanitize_refuses_absolute_dotdot_combination() {
-        assert!(sanitize_member_name("/../../root/.ssh/authorized_keys").is_err());
+        assert!(sanitize_member_name(b"/../../root/.ssh/authorized_keys").is_err());
     }
 
     #[test]
     fn sanitize_refuses_backslash_traversal() {
         // Not a separator on this OS, but this file's tests -- and any host
         // build -- run where it is.
-        assert!(sanitize_member_name("..\\..\\windows\\system32\\x").is_err());
-        assert!(sanitize_member_name("a/..\\b").is_err());
+        assert!(sanitize_member_name(b"..\\..\\windows\\system32\\x").is_err());
+        assert!(sanitize_member_name(b"a/..\\b").is_err());
+    }
+
+    #[test]
+    fn sanitize_passes_a_non_utf8_name_through_byte_for_byte() {
+        // The name is what will be created on disk, so any alteration here is
+        // a silent rename. When this function took `&str` the caller had
+        // already replaced `\xe9` with U+FFFD, so the file was extracted under
+        // a name the archive does not contain -- and the `..` check was being
+        // made about that altered string rather than about what would be
+        // written.
+        assert_eq!(sanitize_member_name(b"caf\xe9/x").unwrap(), b"caf\xe9/x");
+        assert_eq!(sanitize_member_name(b"/\xff\xfe").unwrap(), b"\xff\xfe");
+    }
+
+    #[test]
+    fn sanitize_refuses_dotdot_beside_non_utf8_components() {
+        // The traversal check is on the bytes, so it is not weakened by
+        // neighbouring components that are not text.
+        assert!(sanitize_member_name(b"\xe9/../../etc/passwd").is_err());
     }
 
     #[test]
     fn sanitize_keeps_a_lone_backslash_in_a_name() {
         // A slateos filename may contain a backslash; only a `..` component
         // is refused, and the name is rebuilt with `/` alone.
-        assert_eq!(sanitize_member_name("a/b\\c").unwrap(), "a/b\\c");
+        assert_eq!(sanitize_member_name(b"a/b\\c").unwrap(), b"a/b\\c");
     }
 
     #[test]
     fn sanitize_refuses_names_that_reduce_to_nothing() {
-        assert!(sanitize_member_name("").is_err());
-        assert!(sanitize_member_name("/").is_err());
-        assert!(sanitize_member_name("./.").is_err());
+        assert!(sanitize_member_name(b"").is_err());
+        assert!(sanitize_member_name(b"/").is_err());
+        assert!(sanitize_member_name(b"./.").is_err());
     }
 
     #[test]
     fn sanitize_allows_dotfiles_and_names_starting_with_dots() {
         // `..foo` and `...` are ordinary names, not traversal.
-        assert_eq!(sanitize_member_name(".bashrc").unwrap(), ".bashrc");
-        assert_eq!(sanitize_member_name("a/..foo").unwrap(), "a/..foo");
-        assert_eq!(sanitize_member_name("a/...").unwrap(), "a/...");
+        assert_eq!(sanitize_member_name(b".bashrc").unwrap(), b".bashrc");
+        assert_eq!(sanitize_member_name(b"a/..foo").unwrap(), b"a/..foo");
+        assert_eq!(sanitize_member_name(b"a/...").unwrap(), b"a/...");
     }
 
     // ---------------- data_blocks ----------------
@@ -948,24 +1147,34 @@ mod tests {
         assert!(data_blocks(u64::MAX) > 0);
     }
 
-    // ---------------- extract_string / parse_octal ----------------
+    // ---------------- field_bytes / parse_octal ----------------
 
     #[test]
-    fn extract_string_stops_at_nul() {
+    fn field_bytes_stops_at_nul() {
         let buf = b"hello\0\0\0world";
-        assert_eq!(extract_string(buf), "hello");
+        assert_eq!(field_bytes(buf), b"hello");
     }
 
     #[test]
-    fn extract_string_no_nul_uses_all() {
+    fn field_bytes_no_nul_uses_all() {
         let buf = b"hello";
-        assert_eq!(extract_string(buf), "hello");
+        assert_eq!(field_bytes(buf), b"hello");
     }
 
     #[test]
-    fn extract_string_empty() {
-        assert_eq!(extract_string(&[]), "");
-        assert_eq!(extract_string(&[0u8; 8]), "");
+    fn field_bytes_empty() {
+        assert_eq!(field_bytes(&[]), b"");
+        assert_eq!(field_bytes(&[0u8; 8]), b"");
+    }
+
+    #[test]
+    fn field_bytes_does_not_decode() {
+        // The whole reason this is not `extract_string`: the 100-byte name
+        // field holds a filename, and a filename here is bytes. Decoding it
+        // lossily renamed the member.
+        let mut buf = [0u8; 100];
+        buf[..5].copy_from_slice(b"a\xff\xfeb\xc3");
+        assert_eq!(field_bytes(&buf), b"a\xff\xfeb\xc3");
     }
 
     #[test]
@@ -991,6 +1200,25 @@ mod tests {
     #[test]
     fn parse_octal_empty_is_zero() {
         assert_eq!(parse_octal(&[]), 0);
+    }
+
+    #[test]
+    fn parse_octal_non_ascii_is_zero() {
+        // A hostile header can put any byte in the size field. Non-UTF-8 is
+        // not a number, so it takes the same path as `garbage` -- and must
+        // take it without panicking, since the result feeds `data_blocks`.
+        let mut buf = [0u8; 12];
+        buf[..3].copy_from_slice(b"\xff\xfe7");
+        assert_eq!(parse_octal(&buf), 0);
+    }
+
+    #[test]
+    fn parse_octal_rejects_digits_outside_the_base() {
+        // `8` and `9` are not octal; the whole field is refused rather than
+        // truncated at the bad digit, which would read a wrong size.
+        let mut buf = [0u8; 12];
+        buf[..3].copy_from_slice(b"789");
+        assert_eq!(parse_octal(&buf), 0);
     }
 
     // ---------------- TarHeader::set_octal ----------------
@@ -1029,12 +1257,12 @@ mod tests {
     #[test]
     fn checksum_is_stable() {
         let mut h1 = TarHeader::new();
-        h1.set_name("foo");
+        h1.set_name(b"foo");
         TarHeader::set_octal(&mut h1.mode, 0o644);
         h1.compute_checksum();
 
         let mut h2 = TarHeader::new();
-        h2.set_name("foo");
+        h2.set_name(b"foo");
         TarHeader::set_octal(&mut h2.mode, 0o644);
         h2.compute_checksum();
 
@@ -1044,11 +1272,11 @@ mod tests {
     #[test]
     fn checksum_changes_with_name() {
         let mut h1 = TarHeader::new();
-        h1.set_name("foo");
+        h1.set_name(b"foo");
         h1.compute_checksum();
 
         let mut h2 = TarHeader::new();
-        h2.set_name("bar");
+        h2.set_name(b"bar");
         h2.compute_checksum();
 
         assert_ne!(h1.checksum, h2.checksum);
@@ -1070,7 +1298,7 @@ mod tests {
     #[test]
     fn list_single_zero_byte_file() {
         let mut input: Vec<u8> = Vec::new();
-        input.extend_from_slice(&make_header("hello.txt", 0, b'0'));
+        input.extend_from_slice(&make_header(b"hello.txt", 0, b'0'));
         // No data blocks (size = 0).
         input.extend_from_slice(&[0u8; BLOCK_SIZE]);
         input.extend_from_slice(&[0u8; BLOCK_SIZE]);
@@ -1082,7 +1310,7 @@ mod tests {
     #[test]
     fn list_single_file_with_data() {
         let mut input: Vec<u8> = Vec::new();
-        input.extend_from_slice(&make_header("data.bin", 100, b'0'));
+        input.extend_from_slice(&make_header(b"data.bin", 100, b'0'));
         // 100-byte file occupies 1 data block.
         input.extend_from_slice(&[b'x'; BLOCK_SIZE]);
         input.extend_from_slice(&[0u8; BLOCK_SIZE]);
@@ -1095,12 +1323,12 @@ mod tests {
     #[test]
     fn list_multiple_files() {
         let mut input: Vec<u8> = Vec::new();
-        input.extend_from_slice(&make_header("a.txt", 0, b'0'));
-        input.extend_from_slice(&make_header("b.txt", 600, b'0'));
+        input.extend_from_slice(&make_header(b"a.txt", 0, b'0'));
+        input.extend_from_slice(&make_header(b"b.txt", 600, b'0'));
         // 600-byte file = ceil(600/512) = 2 data blocks.
         input.extend_from_slice(&[b'y'; BLOCK_SIZE]);
         input.extend_from_slice(&[b'y'; BLOCK_SIZE]);
-        input.extend_from_slice(&make_header("c.txt", 0, b'0'));
+        input.extend_from_slice(&make_header(b"c.txt", 0, b'0'));
         input.extend_from_slice(&[0u8; BLOCK_SIZE]);
         input.extend_from_slice(&[0u8; BLOCK_SIZE]);
         let mut out = Vec::new();
@@ -1110,11 +1338,41 @@ mod tests {
     }
 
     #[test]
+    fn list_writes_a_non_utf8_name_unaltered() {
+        // `tar -tf` names members so the output can be fed back to whatever
+        // extracts them. Through `String::from_utf8_lossy` and `writeln!` this
+        // printed `caf<U+FFFD>.txt` -- three bytes where one belongs, naming a
+        // member the archive does not contain.
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(&make_header(b"caf\xe9.txt", 0, b'0'));
+        input.extend_from_slice(&[0u8; BLOCK_SIZE]);
+        input.extend_from_slice(&[0u8; BLOCK_SIZE]);
+        let mut out = Vec::new();
+        list_archive(input.as_slice(), &mut out).unwrap();
+        assert_eq!(out, b"caf\xe9.txt\n");
+    }
+
+    #[test]
+    fn a_non_utf8_name_survives_the_header_round_trip() {
+        // Store and read back, since `set_name` and `field_bytes` are the two
+        // ends of the conversion and either alone could be lossless while the
+        // pair is not.
+        let name = b"\xff/dir\x80/\xe9\xe9";
+        let block = make_header(name, 0, b'0');
+        assert_eq!(field_bytes(block.get(..100).unwrap()), name);
+        // And the sanitizer, which stands between the two, does not touch it.
+        assert_eq!(
+            sanitize_member_name(field_bytes(block.get(..100).unwrap())).unwrap(),
+            name
+        );
+    }
+
+    #[test]
     fn list_truncated_input_does_not_panic() {
         // Header announces a 1024-byte file but no data follows: must
         // exit cleanly, not loop or panic.
         let mut input: Vec<u8> = Vec::new();
-        input.extend_from_slice(&make_header("liar.bin", 1024, b'0'));
+        input.extend_from_slice(&make_header(b"liar.bin", 1024, b'0'));
         let mut out = Vec::new();
         list_archive(input.as_slice(), &mut out).unwrap();
         // We still recorded the name before discovering the truncation.

@@ -1804,6 +1804,72 @@ impl Vfs {
         Self::resolve_inner(&norm, true, 0, true)
     }
 
+    /// One step of the `RESOLVE_BENEATH` containment rule.
+    ///
+    /// `depth` is how many components the walk currently sits below the
+    /// containment base.  `fragment` is a path about to be walked from
+    /// there — either the caller-supplied relative path at the start of
+    /// resolution, or the target of a symlink met part-way through.
+    /// Returns the depth after walking it, or [`KernelError::CrossDevice`]
+    /// (→ `EXDEV`) if the walk would step *above* the base at any point.
+    ///
+    /// # The rule is per-hop and syntactic, not "canonicalise and compare"
+    ///
+    /// This is the part that is counter-intuitive, and the natural
+    /// implementation is the wrong one.  The obvious approach — resolve the
+    /// whole path, then check the result still has the base as a prefix —
+    /// is **more permissive than Linux in exactly the cases an attacker
+    /// picks**.  Lane B measured GNU tar (which emulates these same
+    /// semantics) against ten cases while building the userspace
+    /// substitute in `userspace/coreutils/src/bin/tar.rs`; a prefix check
+    /// disagrees on three of them:
+    ///
+    /// | ancestor symlink points at | `RESOLVE_BENEATH` | a prefix check |
+    /// |---|---|---|
+    /// | `sub` (relative, inside) | allow | allow |
+    /// | `deep/../sub` (`..` that never leaves) | allow | allow |
+    /// | `deep/er/../..` (`..` back to the base itself) | allow | allow |
+    /// | `$PWD/sub` (absolute, and *inside* the base) | **refuse** | allow ✗ |
+    /// | `$PWD` (absolute, the base itself) | **refuse** | allow ✗ |
+    /// | `../d/sub` (up and straight back in) | **refuse** | allow ✗ |
+    /// | `../out`, `/tmp` (escapes) | refuse | refuse |
+    ///
+    /// So: an **absolute** target is refused outright, without ever being
+    /// compared to the base — being inside it does not save it.  And a
+    /// `..` is refused at the moment the walk *would step above* the base,
+    /// not judged by where it eventually lands: `deep/er/../..` is allowed
+    /// because it never rises above the base, while `../d/sub` is refused
+    /// because it does, even though it comes straight back in.
+    ///
+    /// Tracking a depth counter rather than comparing paths is what makes
+    /// those two questions distinguishable at all.  A resolved path has
+    /// forgotten how it got there.
+    fn beneath_step(depth: usize, fragment: &Path) -> KernelResult<usize> {
+        // An absolute target is refused before any comparison: under
+        // RESOLVE_BENEATH the base is the whole world, and a target that
+        // names a path from `/` has left it by construction.  (This is the
+        // row where "but it points inside the base!" is wrong — the caller
+        // asked for a walk that cannot address anything outside, and an
+        // absolute target is such an address whatever it happens to name.)
+        if fragment.is_absolute() {
+            return Err(KernelError::CrossDevice);
+        }
+        let mut depth = depth;
+        for comp in fragment.components() {
+            match comp.as_bytes() {
+                b"." => {}
+                b".." => {
+                    // The whole rule, in one line: stepping above the base
+                    // is refused *here*, at the hop, and not forgiven by a
+                    // later component that steps back down.
+                    depth = depth.checked_sub(1).ok_or(KernelError::CrossDevice)?;
+                }
+                _ => depth = depth.saturating_add(1),
+            }
+        }
+        Ok(depth)
+    }
+
     /// Core recursive resolver.
     ///
     /// `path` must already be normalized (no `.`, `..`, or double slashes).
@@ -6084,6 +6150,93 @@ pub fn self_test() -> KernelResult<()> {
     // --- Permission gate: POSIX ACL enforcement ---
     if has_tmp {
         acl_gate_self_test()?;
+    }
+
+    // --- RESOLVE_BENEATH containment, per hop ---
+    //
+    // Not gated on `has_tmp`: `beneath_step` is a pure function over a path
+    // fragment, so it needs no mount and can never be skipped.  The cases are
+    // lane B's measured table (see the doc comment on `beneath_step`), and the
+    // three marked ✗ there are the ones a "canonicalise and compare the
+    // prefix" implementation gets *wrong by allowing* — which is why they are
+    // asserted here rather than left to read as obvious.
+    {
+        // `depth` is where the walk already sits below the base; 0 is the base
+        // itself, which is what a fresh caller-supplied relative path starts at.
+        let allow = |depth: usize, frag: &str, want: usize| -> KernelResult<()> {
+            match Vfs::beneath_step(depth, Path::new(frag)) {
+                Ok(d) if d == want => Ok(()),
+                Ok(d) => {
+                    serial_println!(
+                        "[vfs]   FAIL: beneath_step({}, {:?}) = {}, want {}",
+                        depth,
+                        frag,
+                        d,
+                        want
+                    );
+                    Err(KernelError::InvalidArgument)
+                }
+                Err(e) => {
+                    serial_println!(
+                        "[vfs]   FAIL: beneath_step({}, {:?}) refused ({:?}), want {}",
+                        depth,
+                        frag,
+                        e,
+                        want
+                    );
+                    Err(e)
+                }
+            }
+        };
+        let refuse = |depth: usize, frag: &str| -> KernelResult<()> {
+            match Vfs::beneath_step(depth, Path::new(frag)) {
+                Err(KernelError::CrossDevice) => Ok(()),
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: beneath_step({}, {:?}) = {:?}, want CrossDevice",
+                        depth,
+                        frag,
+                        other
+                    );
+                    Err(KernelError::InvalidArgument)
+                }
+            }
+        };
+
+        // Rows that stay inside, and where a prefix check agrees.
+        allow(0, "sub", 1)?;
+        allow(0, "deep/../sub", 1)?;
+        // `..` all the way back to the base is allowed: it never rises above.
+        allow(0, "deep/er/../..", 0)?;
+        allow(0, "./sub/./deeper", 2)?;
+
+        // The three a prefix check would wrongly allow.  The first two are
+        // absolute targets that happen to name something inside the base --
+        // refused without comparison, because the caller asked for a walk that
+        // cannot address anything from the root.
+        refuse(0, "/tmp/base/sub")?;
+        refuse(0, "/tmp/base")?;
+        // And the one that steps above the base and comes straight back in.
+        // A resolved path cannot tell this from `sub`; a depth counter can.
+        refuse(0, "../base/sub")?;
+
+        // Plain escapes, which every implementation gets right.
+        refuse(0, "../out")?;
+        refuse(0, "/tmp")?;
+        refuse(1, "../../out")?;
+
+        // Depth carries across hops, which is what makes a symlink chain
+        // decidable: two hops that are each individually fine.
+        let d = Vfs::beneath_step(0, Path::new("a/b"))?;
+        allow(d, "../c", 2)?;
+        // ...and a second hop that escapes from where the first one left off.
+        refuse(d, "../../..")?;
+
+        serial_println!(
+            "[vfs]   RESOLVE_BENEATH containment is per-hop and syntactic: OK \
+             (absolute target refused even inside the base, `..` refused where \
+             it steps above rather than where it lands)"
+        );
     }
 
     skips.report("[vfs]");

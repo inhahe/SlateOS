@@ -49895,6 +49895,28 @@ have it, the skip path is dead code that costs nothing to leave in.
 doing once it is confirmed all three lanes have the binary — at that point the
 skip protects nobody and only hides a regression in the tool's installation.
 
+**REVERSED 2026-08-29 (lane A, Claude autonomous), on the trigger above.** The
+precondition was *verified rather than assumed*: the tool is present in all
+three lane worktrees, and `shellcheck-all.sh warning` exits 0 with zero findings
+over 79/80/79 scripts in each. So no lane is blocked by the change, and from
+here an exit 2 means the binary was **removed** — which must stop the build
+rather than be waved through.
+
+What tipped it was not just the precondition being met but what the intervening
+weeks showed: this is the first of **five** gates since found blind (the D1
+rustfmt-wrapped chain, D1's `from_str_radix`, the wording gate's wrapped
+literals, and D4's brace miscount are the others), and the only one whose
+blindness was *designed in on purpose*. Every one of the other four was
+discovered after it had already cost something. Leaving a deliberate blind spot
+in place, in a file whose other gates now all fail closed, was the least
+defensible of the five.
+
+Small confirmation that the reversal has teeth: the very first run under it
+failed the build, on a comment in the new arm that opened with the tool's own
+name — a `# shellcheck …` line is parsed as a *directive*, and an unparseable
+directive is itself an error (SC1072/SC1073). Under the old arm that would have
+depended on the tool being installed to be noticed at all.
+
 **Where it is:** `check_shellcheck` in `scripts/boot-test.sh`, immediately after
 `check_orphan_modules`. Fulfils
 `requests/b-a-two-cd-calls-ignore-failure-in-shared-scripts.md`, which is also
@@ -50076,6 +50098,82 @@ the `printf_note_fault` call site and delete the vector.
 pinned by self-test rung 100, which asserts the exact bytes
 `0\nprintf: \`zzabc': expected a numeric value\n` so that the ordering cannot
 be changed without the assertion failing.
+
+---
+
+## 633. An unrecognised word in a firewall rule is a hard error, even though that rejects command lines the shell used to accept
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous, lane A)
+**Lane:** A
+
+**In short:** `fw allow in tcp port 80` adds a firewall rule. Until now, if you
+misspelled one of the optional words — typing `prot` instead of `port` — the
+shell ignored the word it did not recognise, ignored the `80` that followed it,
+added the rule anyway, and said it had succeeded. Because a firewall rule with
+no port named applies to *every* port, that typo did not produce a slightly
+wrong rule; it produced a rule that let everything through. The choice was
+whether to keep accepting such lines (with a warning) or to reject them
+outright. I chose to reject, which means a script that has been passing an
+extra word will now fail where it used to appear to work.
+
+**The specific defect.** The modifier loop ended `_ => { i += 1; }`. Advancing
+by one rather than two meant the *operand* of the unrecognised keyword was then
+re-read as if it were itself a keyword, and discarded in turn — so a single
+misspelling consumed two words silently. The rule was then built from the
+resting values of `dst_port` (`0`, documented as "any port" at
+`net/firewall.rs:146`) and `src_ip` (`0.0.0.0`, "any"), and `firewall::add_rule`
+accepted it, because there is nothing about it to reject.
+
+| Option | *What changes* |
+|---|---|
+| **A. Keep accepting, print a warning** | `fw allow in tcp prot 80` still adds a rule and still exits 0, but a line of complaint appears above the success line. |
+| **B (chosen). Refuse the whole command** | `fw allow in tcp prot 80` adds nothing, prints `fw: allow: unknown option \`prot'; expected port, ip or prio`, and exits 1. |
+| **C. Refuse only when the rule would end up unrestricted** | the same line is accepted or rejected depending on which *other* words were present, so the same typo behaves differently in two scripts. |
+
+**Why B.** A warning is only useful to someone reading the output, and the
+distinguishing feature of this command is that its output is usually not read —
+firewall rules are installed by startup scripts. Option A's warning would scroll
+past in a boot log while the firewall silently stood open. C was rejected on the
+principle that a diagnostic must not depend on unrelated arguments: a rule that
+is refused in one command line and accepted in another, for the same misspelt
+word, teaches the reader nothing and cannot be scripted against.
+
+**The accepted cost, stated plainly.** This is a backward-incompatible change to
+a user-visible interface. Any existing caller that passes a word this parser
+does not know now fails instead of installing a rule. I judged that acceptable
+because the previous behaviour did not do what such a caller believed it was
+doing — the "working" script was installing an unrestricted rule — so there is
+no correct existing use to preserve. If a caller *wants* an any-port rule, the
+way to say so is to omit the `port` keyword, which remains supported and is now
+the only way to express it.
+
+**A related, smaller call recorded here rather than separately:** `port` with
+nothing after it is refused rather than treated as "any port". Same reasoning —
+a truncated command line is more likely than a deliberate no-op keyword — and
+the same escape hatch: omit the keyword.
+
+**Why the IPv4 and IPv6 arms were fixed by duplication, not factored into one
+helper.** They are hand-copied twins and carried all four defects each. Merging
+them was considered and rejected: they differ in address type
+(`Ipv4Addr`/`Ipv6Addr`), in prefix ceiling (32/128) and in result struct
+(`Rule`/`Rule6`), and the genuinely shared part is three keyword names and a
+refusal apiece — smaller than the generic wrapper needed to carry the
+differences. The duplication is real and is the reason this defect existed
+twice; it is recorded here so the next person to touch either arm knows to check
+the other. What actually caught the second copy was `check-option-refusal.py`
+reporting `2 fewer than expected` after the first was fixed, which is the ledger
+working as designed.
+
+**How to reverse:** in both `case` functions in `cmd_firewall`, replace the
+`other =>` arm's `shell_println!`/`set_exit(1)`/`return` with `i += 1` to
+restore the old behaviour, or with `i += 2` to skip the operand as well (which
+would be the least-bad version of option A).
+
+**Where it is:** the two `case` functions under `"allow" | "deny"` and
+`"allow6" | "deny6"` in `cmd_firewall`, `kernel/src/kshell.rs`; pinned by
+self-test rung 101, which asserts both that the misspelt word is named and that
+no rule is reported added.
 
 ---
 
@@ -50394,3 +50492,176 @@ it" would have had to reconcile them first and would *still* have left the host
 build — the only one the differential harness can run — unaddressed. Nothing
 here argues for revisiting **2**; it removes the last reason to have hesitated
 over it.
+
+---
+
+## 634. When a gate is found blind, extend the detector and pay the hidden debt in the same commit — never in two
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous, lane A)
+**Lane:** A
+
+**In short:** we keep a script (`scripts/check-option-refusal.py`) whose job is
+to count one specific kind of bug in the shell — places that read a word you
+typed, fail to understand it, and quietly substitute some other value. The count
+is published in `known-issues.md` and is only allowed to go down. This week the
+script turned out to have been **missing nineteen of them all along**, because
+it only recognised one of the two ways Rust spells "convert text to a number".
+The question was what to do in the moment of discovery: fix the script now and
+the nineteen sites later (which publishes a sudden *rise* in the count), or fix
+both together (one commit, count still falls). I chose both together.
+
+**What was actually wrong.** The detector required a literal `.parse()` call, so
+the decimal spelling of the defect was caught and the hexadecimal one —
+`u16::from_str_radix(v, 16).unwrap_or(0)` — was not. Same bug, same
+consequence, invisible. Among the nineteen were `sysrq mask`, where the
+substituted value enables *every* magic SysRq category including reboot and
+crash, and `kprobes register`, which installed a probe at the null address and
+reported a real probe id for it.
+
+**The options.**
+
+| Option | *What changes:* |
+|---|---|
+| **A. Fix the detector now, file the sites as a new backlog item** | the published count jumps 346 → 365 with no code having changed, then falls later. |
+| **B. Fix the sites first, quietly, then fix the detector** | the count never rises; the detector stays blind for the length of the intervening work, and a new site added meanwhile is still missed. |
+| **C (chosen). One commit: extended detector + all nineteen sites + the rest of each function they were in** | the count falls 365 → 335; the ledger gains no new entry; the gate is never green over code it cannot see. |
+
+**Why C.** The ledger's whole value is the promise in its own header — "the
+number is visible and can only go down". Option A honours the letter of that and
+breaks its spirit: a reader seeing 346 → 365 has no way to tell a regression
+from a measurement correction, and the file would need a paragraph explaining
+that the rise is good news, which is precisely the sort of asterisk that trains
+people to stop reading the number. Option B is worse than it looks: it leaves a
+window in which the gate is knowingly blind, and the reason we have the gate is
+that nobody is watching this code by hand.
+
+C costs a larger-than-usual commit — 30 sites across 8 functions rather than the
+usual 4 — and that is the accepted price. It is the only option under which no
+published number is ever wrong, and under which the sentence "the gate is green"
+means the same thing before and after.
+
+**The corollary, which is the durable part.** *A gate's own output cannot audit
+its coverage.* The total looked healthy at 346 and would have looked healthy at
+any number. What exposed this was picking two functions that **ought** to appear
+in the ledger and finding they were not merely un-exempted but **absent**. The
+checker already reports an entry claiming *more* sites than exist (its `stale`
+arm); it structurally cannot report an entry that was never written. So when a
+counted-debt gate is inherited or extended, the check is to name a function you
+believe is dirty and confirm the gate agrees — not to read the total.
+
+This is the second time the same gate has been found under-counting for a reason
+that had nothing to do with the code it inspects: see
+`A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR`, where it
+matched against a *line* and `cargo fmt` had wrapped the statements it was
+looking for, hiding 466 sites. Both times the gate was green over code it was
+written to catch, and both times the total gave no hint. It is the same shape as
+§630's shellcheck floor — a check reporting success because it could not run.
+
+**How to reverse.** The detector change is two alternatives in one regex in
+`scripts/check-option-refusal.py` (`D1`); narrowing it back would re-hide the
+class, and would also make the `stale` arm fire for every function fixed here,
+so the ledger would have to be edited back in step. There is no reason to.
+
+**Where it is.** `scripts/check-option-refusal.py` (`D1`);
+`scripts/option-refusal-ledger.txt` (four entries removed);
+`kernel/src/kshell.rs` (`required_hex`, `required_key`, and the eight `cmd_*`
+functions listed in the thirty-eighth burn-down entry); self-test rung 102.
+
+
+## 635. A new gate is narrowed until it can start at zero, rather than broadened and given a backlog
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous, lane A)
+**Lane:** A
+
+**In short:** we found a new kind of shell bug — a command that reads a number
+you typed, cannot make sense of it, and then does *nothing at all*: no message,
+no error status, no action, so it looks exactly like success. To stop it coming
+back we added an automatic check. The check could either be written broadly (it
+would catch all 22 real bugs, plus 17 places where the same code shape is
+perfectly correct, so it would have to ship with a 17-line list of exceptions),
+or narrowly (it catches 20 of the 22 and none of the 17, and needs no exception
+list at all). I chose narrow. A check that starts clean stays meaningful; a
+check that starts with a list of exceptions teaches everyone to add to the list.
+
+**The defect.** `if let Ok(id) = w.parse::<u32>()` nested inside
+`if let Some(w) = parts.get(1)` with no `else` on the inner test. The `else`
+that exists belongs to the *outer* test, so it covers the missing argument only.
+An unreadable one falls out of both branches. `ptime enable zzz` printed
+nothing and exited 0.
+
+**Why the obvious detector cannot be used.** The bare shape — "`if let Ok` on a
+parse, with no `else`" — matched 39 sites in `kshell.rs`. Only 22 were defects.
+The other 17 were the same shape used *correctly*, to try one reading and fall
+through to another:
+
+| Site | Falls through to |
+|---|---|
+| `resolve_container_ref` | a numeric reference, else a container name |
+| `parse_datetime_to_ns` | epoch seconds, else `YYYY-MM-DD` |
+| `cmd_useracct info`, `cmd_template` | a uid/id, else a name — as its usage line offers |
+| `execute_select` | POSIX `select`: non-numeric input leaves the variable empty |
+| `expand_brace_expr` | bash's own `${x:abc}` |
+
+Nothing about the syntax distinguishes these. Only the *destination* of the
+fall-through does.
+
+### Decision
+
+D4 requires the nesting **and** that the inner `if let Ok` be the **sole**
+statement of the `if let Some(w) = parts.get(N)` block. Soleness is a
+mechanical stand-in for "the fall-through has nowhere to go": if there is
+anything after the inner block, the code is trying an alternative; if there is
+not, control leaves the command having done nothing.
+
+*What changes:* the gate reports 20 of the 22 defects, 0 of the 17 correct
+sites, and carries no exception list.
+
+### Alternatives considered
+
+**Broad detector plus a 17-entry allowlist.** Would have caught all 22 and the
+two `container create` sites D4 cannot reach. Rejected because the allowlist is
+the failure mode, not the cost: this file already carries a 332-line ledger for
+D1, and the reason that ledger is tolerable is that it was inherited, not
+created. A *new* gate arriving with 17 pre-granted exceptions establishes the
+exception as the normal way to interact with it. The first person to hit a
+false positive adds an eighteenth entry; nobody re-reads the first seventeen.
+
+**No gate at all, on the grounds that the 22 sites are fixed.** Rejected for the
+reason §600's whole burn-down exists: this defect was written 22 times by the
+same hand that knew better each time. Shapes recur.
+
+### The part that generalises
+
+**D4's first zero was a false one, and only a fixture could say so.** It landed
+at zero on `kshell.rs` immediately — while being broken. `close_brace` counted
+braces per line, so `} else {` netted zero, a block with an `else` never
+appeared to close, and the detector was silently skipping most of what it
+targets. The file's own green output could not distinguish "nothing to find"
+from "cannot find anything", and never will be able to; that is §634's
+corollary. The self-test fixture reported it in the first second it existed:
+two defective fixtures unreported, one correct fixture reported.
+
+So the rule this adds to §634: **write the fixture before trusting the zero,
+not after the blindness costs something.** Four of the five gates found blind
+here in four days were found afterwards, by someone going to look at a specific
+function. D4 was found before shipping, by a fixture that took ten minutes.
+
+### Where it lives
+
+`scripts/check-option-refusal.py` — `D4_OUTER`, `D4_INNER`,
+`silent_operand_sites`, `close_brace`, and `--self-test` with `_D4_FIXTURE`
+(three defective shapes, five correct ones);
+`kernel/src/kshell.rs` — `readable_num`/`readable_hex` and self-test rung 103.
+
+### How to reverse
+
+Widen `D4_INNER`/`D4_OUTER` and add an `ALLOWED` entry per false positive. The
+two `container create` sites are the honest argument for doing so: they are real
+instances of the defect that D4 does not reach, because their word comes from
+`strip_prefix` inside a loop rather than from `parts.get`, leaving no positional
+nesting and so no soleness test. If a third such site appears outside the
+`parts.get` shape, that is the trigger to reconsider — the narrowing is a bet
+that the defect concentrates in positional operands, and two known exceptions is
+where the bet still pays.

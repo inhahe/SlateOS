@@ -116,8 +116,24 @@ PATH = ROOT / "kernel" / "src" / "kshell.rs"
 # the same defect wearing an `Option`: `parts.get(2).and_then(…).unwrap_or(20)`
 # cannot tell "argument omitted" from "argument unreadable", and answers both
 # with 20.
+#
+# `from_str_radix` is the same defect in a different spelling, and was added on
+# 2026-08-29 after it was noticed that two functions with the defect
+# (`cmd_pciids`, `cmd_sysrq`) were not in the ledger at all -- not exempted,
+# *invisible*. The original pattern required a literal `.parse()`, and
+# `u16::from_str_radix(v, 16).unwrap_or(0)` does not contain one, so nine sites
+# across five functions were never counted and the burn-down total was an
+# undercount by that much.
+#
+# This is the failure shape the shellcheck floor had (design-decisions §630): a
+# gate that is green because it cannot see the thing it is for. Worth stating
+# because the fix is not "add a pattern" but "notice that the count is evidence
+# about the detector, not only about the code" -- a function that *should*
+# appear and does not is the signal, and it is only visible to someone who goes
+# looking at a specific function rather than at the total.
 D1 = re.compile(
-    r"\.parse(?:::<[^>]*>)?\(\)[^;]*?\.unwrap_or(?:_default|_else)?\b"
+    r"(?:\.parse(?:::<[^>]*>)?\(\)|from_str_radix\()[^;]*?"
+    r"\.unwrap_or(?:_default|_else)?\b"
 )
 
 # --------------------------------------------------------------------------
@@ -144,6 +160,48 @@ REFUSAL = re.compile(
     r"|end_help_arm\("                   # resolves a catch-all help arm
     r"|\w+_(?:parse|split)_\w*\("        # e.g. backup_parse_flags, grep_split_args
     r"|return Err\("                     # a parser whose contract is a Result
+)
+
+# --------------------------------------------------------------------------
+# D4 -- an operand read as a number, and dropped in silence when it will not.
+# --------------------------------------------------------------------------
+# The third shape of §600's defect, and the one that hid longest because it
+# leaves *no* trace at all:
+#
+#     if let Some(id_str) = parts.get(1) {
+#         if let Ok(id) = id_str.parse::<u32>() {
+#             act_on(id);
+#         }
+#     } else {
+#         shell_println!("Usage: ...");
+#     }
+#
+# An unreadable word falls out of both branches.  Nothing is printed, no
+# default is substituted, `set_exit` is never called -- so `ptime enable zzz`
+# printed nothing and exited 0, which neither a person nor a script could tell
+# from a configuration that really had been enabled.  D1's guessed value is a
+# lesser fault than this: a guess at least leaves a wrong number on screen.
+#
+# The rule is narrow on purpose, and the narrowing is the interesting part.
+# The raw shape "`if let Ok(..) = x.parse()` with no `else`" matched 39 sites
+# in this file, of which only 22 were defects; the other 17 were *alternatives*
+# being tried -- `resolve_container_ref` reads a container reference as an id
+# and falls through to a name lookup, `parse_datetime_to_ns` reads epoch
+# seconds and falls through to `YYYY-MM-DD`, `execute_select` follows POSIX in
+# leaving the variable empty for non-numeric input, and `expand_brace_expr`
+# reproduces bash's own `${x:abc}`.  Every one of those was confirmed by
+# reading it, not by its shape.
+#
+# What separates the 22 from the 17 is where the fall-through *goes*: in a
+# defect the `if let Ok` is the sole statement of an `if let Some(w) =
+# parts.get(N)` block, so control leaves the command having done nothing.  In
+# a legitimate alternative there is always something after it to reach.  D4
+# therefore requires the nesting *and* the soleness, which is why it can sit
+# at zero with no ledger -- the shape it describes has no benign instance.
+D4_OUTER = re.compile(r"^\s*(?:\}\s*else\s+)?if let Some\(\s*(\w+)\s*\) = parts\.get\(")
+D4_INNER = re.compile(
+    r"^\s*if let Ok\(\s*(?:mut\s+)?\w+\s*\) = (\w+)"
+    r"(?:\.\w+\(\))*\.parse(?:::<[^>]*>)?\(\)\s*\{\s*$"
 )
 
 # --------------------------------------------------------------------------
@@ -229,11 +287,208 @@ def loop_bodies(struct: list[str]):
                 break
 
 
+def close_brace(struct: list[str], line: int, col: int, limit: int = 400):
+    """Match the `{` at `(line, col)`; return its `}` as `(line, col)`.
+
+    Character-level, not line-level, and the difference is not pedantry: the
+    first version of this counted `{` and `}` per line, so `} else {` netted
+    zero and a block with an `else` never appeared to close.  D4 then landed at
+    zero on kshell.rs for the wrong reason -- it was skipping every site whose
+    outer block had an `else`, which is most of them -- and the fixture below
+    is the only thing that said so.  A brace on the same line as its partner is
+    common enough in this file that the shortcut was never safe.
+
+    `struct` must have comments and literals blanked, for the reason
+    `loop_bodies` gives.
+    """
+    depth = 0
+    for k in range(line, min(line + limit, len(struct))):
+        s = struct[k]
+        start = col if k == line else 0
+        for c in range(start, len(s)):
+            if s[c] == "{":
+                depth += 1
+            elif s[c] == "}":
+                depth -= 1
+                if depth == 0:
+                    return (k, c)
+    return None
+
+
+def silent_operand_sites(struct: list[str]):
+    """Yield `(line_index, word_var)` for D4 -- see the D4 comment block."""
+    for i, ln in enumerate(struct):
+        m = D4_OUTER.match(ln)
+        if not m:
+            continue
+        word = m.group(1)
+        brace = ln.find("{", m.end())
+        if brace < 0:
+            continue
+        outer = close_brace(struct, i, brace)
+        if outer is None or outer[0] == i:
+            continue
+        outer_close = outer[0]
+        # The inner `if let Ok(..) = <word>.parse…` must be the block's sole
+        # statement.  "Sole" is the whole rule: a fall-through that reaches
+        # more code is an *alternative* being tried, which is legitimate and
+        # is what the other seventeen candidate sites in this file turned out
+        # to be.  Only a block that ends right there has nowhere for the
+        # unreadable word to go.
+        body = [k for k in range(i + 1, outer_close) if struct[k].strip()]
+        if not body:
+            continue
+        inner_line = struct[body[0]]
+        inner = D4_INNER.match(inner_line)
+        if not inner or inner.group(1) != word:
+            continue
+        ib = inner_line.rfind("{")
+        end = close_brace(struct, body[0], ib)
+        if end is None:
+            continue
+        inner_close, inner_col = end
+        if inner_close >= outer_close:
+            continue
+        # An `else` on the inner block means the unreadable word *is* handled;
+        # D4 is only about its absence.  Anything else after the inner block is
+        # somewhere for the fall-through to go, which is the legitimate case.
+        tail = struct[inner_close][inner_col + 1:].strip()
+        after = [k for k in range(inner_close + 1, outer_close) if struct[k].strip()]
+        if tail or after:
+            continue
+        yield (i, word)
+
+
 def allowed(fn: str, text: str) -> bool:
     return any(fn == f and frag in text for (f, frag) in ALLOWED)
 
 
+# --------------------------------------------------------------------------
+# Self-test.
+# --------------------------------------------------------------------------
+# D4 landed at zero on the file it was written for, which is the outcome one
+# wants and also the outcome an inert detector produces.  §634's lesson --
+# *a gate's own output cannot audit its coverage* -- says the only way to tell
+# them apart is to name a thing you believe it should catch and check that it
+# agrees.  The fixture below is that, in both directions: three shapes that
+# must be reported and five that must not, the five being condensed from the
+# actual sites that the raw shape matched and that reading proved benign.
+_D4_FIXTURE = '''
+fn cmd_bad_one(parts: &[&str]) {
+    if let Some(id_str) = parts.get(1) {
+        if let Ok(id) = id_str.parse::<u32>() {
+            act(id);
+        }
+    } else {
+        shell_println!("Usage: x y <id>");
+        set_exit(1);
+    }
+}
+
+fn cmd_bad_two(parts: &[&str]) {
+    if let Some(w) = parts.get(2) {
+        if let Ok(n) = w.trim().parse::<usize>() {
+            act(n);
+        }
+    }
+}
+
+fn cmd_bad_three(parts: &[&str]) {
+    if x {
+        act(0);
+    } else if let Some(w) = parts.get(1) {
+        if let Ok(n) = w.parse() {
+            act(n);
+        }
+    }
+}
+
+fn cmd_good_has_else(parts: &[&str]) {
+    if let Some(id_str) = parts.get(1) {
+        if let Ok(id) = id_str.parse::<u32>() {
+            act(id);
+        } else {
+            shell_println!("x: y: `{}` is not an id", id_str);
+            set_exit(1);
+        }
+    }
+}
+
+fn cmd_good_falls_through(parts: &[&str]) {
+    if let Some(w) = parts.get(1) {
+        if let Ok(id) = w.parse::<u32>() {
+            if info(id).is_some() {
+                return Some(id);
+            }
+        }
+        return by_name(w);
+    }
+}
+
+fn cmd_good_refuses_after(parts: &[&str]) {
+    if let Some(w) = parts.get(1) {
+        if let Ok(n) = w.parse::<u32>() {
+            act(n);
+            return;
+        }
+        shell_println!("x: y: `{}` is not a number", w);
+        set_exit(1);
+    }
+}
+
+fn cmd_good_not_an_operand(parts: &[&str]) {
+    if let Some(w) = other.get(1) {
+        if let Ok(n) = w.parse::<u32>() {
+            act(n);
+        }
+    }
+}
+
+fn cmd_good_brace_in_literal(parts: &[&str]) {
+    if let Some(w) = parts.get(1) {
+        shell_println!("{{");
+        if let Ok(n) = w.parse::<u32>() {
+            act(n);
+        }
+    }
+}
+'''
+
+_D4_EXPECT_REPORTED = ["cmd_bad_one", "cmd_bad_two", "cmd_bad_three"]
+
+
+def self_test() -> int:
+    struct = _rl.strip_noise(_D4_FIXTURE).splitlines()
+    lines = _D4_FIXTURE.splitlines()
+    stacks = scope_stack_per_line(lines)
+    hit = {outer_fn(stacks[i]) for i, _ in silent_operand_sites(struct)}
+
+    failures = []
+    for fn in _D4_EXPECT_REPORTED:
+        if fn not in hit:
+            failures.append(f"D4 did not report {fn}, which is the defect it exists for")
+    for fn in sorted(hit):
+        if fn not in _D4_EXPECT_REPORTED:
+            failures.append(f"D4 reported {fn}, which is correct code")
+    # `cmd_good_brace_in_literal` is the one control that is about the scanner
+    # rather than the rule: the `{{` in the format string is not structure, and
+    # a detector that counted it would mis-locate every block after it.
+    if failures:
+        print("", file=sys.stderr)
+        for f in failures:
+            print(f"  self-test: {f}", file=sys.stderr)
+        return 1
+    print(
+        f"[option-refusal] self-test: D4 reports all {len(_D4_EXPECT_REPORTED)} "
+        f"defective fixtures and none of the "
+        f"{len(_D4_FIXTURE.split('fn ')) - 1 - len(_D4_EXPECT_REPORTED)} correct ones"
+    )
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if "--self-test" in argv:
+        return self_test()
     text = PATH.read_text(encoding="utf-8", errors="replace")
     # Three views of one file, identically numbered because `strip_noise`
     # blanks in place: verbatim for reporting, comments-gone/literals-kept for
@@ -251,6 +506,7 @@ def main(argv: list[str]) -> int:
     guessed: list[tuple[int, str, str]] = []
     dropped: list[tuple[int, str, str]] = []
     mute: list[tuple[int, str, str]] = []
+    silent: list[tuple[int, str, str]] = []
 
     # D1 and D2 are matched per *statement*, not per line, because both regexes
     # span method calls and `cargo fmt` -- not the author -- decides where the
@@ -267,6 +523,15 @@ def main(argv: list[str]) -> int:
             guessed.append((start + 1, fn, stmt[:96]))
         if D2.search(stmt) and not allowed(fn, stmt):
             dropped.append((start + 1, fn, stmt[:96]))
+
+    for open_i, word in silent_operand_sites(struct):
+        if not is_production(open_i):
+            continue
+        fn = outer_fn(stacks[open_i])
+        frag = lines[open_i].strip()
+        if allowed(fn, frag):
+            continue
+        silent.append((open_i + 1, fn, f"{frag}  (`{word}' is dropped when unreadable)"))
 
     for open_i, close_i in loop_bodies(struct):
         if not is_production(open_i):
@@ -295,6 +560,33 @@ def main(argv: list[str]) -> int:
             print(f"{fn} {counts[fn]}")
         return 0
 
+    if "--sites" in argv:
+        # `--ledger` says how much debt a function carries; this says *where*,
+        # which is what burning it down actually needs.  Without it each batch
+        # began by re-deriving the site list with a throwaway script -- a
+        # second, slightly-different matcher that could disagree with the gate
+        # about what counts, which is the last thing a burn-down wants.  Same
+        # `guessed` list the gate grades against, so the two cannot drift.
+        #
+        # Grouped by function and ordered densest-first, because the shapes
+        # co-locate: an arm careless enough to guess one operand usually
+        # guesses the next, so a function is a better batch unit than a
+        # pattern.
+        rest = [a for a in argv[1:] if not a.startswith("-")]
+        want = rest[0] if rest else None
+        by_fn: dict[str, list[tuple[int, str]]] = {}
+        for lineno, fn, text in guessed:
+            if want and want not in fn:
+                continue
+            by_fn.setdefault(fn, []).append((lineno, text))
+        for fn in sorted(by_fn, key=lambda f: (-len(by_fn[f]), f)):
+            print(f"{fn}  ({len(by_fn[fn])} site(s))")
+            for lineno, text in by_fn[fn]:
+                print(f"  {rel}:{lineno}  {text}")
+        total = sum(len(v) for v in by_fn.values())
+        print(f"\n{total} site(s) across {len(by_fn)} function(s)")
+        return 0
+
     ledger = load_ledger()
     seen: dict[str, int] = {}
     unaccounted_guessed = []
@@ -310,7 +602,7 @@ def main(argv: list[str]) -> int:
         if seen.get(fn, 0) < n
     ]
 
-    problems = bool(unaccounted_guessed or dropped or mute or stale)
+    problems = bool(unaccounted_guessed or dropped or mute or stale or silent)
     if not problems:
         carried = sum(seen.values())
         print(
@@ -328,6 +620,17 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         for lineno, fn, text in mute:
+            print(f"  {rel}:{lineno}  {fn}", file=sys.stderr)
+            print(f"      {text}", file=sys.stderr)
+    if silent:
+        print("", file=sys.stderr)
+        print(
+            f"{len(silent)} operand(s) are read as a number and dropped in silence when "
+            f"the word will not read -- nothing printed, no default, no non-zero exit "
+            f"(design-decisions.md §600). Use `readable_num`/`readable_hex`:",
+            file=sys.stderr,
+        )
+        for lineno, fn, text in silent:
             print(f"  {rel}:{lineno}  {fn}", file=sys.stderr)
             print(f"      {text}", file=sys.stderr)
     if dropped:

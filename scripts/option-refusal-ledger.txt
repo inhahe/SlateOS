@@ -29,6 +29,21 @@
 # the shell to cause that jump and nothing regressed: the gate simply began
 # seeing what had been there all along. See
 # `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR`.
+#
+# It happened a second time, on 2026-08-29. The detector required a literal
+# `.parse()`, so the base-16 spelling of the same defect --
+# `u16::from_str_radix(v, 16).unwrap_or(0)` -- was invisible, hiding 19 sites
+# across 8 functions, four of which appeared nowhere below because they were
+# never seen rather than deliberately exempted. Both under-counts were found
+# by looking at a *function* that ought to be listed here and noticing it was
+# absent; neither was visible in the total, which looked healthy throughout.
+#
+# So: this number is a floor, not a measurement. A count that has been wrong
+# twice, both times for reasons unrelated to the code it inspects, should be
+# audited the same way both times -- name a function you believe is dirty and
+# check that the gate agrees. Reading the total proves nothing. See
+# design-decisions.md §634, which is also why that detector fix and the 30
+# sites it exposed landed in one commit rather than two.
 cmd_acpistat 1
 cmd_alloc_trace 1
 cmd_applaunch 1
@@ -53,7 +68,6 @@ cmd_cliphistory 1
 cmd_clipsync 2
 cmd_clocksrc 1
 cmd_compstat 1
-cmd_cpuset 4
 cmd_cursorsettings 2
 cmd_defaultapps 4
 cmd_deskicons 2
@@ -82,7 +96,6 @@ cmd_fileshare 1
 cmd_filetransfer 2
 cmd_filevault 1
 cmd_findex 1
-cmd_firewall 4
 cmd_fnotify 1
 cmd_focussession 1
 cmd_fontpreview 3
@@ -102,7 +115,6 @@ cmd_hwrng 2
 cmd_ime 1
 cmd_iolatency 2
 cmd_ionice 1
-cmd_ioport 3
 cmd_iosched 1
 cmd_iotdevice 2
 cmd_ipclog 3
@@ -110,7 +122,6 @@ cmd_kbmacro 2
 cmd_kbsettings 4
 cmd_kernlog 1
 cmd_kmod 1
-cmd_kprobes 3
 cmd_ksmstat 2
 cmd_kstat 1
 cmd_kthread 4
@@ -123,7 +134,7 @@ cmd_memcg 3
 cmd_memdiag 1
 cmd_memtest 1
 cmd_migstat 1
-cmd_mobilelink 2
+cmd_mobilelink 1
 cmd_msivec 3
 cmd_multiclip 1
 cmd_namespace 1
@@ -142,7 +153,6 @@ cmd_netusage 3
 cmd_nightlight 1
 cmd_notifcenter 1
 cmd_pacct 1
-cmd_parentaltime 4
 cmd_pftrack 3
 cmd_pgtable 1
 cmd_pidns 1
@@ -158,7 +168,6 @@ cmd_printqueue 1
 cmd_procstat 4
 cmd_progmgr 2
 cmd_quicknote 1
-cmd_quicksettings 2
 cmd_quota 1
 cmd_raidmgr 3
 cmd_rcustat 3
@@ -173,7 +182,6 @@ cmd_secpolicy 1
 cmd_secureboot 1
 cmd_secureerase 1
 cmd_seq 2
-cmd_service_limits 4
 cmd_sharesheet 1
 cmd_slabstat 1
 cmd_snaplayout 1
@@ -203,11 +211,9 @@ cmd_ttystat 3
 cmd_udp6 1
 cmd_upnp 4
 cmd_usagetime 1
-cmd_usbpolicy 1
 cmd_vmballoon 3
 cmd_vmfrag 2
 cmd_vmguest 2
-cmd_vmmap 4
 cmd_vmzone 4
 cmd_voicecontrol 1
 cmd_volumeosd 2

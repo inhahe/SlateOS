@@ -142,7 +142,30 @@ PRINT = re.compile(
     r"\b(?:shell_println|shell_print|console_println|console_print"
     r"|serial_println|serial_print|println|print|write|writeln)\s*!\s*\("
 )
-LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"')
+# `re.DOTALL` is load-bearing, and its absence was this gate's own blind spot.
+#
+# A Rust escape may be a *line continuation* -- `"… \` newline `   …"` -- which
+# is what `cargo fmt` produces for any message too long for one line. Without
+# `DOTALL` the `.` in `\\.` refuses the newline, so the scan of such a literal
+# dies at the backslash and never reaches the closing quote: the message is not
+# merely truncated, it is absent from the pool entirely, and the next quote in
+# the file is mistaken for an opening one, so the literals *after* it are
+# misaligned too. 61 of kshell.rs's literals are wrapped this way.
+#
+# Everywhere else in this file the literal regexes run over `statements()`
+# output, which has already collapsed the newline to a space (see `unescape`),
+# so they never met the problem. `print_literals` is the exception -- it needs
+# raw offsets into the body, so it sees the continuation as written. The effect
+# was that a command whose refusal message rustfmt had wrapped owned none of its
+# own wording as far as this gate was concerned, and a correct rung asserting
+# that wording was reported as naming text the command cannot print.
+#
+# This is the third gate found blind for a reason unrelated to the code it
+# inspects, after design-decisions.md §630's shellcheck floor and §634's
+# `from_str_radix`. Same lesson as §634: a gate's own output cannot audit its
+# coverage -- green here meant "derivable", and "not derivable" was silently
+# indistinguishable from "the analyzer cannot see the string".
+LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
 
 # A `match` arm whose pattern is one or more bare string literals --
 # `"remove" =>`, `"create" | "addws" =>`. This is what a kshell command's
@@ -820,6 +843,13 @@ fn cmd_vdesktop(args: &str) {
         "create" => {
             shell_println!("Usage: vd create <name>");
         }
+        "rename" => {
+            shell_println!(
+                "vd: rename: `{}' is not a desktop name; expected letters, \
+                 digits or `-'",
+                parts.get(1).copied().unwrap_or("")
+            );
+        }
         _ => shell_println!("vd - virtual desktops"),
     }
 }
@@ -843,6 +873,15 @@ pub fn self_test() {
         let out = capture_command("vd remove");
         assert_output_contains("a missing id is named", &out, b"missing desktop id");
         assert_output_lacks("and no synopsis is dumped", &out, b"Usage: vd remove");
+    }
+    {
+        // The message this asserts is spelled across two source lines with a
+        // `\` continuation, which is what rustfmt does to any message too long
+        // for one. Scanning it needs `LITERAL` to be `DOTALL`; without that the
+        // whole message is absent from `rename`'s pool and this correct rung is
+        // reported as naming text the command cannot print.
+        let out = capture_command("vd rename zz_bad_name");
+        assert_output_contains("a wrapped refusal is the command's own wording", &out, b"is not a desktop name");
     }
     {
         let out = capture_command("zzecho zz_witness_token");
@@ -915,6 +954,11 @@ def self_test() -> int:
         ("vd create", b"Usage:", "arm narrowing kept `Usage:` legal for `create`"),
         ("vd create zz_name", b"Usage:", "same, in the row's full form"),
         ("vd remove", b"missing desktop id", "the closure reaches `required_id`"),
+        (
+            "vd rename zz_bad_name",
+            b"is not a desktop name",
+            "a rustfmt-wrapped literal is in the pool (LITERAL needs re.DOTALL)",
+        ),
         ("zzecho zz_witness_token", b"zz_witness_token", "the witness rule"),
     ):
         if any(c == cmd and f == frag for c, _, f in got):

@@ -81864,7 +81864,218 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **362 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **332 of 800 remain**
+
+> **Burn-down log.** 2026-08-29 (thirty-ninth batch): the batch that was not
+> about this defect at all, and moved its count anyway. Batch 39 went after a
+> *third* shape of §600 — an operand read as a number and dropped in **silence**
+> when the word would not read, with no message, no default and no non-zero
+> exit — tracked separately as
+> `A-KSHELL-AN-OPERAND-READ-AS-A-NUMBER-AND-DROPPED-IN-SILENCE`. 22 sites
+> converted there. Three of them turned out to *also* carry a guessed value in
+> the same few lines (`mlink battery`'s percentage, `qs set`'s two operands), so
+> this heading fell 335 → 332 across 186 → 185 functions as a side-effect.
+>
+> The general point is worth more than the three sites: **the shapes co-locate.**
+> An arm careless enough to drop one word silently is the same arm that guesses
+> at the next one, so reading an arm to fix either shape tends to surface the
+> other. That argues for finishing this backlog arm-by-arm rather than
+> pattern-by-pattern — the gate can only sort by pattern, but the defects are
+> distributed by author attention.
+>
+> **Burn-down log.** 2026-08-29 (thirty-eighth batch): `cmd_iomem` (5),
+> `cmd_ioport` (6), `cmd_vmmap` (6), `cmd_kprobes` (4), `cmd_pciids` (4),
+> `cmd_usbpolicy` (3), `cmd_sysrq` (1) and `cmd_gpu` (1) cleared — 30 sites
+> across 8 functions. Pinned by self-test rung 102.
+>
+> **The counts moved differently from every previous batch, and that is the
+> finding.** The heading went 346 → 335, a fall of 11, while 30 sites were
+> actually fixed. Both numbers are right. The gate had been reporting 346 when
+> the true figure was **365**: `scripts/check-option-refusal.py` matched a
+> literal `.parse()`, so the base-16 spelling of the identical defect —
+> `u16::from_str_radix(v, 16).unwrap_or(0)` — was **invisible to it**. Nineteen
+> sites across eight functions had never been seen, let alone exempted. So the
+> real movement is 365 → 335 across 194 → 186 functions, and every earlier
+> total printed by this gate was an undercount by the same 19.
+>
+> **In short:** a gate that measures a debt can only be trusted about the part
+> of the debt it can see, and nothing in its own output says which part that is.
+> This one had been green for months over code it was written to catch. The
+> detector was extended in the same change that paid the debt it was hiding, so
+> the ledger gained nothing from the discovery.
+>
+> * **How it was found, which is the part worth reusing.** Not from the total —
+>   346 looked exactly as healthy as 365 would have. It was found by picking two
+>   functions that *ought* to have been in the ledger, `cmd_pciids` and
+>   `cmd_sysrq`, and noticing they were not merely un-exempted but **absent**.
+>   An entry claiming too many sites is already reported by the checker (that is
+>   what the `stale` arm is for); an entry that was never written cannot be. The
+>   only audit that catches this is to go looking at a specific function rather
+>   than at the count — the same lesson as
+>   `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR`, where the
+>   gate was matching lines and `cargo fmt` had wrapped the statements it wanted.
+>
+> * **`cmd_sysrq` continues the thirty-seventh batch's theme exactly, and is the
+>   most severe site in this one.** `sysrq mask` narrows what the magic SysRq key
+>   is permitted to do; it has no other purpose. The guess was
+>   `unwrap_or(0x7F)`, and `kernel/src/fs/sysrq.rs:205` documents `0x7F` as
+>   "All categories enabled". So a mistyped mask did not narrow the permission
+>   set, it **opened all of it** — reboot and crash included — and printed
+>   `SysRq mask set to 0x7f` as though that had been the request.
+>
+> * **`cmd_sysrq` also carried a different defect the gate cannot see at all,
+>   and it is worse.** The five key operands were read with
+>   `parts.get(1).and_then(|s| s.chars().next())`, which does not read a
+>   character — it reads the first one and discards the rest. The sysrq keys are
+>   single letters naming destructive actions, so `sysrq trigger boot` was obeyed
+>   as `b` (reboot) and `sysrq trigger info` as `i` (kill every process). This is
+>   not a guess but a *truncation*, and it is more convincing than a guess
+>   because the letter acted on is one the operator really typed. Fixed with a
+>   new `required_key` helper; the same shape had already been fixed once for
+>   `find -type`, where the valid set is closed and a whitelist sufficed.
+>
+> * **`cmd_usbpolicy` is the third instance of "the guess is the value that
+>   restricts nothing", reached by a third idiom.** A rule's vendor and product
+>   ids are `Option<u16>`, and `kernel/src/fs/usbpolicy.rs:203` matches with
+>   `rule.vendor_id.is_none_or(|v| v == vid)` — so `None` does not mean "unset",
+>   it means **match every vendor**. The old `…from_str_radix(..).ok()` turned a
+>   mistyped `vid=` into exactly that: a rule aimed at one device silently became
+>   a rule matching all of them, and with `decision=deny` that is every USB
+>   device on the machine. Note this site spells no `unwrap_or` at all, so the
+>   extended detector still does not see it; it was found by reading the
+>   function while fixing its neighbour.
+>
+> * **Two catch-alls in the same command, both of which changed the meaning
+>   rather than defaulting it.** `parse_usb_decision` ended in
+>   `_ => Decision::AskUser`, so `usbpolicy add r denny` installed an *ask* rule
+>   where a *deny* was meant and reported it added — and `usbpolicy default`,
+>   which sets the decision for every device matching no rule, ran through the
+>   same parser. `parse_usb_class` ended in `_ => UsbClass::Other`, which is not
+>   a fallback but **a real class that real devices belong to**, so
+>   `class=stroage` produced a rule quietly governing the wrong class. Both now
+>   return `Option`, and `Other` is still reachable — by spelling it.
+>
+> * **The address and id functions are the wrong-object mutation, as `cmd_cpuset`
+>   was in the previous batch, but with a sharper edge: zero is not a
+>   placeholder in any of these spaces.** Port 0 is a real port, base address 0
+>   is a real region, pid 0 is a real process, vendor id 0 is a real id. So
+>   `iomem unregister 0xFFFG` did not fail — it unregistered whatever was at base
+>   `0` and answered `iomem: unregistered 0x0`, echoing back the same
+>   hexadecimal that had just been mistyped. `kprobes register` is the same
+>   shape at its worst: it installed a probe on the **null address** and printed
+>   `Registered probe id=N` with a genuine id, which is precisely what let the
+>   mistake survive — the operator has a probe, it is simply not on the function
+>   they named, and nothing in the output says so.
+>
+> * **`cmd_pciids` is the query case, and queries are not the mild case.** A
+>   mistyped vendor id became `0` and the command answered `Vendor: Unknown` —
+>   a real answer, about a vendor that was never asked about, and
+>   **indistinguishable from the correct answer for a vendor genuinely not in
+>   the database**. A lookup that cannot read what it was asked to look up has
+>   to say so, or neither of its two outcomes can be trusted.
+>
+> * **`cmd_gpu fill` was fixed on both routes and then reordered.** A bad `0x`
+>   literal and an unlisted colour name both ended at the same default blue, and
+>   on a command whose entire output *is* the screen a wrong fill looks exactly
+>   like a right one. The argument is now validated *before*
+>   `virtio::gpu::is_available()` is consulted: a word the shell cannot read is
+>   wrong on a machine with no GPU exactly as on one with a GPU, and the old
+>   order would have made the diagnostic depend on whether QEMU was started with
+>   `-device virtio-gpu-pci` — the §604 trap, in the self-test as much as in use.
+>
+> * **New helpers.** `required_hex` (the `required_num` of base 16) and
+>   `required_key` (an operand that must be exactly one character) join
+>   `optional_hex` from the previous batch; `FromHexStr` gained a `u8` impl for
+>   `pciids`' class and subclass bytes.
+>
+> **Not fixed here, and deliberately.** `cmd_iomem`'s `name` and `cmd_ioport`'s
+> `name` previously defaulted to the placeholders `"DEV"` and `"PORT"` when
+> absent; both are now required, because a region registered under a name nobody
+> chose is unfindable in the `list` output that is the only way to see it. The
+> remaining `unwrap_or` defaults in these functions — `iomem register`'s size of
+> `0x1000` and `ioport`'s access width of `1` — are genuine documented defaults
+> for *absent* operands and are kept, now routed through `optional_hex` /
+> `optional_num` so a *present but unreadable* operand is refused instead.
+
+> **Burn-down log.** 2026-08-29 (thirty-seventh batch): `cmd_firewall` (4),
+> `cmd_parentaltime` (4), `cmd_service_limits` (4) and `cmd_cpuset` (4) cleared —
+> 362 → 346 across 194 → 190 functions. Pinned by self-test rung 101.
+>
+> **In short:** these four were batched together because they share a property
+> no previous batch had, and it is the one that makes this class dangerous
+> rather than merely untidy. **In all four, the value that was guessed is the
+> setting that enforces nothing.** A firewall rule with no port matches every
+> port; a screen-time limit of zero minutes is not a strict limit but an absent
+> one; a service quota of zero is printed by the command itself as
+> `unlimited`. So the substitution did not produce a *wrong* restriction, which
+> a user might eventually notice — it produced *no* restriction, and then
+> printed the success line that says the restriction was applied.
+>
+> * **`cmd_firewall` is the most severe instance found in thirty-seven
+>   batches**, and the severity was verified in the subsystem rather than
+>   assumed. `net/firewall.rs:146` documents `dst_port: 0` as "any port",
+>   `:142` documents `src_ip` `0.0.0.0` as "any", and the matcher at `:1467`
+>   reads `if rule.dst_port != 0 && rule.dst_port != port` — it honours both.
+>   Therefore `fw allow in tcp port 8O8O` (letter O) did not install a rule for
+>   a wrong port and did not fail: **it opened every inbound TCP port** and
+>   printed `Rule 3 added`. There were four distinct ways to reach that state,
+>   not one: the unreadable port; the unreadable address (`ip 10.0.0.256` →
+>   accept from anywhere); `prefix_part.parse().unwrap_or(32)`; and — the
+>   quietest — `_ => { i += 1; }`, which discarded an unrecognised keyword *and*
+>   left its operand to be re-read as a keyword, so `fw allow in tcp prot 80`
+>   (for `port`) threw away both words and installed an any-port rule. Every
+>   defect existed twice, because the IPv6 arm is a hand-copied twin; the gate
+>   is what found the second copy, after the first was fixed and it reported
+>   `2 fewer than expected` instead of 4.
+> * **A prefix-length ceiling that never existed.** `/33` on an IPv4 rule (or
+>   `/129` on IPv6) parsed as a `u8` and was stored. What a matcher does with a
+>   prefix wider than its address is undefined by anything written down here, so
+>   this was not a guessed value but an unchecked one — found while fixing the
+>   arm, and fixed with it. `0` remains legal: it is "any address" said
+>   deliberately, which is exactly the distinction the rest of this batch is
+>   about.
+> * **`cmd_service_limits` is the clearest instance anywhere in kshell**,
+>   because the proof is in the same function. The `set` arm read
+>   `val.parse().unwrap_or(0)` four times; the `list` arm, forty lines above,
+>   renders a limit of `0` as the literal string `"unlimited"`. So
+>   `slimit set web rss=1O24` removed the limit and then printed the limits back
+>   with `unlimited` in the column the operator had just tried to fill.
+> * **`cmd_parentaltime` is the one where nobody is placed to notice.** A
+>   parental control restricts one person and is read by another, so a silent
+>   failure has no observer. `parentaltime::record_usage` gates enforcement on
+>   `daily_limit_minutes > 0`, so `ptime limit 1 6O` printed
+>   `Daily limit set to 0 min` — a line that reads like a total lockout and
+>   means the opposite. Its `use` operand is the inverse case and is refused for
+>   the opposite reason: usage *accumulates*, so a mistyped `ptime use 1 4O`
+>   charged 30 minutes that were never spent and reported the invented number as
+>   fact.
+> * **`cmd_cpuset` is the variant, and is included to mark the boundary.** Its
+>   four `id` operands defaulted to `0`, which is not a wider setting but a
+>   *different object* — set 0 exists, `cpuset init` creates it, and
+>   `cpuset destroy 1O` destroyed it while printing `destroyed id=0`. Its two
+>   mask operands are the widening case proper: an unreadable mask became `0xF`,
+>   four CPUs nobody asked for, echoed back in the same hex the operator had
+>   just typed.
+> * **A new shared helper, `optional_hex`.** The mask sites used
+>   `…and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()).unwrap_or(0xF)`,
+>   an idiom with **8 further occurrences** still in the file. `from_str_radix`
+>   is an inherent method rather than a trait one, so there was nothing in
+>   `core` to bound a generic on; a three-line `FromHexStr` trait with a macro
+>   impl for `u16`/`u32`/`u64` supplies it. Future batches inherit the tool.
+> * **An incidental find, fixed in place: fifteen diagnostics named a command
+>   that routes elsewhere.** Every usage and error line in `cmd_firewall` said
+>   `firewall`, but the dispatcher sends `firewall` to `cmd_fwsettings` — a
+>   different subsystem (`fs::fwsettings`) with no `allow`/`deny` at all. The
+>   command is `fw`, which is what its own help arm has always printed. So a
+>   user who followed the usage text verbatim reached the wrong command. Not a
+>   guessed value, but the same failure mode one layer up: output stating
+>   something untrue with complete confidence.
+>
+> **Not fixed here, and deliberately.** The `direction` and `protocol` operands
+> of a firewall rule already refuse (`_ =>` prints usage and returns), so they
+> were never in this class. And `cmd_fwsettings` — the *other* firewall command
+> — was not audited in this batch; it is `fs::fwsettings`, a separate subsystem,
+> and pulling it in would have made the batch about two things.
 
 > **Burn-down log.** 2026-08-29 (thirty-sixth batch): `cmd_printf` (5) cleared —
 > 367 → 362 across 195 → 194 functions. Pinned by self-test rung 100.
@@ -93904,6 +94115,172 @@ argument for the witness being an `assert!` inside the test rather than a note i
 a comment: it is re-checked every run, at the same moment as the assertion it
 guards, so the two cannot drift apart later.
 
+### Lesson 68: a containment assertion has slack, and any fault that fits inside the slack is invisible (lane C, 2026-08-29)
+
+**In short:** "the button is inside the band" and "the button is *centred* in the
+band" are different claims, and only the second one is a placement. The first is
+an inequality with room to spare, so a fault that moves the thing by less than
+that room passes it. Sokoban's control-button test compared coordinates — it was
+not lesson 57's mistake of checking only that a thing was drawn — and still could
+not see the buttons slide to the top edge of the band they sit in.
+
+**The fault.** `button_rects` gives each button a height of `controls.h - pad`
+and places it at `controls.y + (controls.h - bh) / 2.0`, i.e. half a pad of
+breathing room above and half below. The test asserted:
+
+```rust
+r.y >= l.controls.y - 0.01 && r.bottom() <= l.controls.bottom() + 0.01
+```
+
+Replace the `y` with a bare `controls.y` and the button moves down by half a pad
+— visibly, in the drawn picture — and the assertion still holds, because
+`controls.y >= controls.y` and the bottom edge, now `controls.y + controls.h -
+pad`, is *further* inside the band than before. The mutation moved the button and
+the test that owns button placement said nothing. The centring was, in effect,
+untested code that happened to be correct.
+
+**The rule.** *An assertion of the form `a <= x <= b` tests the endpoints, not the
+value. If the value is determined by a formula — centred, thirds, golden — assert
+the formula, not the interval it lands in.* The replacement is one line and says
+exactly what the code does:
+
+```rust
+((r.y - l.controls.y) - (l.controls.bottom() - r.bottom())).abs() <= 0.01
+```
+
+"The gap above equals the gap below" is what the word "centred" means, written
+down. Note that it is stated as a relation between two measured gaps rather than
+as `r.y == controls.y + (controls.h - bh) / 2.0` — the latter is lesson 65's
+mistake, a check that recomputes the thing it is checking and therefore agrees
+with any formula the production code happens to hold.
+
+**How it was found, and why that matters.** Not by reading the test — by trying
+to write a mutation for a guard that had just been deleted. Faults 16 and 17 in
+sokoban were five-plus-three unobservable guards (lesson 51), and deleting them
+left three mutation slots with nothing to break. Reaching for something else in
+the same function to break is what surfaced the hole. **Deleting dead defensive
+code is worth doing for its own sake, but the mutation slot it frees is the more
+valuable half**: it forces you to ask what else in that function is load-bearing,
+and the answer is usually a line no test has ever disagreed with.
+
+**Where else to look.** Every "stays inside the window", "does not overlap",
+"fits in its box" assertion in these suites — they are the commonest shape in the
+layout tests and every one of them is an interval. They are the right test for
+the fault they were written against (a thing drawn off the edge) and say nothing
+about position within the box. The tell is a test whose name contains *inside*,
+*within*, *stays*, *fits*, or *does not overlap* and whose subject is computed by
+a formula with a division in it.
+
+### Lesson 69: a tool that matches bytes and a table written as text disagree about what ends a line (lane C, 2026-08-29)
+
+**In short:** the mutation harness reported 35 of wordle's 75 anchors as
+appearing "0 times" in a file that plainly contained every one of them. The
+anchors were written in a Python file with `\n` between their lines; the Rust
+file on disk had `\r\n`, because a splice script had written it with
+`pathlib.Path.write_text`, which translates line endings to the platform's on
+the way out. Every single-line anchor matched and every multi-line one did not,
+and the harness printed the same verdict — `SKIP anchor appears 0x` — that it
+prints for an anchor genuinely edited away.
+
+**Why it took a while to see.** The verdict is honest and it is the right
+verdict; it just has two causes with nothing to tell them apart. A sweep whose
+survivors are scattered across nine sections of the program reads as "the suite
+has holes all over", which is a plausible thing for a new suite to be, and it
+sends you off reading tests. The tell — obvious afterwards — is the *shape* of
+the failure: every multi-line anchor failed and no single-line one did. A defect
+that respects a syntactic property of the anchor rather than a semantic one is a
+defect in the matching, not in the tests.
+
+**Two fixes, and both are wanted.**
+
+1. **The file.** `apps/wordle/src/main.rs` was normalised to LF. Nothing in this
+   tree wants CRLF: the committed blobs are LF and `core.autocrlf` is unset, so
+   only the working copy was affected — and only the copy of it a Python script
+   had rewritten.
+2. **The harness.** `scripts/mutation_harness.py` reads and writes the source
+   with `newline=""` so a restore is byte-identical; that is deliberate and must
+   stay. It now also detects the source's line ending once and translates every
+   anchor into it before searching:
+
+   ```python
+   eol = "\r\n" if "\r\n" in original else "\n"
+   ```
+
+   A harness that can only be driven from a file with one particular line ending
+   is a harness that will one day report a clean sweep because it broke nothing
+   at all — which is the failure lesson 66 was written about, arriving by a
+   different road.
+
+**The rule.** *Any Python that rewrites a source file in place must pass
+`newline="\n"`, or read and write bytes.* `write_text` is not a round trip on
+Windows: `read_text` strips the `\r`, `write_text` puts it back, so a script that
+reads a file, changes one line and writes it out rewrites all 3,828 of them. The
+`git diff` looks the same either way — git normalises — which is what lets it
+through review.
+
+**Where else to look.** Every splice or patch helper in `scripts/`, and every
+throwaway `python -c` that edits a `.rs` or `.md` in place. The damage is
+invisible until some other tool matches on bytes.
+
+**How widespread it already is.** Fifty tracked files carry CRLF — `git ls-files`
+plus a byte count finds them — headed by `apps/settings/src/main.rs` (8,227
+lines), `apps/vpnmanager`, `apps/netmanager`, `apps/indexer`, `gui/credentials`,
+`gui/notifications`, and eleven apps that already have windows and suites. In
+every one of them the *committed blob* has the CRLF too, so this is history and
+not a stale checkout, and `git checkout` will not fix it. **They are not being
+normalised**: a fifty-file whitespace-only commit would bury the next few real
+diffs and conflict with anything the other two lanes have in flight, and the
+harness translation above already makes them safe to mutate. The cost of leaving
+them is that a hand-written `grep`/`sed`/`python` one-liner against any of those
+files must still expect `\r\n`; the cost of fixing them is paid by everyone
+reading history for a year. If one is being rewritten wholesale for another
+reason — as wordle was — normalise it in that commit.
+
+### Lesson 70: a movement that is clamped can only be tested where it is free to move (lane C, 2026-08-29)
+
+**In short:** nonogram's mutation sweep left five survivors, and four of them
+were the same mistake wearing different hats. Every arrow-key test pressed its
+arrow *at the edge the arrow stops at* — `Up` at row 0, `Left` at column 0, `Up`
+at the top of the puzzle list. At that spot the guard (`if self.cursor_row > 0`)
+refuses the key, so the line the guard protects never runs; and if you delete
+the guard, `saturating_sub(1)` on 0 is still 0. Two different faults — a missing
+bound check and a movement that goes the wrong way — both produce exactly the
+cursor position the test asserts. The fifth survivor is the same shape in
+geometry: the centring test measured vertical slack in a fixture where the grid
+was height-constrained, so the slack was zero and "centred" and "flush against
+the top" were the same number.
+
+**The two halves of the rule.**
+
+1. **To test a *direction*, press the key somewhere it can actually move.** `Up`
+   from row 1 must land on row 0. Pressed from row 0 it asserts nothing about
+   which way up is — the guard answers first, and `saturating_sub` answers
+   after it.
+2. **To test a *bound*, assert the verdict, not just the position.** At the edge
+   the position is unchanged whether the key was refused or applied-and-clamped;
+   what distinguishes them is that a refused key returns `EventResult::Ignored`
+   and a clamped one returns `Consumed`. The window is told to repaint in the
+   second case and not the first, so this is a real user-visible difference and
+   not a technicality.
+
+Written out, the pair covers a movement key completely: from an interior cell,
+`Consumed` and the cursor one step in the named direction; from its own edge,
+`Ignored` and the cursor where it was.
+
+**And the geometry half.** A "centred" assertion of the form *slack on this side
+equals slack on that side* is satisfied by `0 == 0`. `Grid::new` sizes its cells
+by `min(width_fit, height_fit)`, so in **any** fixture exactly one axis is fully
+consumed and has no slack at all. A single fixture can therefore only ever test
+centring on one axis; testing both needs a wide area *and* a tall one, and each
+assertion needs `assert!(slack > 0.0)` in front of it to prove it was measuring
+something. This is lesson 67 (a test over a branch must prove the branch was
+entered) arriving through arithmetic rather than control flow.
+
+**Where else to look.** Every app with a cursor that clamps — sudoku, minesweeper,
+2048, connect4, the file explorer's list — and every `(a - b).abs() < eps`
+centring assertion in a layout suite. The tell is a test whose fixture puts the
+thing under test at rest.
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print
@@ -94715,7 +95092,8 @@ harness discriminates at all.
 
 What is deliberately *not* compared is the interactive screen: with stdout a
 terminal, util-linux drives it through terminfo
-(`ESC[7m--More--(Next file: x)ESC[27mESC[K`) and ours writes a plain
+(`ESC[7m--More--(Next file: x)ESC[27m
+ESC[K`) and ours writes a plain
 `--More--`. Those cannot match byte for byte without porting terminfo into a
 pager. The decision to pause, and the keystroke handling, are covered by unit
 tests in `more.rs` instead.
@@ -94895,3 +95273,256 @@ genuinely weaker guarantee -- a member cannot be *named* outside the
 destination, but a link planted between the check and the creation would not be
 caught -- and it is documented as such at the type. That platform cannot create
 a symlink, a fifo or a device node in the first place.
+
+## `A-THE-WORDING-GATE-CANNOT-SEE-A-MESSAGE-RUSTFMT-WRAPPED` (lane A, 2026-08-29) — **FIXED 2026-08-29**, one character
+
+**In short:** a gate checks that every self-test assertion names text the
+command under test can actually print, so a rung cannot pass by asserting
+wording that no longer exists. To do that it collects the strings each command
+prints. It could not see a string that `cargo fmt` had split across two source
+lines — 61 of them in `kshell.rs` — so those commands owned none of that
+wording as far as the gate was concerned. The visible symptom is the opposite
+of silence: it accuses *correct* rungs. The invisible half is worse, and is why
+this is filed rather than just fixed.
+
+**Where.** `scripts/check-selftest-wording.py`, `LITERAL` (was line 145):
+
+```python
+LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"')     # no re.DOTALL
+```
+
+A Rust string may be continued onto the next line with a trailing backslash:
+
+```rust
+shell_println!(
+    "gpu: {}: unknown colour `{}'; expected red, green, blue, \
+     white, black or a 0x-prefixed ARGB value",
+    sub, other
+);
+```
+
+`\\.` is the escape alternative, and without `re.DOTALL` its `.` refuses a
+newline. So the scan of that literal dies at the backslash, never reaches the
+closing quote, and **the literal is absent from the match entirely** — not
+truncated, absent. Worse, `finditer` then resumes at the *closing* quote and
+treats it as an opening one, so the literals after it in the same argument list
+are misaligned too. The total barely moves (46888 matches against 46889), which
+is exactly why nothing noticed: the count was right and the contents were wrong.
+
+**Why only here.** Every other literal regex in the file (`STR`, `BSTR`,
+`BYTES_LET`) runs over `statements()` output, which has already collapsed the
+newline to a space — `unescape`'s docstring says so, and eats "backslash
+followed by whitespace" for that reason. `print_literals` is the one scan that
+must run over the **raw** body, because it needs real offsets into it, so it is
+the one scan that meets the continuation as written.
+
+**Resolution.** `re.DOTALL` on `LITERAL`, plus a comment saying why it is
+load-bearing, plus a fixture case that fails without it: `cmd_vdesktop` gained a
+`rename` arm whose refusal is wrapped, and a rung asserting it. It is in the
+self-test's *controls* — the list of correct code that must **not** be reported
+— so a future edit that drops the flag is caught by `--self-test`, not by a red
+boot test two batches later. Verified by reverting the flag: the control fails,
+alone.
+
+**How it surfaced, which is the part worth keeping.** Not from the gate's
+output, which had been green. It surfaced because batch 38 of the operand-refusal
+burn-down added two rungs asserting refusal messages long enough for rustfmt to
+wrap, and the gate reported them as naming text the command cannot print. The
+messages were right; the gate could not read them. Had I taken the gate's word
+for it — its own error text offers an `ALLOWED` list for "genuinely right and
+merely underivable" — I would have written two exemptions and left 61 literals
+invisible, in a checker whose entire purpose is to notice when an assertion and
+a message drift apart.
+
+**This is the third gate found blind for a reason unrelated to the code it
+inspects**, and the third in three days:
+
+| Gate | Blind to | Hid |
+|---|---|---|
+| `check-shell-portability.sh` (§630) | anything, if shellcheck was absent | the whole bug class |
+| `check-option-refusal.py` (`…RUSTFMT-USES-FOUR`) | a chain rustfmt wrapped | 466 sites |
+| `check-option-refusal.py` (§634) | `from_str_radix` | 19 sites |
+| `check-selftest-wording.py` (this) | a message rustfmt wrapped | 61 literals |
+
+Two of the four are the *same* cause: **rustfmt decides the layout, and a regex
+written against the layout the author typed is a regex against a coincidence.**
+`statements()` exists to fix that class once; this scan could not use it, and
+paid the cost separately. Before adding any regex over raw Rust here, ask what
+`cargo fmt` is free to do to the construct it matches.
+
+**The half that is still not measured.** A gate whose failure mode is *accusing
+correct code* announces itself, and that is how this one was caught. But the
+same missing flag also *enlarged* nothing and *shrank* every affected pool,
+which means an assertion that should have been reported could equally have been
+excused by the witness rule instead — and that failure is silent. There is no
+count of how many, because the question a gate cannot answer is how much it did
+not see. This is design-decisions.md §634's corollary landing for the third
+time: **a gate's own output cannot audit its coverage.** The only method that
+has ever worked on this project is the one used both times — name a specific
+thing you believe the gate should catch, and check that it agrees.
+
+
+## A-KSHELL-AN-OPERAND-READ-AS-A-NUMBER-AND-DROPPED-IN-SILENCE (lane A, 2026-08-29) — **FIXED 2026-08-29**, 22 sites
+
+**In short:** twenty-two shell subcommands took a number as an argument, and
+when the word you typed was not a number they did *nothing at all* — no
+message, no error status, no action. `ptime enable zzz` printed nothing and
+exited 0, which looks exactly like a configuration that really had been
+enabled. A script checking the exit status could not tell the difference; nor
+could a person reading the screen. All twenty-two now name the word they could
+not read and exit non-zero.
+
+**Where.** `kernel/src/kshell.rs`, in the shape
+
+```rust
+if let Some(id_str) = parts.get(1) {
+    if let Ok(id) = id_str.parse::<u32>() {
+        act_on(id);
+    }
+} else {
+    shell_println!("Usage: ptime enable <id>");
+    set_exit(1);
+}
+```
+
+The `else` belongs to the *outer* `if let`, so it covers the absent operand
+only. An unreadable one falls out of both branches.
+
+**Why this is worse than the guessed value.** This is the third shape of
+design-decisions.md §600, and the burn-down found it last because it is the
+only one that leaves no trace. A guessed value (`…parse().ok().unwrap_or(0)`,
+the 332 sites still in the ledger) at least *does* something and leaves a wrong
+number on screen for someone to notice. A catch-all match arm installs a
+visibly-wrong rule. This one produces a clean, empty, successful-looking
+non-event.
+
+**The helper.** Neither existing helper fitted. `required_num` refuses an
+absent operand, but for several of these the absence is legitimate and means
+something different — `mkeys play` acts on the active session, `mkeys play 3`
+on session 3. `optional_num` has a default to substitute, and here the absent
+case is not a value at all but a different action. So `readable_num` /
+`readable_hex` were added: *present, and must be readable*.
+
+**Three neighbouring defects were fixed with them,** each found only because
+the arm had to be read closely to convert it, and each capable of surviving a
+fix that addressed only the visible half:
+
+| Where | What it did |
+|---|---|
+| `ptime enable/disable` | `set_active(id, true).ok()` discarded the `Result`, so a readable id naming no config was still announced as "Config 999 enabled." |
+| `qs set` | guessed both operands as `0`, then reused the id's guess as the sentinel for "absent" — so `qs set 3 xyz` set the tile to 0% and reported "Set to 0%", and tile 0 was unreachable |
+| `container create net=…,gw=<typo>` | assigned `parse_ipv4_octets`'s `None` straight into the field, so a mistyped gateway did not fail to take effect, it **removed** the gateway |
+
+**Resolution.** 22 sites converted (`ptime`, `mkeys`, `cam`, `speech`, `mlink`,
+`store`, `slock`, `qs`, `container create`). Self-test rung 103 pins six of
+them with *paired* assertions — the refusal named, and the success message
+asserted absent — because checking only the refusal would pass against code
+that refuses and then acts anyway. D1's ledger fell 335 → 332 as a side-effect.
+
+**The measurement worth keeping: this shape is 56% precise, and the other 44%
+had to be read.** The raw pattern matched 39 sites; 17 were correct code doing
+something the shape cannot distinguish — trying one reading and falling through
+to another:
+
+| Site | The alternative it falls through to |
+|---|---|
+| `resolve_container_ref` | a numeric reference, else a container *name* |
+| `parse_datetime_to_ns` | epoch seconds, else `YYYY-MM-DD` |
+| `cmd_useracct info`, `cmd_template` ×2 | a uid/id, else a name — as the usage line offers |
+| `cmd_queryable` | "auto-detect type: try int first, then text" |
+| `execute_select` | POSIX `select`: non-numeric input leaves the variable empty |
+| `expand_brace_expr` ×3 | bash's own `${x:abc}` and `${arr[abc]}` |
+| `cmd_fsearch` | a max size, else a root path |
+| `parse_sed_command`, `awk_eval_expr`, `cmd_unset`, `cmd_appdefaults` | a later arm, or an `Err` the caller reports |
+
+None of these was excluded by a heuristic. Each was opened and read. That is
+the cost of the shape, and it is the reason the gate below is narrower than the
+shape.
+
+**The gate.** `scripts/check-option-refusal.py` gained **D4**, which requires
+the nesting *and* that the inner `if let Ok` be the **sole** statement of the
+`if let Some(w) = parts.get(N)` block. Soleness is exactly what separates the
+22 from the 17: a fall-through that reaches more code is an alternative being
+tried; a block that ends right there has nowhere for the word to go. So D4
+sits at **zero with no ledger entry** — a gate that starts green with no
+allowlist, rather than one that starts with a 22-line backlog.
+
+**And D4's first zero was a false one, which is the part worth keeping.** It
+landed at zero on `kshell.rs` immediately — and for the wrong reason:
+`close_brace` counted braces per line, so `} else {` netted zero, a block with
+an `else` never appeared to close, and D4 was skipping most of the sites it
+exists for. The file's own output could not say this; a fixture could, and did,
+the moment it was written (two defective fixtures unreported, one correct one
+reported). `close_brace` is now character-level, and running D4 against the
+pre-fix tree reports 20 sites in 8 functions and none of the 17 lookalikes.
+
+This is design-decisions.md §634's corollary applied to a gate written the day
+after it — *a gate's own output cannot audit its coverage* — and it is now the
+**fifth** time in four days that a gate here was found blind:
+
+| Gate | Blind to | Hid |
+|---|---|---|
+| `check-shell-portability.sh` (§630) | anything, if shellcheck was absent | the whole bug class |
+| `check-option-refusal.py` D1 | a chain rustfmt wrapped | 466 sites |
+| `check-option-refusal.py` D1 | `from_str_radix` | 19 sites |
+| `check-selftest-wording.py` `LITERAL` | a message rustfmt wrapped | 61 literals |
+| `check-option-refusal.py` D4 | any block with an `else` | 20 of the 20 sites it targets |
+
+Four of the five were found by naming a specific thing the gate should catch
+and checking that it agreed. The fifth (D4) was found by writing that check
+down as a fixture *before* trusting the zero. The fixture is the cheaper method
+and the only one that keeps working.
+
+The first row is now **closed** (2026-08-29): §630's missing-tool arm was the
+only blindness in the table that was *designed in on purpose*, and its stated
+reversal trigger — all three lanes confirmed to have the binary — was verified
+and acted on the same day. `check_shellcheck` now exits 1 rather than returning
+0 when the tool is absent, so a removed binary stops the build instead of
+quietly restoring the blindness.
+
+**Two things this leaves.** D4 does not reach `container create`'s `cpu=`/
+`mem=` options, whose word comes from `strip_prefix` inside a loop rather than
+from `parts.get`, so there is no positional nesting and no soleness test to
+distinguish defect from alternative; those two sites are fixed but ungated.
+And `${x:1:abc}` expands to the rest of the string where bash gives the empty
+string — a compatibility divergence noticed while reading the 17, not fixed
+here because it needs bash's arithmetic-context rules rather than a guess at
+them.
+
+### A sixth blindness, in the rung rather than the gate — and this one is not fixable by a gate
+
+The boot that verified this batch passed, and rung 103's six assertions all
+ran and all held. But the rung was **invisible in the log**: the block was
+committed with no `serial_println!` banner, so the serial output went straight
+from rung 102 to `kshell::self_test PASSED`. Deleting the entire rung would
+have left the log byte-identical.
+
+That is the same shape as the defect the rung was written to pin, one level up.
+The batch-39 bug was a command that did its work and said nothing; this was a
+*test* that did its work and said nothing. In both cases the thing that was
+supposed to make an event observable was the thing that was missing, and in
+both cases the surviving evidence — exit 0, `PASSED` — was indistinguishable
+from success.
+
+**It is not statically detectable, and the attempt is documented so nobody
+repeats it.** The obvious rule — every top-level brace-block containing
+assertions must be preceded by a banner — cannot be written, because a sibling
+rung missing its banner and a legitimate *scoping* sub-block are the same
+syntax. `self_test` has two real scoping blocks (one saves and restores
+`KSHELL_SELFTEST_VAR`, one shadows a `PrintfSpec`), and nothing separates them
+from an unbannered rung without reading intent. Numbering does not help either:
+with no banner at all, the numbering stayed a clean contiguous 1..102.
+
+So what was gated is the invariant that *is* mechanical, and it starts at zero:
+`scripts/check-selftest-rung-numbers.py` requires the banner numbers to be
+unique, contiguous from 1, and in file order — 103 rungs, 1..103, clean. Its
+value is a different failure that is likelier than this one and equally
+invisible: **two batches taking the same next-free number against the same
+tip.** Both compile, both run, both pass, and a report naming "rung 103" then
+points at either — the reference that was supposed to locate a failure is what
+makes it ambiguous. Only a reading of all 103 banners finds that.
+
+For the unbannered rung itself the mitigation is not a gate but a habit: after
+adding a rung, **read the boot's serial output and confirm the new banner is
+there.** This one was caught that way — by checking the log for rung 103 before
+pushing, rather than by trusting that a green boot meant the rung had run.

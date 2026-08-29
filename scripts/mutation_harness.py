@@ -202,6 +202,24 @@ def sweep(src, mutations, crate, timeout=240, only=None):
     # output that looks like evidence and is not.
     original = src.read_text(encoding="utf-8", newline="")
     bak.write_text(original, encoding="utf-8", newline="")
+
+    # The source is read and written byte-exact -- `newline=""` -- so that a
+    # restore puts back what was there rather than a re-line-ended copy of it.
+    # The mutation tables, though, are Python literals written with `\n`, so a
+    # working copy that has picked up CRLF matches none of the multi-line
+    # anchors and every one of them is reported as `SKIP anchor appears 0x`.
+    #
+    # That is a failure mode with no symptom worth trusting: a sweep is expected
+    # to skip the odd anchor, so 35 skips among 75 reads as a table that has
+    # drifted from the code rather than as a table that was never applied at
+    # all.  It cost a 20-minute run on wordle, whose `main.rs` had been rewritten
+    # by a Python splice that let the platform choose the line ending.  Meeting
+    # the file where it is costs one substitution and cannot be got wrong.
+    eol = "\r\n" if "\r\n" in original else "\n"
+
+    def to_source_eol(text):
+        return text.replace("\n", eol) if eol != "\n" else text
+
     verdicts = []
     only = sys.argv[1:] if only is None else only
 
@@ -237,6 +255,7 @@ def sweep(src, mutations, crate, timeout=240, only=None):
         for name, old, new, expect in mutations:
             if only and not any(o in name for o in only):
                 continue
+            old, new = to_source_eol(old), to_source_eol(new)
             if original.count(old) != 1:
                 verdicts.append((name, f"SKIP anchor appears {original.count(old)}x"))
                 print(f"[skip] {name}: anchor appears {original.count(old)} times")

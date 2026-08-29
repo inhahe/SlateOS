@@ -87,6 +87,12 @@
 //!    for three strings; and every car's letter at `cx + vw / 2.0 - 5.0`, which
 //!    is a claim that the glyph is ten pixels wide. The program already linked
 //!    `guitk::text`. Every string is now placed from its measured width.
+//!    The guess also decided *whether two strings collided*: the title was drawn
+//!    at the left with no width limit while the counters were drawn against that
+//!    120-pixel reservation, so in a window narrower than the two of them the
+//!    header painted them through each other. The counters are measured first
+//!    now, and what is left of the header after them — less a `pad`-wide gap —
+//!    is the width the title is cut to.
 //! 10. **A blanket `#![allow(dead_code)]` sat at the top of the file.** With
 //!     `main` discarding the app almost the whole program was dead, and the
 //!     allow is what let it compile without ever saying so — including
@@ -1323,7 +1329,38 @@ impl RushHour {
         } else {
             l.header.y + (l.header.h - title_h) / 2.0
         };
-        label(
+
+        // The counters are measured first, because what is left of the header
+        // after them is what the title has to fit in. Both used to be drawn at
+        // `total_width - 120.0` — a guess at how wide "Moves: 1234" would turn
+        // out to be — and the title was drawn at the left with no limit at all,
+        // so in a narrow window the two were painted through each other.
+        let moves_text = format!("Moves: {}", self.moves);
+        let undo_text = format!("Undo: {}", self.undo_stack.len());
+        let moves = Label {
+            text: &moves_text,
+            size: l.font,
+            weight: FontWeightHint::Regular,
+            color: TEXT_COLOR,
+        };
+        let undo = Label {
+            text: &undo_text,
+            size: l.small,
+            weight: FontWeightHint::Regular,
+            color: OVERLAY0,
+        };
+        let counters_w = text::measure(moves.text, moves.size, moves.weight).max(if two_lines {
+            text::measure(undo.text, undo.size, undo.weight)
+        } else {
+            0.0
+        });
+
+        let left = l.header.x + l.pad;
+        let right = l.header.right() - l.pad;
+        // The gap is `pad` wide, so a title long enough to reach the counters is
+        // cut short of them rather than up against them.
+        let room = (right - counters_w - l.pad - left).max(0.0);
+        label_limited(
             f,
             &Label {
                 text: "Rush Hour",
@@ -1331,8 +1368,9 @@ impl RushHour {
                 weight: FontWeightHint::Bold,
                 color: LAVENDER,
             },
-            l.header.x + l.pad,
+            left,
             top,
+            room,
         );
         if two_lines {
             let difficulty = self.difficulty();
@@ -1341,7 +1379,7 @@ impl RushHour {
                 self.current_puzzle.saturating_add(1),
                 difficulty.label()
             );
-            label(
+            label_limited(
                 f,
                 &Label {
                     text: &subtitle,
@@ -1349,40 +1387,15 @@ impl RushHour {
                     weight: FontWeightHint::Regular,
                     color: difficulty.color(),
                 },
-                l.header.x + l.pad,
+                left,
                 top + title_h,
+                room,
             );
         }
 
-        // Right-aligned from the strings' own measured widths. The version this
-        // replaced drew both at `total_width - 120.0`, a guess at how wide
-        // "Moves: 1234" would turn out to be.
-        let moves = format!("Moves: {}", self.moves);
-        let undo = format!("Undo: {}", self.undo_stack.len());
-        let right = l.header.right() - l.pad;
-        label_right(
-            f,
-            &Label {
-                text: &moves,
-                size: l.font,
-                weight: FontWeightHint::Regular,
-                color: TEXT_COLOR,
-            },
-            right,
-            top,
-        );
+        label_right(f, &moves, right, top);
         if two_lines {
-            label_right(
-                f,
-                &Label {
-                    text: &undo,
-                    size: l.small,
-                    weight: FontWeightHint::Regular,
-                    color: OVERLAY0,
-                },
-                right,
-                top + title_h,
-            );
+            label_right(f, &undo, right, top + title_h);
         }
     }
 
@@ -1923,6 +1936,16 @@ fn label(f: &mut Frame<Target>, l: &Label, x: f32, y: f32) {
     push_text(f, l, x, y, None);
 }
 
+/// Top-left corner at `(x, y)`, cut with an ellipsis at `limit`.
+///
+/// No `limit <= 0.0` guard: a caller that has no room to give already passes
+/// `0.0`, and the renderer's answer to a zero limit — draw nothing of the
+/// string — is the answer such a guard would have hard-coded, so the guard
+/// would be a line no test could ever own.
+fn label_limited(f: &mut Frame<Target>, l: &Label, x: f32, y: f32, limit: f32) {
+    push_text(f, l, x, y, Some(limit));
+}
+
 /// Right-aligned at `right`, from the string's measured width.
 fn label_right(f: &mut Frame<Target>, l: &Label, right: f32, y: f32) {
     let w = text::measure(l.text, l.size, l.weight);
@@ -2048,8 +2071,15 @@ mod tests {
     /// the old layout never had to survive, because `render` opened with
     /// `let _ = (width, height);` and drew a 476x568 picture whatever size the
     /// window was.
+    ///
+    /// `170x900` earns its place separately: it is tall enough to keep every
+    /// band and narrow enough that the footer's second line and the header's
+    /// title are both wider than the whole window. It is the only size at which
+    /// the footer's clip actually cuts anything and the title is actually
+    /// elided, so without it both would be branches no test enters.
     const WINDOWS: &[(f32, f32)] = &[
         (140.0, 100.0),
+        (170.0, 900.0),
         (200.0, 160.0),
         (320.0, 240.0),
         (400.0, 900.0),
@@ -2152,6 +2182,36 @@ mod tests {
             (w as f32, h as f32),
             RushHour::SIZE,
             "the probe and the window disagree about the opening size"
+        );
+    }
+
+    #[test]
+    fn the_window_close_request_exits() {
+        let mut g = game();
+        assert!(
+            matches!(g.on_event(&Event::CloseRequested), Response::Exit),
+            "the close button does not close the window"
+        );
+    }
+
+    #[test]
+    fn only_a_handled_event_asks_for_a_repaint() {
+        // A window that repaints on every event it was handed — including the
+        // ones it ignored — is a window that never idles.
+        let mut g = game();
+        assert!(
+            matches!(
+                g.on_event(&Event::Key(probe::press(Key::P))),
+                Response::Redraw
+            ),
+            "opening the puzzle sheet does not ask for a repaint"
+        );
+        assert!(
+            matches!(
+                g.on_event(&Event::Key(probe::press(Key::F5))),
+                Response::Idle
+            ),
+            "a key the game does not use still asks for a repaint"
         );
     }
 
@@ -2796,18 +2856,91 @@ mod tests {
 
     #[test]
     fn every_string_drawn_is_inside_the_window() {
+        // There are three ways a string can be kept inside the window, and this
+        // walks the command list so all three are honoured: it can simply be
+        // short enough; it can carry a `max_width` the renderer stops at; or it
+        // can sit inside a clip rect that is itself inside the window. A test
+        // that only measured the string would call the footer's long second line
+        // an escape when the clip around it is exactly what stops it.
         let mut g = game();
+        let mut cut_somewhere = false;
         for &(w, h) in WINDOWS {
             g.resize(w, h);
-            for (text, x, y, size, weight) in text_commands(&g.frame(w, h)) {
-                let tw = text::measure(&text, size, weight);
-                let th = text::line_height(size, weight);
-                assert!(
-                    x >= -0.01 && y >= -0.01 && x + tw <= w + 0.5 && y + th <= h + 0.5,
-                    "at {w}x{h} {text:?} is drawn at ({x},{y}) and does not fit"
-                );
+            let f = g.frame(w, h);
+            let mut clips: Vec<Rect> = Vec::new();
+            for c in f.commands() {
+                match c {
+                    RenderCommand::PushClip {
+                        x,
+                        y,
+                        width,
+                        height,
+                    } => {
+                        let r = Rect::new(*x, *y, *width, *height);
+                        assert!(
+                            r.x >= -0.01
+                                && r.y >= -0.01
+                                && r.right() <= w + 0.5
+                                && r.bottom() <= h + 0.5,
+                            "at {w}x{h} a clip rect {r:?} is not itself inside the window"
+                        );
+                        clips.push(r);
+                    }
+                    RenderCommand::PopClip => {
+                        assert!(
+                            clips.pop().is_some(),
+                            "a clip was popped that was never pushed"
+                        );
+                    }
+                    RenderCommand::Text {
+                        x,
+                        y,
+                        text,
+                        font_size,
+                        font_weight,
+                        max_width,
+                        ..
+                    } => {
+                        let measured = text::measure(text, *font_size, *font_weight);
+                        // The ink is the shorter of what the string measures and
+                        // what the renderer was told to stop at.
+                        let ink = max_width.map_or(measured, |m| measured.min(m));
+                        let th = text::line_height(*font_size, *font_weight);
+                        if ink + 0.5 < measured {
+                            cut_somewhere = true;
+                        }
+                        let bounds = clips.last().copied().unwrap_or(Rect::new(0.0, 0.0, w, h));
+                        if !clips.is_empty() && measured > bounds.w {
+                            // A clip is a promise the renderer keeps, so the
+                            // string only has to *start* inside one.
+                            cut_somewhere = true;
+                            assert!(
+                                *x >= bounds.x - 0.01 && *y >= bounds.y - 0.01,
+                                "at {w}x{h} {text:?} starts at ({x},{y}), outside the clip {bounds:?} meant to contain it"
+                            );
+                            continue;
+                        }
+                        assert!(
+                            *x >= bounds.x - 0.01
+                                && *y >= bounds.y - 0.01
+                                && *x + ink <= bounds.right() + 0.5
+                                && *y + th <= bounds.bottom() + 0.5,
+                            "at {w}x{h} {text:?} is drawn at ({x},{y}) and does not fit {bounds:?}"
+                        );
+                    }
+                    _ => {}
+                }
             }
+            assert!(
+                clips.is_empty(),
+                "at {w}x{h} a clip was pushed and never popped"
+            );
         }
+        assert!(
+            cut_somewhere,
+            "no window in the list is narrow enough to cut a single string, so the \
+             clip and the width limits are branches this test never enters"
+        );
     }
 
     #[test]
@@ -2831,6 +2964,60 @@ mod tests {
             (right - (l.header.right() - l.pad)).abs() < 0.5,
             "{text:?} ends at {right}, not at the header's right margin {}",
             l.header.right() - l.pad
+        );
+    }
+
+    #[test]
+    fn the_title_gives_way_to_the_counters_rather_than_running_under_them() {
+        // The title used to be drawn at the left with no width limit while the
+        // counters were drawn against a flat 120-pixel reservation, so in a
+        // window narrower than the two of them the header painted one through
+        // the other.
+        let mut g = game();
+        let mut elided_somewhere = false;
+        for &(w, h) in WINDOWS {
+            g.resize(w, h);
+            let f = g.frame(w, h);
+            let commands = f.commands();
+            let text_of = |want: &str| {
+                commands.iter().find_map(|c| match c {
+                    RenderCommand::Text {
+                        x,
+                        text,
+                        font_size,
+                        font_weight,
+                        max_width,
+                        ..
+                    } if text == want => Some((
+                        *x,
+                        text::measure(text, *font_size, *font_weight),
+                        *max_width,
+                    )),
+                    _ => None,
+                })
+            };
+            let Some((title_x, title_w, limit)) = text_of("Rush Hour") else {
+                continue;
+            };
+            let Some((moves_x, ..)) = commands.iter().find_map(|c| match c {
+                RenderCommand::Text { x, text, .. } if text.starts_with("Moves:") => Some((*x,)),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let ink = limit.map_or(title_w, |m| title_w.min(m));
+            if ink + 0.5 < title_w {
+                elided_somewhere = true;
+            }
+            assert!(
+                title_x + ink <= moves_x + 0.5,
+                "at {w}x{h} the title runs from {title_x} for {ink} and the move counter starts at {moves_x}"
+            );
+        }
+        assert!(
+            elided_somewhere,
+            "no window is narrow enough to cut the title, so the limit the header \
+             computes is never the thing that keeps the two apart"
         );
     }
 
@@ -2892,23 +3079,33 @@ mod tests {
 
     #[test]
     fn a_letter_too_big_for_its_car_is_dropped_rather_than_spilled() {
+        // 60x40 rather than one of `WINDOWS`: at every size in that list the
+        // glyph fits, so the drop branch would never be entered and the test
+        // would pass by never testing anything. Here the cells are under six
+        // pixels tall and the smallest glyph's line height is not.
         let g = game();
-        let (w, h) = (140.0, 100.0);
+        let (w, h) = (60.0, 40.0);
         let l = Layout::new(w, h);
         let f = g.frame(w, h);
         let commands = text_commands(&f);
+        let mut dropped = 0;
         for v in g.vehicles() {
             let r = l.vehicle_rect(v);
             let glyph = v.label.to_string();
-            if let Some((_, _, _, size, weight)) = commands.iter().find(|(t, ..)| *t == glyph) {
-                assert!(
+            match commands.iter().find(|(t, ..)| *t == glyph) {
+                Some((_, _, _, size, weight)) => assert!(
                     text::measure(&glyph, *size, *weight) <= r.w + 0.01
                         && text::line_height(*size, *weight) <= r.h + 0.01,
                     "car {}'s letter does not fit the car it is drawn on",
                     v.label
-                );
+                ),
+                None => dropped += 1,
             }
         }
+        assert!(
+            dropped > 0,
+            "every letter fitted even at {w}x{h}, so nothing here exercises the drop"
+        );
     }
 
     #[test]

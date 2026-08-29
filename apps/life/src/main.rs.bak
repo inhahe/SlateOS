@@ -1477,7 +1477,7 @@ fn centred_in(f: &mut Frame, r: Rect, s: &str, size: f32, color: Color, weight: 
     // 900-wide window. And a string too long to centre must start *at* the box
     // rather than left of it, or the ellipsis trims the end of a string whose
     // beginning has already fallen off the other side.
-    let x = r.x + (r.w - w) / 2.0;
+    let x = (r.x + (r.w - w) / 2.0).max(r.x);
     label(
         f,
         x,

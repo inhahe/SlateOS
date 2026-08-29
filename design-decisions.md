@@ -31,16 +31,30 @@ Format for each entry:
 
 ## Numbering and file order
 
-Sections are numbered by lane, and **the file is ordered by section number,
-not by date.** Insert your entry among its numeric neighbours; do not append
-at end-of-file unless your number happens to be the highest.
+Sections are numbered by lane, and **each lane's band ascends in file order.**
+Take the next unused number in your own open band, and insert your entry
+**immediately after the last entry already in that band** — the line the gate
+prints for you (see below). Do not append at end-of-file unless yours is the
+last band; do not order by date.
 
-| Band | Owner | Region of this file |
-|---|---|---|
-| §1–§127 | single-agent history | the head — never renumber these |
-| §200–§299 | **lane A** | contiguous, after the history |
-| §300–§399 | **lane B** | contiguous, after A's band |
-| §400–§499 | **lane C** | contiguous, to end of file |
+**This table is machine-read** by `scripts/check-design-decisions-bands.py`,
+which parses each `§lo–§hi` row for its owning lane and for the word `open` or
+`closed`. Keep the shape; the gate fails loudly if it stops matching, rather
+than silently believing there are no bands.
+
+| Band | Owner | Status | Region of this file |
+|---|---|---|---|
+| §1–§127 | single-agent history | closed | the head — never renumber these |
+| §200–§299 | **lane A** | closed — full at §299 | after the history |
+| §300–§399 | **lane B** | closed — full at §360 | after A's first band |
+| §400–§499 | **lane C** | closed — full at §498 | after B's first band |
+| §500–§599 | **lane C** | **open** | interleaved with A's §600s; C's own run ascends |
+| §600–§699 | **lane A** | **open** | interleaved with C's §500s; A's own run ascends |
+| §700–§799 | **lane B** | **open** | the tail — B alone still appends at EOF |
+
+Bands 200–499 are closed but **not free**: every number in them is spent, and
+spent numbers are never reissued (see §217–§220 and §626 below). A new entry
+always extends an *open* band upward.
 
 **One exception, settled 2026-08-17: §217–§220 are lane C's, permanently.**
 Four lane-C entries about the AMD display engine were numbered in lane A's
@@ -87,20 +101,45 @@ to 627. The account is
 **Lane B takes §700–§799 from here on, as invited above.** With C on
 §500–§599, A on §600–§699 and B on §700–§799, the three bands are disjoint and
 none is full, which for the first time gives each lane a distinct insertion
-point: C inserts before the first §600 heading, A before the first §700, and B
-appends at end of file — the one lane for which "append" is still correct,
-because its band is the last. The entries already in the 600s keep their
+point. **The rule is "immediately after the last entry in your own band" —
+*not* "before the first heading of the next band", which this paragraph
+originally said and which was already false when it was written.** The §500s
+and the §600s are thoroughly interleaved by four months of merges: the first
+§600 heading is at line 44741, but §554–§573 all sit *after* it, the last of
+them ~2 900 lines further down. A lane C entry placed "before the first §600"
+would land in the middle of lane A's run, out of numeric order with C's own
+neighbours, and — the part that matters — at the *same* offset lane A is
+editing, which is the one outcome the bands exist to prevent. Following your
+own band's tail is correct under any amount of interleaving, because it is a
+statement about your entries and nobody else's. The gate prints the exact line
+for each lane, so nobody has to work it out. The entries already in the 600s keep their
 numbers on the §217–§220 precedent — they are cited from source comments and
 from each other (626 cites 622 and 623), so renumbering would trade a cosmetic
 inconsistency for dangling citations. Every number below 700 that exists is
 spent, by whichever lane wrote it, and is never reissued.
 
-**A gate is coming, and lane B agrees with it.** Lane A is landing
-`scripts/check-design-decisions-bands.py` — it requires each *new* heading to
-sit inside the writing lane's band, in numeric order, and to carry a
-`**Lane:**` field, with existing sections grandfathered by a baseline. Until
-it lands, the band table above is the rule and this paragraph is the reason to
-believe it needs enforcing.
+**The gate landed 2026-08-29: `scripts/check-design-decisions-bands.py`,** run
+by `scripts/boot-test.sh` before it builds anything. It requires each *new*
+heading to sit inside an open band, to be above that band's high-water mark, to
+be unique, and to carry a `**Lane:**` field matching the band's owner; it
+requires each open band to ascend in file order; and it warns when a band
+passes 80% spent. Existing sections are grandfathered by
+`scripts/design-decisions-baseline.json`. Run it directly for the per-band
+summary — it prints each lane's next number and the line to insert after.
+
+Writing it found that **the §626 collision was not the only one.** Nine numbers
+— §268 through §276 — are each borne by *two* live sections, and had been for
+weeks. The mechanism is that this file uses two heading styles, `## §268 —
+title` and `## 268. title`, and every hand-check ever run against it (including
+the `^## 62[4-9]\.` grep that caught §626, and the regex lane A originally
+specified for this gate) matched only the second, which is 201 of the 527
+headings. The other 326 were invisible to inspection. The nine duplicates keep
+their numbers on the §217–§220 precedent and are recorded in `known-issues.md`
+under `A-DESIGN-DECISIONS-NINE-DUPLICATE-SECTION-NUMBERS`; three of them are
+cited from source and resolve ambiguously, which is logged there. The gate
+matches both styles and rejects any heading that starts with a number but
+matches neither, because a heading it cannot number is a heading no check can
+see.
 
 The numeric *order* is what makes the bands physically disjoint, and that —
 not the numbering by itself — is what makes this file merge cleanly between
@@ -49775,6 +49814,95 @@ skip protects nobody and only hides a regression in the tool's installation.
 `check_orphan_modules`. Fulfils
 `requests/b-a-two-cd-calls-ignore-failure-in-shared-scripts.md`, which is also
 where the install note for the Windows build is recorded.
+
+---
+
+## 631. The numbering bands are enforced by a gate that grandfathers everything already here, and reads the band table out of this file
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous, lane A) — lanes B and C both asked for it
+**Lane:** A
+
+**In short:** This document is written by three parallel agents. Each takes
+section numbers from its own reserved range so the three of them edit three
+different places in the file and never collide. That rule was kept by nothing
+but attention, and attention lost twice: two lanes wrote a section 626 on the
+same day, and — discovered while writing this gate — nine *other* numbers
+(268 through 276) each label two different sections and have done for weeks.
+`scripts/boot-test.sh` now refuses to build if a newly-added section breaks the
+rule. Nothing already in the file is touched or renumbered.
+
+**Why a gate at all.** The cost of the failure is not the conflict; it is that
+git cannot report it. When lanes A and B both wrote 626, git produced a
+350-line `CONFLICT (content)` that named the file and the lines and never
+mentioned that two sections now had the same number. It was caught because lane
+A ran a grep afterwards, on a hunch. The nine duplicates at 268–276 are what
+happens when nobody has the hunch: they merged cleanly, because they were
+written far enough apart in the file that git had nothing to complain about at
+all. Three of them are cited from source comments, and those citations are now
+genuinely ambiguous — `known-issues.md` →
+`A-DESIGN-DECISIONS-NINE-DUPLICATE-SECTION-NUMBERS` has the list.
+
+**Four decisions inside it, each with a real alternative.**
+
+*1. Grandfather, don't renumber.* The alternative — fix the nine duplicates and
+the numbering becomes clean — was rejected on the precedent already set twice
+in this file's header (§217–§220, and §626). The numbers are cited from source
+comments, from `known-issues.md`, and from each other; renumbering trades a
+cosmetic inconsistency for dangling citations, and the citations are the only
+reason the numbers exist. Two of the nine are cited from `kernel/src/drm/`,
+which lane C cannot edit, so a lane-C renumber could not even be completed. The
+baseline (`scripts/design-decisions-baseline.json`) records each number and how
+many headings legitimately bear it, so the nine pass and a tenth does not.
+Cost: the file permanently contains nine ambiguous numbers, and a reader who
+follows one of those citations may land on the wrong entry. That cost is real
+and is why the duplicates are logged rather than merely tolerated.
+
+*2. Parse the band table out of this document rather than hardcoding it.* The
+bands have already moved three times (400s → 500s → 600s → 700s), each time
+because a lane ran out. A gate whose idea of the bands is a constant in a
+script would go quietly wrong the fourth time — and "quietly wrong gate" is the
+exact failure being fixed. So the table above is the source of truth and the
+gate reads it, which costs a parser and a format the table must keep. It fails
+loudly if the table stops matching, rather than concluding there are no bands.
+
+*3. The order rule is "insert after your band's last entry", not "before the
+next band's first".* The header said the latter, and it was already false when
+written: the §500s and §600s are thoroughly interleaved by four months of
+merges, so lane C following it literally would have inserted ~2 900 lines above
+its own neighbours, in the middle of lane A's run — at the one offset the bands
+exist to keep it away from. "After my own band's tail" is a statement about a
+lane's own entries and stays true under any amount of interleaving. The gate
+prints the line for each lane, so nobody has to work it out.
+
+*4. Both heading styles are matched, and a heading matching neither is an
+error.* This file uses `## §268 — title` and `## 268. title` interchangeably;
+the header calls the drift "not meaning". Lane A's own published plan for this
+gate specified `^## (\d+)\.`, which sees 201 of 527 headings — and that
+blindness, shared by every hand-check ever run against this file including the
+grep that caught 626, is the most plausible mechanism by which nine duplicates
+survived. Matching one style would have shipped a gate with the defect it was
+written to remove. A heading that starts with a number but parses as neither
+style is rejected rather than skipped, for the same reason: a heading the gate
+cannot number is invisible to every check in it.
+
+**What it does not do.** It does not check that a section's *content* belongs
+to the lane that claims it, and it cannot: `**Lane:**` is self-declared. Its
+value is that a lane writing into another's band now produces a one-line
+contradiction in the diff instead of a silent collision six weeks later.
+
+**Where it lives:** `scripts/check-design-decisions-bands.py`,
+`scripts/design-decisions-baseline.json`,
+`scripts/test-check-design-decisions-bands.py` (35 assertions), wired as
+`check_design_decisions_bands` in `scripts/boot-test.sh` immediately after
+`check_python_suites`. Fulfils
+`requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`.
+
+**How to reverse:** delete the `check_design_decisions_bands` call. The
+baseline and the checker are inert without it. To re-baseline after a
+deliberate renumber: `python scripts/check-design-decisions-bands.py
+--update-baseline`, and say so in the commit message — a dropped count means a
+section that something may still cite has stopped existing.
 
 ---
 

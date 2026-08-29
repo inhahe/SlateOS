@@ -43,6 +43,8 @@ use coreutils::errmsg::strerror;
 // would have said `tar: 'caf'$'\351': Not found in archive`.
 use coreutils::quote::{escape, escape_os, os_bytes, os_from_bytes, quoteaf};
 use coreutils::stdfd;
+#[cfg(unix)]
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -291,6 +293,101 @@ struct TarHeader {
     _pad: [u8; 12],
 }
 
+/// The `name` field's width. A name of exactly this length fills it with no
+/// room for a terminator, which is legal: ustar NUL-terminates only when the
+/// name is short enough to leave a byte spare.
+const NAME_FIELD: usize = 100;
+
+/// The `prefix` field's width.
+const PREFIX_FIELD: usize = 155;
+
+/// Why a member name could not be stored in a ustar header.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum NameTooLong {
+    /// Longer than the two fields and the `/` between them can hold at all.
+    Max,
+    /// Short enough in total, but with no `/` in a position that would put no
+    /// more than [`NAME_FIELD`] bytes after it.
+    CannotSplit,
+}
+
+impl NameTooLong {
+    /// GNU's wording, which names the limit in the first case and not in the
+    /// second. Both end `; not dumped`, and both leave the archive otherwise
+    /// intact — the member is skipped, the rest are written, and the exit
+    /// status is 2.
+    fn message(self, name: &[u8]) -> String {
+        match self {
+            Self::Max => format!(
+                "tar: {}: file name is too long (max {}); not dumped",
+                escape(name),
+                NAME_FIELD.saturating_add(PREFIX_FIELD).saturating_add(1)
+            ),
+            Self::CannotSplit => format!(
+                "tar: {}: file name is too long (cannot be split); not dumped",
+                escape(name)
+            ),
+        }
+    }
+}
+
+/// Split `full` into ustar's `prefix` and `name`, as GNU's `split_long_name`
+/// does.
+///
+/// The whole name is `prefix` + `/` + `name` when a prefix is used, so the
+/// split has to fall on a `/` and that `/` is not stored. Names that fit in
+/// [`NAME_FIELD`] outright use no prefix at all.
+///
+/// The search is *backwards from a capped position*, not "the last slash", and
+/// the cap is what makes some names unsplittable that look splittable:
+///
+/// 1. Consider only the first `PREFIX_FIELD + 1` bytes, since a prefix cannot
+///    reach past that anyway.
+/// 2. Unless the cap already applied, ignore a trailing `/` — a directory
+///    member is stored with one and it must not be chosen as the split point.
+/// 3. Take the last `/` at or before that position; offset 0 does not count,
+///    because an empty prefix is not a prefix.
+/// 4. Refuse if what follows it is empty or longer than [`NAME_FIELD`].
+///
+/// Measured against GNU tar 1.35 across the boundary (`tar-longname.sh`):
+/// `t/` + 96×`d` + `/fff` splits at offset 98; a 100-byte remainder is
+/// accepted and a 101-byte one is refused; and `t/` + 150×`d` + `/` — 153
+/// bytes, which would fit a 152-byte prefix and a 0-byte name — is refused,
+/// because rule 3 finds the slash at offset 1 and leaves 151 bytes after it.
+fn split_ustar_name(full: &[u8]) -> Result<(&[u8], &[u8]), NameTooLong> {
+    if full.len() <= NAME_FIELD {
+        return Ok((&[], full));
+    }
+    if full.len() > NAME_FIELD.saturating_add(PREFIX_FIELD).saturating_add(1) {
+        return Err(NameTooLong::Max);
+    }
+    let capped = PREFIX_FIELD.saturating_add(1);
+    let mut end = full.len();
+    if end > capped {
+        end = capped;
+    } else if full.get(end.saturating_sub(1)) == Some(&b'/') {
+        end = end.saturating_sub(1);
+    }
+    // Backwards over `full[1..end]`: offset 0 is excluded because a prefix of
+    // no bytes is the no-prefix case, which the length test above already took.
+    let split = full
+        .get(1..end)
+        .unwrap_or(&[])
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map(|i| i.saturating_add(1));
+    let Some(i) = split else {
+        return Err(NameTooLong::CannotSplit);
+    };
+    let (Some(prefix), Some(name)) = (full.get(..i), full.get(i.saturating_add(1)..)) else {
+        return Err(NameTooLong::CannotSplit);
+    };
+    if name.is_empty() || name.len() > NAME_FIELD {
+        return Err(NameTooLong::CannotSplit);
+    }
+    Ok((prefix, name))
+}
+
 #[cfg_attr(not(unix), allow(dead_code))]
 impl TarHeader {
     fn new() -> Self {
@@ -315,19 +412,43 @@ impl TarHeader {
         }
     }
 
-    /// Copy a member name into the header's 100-byte `name` field.
+    /// Store a member name across the header's `name` and `prefix` fields.
     ///
-    /// Bytes, not `&str`: the field is 100 bytes of whatever the filesystem
-    /// gave us, and ustar has never required it to be text. The truncation at
-    /// 99 is the field's own limit and is unchanged — but note that it now cuts
-    /// at a byte boundary in the honest sense rather than pretending the input
-    /// was characters. See the module's "not supported" note about names > 255.
-    fn set_name(&mut self, name: &[u8]) {
-        let bytes = name;
-        let len = bytes.len().min(99);
-        if let (Some(dst), Some(src)) = (self.name.get_mut(..len), bytes.get(..len)) {
+    /// Bytes, not `&str`: the fields hold whatever the filesystem gave us, and
+    /// ustar has never required it to be text.
+    ///
+    /// This used to copy the first 99 bytes into `name` and stop. Two separate
+    /// defects in one line: a 100-byte name lost its last byte, because the
+    /// field is not NUL-terminated when it is full; and a name longer than that
+    /// was silently truncated, producing a well-formed archive holding the
+    /// wrong name and exiting 0. See [`split_ustar_name`] for the split and for
+    /// what happens when there is none.
+    fn set_name(&mut self, full: &[u8]) -> Result<(), NameTooLong> {
+        let (prefix, name) = split_ustar_name(full)?;
+        if let (Some(dst), Some(src)) = (self.name.get_mut(..name.len()), name.get(..)) {
             dst.copy_from_slice(src);
         }
+        if let (Some(dst), Some(src)) = (self.prefix.get_mut(..prefix.len()), prefix.get(..)) {
+            dst.copy_from_slice(src);
+        }
+        Ok(())
+    }
+
+    /// Store a link target in the 100-byte `linkname` field, cutting it to fit.
+    ///
+    /// Returns whether the whole target fit; the caller warns when it did not.
+    ///
+    /// There is no `prefix` for this one — ustar gives the link target a single
+    /// field and no escape hatch — and unlike a member name, which GNU refuses
+    /// outright, a target that does not fit is stored truncated. Measured: a
+    /// 101-byte symlink target produces the warning, exit status 2, *and* a
+    /// member in the archive whose link is the first 100 bytes.
+    fn set_linkname(&mut self, target: &[u8]) -> bool {
+        let kept = target.len().min(NAME_FIELD);
+        if let (Some(dst), Some(src)) = (self.linkname.get_mut(..kept), target.get(..kept)) {
+            dst.copy_from_slice(src);
+        }
+        target.len() <= NAME_FIELD
     }
 
     /// Write `value` as a zero-padded octal string into `field`.  The
@@ -510,46 +631,319 @@ fn sanitize_member_name(raw: &[u8]) -> Result<Vec<u8>, String> {
     Ok(parts.join(&b'/'))
 }
 
+/// Split a device number the way ustar stores it, into `devmajor`/`devminor`.
+///
+/// Not a plain shift: Linux packs `dev_t` in two pieces so that old 16-bit
+/// numbers keep their old encoding — 12 bits of major and 8 of minor in the
+/// low half, the rest of each in the high half.
 #[cfg(unix)]
-fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose) -> i32 {
-    let mut out: Box<dyn Write> = match archive_file {
-        Some(path) => match File::create(path) {
-            Ok(f) => Box::new(f),
-            Err(e) => {
-                diag!("tar: {}: Cannot open: {}", escape_os(path), strerror(&e));
-                return fatal();
-            }
-        },
-        None => Box::new(io::stdout()),
-    };
+fn split_dev(rdev: u64) -> (u64, u64) {
+    let major = ((rdev >> 8) & 0xfff) | ((rdev >> 32) & !0xfff);
+    let minor = (rdev & 0xff) | ((rdev >> 12) & !0xff);
+    (major, minor)
+}
 
-    /// Report a write failure once and give up on the archive. There is no
-    /// point continuing: every later member would land at the wrong offset,
-    /// producing a file that looks like an archive and is not one.
-    fn write_or_fail(out: &mut dyn Write, buf: &[u8], status: &mut i32) -> bool {
-        match out.write_all(buf) {
+/// Split off the leading components tar refuses to *store*, returning
+/// `(removed, rest)`.
+///
+/// An archive holding `/etc/passwd` is a loaded gun: extracting it anywhere
+/// writes to `/etc/passwd`. GNU's answer is at both ends — it strips the prefix
+/// when writing the archive as well as when reading one — and this is the
+/// writing end.
+///
+/// What counts as a prefix, measured against GNU tar 1.35 (`tar-lead.sh`):
+///
+/// | given | stored | said |
+/// |---|---|---|
+/// | `/a/b` | `a/b` | ``Removing leading `/' from member names`` |
+/// | `//a/b` | `a/b` | ``Removing leading `//' ...`` — the exact run, not one `/` |
+/// | `../a` | `a` | ``Removing leading `../' ...`` |
+/// | `..` | `.` | ``Removing leading `..' ...`` |
+/// | `./a` | `./a` | nothing — a leading `.` is not a prefix |
+///
+/// So: any run of `/`, and any `..` that is a whole component, in any order and
+/// repeated. A leading `.` is deliberately not in that set; it names the
+/// directory being archived and takes the extractor nowhere it was not already.
+fn strip_leading(name: &[u8]) -> (&[u8], &[u8]) {
+    let mut i = 0usize;
+    loop {
+        match name.get(i) {
+            Some(&b'/') => i = i.saturating_add(1),
+            Some(&b'.')
+                if name.get(i.saturating_add(1)) == Some(&b'.')
+                    && matches!(name.get(i.saturating_add(2)), None | Some(&b'/')) =>
+            {
+                i = i.saturating_add(2);
+            }
+            _ => break,
+        }
+    }
+    (name.get(..i).unwrap_or(&[]), name.get(i..).unwrap_or(&[]))
+}
+
+/// The state one `-c` pass carries from member to member.
+///
+/// This was four free functions threading a `&mut i32`. The hard-link table is
+/// why it is a struct: recognising a second name for an inode means
+/// remembering every inode already written for the whole run and across
+/// operands — measured, GNU stores `t/h` as a link to `t/a.txt` even when the
+/// two are separate command-line arguments, and stores the *first* name it
+/// happened to archive, so `tar -c t/h t/a.txt` links `a.txt` to `h`.
+#[cfg(unix)]
+struct Creator<'a> {
+    out: &'a mut dyn Write,
+    verbose: Verbose,
+    /// 0, or [`EXIT_FATAL`] once anything has gone wrong. A member that cannot
+    /// be archived sets this and is skipped; it does not abandon the archive.
+    status: i32,
+    /// Every inode already archived that could have another name, and the name
+    /// it went in under. Keyed by `(dev, ino)`, because an inode number is only
+    /// unique within one filesystem — a bare `ino` key would link together two
+    /// unrelated files that happen to share a number across mount points.
+    links: BTreeMap<(u64, u64), Vec<u8>>,
+    /// The last prefix [`strip_leading`] removed from a member name, and the
+    /// last one it removed from a hard link's target. GNU warns when the prefix
+    /// *changes*, not once per archive and not once per member — which is why
+    /// `tar -c ..` produces two lines, ``Removing leading `..'`` for the
+    /// directory itself and ``Removing leading `../'`` for everything in it.
+    last_name_prefix: Vec<u8>,
+    last_link_prefix: Vec<u8>,
+    /// `(dev, ino)` of the archive being written, when it is a file we can
+    /// identify. `tar -cf backup.tar .` names the archive among the things to
+    /// archive, and a tar that obliges copies the archive into itself as it
+    /// grows — the result is a much larger file holding a truncated snapshot of
+    /// itself, and no warning that it happened.
+    archive_id: Option<(u64, u64)>,
+    /// Cleared by the first failed write. There is no point continuing after
+    /// one: every later member would land at the wrong offset, producing a file
+    /// that looks like an archive and is not one.
+    writable: bool,
+}
+
+#[cfg(unix)]
+impl Creator<'_> {
+    fn fail(&mut self) {
+        self.status = EXIT_FATAL;
+    }
+
+    fn write(&mut self, buf: &[u8]) -> bool {
+        if !self.writable {
+            return false;
+        }
+        match self.out.write_all(buf) {
             Ok(()) => true,
             Err(e) => {
                 diag!("tar: Cannot write: {}", strerror(&e));
-                *status = EXIT_FATAL;
+                self.writable = false;
+                self.fail();
                 false
             }
         }
     }
 
-    /// `name` is the member name as it will be stored, in bytes. It is derived
-    /// from `path` and so is as arbitrary as any file name on this system.
-    fn add_file(path: &Path, name: &[u8], out: &mut dyn Write, verbose: Verbose, status: &mut i32) {
+    /// The name this member goes into the archive under: `name` with any
+    /// leading `/` or `../` taken off, and with the trailing slash a directory
+    /// member carries put on.
+    ///
+    /// The two happen in that order, which matters for `tar -c ..`: strip
+    /// first and `..` becomes nothing, which is stored as `.` and listed as
+    /// `./`. Appending first would have stripped the slash back off again.
+    fn stored_name(&mut self, name: &[u8], dir: bool) -> Vec<u8> {
+        let (removed, rest) = strip_leading(name);
+        if !removed.is_empty() && self.last_name_prefix != removed {
+            diag!("tar: Removing leading `{}' from member names", escape(removed));
+            self.last_name_prefix = removed.to_vec();
+        }
+        let mut stored = if rest.is_empty() {
+            b".".to_vec()
+        } else {
+            rest.to_vec()
+        };
+        if dir {
+            stored.push(b'/');
+        }
+        stored
+    }
+
+    /// The same for a hard link's target, which is a member name too and gets
+    /// the same treatment under a message of its own.
+    ///
+    /// Not for a *symlink* target: that one is data, not a member name, and an
+    /// absolute symlink is a legitimate thing to archive. Measured — GNU stores
+    /// `/etc/passwd` for `ln -s /etc/passwd x` and says nothing.
+    fn stored_link_target(&mut self, target: &[u8]) -> Vec<u8> {
+        let (removed, rest) = strip_leading(target);
+        if !removed.is_empty() && self.last_link_prefix != removed {
+            diag!(
+                "tar: Removing leading `{}' from hard link targets",
+                escape(removed)
+            );
+            self.last_link_prefix = removed.to_vec();
+        }
+        if rest.is_empty() {
+            b".".to_vec()
+        } else {
+            rest.to_vec()
+        }
+    }
+
+    /// Fill in the fields every member type shares. `None` means the name
+    /// cannot be stored — reported here, and the member is skipped.
+    ///
+    /// `size` is left at zero: only a regular file overrides it, and getting
+    /// that wrong on a link or a device would make the extractor read the next
+    /// member's header as file contents.
+    fn header(&mut self, name: &[u8], meta: &fs::Metadata, dir: bool) -> Option<TarHeader> {
         use std::os::unix::fs::MetadataExt;
-        let meta = match fs::metadata(path) {
+        let name = &self.stored_name(name, dir);
+        let mut header = TarHeader::new();
+        if let Err(e) = header.set_name(name) {
+            // Skipped, not fatal to the archive: GNU writes every other member
+            // and exits 2, so one unstorable name does not cost you the backup.
+            // Measured — an archive of a tree holding such a file still lists
+            // the rest.
+            diag!("{}", e.message(name));
+            self.fail();
+            return None;
+        }
+        TarHeader::set_octal(&mut header.mode, u64::from(meta.mode()) & 0o7777);
+        TarHeader::set_octal(&mut header.uid, u64::from(meta.uid()));
+        TarHeader::set_octal(&mut header.gid, u64::from(meta.gid()));
+        TarHeader::set_octal(&mut header.size, 0);
+        TarHeader::set_octal(&mut header.mtime, meta.mtime().unsigned_abs());
+        header.magic = *b"ustar\0";
+        header.version = *b"00";
+        Some(header)
+    }
+
+    /// Archive whatever `path` turns out to be, under the member name `name`.
+    ///
+    /// The type test is `symlink_metadata`, not `metadata`. The previous code
+    /// asked `path.is_dir()` and then `fs::metadata`, both of which follow
+    /// symlinks, so a symlink was archived as a *copy of whatever it pointed
+    /// at* — a symlink to a directory pulled that whole directory into the
+    /// archive under the link's name, and a symlink to a file duplicated the
+    /// file. Restoring such an archive does not restore the tree.
+    fn add(&mut self, path: &Path, name: &[u8]) {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let meta = match fs::symlink_metadata(path) {
             Ok(m) => m,
             Err(e) => {
                 diag!("tar: {}: Cannot stat: {}", escape(name), strerror(&e));
-                *status = EXIT_FATAL;
+                self.fail();
                 return;
             }
         };
+        if self.archive_id == Some((meta.dev(), meta.ino())) {
+            // A warning, not an error: GNU exits 0 for this, because the
+            // archive it produced is exactly the one that was asked for minus
+            // the one member that could not possibly have gone in it.
+            diag!(
+                "tar: {}: archive cannot contain itself; not dumped",
+                escape(name)
+            );
+            return;
+        }
+        let ft = meta.file_type();
+        if ft.is_dir() {
+            self.add_dir(path, name, &meta);
+            return;
+        }
+        // A second name for an inode already archived is stored as a link to
+        // the first, whatever the two names are. Checked before the type
+        // dispatch because it applies to fifos and devices too, not just
+        // regular files, and checked only when the inode admits another name:
+        // a link count of one cannot have a second name to find.
+        if meta.nlink() > 1 {
+            let key = (meta.dev(), meta.ino());
+            if let Some(first) = self.links.get(&key) {
+                let first = first.clone();
+                self.add_link(name, &meta, b'1', &first);
+                return;
+            }
+            self.links.insert(key, name.to_vec());
+        }
+        if ft.is_symlink() {
+            let target = match fs::read_link(path) {
+                Ok(t) => os_bytes(t.as_os_str()).into_owned(),
+                Err(e) => {
+                    diag!("tar: {}: Cannot read link: {}", escape(name), strerror(&e));
+                    self.fail();
+                    return;
+                }
+            };
+            self.add_link(name, &meta, b'2', &target);
+        } else if ft.is_file() {
+            self.add_regular(path, name, &meta);
+        } else if ft.is_fifo() {
+            self.add_special(name, &meta, b'6');
+        } else if ft.is_char_device() {
+            self.add_special(name, &meta, b'3');
+        } else if ft.is_block_device() {
+            self.add_special(name, &meta, b'4');
+        } else if ft.is_socket() {
+            // Not an error, and measured as such: a socket is a kernel object
+            // with no contents an archive could hold, so GNU says so and still
+            // exits 0. Skipping it silently would be the wrong half of that —
+            // the file is missing from the archive and the user should know.
+            diag!("tar: {}: socket ignored", escape(name));
+        } else {
+            diag!("tar: {}: Unknown file type; file ignored", escape(name));
+            self.fail();
+        }
+    }
 
+    /// A member that is a name pointing at another name and nothing else: a
+    /// symlink (`2`) or a hard link (`1`). Both store zero bytes of data.
+    fn add_link(&mut self, name: &[u8], meta: &fs::Metadata, typeflag: u8, target: &[u8]) {
+        // The order is GNU's: the member name's prefix is reported before the
+        // link target's, because `header` runs first.
+        let Some(mut header) = self.header(name, meta, false) else {
+            return;
+        };
+        let target = &if typeflag == b'1' {
+            self.stored_link_target(target)
+        } else {
+            target.to_vec()
+        };
+        header.typeflag = typeflag;
+        if !header.set_linkname(target) {
+            // GNU says "not dumped" and then dumps it anyway, with the target
+            // cut to 100 bytes — measured, the member is in the archive with a
+            // truncated link. We match that rather than skipping, because the
+            // alternative loses the member entirely: a truncated target almost
+            // certainly does not exist, so extraction fails loudly, whereas a
+            // skipped member is simply absent. Note the message names the
+            // *target*, not the member — that is GNU's wording, not a slip.
+            diag!("tar: {}: link name is too long; not dumped", escape(target));
+            self.fail();
+        }
+        header.compute_checksum();
+        if self.write(header.as_bytes()) {
+            self.verbose.line(name);
+        }
+    }
+
+    /// A fifo (`6`) or a device (`3`/`4`): a header, no data.
+    fn add_special(&mut self, name: &[u8], meta: &fs::Metadata, typeflag: u8) {
+        use std::os::unix::fs::MetadataExt;
+        let Some(mut header) = self.header(name, meta, false) else {
+            return;
+        };
+        header.typeflag = typeflag;
+        if typeflag == b'3' || typeflag == b'4' {
+            let (major, minor) = split_dev(meta.rdev());
+            TarHeader::set_octal(&mut header.devmajor, major);
+            TarHeader::set_octal(&mut header.devminor, minor);
+        }
+        header.compute_checksum();
+        if self.write(header.as_bytes()) {
+            self.verbose.line(name);
+        }
+    }
+
+    /// A regular file: a header, then its contents padded out to a block.
+    fn add_regular(&mut self, path: &Path, name: &[u8], meta: &fs::Metadata) {
         // The header commits to a length, so the body must be exactly that
         // many bytes however the read goes. Writing fewer would not merely
         // truncate this member: the extractor reads a fixed number of blocks
@@ -561,27 +955,22 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
             Ok(f) => f,
             Err(e) => {
                 diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
-                *status = EXIT_FATAL;
+                self.fail();
                 return;
             }
         };
 
-        let mut header = TarHeader::new();
-        header.set_name(name);
-        TarHeader::set_octal(&mut header.mode, u64::from(meta.mode()) & 0o7777);
-        TarHeader::set_octal(&mut header.uid, u64::from(meta.uid()));
-        TarHeader::set_octal(&mut header.gid, u64::from(meta.gid()));
+        let Some(mut header) = self.header(name, meta, false) else {
+            return;
+        };
         TarHeader::set_octal(&mut header.size, declared);
-        TarHeader::set_octal(&mut header.mtime, meta.mtime().unsigned_abs());
         header.typeflag = b'0';
-        header.magic = *b"ustar\0";
-        header.version = *b"00";
         header.compute_checksum();
-        if !write_or_fail(out, header.as_bytes(), status) {
+        if !self.write(header.as_bytes()) {
             return;
         }
 
-        verbose.line(name);
+        self.verbose.line(name);
 
         let mut remaining = declared;
         let mut buf = [0u8; BLOCK_SIZE];
@@ -602,7 +991,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                     Err(e) => {
                         diag!("tar: {}: Cannot read: {}", escape(name), strerror(&e));
-                        *status = EXIT_FATAL;
+                        self.fail();
                         short = true;
                     }
                 }
@@ -610,58 +999,59 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
             if let Some(pad) = buf.get_mut(filled..) {
                 pad.fill(0);
             }
-            if !write_or_fail(out, &buf, status) {
+            if !self.write(&buf) {
                 return;
             }
             remaining = remaining.saturating_sub(want as u64);
         }
         if short {
-            // The file shrank between `metadata` and the read, or never had
-            // the length it claimed. The archive stays well-formed because the
+            // The file shrank between the stat and the read, or never had the
+            // length it claimed. The archive stays well-formed because the
             // remaining blocks were padded, but it no longer holds the file.
             diag!(
                 "tar: {}: file shorter than expected; padded with zeros",
                 escape(name)
             );
-            *status = EXIT_FATAL;
+            self.fail();
         }
     }
 
-    /// `prefix` is the directory's own member name in bytes, without the
-    /// trailing slash the header carries.
-    fn add_directory_recursive(
-        dir: &Path,
-        prefix: &[u8],
-        out: &mut dyn Write,
-        verbose: Verbose,
-        status: &mut i32,
-    ) {
-        let mut header = TarHeader::new();
-        let mut name = prefix.to_vec();
-        name.push(b'/');
-        header.set_name(&name);
-        TarHeader::set_octal(&mut header.mode, 0o755);
-        TarHeader::set_octal(&mut header.uid, 0);
-        TarHeader::set_octal(&mut header.gid, 0);
-        TarHeader::set_octal(&mut header.size, 0);
-        TarHeader::set_octal(&mut header.mtime, 0);
+    /// A directory (`5`) and, after it, everything under it in name order.
+    ///
+    /// `name` is the directory's member name *without* the trailing slash the
+    /// header carries; children are named by appending to it.
+    fn add_dir(&mut self, dir: &Path, name: &[u8], meta: &fs::Metadata) {
+        // A directory has an owner, permissions and an mtime like anything
+        // else, and all four used to be hard-coded here: every directory in
+        // every archive we wrote came out `drwxr-xr-x 0/0` stamped 1970. Not a
+        // cosmetic difference — restoring such an archive as root would hand
+        // every directory in it to root and open a 0700 directory to the world.
+        let Some(mut header) = self.header(name, meta, true) else {
+            // The directory is skipped and so, necessarily, is everything under
+            // it: a member name that cannot be stored has no children whose
+            // names could be.
+            return;
+        };
         header.typeflag = b'5';
-        header.magic = *b"ustar\0";
-        header.version = *b"00";
         header.compute_checksum();
-        if !write_or_fail(out, header.as_bytes(), status) {
+        if !self.write(header.as_bytes()) {
             return;
         }
 
-        verbose.line(&name);
+        // The *unstripped* name, with the trailing slash. GNU's `-cv` names the
+        // file it is reading, not the member it is writing: `tar -cvf a.tar
+        // /etc` lists `/etc/...` while the archive holds `etc/...`. Measured.
+        let mut shown = name.to_vec();
+        shown.push(b'/');
+        self.verbose.line(&shown);
 
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) => {
                 // Previously `if let Ok(entries)`, so an unreadable directory
                 // produced an archive silently missing its whole subtree.
-                diag!("tar: {}: Cannot open: {}", escape(prefix), strerror(&e));
-                *status = EXIT_FATAL;
+                diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
+                self.fail();
                 return;
             }
         };
@@ -681,40 +1071,66 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
             match entry {
                 Ok(e) => children.push((os_bytes(&e.file_name()).into_owned(), e.path())),
                 Err(e) => {
-                    diag!("tar: {}: Cannot read: {}", escape(prefix), strerror(&e));
-                    *status = EXIT_FATAL;
+                    diag!("tar: {}: Cannot read: {}", escape(name), strerror(&e));
+                    self.fail();
                 }
             }
         }
         children.sort();
         for (file_name, entry_path) in children {
-            let mut entry_name = prefix.to_vec();
+            let mut entry_name = name.to_vec();
             entry_name.push(b'/');
             entry_name.extend_from_slice(&file_name);
-            if entry_path.is_dir() {
-                add_directory_recursive(&entry_path, &entry_name, out, verbose, status);
-            } else {
-                add_file(&entry_path, &entry_name, out, verbose, status);
-            }
+            self.add(&entry_path, &entry_name);
         }
     }
+}
 
-    let mut status = 0;
+#[cfg(unix)]
+fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose) -> i32 {
+    // Identified by inode, not by name: `tar -cf ./b.tar .` and `tar -cf b.tar
+    // .` name the archive differently and it is the same file both times, and
+    // comparing the strings would catch neither.
+    let mut archive_id = None;
+    let mut out: Box<dyn Write> = match archive_file {
+        Some(path) => match File::create(path) {
+            Ok(f) => {
+                use std::os::unix::fs::MetadataExt;
+                // A stat that fails is not fatal; it only costs the self-check,
+                // and the archive is otherwise fine.
+                if let Ok(m) = f.metadata() {
+                    archive_id = Some((m.dev(), m.ino()));
+                }
+                Box::new(f)
+            }
+            Err(e) => {
+                diag!("tar: {}: Cannot open: {}", escape_os(path), strerror(&e));
+                return fatal();
+            }
+        },
+        None => Box::new(io::stdout()),
+    };
+
+    let mut creator = Creator {
+        out: &mut out,
+        verbose,
+        status: 0,
+        links: BTreeMap::new(),
+        last_name_prefix: Vec::new(),
+        last_link_prefix: Vec::new(),
+        archive_id,
+        writable: true,
+    };
     for operand in files {
-        let path = Path::new(operand);
         // The member name is the operand exactly as typed, byte for byte —
         // which is what GNU stores too.
         let name = os_bytes(operand);
-        if path.is_dir() {
-            add_directory_recursive(path, &name, &mut out, verbose, &mut status);
-        } else {
-            add_file(path, &name, &mut out, verbose, &mut status);
-        }
+        creator.add(Path::new(operand), &name);
     }
 
     let zero_block = [0u8; BLOCK_SIZE];
-    let _ = write_or_fail(&mut out, &zero_block, &mut status)
-        && write_or_fail(&mut out, &zero_block, &mut status);
+    let _ = creator.write(&zero_block) && creator.write(&zero_block);
+    let mut status = creator.status;
     // The end-of-archive marker is the last thing written, so a flush that
     // fails here loses precisely the bytes that make the file a valid archive.
     if let Err(e) = out.flush() {
@@ -1810,7 +2226,7 @@ mod tests {
     /// Build a single tar header block with the given name and size.
     fn make_header(name: &[u8], size: u64, typeflag: u8) -> [u8; BLOCK_SIZE] {
         let mut h = TarHeader::new();
-        h.set_name(name);
+        h.set_name(name).unwrap();
         TarHeader::set_octal(&mut h.mode, 0o644);
         TarHeader::set_octal(&mut h.uid, 0);
         TarHeader::set_octal(&mut h.gid, 0);
@@ -1858,7 +2274,7 @@ mod tests {
         gname: &[u8],
     ) -> [u8; BLOCK_SIZE] {
         let mut h = TarHeader::new();
-        h.set_name(name);
+        h.set_name(name).unwrap();
         TarHeader::set_octal(&mut h.mode, u64::from(mode));
         TarHeader::set_octal(&mut h.uid, u64::from(uid));
         TarHeader::set_octal(&mut h.gid, u64::from(gid));
@@ -2211,12 +2627,12 @@ mod tests {
     #[test]
     fn checksum_is_stable() {
         let mut h1 = TarHeader::new();
-        h1.set_name(b"foo");
+        h1.set_name(b"foo").unwrap();
         TarHeader::set_octal(&mut h1.mode, 0o644);
         h1.compute_checksum();
 
         let mut h2 = TarHeader::new();
-        h2.set_name(b"foo");
+        h2.set_name(b"foo").unwrap();
         TarHeader::set_octal(&mut h2.mode, 0o644);
         h2.compute_checksum();
 
@@ -2226,11 +2642,11 @@ mod tests {
     #[test]
     fn checksum_changes_with_name() {
         let mut h1 = TarHeader::new();
-        h1.set_name(b"foo");
+        h1.set_name(b"foo").unwrap();
         h1.compute_checksum();
 
         let mut h2 = TarHeader::new();
-        h2.set_name(b"bar");
+        h2.set_name(b"bar").unwrap();
         h2.compute_checksum();
 
         assert_ne!(h1.checksum, h2.checksum);
@@ -2324,6 +2740,144 @@ mod tests {
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "café.txt\n");
         assert!(matches!(stop, Stop::End), "{stop:?}");
+    }
+
+    /// `t/` + `n`×`d` + `/` + `m`×`f`, the shape every split test uses.
+    fn deep(dirlen: usize, filelen: usize) -> Vec<u8> {
+        let mut v = b"t/".to_vec();
+        v.extend(std::iter::repeat_n(b'd', dirlen));
+        v.push(b'/');
+        v.extend(std::iter::repeat_n(b'f', filelen));
+        v
+    }
+
+    #[test]
+    fn a_name_that_exactly_fills_the_field_keeps_its_last_byte() {
+        // The bug this replaced: `name[..99]`, so a 100-byte name lost a byte.
+        // The field has no terminator when it is full, which is legal ustar and
+        // is what GNU writes.
+        let full = deep(96, 1);
+        assert_eq!(full.len(), 100);
+        assert_eq!(split_ustar_name(&full), Ok((&b""[..], &full[..])));
+        let mut h = TarHeader::new();
+        h.set_name(&full).unwrap();
+        assert_eq!(&h.name[..], &full[..]);
+        assert_eq!(h.prefix[0], 0);
+    }
+
+    #[test]
+    fn one_byte_past_the_field_moves_the_directory_into_the_prefix() {
+        // Measured against GNU: `t/` + 96×`d` + `/fff` -> prefix 98, name 3.
+        let full = deep(96, 3);
+        assert_eq!(full.len(), 102);
+        let (prefix, name) = split_ustar_name(&full).unwrap();
+        assert_eq!(prefix.len(), 98);
+        assert_eq!(name, b"fff");
+        // The `/` at the seam is not stored in either field.
+        assert_eq!(prefix.last(), Some(&b'd'));
+    }
+
+    #[test]
+    fn the_remainder_may_be_a_hundred_bytes_but_not_a_hundred_and_one() {
+        // GNU accepts the first and refuses the second. The boundary matters
+        // because it is the one place a name that *fits in 256 bytes* is still
+        // rejected, and getting it wrong either drops a file GNU keeps or
+        // writes a header GNU would not.
+        let ok = deep(3, 100);
+        assert_eq!(split_ustar_name(&ok).unwrap().1.len(), 100);
+        let refused = deep(3, 101);
+        assert_eq!(split_ustar_name(&refused), Err(NameTooLong::CannotSplit));
+    }
+
+    #[test]
+    fn a_single_component_too_long_cannot_be_split() {
+        let mut full = b"t/".to_vec();
+        full.extend(std::iter::repeat_n(b'f', 200));
+        assert_eq!(split_ustar_name(&full), Err(NameTooLong::CannotSplit));
+    }
+
+    #[test]
+    fn past_two_hundred_and_fifty_six_bytes_is_the_other_refusal() {
+        // Two different GNU messages, so two different errors: "max 256" when
+        // no split could ever work, "cannot be split" when the pieces do not
+        // land where ustar needs them.
+        let full = deep(200, 100);
+        assert_eq!(full.len(), 303);
+        assert_eq!(split_ustar_name(&full), Err(NameTooLong::Max));
+    }
+
+    #[test]
+    fn a_directory_name_that_only_a_zero_length_name_would_fit_is_refused() {
+        // 153 bytes: `t/` + 150×`d` + `/`. A 152-byte prefix and an empty name
+        // would hold it, and GNU still refuses -- the backward search starts at
+        // the trailing slash, skips it, and then finds only the `/` at offset 1,
+        // leaving 151 bytes for a 100-byte field. Measured; this is the case
+        // that proves the search is capped-and-backward rather than "last `/`".
+        let mut full = b"t/".to_vec();
+        full.extend(std::iter::repeat_n(b'd', 150));
+        full.push(b'/');
+        assert_eq!(full.len(), 153);
+        assert_eq!(split_ustar_name(&full), Err(NameTooLong::CannotSplit));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_leading_slash_run_is_removed_whole_not_one_slash_at_a_time() {
+        // The message quotes the prefix it removed, so `//a` must report `//`.
+        assert_eq!(strip_leading(b"/a/b"), (&b"/"[..], &b"a/b"[..]));
+        assert_eq!(strip_leading(b"//a/b"), (&b"//"[..], &b"a/b"[..]));
+        assert_eq!(strip_leading(b"///a"), (&b"///"[..], &b"a"[..]));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_leading_dotdot_component_is_removed_but_a_leading_dot_is_not() {
+        // Measured: GNU stores `./t` unchanged and says nothing, but turns
+        // `../t` into `t` with a message. A `.` takes an extractor nowhere it
+        // was not already; a `..` takes it out of the destination.
+        assert_eq!(strip_leading(b"../t"), (&b"../"[..], &b"t"[..]));
+        assert_eq!(strip_leading(b"../../t"), (&b"../../"[..], &b"t"[..]));
+        assert_eq!(strip_leading(b"/../t"), (&b"/../"[..], &b"t"[..]));
+        assert_eq!(strip_leading(b"./t"), (&b""[..], &b"./t"[..]));
+        assert_eq!(strip_leading(b".t"), (&b""[..], &b".t"[..]));
+        // `...` is a legal file name and is not two dots followed by anything.
+        assert_eq!(strip_leading(b".../t"), (&b""[..], &b".../t"[..]));
+        // A `..` in the middle is not a *leading* prefix and is left alone; the
+        // extractor is what refuses those.
+        assert_eq!(strip_leading(b"a/../b"), (&b""[..], &b"a/../b"[..]));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_name_that_is_nothing_but_prefix_is_left_with_nothing() {
+        // `tar -c ..` -- the caller asked for the parent directory, and every
+        // byte of the name is a prefix tar removes. GNU stores `.` (listed as
+        // `./`), which is the only name left that means anything.
+        assert_eq!(strip_leading(b".."), (&b".."[..], &b""[..]));
+        assert_eq!(strip_leading(b"/"), (&b"/"[..], &b""[..]));
+        assert_eq!(strip_leading(b""), (&b""[..], &b""[..]));
+    }
+
+    #[test]
+    fn a_link_target_that_does_not_fit_is_cut_rather_than_refused() {
+        // GNU says "not dumped" and dumps it anyway with the target cut to 100
+        // bytes. Measured -- a 101-byte symlink target warns, exits 2, and is
+        // in the archive. The boolean is what drives the warning.
+        let mut h = TarHeader::new();
+        assert!(h.set_linkname(&[b'y'; 100]));
+        assert_eq!(&h.linkname[..], &[b'y'; 100][..]);
+        let mut h = TarHeader::new();
+        assert!(!h.set_linkname(&[b'y'; 101]));
+        assert_eq!(&h.linkname[..], &[b'y'; 100][..]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn device_numbers_split_the_way_the_kernel_packs_them() {
+        // /dev/null is 1,3 -- measured, GNU lists it as `crw-rw-rw- 0/0 1,3`.
+        assert_eq!(split_dev(0x0103), (1, 3));
+        // A minor past 255 spills into the high half rather than into major.
+        assert_eq!(split_dev((8 << 8) | 0x11), (8, 0x11));
     }
 
     #[test]

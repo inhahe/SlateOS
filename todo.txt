@@ -55143,3 +55143,32 @@ is a real capability regression for a native binary that wants the flag.
 The structural fix -- a native syscall number so libc forwards to the kernel
 rather than re-implementing the gates -- is ask 2 of the same request, and is
 explicitly conditional on ask 1.  Reversible: delete the one gate.
+
+----------------------------------------------------------------------
+tar -- `--help`, `--usage` and `--version` are recognised but refused
+(2026-08-29, lane B)
+
+After the long-option change, tar's own referral line tells the reader
+
+    Try 'tar --help' or 'tar --usage' for more information.
+
+and both of those now answer
+
+    tar: option '--help' is recognised but not implemented by this tar
+
+which is self-contradictory. It is not a regression -- before the change
+`--help` was treated as a *member name* and got `tar: --help: Not found in
+archive` -- but it is the one place where the new refusal policy points at
+itself.
+
+FIX: implement `--help`, `--usage` and `--version`. They must describe what
+*this* tar does, not what GNU's does: reproducing GNU's help text verbatim would
+advertise 171 options of which nine work, which is the same silent-lie failure
+that motivated refusing unimplemented options in the first place (see
+design-decisions.md 703). GNU's `--usage` is the compact synopsis form and
+`--help` the long one; both exit 0. Note that 29 other coreutils bins also lack
+`--version`, tracked separately -- this entry is only about tar's referral
+naming commands tar rejects.
+
+TRIGGER: none needed; this is straightforwardly doable and should be the next
+tar task.

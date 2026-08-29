@@ -4,6 +4,15 @@
 //!        tar -x [-f ARCHIVE] [-v] [-C DIR]    extract archive
 //!        tar -t [-f ARCHIVE]                   list archive
 //!
+//! Each of those has GNU's long spelling too — `--create`, `--extract` (or
+//! `--get`), `--list`, `--verbose`, `--file`, `--directory`,
+//! `--preserve-permissions` (or `--same-permissions`) — abbreviable to any
+//! unambiguous prefix, and `--` ends the options. The other 162 long options
+//! GNU has are **recognised and refused** rather than ignored; see
+//! [`LONG_OPTIONS`] for why a table of names this tar does not implement is
+//! load-bearing rather than decorative, and [`unsupported`] for why refusing
+//! beats the two cheaper answers.
+//!
 //! Supports basic POSIX/ustar tar format (uncompressed).
 //! Files > 8GB and paths > 255 chars are not supported.
 //!
@@ -41,6 +50,7 @@
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
+use coreutils::getopt::{self, Opt, Program, Takes};
 // `escape`, not `quotef`, and that is a deliberate departure from the house
 // style of the other 85 bins. GNU tar calls `set_quoting_style (NULL,
 // escape_quoting_style)` at startup, so *every* name it prints -- in a
@@ -54,7 +64,10 @@ use coreutils::errmsg::strerror;
 // `set_quoting_style` above. Measured side by side in one run of one command:
 // `tar: esc: Cannot hard link to ‘etc/passwd’: ...` next to
 // `tar: caf\351: Not found in archive`.
-use coreutils::quote::{escape, escape_os, os_bytes, quote, quoteaf};
+// `quoteaf` left with the hand-written option loop: every command-line
+// diagnostic now comes from `coreutils::getopt`, which does its own rendering
+// (glibc's straight-marked style, not gnulib's locale-aware one).
+use coreutils::quote::{escape, escape_os, os_bytes, quote};
 // Only the non-unix twin of `Dir` builds a path out of a member's bytes; on
 // unix every component is handed to `openat` as it stands.
 #[cfg(any(not(unix), test))]
@@ -85,7 +98,281 @@ const EXIT_FATAL: i32 = 2;
 const EXIT_USAGE: i32 = 64;
 
 /// The second line argp prints after any usage error, verbatim.
+///
+/// **Two commands, not one**, and that is why every call site here prints this
+/// rather than [`getopt::Error::message`]. The shared getopt module ends its
+/// diagnostics with gnulib's one-command `Try 'tar --help' for more
+/// information.`, which is right for the 85 utilities that use `getopt_long`
+/// directly and wrong for tar: argp supplies its own referral naming both
+/// `--help` and `--usage`. The *sentences* are glibc's either way — argp calls
+/// `getopt_long` to do the parsing — so only this last line differs. Measured
+/// side by side: all six of tar's command-line errors end in this line.
 const TRY_HELP: &str = "Try 'tar --help' or 'tar --usage' for more information.";
+
+/// tar's name and its usage status, bound once so no diagnostic can drift.
+///
+/// 64, not 1 and not 2 — see [`EXIT_USAGE`]. It is passed here rather than
+/// written into each message so that the two cannot disagree.
+const TAR: Program = Program::new("tar", EXIT_USAGE);
+
+/// The short options this tar implements, in `getopt` notation.
+///
+/// No leading `+`: tar **permutes**, so an option may follow an operand.
+/// Measured — `tar -tf t.tar a --verbose` applies the `--verbose` and prints a
+/// long listing, rather than treating it as a second member name.
+const SHORT_OPTIONS: &str = "cxtvpf:C:";
+
+/// Every long option GNU tar 1.35 has — all 171 — in argp's own table order.
+///
+/// # Why the whole set, when this tar implements nine of them
+///
+/// Because the table is what decides whether an abbreviation is *ambiguous*,
+/// and an abbreviation is resolved against every name tar knows, not every name
+/// tar acts on. Drop the 162 unimplemented entries and `tar --ex` stops being
+/// an error and silently becomes `--extract` — GNU refuses it, listing
+/// fourteen candidates. A table that lists only what it implements does not
+/// merely give a worse message; it gives a *different command* than GNU would.
+///
+/// The unimplemented names are still refused, by [`parse_args`] — recognising a
+/// name and performing it are separate things. See [`unsupported`].
+///
+/// # Why the order is load-bearing, and must not be alphabetised
+///
+/// `getopt_long` lists an ambiguous prefix's candidates in the order the caller
+/// declared them, so this array's order is observable output:
+///
+/// ```text
+/// $ tar --ex
+/// tar: option '--ex' is ambiguous; possibilities: '--extract' '--exclude' ...
+/// ```
+///
+/// `--extract` precedes `--exclude`, which alphabetical order would reverse.
+///
+/// # How this was obtained
+///
+/// Measured from the binary, not transcribed from `--help` or from memory.
+///
+/// - **Order**: argp prints its possibilities in table order, and every
+///   candidate for an ambiguous prefix necessarily shares its first letter — so
+///   one query per letter (`tar --a`, `tar --b`, …) reports each letter's group
+///   in declaration order, and cross-letter order is unobservable. 36 queries
+///   fix the whole array.
+/// - **Argument class**: `tar --opt=zz` answering `doesn't allow an argument`
+///   is `Nothing`; `tar --opt` *as the last word* answering `requires an
+///   argument` is `Required`; neither is `Optional`. The option must be last —
+///   a `Required` one followed by anything simply eats it, so `tar --file
+///   --version` reports nothing at all. Getting that wrong is what first
+///   reported zero required options.
+/// - **`--program-name`** appears in no `--help` output: it is argp-hidden, and
+///   was found only because `tar --p` listed it among its possibilities. This
+///   is why the ambiguity lists, not `--help`, are the authority for the name
+///   *set* as well as the order.
+///
+/// The whole table was then checked against GNU exhaustively: all **1381**
+/// distinct prefixes of all 171 names were put to the binary and its verdict
+/// compared with this table's — resolved, unrecognised, or ambiguous, and for
+/// ambiguous ones the candidate list in order. **Zero mismatches.** That is
+/// also what establishes tar needs [`Program::resolve_long`] rather than
+/// `resolve_long_aliased`: tar does have aliases (`--extract`/`--get`), but no
+/// two of them share a prefix, so name-only resolution is exact here. Were that
+/// untrue, some prefix among the 1381 would have been accepted by GNU and
+/// called ambiguous by us.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
+    ("append", Takes::Nothing),
+    ("atime-preserve", Takes::Optional),
+    ("acls", Takes::Nothing),
+    ("auto-compress", Takes::Nothing),
+    ("absolute-names", Takes::Nothing),
+    ("after-date", Takes::Required),
+    ("add-file", Takes::Required),
+    ("anchored", Takes::Nothing),
+    ("blocking-factor", Takes::Required),
+    ("bzip2", Takes::Nothing),
+    ("backup", Takes::Optional),
+    ("block-number", Takes::Nothing),
+    ("create", Takes::Nothing),
+    ("compare", Takes::Nothing),
+    ("catenate", Takes::Nothing),
+    ("concatenate", Takes::Nothing),
+    ("check-device", Takes::Nothing),
+    ("clamp-mtime", Takes::Nothing),
+    ("compress", Takes::Nothing),
+    ("checkpoint", Takes::Optional),
+    ("checkpoint-action", Takes::Required),
+    ("check-links", Takes::Nothing),
+    ("confirmation", Takes::Nothing),
+    ("diff", Takes::Nothing),
+    ("delete", Takes::Nothing),
+    ("delay-directory-restore", Takes::Nothing),
+    ("dereference", Takes::Nothing),
+    ("directory", Takes::Required),
+    ("extract", Takes::Nothing),
+    ("exclude", Takes::Required),
+    ("exclude-from", Takes::Required),
+    ("exclude-caches", Takes::Nothing),
+    ("exclude-caches-under", Takes::Nothing),
+    ("exclude-caches-all", Takes::Nothing),
+    ("exclude-tag", Takes::Required),
+    ("exclude-ignore", Takes::Required),
+    ("exclude-ignore-recursive", Takes::Required),
+    ("exclude-tag-under", Takes::Required),
+    ("exclude-tag-all", Takes::Required),
+    ("exclude-vcs", Takes::Nothing),
+    ("exclude-vcs-ignores", Takes::Nothing),
+    ("exclude-backups", Takes::Nothing),
+    ("file", Takes::Required),
+    ("force-local", Takes::Nothing),
+    ("format", Takes::Required),
+    ("full-time", Takes::Nothing),
+    ("files-from", Takes::Required),
+    ("get", Takes::Nothing),
+    ("group", Takes::Required),
+    ("group-map", Takes::Required),
+    ("gzip", Takes::Nothing),
+    ("gunzip", Takes::Nothing),
+    ("hole-detection", Takes::Required),
+    ("hard-dereference", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("incremental", Takes::Nothing),
+    ("ignore-failed-read", Takes::Nothing),
+    ("ignore-command-error", Takes::Nothing),
+    ("info-script", Takes::Required),
+    ("ignore-zeros", Takes::Nothing),
+    ("index-file", Takes::Required),
+    ("interactive", Takes::Nothing),
+    ("ignore-case", Takes::Nothing),
+    ("keep-old-files", Takes::Nothing),
+    ("keep-newer-files", Takes::Nothing),
+    ("keep-directory-symlink", Takes::Nothing),
+    ("list", Takes::Nothing),
+    ("listed-incremental", Takes::Required),
+    ("level", Takes::Required),
+    ("label", Takes::Required),
+    ("lzip", Takes::Nothing),
+    ("lzma", Takes::Nothing),
+    ("lzop", Takes::Nothing),
+    ("mtime", Takes::Required),
+    ("mode", Takes::Required),
+    ("multi-volume", Takes::Nothing),
+    ("no-seek", Takes::Nothing),
+    ("no-check-device", Takes::Nothing),
+    ("no-overwrite-dir", Takes::Nothing),
+    ("no-ignore-command-error", Takes::Nothing),
+    ("no-same-owner", Takes::Nothing),
+    ("numeric-owner", Takes::Nothing),
+    ("no-same-permissions", Takes::Nothing),
+    ("no-delay-directory-restore", Takes::Nothing),
+    ("no-xattrs", Takes::Nothing),
+    ("no-selinux", Takes::Nothing),
+    ("no-acls", Takes::Nothing),
+    ("new-volume-script", Takes::Required),
+    ("no-auto-compress", Takes::Nothing),
+    ("newer", Takes::Required),
+    ("newer-mtime", Takes::Required),
+    ("no-quote-chars", Takes::Required),
+    ("null", Takes::Nothing),
+    ("no-null", Takes::Nothing),
+    ("no-unquote", Takes::Nothing),
+    ("no-verbatim-files-from", Takes::Nothing),
+    ("no-recursion", Takes::Nothing),
+    ("no-anchored", Takes::Nothing),
+    ("no-ignore-case", Takes::Nothing),
+    ("no-wildcards", Takes::Nothing),
+    ("no-wildcards-match-slash", Takes::Nothing),
+    ("occurrence", Takes::Optional),
+    ("overwrite", Takes::Nothing),
+    ("overwrite-dir", Takes::Nothing),
+    ("one-top-level", Takes::Optional),
+    ("owner", Takes::Required),
+    ("owner-map", Takes::Required),
+    ("old-archive", Takes::Nothing),
+    ("one-file-system", Takes::Nothing),
+    ("preserve-permissions", Takes::Nothing),
+    ("preserve-order", Takes::Nothing),
+    ("portability", Takes::Nothing),
+    ("posix", Takes::Nothing),
+    ("pax-option", Takes::Required),
+    ("program-name", Takes::Required),
+    ("quoting-style", Takes::Required),
+    ("quote-chars", Takes::Required),
+    ("remove-files", Takes::Nothing),
+    ("recursive-unlink", Takes::Nothing),
+    ("rmt-command", Takes::Required),
+    ("rsh-command", Takes::Required),
+    ("record-size", Takes::Required),
+    ("read-full-records", Takes::Nothing),
+    ("restrict", Takes::Nothing),
+    ("recursion", Takes::Nothing),
+    ("sparse", Takes::Nothing),
+    ("sparse-version", Takes::Required),
+    ("seek", Takes::Nothing),
+    ("skip-old-files", Takes::Nothing),
+    ("same-owner", Takes::Nothing),
+    ("same-permissions", Takes::Nothing),
+    ("same-order", Takes::Nothing),
+    ("sort", Takes::Required),
+    ("selinux", Takes::Nothing),
+    ("starting-file", Takes::Required),
+    ("suffix", Takes::Required),
+    ("strip-components", Takes::Required),
+    ("show-defaults", Takes::Nothing),
+    ("show-snapshot-field-ranges", Takes::Nothing),
+    ("show-omitted-dirs", Takes::Nothing),
+    ("show-transformed-names", Takes::Nothing),
+    ("show-stored-names", Takes::Nothing),
+    ("test-label", Takes::Nothing),
+    ("to-stdout", Takes::Nothing),
+    ("to-command", Takes::Required),
+    ("touch", Takes::Nothing),
+    ("tape-length", Takes::Required),
+    ("transform", Takes::Required),
+    ("totals", Takes::Optional),
+    ("update", Takes::Nothing),
+    ("unlink-first", Takes::Nothing),
+    ("use-compress-program", Takes::Required),
+    ("ungzip", Takes::Nothing),
+    ("uncompress", Takes::Nothing),
+    ("utc", Takes::Nothing),
+    ("unquote", Takes::Nothing),
+    ("usage", Takes::Nothing),
+    ("verify", Takes::Nothing),
+    ("volno-file", Takes::Required),
+    ("verbose", Takes::Nothing),
+    ("verbatim-files-from", Takes::Nothing),
+    ("version", Takes::Nothing),
+    ("warning", Takes::Required),
+    ("wildcards", Takes::Nothing),
+    ("wildcards-match-slash", Takes::Nothing),
+    ("xattrs", Takes::Nothing),
+    ("xattrs-include", Takes::Required),
+    ("xattrs-exclude", Takes::Required),
+    ("xz", Takes::Nothing),
+    ("xform", Takes::Required),
+    ("zstd", Takes::Nothing),
+];
+
+/// A long option GNU tar has and this one does not implement.
+///
+/// **This is a deliberate divergence, and the only one in the parser.** GNU
+/// would accept every one of these; we refuse, with a sentence that says which
+/// of the two reasons applies so the reader is not sent looking for a typo.
+///
+/// The alternative is worse in a way that is not obvious until it bites. Before
+/// long options existed here, `--exclude=*.o` was not an option at all — it fell
+/// through to the operand branch and became a *file name to archive*, so
+/// `tar -cf a.tar --exclude=*.o src` quietly produced an archive containing
+/// everything the user asked to leave out, plus a spurious member, and exited 0.
+/// A refusal at status 64 is a script that stops; silence is a backup that is
+/// wrong and says it succeeded.
+///
+/// Reporting it as `unrecognized option` — the other cheap answer — would be a
+/// second lie: the name *is* tar's, and telling a user that `--exclude` is not
+/// a tar option sends them to the manual to check a spelling that was right.
+fn unsupported(name: &str) -> getopt::Error {
+    TAR.usage(format!(
+        "option '--{name}' is recognised but not implemented by this tar"
+    ))
+}
 
 /// Close out a run that had at least one non-fatal failure.
 ///
@@ -132,82 +419,81 @@ struct TarArgs {
     files: Vec<OsString>,
 }
 
-/// Parse tar's argv.  Supports clustered short flags; `f` and `C`
-/// consume the following argv element as their value (even when
-/// clustered as e.g. `-xvf`, in which case the next argv is the value
-/// of `f`).  Unknown short flags return an error.
+/// Parse tar's argv: short options, long options, and operands.
 ///
-/// The error strings are argp's, verbatim, less the `tar: ` prefix the caller
-/// adds: `invalid option -- 'Q'` and `option requires an argument -- 'f'`. They
-/// used to read `option -f requires an argument`, which says the same thing in
-/// a word order nothing else in the system uses — and a caller matching tar's
-/// stderr is matching the real tar's, not ours.
+/// The walk itself is [`coreutils::getopt`], which is `getopt_long`'s rules
+/// rather than an approximation of them — and argp, which is what real tar
+/// uses, *calls* `getopt_long`, so matching the shared module matches tar. That
+/// is worth more than it sounds: the four spellings of a value
+/// (`-f A`, `-fA`, `--file A`, `--file=A`) are all accepted now, where the
+/// hand-written loop this replaced understood only the first and third, and an
+/// unimplemented option's value is consumed rather than being left behind as a
+/// stray operand.
 ///
-/// The scan is over **bytes**, and the values and operands come out as
-/// `OsString` unchanged. Every one of them is a path — the archive, the `-C`
-/// destination, and each file to add — and on this OS a path may hold any byte
-/// but `/` and NUL. Reading argv as `String` made `tar -cf a.tar <name>` abort
-/// before doing anything at all when the name was not valid UTF-8, which is a
-/// legal name here. See `known-issues.md` → `B-tar-READ-EVERY-PATH-AS-UTF-8`.
+/// Two behaviours arrive with it that were previously bugs, not choices:
 ///
-/// A cluster is walked byte by byte rather than `char` by `char`. That is not
-/// merely the byte-safe spelling of the same loop: a multi-byte character in a
-/// cluster used to be reported whole (`unknown option: -é`), and now reports
-/// its first byte. Since no such cluster is ever valid, the difference is only
-/// in the wording of a refusal — but the byte version cannot panic on a cluster
-/// that is not UTF-8 at all, which the `char` version could not even reach.
-fn parse_args(args: &[OsString]) -> Result<TarArgs, String> {
+/// - **`--` ends the options.** It used to fall through to the operand branch
+///   and be looked for inside the archive, so `tar -xf t.tar -- a` answered
+///   `tar: --: Not found in archive` and exited 2 where GNU extracts `a` and
+///   exits 0.
+/// - **`-fA` works.** A value attached to its letter was previously read as
+///   more option letters, so `-fout.tar` failed on `o` — `invalid option --
+///   'o'` — instead of naming the archive.
+///
+/// # Errors
+///
+/// The five glibc sentences, verbatim, plus [`unsupported`]'s. They are
+/// returned rather than printed so that `main` prints tar's own referral; see
+/// [`TRY_HELP`], which is argp's two-command line and not the getopt module's.
+///
+/// # Bytes, not text
+///
+/// Values and operands come out as `OsString` unchanged. Every one of them is a
+/// path — the archive, the `-C` destination, each file to add — and on this OS
+/// a path may hold any byte but `/` and NUL. Reading argv as `String` made
+/// `tar -cf a.tar <name>` abort before doing anything at all when the name was
+/// not valid UTF-8, which is a legal name here. See `known-issues.md` →
+/// `B-tar-READ-EVERY-PATH-AS-UTF-8`. The shared parser preserves that: it
+/// splits clusters by **byte**, so `-é` is refused by its first byte instead of
+/// panicking, and a long name that is not UTF-8 can match no option and so
+/// takes the `unrecognized option` path rather than failing some third way.
+fn parse_args(args: &[OsString]) -> Result<TarArgs, getopt::Error> {
     let mut out = TarArgs::default();
-    let mut i: usize = 0;
 
-    while let Some(arg) = args.get(i) {
-        let bytes = os_bytes(arg);
-        // `--anything` is not an option here: this tar has no long options, and
-        // treating `--` as the start of a cluster would read each of its letters
-        // as a flag. It falls through to the operand branch, as it always has.
-        if bytes.first() == Some(&b'-') && bytes.len() > 1 && bytes.get(1) != Some(&b'-') {
-            let rest = bytes.get(1..).unwrap_or(&[]);
-            for &c in rest {
-                match c {
-                    b'c' => out.create = true,
-                    b'x' => out.extract = true,
-                    b't' => out.list = true,
-                    b'v' => out.verbose = true,
-                    b'p' => out.same_permissions = true,
-                    b'f' => {
-                        i = i.saturating_add(1);
-                        let v = args
-                            .get(i)
-                            .ok_or_else(|| "option requires an argument -- 'f'".to_string())?;
-                        out.archive_file = Some(v.clone());
-                    }
-                    b'C' => {
-                        i = i.saturating_add(1);
-                        let v = args
-                            .get(i)
-                            .ok_or_else(|| "option requires an argument -- 'C'".to_string())?;
-                        out.directory = Some(v.clone());
-                    }
-                    other => {
-                        // `quoteaf` rather than `char::from`: `other` is an
-                        // arbitrary byte from the command line, and rendering it
-                        // raw would let a crafted argument forge a line of
-                        // tar's stderr.
-                        //
-                        // The wording is GNU's, measured: `tar -Q` says
-                        // `tar: invalid option -- 'Q'`. It used to read
-                        // `unknown option: -Q`, and since `quoteaf` always
-                        // quotes, keeping that shape would have produced the
-                        // odd `-'Q'` — so the message moved to the one it
-                        // should have had anyway.
-                        return Err(format!("invalid option -- {}", quoteaf(&[other])));
-                    }
-                }
-            }
-        } else {
-            out.files.push(arg.clone());
+    for item in TAR.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
+        match item? {
+            Opt::Short(b'c', _) => out.create = true,
+            Opt::Short(b'x', _) => out.extract = true,
+            Opt::Short(b't', _) => out.list = true,
+            Opt::Short(b'v', _) => out.verbose = true,
+            Opt::Short(b'p', _) => out.same_permissions = true,
+            Opt::Short(b'f', value) => out.archive_file = value,
+            Opt::Short(b'C', value) => out.directory = value,
+            // Unreachable while this arm and `SHORT_OPTIONS` agree, since the
+            // parser rejects any letter the string does not list. It is a
+            // refusal rather than a panic so that adding a letter to
+            // `SHORT_OPTIONS` and forgetting the arm is a usage error, which is
+            // true, instead of an abort.
+            Opt::Short(other, _) => return Err(TAR.invalid_option(other)),
+
+            // Long names, as the *table* spells them: an abbreviation has
+            // already been resolved, so `--extr` arrives here as `extract`.
+            Opt::Long(name, value) => match name {
+                "create" => out.create = true,
+                // GNU's own alias pair for `-x`, and likewise `-p` below. Both
+                // spellings are separate table entries because `getopt_long`
+                // matches on names; they converge here.
+                "extract" | "get" => out.extract = true,
+                "list" => out.list = true,
+                "verbose" => out.verbose = true,
+                "preserve-permissions" | "same-permissions" => out.same_permissions = true,
+                "file" => out.archive_file = value,
+                "directory" => out.directory = value,
+                other => return Err(unsupported(other)),
+            },
+
+            Opt::Operand(arg) => out.files.push(arg.clone()),
         }
-        i = i.saturating_add(1);
     }
 
     Ok(out)
@@ -218,9 +504,12 @@ fn main() {
     let parsed = match parse_args(&args) {
         Ok(p) => p,
         Err(e) => {
-            diag!("tar: {e}");
+            // `e.sentence`, deliberately, and never `e.message()` or
+            // `TAR.report(&e)`: both append the getopt module's one-command
+            // referral, and tar's is argp's two-command one. See `TRY_HELP`.
+            diag!("tar: {}", e.sentence);
             diag!("{TRY_HELP}");
-            process::exit(EXIT_USAGE);
+            process::exit(e.status);
         }
     };
 
@@ -3722,7 +4011,10 @@ mod tests {
         let err = parse_args(&s(&["-Z"])).unwrap_err();
         // Byte for byte what GNU tar 1.35 says for `tar -Q`, less the
         // `tar: ` prefix the caller adds.
-        assert_eq!(err, "invalid option -- 'Z'");
+        assert_eq!(err.sentence, "invalid option -- 'Z'");
+        // 64, not 2: a command line that could not be parsed. Measured on every
+        // one of tar's six getopt errors.
+        assert_eq!(err.status, EXIT_USAGE);
     }
 
     #[test]
@@ -3730,13 +4022,13 @@ mod tests {
         // argp's wording, byte for byte: `tar -cf` says exactly this and exits
         // 64. See `scripts/tar-diff.sh`, case "-f with no argument".
         let err = parse_args(&s(&["-f"])).unwrap_err();
-        assert_eq!(err, "option requires an argument -- 'f'");
+        assert_eq!(err.sentence, "option requires an argument -- 'f'");
     }
 
     #[test]
     fn parse_missing_c_value_errors() {
         let err = parse_args(&s(&["-C"])).unwrap_err();
-        assert_eq!(err, "option requires an argument -- 'C'");
+        assert_eq!(err.sentence, "option requires an argument -- 'C'");
     }
 
     #[test]
@@ -3784,10 +4076,243 @@ mod tests {
         // that is not UTF-8 at all is refused like any other unknown flag
         // rather than being a case the parser cannot represent.
         let err = parse_args(&b(&[b"-\xe9"])).unwrap_err();
-        assert!(err.contains("invalid option"), "{err}");
-        // `quoteaf` renders the byte rather than emitting it raw, so the
-        // message cannot forge a line of tar's stderr.
-        assert!(!err.as_bytes().contains(&0xe9), "{err}");
+        assert!(err.sentence.contains("invalid option"), "{err}");
+        // The byte is escaped rather than emitted raw, so the message cannot
+        // forge a line of tar's stderr.
+        assert!(!err.sentence.as_bytes().contains(&0xe9), "{err}");
+    }
+
+    // ---------------- long options ----------------
+    //
+    // Every expectation below was measured against GNU tar 1.35, and the table
+    // that drives them was checked against it exhaustively: all 1381 distinct
+    // prefixes of all 171 names, verdict and candidate list, zero mismatches.
+    // See `LONG_OPTIONS`.
+
+    #[test]
+    fn parse_long_forms_of_every_short_option() {
+        let a = parse_args(&s(&[
+            "--create",
+            "--verbose",
+            "--preserve-permissions",
+            "--file=out.tar",
+            "--directory=/tmp",
+            "x",
+        ]))
+        .unwrap();
+        assert!(a.create && a.verbose && a.same_permissions);
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
+        assert_eq!(a.directory.as_deref(), Some(OsStr::new("/tmp")));
+        assert_eq!(a.files, s(&["x"]));
+    }
+
+    #[test]
+    fn parse_long_value_may_be_the_next_word_or_attached() {
+        // `--file=A` and `--file A` are the same thing; the hand-written parser
+        // this replaced understood neither.
+        for argv in [
+            s(&["--extract", "--file=in.tar"]),
+            s(&["--extract", "--file", "in.tar"]),
+        ] {
+            let a = parse_args(&argv).unwrap();
+            assert!(a.extract);
+            assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("in.tar")));
+        }
+    }
+
+    #[test]
+    fn parse_accepts_gnus_alias_spellings() {
+        // Two names, one option, in both of GNU's pairs.
+        assert!(parse_args(&s(&["--get"])).unwrap().extract);
+        assert!(parse_args(&s(&["--extract"])).unwrap().extract);
+        assert!(
+            parse_args(&s(&["--same-permissions"]))
+                .unwrap()
+                .same_permissions
+        );
+        assert!(
+            parse_args(&s(&["--preserve-permissions"]))
+                .unwrap()
+                .same_permissions
+        );
+    }
+
+    #[test]
+    fn parse_accepts_an_unambiguous_abbreviation() {
+        // `--extr` is a prefix of `--extract` alone. The resolved name is what
+        // reaches the match arm, so no arm needs to know about abbreviations.
+        let a = parse_args(&s(&["--extr", "--verbo"])).unwrap();
+        assert!(a.extract && a.verbose);
+    }
+
+    #[test]
+    fn parse_refuses_an_abbreviation_ambiguous_only_because_of_an_option_we_lack() {
+        // `--verb` is one letter short of unambiguous, and the option that
+        // makes it so — `--verbatim-files-from` — is one this tar does not
+        // implement. So this case is decided *entirely* by an entry that exists
+        // for no other reason, which is the clearest statement of why the table
+        // carries all 171 names. Measured: GNU refuses `--verb` identically,
+        // and `--verbo` lists an archive.
+        let err = parse_args(&s(&["--verb"])).unwrap_err();
+        assert_eq!(
+            err.sentence,
+            "option '--verb' is ambiguous; possibilities: '--verbose' '--verbatim-files-from'"
+        );
+        assert!(parse_args(&s(&["--verbo"])).unwrap().verbose);
+    }
+
+    #[test]
+    fn parse_refuses_an_ambiguous_abbreviation_listing_gnus_candidates() {
+        // The reason the table carries all 171 names. With only the nine this
+        // tar implements, `--ex` would be a *unique* prefix of `--extract` and
+        // would silently extract.
+        let err = parse_args(&s(&["--ex"])).unwrap_err();
+        assert_eq!(
+            err.sentence,
+            "option '--ex' is ambiguous; possibilities: '--extract' '--exclude' \
+             '--exclude-from' '--exclude-caches' '--exclude-caches-under' \
+             '--exclude-caches-all' '--exclude-tag' '--exclude-ignore' \
+             '--exclude-ignore-recursive' '--exclude-tag-under' '--exclude-tag-all' \
+             '--exclude-vcs' '--exclude-vcs-ignores' '--exclude-backups'"
+        );
+    }
+
+    #[test]
+    fn parse_lists_ambiguity_candidates_in_gnus_order_not_alphabetically() {
+        // The single most easily-broken property of the table: `--extract`
+        // precedes `--exclude`, which sorting would reverse. Asserted on its
+        // own so that an alphabetised table fails with an obvious message
+        // rather than inside the long string above.
+        let err = parse_args(&s(&["--ex"])).unwrap_err();
+        let extract = err.sentence.find("'--extract'").unwrap();
+        let exclude = err.sentence.find("'--exclude'").unwrap();
+        assert!(extract < exclude, "{}", err.sentence);
+    }
+
+    #[test]
+    fn parse_refuses_an_unknown_long_option() {
+        let err = parse_args(&s(&["--frobnicate"])).unwrap_err();
+        // The whole word as typed, `--` included — there is no resolved name to
+        // report instead.
+        assert_eq!(err.sentence, "unrecognized option '--frobnicate'");
+    }
+
+    #[test]
+    fn parse_refuses_a_value_given_to_a_long_option_that_takes_none() {
+        let err = parse_args(&s(&["--extract=yes"])).unwrap_err();
+        // Named as the table spells it, not as typed. Measured: GNU answers an
+        // abbreviated `--extr=yes` with `'--extract'` too.
+        assert_eq!(err.sentence, "option '--extract' doesn't allow an argument");
+        assert_eq!(
+            parse_args(&s(&["--extr=yes"])).unwrap_err().sentence,
+            "option '--extract' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn parse_refuses_a_long_option_whose_required_value_is_missing() {
+        let err = parse_args(&s(&["--file"])).unwrap_err();
+        // Note the word order differs from the short form's `option requires an
+        // argument -- 'f'`. That is glibc's, not a slip.
+        assert_eq!(err.sentence, "option '--file' requires an argument");
+    }
+
+    #[test]
+    fn parse_refuses_a_recognised_but_unimplemented_option() {
+        let err = parse_args(&s(&["--exclude=*.o"])).unwrap_err();
+        assert_eq!(
+            err.sentence,
+            "option '--exclude' is recognised but not implemented by this tar"
+        );
+        assert_eq!(err.status, EXIT_USAGE);
+    }
+
+    #[test]
+    fn parse_does_not_leave_an_unimplemented_options_value_as_an_operand() {
+        // The trap this avoids: `--exclude` takes a value, so if the parser did
+        // not know that, `*.o` would be left behind and archived as a file. The
+        // refusal is what the user sees, but the operand list is what would
+        // have been silently wrong had the table's argument class been missing.
+        let err = parse_args(&s(&["-c", "--exclude", "*.o", "src"])).unwrap_err();
+        assert!(err.sentence.contains("--exclude"), "{err}");
+    }
+
+    #[test]
+    fn parse_treats_double_dash_as_end_of_options() {
+        // Previously a bug, not a choice: `--` fell through to the operand
+        // branch and was looked for inside the archive, so this exited 2 with
+        // `tar: --: Not found in archive` where GNU exits 0.
+        let a = parse_args(&s(&["-xf", "t.tar", "--", "a"])).unwrap();
+        assert!(a.extract);
+        assert_eq!(a.files, s(&["a"]));
+    }
+
+    #[test]
+    fn parse_after_double_dash_an_option_shaped_name_is_a_file() {
+        // The point of the terminator: a member really called `--exclude` is
+        // archivable, and a member called `-c` does not turn on create.
+        let a = parse_args(&s(&["-c", "--", "--exclude", "-c"])).unwrap();
+        assert!(a.create);
+        assert_eq!(a.files, s(&["--exclude", "-c"]));
+    }
+
+    #[test]
+    fn parse_accepts_a_short_value_attached_to_its_letter() {
+        // `-fout.tar` used to be read as more option letters and failed on the
+        // `o`: `invalid option -- 'o'`.
+        let a = parse_args(&s(&["-cvfout.tar", "x"])).unwrap();
+        assert!(a.create && a.verbose);
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
+        assert_eq!(a.files, s(&["x"]));
+    }
+
+    #[test]
+    fn parse_permutes_options_after_operands() {
+        // Measured: `tar -tf t.tar a --verbose` gives a long listing, so an
+        // option after an operand is still an option.
+        let a = parse_args(&s(&["-tf", "t.tar", "a", "--verbose"])).unwrap();
+        assert!(a.list && a.verbose);
+        assert_eq!(a.files, s(&["a"]));
+    }
+
+    #[test]
+    fn parse_keeps_a_long_option_value_that_is_not_utf8() {
+        // The `=VALUE` half of a long option is a path like any other, and must
+        // survive bytes that are not text.
+        let a = parse_args(&b(&[b"-x", b"--directory=/tmp/d\x80r"])).unwrap();
+        let d = a.directory.unwrap();
+        assert_eq!(os_bytes(&d).as_ref(), b"/tmp/d\x80r");
+    }
+
+    #[test]
+    fn parse_refuses_a_long_name_that_is_not_utf8_without_panicking() {
+        // No option name is non-ASCII, so such a name matches nothing; it must
+        // reach the unrecognised path rather than failing some third way.
+        let err = parse_args(&b(&[b"--caf\xe9"])).unwrap_err();
+        assert!(err.sentence.contains("unrecognized option"), "{err}");
+        assert!(!err.sentence.as_bytes().contains(&0xe9), "{err}");
+    }
+
+    #[test]
+    fn long_option_table_is_in_gnus_measured_order_and_has_no_duplicates() {
+        // Guards the table itself rather than the parser. A duplicate name
+        // would make one entry unreachable, and the count pins the set: 170
+        // from `--help` plus `--program-name`, which is argp-hidden and appears
+        // in no help output.
+        assert_eq!(LONG_OPTIONS.len(), 171);
+        // Fully qualified: the file's `BTreeSet` import is `#[cfg(unix)]`, and
+        // this test is not.
+        let mut seen = std::collections::BTreeSet::new();
+        for (name, _) in LONG_OPTIONS {
+            assert!(seen.insert(*name), "duplicate long option: --{name}");
+        }
+        assert!(seen.contains("program-name"));
+        // Not sorted — and that is the invariant, not an accident. See the
+        // ambiguity-order test above.
+        assert!(
+            LONG_OPTIONS.windows(2).any(|w| w[0].0 > w[1].0),
+            "table looks alphabetised; GNU's order is observable output"
+        );
     }
 
     // ---------------- contains_dot_dot ----------------

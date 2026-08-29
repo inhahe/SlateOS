@@ -75131,19 +75131,23 @@ fn cmd_parentaltime(args: &str) {
                 set_exit(1);
             }
         }
-        "enable" => {
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    parentaltime::set_active(id, true).ok();
-                    shell_println!("Config {} enabled.", id);
+        "enable" | "disable" => {
+            let on = sub == "enable";
+            let Some(id) = required_num::<u32>(&parts, 1, "ptime", sub, "config id") else {
+                return;
+            };
+            // The discarded `Result` was the second half of the same defect: with
+            // `set_active(id, true).ok()`, `ptime enable 999` announced "Config
+            // 999 enabled." for a config that does not exist. Refusing the
+            // unreadable word but still lying about the unknown id would have
+            // fixed the half that is easy to see.
+            match parentaltime::set_active(id, on) {
+                Ok(()) => {
+                    shell_println!("Config {} {}.", id, if on { "enabled" } else { "disabled" })
                 }
-            }
-        }
-        "disable" => {
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    parentaltime::set_active(id, false).ok();
-                    shell_println!("Config {} disabled.", id);
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -75292,26 +75296,45 @@ fn cmd_mediakeys(args: &str) {
                 set_exit(1);
             }
         }
-        "play" => {
+        // `mkeys play` acts on the active session and `mkeys play 3` on session
+        // 3, so the operand is neither required nor defaulted -- it selects
+        // between two different actions. That is the shape `readable_num`
+        // exists for: absent is legitimate, unreadable is not.
+        "play" | "pause" => {
+            let (state, key, verb, name) = if sub == "play" {
+                (
+                    mediakeys::PlaybackState::Playing,
+                    mediakeys::MediaKey::Play,
+                    "Playing",
+                    "Play",
+                )
+            } else {
+                (
+                    mediakeys::PlaybackState::Paused,
+                    mediakeys::MediaKey::Pause,
+                    "Paused",
+                    "Pause",
+                )
+            };
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    mediakeys::set_playback_state(id, mediakeys::PlaybackState::Playing).ok();
-                    shell_println!("Session {} → Playing", id);
+                let Some(id) = readable_num::<u32>(id_str, "mkeys", sub, "session id") else {
+                    return;
+                };
+                match mediakeys::set_playback_state(id, state) {
+                    Ok(()) => shell_println!("Session {} → {}", id, verb),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
-                mediakeys::handle_key(mediakeys::MediaKey::Play).ok();
-                shell_println!("Play (active session)");
-            }
-        }
-        "pause" => {
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    mediakeys::set_playback_state(id, mediakeys::PlaybackState::Paused).ok();
-                    shell_println!("Session {} → Paused", id);
+                match mediakeys::handle_key(key) {
+                    Ok(()) => shell_println!("{} (active session)", name),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
-            } else {
-                mediakeys::handle_key(mediakeys::MediaKey::Pause).ok();
-                shell_println!("Pause (active session)");
             }
         }
         "toggle" | "pp" => {
@@ -75332,13 +75355,14 @@ fn cmd_mediakeys(args: &str) {
         }
         "active" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match mediakeys::set_active(id) {
-                        Ok(()) => shell_println!("Session {} is now active.", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
+                let Some(id) = readable_num::<u32>(id_str, "mkeys", sub, "session id") else {
+                    return;
+                };
+                match mediakeys::set_active(id) {
+                    Ok(()) => shell_println!("Session {} is now active.", id),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -75603,13 +75627,14 @@ fn cmd_webcam(args: &str) {
         }
         "default" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match webcam::set_default(id) {
-                        Ok(()) => shell_println!("Camera {} is now default.", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
+                let Some(id) = readable_num::<u32>(id_str, "cam", sub, "camera id") else {
+                    return;
+                };
+                match webcam::set_default(id) {
+                    Ok(()) => shell_println!("Camera {} is now default.", id),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -75741,13 +75766,14 @@ fn cmd_speechio(args: &str) {
         }
         "cancel" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match speechio::cancel_utterance(id) {
-                        Ok(()) => shell_println!("Cancelled utterance {}", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
+                let Some(id) = readable_num::<u32>(id_str, "speech", sub, "utterance id") else {
+                    return;
+                };
+                match speechio::cancel_utterance(id) {
+                    Ok(()) => shell_println!("Cancelled utterance {}", id),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -75778,13 +75804,14 @@ fn cmd_speechio(args: &str) {
         }
         "rmvoice" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match speechio::remove_voice(id) {
-                        Ok(()) => shell_println!("Removed voice {}", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
+                let Some(id) = readable_num::<u32>(id_str, "speech", sub, "voice id") else {
+                    return;
+                };
+                match speechio::remove_voice(id) {
+                    Ok(()) => shell_println!("Removed voice {}", id),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -75794,13 +75821,14 @@ fn cmd_speechio(args: &str) {
         }
         "default" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match speechio::set_default_voice(id) {
-                        Ok(()) => shell_println!("Voice {} is now default.", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
+                let Some(id) = readable_num::<u32>(id_str, "speech", sub, "voice id") else {
+                    return;
+                };
+                match speechio::set_default_voice(id) {
+                    Ok(()) => shell_println!("Voice {} is now default.", id),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -75973,13 +76001,14 @@ fn cmd_mobilelink(args: &str) {
         }
         "disconnect" | "dc" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match mobilelink::disconnect(id) {
-                        Ok(()) => shell_println!("Disconnected device {}", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
+                let Some(id) = readable_num::<u32>(id_str, "mlink", sub, "device id") else {
+                    return;
+                };
+                match mobilelink::disconnect(id) {
+                    Ok(()) => shell_println!("Disconnected device {}", id),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -75989,13 +76018,14 @@ fn cmd_mobilelink(args: &str) {
         }
         "reconnect" | "rc" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match mobilelink::reconnect(id) {
-                        Ok(()) => shell_println!("Reconnected device {}", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
+                let Some(id) = readable_num::<u32>(id_str, "mlink", sub, "device id") else {
+                    return;
+                };
+                match mobilelink::reconnect(id) {
+                    Ok(()) => shell_println!("Reconnected device {}", id),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -76005,13 +76035,14 @@ fn cmd_mobilelink(args: &str) {
         }
         "remove" | "rm" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match mobilelink::remove_device(id) {
-                        Ok(()) => shell_println!("Removed device {}", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
+                let Some(id) = readable_num::<u32>(id_str, "mlink", sub, "device id") else {
+                    return;
+                };
+                match mobilelink::remove_device(id) {
+                    Ok(()) => shell_println!("Removed device {}", id),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -76108,10 +76139,26 @@ fn cmd_mobilelink(args: &str) {
         }
         "battery" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    let pct = parts.get(2).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
-                    mobilelink::update_battery(id, pct).ok();
-                    shell_println!("Device {} battery → {}%", id, pct);
+                let Some(id) = readable_num::<u32>(id_str, "mlink", sub, "device id") else {
+                    return;
+                };
+                // Three defects in five lines, all the same family: the id was
+                // silently dropped, the percentage was *guessed* as `0` when
+                // unreadable -- and `0%` is a reading a user would act on, since
+                // it is what a flat battery reports -- and the `Result` was
+                // discarded, so an unknown device still got a battery report
+                // printed for it. The usage line calls `<percent>` required, so
+                // it is `required_num`, not `optional_num`.
+                let Some(pct) = required_num::<u8>(&parts, 2, "mlink", sub, "battery percentage")
+                else {
+                    return;
+                };
+                match mobilelink::update_battery(id, pct) {
+                    Ok(()) => shell_println!("Device {} battery → {}%", id, pct),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: mlink battery <id> <percent>");
@@ -76201,9 +76248,15 @@ fn cmd_screenlock(args: &str) {
         }
         "timeout" => {
             if let Some(s) = parts.get(1) {
-                if let Ok(secs) = s.parse::<u32>() {
-                    screenlock::set_timeout(secs).ok();
-                    shell_println!("Timeout set to {}s.", secs);
+                let Some(secs) = readable_num::<u32>(s, "slock", sub, "timeout in seconds") else {
+                    return;
+                };
+                match screenlock::set_timeout(secs) {
+                    Ok(()) => shell_println!("Timeout set to {}s.", secs),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: slock timeout <seconds>");
@@ -76354,13 +76407,14 @@ fn cmd_appstore(args: &str) {
         }
         "install" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match appstore::install(id) {
-                        Ok(()) => shell_println!("Installed app {}.", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
+                let Some(id) = readable_num::<u32>(id_str, "store", sub, "app id") else {
+                    return;
+                };
+                match appstore::install(id) {
+                    Ok(()) => shell_println!("Installed app {}.", id),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -76370,13 +76424,14 @@ fn cmd_appstore(args: &str) {
         }
         "uninstall" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match appstore::uninstall(id) {
-                        Ok(()) => shell_println!("Uninstalled app {}.", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
+                let Some(id) = readable_num::<u32>(id_str, "store", sub, "app id") else {
+                    return;
+                };
+                match appstore::uninstall(id) {
+                    Ok(()) => shell_println!("Uninstalled app {}.", id),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -76386,13 +76441,14 @@ fn cmd_appstore(args: &str) {
         }
         "update" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match appstore::update_app(id) {
-                        Ok(()) => shell_println!("Updated app {}.", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
+                let Some(id) = readable_num::<u32>(id_str, "store", sub, "app id") else {
+                    return;
+                };
+                match appstore::update_app(id) {
+                    Ok(()) => shell_println!("Updated app {}.", id),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -76493,13 +76549,14 @@ fn cmd_appstore(args: &str) {
         }
         "rm" | "remove" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match appstore::remove_app(id) {
-                        Ok(()) => shell_println!("Removed app {}.", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
+                let Some(id) = readable_num::<u32>(id_str, "store", sub, "app id") else {
+                    return;
+                };
+                match appstore::remove_app(id) {
+                    Ok(()) => shell_println!("Removed app {}.", id),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -77380,13 +77437,14 @@ fn cmd_quicksettings(args: &str) {
         }
         "toggle" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match quicksettings::toggle(id) {
-                        Ok(on) => shell_println!("Toggled → {}", if on { "On" } else { "Off" }),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
+                let Some(id) = readable_num::<u32>(id_str, "qs", sub, "tile id") else {
+                    return;
+                };
+                match quicksettings::toggle(id) {
+                    Ok(on) => shell_println!("Toggled → {}", if on { "On" } else { "Off" }),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -77395,24 +77453,23 @@ fn cmd_quicksettings(args: &str) {
             }
         }
         "set" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let val = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: qs set <tile_id> <value>");
-                set_exit(1);
-            } else {
-                match quicksettings::set_value(id, val) {
-                    Ok(()) => shell_println!("Set to {}%", val),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            // Both operands were guessed as `0`, and the id's guess was then
+            // *reused as the sentinel* for "absent" -- so `qs set abc 50` and
+            // `qs set` printed the same usage line, and `qs set 3 xyz` set the
+            // tile to **0%** while reporting "Set to 0%" as if that were the
+            // value asked for. Tile 0 was also unreachable, since a real id of
+            // zero was indistinguishable from the missing case.
+            let Some(id) = required_num::<u32>(&parts, 1, "qs", sub, "tile id") else {
+                return;
+            };
+            let Some(val) = required_num::<u32>(&parts, 2, "qs", sub, "value") else {
+                return;
+            };
+            match quicksettings::set_value(id, val) {
+                Ok(()) => shell_println!("Set to {}%", val),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -77439,9 +77496,15 @@ fn cmd_quicksettings(args: &str) {
         }
         "rm" | "remove" => {
             if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    quicksettings::remove_tile(id).ok();
-                    shell_println!("Removed tile {}.", id);
+                let Some(id) = readable_num::<u32>(id_str, "qs", sub, "tile id") else {
+                    return;
+                };
+                match quicksettings::remove_tile(id) {
+                    Ok(()) => shell_println!("Removed tile {}.", id),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: qs rm <id>");
@@ -114906,41 +114969,99 @@ fn cmd_container(args: &str) {
                 let mut cfg = container::ContainerConfig::new(name);
 
                 // Parse key=value options from remaining args.
+                //
+                // Every one of these arms used to drop an unreadable value on
+                // the floor and carry on, so `container create web cpu=abc`
+                // created `web` with **no CPU quota at all** and announced
+                // "Created container 'web' (id=3)". A resource limit is the
+                // worst place in the file for that: the silently-substituted
+                // value is the *absence* of the limit the operator asked for,
+                // and the report of success is indistinguishable from one where
+                // the limit was applied. Refuse instead, before creating
+                // anything -- an unreadable option means the container the
+                // operator described is not the container that would be built.
                 for &arg in parts.iter().skip(2) {
                     if let Some(val) = arg.strip_prefix("cpu=") {
-                        if let Ok(cpu) = val.parse::<u64>() {
-                            cfg.cpu_quota = cpu;
-                        }
+                        let Some(cpu) =
+                            readable_num::<u64>(val, "container", "create", "CPU quota")
+                        else {
+                            return;
+                        };
+                        cfg.cpu_quota = cpu;
                     } else if let Some(val) = arg.strip_prefix("mem=") {
-                        if let Ok(mem) = val.parse::<u64>() {
-                            cfg.mem_limit = mem;
-                        }
+                        let Some(mem) =
+                            readable_num::<u64>(val, "container", "create", "memory limit")
+                        else {
+                            return;
+                        };
+                        cfg.mem_limit = mem;
                     } else if let Some(val) = arg.strip_prefix("uid=") {
                         let uid_parts: alloc::vec::Vec<&str> = val.split(':').collect();
-                        if uid_parts.len() == 3 {
-                            if let (Ok(inner), Ok(outer), Ok(count)) = (
-                                uid_parts[0].parse::<u32>(),
-                                uid_parts[1].parse::<u32>(),
-                                uid_parts[2].parse::<u32>(),
-                            ) {
-                                cfg = cfg.uid_map(inner, outer, count);
-                            }
-                        }
+                        let [inner_s, outer_s, count_s] = uid_parts[..] else {
+                            shell_println!(
+                                "container: create: `{}' is not a uid map (expected \
+                                 inner:outer:count)",
+                                val
+                            );
+                            set_exit(1);
+                            return;
+                        };
+                        let Some(inner) =
+                            readable_num::<u32>(inner_s, "container", "create", "inner uid")
+                        else {
+                            return;
+                        };
+                        let Some(outer) =
+                            readable_num::<u32>(outer_s, "container", "create", "outer uid")
+                        else {
+                            return;
+                        };
+                        let Some(count) =
+                            readable_num::<u32>(count_s, "container", "create", "uid range length")
+                        else {
+                            return;
+                        };
+                        cfg = cfg.uid_map(inner, outer, count);
                     } else if let Some(val) = arg.strip_prefix("net=") {
                         // net=10.88.0.2 or net=10.88.0.2,gw=10.88.0.1,dns=8.8.8.8
                         let net_parts: alloc::vec::Vec<&str> = val.split(',').collect();
-                        if let Some(ip) =
-                            parse_ipv4_octets(net_parts.first().copied().unwrap_or(""))
-                        {
-                            cfg.net_ip = Some(ip);
-                            cfg.net_mask = Some([255, 255, 255, 0]); // default /24
-                            for &part in net_parts.iter().skip(1) {
+                        let addr = net_parts.first().copied().unwrap_or("");
+                        let Some(ip) = parse_ipv4_octets(addr) else {
+                            shell_println!("container: create: `{}' is not an IPv4 address", addr);
+                            set_exit(1);
+                            return;
+                        };
+                        cfg.net_ip = Some(ip);
+                        cfg.net_mask = Some([255, 255, 255, 0]); // default /24
+                        for &part in net_parts.iter().skip(1) {
+                            // `gw=`/`dns=` were assigned straight from
+                            // `parse_ipv4_octets`, so an unreadable one set the
+                            // field back to `None` -- a typo in the gateway did
+                            // not merely fail to take effect, it *removed* the
+                            // gateway, and said nothing.
+                            let (field, word): (&mut Option<[u8; 4]>, &str) =
                                 if let Some(gw) = part.strip_prefix("gw=") {
-                                    cfg.net_gateway = parse_ipv4_octets(gw);
+                                    (&mut cfg.net_gateway, gw)
                                 } else if let Some(dns) = part.strip_prefix("dns=") {
-                                    cfg.net_dns = parse_ipv4_octets(dns);
-                                }
-                            }
+                                    (&mut cfg.net_dns, dns)
+                                } else {
+                                    shell_println!(
+                                        "container: create: `{}' is not a net= option (expected \
+                                         gw= or dns=)",
+                                        part
+                                    );
+                                    set_exit(1);
+                                    return;
+                                };
+                            let Some(parsed) = parse_ipv4_octets(word) else {
+                                shell_println!(
+                                    "container: create: `{}' is not an IPv4 address",
+                                    word
+                                );
+                                set_exit(1);
+                                return;
+                            };
+                            *field = Some(parsed);
                         }
                     } else if let Some(val) = arg.strip_prefix("restart=") {
                         // restart=no|always|unless-stopped|on-failure[:N] (Docker
@@ -114961,13 +115082,19 @@ fn cmd_container(args: &str) {
                     } else {
                         // Legacy positional: arg2=cpu, arg3=mem, arg4=uid
                         if parts.get(2) == Some(&arg) {
-                            if let Ok(cpu) = arg.parse::<u64>() {
-                                cfg.cpu_quota = cpu;
-                            }
+                            let Some(cpu) =
+                                readable_num::<u64>(arg, "container", "create", "CPU quota")
+                            else {
+                                return;
+                            };
+                            cfg.cpu_quota = cpu;
                         } else if parts.get(3) == Some(&arg) {
-                            if let Ok(mem) = arg.parse::<u64>() {
-                                cfg.mem_limit = mem;
-                            }
+                            let Some(mem) =
+                                readable_num::<u64>(arg, "container", "create", "memory limit")
+                            else {
+                                return;
+                            };
+                            cfg.mem_limit = mem;
                         }
                     }
                 }

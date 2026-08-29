@@ -5,6 +5,11 @@ edition = "2024"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window. Without it `main` built a `MazeApp`, dropped it and exited: no
+# maze ever reached a screen, no key ever arrived — which is how both key
+# handlers could swallow `pressed` and run every key twice, and how the
+# advertised timer could go the life of the process without ever ticking.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

@@ -14,6 +14,7 @@
 #     SLATE_ROOTFS    $SLATE_ROOT/rootfs.ext4   (may not exist yet)
 #     SLATE_ZIG       the pinned zig cross-toolchain; call slate_ensure_zig first
 #     SLATE_TMP       /tmp/slate-$SLATE_LANE    scratch, created; see below
+#     SLATE_WORK      ~/.cache/slateos/work/$SLATE_LANE   durable objects; see below
 #
 # ---------------------------------------------------------------------------
 # Why this file exists
@@ -168,6 +169,33 @@ SLATE_COREUTILS_TARBALL="$SLATE_ZIG_CACHE/coreutils-$SLATE_COREUTILS_VERSION.tar
 # than unlikely.
 SLATE_TMP="/tmp/slate-$SLATE_LANE"
 
+# Compiled objects, keyed by worktree — and deliberately NOT under /tmp.
+#
+# The four spikes (bash, pkgconf, make, CPython) each cross-compile a
+# third-party source tree once and then *relink* it against our own libc.a
+# every time that libc changes. `create-ext4-rootfs.sh` automates the relink:
+# `spike_rebuild_if_behind` runs the spike's script whenever its .elf is older
+# than the sysroot. That automation was built on object directories in /tmp,
+# and WSL wipes /tmp on every restart of the VM — so the recipe worked only
+# until the next reboot, at which point every one of the four rebuilds died
+# with "does not exist — objects have not been compiled yet" and the image
+# refused to repack. Observed 2026-08-27: WSL had been up 1 minute, /tmp held
+# nothing but the zig wrappers, and all four lanes were equally broken.
+#
+# Caching *compiled objects* across runs is safe here in a way it would not be
+# for our own code, and that is the whole reason this can be durable: the
+# objects are built from a pinned third-party tarball (version + sha256 above),
+# so the only input that moves is our libc.a — and libc.a is consumed by the
+# link step, not the compile step. A stale object here cannot encode a stale
+# libc.
+#
+# It lives beside the pinned tarballs in ~/.cache/slateos rather than in the
+# worktree's build/spike/ because a WSL build under /mnt/d goes through the 9p
+# translation layer and is many times slower; CPython and bash are large enough
+# for that to matter. Lane-keyed all the same: two lanes must never relink one
+# another's objects (see the §305 incident above).
+SLATE_WORK="${SLATE_WORK:-$SLATE_ZIG_CACHE/work/$SLATE_LANE}"
+
 # A sanity check, not decoration: if the derived root is wrong, every path
 # below it is wrong in the same direction, and the failure would otherwise
 # surface as a confusing "no such file" several steps later.
@@ -177,7 +205,19 @@ if [ ! -f "$SLATE_ROOT/CLAUDE.md" ] || [ ! -d "$SLATE_ROOT/kernel" ]; then
     return 1
 fi
 
-mkdir -p "$SLATE_SPIKE" "$SLATE_TMP" 2>/dev/null || true
+mkdir -p "$SLATE_SPIKE" "$SLATE_TMP" "$SLATE_WORK" 2>/dev/null || true
+
+# Move a spike's object directory from its old /tmp home to $SLATE_WORK the
+# first time a script asks for it, so a tree that still has objects from before
+# this change does not have to recompile from scratch. A no-op once migrated,
+# and a no-op if /tmp was already wiped (which is the case this exists for).
+slate_adopt_legacy_work() {
+    local legacy="$1" current="$2"
+    [ -d "$current" ] && return 0
+    [ -d "$legacy" ] || return 0
+    echo "worktree.sh: adopting $legacy -> $current (was scratch, now durable)" >&2
+    mv "$legacy" "$current" 2>/dev/null || return 0
+}
 
 # `$CC` must not contain spaces: autotools word-splits it, and this repo lives
 # under "D:\visual studio projects\", so pointing CC straight at a path under
@@ -320,7 +360,7 @@ slate_ensure_bash_src() {
 slate_ensure_pkgconf_src() {
     local name="pkgconf-$SLATE_PKGCONF_VERSION.tar.xz"
     local cand got
-    for cand in "/tmp/pkgconf-spike-$SLATE_LANE/$name" "$SLATE_SPIKE/$name"; do
+    for cand in "$SLATE_WORK/pkgconf-spike/$name" "/tmp/pkgconf-spike-$SLATE_LANE/$name" "$SLATE_SPIKE/$name"; do
         [ -f "$cand" ] || continue
         got="$(sha256sum "$cand" | cut -d' ' -f1)"
         if [ "$got" = "$SLATE_PKGCONF_SHA256" ]; then
@@ -366,7 +406,7 @@ slate_ensure_pkgconf_src() {
 slate_ensure_make_src() {
     local name="make-$SLATE_MAKE_VERSION.tar.gz"
     local cand got
-    for cand in "/tmp/make-spike-$SLATE_LANE/$name" "$SLATE_SPIKE/$name"; do
+    for cand in "$SLATE_WORK/make-spike/$name" "/tmp/make-spike-$SLATE_LANE/$name" "$SLATE_SPIKE/$name"; do
         [ -f "$cand" ] || continue
         got="$(sha256sum "$cand" | cut -d' ' -f1)"
         if [ "$got" = "$SLATE_MAKE_SHA256" ]; then
@@ -410,7 +450,7 @@ slate_ensure_make_src() {
 slate_ensure_coreutils_src() {
     local name="coreutils-$SLATE_COREUTILS_VERSION.tar.xz"
     local cand got
-    for cand in "/tmp/coreutils-spike-$SLATE_LANE/$name" "$SLATE_SPIKE/$name"; do
+    for cand in "$SLATE_WORK/coreutils-spike/$name" "/tmp/coreutils-spike-$SLATE_LANE/$name" "$SLATE_SPIKE/$name"; do
         [ -f "$cand" ] || continue
         got="$(sha256sum "$cand" | cut -d' ' -f1)"
         if [ "$got" = "$SLATE_COREUTILS_SHA256" ]; then

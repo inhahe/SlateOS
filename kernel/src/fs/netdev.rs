@@ -30,7 +30,7 @@
 //!    [`crate::net::poll`], for whichever NIC driver came up (virtio-net,
 //!    e1000 or rtl8139). Those counters are already relaxed atomics and
 //!    [`crate::net::interface::stats`] reads them. This module **projects**
-//!    that snapshot into a synthetic [`KERNEL_IFACE`] row whenever a reader
+//!    that snapshot into a synthetic [`NIC_IFACE`] row whenever a reader
 //!    asks, rather than having the frame path call in on every packet — see
 //!    below.
 //! 2. **Registered interfaces**, whose counters move only when something calls
@@ -47,24 +47,27 @@
 //! fed, and already say what a monitoring reader wanted. Joining them at *read*
 //! time costs nothing per frame and loses no information.
 //!
-//! **Why the projected row is called `kernel` and not `eth0`.** `netstat -i`
-//! labels the same counters `eth0`, so `eth0` would be the consistent name —
-//! but it would also be slightly false. `net::interface`'s counters are the
-//! *stack's* totals, not one NIC's: `net::veth::poll` records its virtual-pair
-//! traffic into the very same atomics, so on a kernel with containers running
-//! the number includes frames that never touched the wire. Naming the row after
-//! its source rather than after a device says exactly what is being reported,
-//! and leaves the name `eth0` free for a genuine per-NIC row if one is ever
-//! registered. (That conflation is `net::interface`'s to fix, not this
-//! module's; it is logged as
-//! `A-NET-INTERFACE-COUNTERS-CONFLATE-THE-NIC-WITH-EVERY-VETH-PAIR`.)
+//! **Why the projected row is called `eth0`.** It was called `kernel` until
+//! 2026-08-27, because `net::interface` kept one set of counters fed by both the
+//! NIC *and* `net::veth::poll`, so the number included frames that never touched
+//! the wire and naming the row after a device would have been false. That is
+//! fixed: `net::interface` now keeps a counter group per source, and
+//! [`nic_row`] projects [`crate::net::interface::Source::Nic`] — frames that
+//! genuinely crossed the wire and nothing else. The row can therefore carry the
+//! device's real name, matching `netstat -i`. Veth traffic is not lost; it is
+//! reported under its own source there.
+//!
+//! The name stays **reserved** against [`register_iface`] for the same reason it
+//! always was: two rows called `eth0` — one projected, one recorded — would make
+//! it impossible to tell which source a number came from. If a genuine per-NIC
+//! recorder is ever added it should replace this projection, not sit beside it.
 //!
 //! The projected row reports `speed_mbps` and `mtu` as zero, and `rx_errors`,
 //! `tx_drops` and `collisions` as zero, because `net::interface` genuinely
 //! tracks none of them — it has a transmit-error counter and a receive-drop
 //! counter and no others. Those zeros are the one place in this file where zero
 //! does not mean "measured zero"; if any of them is added to
-//! `net::interface`, extend [`kernel_row`] with it.
+//! `net::interface`, extend [`nic_row`] with it.
 
 #![allow(dead_code)]
 
@@ -155,13 +158,14 @@ where
 // Projection of the kernel's own network stack
 // ---------------------------------------------------------------------------
 
-/// Name of the synthetic row that reports [`crate::net::interface`]'s counters.
+/// Name of the synthetic row that reports the NIC's counters from
+/// [`crate::net::interface`].
 ///
 /// Reserved: [`register_iface`] refuses it, because a recorded row with this
 /// name would make the projected one ambiguous — a reader could not tell which
-/// of the two sources a number came from. See the module docs for why it is not
-/// called `eth0`.
-pub const KERNEL_IFACE: &str = "kernel";
+/// of the two sources a number came from. See the module docs for why it is
+/// called `eth0` and what it was called before.
+pub const NIC_IFACE: &str = "eth0";
 
 /// Project the network stack's live counters as an [`IfaceStats`] row, or
 /// `None` if the stack has not seen a single frame and the link is down.
@@ -179,21 +183,17 @@ pub const KERNEL_IFACE: &str = "kernel";
 /// this module, which is the whole reason this projection exists — but the
 /// readers below are written to avoid the nesting entirely rather than to rely
 /// on that staying true. `scripts/check-recursive-locks.py` is the live gate.
-fn kernel_row() -> Option<IfaceStats> {
+fn nic_row() -> Option<IfaceStats> {
     let up = crate::net::interface::is_up();
+    // The NIC's counter group specifically — `stats()` is defined as
+    // `stats_for(Source::Nic)`. Projecting the cross-source total here would
+    // put container-to-container frames in a row named after a device.
     let s = crate::net::interface::stats();
-    if !up
-        && s.rx_bytes == 0
-        && s.tx_bytes == 0
-        && s.rx_packets == 0
-        && s.tx_packets == 0
-        && s.tx_errors == 0
-        && s.rx_drops == 0
-    {
+    if !up && s.is_zero() {
         return None;
     }
     Some(IfaceStats {
-        name: String::from(KERNEL_IFACE),
+        name: String::from(NIC_IFACE),
         nic_type: NicType::Ethernet,
         link_up: up,
         // Not tracked by net::interface; see the module docs.
@@ -226,7 +226,7 @@ fn kernel_row() -> Option<IfaceStats> {
 /// fabricated numbers — the kernel's hard "never invent data in procfs" rule.
 ///
 /// "Empty" here means empty of *recorded* rows.  The readers additionally
-/// project the network stack's own counters as the [`KERNEL_IFACE`] row, which
+/// project the network stack's own counters as the [`NIC_IFACE`] row, which
 /// is not stored in this table at all and so is unaffected by initialisation or
 /// by the self-test's reset — see the module docs for why that is a projection
 /// and not a call on the frame path.
@@ -264,7 +264,7 @@ pub fn init_defaults() {
 /// (`nic_type`, `speed_mbps`, `mtu`); the link starts down with all traffic
 /// counters at zero.  Duplicate interface names return
 /// [`KernelError::AlreadyExists`]; exceeding [`MAX_IFACES`] returns
-/// [`KernelError::ResourceExhausted`].  [`KERNEL_IFACE`] is reserved for the
+/// [`KernelError::ResourceExhausted`].  [`NIC_IFACE`] is reserved for the
 /// projected network-stack row and is refused with
 /// [`KernelError::AlreadyExists`] too, because two rows of that name would make
 /// it impossible to tell projected traffic from recorded traffic.
@@ -274,7 +274,7 @@ pub fn register_iface(
     speed_mbps: u32,
     mtu: u32,
 ) -> KernelResult<()> {
-    if name == KERNEL_IFACE {
+    if name == NIC_IFACE {
         return Err(KernelError::AlreadyExists);
     }
     with_state(|state| {
@@ -386,13 +386,13 @@ pub fn set_link_state(iface: &str, up: bool) -> KernelResult<()> {
 /// List all interfaces.
 ///
 /// Registered interfaces first, in registration order, then the projected
-/// [`KERNEL_IFACE`] row if the network stack has come up or moved a frame.  The
+/// [`NIC_IFACE`] row if the network stack has come up or moved a frame.  The
 /// projected row is appended rather than prepended so that a caller holding an
 /// index into a previous result is not silently re-pointed at a different
 /// interface when the NIC comes up.
 pub fn list() -> Vec<IfaceStats> {
-    // Sampled before the lock: see `kernel_row`.
-    let kernel = kernel_row();
+    // Sampled before the lock: see `nic_row`.
+    let kernel = nic_row();
     let mut rows = STATE
         .lock()
         .as_ref()
@@ -405,11 +405,11 @@ pub fn list() -> Vec<IfaceStats> {
 
 /// Get specific interface.
 ///
-/// Answers for [`KERNEL_IFACE`] from the projection, so a caller that saw the
+/// Answers for [`NIC_IFACE`] from the projection, so a caller that saw the
 /// row in [`list`] can look it up by name and get the same thing.
 pub fn get(iface: &str) -> Option<IfaceStats> {
-    if iface == KERNEL_IFACE {
-        return kernel_row();
+    if iface == NIC_IFACE {
+        return nic_row();
     }
     STATE
         .lock()
@@ -425,8 +425,8 @@ pub fn get(iface: &str) -> Option<IfaceStats> {
 /// `ops` counts operations against *this* table and is deliberately not
 /// inflated by projection — nothing "operated" on it.
 pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
-    // Sampled before the lock: see `kernel_row`.
-    let kernel = kernel_row();
+    // Sampled before the lock: see `nic_row`.
+    let kernel = nic_row();
     let guard = STATE.lock();
     let (ifaces, rx, tx, errors, drops, ops) = match guard.as_ref() {
         Some(s) => (
@@ -486,6 +486,54 @@ fn recorded_totals() -> (usize, u64, u64, u64, u64) {
     })
 }
 
+/// Name of the *recorded* interface this self-test builds its fixtures on.
+///
+/// It must not be [`NIC_IFACE`], which is reserved for the projected row and
+/// refused by [`register_iface`]. It was literally `"eth0"` until 2026-08-27,
+/// when the projected row took that name over from `"kernel"` — and this rung
+/// found the collision by panicking on the refusal at case 2, which is exactly
+/// what a reserved name is supposed to do. Named for what it is instead: a
+/// fixture, not a device anyone has.
+const DEV: &str = "testnic0";
+
+/// Compile-time guard on the line above.
+///
+/// If [`DEV`] is ever set to [`NIC_IFACE`], `register_iface` refuses it and
+/// every run of this self-test panics at case 2 without having tested anything.
+/// That is not hypothetical — it is exactly what happened on 2026-08-27 when the
+/// projected row was renamed `kernel` → `eth0` while the fixture was still
+/// called `"eth0"`, and the only thing that caught it was a kernel panic
+/// eighteen minutes into a boot test. Two string constants in one file agreeing
+/// by accident deserves better than that, so it is a build error here instead.
+const _: () = assert!(
+    !const_str_eq(DEV, NIC_IFACE),
+    "netdev self-test fixture must not use the reserved NIC_IFACE name"
+);
+
+/// Byte-wise `&str` equality usable in a `const` context.
+///
+/// `str`'s `PartialEq` is not `const`, and this is only ever evaluated at
+/// compile time, so the loop's cost is nil.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "const context: an out-of-range index is a compile error, not a runtime panic, \
+              and the bound is checked immediately above"
+)]
+const fn const_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 pub fn self_test() {
     crate::serial_println!("netdev::self_test() — running tests...");
     // Begin from a clean, EMPTY table and build every fixture via the real API,
@@ -498,54 +546,59 @@ pub fn self_test() {
 
     // 1: Empty after init — no fabricated interfaces or counters; record on an
     // unregistered iface fails.  Asserted against the RECORDED table, not the
-    // public views: the projected `kernel` row is live and is present on any
+    // public views: the projected `eth0` row is live and is present on any
     // kernel whose NIC came up, so `list()` and `stats()` are legitimately
     // non-empty here and always will be.
     assert_eq!(recorded_len(), 0);
     assert_eq!(recorded_totals(), (0, 0, 0, 0, 0));
-    assert!(record_rx("eth0", 1, 1).is_err()); // no phantom iface exists yet
+    assert!(record_rx(DEV, 1, 1).is_err()); // no phantom iface exists yet
+    // The reserved name is refused on an EMPTY table, which is what makes it a
+    // reservation rather than ordinary duplicate detection: there is no row it
+    // could be colliding with. Case 9 re-checks it with a row present.
+    assert!(register_iface(NIC_IFACE, NicType::Ethernet, 1000, 1500).is_err());
+    assert_eq!(recorded_len(), 0); // the refusal did not add a row
     crate::serial_println!("  [1/9] empty init: OK");
 
     // 2: Register — zeroed counters, link down, params preserved; dup fails.
-    register_iface("eth0", NicType::Ethernet, 1000, 1500).expect("register");
-    let d = get("eth0").expect("get");
+    register_iface(DEV, NicType::Ethernet, 1000, 1500).expect("register");
+    let d = get(DEV).expect("get");
     assert_eq!(d.nic_type, NicType::Ethernet);
     assert_eq!((d.speed_mbps, d.mtu), (1000, 1500));
     assert!(!d.link_up);
     assert_eq!((d.rx_bytes, d.tx_bytes, d.rx_packets), (0, 0, 0));
-    assert!(register_iface("eth0", NicType::Ethernet, 1000, 1500).is_err());
+    assert!(register_iface(DEV, NicType::Ethernet, 1000, 1500).is_err());
     crate::serial_println!("  [2/9] register: OK");
 
     // 3: Record RX — bytes + packets accumulate; total_rx rises.
-    record_rx("eth0", 1500, 1).expect("rx");
-    record_rx("eth0", 500, 1).expect("rx2");
-    let d = get("eth0").expect("get");
+    record_rx(DEV, 1500, 1).expect("rx");
+    record_rx(DEV, 500, 1).expect("rx2");
+    let d = get(DEV).expect("get");
     assert_eq!(d.rx_bytes, 2000);
     assert_eq!(d.rx_packets, 2);
     crate::serial_println!("  [3/9] rx: OK");
 
     // 4: Record TX — independent counters.
-    record_tx("eth0", 1000, 1).expect("tx");
-    let d = get("eth0").expect("get");
+    record_tx(DEV, 1000, 1).expect("tx");
+    let d = get(DEV).expect("get");
     assert_eq!(d.tx_bytes, 1000);
     assert_eq!(d.tx_packets, 1);
     crate::serial_println!("  [4/9] tx: OK");
 
     // 5: Error/drop direction routing — rx vs tx counters update correctly.
-    record_error("eth0", true).expect("rx error");
-    record_error("eth0", false).expect("tx error");
-    record_drop("eth0", true).expect("rx drop");
-    record_drop("eth0", false).expect("tx drop");
-    let d = get("eth0").expect("get");
+    record_error(DEV, true).expect("rx error");
+    record_error(DEV, false).expect("tx error");
+    record_drop(DEV, true).expect("rx drop");
+    record_drop(DEV, false).expect("tx drop");
+    let d = get(DEV).expect("get");
     assert_eq!((d.rx_errors, d.tx_errors), (1, 1));
     assert_eq!((d.rx_drops, d.tx_drops), (1, 1));
     crate::serial_println!("  [5/9] error/drop: OK");
 
     // 6: Link state toggles.
-    set_link_state("eth0", true).expect("link_up");
-    assert!(get("eth0").expect("get").link_up);
-    set_link_state("eth0", false).expect("link_down");
-    assert!(!get("eth0").expect("get").link_up);
+    set_link_state(DEV, true).expect("link_up");
+    assert!(get(DEV).expect("get").link_up);
+    set_link_state(DEV, false).expect("link_down");
+    assert!(!get(DEV).expect("get").link_up);
     crate::serial_println!("  [6/9] link state: OK");
 
     // 7: Unknown iface → NotFound on every record/link path.
@@ -566,15 +619,15 @@ pub fn self_test() {
     assert!(rx >= 2000 && tx >= 1000 && errors >= 2 && drops >= 2);
     crate::serial_println!("  [8/9] stats: OK");
 
-    // 9: The projected `kernel` row — the whole point of this module now, and
+    // 9: The projected NIC row — the whole point of this module now, and
     // the rung that would have caught the defect it fixes.  The name is
     // reserved so a recorded row can never shadow it, and when the row is
     // present it must agree with its source rather than being a second,
     // separately-accumulated copy.
-    assert!(register_iface(KERNEL_IFACE, NicType::Ethernet, 1000, 1500).is_err());
+    assert!(register_iface(NIC_IFACE, NicType::Ethernet, 1000, 1500).is_err());
     assert_eq!(recorded_len(), 1); // the refusal did not add a row
     let before = crate::net::interface::stats();
-    match get(KERNEL_IFACE) {
+    match get(NIC_IFACE) {
         Some(k) => {
             // Sampled after `before`, so it can only have advanced.  Comparing
             // with `>=` rather than `==` is the difference between a test and a
@@ -583,9 +636,9 @@ pub fn self_test() {
             assert!(k.tx_bytes >= before.tx_bytes);
             assert!(k.rx_packets >= before.rx_packets);
             assert!(k.tx_packets >= before.tx_packets);
-            assert!(list().iter().any(|i| i.name == KERNEL_IFACE));
+            assert!(list().iter().any(|i| i.name == NIC_IFACE));
             crate::serial_println!(
-                "  [9/9] projection: OK (kernel iface: rx {} B/{} pkt, tx {} B/{} pkt, link {})",
+                "  [9/9] projection: OK (nic iface: rx {} B/{} pkt, tx {} B/{} pkt, link {})",
                 k.rx_bytes,
                 k.rx_packets,
                 k.tx_bytes,
@@ -596,8 +649,8 @@ pub fn self_test() {
         None => {
             // No NIC and not a frame moved — legitimate under QEMU with `-net
             // none`.  The row is absent rather than a row of zeros, which is
-            // the behaviour `kernel_row` exists to give.
-            assert!(!list().iter().any(|i| i.name == KERNEL_IFACE));
+            // the behaviour `nic_row` exists to give.
+            assert!(!list().iter().any(|i| i.name == NIC_IFACE));
             crate::serial_println!("  [9/9] projection: OK (no NIC, row absent)");
         }
     }
@@ -609,7 +662,7 @@ pub fn self_test() {
     // not let statistics fail a real operation.  known-issues.md:
     // A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT.
     //
-    // /proc/netdev keeps reporting the `kernel` row across this reset: it is
+    // /proc/netdev keeps reporting the `eth0` row across this reset: it is
     // projected from net::interface at read time, not stored here, so there is
     // nothing in it for the wipe to take away.
     *STATE.lock() = None;

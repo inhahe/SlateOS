@@ -2209,6 +2209,7 @@ name = "connect4"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -2879,6 +2880,7 @@ name = "dictionary"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -4358,6 +4360,7 @@ name = "game2048"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -6594,6 +6597,7 @@ name = "life"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -7140,6 +7144,7 @@ name = "magnifier"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -7403,6 +7408,7 @@ name = "maze"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -7542,6 +7548,7 @@ name = "memory"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -7686,6 +7693,7 @@ name = "minesweeper"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
  "randrange",
 ]
 
@@ -7760,6 +7768,7 @@ name = "mixer"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -8391,6 +8400,7 @@ name = "nim"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -9581,6 +9591,7 @@ name = "pipes"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -11629,6 +11640,7 @@ name = "sliding"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
  "randrange",
 ]
 
@@ -12354,6 +12366,8 @@ name = "sudoku"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
+ "randrange",
 ]
 
 [[package]]
@@ -12936,6 +12950,7 @@ name = "tictactoe"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -13116,6 +13131,7 @@ name = "towers"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -14269,6 +14285,7 @@ name = "wordsearch"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
  "randrange",
 ]
 

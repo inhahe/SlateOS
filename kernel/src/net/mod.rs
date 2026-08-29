@@ -107,9 +107,9 @@ pub fn poll() {
             match frame {
                 Some(data) => {
                     pcap::capture_rx(&data);
-                    interface::record_rx(data.len());
+                    interface::record_rx(interface::Source::Nic, data.len());
                     if let Err(e) = ethernet::process_frame(&data, crate::netns::ROOT_NS) {
-                        interface::record_rx_drop();
+                        interface::record_rx_drop(interface::Source::Nic);
                         crate::serial_println!("[net] Error processing frame: {:?}", e);
                     }
                 }
@@ -198,7 +198,10 @@ pub fn send_frame_ns(ns_id: crate::netns::NetNsId, frame: &[u8]) -> KernelResult
         if let Some((pair, end)) = veth::find_endpoint_for_ns(ns_id) {
             pcap::capture_tx(frame);
             veth::send(pair, end, frame.to_vec())?;
-            interface::record_tx(frame.len());
+            // Counted against the veth aggregate, not the NIC: this frame was
+            // handed to a virtual pair and will be drained by the peer
+            // namespace. No card ever sees it.
+            interface::record_tx(interface::Source::Veth, frame.len());
             return Ok(());
         }
     }
@@ -215,18 +218,18 @@ pub fn send_frame(frame: &[u8]) -> KernelResult<()> {
     // Try virtio-net first.
     if let Some(result) = crate::virtio::net::with_device(|dev| dev.send(frame)) {
         if result.is_ok() {
-            interface::record_tx(frame.len());
+            interface::record_tx(interface::Source::Nic, frame.len());
         } else {
-            interface::record_tx_error();
+            interface::record_tx_error(interface::Source::Nic);
         }
         return result;
     }
     // Fall back to e1000.
     if let Some(result) = crate::e1000::with_device(|dev| dev.send(frame)) {
         if result.is_ok() {
-            interface::record_tx(frame.len());
+            interface::record_tx(interface::Source::Nic, frame.len());
         } else {
-            interface::record_tx_error();
+            interface::record_tx_error(interface::Source::Nic);
         }
         return result;
     }
@@ -234,9 +237,9 @@ pub fn send_frame(frame: &[u8]) -> KernelResult<()> {
     if crate::rtl8139::with_device(|_| ()).is_some() {
         let result = crate::rtl8139::send(frame);
         if result.is_ok() {
-            interface::record_tx(frame.len());
+            interface::record_tx(interface::Source::Nic, frame.len());
         } else {
-            interface::record_tx_error();
+            interface::record_tx_error(interface::Source::Nic);
         }
         return result;
     }
@@ -280,17 +283,22 @@ pub fn self_test() -> KernelResult<()> {
         crate::serial_println!("[net]   No network interface (non-fatal)");
     }
 
-    // Interface traffic statistics.
-    let stats = interface::stats();
-    crate::serial_println!(
-        "[net]   Traffic: TX {}/{} pkts, RX {}/{} pkts, {} TX errors, {} RX drops",
-        stats.tx_bytes,
-        stats.tx_packets,
-        stats.rx_bytes,
-        stats.rx_packets,
-        stats.tx_errors,
-        stats.rx_drops,
-    );
+    // Traffic statistics, one line per counter source. Printing a single merged
+    // line here would say "the NIC is busy" on a machine whose only traffic was
+    // between two of its own containers — see net::interface::Source.
+    for src in interface::Source::ALL {
+        let stats = interface::stats_for(src);
+        crate::serial_println!(
+            "[net]   Traffic ({}): TX {}/{} pkts, RX {}/{} pkts, {} TX errors, {} RX drops",
+            src.name(),
+            stats.tx_bytes,
+            stats.tx_packets,
+            stats.rx_bytes,
+            stats.rx_packets,
+            stats.tx_errors,
+            stats.rx_drops,
+        );
+    }
 
     // TCP state summary.
     let tcp_stats = tcp::stats();

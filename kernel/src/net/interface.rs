@@ -457,46 +457,164 @@ pub fn ns_mac(ns_id: crate::netns::NetNsId) -> MacAddress {
 }
 
 // ---------------------------------------------------------------------------
-// Interface statistics (lock-free atomic counters)
+// Interface statistics (lock-free atomic counters, one group per source)
 // ---------------------------------------------------------------------------
+//
+// There is more than one thing in this kernel that moves Ethernet frames, and
+// only one of them is a network card. `net::send_frame`/`net::poll` drive the
+// real NIC (virtio-net, e1000 or rtl8139); `net::veth::poll` drains virtual
+// pairs, whose frames cross between two network namespaces on this machine and
+// never reach the wire at all.
+//
+// Until 2026-08-27 both fed one set of six atomics, which `netstat -i` then
+// printed under the heading `eth0`. A machine busy only between its own
+// containers therefore reported a busy *NIC*, and nothing in the output let a
+// reader separate the two — the number was not wrong so much as unattributable,
+// which is worse, because it looks authoritative. (`fs::netdev` worked around
+// it by refusing to call its projected row `eth0`; see that module's docs.)
+//
+// The fix is one counter group per source, chosen by the caller. A fixed array
+// of groups, indexed by a `Source` discriminant, keeps the hot path exactly what
+// it was — a relaxed `fetch_add` on a static — with no lock, no allocation and
+// no lookup. A keyed map would have put a spin lock and a name comparison on the
+// path of every single frame, which is precisely the cost `fs::netdev` avoids by
+// projecting at read time instead of recording per packet.
+//
+// `Source` is an argument rather than a defaulted flag on purpose: every
+// recorder must name where its frames came from, so a new frame path cannot be
+// added later without someone deciding which column it belongs in.
 
-/// Total bytes sent (Ethernet frame payload, excluding Ethernet header).
-static TX_BYTES: AtomicU64 = AtomicU64::new(0);
-/// Total bytes received.
-static RX_BYTES: AtomicU64 = AtomicU64::new(0);
-/// Total frames sent.
-static TX_PACKETS: AtomicU64 = AtomicU64::new(0);
-/// Total frames received.
-static RX_PACKETS: AtomicU64 = AtomicU64::new(0);
-/// Total send errors.
-static TX_ERRORS: AtomicU64 = AtomicU64::new(0);
-/// Total frames dropped (invalid, too short, etc.).
-static RX_DROPS: AtomicU64 = AtomicU64::new(0);
-
-/// Record a successful frame transmission.
-pub fn record_tx(bytes: usize) {
-    TX_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-    TX_PACKETS.fetch_add(1, Ordering::Relaxed);
+/// Where the frames counted by a group came from.
+///
+/// Used to key [`record_tx`]/[`record_rx`] and friends so that traffic which
+/// never left the machine is not reported as NIC traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// The physical (or paravirtual) network card — frames that actually
+    /// crossed the wire, via `net::send_frame` and `net::poll`.
+    Nic,
+    /// Virtual Ethernet pairs — frames moved between two network namespaces on
+    /// this machine by `net::veth::poll`. Real traffic, but never on the wire.
+    Veth,
 }
 
-/// Record a failed frame transmission.
-pub fn record_tx_error() {
-    TX_ERRORS.fetch_add(1, Ordering::Relaxed);
+impl Source {
+    /// Every source, in report order. Readers iterate this so that adding a
+    /// variant adds a row everywhere without touching the readers.
+    pub const ALL: [Source; 2] = [Source::Nic, Source::Veth];
+
+    /// Short name used as the row label in `netstat -i` and `/proc/netdev`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Source::Nic => "eth0",
+            Source::Veth => "veth",
+        }
+    }
 }
 
-/// Record a successful frame reception.
-pub fn record_rx(bytes: usize) {
-    RX_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-    RX_PACKETS.fetch_add(1, Ordering::Relaxed);
+/// One source's six traffic counters.
+struct CounterGroup {
+    /// Bytes sent (Ethernet frame payload, excluding Ethernet header).
+    tx_bytes: AtomicU64,
+    /// Frames sent.
+    tx_packets: AtomicU64,
+    /// Send errors.
+    tx_errors: AtomicU64,
+    /// Bytes received.
+    rx_bytes: AtomicU64,
+    /// Frames received.
+    rx_packets: AtomicU64,
+    /// Frames dropped (invalid, too short, unprocessable).
+    rx_drops: AtomicU64,
 }
 
-/// Record a dropped incoming frame.
-pub fn record_rx_drop() {
-    RX_DROPS.fetch_add(1, Ordering::Relaxed);
+impl CounterGroup {
+    const fn new() -> Self {
+        Self {
+            tx_bytes: AtomicU64::new(0),
+            tx_packets: AtomicU64::new(0),
+            tx_errors: AtomicU64::new(0),
+            rx_bytes: AtomicU64::new(0),
+            rx_packets: AtomicU64::new(0),
+            rx_drops: AtomicU64::new(0),
+        }
+    }
+
+    fn record_tx(&self, bytes: usize) {
+        self.tx_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.tx_packets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_tx_error(&self) {
+        self.tx_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_rx(&self, bytes: usize) {
+        self.rx_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.rx_packets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_rx_drop(&self) {
+        self.rx_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> InterfaceStats {
+        InterfaceStats {
+            tx_bytes: self.tx_bytes.load(Ordering::Relaxed),
+            tx_packets: self.tx_packets.load(Ordering::Relaxed),
+            tx_errors: self.tx_errors.load(Ordering::Relaxed),
+            rx_bytes: self.rx_bytes.load(Ordering::Relaxed),
+            rx_packets: self.rx_packets.load(Ordering::Relaxed),
+            rx_drops: self.rx_drops.load(Ordering::Relaxed),
+        }
+    }
 }
 
-/// Snapshot of interface traffic statistics.
-#[derive(Debug, Clone, Copy)]
+/// The NIC's counters — frames that crossed the wire.
+static NIC_COUNTERS: CounterGroup = CounterGroup::new();
+/// The veth aggregate's counters — frames that moved between namespaces.
+///
+/// One group for all pairs rather than one per endpoint: `net::veth` already
+/// keeps exact per-endpoint byte and frame counts in its own `VethEndStats`, so
+/// a second per-endpoint copy here would be a second thing to keep in step for
+/// no new information. What was missing at *this* level was only the split
+/// between wire and not-wire.
+static VETH_COUNTERS: CounterGroup = CounterGroup::new();
+
+/// The counter group a source writes to and [`stats_for`] reads back.
+///
+/// A `match` rather than an indexed array so that adding a [`Source`] variant is
+/// a compile error here until its storage exists — and so the frame path has no
+/// bounds check and no unreachable fallback branch.
+const fn group(src: Source) -> &'static CounterGroup {
+    match src {
+        Source::Nic => &NIC_COUNTERS,
+        Source::Veth => &VETH_COUNTERS,
+    }
+}
+
+/// Record a successful frame transmission by `src`.
+pub fn record_tx(src: Source, bytes: usize) {
+    group(src).record_tx(bytes);
+}
+
+/// Record a failed frame transmission by `src`.
+pub fn record_tx_error(src: Source) {
+    group(src).record_tx_error();
+}
+
+/// Record a successful frame reception by `src`.
+pub fn record_rx(src: Source, bytes: usize) {
+    group(src).record_rx(bytes);
+}
+
+/// Record an incoming frame from `src` that could not be processed.
+pub fn record_rx_drop(src: Source) {
+    group(src).record_rx_drop();
+}
+
+/// Snapshot of one source's traffic statistics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InterfaceStats {
     /// Total bytes transmitted.
     pub tx_bytes: u64,
@@ -512,20 +630,74 @@ pub struct InterfaceStats {
     pub rx_drops: u64,
 }
 
-/// Return a snapshot of interface traffic statistics.
+impl InterfaceStats {
+    /// All counters zero — nothing has been recorded for this source yet.
+    pub const ZERO: Self = Self {
+        tx_bytes: 0,
+        tx_packets: 0,
+        tx_errors: 0,
+        rx_bytes: 0,
+        rx_packets: 0,
+        rx_drops: 0,
+    };
+
+    /// Componentwise sum, used to build the cross-source total.
+    ///
+    /// Saturating rather than wrapping: these are 64-bit frame counters, so an
+    /// overflow is not reachable in practice, but a wrap would print a total
+    /// smaller than one of its own rows, which is the one failure a reader
+    /// could not diagnose.
+    #[must_use]
+    pub const fn plus(self, other: Self) -> Self {
+        Self {
+            tx_bytes: self.tx_bytes.saturating_add(other.tx_bytes),
+            tx_packets: self.tx_packets.saturating_add(other.tx_packets),
+            tx_errors: self.tx_errors.saturating_add(other.tx_errors),
+            rx_bytes: self.rx_bytes.saturating_add(other.rx_bytes),
+            rx_packets: self.rx_packets.saturating_add(other.rx_packets),
+            rx_drops: self.rx_drops.saturating_add(other.rx_drops),
+        }
+    }
+
+    /// Whether every counter is still zero.
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        *self == Self::ZERO
+    }
+}
+
+/// Return a snapshot of one source's traffic statistics.
 ///
 /// Counters are monotonically increasing and never reset (except on
 /// reboot).  Use the difference between two snapshots to compute
 /// per-interval rates.
+pub fn stats_for(src: Source) -> InterfaceStats {
+    group(src).snapshot()
+}
+
+/// Return a snapshot of **the NIC's** traffic statistics.
+///
+/// This is the number that belongs under an `eth0` heading: it counts only
+/// frames that went out through, or arrived from, the network card. Container
+/// traffic on a veth pair is *not* included — ask [`stats_for`] with
+/// [`Source::Veth`] for that, or [`stats_total`] for everything the stack moved.
 pub fn stats() -> InterfaceStats {
-    InterfaceStats {
-        tx_bytes: TX_BYTES.load(Ordering::Relaxed),
-        tx_packets: TX_PACKETS.load(Ordering::Relaxed),
-        tx_errors: TX_ERRORS.load(Ordering::Relaxed),
-        rx_bytes: RX_BYTES.load(Ordering::Relaxed),
-        rx_packets: RX_PACKETS.load(Ordering::Relaxed),
-        rx_drops: RX_DROPS.load(Ordering::Relaxed),
+    stats_for(Source::Nic)
+}
+
+/// Return the componentwise sum across every [`Source`].
+///
+/// This is the right number for stack-level reporting (`netstat -s`'s IP
+/// section, for instance): a frame drained from a veth pair is handed to
+/// `ethernet::process_frame` exactly like one off the wire, so it is genuinely
+/// a packet the IP layer received. It is the *wire* attribution, not the
+/// processing, that veth traffic does not have.
+pub fn stats_total() -> InterfaceStats {
+    let mut total = InterfaceStats::ZERO;
+    for src in Source::ALL {
+        total = total.plus(stats_for(src));
     }
+    total
 }
 
 // ---------------------------------------------------------------------------
@@ -543,8 +715,101 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     test_ipv4_same_subnet()?;
     test_interface_info_default()?;
     test_write_primitives()?;
+    test_counter_sources()?;
 
-    crate::serial_println!("[interface] Self-test PASSED (6 tests)");
+    crate::serial_println!("[interface] Self-test PASSED (7 tests)");
+    Ok(())
+}
+
+/// Test that traffic counters are kept per source and combined only on request.
+///
+/// **Why this does not record into the live counters.** The obvious test —
+/// `record_rx(Source::Veth, 100)`, then check the NIC group did not move — would
+/// leave 100 bytes of traffic that never happened permanently visible in
+/// `netstat -i` and `/proc/netdev`. Those readers exist to report measured
+/// traffic, and the counters are monotonic by contract, so there is no honest
+/// way to take it back afterwards; `test_write_primitives` above can mutate the
+/// live config only because it can restore it. So this exercises the same
+/// `CounterGroup` methods the statics run, on a local group, and separately
+/// checks that the two live groups really are distinct storage and that the
+/// total is their sum.
+fn test_counter_sources() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    // 1. The arithmetic, on a local group — same code path the statics use.
+    let g = CounterGroup::new();
+    if !g.snapshot().is_zero() {
+        crate::serial_println!("[interface]   FAIL: a fresh counter group is not zero");
+        return Err(KernelError::InternalError);
+    }
+    g.record_rx(100);
+    g.record_rx(40);
+    g.record_rx_drop();
+    g.record_tx(60);
+    g.record_tx_error();
+    let s = g.snapshot();
+    if s.rx_bytes != 140 || s.rx_packets != 2 || s.rx_drops != 1 {
+        crate::serial_println!(
+            "[interface]   FAIL: rx counters = {} B / {} pkts / {} drops",
+            s.rx_bytes,
+            s.rx_packets,
+            s.rx_drops
+        );
+        return Err(KernelError::InternalError);
+    }
+    if s.tx_bytes != 60 || s.tx_packets != 1 || s.tx_errors != 1 {
+        crate::serial_println!(
+            "[interface]   FAIL: tx counters = {} B / {} pkts / {} errors",
+            s.tx_bytes,
+            s.tx_packets,
+            s.tx_errors
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 2. Every source maps to its own storage. If two variants shared a group,
+    //    veth traffic would land in the NIC's column again and the split would
+    //    be cosmetic.
+    for (i, a) in Source::ALL.iter().enumerate() {
+        for b in Source::ALL.iter().skip(i.saturating_add(1)) {
+            if core::ptr::eq(group(*a), group(*b)) {
+                crate::serial_println!(
+                    "[interface]   FAIL: {} and {} share one counter group",
+                    a.name(),
+                    b.name()
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    // 3. `stats()` is the NIC's column, not the total, and the total is exactly
+    //    the sum of the columns. Read once so a frame arriving mid-test cannot
+    //    make a correct implementation look wrong.
+    let nic = stats_for(Source::Nic);
+    let veth = stats_for(Source::Veth);
+    let total = stats_total();
+    if stats() != nic {
+        crate::serial_println!("[interface]   FAIL: stats() is not the NIC group");
+        return Err(KernelError::InternalError);
+    }
+    let expected = nic.plus(veth);
+    if total.rx_packets < expected.rx_packets || total.tx_packets < expected.tx_packets {
+        crate::serial_println!(
+            "[interface]   FAIL: total ({} rx / {} tx pkts) is below its own rows ({} / {})",
+            total.rx_packets,
+            total.tx_packets,
+            expected.rx_packets,
+            expected.tx_packets
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!(
+        "[interface]   counter sources (nic {} rx pkts, veth {} rx pkts): OK",
+        nic.rx_packets,
+        veth.rx_packets
+    );
     Ok(())
 }
 

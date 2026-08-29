@@ -27,7 +27,8 @@ set -uo pipefail
 VER="${CPYTHON_VER:-3.12.3}"
 MINOR="${VER%.*}"          # 3.12
 TAG="${MINOR/./}"          # 312
-WORK="/tmp/cpython-spike-$SLATE_LANE"
+WORK="$SLATE_WORK/cpython-spike"
+slate_adopt_legacy_work "/tmp/cpython-spike-$SLATE_LANE" "$WORK"
 BUILD="$WORK/Python-$VER"
 SRC="$WORK/zipsrc"
 ISO="$WORK/ziproot"

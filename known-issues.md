@@ -80699,6 +80699,57 @@ tree and reporting "clean" — arrived at from the opposite direction: not a
 gate that stopped reading the files, but a gate that read them and was talked
 out of its finding by the evidence of its own success.
 
+**Running tally (appended 2026-08-27, lane C).** The five above were the ones
+the gate and the hand search found in one afternoon. Two more have turned up
+since, both while wiring a simulation `main` to a real window, and neither was
+visible to `check-tick-wiring.py` — because an app with no `handle_event` at
+all fails the gate's first condition and is therefore never reported:
+
+| # | App | Symptom |
+|---|---|---|
+| 6 | `apps/maze` | The advertised "Timer tracking" never ticked: `elapsed_secs` was set to zero in two places, read only by `format_time`, and incremented nowhere — and `format_time` was itself never called by `render`, so even a working clock would not have reached the screen. |
+| 7 | `apps/magnifier` | No `tick_interval`, so the smoothing that `smooth_edges` promised could not have eased anything. The field was settable from the keyboard and changed nothing observable. |
+| 8 | `apps/life` | Conway's Game of Life could not advance one generation. `tick_accum`, `speed_ms` and the catch-up loop were all present and all correct; nothing ever handed them a millisecond. |
+| 9 | `apps/mixer` | The peak meters had no clock *and no notion of time*: `update_peak_meters()` took no elapsed argument at all, applying attack 0.6 / decay 0.15 / silence 0.85 **per call**. `main` called it ten times in a loop and exited. |
+
+**#9 is the mirror image of #8, and the pair is the point.** In `apps/life` the
+timekeeping was perfect and only the wire was missing; in `apps/mixer` the wire
+was missing *and* there was nothing at the far end of it to wire to — no
+elapsed-time parameter, no accumulator, no interval, so the ballistics were
+tied to whatever the frame rate happened to be. Both scored clean against
+`check-tick-wiring.py` for the same reason (no `handle_event` at all), and both
+survive a reading: nobody looking at `update_peak_meters()` asks what unit its
+`0.6` is *per*, because a rate with no denominator does not read as a rate at
+all. It reads as a smoothing constant, which is what it would have been if
+anything had been calling it at a fixed cadence. The fix is the same shape in
+both cases — `tick(&mut self, elapsed_ms: u64)` with a bank, a catch-up cap and
+a dropped (not banked) backlog — but only #8's could honestly be described as
+connecting up code that already existed.
+
+The addition to the lesson: **an unwired `main` hides an unwired clock.** The
+gate looks for an app that receives events and ignores the time one; an app
+that receives no events at all is a strictly worse case and scores clean. Any
+app still on the window-wiring backlog should be assumed to have this fault
+until its clock is checked, and the check belongs in the wiring work rather
+than in a separate sweep — which is how all three of these were found.
+
+**#8 is the sub-case worth naming separately: the timekeeping was already
+right.** In the first seven, the clock's absence and the timekeeping's quality
+were separate questions that happened to have the same answer — nobody had
+written the arm, and often nobody had written a correct `tick` either
+(`apps/metronome`'s tap tempo was an empty arm whose comment read "in a real
+app this would use system time"). `apps/life` is the case where every line of
+the time handling was correct, was covered, and would survive a reading, and
+the program was still a still photograph. That is worth stating because it is
+the version of this fault that gets through a code review: a reviewer looking
+at `tick_accum += elapsed_ms; while accum >= interval { step() }` finds
+nothing to object to, and the entire fault is one match arm that is not in the
+function being read. The only reading that catches it starts at the window and
+works inwards — *what does `oswindow` call, and does that path arrive here?* —
+which is the same direction the rule above already prescribes for tests
+("test a wiring through the entry point, not the target"), and it applies to
+reading code exactly as much as to testing it.
+
 ---
 
 ### Lesson 48: a gate must be measured on the tree it will gate, not the tree it was written on (lane A, 2026-08-25)
@@ -82606,6 +82657,11 @@ working at all.
 > becomes the same lockout as `set` the moment that enforcement is written,
 > which is the argument for refusing the word now rather than when it bites. See
 > `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.
+>
+> **That moment arrived 2026-08-27**, when the enforcement landed. The `files`
+> arm's guessed `0` is an active lockout now, and the refusals recorded here are
+> what stop it — a case of the burn-down paying off before the fault it
+> anticipated could bite anyone.
 
 > **Burn-down log.** 2026-08-26 (twentieth batch): `cmd_shmem` (7) cleared —
 > 522 → 515 across 223 → 222 functions. Pinned by `kshell::self_test` rung 88.
@@ -85553,7 +85609,7 @@ build rather than shipping.
 
 ---
 
-## `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED` (lane A, 2026-08-26) — **open**, tech debt
+## `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED` (lane A, 2026-08-26) — **FIXED 2026-08-27**, tech debt
 
 **In short:** `diskquota` can limit two things: how many *bytes* a user may
 store, and how many *files*. The byte half works. The file half is a prop —
@@ -85595,6 +85651,47 @@ moment the enforcement above is written. The `set` arm's guessed `0` is a live
 lockout today, because the byte path is real.
 
 **Not a regression.** True since `set_file_limits` was written.
+
+**Fixed 2026-08-27 (lane A), as the entry above prescribed.** The file half is
+now compared everywhere the byte half is:
+
+- `QuotaEntry::status()` returns the **worse** of the byte and file verdicts.
+  The two dimensions are scored by a shared `dimension_status` helper and
+  combined by severity rank, with `SoftExceeded` and `GracePeriod` ranking
+  equal and ties going to the byte verdict — so the file half can only ever
+  make a status *worse*, never merely different at the same tier. Every
+  existing `status()` reader (kshell's `get` and `list` arms) is therefore
+  unchanged unless the file count is genuinely the worse of the two.
+- `check_quota` takes a `files: u64` parameter and tests both limits in one
+  call under one lock acquisition. A separate `check_file_quota` was rejected:
+  two functions invite a caller to check one and forget the other, which is
+  exactly how this gap arose.
+- It returns `QuotaVerdict` (`Allowed` / `Warned{bytes,files}` /
+  `Denied{bytes,files}`) rather than `bool`. A denial that cannot say which
+  limit fired sends the user hunting for a large file to delete when their
+  problem is two hundred small ones, and the caller cannot reconstruct the
+  reason afterwards without a racy re-read.
+- The grace clock is driven by the **union** of the two soft limits
+  (`QuotaEntry::over_soft`). There is one `grace_start_ns` per entry, so
+  keying it on bytes alone would have cleared a grace period the file count
+  still justified the moment the user deleted a large file.
+- kshell's `check` arm gains an optional `[files]` argument, given the §607
+  treatment `update` already gives `[file_delta]`: absent means the honest
+  default (a write extending an existing file creates none), present-but-
+  unreadable is refused. Its output now names the limit that fired.
+- `diskquota::self_test()` grew from 8 cases to 14. The six new ones use an
+  entry with `u64::MAX` byte limits so every verdict is attributable to the
+  file half alone: allowed under both, warned over soft, **denied over hard**
+  (the regression the change exists for), grace started by the file count with
+  zero bytes used, `status()` reporting `HardExceeded` while the byte half is
+  `Ok`, and the grace clock clearing when the count drops back under.
+
+**The latent/active note above is now spent.** `cmd_diskquota`'s `files` arm
+guessed `0` is no longer latent — a hard file limit silently guessed as zero
+would deny the user's very next file. The `required_num` refusals in that arm
+already prevent it; they were written before the enforcement they now guard,
+and were verified against it rather than assumed. The comment at the site has
+been updated to say so.
 
 ---
 
@@ -85704,7 +85801,7 @@ be opened.
 
 ---
 
-## `A-IPCNS-RECORDS-ONLY-ACCUMULATE-AND-NOTHING-EVER-RELEASES` (lane A, 2026-08-26) — **open**
+## `A-IPCNS-RECORDS-ONLY-ACCUMULATE-AND-NOTHING-EVER-RELEASES` (lane A, 2026-08-26) — **FIXED 2026-08-27**
 
 **In short:** the IPC-namespace accounting can be told that a shared-memory
 segment, a semaphore set or a message queue was *created*, but there is no way
@@ -85750,7 +85847,7 @@ totals survive even that.
 ```
 ipcns init
 ipcns create demo          → id N
-ipcns shm N 1024
+ipcns shm N 1024           (`ipcns shm add N 1024` since the fix below)
 ipcns stats                → SHM: 1
 ipcns destroy N
 ipcns list                 → demo is gone
@@ -85773,6 +85870,43 @@ the caller to remember the size it passed in, and a caller that misremembers
 silently corrupts the total in the other direction. That is the same class of
 mistake this subsystem's parsing has just been cleaned of, so it should not be
 reintroduced in the API.
+
+### Fixed, 2026-08-27 — with two deliberate departures from the recipe above
+
+`release_shm(ns_id, bytes)`, `release_sem(ns_id, count)` and
+`release_msg(ns_id, bytes)` exist; `destroy_ns` subtracts the departing
+namespace's rows from the global totals; the shell reaches all three as
+`ipcns shm|sem|msg del <ns_id> <amount>`, with the matching `add` verb now
+required rather than implied. Reasoning is `design-decisions.md` §628. The
+reproduction above ends `SHM: 0` now, and `ipcns::self_test` grew from 8 cases
+to 10 to pin it. Two places where the fix is *not* what this entry prescribed,
+recorded because the entry is what a future reader will find first:
+
+- **Not `saturating_sub` — a release that does not fit is refused whole.**
+  This entry argued "an underflowing counter is a worse lie than a stale one",
+  which is true and is not the choice on offer. Each row has *two* counters —
+  a count of segments and the sum of their sizes — so clamping does not produce
+  a stale number, it produces an impossible one: release "8192 bytes" from a
+  namespace holding one 4096-byte segment and `saturating_sub` reports success
+  and leaves `shm=0(0 B)`, or, clamping only one column, `shm=0(4096 B)` — no
+  segments and 4096 bytes inside them. Both are plausible enough to survive
+  unexamined forever, because the call returned `Ok`. So both halves are
+  validated before either is written, and a release that would underflow either
+  returns `InvalidArgument` having changed nothing. `self_test` case 7 reads the
+  columns back after a refused release specifically so that a `saturating_sub`
+  implementation fails there rather than passing.
+
+- **`record_*` still takes a size, not an object identity.** The entry's worry
+  is real — the caller must remember what it recorded — but the fix would be to
+  make this module a registry of individual objects, which is a different
+  module: it would need an id space, a per-object table, and a lifetime story
+  for ids, to serve a subsystem that today exists only to *report* aggregates to
+  `/proc/ipcns`. The refusal above is what makes the current shape safe rather
+  than merely convenient: a caller that misremembers gets an error, not a
+  corrupted total, in every case except passing the size of a *different*
+  segment in the same namespace. If a real IPC implementation ever drives this
+  instead of the shell, revisit it then — that caller will have object
+  identities already, and will not have to invent them.
 
 **Not a regression.** True since the subsystem was written; the `record_*`
 functions have never had counterparts.
@@ -85987,11 +86121,12 @@ cannot be wrong and one that cannot be right, and the limit the user was asked
 for at `create` time influences neither.
 
 **Relation to `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.**
-That entry is the stricter version of this one — there the limit is stored and
+That entry is the stricter version of this one — there the limit was stored and
 never compared at all. Here the comparison happens; only its output is
 unreachable. The two share a cause worth naming: a limit operand is easy to
 accept and store, and the work of *acting* on it is a separate change that the
-shape of the code does not force anyone to make.
+shape of the code does not force anyone to make. (That entry was fixed
+2026-08-27; the shared cause it names is unaffected.)
 
 **Proper fix.** Add `high_events` to the `list` line and to `stats()`, so the
 comparison that already happens is visible. `swap_pages` needs the opposite
@@ -88231,7 +88366,99 @@ midnight, and it is now `the_clock_rolls_the_day_over_at_midnight`.
 
 ## `A-NET-INTERFACE-COUNTERS-CONFLATE-THE-NIC-WITH-EVERY-VETH-PAIR` (lane A, 2026-08-26)
 
-**Status:** OPEN
+**Status:** ✅ FIXED 2026-08-27 — `net::interface` now keeps one counter group
+per `Source` (`Nic`, `Veth`); every recorder names its source; `stats()` is the
+NIC's group; `stats_for`/`stats_total` expose the rest.
+
+**What landed, against the plan below:**
+
+| plan | landed |
+|---|---|
+| counter groups keyed by source | `enum Source { Nic, Veth }` + one `static CounterGroup` each, selected by a `match` in `group()`. Not an indexed array: the `match` makes a new variant a compile error until its storage exists, and leaves the frame path with no bounds check. |
+| each recorder names its source | `record_tx`/`record_tx_error`/`record_rx`/`record_rx_drop` all take `Source` as their first argument. Not a defaulted flag, so a new frame path cannot be added without someone deciding which column it belongs in. |
+| `stats()` returns the NIC's group | done; `stats_for(Source)` and `stats_total()` added beside it. |
+| `netstat -i` grows a row per source | done — the config block still describes the NIC, and the traffic block below it is now a table with one row per `Source::ALL` plus a `total` row, iterated so a new variant adds a row without touching the reader. |
+| `netdev::kernel_row` projects the NIC group, row renamed `eth0` | done — `nic_row`, `NIC_IFACE = "eth0"`. The name stays reserved against `register_iface` for the original reason: two rows called `eth0` would be worse than one badly-named one. |
+
+**Three things the plan did not anticipate.**
+
+1. **There was a third conflated site, and it was a *transmit*.**
+   `net::send_frame_ns` (`net/mod.rs:201`) calls `veth::send` and then recorded
+   the frame as NIC transmit. The entry below lists only `veth::poll`'s two
+   receive sites, because it was written from `veth.rs`. So the old `eth0` TX
+   column over-reported too, not just RX. Now `Source::Veth`.
+2. **`SYS_NET_STAT` (825) had to grow a selector rather than change meaning.**
+   Its 48-byte record has no source field, so making it return the NIC's group
+   would have silently narrowed what an existing caller sees. `arg1` now selects:
+   `0` = every source summed (exactly what the call returned before, so no caller
+   changes), `1` = NIC, `2` = veth. Anything else is `InvalidArgument` rather
+   than a fallback to `0`, so a caller written against a future source cannot be
+   handed the total and told it is that source's traffic. No in-tree caller
+   invokes it yet — `posix/src/syscall.rs`'s two references are capability
+   allow-lists — but the ABI is published and was treated as such.
+3. **`/metrics` needed a label, not a second metric name.** `dashboard`'s four
+   `os_net_*_total` counters are now emitted by a new `prom_counter_labeled`
+   with `source="eth0"` / `source="veth"`. A scraper can sum the label to
+   recover the old single number; it could never have split a merged one. The
+   JSON `/api/system` and `/api/network` views keep `stats()` — those numbers sit
+   beside that interface's IP and MAC, so the NIC's column is the correct one and
+   they simply became true.
+
+4. **Renaming the projected row collided with `netdev`'s own test fixture, and
+   only a boot caught it.** `netdev::self_test` built its recorded fixtures on
+   an interface it called `"eth0"`. The moment `NIC_IFACE` became `"eth0"`,
+   `register_iface` correctly refused it and case 2 panicked the kernel —
+   `!!! KERNEL PANIC !!! register: AlreadyExists` at `netdev.rs:510`, boot test
+   60, eighteen minutes in. The reservation was doing its job; two string
+   constants in one file had simply come to agree by accident. Fixed by naming
+   the fixture for what it is (`const DEV: &str = "testnic0"`) **and** by making
+   the collision a build error rather than a boot panic:
+
+   ```rust
+   const _: () = assert!(
+       !const_str_eq(DEV, NIC_IFACE),
+       "netdev self-test fixture must not use the reserved NIC_IFACE name"
+   );
+   ```
+
+   Verified by temporarily setting `DEV` back to `"eth0"` and confirming
+   `cargo check` fails with `E0080` — a guard nobody has watched fail is a guard
+   nobody knows works. Case 1 additionally now asserts the reserved name is
+   refused on an *empty* table, which is what distinguishes a reservation from
+   ordinary duplicate detection: with a row present, `AlreadyExists` could in
+   principle have come from the row.
+
+**`netstat -s`'s IP section reads `stats_total()`, deliberately.** A frame
+drained from a veth pair is handed to `ethernet::process_frame` exactly like one
+off the wire, so it genuinely *is* a packet the IP layer received. What veth
+traffic lacks is the wire attribution, not the processing — so it belongs in an
+IP-level count and not under an `eth0` heading. Same reasoning for the boot-time
+`[net] Traffic` line, which instead prints one line per source.
+
+**Why the veth group is an aggregate and not per-endpoint.** `net::veth` already
+keeps exact per-endpoint byte and frame counts in its own `VethEndStats`. A
+second per-endpoint copy here would be a second thing to keep in step for no new
+information; what was missing at *this* level was only the wire/not-wire split.
+
+**Test coverage** is `interface::self_test` case 7 (7 tests, was 6). It
+deliberately does **not** record into the live counters: `record_rx(Source::Veth,
+100)` followed by "check the NIC group did not move" would leave 100 bytes of
+traffic that never happened permanently visible in `netstat -i` and
+`/proc/netdev`, and the counters are monotonic by contract so there is no honest
+way to take it back — `test_write_primitives` can mutate live config only because
+it can restore it. Instead it exercises the same `CounterGroup` methods on a
+local group, asserts every `Source` maps to distinct storage (`core::ptr::eq`
+over all pairs — if two variants shared a group the split would be cosmetic and
+every other assertion would still pass), and asserts `stats() == stats_for(Nic)`
+and that the total is never below its own rows.
+
+**If a third source appears** (a second NIC, a bridge, a tun/tap device), add a
+`Source` variant: the `match` in `group()`, `Source::name`, and
+`check-variant-lists.py` on `Source::ALL` will between them force the storage,
+the label and the readers to be updated. The one thing that will *not* prompt
+you is `SYS_NET_STAT`'s selector — add the number there too.
+
+**Original report follows.**
 
 **In short:** the kernel counts network traffic in one set of counters and
 labels them `eth0`. Traffic between two containers on a virtual cable — which
@@ -88845,7 +89072,7 @@ which the same rework has to fix; this entry is the caller waiting on both.
 read and names the first failure if a block was malformed, and both refuse
 clearly (`"Cannot export: $HOME is not set"`) rather than failing silently.
 
-## `A-KCOUNTERS-REGISTRY-HAS-NO-REGISTRANTS-AND-CMD-COUNTERS-HIDES-THAT` (lane A, 2026-08-26)
+## `A-KCOUNTERS-REGISTRY-HAS-NO-REGISTRANTS-AND-CMD-COUNTERS-HIDES-THAT` (lane A, 2026-08-26) -- **fixed 2026-08-29**
 
 **In short:** `kernel/src/kcounters.rs` has two halves — a registry that
 subsystems are meant to add counters to, and a hardcoded aggregator that reads
@@ -88926,6 +89153,20 @@ files (the same search that produced the `netdev` and `irqstat` entries above);
 
 **Not a regression.** True since the module was written — it has never had a
 registrant.
+
+**Fixed 2026-08-29** by taking the first option: the registry half is gone.
+Deleted `CounterDesc`, `Registry`, `MAX_COUNTERS`, `REGISTRY`,
+`REGISTRATION_DONE`, `register()`, `seal()`, `snapshot()`, `count()` and the
+three macros -- with them a `static mut` and an `unsafe fn` whose boot-ordering
+`# Safety` contract no call had ever exercised. `cmd_counters` now reads
+`builtin_snapshot()` alone, its doc comment describes what it does rather than
+leading with the dead half, and its empty-case message says "No counters
+available" instead of "No counters registered", which named a path that no
+longer exists. The module `//!` doc, whose entire usage example was of the
+deleted API, now records why there is deliberately no registration path and what
+to do instead when a new counter is needed (add the atomic where the event
+happens, expose it via that subsystem's stats accessor, add a row to
+`builtin_snapshot`) -- so the reasoning survives the code it is about.
 
 ---
 
@@ -91605,3 +91846,956 @@ bug** — recorded here so it is not filed as one later. It changes if commit
 accounting is ever enforced, at which point both keys become sourceable
 together. Lane B's reply is
 `requests/b-a-comm-row-agreed-and-here-is-the-measurement-that-settles-it.md`.
+
+## `A-A-STRAY-D-VISUAL-TURNED-EVERY-WORD-SPLIT-OF-OUR-OWN-PATH-INTO-A-SILENT-SUCCESS` (lane A, 2026-08-27) -- **FIXED 2026-08-27**, environment
+
+**In short:** our checkout lives under `D:\visual studio projects\`, a path with
+spaces in it. Any command that splits that path on whitespace -- an unquoted
+variable, `xargs` without `-d '\n'` -- turns one filename into three words, the
+first of which is `D:\visual`. That should fail loudly. It did not, because a
+stray 88-byte *file* named `D:\visual` was sitting in the root of the drive, so
+the split path **opened successfully** and the tool read 88 bytes of nonsense
+instead of reporting a missing file. The file is now renamed, so the failure is
+loud again.
+
+**How the landmine got there.** On 2026-07-19 a throwaway probe of `osh` (lane
+C's shell port) interpolated a scratch directory into the shell string it was
+testing, without quoting it:
+
+```sh
+D="D:/visual studio projects/os/target/tmptest"
+"$OSH" -c "echo one > $D/e.txt 2>&1; echo two >> $D/e.txt; ..."
+```
+
+The shell under test word-split `$D`, so the redirect target became `D:/visual`
+and the remainder became extra `echo` arguments. `D:\visual` was created with
+exactly the two lines it still held today:
+
+```
+one studio projects/os/target/tmptest/e.txt
+two studio projects/os/target/tmptest/e.txt
+```
+
+Birth and last write were both 2026-07-19 08:35 -- it was written once and never
+again. Everything after that was a *read*.
+
+**What it cost, twice.**
+
+- **2026-08-08** the operator reported "something keeps trying to write to and
+  launch `visual`, hundreds of times". Lane C found and killed a genuine
+  14-hour fork storm (two orphaned `bash /tmp/g4.sh` job-control probes) and
+  correctly identified the quoting bug as its own -- but treated the file as
+  spent and left it on disk. That is why the report came back.
+- **2026-08-22/23** a sweep in an unrelated project ran
+  `xargs -a /tmp/allftsl.txt -n 400 ./harness_intree.exe` over 2595
+  space-containing absolute paths. Without `-d '\n'`, `xargs` split every one,
+  the harness opened `D:\visual` on every batch, and both parsers under test
+  reported *identical* parse errors quoting
+  `projects/os/target/tmptest/e.txt`. Identical failures across two independent
+  parsers read as a grammar bug; it was an invocation bug wearing a costume,
+  and it invalidated the whole 2595-file sweep. Re-running with `-d '\n'` gave
+  `MATCH 2595/2595`.
+
+Both times the diagnosis cost real operator attention, and both times the actual
+defect was one missing pair of quotes.
+
+**Fixed.** `D:\visual` renamed to
+`D:\visual.stray-from-unquoted-path-2026-07-19.txt` -- content preserved, but
+nothing resolves `D:\visual` any more, so the next word-split fails at `open`
+with a name that says what went wrong. Verified: no other extensionless
+single-word file at `D:\` root shadows a prefix of our path, and nothing on the
+machine had written the file since July.
+
+**Standing rules this leaves behind.** Neither is enforced by a gate; both are
+cheap and both were violated by an expert-looking one-liner.
+
+1. **Quote every interpolation of a repo path**, including inside the command
+   string handed to a shell *under test* -- that string is parsed a second time,
+   so one level of quoting is not enough.
+2. **`xargs` over our paths needs `-d '\n'` or `-0`.** Bare `xargs` splits on
+   whitespace, and our paths all contain it.
+
+## A-EVERY-SPIKE-KEPT-ITS-OBJECTS-IN-TMP-SO-A-WSL-RESTART-BROKE-THE-REBUILD (lane A, 2026-08-27) — FIXED 2026-08-27
+
+**In short:** the four third-party programs SlateOS ships — GNU bash, pkgconf,
+GNU make and CPython — are compiled once in WSL and then *relinked* against our
+own `libc.a` every time that libc changes. `create-ext4-rootfs.sh` automates
+that relink. It kept the compiled object trees in WSL's `/tmp`, which the WSL
+VM wipes on every restart. So the automation worked until the next reboot and
+then failed for all four artifacts, in all four checkouts, at once.
+
+**Observed.** 2026-08-27, immediately after rebuilding the sysroot to clear the
+standing "fixtures are behind the tree" warning:
+
+```
+[rootfs] ERROR: scripts/bash-spike/slatelink.sh failed while rebuilding bash-slateos.elf.
+[rootfs]        | ERROR: /tmp/bash-cross-os-lane-a does not exist — bash's objects
+[rootfs]        |        have not been compiled yet.
+[rootfs] *** rootfs.ext4 was NOT written — the existing image is UNCHANGED. ***
+```
+
+`uptime` inside WSL read `up 1 min`, and `/tmp` held nothing but the three zig
+wrapper scripts the run had just created. Every one of
+`/tmp/{bash-cross,pkgconf-spike,make-spike,cpython-spike,coreutils-spike}-*` was
+gone, for every lane.
+
+**Why it mattered more than a slow rebuild.** `bash-slateos.elf` is a *shipped*
+artifact (`design-decisions.md` §305) and `spawn.rs::self_test_bash_on_slateos_libc`
+runs it on every boot. The chain was: libc.a changes → every fixture that links
+it is stale → the image gate refuses to repack → **no boot test can run at all**
+until a human notices that the recipe's prerequisite evaporated. The recipe
+looked healthy right up to the moment it was needed, which is the same shape as
+the two failures already recorded above it: a prerequisite left sitting in a
+place nobody promised to preserve.
+
+**Fixed.** `scripts/lib/worktree.sh` gained `SLATE_WORK`
+(`~/.cache/slateos/work/<lane>/`), and all five spikes now put their object
+trees there instead of `/tmp`:
+
+| Spike | was | now |
+|---|---|---|
+| bash (`cross2`/`cross3`/`slatelink`) | `/tmp/bash-cross-$LANE` | `$SLATE_WORK/bash-cross` |
+| pkgconf (`run`) | `/tmp/pkgconf-spike-$LANE` | `$SLATE_WORK/pkgconf-spike` |
+| make (`run`) | `/tmp/make-spike-$LANE` | `$SLATE_WORK/make-spike` |
+| CPython (`run`/`slatelink`/`stdlib`) | `/tmp/cpython-spike-$LANE` | `$SLATE_WORK/cpython-spike` |
+| coreutils (`run`) | `/tmp/coreutils-spike-$LANE` | `$SLATE_WORK/coreutils-spike` |
+
+Three things this deliberately does *not* change:
+
+1. **The sysroot copies stay in `/tmp`** (`slate-sysroot-$LANE`,
+   `slate-sysroot2-$LANE`, `slate-sysroot-cpython-$LANE`). They are re-copied
+   from `toolchain/sysroot` on every run, so losing them costs one `cp` —
+   whereas *keeping* one would risk linking against a `libc.a` older than the
+   tree's. Scratch is the correct lifetime for those; it was only ever wrong
+   for the objects.
+2. **`SLATE_TMP` and the per-run symbol dumps stay in `/tmp`.** Same reasoning:
+   they are outputs of a single run, not inputs to the next one.
+3. **The work root is under `~/.cache`, not `build/spike/`.** A WSL build
+   against `/mnt/d` goes through the 9p translation layer and is several times
+   slower; CPython and bash are large enough for that to decide the matter. It
+   stays lane-keyed, because two lanes relinking one another's objects is the
+   §305 incident recorded in `worktree.sh`'s own header.
+
+**Why caching objects is safe here, and would not be for our code.** The
+objects are compiled from a pinned third-party tarball — version *and* sha256
+are recorded in `worktree.sh` — so the only input that moves between runs is
+our `libc.a`, and `libc.a` is consumed by the *link* step, not the compile
+step. A stale object in `$SLATE_WORK` therefore cannot encode a stale libc.
+If a spike is ever pointed at a source tree that this repo edits, that
+reasoning fails and the directory must go back to being scratch.
+
+`slate_adopt_legacy_work` moves an existing `/tmp` tree to the new location on
+first use, so a machine that still has objects does not recompile from scratch.
+It is a no-op once migrated and a no-op when `/tmp` was already wiped — which
+is the case it exists to survive.
+
+## `C-NO-CALENDAR-CLOCK-FOR-APPS` (lane C, 2026-08-27) -- **open**, missing kernel/service data
+
+**What it is.** An application running inside a window cannot find out what day
+it is. `oswindow::app::App` gives a program `tick_interval` and `Event::Tick`,
+which is a *metronome* -- it says "another interval has passed", not "it is now
+the 27th". There is no call anywhere in `gui/**` that returns a wall-clock time,
+a date, or a timezone, and nothing in `apps/**` reads one.
+
+**Where it bites.** Any feature whose behaviour is supposed to depend on the
+calendar rather than on elapsed time. Concretely, today:
+
+| Program | What it wanted | What it does instead |
+|---|---|---|
+| `apps/dictionary` | A **word of the day** -- one entry chosen by the date, changing at midnight. | A **featured word**: the same card, stepped by the reader with `Left`/`Right` or the two arrow buttons, and wrapping. |
+
+The dictionary's original code named the field `word_of_day_index`, initialised
+it to `0` with the comment "First word as word of the day", and never assigned
+it again -- so it was permanently the first entry. Renaming the feature was the
+honest fix: a "word of the day" that is not tied to a day is a label making a
+claim the program cannot keep, and the operator would have no way to tell the
+difference between "the date is stuck" and "the feature is fake".
+
+**Why it is not simply a missing function.** A calendar clock is not one API but
+a chain: a hardware time source, a persisted timezone and DST database, and a
+service that owns "what time is it" so that every program agrees. Bolting
+`std::time::SystemTime` into the toolkit would give apps a number without any of
+that, and would then have to be taken away again when the real service arrives
+-- with every caller already written against the wrong shape.
+
+**What the proper fix looks like.** A time service reachable over a channel, and
+a thin `guitk` accessor over it, so an app asks for a *civil* date (year, month,
+day, weekday, in the user's zone) rather than for a count of seconds. Apps that
+want a metronome keep using `Event::Tick`; apps that want the calendar ask the
+service. Until that exists, an app must not pretend to know the date.
+
+**Trigger to revisit.** When a time service exists and is reachable from
+userspace: rename `Screen::Featured` back to a word of the day, seed the index
+from the civil date, and keep the arrows as a way to browse.
+
+### Lesson 51: a guard standing behind a duplicate of itself is a guard no test can reach (lane C, 2026-08-27)
+
+**In short:** the sound mixer checked two of its invariants twice — once where
+the value was produced and again where it was used. The second check never
+fired, because the first one had already made it true. That sounds harmless,
+and it is worse than harmless: it makes the *first* check untestable. Delete
+the first one and the program behaves identically, because the second quietly
+does its job. A 111-mutation sweep found both, and in each case the "surviving
+mutation" was not a hole in the tests at all — it was a piece of the program
+that could not be observed to matter.
+
+Both, in `apps/mixer/src/main.rs`:
+
+| Where | The redundant second guard | Why it could never fire |
+|---|---|---|
+| `percent_of` | after `level.clamp(0.0, 1.0) * 100.0` and `.round()`, a second `.clamp(0.0, 100.0)` | The first clamp already bounds the result to `0..=100`. |
+| `Action::ChooseDevice` | `if self.picker_row >= self.picker_len() { return; }` | All four ways of setting `picker_row` already bound it: `SelectPickerRow` refuses an index past the end, `MovePickerRow` clamps, opening a sheet takes the row from the chosen device, closing one resets it. |
+
+**Why the second clamp in `percent_of` was actively wrong, not merely
+redundant.** Its own doc comment read: "the clamp is before the cast rather
+than after it, because a cast out of range in Rust saturates silently and a
+level that arrived out of range is a bug worth not hiding behind a number that
+happens to look reasonable." The second clamp *is* that silent saturation,
+written out longhand. The comment and the code two lines below it said
+opposite things, and the code won.
+
+**The rule.** Defence in depth is two checks of two *different* invariants at
+two trust boundaries. Two checks of the *same* invariant in sequence is one
+check plus one hiding place — and the hiding place is upstream, where the
+check that people actually read lives. When a mutation sweep reports a guard's
+removal as harmless, the finding is usually not "write a better test": it is
+"one of these two guards is dead, and dead code in a safety position is worse
+than no code, because it reads as protection."
+
+**How to tell the two apart.** Ask what state the second check exists to
+catch, and then try to reach that state from the public API. If nothing can
+produce it, the check is dead. If something can — as with `value_at`, which is
+`pub` and whose caller need not be the pointer handler that happens to pass it
+a matching rectangle — the check is live, and it wants a test that reaches it
+directly rather than through the caller that makes it unnecessary.
+
+### Lesson 52: a test built out of the thing it is testing cannot fail (lane C, 2026-08-27)
+
+**In short:** two shapes of test look thorough, pass forever, and are blind by
+construction. An **agreement test** checks that two views of the program say
+the same thing — but if both views are computed through the same function,
+breaking that function breaks both views identically and they go on agreeing.
+A **symmetry test** checks that two operations undo each other — but two
+operations that have been *swapped* undo each other exactly as well as two that
+have not. In both cases the fault is inside the part the test cancels out, so
+no version of the fault can make it red.
+
+Both showed up in one 111-mutation sweep of `apps/mixer`:
+
+| The test | What it says | The fault it cannot see |
+|---|---|---|
+| `a_column_index_means_the_same_stream_to_the_screen_and_to_the_keyboard` | the name drawn on column *i* is the name of `stream_at(i)` | `stream_at` returning `streams[i]` instead of the *i*th column in draw order. Both sides call `stream_at`, so both moved together. |
+| `left_and_right_undo_each_other_from_every_column` | Left then Right returns you where you started | Left and Right swapped. Swapped keys still undo each other. |
+
+**What does catch them.** Not a better agreement test — a test that names an
+outside fact. For the column mapping: assert against the order the columns are
+*drawn* in ("column 0 is Discord, because playing streams sort first"), which
+is a claim about the sort, not about `stream_at`. For the arrow keys: assert
+which *way* a keystroke moves ("Right from Master selects column 0"), which is
+a claim about direction, not about invertibility.
+
+**The rule for writing them.** Before trusting a test of the form "X equals Y"
+or "f then g is identity", ask: *what does each side go through?* If the two
+sides share a step, the test is silent about that step, and you need a third
+statement that comes from outside the program — a literal, a hand-computed
+value, a fact from the design document. A test whose every term is defined by
+the code under test is a tautology with assertions in it.
+
+**Corollary for mutation sweeps.** When a sweep reports a mutation caught by
+tests *other than* the one you predicted would catch it, that is not a
+bookkeeping detail to fix by editing the expectation. It is the sweep telling
+you the test you named is blind — and the reason is usually one of these two
+shapes. Both entries above were found exactly that way: the harness reported
+`WRONG TESTS`, and the honest reading was not "my expectation was off" but "the
+test I wrote for this cannot see this."
+
+### Lesson 53: an `else` is a two-way choice, and some choices have three ways (lane C, 2026-08-27)
+
+**In short:** `if a > b { up } else { down }` reads as "go up, or else go
+down". It is really "go up, or else go down *including when there is nowhere
+to go*". Whenever the two branches are directions and the quantity can also be
+**equal**, the `else` silently annexes the third case and runs it backwards.
+The word search shipped exactly this and it made most of the game unplayable.
+
+**The fault.** `apps/wordsearch`'s `walk(start, end, i)` answers "where is the
+`i`th cell of the line from `start` to `end`, along one axis". It was:
+
+```rust
+fn walk(start: usize, end: usize, i: usize) -> usize {
+    if end > start { start.saturating_add(i) } else { start.saturating_sub(i) }
+}
+```
+
+A horizontal line does not move on the row axis at all: for the line from
+`(2, 3)` to `(2, 7)`, `walk` is called with `start == end == 2`. `2 > 2` is
+false, so it took the "count down" branch and produced rows `2, 1, 0, 0, 0`.
+Every horizontal mark below row 0 previewed as a staircase running off the top
+of the board, and — because the marked cells then matched no placed word — **no
+word lying along any row or column but the first could be marked at all.** The
+same for vertical words and the column axis. The `saturating_sub` is what made
+it look plausible rather than crash: the wrong answer was clamped into a legal
+coordinate.
+
+**Why review does not catch it.** The bug is invisible at the call site
+(`walk(sr, er, i)` is unremarkable) and invisible in the function (both
+branches are correct code). It lives in the *boundary between* them, which is
+the one place an `if/else` does not name. The `else` keyword is an
+unconditional catch-all wearing the appearance of a complement.
+
+**What catches it.** Two things, and the first is cheaper:
+
+1. **Write the comparison as a `match` on `Ordering`.** `match end.cmp(&start)`
+   forces all three arms to be spelled out; the compiler will not let the
+   `Equal` case be forgotten. (Clippy's `comparison_chain` pushes the same way
+   from the other side, by objecting to `if a > b … else if a < b …` chains.)
+   In this file that turned a bug into three lines that state their intent.
+2. **A test that exercises the still axis specifically.** The old suite tested
+   `cells_between` on diagonals, where both axes move and the fault is absent,
+   and on a horizontal line *on row 0*, where `saturating_sub` clamps to the
+   right answer by luck. The general rule: when a function takes a pair of
+   values that can be `<`, `==` or `>`, the `==` case is a case, and a suite
+   that omits it has tested two thirds of a three-way branch.
+
+**Where else to look.** Any `if x > y { .. } else { .. }` whose branches are
+*opposite actions* rather than *a thing and its absence*: direction of travel,
+sort comparators, scroll/clamp arithmetic, "grow or shrink". Where the branches
+are "do it" / "don't", `else` is genuinely the complement and this lesson does
+not apply.
+
+### Lesson 54: a fixture in which two different quantities happen to be equal cannot tell them apart (lane C, 2026-08-27)
+
+**In short:** a test proves a program right by watching the program get an
+answer. If the *numbers you chose for the test* make the right answer and the
+wrong answer come out the same, the test watches the program get the right
+answer for the wrong reason and reports success. This is not a weak assertion —
+the assertions can be exact and exhaustive — it is a weak **fixture**, and it
+is invisible in the test's own text, because nothing in the test says "and
+these two numbers are different". Minesweeper shipped two of these, found by
+mutation, in code whose tests looked thorough.
+
+**The two faults.**
+
+1. **A square board cannot tell a row count from a column count.** The flat
+   index of a cell is `row * cols + col`. Beginner minesweeper is 9 × 9 and
+   Intermediate is 16 × 16, so on either board `rows()` and `cols()` are *the
+   same number*; a version that multiplied by `rows()` passed every assertion
+   in a test that walked all 81 cells and checked each index round-tripped.
+   Expert (30 columns, 16 rows) is the only board on which the test means
+   anything.
+2. **Three ticks of 250 ms, 250 ms and 2500 ms add up to 3000 ms — and so do
+   three ticks of a flat 1000 ms.** The clock test existed precisely to pin
+   down "count the time that passed, not the number of times you were woken",
+   which is a bug the program had once shipped. It asserted the exact final
+   reading, `3_000`. The rule it was written to forbid produces `1000 + 1000 +
+   1000`, which is *also* `3_000`. The test could not fail.
+3. **A cell on the diagonal is its own mirror image.** (Found a day later, in
+   the same suite, by the same sweep — which is the argument for reading every
+   verdict rather than only the survivors.) `hit_test(event.x, event.y)` was
+   mutated to `hit_test(event.y, event.x)`, which reflects every click across
+   the diagonal. Sixty-odd tests failed. The one test whose entire subject is
+   *where a click lands* — it clicked one cell, row 5 column 3, and checked
+   that cell opened — passed, because on that board the board's left margin
+   happens to exceed its top margin by about two cells, which puts cell 5,3 on
+   the line the reflection fixes: the swapped point landed back inside the very
+   cell it started in. A one-point fixture cannot see a transformation that has
+   fixed points, and every reflection, rotation and swap has them. Click four
+   cells spread about, and no single reflection fixes all four.
+
+**Why review does not catch it.** All three tests read as strong: they assert
+exact values, and (1) asserts them over every cell on the board. The defect is a
+relationship between two constants that the test never mentions — `9 == 9`,
+`250 + 250 + 2500 == 3 * 1000` — and there is nothing at the point of reading
+to prompt the question. A reviewer checks that the assertion follows from the
+rule; they do not usually check that it *fails* to follow from the plausible
+wrong rules.
+
+**What catches it.**
+
+- **Mutation.** This is the class of blindness mutation testing exists for, and
+  essentially the only one that finds it reliably. All three were caught by a
+  one-line substitution (`cols()` → `rows()`, `elapsed_ms` → `1_000`,
+  `hit_test(x, y)` → `hit_test(y, x)`) and by nothing else in the test that
+  owned the rule.
+- **Choose fixtures whose quantities are pairwise distinct, deliberately, and
+  say so in the test.** Prefer the non-square board, the non-uniform interval,
+  the list whose length differs from its element values, the index that differs
+  from the value stored at it. Where the distinctness is the point, assert it:
+  `assert_ne!(a.rows(), a.cols(), "a square board cannot tell them apart")`
+  turns an invisible property of the fixture into a line that fails loudly if
+  someone later "simplifies" the test onto Beginner.
+- **Ask of every constant in a fixture: what wrong rule also produces this
+  number?** For a sum, a uniform interval whose product matches is the usual
+  culprit; for an index, equal dimensions; for a scale factor, 1.0; for an
+  offset, 0.
+- **For anything that maps a point to a thing — a hit test, a projection, a
+  transform — use more than one point, and put them where a symmetry cannot
+  hold them still.** A single sample cannot distinguish a mapping from any of
+  its symmetries, and the fixed points of a swap, a reflection or a rotation
+  are exactly where a tidy fixture (the middle, the diagonal, the origin) tends
+  to land.
+
+**Where else to look.** Any test using a square grid, a power-of-two size that
+also appears as a count, a duration equal to the tick period, a scale of 1, an
+origin of 0, a single sample point, or a collection whose length coincides with
+one of its values.
+Also any test whose fixture was chosen for tidiness — round numbers and equal
+dimensions are exactly the choices that make wrong rules agree with right ones.
+
+### Lesson 55: an unbounded loop in a test helper turns every fault it depends on into the same silence (lane C, 2026-08-27)
+
+**In short:** test helpers often *drive* the program to a starting position —
+"press Right until the cursor is on cell 5,3" — before the test asserts
+anything. Written as a `while` with no step limit, such a helper never returns
+if the program has stopped moving the way it says it does. The test does not
+fail; it hangs. The runner kills it on a timeout, and every distinct fault that
+touches the helper produces the identical, contentless verdict: *timed out*.
+The suite has told you nothing about which rule broke, and it charged you the
+full timeout to say it.
+
+**What happened.** `apps/minesweeper`'s tests walked the cursor with
+
+```rust
+while a.cursor() != (r, c) {
+    if cr < r { a.apply(Action::Move(Dir::Down)); } else if …
+}
+```
+
+in three places. Five separate mutations of the movement code — a step that
+stays put, an `Up` that goes down, a `Left` that goes up, a move that reports
+it moved without moving, and a move that uncovers as well as moving — all
+produced exactly one outcome: a 240-second hang. Five different faults,
+one verdict, twenty minutes of wall-clock to learn nothing. `apps/maze` had
+already hit this once, in a helper written as `while g.moves() < moves`, where
+a program that stops counting moves spins forever; that finding was written up
+in the roadmap entry and **not** promoted to a lesson, which is part of why the
+same shape appeared again in a suite written afterwards.
+
+**Why it is worse than it looks.**
+
+- **A hang is scored as a catch, and it is a real one** — a program that hangs
+  is a program that is wrong. So the sweep stays green and nothing prompts you
+  to look. The loss is invisible in the summary line.
+- **It destroys the one thing a mutation sweep is for.** The sweep's product is
+  the *mapping* from fault to the test that owns it. A hang maps every fault to
+  the same non-answer, so the mutations become a smoke test.
+- **It is expensive in the currency that matters.** Each hang costs the full
+  runner timeout. Sweeps are already the slowest thing in the loop.
+- **It can mask a survivor.** If a mutation would otherwise have survived, and
+  a helper it touches hangs first, the survivor is reported as caught.
+
+**The rule.** *Every loop in a test that waits on the program to reach a state
+gets a step bound, and the bound's failure message names the fault.* A bound is
+one line and it converts a timeout into a sentence:
+
+```rust
+let bound = a.rows() + a.cols() + 8;
+for _ in 0..bound { … }
+panic!("the cursor did not reach {row},{col} in {bound} moves — it is at {:?}, \
+        so a move is not moving where it says it does", a.cursor());
+```
+
+Pick the bound from the geometry, not from taste: it should be comfortably
+above the longest legitimate route and far below "forever". Where two tests
+need the same walk driven differently — one through `apply`, one through the
+keyboard, because *that* test's subject is the keyboard — take the step as a
+closure rather than writing the loop twice; two copies of a loop are two places
+for the bound to be forgotten.
+
+**Where else to look.** Any test containing `while`, `loop`, or a `retry`
+helper whose exit condition is a fact about the program under test rather than
+a counter: "until it settles", "until the queue is empty", "until the animation
+finishes", "until the search finds it", "until the generator deals a solvable
+board". Also every polling helper in an integration test. The safe shapes are a
+bounded `for` with a named failure at the end, or an exit condition that
+depends only on the test's own counter.
+
+### Lesson 56: a fixture one move from finished tests the finish, not the move (lane C, 2026-08-27)
+
+**In short:** most tests of a game start from a fixture — a board in some
+prepared position — and then make a move. If the fixture is *one move away from
+being over*, the first move a test makes ends the game, and every assertion
+after that point is about a **finished** game rather than about the rule the
+test was written for. The test still passes. It passes because the program
+refused the move for a reason the test never mentions. Sudoku shipped six of
+these at once, from a single fixture, and they all went green.
+
+**What happened.** `apps/sudoku`'s tests were built on
+
+```rust
+fn board(holes: &[usize]) -> SudokuApp   // the solved grid, with `holes` emptied
+```
+
+and almost every test called `board(&[idx(1, 7)])` — the finished board with
+exactly one square rubbed out. The solution's digit at `(1, 7)` is a `4`, so:
+
+- `a.apply(Intent::Digit(4))` filled the last hole, `check_completion` fired,
+  and the status became `Won`;
+- `apply` refuses `Select`, `Digit`, `Erase`, `Hint`, `Undo`, `Redo` and
+  `ToggleNotes` once the status is not `Playing`;
+- so every later intent in that test returned `Ignored` — which is very often
+  exactly what the test was asserting.
+
+`a_hint_for_a_square_that_is_already_right_is_refused` is the clearest case. It
+wrote the right digit into the hole, then asked for a hint, then asserted
+`Ignored`. The rule it is named for — *a hint is not spent on a square that is
+already correct* — was never exercised. The hint was refused because the game
+was over. Deleting the `cell.value == self.solution_at(row, col)` clause from
+the production guard would not have failed it.
+
+Six tests were passing for this wrong reason. The fix was one line — a fixture
+with **three** holes instead of one —
+
+```rust
+/// A game with room to play in.
+///
+/// Three holes, not one. A fixture one digit short of finished turns every
+/// test that writes a digit into a test about a *won* game.
+fn playground() -> SudokuApp {
+    board(&[idx(1, 7), idx(7, 1), idx(4, 0)])
+}
+```
+
+— and it turned ten tests red at once, which is what those tests should have
+been saying all along.
+
+**Why review does not catch it.** Nothing in the test's text mentions the
+number of holes; the fixture is a helper call two lines up, and the count is a
+property of the *board data*, not of the test. The assertions are exact and the
+test name is honest about its intent. The defect is that the program has a
+second, unrelated reason to produce the asserted answer, and that reason was
+switched on by the fixture. It is lesson 54's shape — a fixture in which two
+things coincide — but the coinciding things here are not two numbers, they are
+**a rule and a state**: "refused because the square is right" and "refused
+because the game is over" are indistinguishable from the outside.
+
+**The rule.** *A fixture must leave room for every move the test will make, and
+then some.* Concretely:
+
+- **Count the moves the test makes, and give the fixture strictly more slack
+  than that.** One hole plus one digit is zero slack. Three holes and one digit
+  leaves two.
+- **When a program has a terminal state, no fixture should be one step from
+  it** unless reaching the terminal state is the test's subject — and then the
+  test should be named for it (`the_last_digit_wins_…`, `a_redo_can_win_…`) and
+  should be the *only* thing it does.
+- **Assert the precondition the test depends on, in the test.** One line —
+  `assert_eq!(a.status(), GameStatus::Playing, "the fixture was already over")`
+  after the move — converts an invisible property of the board into a failure
+  with a sentence on it. The same trick as lesson 54's `assert_ne!`.
+- **Two fixtures, named for what they are.** `playground()` (room to play) and
+  `almost_done()` (one square left) both exist here now. A single fixture used
+  for both purposes is a fixture that is wrong for one of them.
+
+**How it was found.** Not by review, and not by the mutation sweep either —
+by *raising the hole count and running the suite*. Twelve tests went red;
+ten of them were this. That is the cheap general move: when a fixture encodes a
+number, change the number and see how much of the suite was standing on it. A
+suite that does not notice is a suite that was not testing the number; a suite
+that collapses was testing something else than it claimed.
+
+**Where else to look.** Any test suite for something with a terminal state —
+won/lost/complete/full/exhausted/closed/end-of-file — whose fixture sits on the
+last step before it. Boards with one empty square, buffers with one byte of
+room, counters one below their limit, a quota with one use left, a queue with
+one slot, an undo history one entry from its cap. Also the mirror image: a
+fixture already *in* the terminal state, which makes every "is refused" test
+pass for free.
+
+### Lesson 57: "is it drawn?" is not "is it drawn *there*?" (lane C, 2026-08-28)
+
+**In short:** a layout test that asks only whether each part of the window
+survived, and never where it landed, will pass with the window upside down.
+Sudoku's band test named its subject exactly — "the bands go in the order they
+are named" — and then checked only that each band was *shown*. The mutation
+sweep drew the footer across the top of the window and slid the keypad
+underneath it, and every assertion in that test still held, because a band in
+the wrong place is still a band that is there.
+
+**The fault.** The layout drops bands from the bottom up as the window shrinks,
+so the interesting property is a ladder: at 400 px tall everything fits, at 120
+the footer is gone, at 80 the keypad is gone too. The test walked that ladder
+carefully at four heights and asserted twelve `shows(...)` predicates. Not one
+of them mentions a coordinate. Two mutations survived it:
+
+| Mutation | What it did | Why the test held |
+|---|---|---|
+| `Rect::new(0.0, (h - foot_h - pad_h)…)` to `Rect::new(0.0, (h - pad_h)…)` | put the keypad below the footer | the keypad is still non-empty, so it is still "shown" |
+| `Rect::new(0.0, (h - foot_h)…)` to `Rect::new(0.0, 0.0, w, foot_h)` | drew the footer across the top of the window | same |
+
+**The rule.** *When a test's name contains a spatial word — order, above,
+below, beside, inside, first, last, left, right — at least one assertion must
+compare two coordinates.* Visibility and placement are two different
+properties, and a predicate over one says nothing about the other.
+
+The replacement, `the_bands_stack_down_the_window_in_the_order_they_are_named`,
+asserts four things at one size: the first band starts at the top, the last ends
+at the bottom, every band lies inside the window horizontally, and each band
+begins at or below the end of the band named before it. That last one is the
+whole content of the word "order", written down. Note that the bands are padded
+apart and so do *not* abut — the first draft asserted `a.bottom() == b.y` and
+failed honestly on a six-pixel gap, which is the assertion telling you what the
+layout really promises rather than what you assumed.
+
+**Where else to look.** Anything that answers "which of these exist" as a proxy
+for "how are these arranged": z-order tests that check a thing was drawn rather
+than that it was drawn *last*; tab-order tests that check every control is
+reachable rather than that Tab reaches them in order; menu tests that check
+every item is present; sort tests that check the output is a permutation of the
+input. In each, the sets match and the order is unexamined.
+
+### Lesson 58: a witness that more than one rule explains tests only the strongest of them (lane C, 2026-08-28)
+
+**In short:** to test that a program enforces rule A you give it something that
+rule A forbids and check it says no. If the thing you gave it is *also*
+forbidden by rule B, the program can say no with rule A deleted, and your test
+cannot tell. Sudoku's candidate test struck out a digit in the row, a digit in
+the column and a digit in the box, and asserted each was struck — and all three
+of its witnesses sat inside the same 3x3 box, so the box scan alone did all the
+work. Deleting the row scan and deleting the column scan both survived the
+sweep, and the messages `"the row was ignored"` and `"the column was ignored"`
+had never once been about the row or the column.
+
+**The fault.** The witnesses were `(0, 1)`, `(1, 0)` and `(2, 2)`, chosen for
+cell `(0, 0)`. They read as "one along the row, one down the column, one in the
+box" — and `(0, 1)` and `(1, 0)` genuinely are in the row and in the column,
+which is exactly what makes the mistake easy to make and hard to see. They are
+also both inside cell `(0, 0)`'s own box, which spans rows 0-2 and columns 0-2.
+Sudoku's three rules overlap by construction near the corner of a box, and the
+fixture sat in the overlap. Moving the witnesses to `(0, 5)` and `(5, 0)` — same
+row, same column, different box — took thirty seconds and turned two survivors
+into two catches.
+
+**The rule.** *For each rule you mean to test, pick a witness that no other rule
+explains.* State it as a question about the fixture: "if the code under test
+were deleted, would anything else still produce this answer?" If yes, the
+fixture is wrong however sharp the assertion is.
+
+Two habits that make it cheap:
+
+- **Write the exclusion into the test as a comment naming the other rules,** so
+  the next person to edit the coordinates knows what the coordinates are for. A
+  witness chosen for a reason that is not written down will be moved.
+- **When rules overlap by construction, put the witness as far from the overlap
+  as the domain allows.** In a 9x9 grid of 3x3 boxes, a row witness belongs in
+  a different box band, not in the next column.
+
+**Where else to look.** Any validator with several independent rules that can
+each reject the same input: a password checker tested with `""` (too short —
+and also no digit, no capital, no symbol); an access check tested as a user who
+is both unauthenticated *and* unauthorised; a parser tested with input that is
+both malformed and too long; a firewall rule tested with a packet the default
+policy would drop anyway. The tell is a run of assertions that all use the
+*same* fixture value with only the expected message changing.
+
+### Lesson 59: a fixture with no asymmetry cannot notice that two things were swapped (lane C, 2026-08-28)
+
+**In short:** transposing rows and columns, reversing a cycle, and taking from
+the wrong end of a list are all changes that leave the *shape* of the answer
+intact and move only which item is where. A fixture in which every item is
+alike, or whose arrangement is symmetric, comes out identical either way — so
+the test passes and the swap ships. Sudoku's sweep found three of these in one
+suite, and the fixture was the cause in all three.
+
+**The three faults.**
+
+1. **Nine marks in nine places is symmetric under transposition.** The pencil
+   marks of a square are laid out 3x3, `nrow = slot / 3`, `ncol = slot % 3`.
+   The test set *all nine* marks and asserted that nine texts were drawn in nine
+   distinct positions. Swapping those two lines still draws nine marks in nine
+   distinct positions — the very same nine positions, with the digits permuted.
+   The all-nine fixture hid a second mutation too: with every slot occupied,
+   drawing the marks that were *not* set changed nothing either. Three marks —
+   1, 2 and 4 — answer both questions, because "2 is to the right of 1" and "4
+   is below 1" are statements a transposition breaks, and "only three texts
+   were drawn" is a statement an unfiltered loop breaks.
+2. **A cycle that closes and visits everything also does so backwards.** The
+   difficulty chip steps Easy, Medium, Hard, Easy. Its test asserted that three
+   steps return to the start and that three distinct labels are seen. Both hold
+   of Easy, Hard, Medium, Easy. Naming the three steps
+   (`assert_eq!(Difficulty::Easy.next(), Difficulty::Medium)`) is what a test of
+   an *order* has to say.
+3. **Five hundred identical entries have no oldest and no newest.** The undo
+   history is capped at 500 and drops from the front. The test made 502 changes
+   by toggling one mark on and off, and asserted the depth was 500. Dropping
+   from the *back* instead also leaves 500. Two changes fix it: make the count
+   odd, so the board's final state records how many toggles survived, and then
+   undo the whole history and look — the first toggle fell off the end, so the
+   mark is still set, whereas a history that dropped its newest would rewind
+   all the way to bare.
+
+**The rule.** *Ask what your fixture is symmetric under, and break that
+symmetry.* A test of a mapping needs elements that are distinguishable along
+the axis being mapped: distinct values, an odd count, an asymmetric shape, a
+non-square grid. This is lesson 54 ("two quantities that happen to be equal")
+one level up — there the *numbers* coincided, here the *arrangement* does.
+
+**Where else to look.** Square matrices in a transpose test; a full set where a
+subset would do (all flags set, all bits on, every field populated); an even
+count where parity is the signal; palindromic or sorted-and-uniform test data;
+round-trip tests over a value that is its own inverse; ring buffers filled with
+one repeated byte. Any time a test's data is "all of them" or "the same one
+many times", it is probably symmetric under the very swap you are trying to
+forbid.
+
+### Lesson 60: a layout that shrinks type to fit assumes the renderer will honour the size it asked for (lane C, 2026-08-28)
+
+**In short:** every app in this campaign scales its text with the window, so
+that a small window gets small type. It does that by computing a font size as a
+fraction of some band's height and passing it to the drawing pass. But the
+renderer does not draw at the size you ask for — `gui/font/src/system.rs`'s
+`round_px` does `px.clamp(1.0, 512.0).round()`, so a request below one pixel is
+drawn *one whole pixel* high. Below that floor the layout's arithmetic and the
+screen part company: the layout believes it laid out a tenth-of-a-pixel line,
+the renderer draws it thirteen times taller than that, and the text spills out
+of the band, over its neighbours, and off the window. 2048's help sheet did
+exactly this at a 4x4 window — the rows were sized 0.0849 and drawn about
+1.32 pixels high, stacked on top of each other and outside the sheet entirely.
+
+**Why it is easy to miss.** The fault is invisible at every ordinary window
+size and only appears when a fraction-of-a-band computation goes sub-pixel,
+which needs a window small enough that nobody thinks to test it. It is also
+*the opposite* of the failure you brace for: you guard against text being
+clipped or unreadably small, and the actual bug is text coming out too
+**large**. A `size > 0.0` check — the obvious guard, and the one 2048 had —
+does not catch it, because 0.0849 is greater than zero.
+
+**The fix, and where it goes.** Name the renderer's floor as a constant with
+the reason attached (`const MIN_DRAWN_FONT: f32 = 1.0;`) and refuse to draw
+below it, in *one* place — the single function every string in the program
+passes through on its way to the frame. 2048 has `label`, which `centred` and
+every button caption call in turn, so one guard covers the program. Putting the
+check at each call site instead would be lesson 51's shape: a guard repeated in
+front of a guard is a guard no mutation can remove and no test can own.
+Refusing is the right answer rather than clamping the size up, because a line
+drawn at a size its band cannot hold is not a smaller line, it is a line in the
+wrong place; leaving it out is the only outcome the layout's own arithmetic
+still describes.
+
+**Where else to look.** Any `(band.h * f).min(cap)` or `font * k` that is not
+floored; any layout that keeps shrinking rather than dropping a band when the
+window runs out; and anything that treats "the size I asked for" as "the size
+that was drawn" when measuring — `text::measure(body, size, weight)` in a test
+computes the *asked* size's extent, so a test that measures cannot see this
+fault either. The window-size fixture is the thing that catches it: keep a
+window in the list small enough to drive at least one computed size under a
+pixel (2048's `WINDOWS` has `(4, 4)` for exactly this), and assert that no text
+is drawn outside the window it belongs to.
+
+### Lesson 61: the exception you carve out of a rule is the one place a comment does the work of a test (lane C, 2026-08-28)
+
+**In short:** when a sweep establishes a rule — "none of these five drawing
+passes needs a `did this band fit?` guard, because every call inside already
+refuses an empty box" — the tempting thing is to keep *one* guard and write a
+paragraph explaining why that one is different. Connect Four did this twice in
+the same afternoon, and both exceptions were wrong: the prose that justified
+them was reasoning about a case that could not arise, and prose cannot be run.
+An exception argued for in a comment is an assertion nobody checks.
+
+**The two instances.**
+
+- **A guard against a window the layout cannot produce.** Four band guards came
+  out of `draw_board`'s siblings under lesson 51. `draw_board`'s stayed, with a
+  comment: unlike the others it pushes a `RenderCommand::Line` between the ends
+  of the winning four *unconditionally*, so on a board with no room that would
+  be a zero-length stroke in the corner of the window. The premise is false.
+  The board is the one band the drop ladder cannot take: the padding is capped
+  at a quarter of the smaller side, so `width - 2 * pad` is never zero, and the
+  ladder empties all four *other* bands before it would eat into the board's
+  `BOARD_SHARE`, so the height left over is always positive. There is no window
+  size, down to 1x1, at which `l.board.is_empty()`. The comment had been
+  standing in for a test for as long as it had existed.
+- **An exemption that landed where the rule landed.** The help sheet is modal:
+  any intent while it is up shuts it and is swallowed. Two intents — "toggle
+  the sheet" and "close the sheet" — were excused from that rule and left to
+  fall through to their own match arms, on the reasoning that shutting the
+  sheet was what they were going to do anyway. That reasoning is exactly why
+  the exemption bought nothing: both arms ended where the guard ends, so no key
+  could tell the two paths apart, and all the exemption actually produced was
+  two branches below that could never be taken with the sheet up. Deleting the
+  exemption turned `ToggleHelp` into an unconditional "open it" and `CloseHelp`
+  into an unconditional "there is nothing to close" — three lines shorter and,
+  for the first time, reachable by a test.
+
+**How the two smell the same.** In both, the justification has the form *"this
+one is different because of what happens over there"* — a claim about another
+part of the program, held in a comment, checked by nobody. Mutation testing
+finds them from the other end: the guard, or the exemption, is a line whose
+removal changes no test's verdict, which is lesson 51's signature. What is new
+here is the *shape of the trap*: lesson 51's guards were obvious duplicates
+sitting one statement from the check they repeated, whereas these two were
+defended, at length, by someone who had already thought about it.
+
+**What to do instead.** If you believe an exception is needed, write the belief
+as a test before you write the guard. "The board is drawn in every window
+however small" is one sweep over a grid of sizes and it either passes — in
+which case the guard is dead and goes — or it fails, in which case you have
+found a real layout bug and the guard was never the fix. `connect4`'s
+`the_board_is_drawn_in_every_window_however_small` is that test; it is also the
+only thing now licensing `draw_board` to go without a guard, which is the
+correct place for the licence to live. And prefer a *grid* of sizes to the
+project's `WINDOWS` list for this: `WINDOWS` holds sizes each chosen because it
+makes some other rule bind, and a claim about every size has to be asked about
+sizes nobody picked deliberately.
+
+### Lesson 62: a witness the code under test produced moves with the fault (lane C, 2026-08-28)
+
+**In short:** to check that a program did the right thing you need a fact about
+it that came from somewhere else. If your only witness is something the program
+itself reported, a fault upstream of the report corrupts the answer *and* the
+evidence together, and they go on agreeing with each other. Connect Four's
+`ai_turn` chose a column, dropped a piece into it, and returned it; the test
+checked that the returned column was the column in the move list. Both come out
+of the same two lines. Shifting the played column one to the right between
+choosing and dropping failed nothing at all.
+
+**The fault, exactly.**
+
+```rust
+let col = ai_best_move(&mut self.board, self.ai_player, self.ai_depth)?;
+if !self.drop_at(col) { return None; }
+Some(col)                          // <- the test's only witness
+```
+
+The mutation inserted `let col = col.saturating_add(1) % COLS;` between the two
+lines. Because the new binding shadows the old, the drop and the return both
+use the shifted column: the piece lands in the wrong place, `ai_turn` reports
+the wrong place, and the two match. Every assertion in the test still held. The
+search's actual choice — the one fact that would have disagreed — was never
+asked for.
+
+**Why it is easy to write.** The test looks thorough. It asserts the move list
+grew by exactly one, that the piece is the AI's colour, that the turn came
+back, and that the reported column is the one that was played. Four assertions,
+and the *last* one reads like the strong one. It is the weak one: it relates
+two outputs of the same computation to each other, which no fault between them
+can break.
+
+**The rule.** *Every test needs at least one fact that did not come through the
+code path under test.* Ask of each assertion: where did the right-hand side
+come from? If the answer is "the function I am testing told me", it is not a
+witness, it is an echo. The fix is usually one line — compute the expected
+answer independently, before the call:
+
+```rust
+let mut board = app.board.clone();
+let want = ai_best_move(&mut board, app.ai_player, app.ai_depth).expect("...");
+let col = app.ai_turn().expect("...");
+assert_eq!(col, want, "the AI played a column the search did not pick");
+```
+
+**Where else to look.** Anywhere a function both *acts* and *reports what it
+did*: a writer that returns the byte count it wrote (asserted against itself
+rather than against the file's length); a scheduler that returns the task it
+picked; a parser that returns both a value and the offset it consumed; an
+allocator that returns a pointer and a size. The tell is an `assert_eq!` whose
+two sides can be traced back to a single call. Related to lesson 58 but not the
+same shape: there, two independent *rules* could each explain one witness; here
+there is only ever one rule, and the witness is downstream of it.
+
+### Lesson 63: a rule kept only by copying is a rule that will be dropped (lane C, 2026-08-28)
+
+**In short:** a keyboard on this system reports a key twice — once when it goes
+down and once when it comes back up — and an application is expected to act only
+on the first. Ninety-two applications did. One did not, and it was the one
+written most recently, by the author who had just put the same check into six
+others in a row. Nothing complained: it compiled, and every test that pressed a
+key passed, because no test thought to let one go. The fix is not another
+correct copy; it is `scripts/check-key-release-wiring.py`, a gate that fails the
+build when a windowed program routes keys and never reads the flag.
+
+**The fault.** `guitk::event::KeyEvent` carries `pressed`, and
+`gui/compositor/src/lib.rs` sends one event with `pressed: true` and a second
+with `pressed: false` for every keystroke. `apps/connect4`'s `key_intent`
+matched on `ev.key` and never looked at `ev.pressed`, so a single press of `1`
+dropped the player's piece *and then dropped a second piece into column one on
+the release* — which, the turn having passed, was played on the AI's behalf. The
+board advanced two moves for one keystroke, and the game shown was not the game
+being played. `apps/life` had stepped the generation twice per press for the
+same reason, and `apps/maze` had moved the walker two cells.
+
+**Why it is easy to write.** The guard is one `if` at the top of a function
+whose *interesting* content is a twenty-arm match, so it reads as boilerplate
+and gets skipped by anyone writing the handler from memory rather than copying
+the file next door. And it is invisible to everything that would normally catch
+a mistake:
+
+* the compiler is happy — `pressed` is a field nobody is obliged to read;
+* `clippy` is happy for the same reason;
+* the whole test suite is happy, because a test helper called `press` builds
+  `pressed: true` and no test builds the other one. A suite of two hundred
+  keyboard tests can have complete coverage of *which key does what* and zero
+  coverage of *how many times*.
+
+**The rule.** When the same one-line guard has to be written into every member
+of a family, stop writing it and write the gate instead. The tell is the count:
+if you can say "ninety-two files have this line", the line is a convention, and
+a convention with ninety-two instances has no mechanism holding it up — only the
+memory of whoever edits next. Conventions at that scale fail silently and fail
+on the newest file, because the newest file is the one written without the
+others open. A gate turns "everybody remembers" into "nobody has to", and its
+baseline should be zero from the day it is written if the population is already
+clean; a ratchet is for a mess you inherited, not for one you are still making.
+
+**Where else to look.** Any flag on an event or a message that a handler is free
+to ignore: `pressed` here; a `repeat` flag when key auto-repeat lands (the same
+fault one step along — an action that runs thirty times while a key is held);
+`MouseEventKind::Release` for a handler that only wants presses; a
+`compact_boundary` or `is_replay` marker on a stream a client re-reads. In every
+case the shape is the same — the field is *available*, ignoring it type-checks,
+and the consequence is a doubled action rather than a crash.
+## `A-MODULE-SELF-TEST-ASSERTIONS-WERE-GUARDED-BY-NOTHING` (lane A, 2026-08-29) -- **fixed by a new gate**
+
+**What it is.** ~300 assertions of the shape
+`assert!(formatted.contains("some text"))`, inside module `self_test`
+functions all over the kernel, had no static check of any kind behind them.
+The sibling gate `scripts/check-selftest-wording.py` covers only kshell rungs
+-- it resolves a *command word* to the text that command prints -- and a
+module self-test that formats a string and asserts on it has no command word
+to resolve, so the sibling never looked at one.
+
+**Why "no check" means "no check at all."** `kernel/Cargo.toml` carries
+`test = false`: a bare-metal binary supplies its own `panic_impl`, so the
+kernel's assertions cannot run on the host. The only thing that executes one is
+an eleven-minute QEMU boot. `cargo build` and `cargo clippy` are green on a tree
+whose self-test panics on the first assertion it reaches.
+
+**The variant that is worse than a panic.** `net::dashboard` asserted
+`metrics.contains("os_net_rx_bytes_total ")` -- with a trailing space, meaning
+"the sample line, not just the header." The `# HELP` and `# TYPE` lines satisfy
+that on their own. When the metric gained a `source` label its sample line
+became `os_net_rx_bytes_total{source="..."} N`, and the assertion went on
+passing against a build emitting no samples at all. A panicking assertion at
+least announces itself on the next boot; this one guarded nothing and said so
+in the same words as a working test.
+
+**The gate.** `scripts/check-selftest-format-wording.py`, run from
+`scripts/boot-test.sh` beside its sibling. It enforces: *every fragment a
+`self_test` requires a string to contain must be text some string literal in the
+kernel can actually produce.* Three things make it usable rather than noisy:
+
+| Rule | Why |
+|---|---|
+| The pool excludes *consuming* positions (`contains`, `starts_with`, `assert_output_contains`, ...) rather than enumerating producing ones. | A taxonomy of producers is a list that will be incomplete, and every omission is a false accusation. Over-approximating the pool errs toward missing a defect; under-approximating it errs toward the gate being switched off. |
+| Acceptance is crate-wide verbatim first, then same-file alignment against a format string. | A module legitimately asserts on another module's wording (`net::netstat` asserts `"ESTABLISHED"`, which `TcpState` spells). Widening the *alignment* stage to the crate would make almost anything producible. |
+| Only *presence* assertions are targets. | `if cpu_text.contains("processors:") { fail }` and `assert!(!x.contains(L))` demand the opposite; for them "nothing produces this" is the state being enforced, and reporting them would accuse a working regression guard. |
+
+**22 exemptions, each checked by hand** (`ALLOWED` in the script, with reasons).
+They are all text the code *computes* -- a byte count scaled to `3.0 MiB`,
+`Content-Length: 9`, base64 `YWRtaW46c2VjcmV0`, a dot-stuffed SMTP line -- or
+pasted together without a format string, as `http` does with
+`extend_from_slice(b"Content-Type: ")` and `journal` with
+`push_str(name); push_str("_hex\":\"")`. Modelling concatenation was considered
+and rejected: `RX packets:` is `RX packets` plus a colon, and a colon is a
+literal somewhere in every large program, so admitting it would accept the very
+bug the gate was written for.
+
+**A fix in the shared helper.** `producible()` in `check-selftest-wording.py`
+expressed its alignment as a regex whose "suffix of segment" alternation has one
+branch per byte. `net::dashboard` formats its 16 KiB HTML page from one literal
+with 48 segments: 1128 segment pairs, each compiling an alternation of thousands
+of branches, which took **minutes for a single fragment**. It was also *wrong* --
+`.*?` between two alternations commits to one split and never reconsiders, so an
+alignment existing under a different split was silently missed. Replaced with
+direct enumeration of the three placements that can ever carry the run. The
+whole gate now runs in 19 s; the sibling's verdict on kshell is unchanged
+(502 assertions, 7 allowed).

@@ -34,7 +34,14 @@
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
-use coreutils::quote::{os_bytes, os_from_bytes, quoteaf, quotef, quotef_os};
+// `escape`, not `quotef`, and that is a deliberate departure from the house
+// style of the other 85 bins. GNU tar calls `set_quoting_style (NULL,
+// escape_quoting_style)` at startup, so *every* name it prints -- in a
+// diagnostic, in `-t`, and in `-cv`/`-xv` -- comes out the same way: C escapes,
+// octal for anything that is not a valid character, and no quotes at all.
+// Measured: `tar: caf\351: Not found in archive`, where a `quotef`-shaped tar
+// would have said `tar: 'caf'$'\351': Not found in archive`.
+use coreutils::quote::{escape, escape_os, os_bytes, os_from_bytes, quoteaf};
 use coreutils::stdfd;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -392,16 +399,25 @@ enum Verbose {
 }
 
 impl Verbose {
-    /// Announce one member name, unquoted and as bytes.
+    /// Announce one member name, rendered exactly as a diagnostic would render
+    /// it.
     ///
-    /// `diag!` cannot do this: it goes through `format!`, which takes a `&str`,
-    /// so the name would have to pass through `from_utf8_lossy` first — and the
-    /// whole point of the byte conversion is that a name is carried intact.
-    /// Unquoted because that is what GNU prints; the *diagnostics* quote, the
-    /// listing does not.
+    /// This used to write the name's bytes raw, on the reasoning that a listing
+    /// is output rather than a message and should carry the name intact. That
+    /// is not what GNU does and it is not safe: `-cv`, `-xv` and `-t` all go
+    /// through the same `escape` style as tar's diagnostics, so a member called
+    /// `a\nb` prints as `a\nb` on one line rather than as two lines that a
+    /// script reading the manifest would take for two files. Measured against
+    /// GNU tar 1.35 for all of `-t`, `-tv`, `-cv` and `-xv`.
+    ///
+    /// The cost is that the rendering is no longer reversible — a name holding
+    /// a literal backslash comes back doubled — which is exactly the cost GNU
+    /// pays, and the reason `tar -t` has never been a safe way to feed names to
+    /// another program.
     fn line(self, name: &[u8]) {
-        let mut line = Vec::with_capacity(name.len().saturating_add(1));
-        line.extend_from_slice(name);
+        let shown = escape(name);
+        let mut line = Vec::with_capacity(shown.len().saturating_add(1));
+        line.extend_from_slice(shown.as_bytes());
         line.push(b'\n');
         match self {
             Self::Off => {}
@@ -458,9 +474,9 @@ impl Verbose {
 ///   longer the name being written. Comparing bytes to bytes removes a whole
 ///   class of question about whether the check and the write agree.
 ///
-/// The error messages quote the raw name with `quoteaf`, since it is
-/// attacker-chosen and rendering it raw would let a crafted archive forge a
-/// line of tar's stderr.
+/// The error messages render the raw name with `escape` — tar's one quoting
+/// style — since it is attacker-chosen and printing it raw would let a crafted
+/// archive forge a line of tar's stderr.
 fn sanitize_member_name(raw: &[u8]) -> Result<Vec<u8>, String> {
     let mut parts: Vec<&[u8]> = Vec::new();
     for component in raw.split(|&b| b == b'/') {
@@ -477,7 +493,7 @@ fn sanitize_member_name(raw: &[u8]) -> Result<Vec<u8>, String> {
             // there. The member is skipped either way.
             return Err(format!(
                 "{}: Member name contains '..'",
-                quotef(raw)
+                escape(raw)
             ));
         }
         parts.push(component);
@@ -489,7 +505,7 @@ fn sanitize_member_name(raw: &[u8]) -> Result<Vec<u8>, String> {
         // stripping passes runs out of name first; what matters is that such a
         // member is refused rather than resolved to `.`, which is the directory
         // being extracted into.
-        return Err(format!("{}: Cannot extract: empty member name", quotef(raw)));
+        return Err(format!("{}: Cannot extract: empty member name", escape(raw)));
     }
     Ok(parts.join(&b'/'))
 }
@@ -500,7 +516,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
         Some(path) => match File::create(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                diag!("tar: {}: Cannot open: {}", quotef_os(path), strerror(&e));
+                diag!("tar: {}: Cannot open: {}", escape_os(path), strerror(&e));
                 return fatal();
             }
         },
@@ -528,7 +544,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
         let meta = match fs::metadata(path) {
             Ok(m) => m,
             Err(e) => {
-                diag!("tar: {}: Cannot stat: {}", quotef(name), strerror(&e));
+                diag!("tar: {}: Cannot stat: {}", escape(name), strerror(&e));
                 *status = EXIT_FATAL;
                 return;
             }
@@ -544,7 +560,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
         let mut f = match File::open(path) {
             Ok(f) => f,
             Err(e) => {
-                diag!("tar: {}: Cannot open: {}", quotef(name), strerror(&e));
+                diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
                 *status = EXIT_FATAL;
                 return;
             }
@@ -585,7 +601,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
                     Ok(n) => filled = filled.saturating_add(n),
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                     Err(e) => {
-                        diag!("tar: {}: Cannot read: {}", quotef(name), strerror(&e));
+                        diag!("tar: {}: Cannot read: {}", escape(name), strerror(&e));
                         *status = EXIT_FATAL;
                         short = true;
                     }
@@ -605,7 +621,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
             // remaining blocks were padded, but it no longer holds the file.
             diag!(
                 "tar: {}: file shorter than expected; padded with zeros",
-                quotef(name)
+                escape(name)
             );
             *status = EXIT_FATAL;
         }
@@ -644,7 +660,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
             Err(e) => {
                 // Previously `if let Ok(entries)`, so an unreadable directory
                 // produced an archive silently missing its whole subtree.
-                diag!("tar: {}: Cannot open: {}", quotef(prefix), strerror(&e));
+                diag!("tar: {}: Cannot open: {}", escape(prefix), strerror(&e));
                 *status = EXIT_FATAL;
                 return;
             }
@@ -665,7 +681,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
             match entry {
                 Ok(e) => children.push((os_bytes(&e.file_name()).into_owned(), e.path())),
                 Err(e) => {
-                    diag!("tar: {}: Cannot read: {}", quotef(prefix), strerror(&e));
+                    diag!("tar: {}: Cannot read: {}", escape(prefix), strerror(&e));
                     *status = EXIT_FATAL;
                 }
             }
@@ -1019,7 +1035,7 @@ fn report_stop(stop: Stop, label: &[u8]) -> i32 {
             fatal()
         }
         Stop::Unreadable(e, at_start) => {
-            diag!("tar: {}: Cannot read: {}", quotef(label), strerror(&e));
+            diag!("tar: {}: Cannot read: {}", escape(label), strerror(&e));
             if at_start {
                 // GNU's phrasing for "nothing at all was read", inherited from
                 // when the archive really was on tape. Kept because it is the
@@ -1109,7 +1125,7 @@ impl Selector {
         let mut status = 0;
         for (w, matched) in &self.wanted {
             if !matched {
-                diag!("tar: {}: Not found in archive", quotef(w));
+                diag!("tar: {}: Not found in archive", escape(w));
                 status = EXIT_FATAL;
             }
         }
@@ -1212,14 +1228,14 @@ fn extraction_mode(stored: u32, same_permissions: bool, umask: u32) -> u32 {
 /// with the `-tv` listing rather than each having its own.
 fn restore_metadata(name: &[u8], path: &Path, mode: u32, mtime: i64, status: &mut i32) {
     if let Err(e) = set_mtime(path, mtime) {
-        diag!("tar: {}: Cannot utime: {}", quotef(name), strerror(&e));
+        diag!("tar: {}: Cannot utime: {}", escape(name), strerror(&e));
         *status = EXIT_FATAL;
     }
     if let Err(e) = set_mode(path, mode) {
         let bits = mode_string(mode, b'0');
         diag!(
             "tar: {}: Cannot change mode to {}: {}",
-            quotef(name),
+            escape(name),
             String::from_utf8_lossy(bits.get(1..).unwrap_or(&[])),
             strerror(&e)
         );
@@ -1278,7 +1294,7 @@ fn do_extract(
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                diag!("tar: {}: Cannot open: {}", quotef_os(path), strerror(&e));
+                diag!("tar: {}: Cannot open: {}", escape_os(path), strerror(&e));
                 return fatal();
             }
         },
@@ -1288,7 +1304,7 @@ fn do_extract(
     if let Some(dir) = directory
         && let Err(e) = env::set_current_dir(dir)
     {
-        diag!("tar: {}: Cannot chdir: {}", quotef_os(dir), strerror(&e));
+        diag!("tar: {}: Cannot chdir: {}", escape_os(dir), strerror(&e));
         return fatal();
     }
 
@@ -1366,7 +1382,7 @@ fn do_extract(
         match member.typeflag {
             _ if member.is_dir() => {
                 if let Err(e) = fs::create_dir_all(os_from_bytes(&name)) {
-                    diag!("tar: {}: Cannot mkdir: {}", quotef(&name), strerror(&e));
+                    diag!("tar: {}: Cannot mkdir: {}", escape(&name), strerror(&e));
                     status = EXIT_FATAL;
                 } else {
                     pending_dirs.push((
@@ -1398,7 +1414,7 @@ fn do_extract(
                 // stderr; `quoteaf` renders that byte as `''$'\n'`.
                 diag!(
                     "tar: {}: unsupported entry type {}; skipped",
-                    quotef(&name),
+                    escape(&name),
                     quoteaf(&[other])
                 );
                 status = EXIT_FATAL;
@@ -1457,7 +1473,7 @@ fn extract_regular_file(
         && !parent.as_os_str().is_empty()
         && let Err(e) = fs::create_dir_all(parent)
     {
-        diag!("tar: {}: Cannot mkdir: {}", quotef_os(parent), strerror(&e));
+        diag!("tar: {}: Cannot mkdir: {}", escape_os(parent), strerror(&e));
         *status = EXIT_FATAL;
         return skip_data(input, size);
     }
@@ -1467,7 +1483,7 @@ fn extract_regular_file(
         Err(e) => {
             // Still consume the data: the archive may hold members after this
             // one, and abandoning the stream would lose them too.
-            diag!("tar: {}: Cannot open: {}", quotef(name), strerror(&e));
+            diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
             *status = EXIT_FATAL;
             None
         }
@@ -1488,7 +1504,7 @@ fn extract_regular_file(
         if let Some(f) = file.as_mut()
             && let Err(e) = f.write_all(block.get(..take).unwrap_or(&[]))
         {
-            diag!("tar: {}: Cannot write: {}", quotef(name), strerror(&e));
+            diag!("tar: {}: Cannot write: {}", escape(name), strerror(&e));
             *status = EXIT_FATAL;
             // Drop the handle so the rest of the member is only skipped, but
             // keep reading so the following headers stay aligned.
@@ -1501,7 +1517,7 @@ fn extract_regular_file(
     let wrote = match file {
         Some(mut f) => {
             if let Err(e) = f.flush() {
-                diag!("tar: {}: Cannot write: {}", quotef(name), strerror(&e));
+                diag!("tar: {}: Cannot write: {}", escape(name), strerror(&e));
                 *status = EXIT_FATAL;
                 false
             } else {
@@ -1524,7 +1540,7 @@ fn do_list_main(archive_file: Option<&OsStr>, verbose: bool, members: &[OsString
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                diag!("tar: {}: Cannot open: {}", quotef_os(path), strerror(&e));
+                diag!("tar: {}: Cannot open: {}", escape_os(path), strerror(&e));
                 return fatal();
             }
         },
@@ -1603,16 +1619,16 @@ fn list_archive(
         // of `tar -t` is to tell you what is in the archive, and a member
         // called `../../etc/passwd` is exactly what you want to be shown.
         //
-        // Written as bytes, not through `writeln!`: `tar -tf a.tar` must be
-        // usable as input to the thing that extracts it, so a name that is not
-        // UTF-8 has to come out as the bytes that are actually in the header
-        // rather than as U+FFFD. That the name is untrusted is fine here for
-        // the same reason `cat` may print arbitrary bytes — this is the file's
-        // content, on stdout, not a diagnostic claiming to come from tar.
+        // Shown through `escape`, which is what GNU does and is why a name that
+        // is not UTF-8 comes out as `caf\351.txt` rather than as the bytes
+        // themselves. The earlier reasoning here — that `tar -t` output must be
+        // feedable back to `tar -x`, so the bytes must survive — was wrong on
+        // its own terms: GNU's output is not feedable back either, and a name
+        // containing a newline would put two lines in the manifest.
         let line = if verbose {
             long_line(member, &mut ugswidth, zone)
         } else {
-            let mut l = member.name.clone();
+            let mut l = escape(&member.name).into_bytes();
             l.push(b'\n');
             l
         };
@@ -1678,7 +1694,12 @@ fn long_line(member: &Member, ugswidth: &mut usize, zone: &localtime::Zone) -> V
     let tm = zone.local(member.mtime, 0);
     line.extend_from_slice(&localtime::strftime(b"%Y-%m-%d %H:%M", &tm));
     line.push(b' ');
-    line.extend_from_slice(&member.name);
+    // The name and the link target are escaped; the user and group names above
+    // are not. That asymmetry is GNU's — `print_header` passes the name and the
+    // linkname through `quotearg` and prints the owner fields with a plain
+    // `%s` — and it is the reason the column arithmetic can use the owner
+    // lengths as they stand: nothing before the name column can change width.
+    line.extend_from_slice(escape(&member.name).as_bytes());
 
     // GNU's two suffixes, and part of the reason `-tv` is worth having over
     // `-t`: a symlink's target and a hard link's other name are stored in the
@@ -1686,11 +1707,11 @@ fn long_line(member: &Member, ugswidth: &mut usize, zone: &localtime::Zone) -> V
     match member.typeflag {
         b'2' => {
             line.extend_from_slice(b" -> ");
-            line.extend_from_slice(&member.linkname);
+            line.extend_from_slice(escape(&member.linkname).as_bytes());
         }
         b'1' => {
             line.extend_from_slice(b" link to ");
-            line.extend_from_slice(&member.linkname);
+            line.extend_from_slice(escape(&member.linkname).as_bytes());
         }
         _ => {}
     }
@@ -2275,18 +2296,46 @@ mod tests {
     }
 
     #[test]
-    fn list_writes_a_non_utf8_name_unaltered() {
-        // `tar -tf` names members so the output can be fed back to whatever
-        // extracts them. Through `String::from_utf8_lossy` and `writeln!` this
-        // printed `caf<U+FFFD>.txt` -- three bytes where one belongs, naming a
-        // member the archive does not contain.
+    fn list_escapes_a_byte_that_is_not_a_character() {
+        // Through `String::from_utf8_lossy` and `writeln!` this printed
+        // `caf<U+FFFD>.txt` -- three bytes where one belongs, and the same
+        // three for every distinct bad byte, so two different members could
+        // list under one name. GNU's answer is the octal escape, which is
+        // unambiguous and stays on one line. Measured.
         let mut input: Vec<u8> = Vec::new();
         input.extend_from_slice(&make_header(b"caf\xe9.txt", 0, b'0'));
-        input.extend_from_slice(&[0u8; BLOCK_SIZE]);
-        input.extend_from_slice(&[0u8; BLOCK_SIZE]);
+        input.extend_from_slice(&[0u8; BLOCK_SIZE * 2]);
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
-        assert_eq!(out, b"caf\xe9.txt\n");
+        assert_eq!(String::from_utf8(out).unwrap(), "caf\\351.txt\n");
+        assert!(matches!(stop, Stop::End), "{stop:?}");
+    }
+
+    #[test]
+    fn list_leaves_a_valid_multibyte_name_alone() {
+        // The other half of the rule: `escape` escapes what is not a character,
+        // not what is not ASCII. GNU under a UTF-8 locale prints `café.txt`
+        // whole and only falls back to octal for the bytes that decode to
+        // nothing.
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(&make_header("café.txt".as_bytes(), 0, b'0'));
+        input.extend_from_slice(&[0u8; BLOCK_SIZE * 2]);
+        let mut out = Vec::new();
+        let stop = list_names(&input, &mut out);
+        assert_eq!(String::from_utf8(out).unwrap(), "café.txt\n");
+        assert!(matches!(stop, Stop::End), "{stop:?}");
+    }
+
+    #[test]
+    fn list_keeps_a_name_holding_a_newline_on_one_line() {
+        // The reason escaping is not merely cosmetic: a member called `a\nb`
+        // printed raw makes `tar -t` report two files, one of them named `b`.
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(&make_header(b"a\nb.txt", 0, b'0'));
+        input.extend_from_slice(&[0u8; BLOCK_SIZE * 2]);
+        let mut out = Vec::new();
+        let stop = list_names(&input, &mut out);
+        assert_eq!(String::from_utf8(out).unwrap(), "a\\nb.txt\n");
         assert!(matches!(stop, Stop::End), "{stop:?}");
     }
 

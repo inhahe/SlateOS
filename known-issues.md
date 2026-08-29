@@ -94068,6 +94068,51 @@ files must still expect `\r\n`; the cost of fixing them is paid by everyone
 reading history for a year. If one is being rewritten wholesale for another
 reason — as wordle was — normalise it in that commit.
 
+### Lesson 70: a movement that is clamped can only be tested where it is free to move (lane C, 2026-08-29)
+
+**In short:** nonogram's mutation sweep left five survivors, and four of them
+were the same mistake wearing different hats. Every arrow-key test pressed its
+arrow *at the edge the arrow stops at* — `Up` at row 0, `Left` at column 0, `Up`
+at the top of the puzzle list. At that spot the guard (`if self.cursor_row > 0`)
+refuses the key, so the line the guard protects never runs; and if you delete
+the guard, `saturating_sub(1)` on 0 is still 0. Two different faults — a missing
+bound check and a movement that goes the wrong way — both produce exactly the
+cursor position the test asserts. The fifth survivor is the same shape in
+geometry: the centring test measured vertical slack in a fixture where the grid
+was height-constrained, so the slack was zero and "centred" and "flush against
+the top" were the same number.
+
+**The two halves of the rule.**
+
+1. **To test a *direction*, press the key somewhere it can actually move.** `Up`
+   from row 1 must land on row 0. Pressed from row 0 it asserts nothing about
+   which way up is — the guard answers first, and `saturating_sub` answers
+   after it.
+2. **To test a *bound*, assert the verdict, not just the position.** At the edge
+   the position is unchanged whether the key was refused or applied-and-clamped;
+   what distinguishes them is that a refused key returns `EventResult::Ignored`
+   and a clamped one returns `Consumed`. The window is told to repaint in the
+   second case and not the first, so this is a real user-visible difference and
+   not a technicality.
+
+Written out, the pair covers a movement key completely: from an interior cell,
+`Consumed` and the cursor one step in the named direction; from its own edge,
+`Ignored` and the cursor where it was.
+
+**And the geometry half.** A "centred" assertion of the form *slack on this side
+equals slack on that side* is satisfied by `0 == 0`. `Grid::new` sizes its cells
+by `min(width_fit, height_fit)`, so in **any** fixture exactly one axis is fully
+consumed and has no slack at all. A single fixture can therefore only ever test
+centring on one axis; testing both needs a wide area *and* a tall one, and each
+assertion needs `assert!(slack > 0.0)` in front of it to prove it was measuring
+something. This is lesson 67 (a test over a branch must prove the branch was
+entered) arriving through arithmetic rather than control flow.
+
+**Where else to look.** Every app with a cursor that clamps — sudoku, minesweeper,
+2048, connect4, the file explorer's list — and every `(a - b).abs() < eps`
+centring assertion in a layout suite. The tell is a test whose fixture puts the
+thing under test at rest.
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print

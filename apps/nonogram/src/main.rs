@@ -1,85 +1,112 @@
-#![allow(dead_code)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(clippy::needless_range_loop)]
-#![allow(unused_imports)]
-
-//! Slate OS Nonogram (Picross / picture-logic puzzle) game.
+//! Nonogram — deduce a hidden picture from run-length clues down the side of
+//! every row and along the top of every column. Ten built-in pictures at
+//! 5x5, 10x10 and 15x15; a cursor you can drive from the keyboard or the
+//! pointer; an X mark for "this one is definitely blank"; a check switch that
+//! calls out the cells you have got wrong; and a timer.
 //!
-//! The player deduces which cells to fill based on numeric clues given for
-//! each row and column. Clues describe the lengths of consecutive filled
-//! runs in order. The puzzle is solved when the player's grid matches the
-//! hidden solution exactly.
+//! ## What wiring it found
 //!
-//! Features:
-//! - 5x5, 10x10, and 15x15 grid sizes with 8+ built-in picture puzzles
-//! - Row and column clue numbers computed automatically from the solution
-//! - Arrow-key cursor movement, Enter/Space to fill, X to mark empty
-//! - Current row/column clue highlighting
-//! - Win detection when grid matches solution
-//! - Puzzle select screen with thumbnails
-//! - Elapsed-time timer
-//! - Check mode to highlight errors (C key)
-//! - Catppuccin Mocha dark theme
+//! `main` was `let _app = NonogramApp::new();` — it built the puzzle
+//! catalogue, computed every clue and dropped the lot, so no picture ever
+//! reached a screen and no key or click ever arrived.
+//!
+//! Under that, **the program chose its own window and then drew in absolute
+//! pixels inside it.** `render` took no size at all: the select screen
+//! declared itself `520.0` wide, and the playing screen measured its own
+//! width from the grid. Nothing ever asked how big the window was, so in any
+//! window that was not the one the program had in mind the picture was either
+//! cut off or marooned in a corner. The layout is solved from the live window
+//! size every frame now.
+//!
+//! **The select list's geometry was written out twice and the two copies had
+//! already drifted apart**: the drawing pass drew entries from `x = PADDING`
+//! to `x = 520 - PADDING`, and the hit test accepted `PADDING..500.0` — a
+//! four-pixel strip down the right-hand edge of every entry that looked
+//! clickable and was not (`known-issues.md` lesson 63). The hit boxes are
+//! recorded by the drawing pass now, so an entry is clickable exactly where
+//! its ink is.
+//!
+//! **The clue numbers were centred against eyeballed text metrics.**
+//! `CLUE_HALF_WIDTH = 4.0` sat under a doc comment claiming "the renderer has
+//! no text-metrics call to ask"; [`guitk::text::measure`] has existed all
+//! along, and the guess was wrong for every two-digit clue — a `12` was
+//! centred as though it were as narrow as a `1`. Every string is measured
+//! and given a `max_width` now; there were none before, so nothing was ever
+//! clipped to its box.
+//!
+//! **The pointer could fill a cell and nothing else.** `X`, the mark the
+//! whole game is built around, was keyboard-only, as were the check switch
+//! and the way back to the menu. Right-click marks, and the footer carries
+//! the two switches.
+//!
+//! Twelve blanket `#![allow(...)]` sat at the top of the file — `dead_code`
+//! and `unused_imports` among them, which is what let a program whose `main`
+//! discarded its own app compile without a word of complaint.
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
 const MANTLE: Color = Color::from_hex(0x181825);
 const SURFACE0: Color = Color::from_hex(0x313244);
 const SURFACE1: Color = Color::from_hex(0x45475A);
+const SURFACE2: Color = Color::from_hex(0x585B70);
 const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
 const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
 const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
 
-// ── Layout constants ────────────────────────────────────────────────
-const CELL_SIZE: f32 = 28.0;
-const CELL_GAP: f32 = 2.0;
-const PADDING: f32 = 16.0;
-const HEADER_HEIGHT: f32 = 50.0;
-const CLUE_FONT_SIZE: f32 = 13.0;
-const CELL_FONT_SIZE: f32 = 16.0;
-const HEADER_FONT_SIZE: f32 = 20.0;
-const STATUS_FONT_SIZE: f32 = 14.0;
-const SELECT_FONT_SIZE: f32 = 15.0;
-const THUMB_CELL: f32 = 6.0;
-const CELL_CORNER_RADIUS: f32 = 3.0;
-/// Maximum number of clue values per row/column (determines clue area width/height).
-const MAX_CLUE_SLOTS: usize = 8;
-/// Pixel width reserved for each clue number in the row clue area.
-const CLUE_SLOT_W: f32 = 18.0;
-/// Pixel height reserved for each clue number in the column clue area.
-const CLUE_SLOT_H: f32 = 16.0;
+// ── Layout proportions ──────────────────────────────────────────────
+//
+// Everything below is a *share* of something the window gives us, because the
+// window is the one measurement the program does not get to choose. The
+// figures these replaced were absolute pixels — a 28-pixel cell, a 2-pixel
+// gap, a 50-pixel header — which is why the old program had to invent a
+// window big enough for them rather than fit itself to one.
 
-/// Half a clue number's drawn width and height at `CLUE_FONT_SIZE`.
+/// The gap between two neighbouring cells, per unit of cell size, so that every
+/// dimension of the grid is a multiple of the single number `cell`.
+const GAP_PER_CELL: f32 = 0.08;
+
+/// The width of one row-clue slot, per unit of cell size. A slot holds one
+/// number, and the widest clue in the puzzle decides how many slots the band
+/// is deep.
+const CLUE_W_PER_CELL: f32 = 0.66;
+
+/// The height of one column-clue slot, per unit of cell size.
+const CLUE_H_PER_CELL: f32 = 0.60;
+
+/// The fraction of the window height the picture is guaranteed before the
+/// header or the footer keeps its full height. A nonogram with no grid is not
+/// a smaller nonogram; it is a blank rectangle.
+const BODY_SHARE: f32 = 0.62;
+
+/// The tallest a select-list entry may be, as a fraction of the list's own
+/// height, so that four puzzles do not each become a banner.
+const ENTRY_SHARE: f32 = 0.16;
+
+const WINDOW_WIDTH: f32 = 640.0;
+const WINDOW_HEIGHT: f32 = 720.0;
+
+/// How often the window is asked to send a [`Event::Tick`].
 ///
-/// `RenderCommand::Text` is positioned by its top-left corner, so a number is
-/// centred on a row or column by starting it this far up and to the left of
-/// that row's or column's middle. The figures are eyeballed -- the renderer has
-/// no text-metrics call to ask -- which is why they are named rather than left
-/// as bare literals subtracted from an inline half-cell.
-const CLUE_HALF_WIDTH: f32 = 4.0;
-/// Half a clue number's drawn height at `CLUE_FONT_SIZE`. See
-/// `CLUE_HALF_WIDTH`.
-const CLUE_HALF_HEIGHT: f32 = 7.0;
+/// The old program handled ticks and never received one — nothing in it ever
+/// asked for them, so `elapsed_ms` stayed at zero and the timer in the header
+/// read `0:00` for the whole game.
+const TICK: Duration = Duration::from_millis(200);
 
 // ── Grid sizes ─────────────────────────────────────────────────────
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,14 +122,6 @@ impl GridSize {
             Self::Small => 5,
             Self::Medium => 10,
             Self::Large => 15,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Small => "5x5",
-            Self::Medium => "10x10",
-            Self::Large => "15x15",
         }
     }
 }
@@ -146,23 +165,29 @@ fn compute_clue(line: &[bool]) -> Vec<u8> {
 
 /// Compute row clues from a solution grid stored in row-major order.
 fn compute_row_clues(solution: &[bool], cols: usize) -> Vec<Vec<u8>> {
-    let rows = solution.len() / cols;
-    (0..rows)
-        .map(|r| {
-            let start = r * cols;
-            let end = start + cols;
-            compute_clue(&solution[start..end])
-        })
-        .collect()
+    if cols == 0 {
+        return Vec::new();
+    }
+    // A trailing partial row is dropped rather than described, which is what
+    // the integer division here used to do by accident.
+    solution.chunks_exact(cols).map(compute_clue).collect()
 }
 
 /// Compute column clues from a solution grid stored in row-major order.
 fn compute_col_clues(solution: &[bool], cols: usize) -> Vec<Vec<u8>> {
-    let rows = solution.len() / cols;
+    let Some(rows) = solution.len().checked_div(cols) else {
+        return Vec::new();
+    };
     (0..cols)
         .map(|c| {
-            let col_vals: Vec<bool> = (0..rows).map(|r| solution[r * cols + c]).collect();
-            compute_clue(&col_vals)
+            let column: Vec<bool> = solution
+                .iter()
+                .skip(c)
+                .step_by(cols)
+                .take(rows)
+                .copied()
+                .collect();
+            compute_clue(&column)
         })
         .collect()
 }
@@ -180,18 +205,22 @@ struct PuzzleDef {
 
 /// Parse a multi-line string picture into a boolean grid.
 /// `#` = filled, anything else = empty. Each line is one row.
+///
+/// A line past the bottom of the grid needs no guard of its own: its cells all
+/// index past the end of `grid`, which the `get_mut` below already answers for.
+/// A character past the right-hand edge is different — without the `take` it
+/// would land on the *next row* rather than off the end — so that one is real
+/// (`known-issues.md` lesson 51: a guard in front of a rule that already holds
+/// is a line no test can own).
 fn parse_picture(s: &str, side: usize) -> Vec<bool> {
-    let mut grid = vec![false; side * side];
+    let mut grid = vec![false; side.saturating_mul(side)];
     for (r, line) in s.lines().enumerate() {
-        if r >= side {
-            break;
-        }
-        for (c, ch) in line.chars().enumerate() {
-            if c >= side {
-                break;
+        for (c, ch) in line.chars().take(side).enumerate() {
+            if ch != '#' {
+                continue;
             }
-            if ch == '#' {
-                grid[r * side + c] = true;
+            if let Some(slot) = grid.get_mut(r.saturating_mul(side).saturating_add(c)) {
+                *slot = true;
             }
         }
     }
@@ -376,6 +405,382 @@ fn builtin_puzzles() -> Vec<PuzzleDef> {
     ]
 }
 
+// ── What a click can land on ────────────────────────────────────────
+
+/// Everything the pointer can reach.
+///
+/// The drawing pass records one of these against each box it paints, so the
+/// hit map is a by-product of the picture rather than a second copy of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// An entry in the puzzle list, by index into the catalogue.
+    Puzzle(usize),
+    /// A cell of the grid, by row and column.
+    Cell(usize, usize),
+    /// The switch that highlights wrong cells.
+    Check,
+    /// Back to the puzzle list.
+    Menu,
+}
+
+/// Whether an event changed anything the window would need to redraw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventResult {
+    Consumed,
+    Ignored,
+}
+
+// ── Layout ──────────────────────────────────────────────────────────
+
+/// The bands a window of a given size is divided into.
+///
+/// Built fresh every frame and never stored on the model, because a remembered
+/// layout is one that can disagree with the window it is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    pub window: Rect,
+    /// Title, timer, and the solved banner.
+    pub header: Rect,
+    /// Everything between the header and the footer: the grid, or the list.
+    pub body: Rect,
+    /// Hints, progress, and the two switches.
+    pub footer: Rect,
+    /// The header title's size.
+    pub big: f32,
+    /// Body text.
+    pub font: f32,
+    /// Footer text.
+    pub small: f32,
+    pub pad: f32,
+}
+
+impl Layout {
+    /// The bands for a window of the given size.
+    #[must_use]
+    pub fn new(width: f32, height: f32) -> Self {
+        let w = width.max(1.0);
+        let h = height.max(1.0);
+        let pad = (w.min(h) * 0.02).clamp(2.0, 12.0);
+        let big = (h / 28.0).clamp(9.0, 22.0);
+        let font = (h / 42.0).clamp(8.0, 16.0);
+        let small = (font - 1.0).max(7.0);
+
+        // The footer gives up its height first and the header second. Both are
+        // laid out as full-width strips nought pixels tall rather than
+        // `Rect::EMPTY`, because `Rect::is_empty` is `w <= 0.0 || h <= 0.0` —
+        // so a dropped band already answers "no" to the only question the
+        // drawing code asks, and it still sits where the band would have been.
+        // That is what lets the edges below fall out without a guard apiece
+        // (`known-issues.md` lesson 51).
+        let mut hdr = (h * 0.08).clamp(20.0, 48.0);
+        let mut ftr = (h * 0.07).clamp(18.0, 42.0);
+        let floor = h * BODY_SHARE;
+        if h - hdr - ftr < floor {
+            ftr = (h - hdr - floor).max(0.0);
+        }
+        if h - hdr - ftr < floor {
+            hdr = (h - floor).max(0.0);
+        }
+
+        let header = Rect::new(0.0, 0.0, w, hdr);
+        let footer = Rect::new(0.0, h - ftr, w, ftr);
+        let body = Rect::new(
+            pad,
+            hdr + pad,
+            (w - pad * 2.0).max(0.0),
+            (footer.y - hdr - pad * 2.0).max(0.0),
+        );
+
+        Self {
+            window: Rect::new(0.0, 0.0, w, h),
+            header,
+            body,
+            footer,
+            big,
+            font,
+            small,
+            pad,
+        }
+    }
+}
+
+/// Where the cells and their clue bands go inside the space left for them.
+///
+/// The clue bands are part of the picture's own size, not an offset added to
+/// it: a puzzle whose widest row clue is four numbers deep gets a wider band
+/// and therefore smaller cells in the same window, which is the whole reason
+/// this is solved rather than declared.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grid {
+    pub side: usize,
+    /// How many numbers deep the row-clue band is.
+    pub row_slots: usize,
+    /// How many numbers deep the column-clue band is.
+    pub col_slots: usize,
+    pub cell: f32,
+    pub gap: f32,
+    /// The width of one row-clue slot.
+    pub clue_w: f32,
+    /// The height of one column-clue slot.
+    pub clue_h: f32,
+    /// The band of row clues down the left of the cells.
+    pub row_clues: Rect,
+    /// The band of column clues across the top of the cells.
+    pub col_clues: Rect,
+    /// The cells themselves.
+    pub cells: Rect,
+    pub clue_font: f32,
+}
+
+impl Grid {
+    /// The grid for a `side`x`side` puzzle in `area`.
+    #[must_use]
+    pub fn new(area: Rect, side: usize, row_slots: usize, col_slots: usize) -> Self {
+        let across = usize_f32(side);
+        if side == 0 || area.is_empty() {
+            return Self {
+                side,
+                row_slots,
+                col_slots,
+                cell: 0.0,
+                gap: 0.0,
+                clue_w: 0.0,
+                clue_h: 0.0,
+                row_clues: Rect::EMPTY,
+                col_clues: Rect::EMPTY,
+                cells: Rect::EMPTY,
+                clue_font: 0.0,
+            };
+        }
+
+        // One number decides the whole picture. Everything else — the gaps,
+        // the clue slots, the bands, the span — is a multiple of it, so the
+        // grid cannot come out non-square and a clue cannot drift off the
+        // column it describes.
+        let spread = across + (across - 1.0) * GAP_PER_CELL;
+        let per_w = usize_f32(row_slots) * CLUE_W_PER_CELL + spread;
+        let per_h = usize_f32(col_slots) * CLUE_H_PER_CELL + spread;
+        let cell = (area.w / per_w).min(area.h / per_h).max(0.0);
+        let gap = cell * GAP_PER_CELL;
+        let clue_w = cell * CLUE_W_PER_CELL;
+        let clue_h = cell * CLUE_H_PER_CELL;
+        let span = across * cell + (across - 1.0) * gap;
+        let band_w = usize_f32(row_slots) * clue_w;
+        let band_h = usize_f32(col_slots) * clue_h;
+
+        // Bands and cells are centred together, so the picture sits in the
+        // middle of the window it was given rather than in the corner of a
+        // window it chose for itself.
+        let x = area.x + (area.w - band_w - span) / 2.0;
+        let y = area.y + (area.h - band_h - span) / 2.0;
+
+        Self {
+            side,
+            row_slots,
+            col_slots,
+            cell,
+            gap,
+            clue_w,
+            clue_h,
+            row_clues: Rect::new(x, y + band_h, band_w, span),
+            col_clues: Rect::new(x + band_w, y, span, band_h),
+            cells: Rect::new(x + band_w, y + band_h, span, span),
+            clue_font: (clue_h * 0.82).clamp(4.0, 20.0),
+        }
+    }
+
+    /// The step from one cell's near edge to the next one's.
+    #[must_use]
+    pub fn step(&self) -> f32 {
+        self.cell + self.gap
+    }
+
+    /// The ink of one cell.
+    #[must_use]
+    pub fn cell_rect(&self, row: usize, col: usize) -> Rect {
+        if row >= self.side || col >= self.side {
+            return Rect::EMPTY;
+        }
+        Rect::new(
+            self.cells.x + usize_f32(col) * self.step(),
+            self.cells.y + usize_f32(row) * self.step(),
+            self.cell,
+            self.cell,
+        )
+    }
+
+    /// The clickable box of one cell: its ink grown by half the gap on every
+    /// side.
+    ///
+    /// Neighbouring boxes abut exactly, so a click in the space between two
+    /// cells lands in the nearer one instead of nowhere, and the outside edges
+    /// of the grid get the same half-gap of slop as the inside ones. Nonogram
+    /// is a game of many rapid clicks, so slop is wanted here; sudoku made the
+    /// opposite call for the opposite reason (design-decisions.md §486).
+    #[must_use]
+    pub fn cell_hit(&self, row: usize, col: usize) -> Rect {
+        let r = self.cell_rect(row, col);
+        if r.is_empty() {
+            return Rect::EMPTY;
+        }
+        let half = self.gap / 2.0;
+        Rect::new(r.x - half, r.y - half, r.w + self.gap, r.h + self.gap)
+    }
+
+    /// Slot `slot` of row `row`'s clue, counting from the left of the band.
+    #[must_use]
+    pub fn row_clue_rect(&self, row: usize, slot: usize) -> Rect {
+        if row >= self.side || slot >= self.row_slots {
+            return Rect::EMPTY;
+        }
+        Rect::new(
+            self.row_clues.x + usize_f32(slot) * self.clue_w,
+            self.cells.y + usize_f32(row) * self.step(),
+            self.clue_w,
+            self.cell,
+        )
+    }
+
+    /// Slot `slot` of column `col`'s clue, counting from the top of the band.
+    #[must_use]
+    pub fn col_clue_rect(&self, col: usize, slot: usize) -> Rect {
+        if col >= self.side || slot >= self.col_slots {
+            return Rect::EMPTY;
+        }
+        Rect::new(
+            self.cells.x + usize_f32(col) * self.step(),
+            self.col_clues.y + usize_f32(slot) * self.clue_h,
+            self.cell,
+            self.clue_h,
+        )
+    }
+}
+
+/// Where the puzzle entries go on the select screen.
+///
+/// Every entry is divided the same way — thumbnail hard against the right,
+/// size label to its left in a column as wide as the widest label, name in
+/// whatever is left — so the three columns line up down the list without
+/// anyone choosing a pixel offset for them. The three offsets this replaced
+/// (`+12`, `+160`, `+260` from the left margin) were fixed, so a name longer
+/// than 144 pixels ran straight through its neighbour.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct List {
+    pub area: Rect,
+    pub count: usize,
+    /// The height of one entry's ink.
+    pub entry_h: f32,
+    /// The step from one entry's top edge to the next one's.
+    pub step: f32,
+    /// The side of the square thumbnail.
+    pub thumb: f32,
+    /// The margin inside an entry.
+    pub inset: f32,
+    /// The width of the size-label column.
+    pub size_w: f32,
+}
+
+impl List {
+    /// The list of `count` entries in `area`, with a size-label column wide
+    /// enough for a label of `size_w` pixels.
+    #[must_use]
+    pub fn new(area: Rect, count: usize, size_w: f32) -> Self {
+        if count == 0 || area.is_empty() {
+            return Self {
+                area,
+                count,
+                entry_h: 0.0,
+                step: 0.0,
+                thumb: 0.0,
+                inset: 0.0,
+                size_w: 0.0,
+            };
+        }
+        let step = (area.h / usize_f32(count)).min(area.h * ENTRY_SHARE);
+        let entry_h = step * 0.86;
+        let inset = entry_h * 0.12;
+        let thumb = (entry_h - inset * 2.0).max(0.0);
+        Self {
+            area,
+            count,
+            entry_h,
+            step,
+            thumb,
+            inset,
+            size_w: size_w.min((area.w - thumb - inset * 4.0).max(0.0)),
+        }
+    }
+
+    /// The whole box of entry `i` — its background, and its hit box.
+    #[must_use]
+    pub fn entry(&self, i: usize) -> Rect {
+        if i >= self.count {
+            return Rect::EMPTY;
+        }
+        Rect::new(
+            self.area.x,
+            self.area.y + usize_f32(i) * self.step,
+            self.area.w,
+            self.entry_h,
+        )
+    }
+
+    /// The square thumbnail at the right-hand end of entry `i`.
+    #[must_use]
+    pub fn thumb_rect(&self, i: usize) -> Rect {
+        let e = self.entry(i);
+        if e.is_empty() || self.thumb <= 0.0 {
+            return Rect::EMPTY;
+        }
+        Rect::new(
+            e.right() - self.inset - self.thumb,
+            e.y + self.inset,
+            self.thumb,
+            self.thumb,
+        )
+    }
+
+    /// The size label's column in entry `i`.
+    #[must_use]
+    pub fn size_rect(&self, i: usize) -> Rect {
+        let e = self.entry(i);
+        if e.is_empty() || self.size_w <= 0.0 {
+            return Rect::EMPTY;
+        }
+        Rect::new(
+            e.right() - self.inset * 2.0 - self.thumb - self.size_w,
+            e.y,
+            self.size_w,
+            e.h,
+        )
+    }
+
+    /// The name's column in entry `i`: whatever the other two leave.
+    #[must_use]
+    pub fn name_rect(&self, i: usize) -> Rect {
+        let e = self.entry(i);
+        if e.is_empty() {
+            return Rect::EMPTY;
+        }
+        let x = e.x + self.inset;
+        let right = e.right() - self.inset * 3.0 - self.thumb - self.size_w;
+        Rect::new(x, e.y, (right - x).max(0.0), e.h)
+    }
+}
+
+/// A count as a coordinate.
+///
+/// Grid sides, clue depths and list lengths are all small; the cast is exact
+/// for anything under 2^24, and a nonogram with sixteen million rows is not
+/// the failure mode worth guarding against.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "counts here are bounded by the puzzle catalogue"
+)]
+fn usize_f32(n: usize) -> f32 {
+    n as f32
+}
+
 // ── Game status ────────────────────────────────────────────────────
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
@@ -388,7 +793,7 @@ enum Screen {
 }
 
 // ── Main application struct ────────────────────────────────────────
-struct NonogramApp {
+pub struct NonogramApp {
     screen: Screen,
     /// Index into the puzzle catalogue, or which puzzle is being played.
     selected_puzzle: usize,
@@ -414,10 +819,14 @@ struct NonogramApp {
     check_mode: bool,
     /// The index on the select screen that is highlighted.
     select_cursor: usize,
+    /// The size the last frame was drawn at, which is the size the next click
+    /// is read against.
+    size_drawn: (f32, f32),
 }
 
 impl NonogramApp {
-    fn new() -> Self {
+    #[must_use]
+    pub fn new() -> Self {
         let puzzles = builtin_puzzles();
         Self {
             screen: Screen::Select,
@@ -433,18 +842,18 @@ impl NonogramApp {
             elapsed_ms: 0,
             check_mode: false,
             select_cursor: 0,
+            size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
         }
     }
 
     /// Start playing a specific puzzle by index.
     fn start_puzzle(&mut self, index: usize) {
-        if index >= self.puzzles.len() {
+        let Some(def) = self.puzzles.get(index).cloned() else {
             return;
-        }
-        let def = self.puzzles[index].clone();
+        };
         self.selected_puzzle = index;
         self.grid_side = def.size.side();
-        let total = self.grid_side * self.grid_side;
+        let total = self.grid_side.saturating_mul(self.grid_side);
         self.row_clues = compute_row_clues(&def.solution, self.grid_side);
         self.col_clues = compute_col_clues(&def.solution, self.grid_side);
         self.solution = def.solution;
@@ -456,19 +865,29 @@ impl NonogramApp {
         self.screen = Screen::Playing;
     }
 
+    /// Where a cell's mark lives in `cells`, and its answer in `solution`, or
+    /// `None` if it is off the grid.
+    ///
+    /// The two vectors are the same shape, so one function answers for both.
+    fn index(&self, row: usize, col: usize) -> Option<usize> {
+        if row >= self.grid_side || col >= self.grid_side {
+            return None;
+        }
+        row.checked_mul(self.grid_side)?.checked_add(col)
+    }
+
     /// Return the cell mark at (row, col), or `Empty` if out of bounds.
     fn cell_at(&self, row: usize, col: usize) -> CellMark {
-        if row < self.grid_side && col < self.grid_side {
-            self.cells[row * self.grid_side + col]
-        } else {
-            CellMark::Empty
-        }
+        self.index(row, col)
+            .and_then(|i| self.cells.get(i))
+            .copied()
+            .unwrap_or(CellMark::Empty)
     }
 
     /// Set the cell mark at (row, col).
     fn set_cell(&mut self, row: usize, col: usize, mark: CellMark) {
-        if row < self.grid_side && col < self.grid_side {
-            self.cells[row * self.grid_side + col] = mark;
+        if let Some(slot) = self.index(row, col).and_then(|i| self.cells.get_mut(i)) {
+            *slot = mark;
         }
     }
 
@@ -493,29 +912,32 @@ impl NonogramApp {
     }
 
     /// Check whether the player's filled cells match the solution exactly.
+    ///
+    /// `cells` and `solution` are always the same length — `start_puzzle`
+    /// builds both from one side length — so zipping them cannot quietly
+    /// ignore a tail of either.
     fn check_win(&self) -> bool {
-        for i in 0..self.solution.len() {
-            let player_filled = self.cells[i] == CellMark::Filled;
-            if player_filled != self.solution[i] {
-                return false;
-            }
-        }
-        true
+        self.cells
+            .iter()
+            .zip(&self.solution)
+            .all(|(&mark, &wanted)| (mark == CellMark::Filled) == wanted)
     }
 
     /// Return whether a cell is an error (filled but should not be, or
-    /// not filled but should be). Used in check mode.
+    /// marked blank when it should be filled). Used in check mode.
     fn is_error(&self, row: usize, col: usize) -> bool {
-        if row >= self.grid_side || col >= self.grid_side {
+        let Some(idx) = self.index(row, col) else {
             return false;
-        }
-        let idx = row * self.grid_side + col;
-        let should_fill = self.solution[idx];
-        // Only flag filled-but-wrong or marked-empty-but-should-be-filled.
-        match self.cells[idx] {
-            CellMark::Filled => !should_fill,
-            CellMark::MarkedEmpty => should_fill,
-            CellMark::Empty => false,
+        };
+        let Some(&should_fill) = self.solution.get(idx) else {
+            return false;
+        };
+        // A cell you have not touched is not yet a mistake — check mode calls
+        // out what you have said, not what you have not said yet.
+        match self.cells.get(idx) {
+            Some(CellMark::Filled) => !should_fill,
+            Some(CellMark::MarkedEmpty) => should_fill,
+            Some(CellMark::Empty) | None => false,
         }
     }
 
@@ -570,122 +992,60 @@ impl NonogramApp {
         self.col_clues.iter().map(|c| c.len()).max().unwrap_or(1)
     }
 
-    // ── Grid geometry ──────────────────────────────────────────────
+    // ── Geometry ───────────────────────────────────────────────────
     //
     // Where a cell is painted and which cell a click lands in used to be
-    // worked out separately: `CELL_SIZE + CELL_GAP` was spelled out at five
-    // sites and the grid's origin at two, once in `handle_mouse_playing` and
-    // once in `render_playing`. That origin is not a constant -- it is pushed
-    // right and down by however much room this puzzle's clues need -- so the
-    // two copies had to agree about the clue slot sizes as well as about the
-    // cells, and a change to either would have moved the picture without
-    // moving the hit test. A third copy lived in the tests, which meant the
-    // suite was measuring its own arithmetic rather than the app's; see
-    // design-decisions.md §486. These are now the one place it is written.
+    // worked out separately, in absolute pixels, from a `CELL_SIZE` the window
+    // had no say in. Both now come from `Grid`, solved from the live window
+    // size, and the pointer reads the boxes the drawing pass recorded rather
+    // than a second spelling of the same arithmetic (`known-issues.md`
+    // lesson 63; design-decisions.md §486).
 
-    /// Distance from one cell's near edge to the next one's.
-    const CELL_STEP: f32 = CELL_SIZE + CELL_GAP;
-
-    /// Width of the band of row clues down the left-hand side.
-    ///
-    /// Every row is given the same width -- that of the wordiest row in this
-    /// puzzle -- so that the clue columns line up with each other.
-    fn row_clue_area_w(&self) -> f32 {
-        self.max_row_clue_len() as f32 * CLUE_SLOT_W
-    }
-
-    /// Height of the band of column clues across the top. See
-    /// `row_clue_area_w`.
-    fn col_clue_area_h(&self) -> f32 {
-        self.max_col_clue_len() as f32 * CLUE_SLOT_H
-    }
-
-    /// Screen coordinates of the grid's top-left corner.
-    fn grid_origin(&self) -> (f32, f32) {
-        (
-            PADDING + self.row_clue_area_w(),
-            HEADER_HEIGHT + PADDING + self.col_clue_area_h(),
+    /// The grid as it stands in a window of the given size.
+    #[must_use]
+    pub fn grid(&self, l: &Layout) -> Grid {
+        Grid::new(
+            l.body,
+            self.grid_side,
+            self.max_row_clue_len(),
+            self.max_col_clue_len(),
         )
     }
 
-    /// Distance across the whole grid, in pixels.
+    /// The select list as it stands in a window of the given size.
     ///
-    /// The last cell has no gap after it, so this is one gap short of
-    /// `side * CELL_STEP` -- which is the sort of detail that goes wrong when
-    /// the window size and the cells are measured by different code.
-    fn grid_pixel_span(&self) -> f32 {
-        self.grid_side as f32 * Self::CELL_STEP - CELL_GAP
-    }
-
-    /// Screen coordinates of the top-left corner of a cell.
-    fn cell_origin(&self, row: usize, col: usize) -> (f32, f32) {
-        let (ox, oy) = self.grid_origin();
-        (
-            ox + col as f32 * Self::CELL_STEP,
-            oy + row as f32 * Self::CELL_STEP,
-        )
-    }
-
-    /// Screen coordinates of the middle of a cell.
-    fn cell_center(&self, row: usize, col: usize) -> (f32, f32) {
-        let (x, y) = self.cell_origin(row, col);
-        (x + CELL_SIZE / 2.0, y + CELL_SIZE / 2.0)
-    }
-
-    /// The row or column an offset from the grid's near edge falls in, or
-    /// `None` if it falls outside the grid.
-    ///
-    /// Each cell owns half of the gap on either side of it, which makes the
-    /// mapping forgiving in the middle of the grid *and* symmetric at its
-    /// edges: there is exactly `CELL_GAP / 2` of slop past the first cell's
-    /// near edge and past the last cell's far edge, the same as between any
-    /// two neighbours. The previous version handed each cell the whole gap
-    /// *after* it, which gave the right-hand and bottom edges a gap's worth of
-    /// slop and the left and top edges none -- an asymmetry small enough never
-    /// to be noticed and still worth not having. Nonogram is a game of many
-    /// rapid clicks, so slop is wanted here; sudoku made the opposite call for
-    /// the opposite reason (design-decisions.md §486).
-    ///
-    /// The bounds are checked before any cast, because a float-to-integer cast
-    /// in Rust truncates toward zero and would turn a point just left of the
-    /// grid into column 0. See known-issues.md
-    /// `C-GOMOKU-THE-CLICK-SLOP-ONLY-WORKED-ON-TWO-EDGES`.
-    fn axis_index(&self, offset: f32) -> Option<usize> {
-        let shifted = offset + CELL_GAP / 2.0;
-        if shifted < 0.0 || shifted >= self.grid_side as f32 * Self::CELL_STEP {
-            return None;
-        }
-        // Truncation is the intent -- the fraction is the position within the
-        // cell -- and the guard above is what makes the cast safe.
-        Some((shifted / Self::CELL_STEP) as usize)
-    }
-
-    /// The cell a click at `(x, y)` lands on, or `None` if it misses the grid.
-    fn cell_at_point(&self, x: f32, y: f32) -> Option<(usize, usize)> {
-        let (ox, oy) = self.grid_origin();
-        let row = self.axis_index(y - oy)?;
-        let col = self.axis_index(x - ox)?;
-        Some((row, col))
+    /// The size-label column is as wide as the widest label actually in the
+    /// catalogue, measured at the size it will be drawn at.
+    #[must_use]
+    pub fn list(&self, l: &Layout) -> List {
+        let widest = self
+            .puzzles
+            .iter()
+            .map(|p| text::measure(&size_label(p.size), l.font, FontWeightHint::Regular))
+            .fold(0.0f32, f32::max);
+        List::new(l.body, self.puzzles.len(), widest)
     }
 
     // ── Event handling ─────────────────────────────────────────────
 
-    fn handle_event(&mut self, event: &Event) {
-        match event {
-            Event::Key(key_event) if key_event.pressed => {
-                self.handle_key(key_event);
-            }
-            Event::Mouse(mouse_event) => {
-                self.handle_mouse(mouse_event);
-            }
-            Event::Tick { elapsed_ms } => {
-                self.handle_tick(*elapsed_ms);
-            }
-            _ => {}
-        }
+    /// What the window is drawing at, which is what the next click is read
+    /// against.
+    #[must_use]
+    pub fn size_drawn(&self) -> (f32, f32) {
+        self.size_drawn
     }
 
-    fn handle_key(&mut self, key_event: &KeyEvent) {
+    /// Remember the size the next frame will be drawn at.
+    pub fn resize(&mut self, width: f32, height: f32) {
+        self.size_drawn = (width.max(1.0), height.max(1.0));
+    }
+
+    fn handle_key(&mut self, key_event: &KeyEvent) -> EventResult {
+        // A modified key belongs to whatever is listening for shortcuts, not
+        // to the grid: Ctrl-X is not the X mark.
+        if key_event.modifiers != Modifiers::NONE {
+            return EventResult::Ignored;
+        }
         match self.screen {
             Screen::Select => self.handle_key_select(key_event),
             Screen::Playing => self.handle_key_playing(key_event),
@@ -693,2107 +1053,2315 @@ impl NonogramApp {
         }
     }
 
-    fn handle_key_select(&mut self, key_event: &KeyEvent) {
+    fn handle_key_select(&mut self, key_event: &KeyEvent) -> EventResult {
         match key_event.key {
             Key::Up if self.select_cursor > 0 => {
-                self.select_cursor -= 1;
+                self.select_cursor = self.select_cursor.saturating_sub(1);
+                EventResult::Consumed
             }
-            Key::Down if self.select_cursor + 1 < self.puzzles.len() => {
-                self.select_cursor += 1;
+            Key::Down if self.select_cursor.saturating_add(1) < self.puzzles.len() => {
+                self.select_cursor = self.select_cursor.saturating_add(1);
+                EventResult::Consumed
             }
             Key::Enter | Key::Space => {
                 self.start_puzzle(self.select_cursor);
+                EventResult::Consumed
             }
-            _ => {}
+            _ => EventResult::Ignored,
         }
     }
 
-    fn handle_key_playing(&mut self, key_event: &KeyEvent) {
+    fn handle_key_playing(&mut self, key_event: &KeyEvent) -> EventResult {
         match key_event.key {
             Key::Up if self.cursor_row > 0 => {
-                self.cursor_row -= 1;
+                self.cursor_row = self.cursor_row.saturating_sub(1);
+                EventResult::Consumed
             }
-            Key::Down if self.cursor_row + 1 < self.grid_side => {
-                self.cursor_row += 1;
+            Key::Down if self.cursor_row.saturating_add(1) < self.grid_side => {
+                self.cursor_row = self.cursor_row.saturating_add(1);
+                EventResult::Consumed
             }
             Key::Left if self.cursor_col > 0 => {
-                self.cursor_col -= 1;
+                self.cursor_col = self.cursor_col.saturating_sub(1);
+                EventResult::Consumed
             }
-            Key::Right if self.cursor_col + 1 < self.grid_side => {
-                self.cursor_col += 1;
+            Key::Right if self.cursor_col.saturating_add(1) < self.grid_side => {
+                self.cursor_col = self.cursor_col.saturating_add(1);
+                EventResult::Consumed
             }
             Key::Enter | Key::Space => {
-                self.toggle_fill(self.cursor_row, self.cursor_col);
-                if self.check_win() {
-                    self.screen = Screen::Won;
-                }
+                self.fill_at(self.cursor_row, self.cursor_col);
+                EventResult::Consumed
             }
             Key::X => {
                 self.toggle_mark_empty(self.cursor_row, self.cursor_col);
+                EventResult::Consumed
             }
             Key::C => {
                 self.check_mode = !self.check_mode;
+                EventResult::Consumed
             }
             Key::Escape => {
                 self.screen = Screen::Select;
+                EventResult::Consumed
             }
-            _ => {}
+            _ => EventResult::Ignored,
         }
     }
 
-    fn handle_key_won(&mut self, key_event: &KeyEvent) {
+    fn handle_key_won(&mut self, key_event: &KeyEvent) -> EventResult {
         match key_event.key {
             Key::Enter | Key::Space | Key::Escape => {
                 self.screen = Screen::Select;
+                EventResult::Consumed
             }
-            _ => {}
+            _ => EventResult::Ignored,
         }
     }
 
-    fn handle_mouse(&mut self, mouse_event: &MouseEvent) {
-        if let MouseEventKind::Press(MouseButton::Left) = mouse_event.kind {
-            match self.screen {
-                Screen::Select => self.handle_mouse_select(mouse_event),
-                Screen::Playing => self.handle_mouse_playing(mouse_event),
-                Screen::Won => {
-                    self.screen = Screen::Select;
-                }
-            }
+    /// Fill or unfill a cell, and notice if that finished the picture.
+    ///
+    /// The win check lives here rather than at each of the two callers,
+    /// because a way of filling a cell that could not also win is a way of
+    /// filling a cell that is not in the game.
+    fn fill_at(&mut self, row: usize, col: usize) {
+        self.toggle_fill(row, col);
+        if self.check_win() {
+            self.screen = Screen::Won;
         }
     }
 
-    fn handle_mouse_select(&mut self, mouse_event: &MouseEvent) {
-        let mx = mouse_event.x;
-        let my = mouse_event.y;
-        // Each puzzle entry is rendered as a row starting at y = HEADER_HEIGHT + i * 40.0
-        let list_y_start = HEADER_HEIGHT + PADDING;
-        for i in 0..self.puzzles.len() {
-            let entry_y = list_y_start + i as f32 * 40.0;
-            if my >= entry_y && my < entry_y + 36.0 && (PADDING..500.0).contains(&mx) {
+    /// Act on whatever the pointer landed on.
+    fn activate(&mut self, target: Target, button: MouseButton) -> EventResult {
+        match target {
+            Target::Puzzle(i) => {
+                self.select_cursor = i;
                 self.start_puzzle(i);
-                return;
+                EventResult::Consumed
+            }
+            // Left fills, right marks — the convention every nonogram uses,
+            // and the only way the pointer can reach the X mark at all. The
+            // old program had none: `X` was keyboard-only.
+            Target::Cell(row, col) => {
+                if self.screen == Screen::Won {
+                    return EventResult::Ignored;
+                }
+                match button {
+                    MouseButton::Right => self.toggle_mark_empty(row, col),
+                    _ => self.fill_at(row, col),
+                }
+                self.cursor_row = row;
+                self.cursor_col = col;
+                EventResult::Consumed
+            }
+            Target::Check => {
+                self.check_mode = !self.check_mode;
+                EventResult::Consumed
+            }
+            Target::Menu => {
+                self.screen = Screen::Select;
+                EventResult::Consumed
             }
         }
     }
 
-    fn handle_mouse_playing(&mut self, mouse_event: &MouseEvent) {
-        let mx = mouse_event.x;
-        let my = mouse_event.y;
-
-        if let Some((row, col)) = self.cell_at_point(mx, my) {
-            self.cursor_row = row;
-            self.cursor_col = col;
-            self.toggle_fill(row, col);
-            if self.check_win() {
-                self.screen = Screen::Won;
+    fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        let button = match ev.kind {
+            MouseEventKind::Press(b) => b,
+            _ => return EventResult::Ignored,
+        };
+        let (w, h) = self.size_drawn;
+        match self.frame(w, h).hit_test(ev.x, ev.y) {
+            Some(target) => self.activate(target, button),
+            // Clicking the board away from anything is how you leave the
+            // victory screen; anywhere else it means nothing.
+            None if self.screen == Screen::Won => {
+                self.screen = Screen::Select;
+                EventResult::Consumed
             }
+            None => EventResult::Ignored,
         }
     }
 
-    fn handle_tick(&mut self, elapsed_ms: u64) {
+    fn handle_tick(&mut self, elapsed_ms: u64) -> EventResult {
         if self.screen == Screen::Playing {
             self.elapsed_ms = self.elapsed_ms.saturating_add(elapsed_ms);
-        }
-    }
-
-    // ── Rendering ──────────────────────────────────────────────────
-
-    fn render(&self) -> Vec<RenderCommand> {
-        match self.screen {
-            Screen::Select => self.render_select(),
-            Screen::Playing | Screen::Won => self.render_playing(),
-        }
-    }
-
-    fn render_select(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-        let total_width = 520.0_f32;
-        let list_height = self.puzzles.len() as f32 * 40.0 + PADDING * 2.0;
-        let total_height = HEADER_HEIGHT + list_height + PADDING;
-
-        // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: total_width,
-            height: total_height,
-            color: BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Header
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: total_width,
-            height: HEADER_HEIGHT,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: 15.0,
-            text: "Nonogram - Select Puzzle".into(),
-            color: TEXT_COLOR,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Puzzle list
-        let list_y_start = HEADER_HEIGHT + PADDING;
-        for (i, puzzle) in self.puzzles.iter().enumerate() {
-            let entry_y = list_y_start + i as f32 * 40.0;
-            let is_selected = i == self.select_cursor;
-
-            // Highlight background for selected entry
-            let bg_color = if is_selected { SURFACE1 } else { SURFACE0 };
-            cmds.push(RenderCommand::FillRect {
-                x: PADDING,
-                y: entry_y,
-                width: total_width - PADDING * 2.0,
-                height: 36.0,
-                color: bg_color,
-                corner_radii: CornerRadii::all(4.0),
-            });
-
-            // Puzzle name and size label
-            let name_color = if is_selected { BLUE } else { TEXT_COLOR };
-            cmds.push(RenderCommand::Text {
-                x: PADDING + 12.0,
-                y: entry_y + 10.0,
-                text: puzzle.name.into(),
-                color: name_color,
-                font_size: SELECT_FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cmds.push(RenderCommand::Text {
-                x: PADDING + 160.0,
-                y: entry_y + 10.0,
-                text: format!("({})", puzzle.size.label()),
-                color: SUBTEXT0,
-                font_size: STATUS_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            // Mini thumbnail
-            let thumb_x = PADDING + 260.0;
-            let thumb_y = entry_y + 4.0;
-            let side = puzzle.size.side();
-            // Draw small cells for thumbnail — only draw filled ones
-            for r in 0..side {
-                for c in 0..side {
-                    if puzzle.solution[r * side + c] {
-                        cmds.push(RenderCommand::FillRect {
-                            x: thumb_x + c as f32 * THUMB_CELL,
-                            y: thumb_y + r as f32 * THUMB_CELL,
-                            width: THUMB_CELL - 1.0,
-                            height: THUMB_CELL - 1.0,
-                            color: if is_selected { BLUE } else { LAVENDER },
-                            corner_radii: CornerRadii::ZERO,
-                        });
-                    }
-                }
-            }
-        }
-
-        // Footer hint
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: total_height - 24.0,
-            text: "Up/Down: navigate   Enter: play".into(),
-            color: OVERLAY0,
-            font_size: STATUS_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds
-    }
-
-    fn render_playing(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-
-        let grid_span = self.grid_pixel_span();
-        let (grid_origin_x, grid_origin_y) = self.grid_origin();
-
-        let footer_height = 40.0;
-        // The window is measured from the grid's far edge rather than restating
-        // the clue widths, so it cannot disagree with where the grid is drawn.
-        let total_width = grid_origin_x + grid_span + PADDING;
-        let total_height = grid_origin_y + grid_span + footer_height + PADDING;
-
-        // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: total_width,
-            height: total_height,
-            color: BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Header
-        self.render_header(&mut cmds, total_width);
-
-        // Column clues
-        self.render_col_clues(&mut cmds);
-
-        // Row clues
-        self.render_row_clues(&mut cmds);
-
-        // Grid cells
-        self.render_grid(&mut cmds);
-
-        // Footer
-        self.render_footer(&mut cmds, total_width, total_height, footer_height);
-
-        cmds
-    }
-
-    fn render_header(&self, cmds: &mut Vec<RenderCommand>, total_width: f32) {
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: total_width,
-            height: HEADER_HEIGHT,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        let title = if self.selected_puzzle < self.puzzles.len() {
-            &self.puzzles[self.selected_puzzle].name
+            EventResult::Consumed
         } else {
-            &"Nonogram"
-        };
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: 15.0,
-            text: format!("Nonogram - {title}"),
-            color: TEXT_COLOR,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+            EventResult::Ignored
+        }
+    }
 
-        // Timer
-        let time_text = self.format_time();
-        cmds.push(RenderCommand::Text {
-            x: total_width - 80.0,
-            y: 15.0,
-            text: time_text,
-            color: SUBTEXT0,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+    // ── Drawing ────────────────────────────────────────────────────
+
+    /// One frame at the given size: the picture and the hit boxes together.
+    #[must_use]
+    pub fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let l = Layout::new(width, height);
+        let mut f = Frame::new(width, height);
+        fill(&mut f, l.window, BASE, CornerRadii::ZERO);
+        match self.screen {
+            Screen::Select => self.draw_select(&mut f, &l),
+            Screen::Playing | Screen::Won => self.draw_playing(&mut f, &l),
+        }
+        f
+    }
+
+    fn draw_select(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.header, MANTLE, CornerRadii::ZERO);
+        label_left(
+            f,
+            &Label {
+                text: "Nonogram — Select Puzzle",
+                size: l.big,
+                weight: FontWeightHint::Bold,
+                color: TEXT_COLOR,
+            },
+            inset_x(l.header, l.pad * 2.0),
+        );
+
+        let list = self.list(l);
+        for (i, puzzle) in self.puzzles.iter().enumerate() {
+            let entry = list.entry(i);
+            if entry.is_empty() {
+                continue;
+            }
+            let selected = i == self.select_cursor;
+            fill(
+                f,
+                entry,
+                if selected { SURFACE1 } else { SURFACE0 },
+                CornerRadii::all(list.inset),
+            );
+            label_left(
+                f,
+                &Label {
+                    text: puzzle.name,
+                    size: l.font,
+                    weight: FontWeightHint::Bold,
+                    color: if selected { BLUE } else { TEXT_COLOR },
+                },
+                list.name_rect(i),
+            );
+            label_left(
+                f,
+                &Label {
+                    text: &size_label(puzzle.size),
+                    size: l.font,
+                    weight: FontWeightHint::Regular,
+                    color: SUBTEXT0,
+                },
+                list.size_rect(i),
+            );
+            draw_thumbnail(
+                f,
+                puzzle,
+                list.thumb_rect(i),
+                if selected { BLUE } else { LAVENDER },
+            );
+            f.hit(Target::Puzzle(i), entry);
+        }
+
+        fill(f, l.footer, MANTLE, CornerRadii::ZERO);
+        label_left(
+            f,
+            &Label {
+                text: "Up/Down: choose    Enter: play",
+                size: l.small,
+                weight: FontWeightHint::Regular,
+                color: OVERLAY0,
+            },
+            inset_x(l.footer, l.pad * 2.0),
+        );
+    }
+
+    fn draw_playing(&self, f: &mut Frame<Target>, l: &Layout) {
+        self.draw_header(f, l);
+        let g = self.grid(l);
+        self.draw_clues(f, &g);
+        self.draw_cells(f, &g);
+        self.draw_footer(f, l);
+    }
+
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.header, MANTLE, CornerRadii::ZERO);
+        let mut rest = inset_x(l.header, l.pad * 2.0);
+
+        // The timer is carved off the right and the title off the left, so the
+        // banner in the middle is whatever the two of them leave rather than a
+        // guessed offset from the centre — the old header put "SOLVED!" at
+        // `total_width / 2.0 - 30.0` and the timer at `total_width - 80.0`.
+        let time = self.format_time();
+        let time_w = text::measure(&time, l.font, FontWeightHint::Regular);
+        let time_rect = take_right(&mut rest, time_w, l.pad);
+        label_left(
+            f,
+            &Label {
+                text: &time,
+                size: l.font,
+                weight: FontWeightHint::Regular,
+                color: SUBTEXT0,
+            },
+            time_rect,
+        );
+
+        let title = self.puzzle_name();
+        let title_w = text::measure(title, l.big, FontWeightHint::Bold).min(rest.w);
+        let title_rect = take_left(&mut rest, title_w, l.pad);
+        label_left(
+            f,
+            &Label {
+                text: title,
+                size: l.big,
+                weight: FontWeightHint::Bold,
+                color: TEXT_COLOR,
+            },
+            title_rect,
+        );
 
         if self.screen == Screen::Won {
-            cmds.push(RenderCommand::Text {
-                x: total_width / 2.0 - 30.0,
-                y: 30.0,
-                text: "SOLVED!".into(),
-                color: GREEN,
-                font_size: STATUS_FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            label_centred(
+                f,
+                &Label {
+                    text: "SOLVED!",
+                    size: l.font,
+                    weight: FontWeightHint::Bold,
+                    color: GREEN,
+                },
+                rest,
+            );
         }
     }
 
-    fn render_col_clues(&self, cmds: &mut Vec<RenderCommand>) {
-        let max_len = self.max_col_clue_len();
-        // The clue band sits directly on top of the grid, so its top edge is
-        // the grid's own origin less the band's height -- derived rather than
-        // restated, so the clues cannot drift away from the columns they
-        // describe.
-        let clue_area_y = self.grid_origin().1 - self.col_clue_area_h();
-
-        for (c, clue) in self.col_clues.iter().enumerate() {
-            let is_current = self.screen == Screen::Playing && c == self.cursor_col;
-            // Centred on the column it belongs to, so a clue is over its own
-            // column whatever the spacing is.
-            let center_x = self.cell_center(0, c).0;
-            // Bottom-align clue numbers against the grid: the last value of
-            // every clue sits in the slot immediately above the first row.
-            let start_slot = max_len - clue.len();
-            for (j, &val) in clue.iter().enumerate() {
-                let slot = start_slot + j;
-                let cy = clue_area_y + slot as f32 * CLUE_SLOT_H;
-                let color = if is_current { BLUE } else { SUBTEXT0 };
-                let weight = if is_current {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                };
-                cmds.push(RenderCommand::Text {
-                    x: center_x - CLUE_HALF_WIDTH,
-                    y: cy,
-                    text: val.to_string(),
-                    color,
-                    font_size: CLUE_FONT_SIZE,
-                    font_weight: weight,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
-        }
-    }
-
-    fn render_row_clues(&self, cmds: &mut Vec<RenderCommand>) {
-        let max_len = self.max_row_clue_len();
-        // The clue band butts up against the grid's left edge; see
-        // `render_col_clues` for why this is derived and not restated.
-        let clue_area_x = self.grid_origin().0 - self.row_clue_area_w();
-
+    fn draw_clues(&self, f: &mut Frame<Target>, g: &Grid) {
+        // Both bands are drawn against the far edge of their band, so the
+        // *last* number of every clue sits in the slot next to the grid — a
+        // clue reads towards the picture, which is how the puzzle is meant to
+        // be read. `g.row_slots` is the deepest clue in the puzzle, so a
+        // shorter one starts further in.
         for (r, clue) in self.row_clues.iter().enumerate() {
-            let is_current = self.screen == Screen::Playing && r == self.cursor_row;
-            // Centred on the row it belongs to.
-            let base_y = self.cell_center(r, 0).1 - CLUE_HALF_HEIGHT;
-            // Right-align clue numbers against the grid: the last value of
-            // every clue sits in the slot immediately left of the first column.
-            let start_slot = max_len - clue.len();
+            let start = g.row_slots.saturating_sub(clue.len());
+            let live = self.screen == Screen::Playing && r == self.cursor_row;
             for (j, &val) in clue.iter().enumerate() {
-                let slot = start_slot + j;
-                let cx = clue_area_x + slot as f32 * CLUE_SLOT_W;
-                let color = if is_current { BLUE } else { SUBTEXT0 };
-                let weight = if is_current {
+                self.draw_clue(
+                    f,
+                    g.row_clue_rect(r, start.saturating_add(j)),
+                    val,
+                    live,
+                    g.clue_font,
+                );
+            }
+        }
+        for (c, clue) in self.col_clues.iter().enumerate() {
+            let start = g.col_slots.saturating_sub(clue.len());
+            let live = self.screen == Screen::Playing && c == self.cursor_col;
+            for (j, &val) in clue.iter().enumerate() {
+                self.draw_clue(
+                    f,
+                    g.col_clue_rect(c, start.saturating_add(j)),
+                    val,
+                    live,
+                    g.clue_font,
+                );
+            }
+        }
+    }
+
+    /// One clue number, centred in its slot by measurement.
+    ///
+    /// It was centred by subtracting an eyeballed `CLUE_HALF_WIDTH = 4.0`
+    /// from the middle of the row or column, which put every two-digit clue
+    /// left of where it belonged.
+    fn draw_clue(&self, f: &mut Frame<Target>, slot: Rect, val: u8, live: bool, size: f32) {
+        label_centred(
+            f,
+            &Label {
+                text: &val.to_string(),
+                size,
+                weight: if live {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
-                };
-                cmds.push(RenderCommand::Text {
-                    x: cx,
-                    y: base_y,
-                    text: val.to_string(),
-                    color,
-                    font_size: CLUE_FONT_SIZE,
-                    font_weight: weight,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
-        }
-    }
-
-    fn render_grid(&self, cmds: &mut Vec<RenderCommand>) {
-        let (grid_origin_x, grid_origin_y) = self.grid_origin();
-
-        for r in 0..self.grid_side {
-            for c in 0..self.grid_side {
-                let (cx, cy) = self.cell_origin(r, c);
-
-                let is_cursor =
-                    self.screen == Screen::Playing && r == self.cursor_row && c == self.cursor_col;
-                let mark = self.cell_at(r, c);
-                let error = self.check_mode && self.is_error(r, c);
-
-                // Cell background
-                let bg = match mark {
-                    CellMark::Filled => {
-                        if error {
-                            RED
-                        } else if self.screen == Screen::Won {
-                            BLUE
-                        } else {
-                            LAVENDER
-                        }
-                    }
-                    CellMark::MarkedEmpty => {
-                        if error {
-                            Color::rgba(243, 139, 168, 60)
-                        } else {
-                            SURFACE0
-                        }
-                    }
-                    CellMark::Empty => SURFACE0,
-                };
-                cmds.push(RenderCommand::FillRect {
-                    x: cx,
-                    y: cy,
-                    width: CELL_SIZE,
-                    height: CELL_SIZE,
-                    color: bg,
-                    corner_radii: CornerRadii::all(CELL_CORNER_RADIUS),
-                });
-
-                // MarkedEmpty X
-                if mark == CellMark::MarkedEmpty {
-                    let inset = 6.0;
-                    let x_color = if error { RED } else { OVERLAY0 };
-                    cmds.push(RenderCommand::Line {
-                        x1: cx + inset,
-                        y1: cy + inset,
-                        x2: cx + CELL_SIZE - inset,
-                        y2: cy + CELL_SIZE - inset,
-                        color: x_color,
-                        width: 2.0,
-                    });
-                    cmds.push(RenderCommand::Line {
-                        x1: cx + CELL_SIZE - inset,
-                        y1: cy + inset,
-                        x2: cx + inset,
-                        y2: cy + CELL_SIZE - inset,
-                        color: x_color,
-                        width: 2.0,
-                    });
-                }
-
-                // Cursor outline
-                if is_cursor {
-                    cmds.push(RenderCommand::StrokeRect {
-                        x: cx - 1.0,
-                        y: cy - 1.0,
-                        width: CELL_SIZE + 2.0,
-                        height: CELL_SIZE + 2.0,
-                        color: YELLOW,
-                        line_width: 2.0,
-                        corner_radii: CornerRadii::all(CELL_CORNER_RADIUS + 1.0),
-                    });
-                }
-            }
-        }
-
-        // Draw grid lines for 5-cell groups (thicker lines every 5 cells)
-        if self.grid_side >= 10 {
-            let line_color = OVERLAY0;
-            let span = self.grid_pixel_span();
-            for g in 1..(self.grid_side / 5) {
-                // Down the middle of the gap before the group's first cell,
-                // taken from that cell's own origin so the rule always lands
-                // between the two cells it separates.
-                let cell = g * 5;
-                let (bx, by) = self.cell_origin(cell, cell);
-                // Vertical line
-                cmds.push(RenderCommand::Line {
-                    x1: bx - CELL_GAP / 2.0,
-                    y1: grid_origin_y,
-                    x2: bx - CELL_GAP / 2.0,
-                    y2: grid_origin_y + span,
-                    color: line_color,
-                    width: 1.5,
-                });
-                // Horizontal line
-                cmds.push(RenderCommand::Line {
-                    x1: grid_origin_x,
-                    y1: by - CELL_GAP / 2.0,
-                    x2: grid_origin_x + span,
-                    y2: by - CELL_GAP / 2.0,
-                    color: line_color,
-                    width: 1.5,
-                });
-            }
-        }
-    }
-
-    fn render_footer(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        total_width: f32,
-        total_height: f32,
-        footer_height: f32,
-    ) {
-        let footer_y = total_height - footer_height;
-
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: footer_y,
-            width: total_width,
-            height: footer_height,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        let hint = if self.screen == Screen::Won {
-            "Enter/Esc: back to menu"
-        } else {
-            "Arrows: move  Space/Enter: fill  X: mark  C: check  Esc: menu"
-        };
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: footer_y + 12.0,
-            text: hint.into(),
-            color: OVERLAY0,
-            font_size: STATUS_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Progress indicator
-        let filled = self.player_filled_count();
-        let target = self.total_filled_in_solution();
-        let progress_text = format!("{filled}/{target}");
-        cmds.push(RenderCommand::Text {
-            x: total_width - 80.0,
-            y: footer_y + 12.0,
-            text: progress_text,
-            color: if self.screen == Screen::Won {
-                GREEN
-            } else {
-                SUBTEXT0
+                },
+                color: if live { BLUE } else { SUBTEXT0 },
             },
-            font_size: STATUS_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            slot,
+        );
+    }
+
+    fn draw_cells(&self, f: &mut Frame<Target>, g: &Grid) {
+        let radius = CornerRadii::all(g.cell * 0.11);
+        for row in 0..self.grid_side {
+            for col in 0..self.grid_side {
+                let r = g.cell_rect(row, col);
+                let mark = self.cell_at(row, col);
+                let wrong = self.check_mode && self.is_error(row, col);
+                fill(f, r, self.cell_color(mark, wrong), radius);
+                if mark == CellMark::MarkedEmpty {
+                    draw_cross(f, r, if wrong { RED } else { OVERLAY0 }, g.cell);
+                }
+                f.hit(Target::Cell(row, col), g.cell_hit(row, col));
+            }
+        }
+
+        // A rule down the middle of every fifth gap, to count by. Taken from
+        // the cell's own origin, so it always lands between the two cells it
+        // separates.
+        if self.grid_side >= 10 {
+            for group in (5..self.grid_side).step_by(5) {
+                let cell = g.cell_rect(group, group);
+                let w = (g.gap * 0.75).max(1.0);
+                fill(
+                    f,
+                    Rect::new(cell.x - g.gap / 2.0 - w / 2.0, g.cells.y, w, g.cells.h),
+                    OVERLAY0,
+                    CornerRadii::ZERO,
+                );
+                fill(
+                    f,
+                    Rect::new(g.cells.x, cell.y - g.gap / 2.0 - w / 2.0, g.cells.w, w),
+                    OVERLAY0,
+                    CornerRadii::ZERO,
+                );
+            }
+        }
+
+        // The cursor is drawn last so it is never painted over by a
+        // neighbouring cell, and outside its cell so it does not eat the ink.
+        if self.screen == Screen::Playing {
+            let r = g.cell_rect(self.cursor_row, self.cursor_col);
+            if !r.is_empty() {
+                let out = (g.gap / 2.0).max(1.0);
+                stroke(
+                    f,
+                    Rect::new(r.x - out, r.y - out, r.w + out * 2.0, r.h + out * 2.0),
+                    YELLOW,
+                    out,
+                    CornerRadii::all(g.cell * 0.11 + out),
+                );
+            }
+        }
+    }
+
+    /// The colour a cell is painted.
+    fn cell_color(&self, mark: CellMark, wrong: bool) -> Color {
+        match mark {
+            CellMark::Filled => {
+                if wrong {
+                    RED
+                } else if self.screen == Screen::Won {
+                    BLUE
+                } else {
+                    LAVENDER
+                }
+            }
+            CellMark::MarkedEmpty if wrong => SURFACE2,
+            CellMark::Empty | CellMark::MarkedEmpty => SURFACE0,
+        }
+    }
+
+    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.footer, MANTLE, CornerRadii::ZERO);
+        let mut rest = inset_x(l.footer, l.pad * 2.0);
+
+        // Switches first, right to left, then the progress count, then the
+        // hint gets whatever is left — and is told to stop there, which is
+        // what `max_width` is for and what every string in this program was
+        // missing.
+        for (target, text) in [(Target::Menu, "Menu"), (Target::Check, "Check")] {
+            let w = text::measure(text, l.small, FontWeightHint::Bold) + l.pad * 2.0;
+            let box_rect = take_right(&mut rest, w, l.pad);
+            if box_rect.is_empty() {
+                continue;
+            }
+            let on = target == Target::Check && self.check_mode;
+            let inner = inset_y(box_rect, box_rect.h * 0.18);
+            fill(
+                f,
+                inner,
+                if on { BLUE } else { SURFACE0 },
+                CornerRadii::all(inner.h * 0.25),
+            );
+            label_centred(
+                f,
+                &Label {
+                    text,
+                    size: l.small,
+                    weight: FontWeightHint::Bold,
+                    color: if on { BASE } else { TEXT_COLOR },
+                },
+                inner,
+            );
+            f.hit(target, box_rect);
+        }
+
+        let progress = format!(
+            "{}/{}",
+            self.player_filled_count(),
+            self.total_filled_in_solution()
+        );
+        let progress_w = text::measure(&progress, l.small, FontWeightHint::Regular);
+        let progress_rect = take_right(&mut rest, progress_w, l.pad);
+        label_left(
+            f,
+            &Label {
+                text: &progress,
+                size: l.small,
+                weight: FontWeightHint::Regular,
+                color: if self.screen == Screen::Won {
+                    GREEN
+                } else {
+                    SUBTEXT0
+                },
+            },
+            progress_rect,
+        );
+
+        label_left(
+            f,
+            &Label {
+                text: if self.screen == Screen::Won {
+                    "Enter/Esc: back to the list"
+                } else {
+                    "Arrows: move   Space: fill   X: mark   C: check   Esc: list"
+                },
+                size: l.small,
+                weight: FontWeightHint::Regular,
+                color: OVERLAY0,
+            },
+            rest,
+        );
+    }
+
+    /// The name of the puzzle being played.
+    fn puzzle_name(&self) -> &'static str {
+        self.puzzles
+            .get(self.selected_puzzle)
+            .map_or("Nonogram", |p| p.name)
+    }
+}
+
+impl Default for NonogramApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── Drawing helpers ─────────────────────────────────────────────────
+
+fn fill(f: &mut Frame<Target>, r: Rect, color: Color, corner_radii: CornerRadii) {
+    if r.is_empty() {
+        return;
+    }
+    f.push(RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii,
+    });
+}
+
+fn stroke(
+    f: &mut Frame<Target>,
+    r: Rect,
+    color: Color,
+    line_width: f32,
+    corner_radii: CornerRadii,
+) {
+    if r.is_empty() {
+        return;
+    }
+    f.push(RenderCommand::StrokeRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        line_width,
+        corner_radii,
+    });
+}
+
+/// The X that says "this cell is definitely blank".
+fn draw_cross(f: &mut Frame<Target>, r: Rect, color: Color, cell: f32) {
+    if r.is_empty() {
+        return;
+    }
+    let inset = cell * 0.22;
+    let width = (cell * 0.08).max(1.0);
+    for (x1, x2) in [
+        (r.x + inset, r.right() - inset),
+        (r.right() - inset, r.x + inset),
+    ] {
+        f.push(RenderCommand::Line {
+            x1,
+            y1: r.y + inset,
+            x2,
+            y2: r.bottom() - inset,
+            color,
+            width,
         });
     }
 }
 
-// ── Entry point ─────────────────────────────────────────────────────
-
-fn main() {
-    let _app = NonogramApp::new();
+/// The picture, small, inside `r`.
+fn draw_thumbnail(f: &mut Frame<Target>, puzzle: &PuzzleDef, r: Rect, color: Color) {
+    let side = puzzle.size.side();
+    if r.is_empty() || side == 0 {
+        return;
+    }
+    let step = r.w / usize_f32(side);
+    for row in 0..side {
+        for col in 0..side {
+            if puzzle
+                .solution
+                .get(row.saturating_mul(side).saturating_add(col))
+                != Some(&true)
+            {
+                continue;
+            }
+            fill(
+                f,
+                Rect::new(
+                    r.x + usize_f32(col) * step,
+                    r.y + usize_f32(row) * step,
+                    (step * 0.85).max(0.5),
+                    (step * 0.85).max(0.5),
+                ),
+                color,
+                CornerRadii::ZERO,
+            );
+        }
+    }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Tests
-// ═══════════════════════════════════════════════════════════════════════
+/// One string and everything about how it looks, minus where it goes.
+struct Label<'a> {
+    text: &'a str,
+    size: f32,
+    weight: FontWeightHint,
+    color: Color,
+}
+
+/// The one place a `Text` command is built.
+///
+/// `limit` is passed straight through as `max_width`, so a caller that worked
+/// out a width limit gets one the renderer will actually stop at, and the
+/// overflow rule follows from it rather than being a second choice that could
+/// disagree with it.
+fn push_text(f: &mut Frame<Target>, l: &Label, x: f32, y: f32, limit: f32) {
+    if l.text.is_empty() || limit <= 0.0 {
+        return;
+    }
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: l.text.to_string(),
+        color: l.color,
+        font_size: l.size,
+        font_weight: l.weight,
+        max_width: Some(limit),
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+/// Against the left edge of `r`, centred down it.
+fn label_left(f: &mut Frame<Target>, l: &Label, r: Rect) {
+    if r.is_empty() {
+        return;
+    }
+    let lh = text::line_height(l.size, l.weight);
+    push_text(f, l, r.x, r.y + (r.h - lh) / 2.0, r.w);
+}
+
+/// Centred in `r` — across from the measured width, down from the line height
+/// — **and limited to `r`**.
+///
+/// The width that decides the centre is the width the renderer is told to stop
+/// at, so the two cannot disagree; and because that width is never more than
+/// `r.w`, `(r.w - w) / 2.0` is never negative, which is what keeps a string too
+/// wide for its box starting at the box rather than to the left of it.
+fn label_centred(f: &mut Frame<Target>, l: &Label, r: Rect) {
+    if r.is_empty() {
+        return;
+    }
+    let w = text::measure(l.text, l.size, l.weight).min(r.w);
+    let lh = text::line_height(l.size, l.weight);
+    push_text(f, l, r.x + (r.w - w) / 2.0, r.y + (r.h - lh) / 2.0, r.w);
+}
+
+/// Take `w` off the right-hand end of `area`, leaving `gap` between what was
+/// taken and what is left.
+///
+/// Returns `Rect::EMPTY` and takes nothing if there is not room, so a row that
+/// runs out of space drops its right-hand items rather than drawing them on
+/// top of its left-hand ones.
+fn take_right(area: &mut Rect, w: f32, gap: f32) -> Rect {
+    if w <= 0.0 || area.w < w {
+        return Rect::EMPTY;
+    }
+    let taken = Rect::new(area.right() - w, area.y, w, area.h);
+    area.w = (area.w - w - gap).max(0.0);
+    taken
+}
+
+/// Take `w` off the left-hand end of `area`. See [`take_right`].
+fn take_left(area: &mut Rect, w: f32, gap: f32) -> Rect {
+    if w <= 0.0 || area.w < w {
+        return Rect::EMPTY;
+    }
+    let taken = Rect::new(area.x, area.y, w, area.h);
+    area.x += w + gap;
+    area.w = (area.w - w - gap).max(0.0);
+    taken
+}
+
+/// `r` with `dx` taken off each of its left and right edges.
+fn inset_x(r: Rect, dx: f32) -> Rect {
+    Rect::new(r.x + dx, r.y, (r.w - dx * 2.0).max(0.0), r.h)
+}
+
+/// `r` with `dy` taken off each of its top and bottom edges.
+fn inset_y(r: Rect, dy: f32) -> Rect {
+    Rect::new(r.x, r.y + dy, r.w, (r.h - dy * 2.0).max(0.0))
+}
+
+/// The size of a puzzle, as it is written in the list.
+///
+/// `GridSize::label` used to spell the number out a second time — `Small` was
+/// `5` in `side()` and `"5x5"` here — so a grid size could be changed in one
+/// place and go on being described by the other.
+fn size_label(size: GridSize) -> String {
+    let side = size.side();
+    format!("{side}x{side}")
+}
+
+// ── Window plumbing ─────────────────────────────────────────────────
+
+/// The one body both the window and the test probe drive, so what a click does
+/// in a test is what it does on a screen.
+pub fn handle_event(app: &mut NonogramApp, event: &Event) -> EventResult {
+    match event {
+        Event::Key(ev) if ev.pressed => app.handle_key(ev),
+        Event::Mouse(ev) => app.handle_mouse(ev),
+        Event::Tick { elapsed_ms } => app.handle_tick(*elapsed_ms),
+        Event::Resize { width, height } => {
+            app.resize(*width as f32, *height as f32);
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+impl App for NonogramApp {
+    fn title(&self) -> String {
+        "Nonogram".to_string()
+    }
+
+    fn app_id(&self) -> String {
+        "nonogram".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn tick_interval(&self) -> Option<Duration> {
+        Some(TICK)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against, which is the only reason it is stored at all.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for NonogramApp {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
+    }
+}
+
+fn main() -> ExitCode {
+    let mut game = NonogramApp::new();
+    app::launch("nonogram", &mut game)
+}
+
 #[cfg(test)]
 mod tests {
-    // A test that indexes past the end, or unwraps a `None`, is a test that
-    // has already failed; panicking is the reporting mechanism, not a fault.
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
     #![allow(
-        clippy::arithmetic_side_effects,
-        clippy::expect_used,
         clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
         clippy::panic,
-        clippy::unwrap_used
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
     )]
 
     use super::*;
+    use guitk::probe;
 
-    // ── Helper: create a key press event ────────────────────────────
-    fn key_press(key: Key) -> Event {
-        Event::Key(KeyEvent {
-            key,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        })
+    const SIZE: (f32, f32) = <NonogramApp as Probe>::SIZE;
+
+    /// Window shapes every geometric claim is made at.
+    ///
+    /// `140x900` is there because it is tall enough for every band and narrow
+    /// enough that the footer has less room than its own text wants -- the case
+    /// where a string measured without regard to its box lands off the left
+    /// edge of the window. `60x60` is smaller than the header and footer put
+    /// together, which is what makes them give up their height.
+    const SHAPES: [(f32, f32); 7] = [
+        SIZE,
+        (320.0, 900.0),
+        (1400.0, 400.0),
+        (200.0, 200.0),
+        (2000.0, 1400.0),
+        (60.0, 60.0),
+        (140.0, 900.0),
+    ];
+
+    // ── Helpers ────────────────────────────────────────────────────
+
+    /// The index of the puzzle with this name.
+    fn index_of(app: &NonogramApp, name: &str) -> usize {
+        app.puzzles
+            .iter()
+            .position(|p| p.name == name)
+            .unwrap_or_else(|| panic!("no puzzle called {name}"))
     }
 
-    fn key_release(key: Key) -> Event {
-        Event::Key(KeyEvent {
-            key,
-            pressed: false,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        })
-    }
-
-    fn left_click(x: f32, y: f32) -> Event {
-        Event::Mouse(MouseEvent {
-            x,
-            y,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        })
-    }
-
-    fn tick(ms: u64) -> Event {
-        Event::Tick { elapsed_ms: ms }
-    }
-
-    /// Start playing the first puzzle (Heart 5x5).
-    fn app_playing_heart() -> NonogramApp {
+    /// A game already playing the named puzzle.
+    fn playing(name: &str) -> NonogramApp {
         let mut app = NonogramApp::new();
-        app.start_puzzle(0);
+        let i = index_of(&app, name);
+        app.start_puzzle(i);
+        assert_eq!(app.screen, Screen::Playing);
         app
     }
 
-    /// Fill the solution for a given app so it wins.
-    fn fill_solution(app: &mut NonogramApp) {
-        for i in 0..app.solution.len() {
-            if app.solution[i] {
-                let r = i / app.grid_side;
-                let c = i % app.grid_side;
-                app.set_cell(r, c, CellMark::Filled);
-            }
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // Clue computation
-    // ═══════════════════════════════════════════════════════════════
-
-    #[test]
-    fn test_compute_clue_all_empty() {
-        let line = [false, false, false, false, false];
-        assert_eq!(compute_clue(&line), vec![0]);
-    }
-
-    #[test]
-    fn test_compute_clue_all_filled() {
-        let line = [true, true, true, true, true];
-        assert_eq!(compute_clue(&line), vec![5]);
-    }
-
-    #[test]
-    fn test_compute_clue_single() {
-        let line = [false, false, true, false, false];
-        assert_eq!(compute_clue(&line), vec![1]);
-    }
-
-    #[test]
-    fn test_compute_clue_two_runs() {
-        let line = [true, true, false, true, true];
-        assert_eq!(compute_clue(&line), vec![2, 2]);
-    }
-
-    #[test]
-    fn test_compute_clue_mixed() {
-        let line = [true, false, true, true, false];
-        assert_eq!(compute_clue(&line), vec![1, 2]);
-    }
-
-    #[test]
-    fn test_compute_clue_starts_empty() {
-        let line = [false, true, true, true, false];
-        assert_eq!(compute_clue(&line), vec![3]);
-    }
-
-    #[test]
-    fn test_compute_clue_ends_filled() {
-        let line = [false, false, true, true, true];
-        assert_eq!(compute_clue(&line), vec![3]);
-    }
-
-    #[test]
-    fn test_compute_clue_alternating() {
-        let line = [true, false, true, false, true];
-        assert_eq!(compute_clue(&line), vec![1, 1, 1]);
-    }
-
-    #[test]
-    fn test_compute_clue_single_cell_filled() {
-        let line = [true];
-        assert_eq!(compute_clue(&line), vec![1]);
-    }
-
-    #[test]
-    fn test_compute_clue_single_cell_empty() {
-        let line = [false];
-        assert_eq!(compute_clue(&line), vec![0]);
-    }
-
-    // ── Row/column clue computation ────────────────────────────────
-
-    #[test]
-    fn test_compute_row_clues_heart() {
-        // Heart puzzle:
-        // .#.#.  -> [1, 1]
-        // ##### -> [5]
-        // ##### -> [5]
-        // .###. -> [3]
-        // ..#.. -> [1]
-        let heart = parse_picture(".#.#.\n#####\n#####\n.###.\n..#..", 5);
-        let row_clues = compute_row_clues(&heart, 5);
-        assert_eq!(row_clues.len(), 5);
-        assert_eq!(row_clues[0], vec![1, 1]);
-        assert_eq!(row_clues[1], vec![5]);
-        assert_eq!(row_clues[2], vec![5]);
-        assert_eq!(row_clues[3], vec![3]);
-        assert_eq!(row_clues[4], vec![1]);
-    }
-
-    #[test]
-    fn test_compute_col_clues_heart() {
-        let heart = parse_picture(".#.#.\n#####\n#####\n.###.\n..#..", 5);
-        let col_clues = compute_col_clues(&heart, 5);
-        assert_eq!(col_clues.len(), 5);
-        // col 0: .#.#. transposed columns:
-        // col0: .,#,#,.,. -> [2]
-        assert_eq!(col_clues[0], vec![2]);
-        // col1: #,#,#,#,. -> [4]
-        assert_eq!(col_clues[1], vec![4]);
-        // col2: .,#,#,#,# -> [4]
-        assert_eq!(col_clues[2], vec![4]);
-        // col3: #,#,#,#,. -> [4]
-        assert_eq!(col_clues[3], vec![4]);
-        // col4: .,#,#,.,. -> [2]
-        assert_eq!(col_clues[4], vec![2]);
-    }
-
-    #[test]
-    fn test_compute_row_clues_arrow() {
-        let arrow = parse_picture("..#..\n.##..\n#####\n.##..\n..#..", 5);
-        let row_clues = compute_row_clues(&arrow, 5);
-        assert_eq!(row_clues[0], vec![1]);
-        assert_eq!(row_clues[1], vec![2]);
-        assert_eq!(row_clues[2], vec![5]);
-        assert_eq!(row_clues[3], vec![2]);
-        assert_eq!(row_clues[4], vec![1]);
-    }
-
-    #[test]
-    fn test_compute_col_clues_arrow() {
-        let arrow = parse_picture("..#..\n.##..\n#####\n.##..\n..#..", 5);
-        let col_clues = compute_col_clues(&arrow, 5);
-        // col0: .,..,#,..,.. -> [1]
-        assert_eq!(col_clues[0], vec![1]);
-        // col1: .,#,#,#,. -> [3]
-        assert_eq!(col_clues[1], vec![3]);
-        // col2: #,#,#,#,# -> [5]
-        assert_eq!(col_clues[2], vec![5]);
-        // col3: .,.,#,.,. -> [1]
-        assert_eq!(col_clues[3], vec![1]);
-        // col4: .,.,#,.,. -> [1]
-        assert_eq!(col_clues[4], vec![1]);
-    }
-
-    // ── parse_picture ──────────────────────────────────────────────
-
-    #[test]
-    fn test_parse_picture_all_empty() {
-        let grid = parse_picture(".....\n.....\n.....\n.....\n.....", 5);
-        assert_eq!(grid.len(), 25);
-        assert!(grid.iter().all(|&v| !v));
-    }
-
-    #[test]
-    fn test_parse_picture_all_filled() {
-        let grid = parse_picture("#####\n#####\n#####\n#####\n#####", 5);
-        assert_eq!(grid.len(), 25);
-        assert!(grid.iter().all(|&v| v));
-    }
-
-    #[test]
-    fn test_parse_picture_heart_fill_count() {
-        let grid = parse_picture(".#.#.\n#####\n#####\n.###.\n..#..", 5);
-        let filled = grid.iter().filter(|&&v| v).count();
-        // Row 0: 2, Row 1: 5, Row 2: 5, Row 3: 3, Row 4: 1 = 16
-        assert_eq!(filled, 16);
-    }
-
-    #[test]
-    fn test_parse_picture_respects_side() {
-        // Provide a 3x3 picture but parse with side=5
-        let grid = parse_picture("###\n###\n###", 5);
-        assert_eq!(grid.len(), 25);
-        // Only first 3 cols of first 3 rows should be filled
-        assert!(grid[0]); // (0,0)
-        assert!(grid[2]); // (0,2)
-        assert!(!grid[3]); // (0,3) — beyond picture data
-    }
-
-    // ── GridSize ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_grid_size_small() {
-        assert_eq!(GridSize::Small.side(), 5);
-        assert_eq!(GridSize::Small.label(), "5x5");
-    }
-
-    #[test]
-    fn test_grid_size_medium() {
-        assert_eq!(GridSize::Medium.side(), 10);
-        assert_eq!(GridSize::Medium.label(), "10x10");
-    }
-
-    #[test]
-    fn test_grid_size_large() {
-        assert_eq!(GridSize::Large.side(), 15);
-        assert_eq!(GridSize::Large.label(), "15x15");
-    }
-
-    // ── Builtin puzzles ────────────────────────────────────────────
-
-    #[test]
-    fn test_builtin_puzzles_count() {
-        let puzzles = builtin_puzzles();
-        assert!(
-            puzzles.len() >= 8,
-            "Should have at least 8 built-in puzzles"
-        );
-    }
-
-    #[test]
-    fn test_builtin_puzzles_solution_sizes() {
-        let puzzles = builtin_puzzles();
-        for p in &puzzles {
-            let side = p.size.side();
-            assert_eq!(
-                p.solution.len(),
-                side * side,
-                "Puzzle '{}' solution should have {} cells",
-                p.name,
-                side * side,
-            );
-        }
-    }
-
-    #[test]
-    fn test_builtin_puzzles_have_filled_cells() {
-        let puzzles = builtin_puzzles();
-        for p in &puzzles {
-            let filled = p.solution.iter().filter(|&&v| v).count();
-            assert!(
-                filled > 0,
-                "Puzzle '{}' should have at least one filled cell",
-                p.name,
-            );
-        }
-    }
-
-    #[test]
-    fn test_builtin_puzzles_unique_names() {
-        let puzzles = builtin_puzzles();
-        for i in 0..puzzles.len() {
-            for j in (i + 1)..puzzles.len() {
-                assert_ne!(
-                    puzzles[i].name, puzzles[j].name,
-                    "Puzzle names should be unique",
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_builtin_has_all_sizes() {
-        let puzzles = builtin_puzzles();
-        let has_small = puzzles.iter().any(|p| p.size == GridSize::Small);
-        let has_medium = puzzles.iter().any(|p| p.size == GridSize::Medium);
-        let has_large = puzzles.iter().any(|p| p.size == GridSize::Large);
-        assert!(has_small, "Should have at least one 5x5 puzzle");
-        assert!(has_medium, "Should have at least one 10x10 puzzle");
-        assert!(has_large, "Should have at least one 15x15 puzzle");
-    }
-
-    // ── NonogramApp creation ───────────────────────────────────────
-
-    #[test]
-    fn test_new_app_starts_on_select_screen() {
-        let app = NonogramApp::new();
-        assert_eq!(app.screen, Screen::Select);
-    }
-
-    #[test]
-    fn test_new_app_has_puzzles() {
-        let app = NonogramApp::new();
-        assert!(app.puzzles.len() >= 8);
-    }
-
-    #[test]
-    fn test_new_app_select_cursor_at_zero() {
-        let app = NonogramApp::new();
-        assert_eq!(app.select_cursor, 0);
-    }
-
-    // ── Start puzzle ───────────────────────────────────────────────
-
-    #[test]
-    fn test_start_puzzle_transitions_to_playing() {
-        let mut app = NonogramApp::new();
-        app.start_puzzle(0);
-        assert_eq!(app.screen, Screen::Playing);
-    }
-
-    #[test]
-    fn test_start_puzzle_sets_grid_side() {
-        let mut app = NonogramApp::new();
-        app.start_puzzle(0); // Heart is 5x5
-        assert_eq!(app.grid_side, 5);
-    }
-
-    #[test]
-    fn test_start_puzzle_resets_cells() {
-        let mut app = NonogramApp::new();
-        app.start_puzzle(0);
-        assert!(app.cells.iter().all(|&c| c == CellMark::Empty));
-    }
-
-    #[test]
-    fn test_start_puzzle_resets_timer() {
-        let mut app = NonogramApp::new();
-        app.start_puzzle(0);
-        app.elapsed_ms = 5000;
-        app.start_puzzle(1);
-        assert_eq!(app.elapsed_ms, 0);
-    }
-
-    #[test]
-    fn test_start_puzzle_resets_check_mode() {
-        let mut app = NonogramApp::new();
-        app.start_puzzle(0);
-        app.check_mode = true;
-        app.start_puzzle(1);
-        assert!(!app.check_mode);
-    }
-
-    #[test]
-    fn test_start_puzzle_out_of_bounds_does_nothing() {
-        let mut app = NonogramApp::new();
-        app.start_puzzle(9999);
-        assert_eq!(app.screen, Screen::Select);
-    }
-
-    #[test]
-    fn test_start_puzzle_computes_row_clues() {
-        let mut app = NonogramApp::new();
-        app.start_puzzle(0); // Heart
-        assert_eq!(app.row_clues.len(), 5);
-        assert_eq!(app.row_clues[0], vec![1, 1]);
-        assert_eq!(app.row_clues[1], vec![5]);
-    }
-
-    #[test]
-    fn test_start_puzzle_computes_col_clues() {
-        let mut app = NonogramApp::new();
-        app.start_puzzle(0); // Heart
-        assert_eq!(app.col_clues.len(), 5);
-    }
-
-    #[test]
-    fn test_start_medium_puzzle() {
-        let mut app = NonogramApp::new();
-        // Find a medium puzzle
-        let idx = app
-            .puzzles
-            .iter()
-            .position(|p| p.size == GridSize::Medium)
-            .expect("Should have a medium puzzle");
-        app.start_puzzle(idx);
-        assert_eq!(app.grid_side, 10);
-        assert_eq!(app.cells.len(), 100);
-    }
-
-    #[test]
-    fn test_start_large_puzzle() {
-        let mut app = NonogramApp::new();
-        let idx = app
-            .puzzles
-            .iter()
-            .position(|p| p.size == GridSize::Large)
-            .expect("Should have a large puzzle");
-        app.start_puzzle(idx);
-        assert_eq!(app.grid_side, 15);
-        assert_eq!(app.cells.len(), 225);
-    }
-
-    // ── Cell operations ────────────────────────────────────────────
-
-    #[test]
-    fn test_cell_at_empty_initially() {
-        let app = app_playing_heart();
-        assert_eq!(app.cell_at(0, 0), CellMark::Empty);
-    }
-
-    #[test]
-    fn test_set_cell_and_read_back() {
-        let mut app = app_playing_heart();
-        app.set_cell(1, 1, CellMark::Filled);
-        assert_eq!(app.cell_at(1, 1), CellMark::Filled);
-    }
-
-    #[test]
-    fn test_cell_at_out_of_bounds() {
-        let app = app_playing_heart();
-        assert_eq!(app.cell_at(99, 99), CellMark::Empty);
-    }
-
-    #[test]
-    fn test_set_cell_out_of_bounds_no_panic() {
-        let mut app = app_playing_heart();
-        app.set_cell(99, 99, CellMark::Filled); // should not panic
-    }
-
-    #[test]
-    fn test_toggle_fill_empty_to_filled() {
-        let mut app = app_playing_heart();
-        app.toggle_fill(0, 0);
-        assert_eq!(app.cell_at(0, 0), CellMark::Filled);
-    }
-
-    #[test]
-    fn test_toggle_fill_filled_to_empty() {
-        let mut app = app_playing_heart();
-        app.toggle_fill(0, 0);
-        app.toggle_fill(0, 0);
-        assert_eq!(app.cell_at(0, 0), CellMark::Empty);
-    }
-
-    #[test]
-    fn test_toggle_fill_marked_to_filled() {
-        let mut app = app_playing_heart();
-        app.set_cell(0, 0, CellMark::MarkedEmpty);
-        app.toggle_fill(0, 0);
-        assert_eq!(app.cell_at(0, 0), CellMark::Filled);
-    }
-
-    #[test]
-    fn test_toggle_mark_empty_from_empty() {
-        let mut app = app_playing_heart();
-        app.toggle_mark_empty(0, 0);
-        assert_eq!(app.cell_at(0, 0), CellMark::MarkedEmpty);
-    }
-
-    #[test]
-    fn test_toggle_mark_empty_from_marked() {
-        let mut app = app_playing_heart();
-        app.toggle_mark_empty(0, 0);
-        app.toggle_mark_empty(0, 0);
-        assert_eq!(app.cell_at(0, 0), CellMark::Empty);
-    }
-
-    #[test]
-    fn test_toggle_mark_empty_from_filled() {
-        let mut app = app_playing_heart();
-        app.set_cell(0, 0, CellMark::Filled);
-        app.toggle_mark_empty(0, 0);
-        assert_eq!(app.cell_at(0, 0), CellMark::MarkedEmpty);
-    }
-
-    // ── Win detection ──────────────────────────────────────────────
-
-    #[test]
-    fn test_check_win_empty_is_false() {
-        let app = app_playing_heart();
-        assert!(!app.check_win());
-    }
-
-    #[test]
-    fn test_check_win_correct_solution() {
-        let mut app = app_playing_heart();
-        fill_solution(&mut app);
-        assert!(app.check_win());
-    }
-
-    #[test]
-    fn test_check_win_extra_fill_is_false() {
-        let mut app = app_playing_heart();
-        fill_solution(&mut app);
-        // Fill an extra cell that should NOT be filled
-        // (0,0) in heart is empty
-        app.set_cell(0, 0, CellMark::Filled);
-        assert!(!app.check_win());
-    }
-
-    #[test]
-    fn test_check_win_missing_fill_is_false() {
-        let mut app = app_playing_heart();
-        fill_solution(&mut app);
-        // Remove one correct fill
-        app.set_cell(0, 1, CellMark::Empty);
-        assert!(!app.check_win());
-    }
-
-    #[test]
-    fn test_check_win_marked_empty_not_counted() {
-        let mut app = app_playing_heart();
-        fill_solution(&mut app);
-        // Mark a filled cell as MarkedEmpty instead
-        app.set_cell(0, 1, CellMark::MarkedEmpty);
-        assert!(!app.check_win());
-    }
-
-    // ── Error detection (check mode) ───────────────────────────────
-
-    #[test]
-    fn test_is_error_filled_wrong() {
-        let mut app = app_playing_heart();
-        // (0,0) in heart is NOT filled in solution
-        app.set_cell(0, 0, CellMark::Filled);
-        assert!(app.is_error(0, 0));
-    }
-
-    #[test]
-    fn test_is_error_filled_correct() {
-        let mut app = app_playing_heart();
-        // (0,1) in heart IS filled in solution
-        app.set_cell(0, 1, CellMark::Filled);
-        assert!(!app.is_error(0, 1));
-    }
-
-    #[test]
-    fn test_is_error_marked_empty_wrong() {
-        let mut app = app_playing_heart();
-        // (0,1) should be filled, marking it empty is an error
-        app.set_cell(0, 1, CellMark::MarkedEmpty);
-        assert!(app.is_error(0, 1));
-    }
-
-    #[test]
-    fn test_is_error_marked_empty_correct() {
-        let mut app = app_playing_heart();
-        // (0,0) should be empty, marking it empty is correct
-        app.set_cell(0, 0, CellMark::MarkedEmpty);
-        assert!(!app.is_error(0, 0));
-    }
-
-    #[test]
-    fn test_is_error_empty_cell_never_error() {
-        let app = app_playing_heart();
-        // Empty cells are never flagged as errors
-        assert!(!app.is_error(0, 0));
-        assert!(!app.is_error(0, 1));
-    }
-
-    #[test]
-    fn test_is_error_out_of_bounds() {
-        let app = app_playing_heart();
-        assert!(!app.is_error(99, 99));
-    }
-
-    // ── Counting ───────────────────────────────────────────────────
-
-    // The three `test_filled_correct_count_*` tests went with the function
-    // they exercised; see the comment where it used to be defined.  Their
-    // assertions are not lost: `test_check_win_*` covers "the player's
-    // filled cells agree with the solution" as the thing the game actually
-    // decides on, and `test_is_error_*` covers the per-cell version that
-    // check mode draws.
-
-    #[test]
-    fn test_total_filled_in_solution_heart() {
-        let app = app_playing_heart();
-        // Heart: 2 + 5 + 5 + 3 + 1 = 16
-        assert_eq!(app.total_filled_in_solution(), 16);
-    }
-
-    #[test]
-    fn test_player_filled_count() {
-        let mut app = app_playing_heart();
-        assert_eq!(app.player_filled_count(), 0);
-        app.set_cell(0, 0, CellMark::Filled);
-        app.set_cell(0, 1, CellMark::Filled);
-        assert_eq!(app.player_filled_count(), 2);
-    }
-
-    // ── Timer ──────────────────────────────────────────────────────
-
-    #[test]
-    fn test_timer_format_zero() {
-        let app = app_playing_heart();
-        assert_eq!(app.format_time(), "0:00");
-    }
-
-    #[test]
-    fn test_timer_format_seconds() {
-        let mut app = app_playing_heart();
-        app.elapsed_ms = 45_000;
-        assert_eq!(app.format_time(), "0:45");
-    }
-
-    #[test]
-    fn test_timer_format_minutes() {
-        let mut app = app_playing_heart();
-        app.elapsed_ms = 125_000;
-        assert_eq!(app.format_time(), "2:05");
-    }
-
-    #[test]
-    fn test_timer_advances_while_playing() {
-        let mut app = app_playing_heart();
-        app.handle_event(&tick(1000));
-        assert_eq!(app.elapsed_ms, 1000);
-        app.handle_event(&tick(500));
-        assert_eq!(app.elapsed_ms, 1500);
-    }
-
-    #[test]
-    fn test_timer_does_not_advance_on_select() {
-        let mut app = NonogramApp::new();
-        app.handle_event(&tick(1000));
-        assert_eq!(app.elapsed_ms, 0);
-    }
-
-    #[test]
-    fn test_timer_does_not_advance_after_win() {
-        let mut app = app_playing_heart();
-        app.handle_event(&tick(2000));
-        fill_solution(&mut app);
-        app.screen = Screen::Won;
-        app.handle_event(&tick(1000));
-        assert_eq!(app.elapsed_ms, 2000);
-    }
-
-    // ── Keyboard navigation ────────────────────────────────────────
-
-    #[test]
-    fn test_cursor_starts_at_origin() {
-        let app = app_playing_heart();
-        assert_eq!(app.cursor_row, 0);
-        assert_eq!(app.cursor_col, 0);
-    }
-
-    #[test]
-    fn test_cursor_move_down() {
-        let mut app = app_playing_heart();
-        app.handle_event(&key_press(Key::Down));
-        assert_eq!(app.cursor_row, 1);
-        assert_eq!(app.cursor_col, 0);
-    }
-
-    #[test]
-    fn test_cursor_move_right() {
-        let mut app = app_playing_heart();
-        app.handle_event(&key_press(Key::Right));
-        assert_eq!(app.cursor_col, 1);
-    }
-
-    #[test]
-    fn test_cursor_move_up_clamped() {
-        let mut app = app_playing_heart();
-        app.handle_event(&key_press(Key::Up));
-        assert_eq!(app.cursor_row, 0);
-    }
-
-    #[test]
-    fn test_cursor_move_left_clamped() {
-        let mut app = app_playing_heart();
-        app.handle_event(&key_press(Key::Left));
-        assert_eq!(app.cursor_col, 0);
-    }
-
-    #[test]
-    fn test_cursor_move_down_clamped_at_bottom() {
-        let mut app = app_playing_heart();
-        app.cursor_row = 4; // last row of 5x5
-        app.handle_event(&key_press(Key::Down));
-        assert_eq!(app.cursor_row, 4);
-    }
-
-    #[test]
-    fn test_cursor_move_right_clamped_at_edge() {
-        let mut app = app_playing_heart();
-        app.cursor_col = 4;
-        app.handle_event(&key_press(Key::Right));
-        assert_eq!(app.cursor_col, 4);
-    }
-
-    #[test]
-    fn test_cursor_traverse_entire_grid() {
-        let mut app = app_playing_heart();
-        // Move to bottom-right
-        for _ in 0..4 {
-            app.handle_event(&key_press(Key::Down));
-        }
-        for _ in 0..4 {
-            app.handle_event(&key_press(Key::Right));
-        }
-        assert_eq!(app.cursor_row, 4);
-        assert_eq!(app.cursor_col, 4);
-        // Move back to top-left
-        for _ in 0..4 {
-            app.handle_event(&key_press(Key::Up));
-        }
-        for _ in 0..4 {
-            app.handle_event(&key_press(Key::Left));
-        }
-        assert_eq!(app.cursor_row, 0);
-        assert_eq!(app.cursor_col, 0);
-    }
-
-    // ── Fill/mark via keyboard ─────────────────────────────────────
-
-    #[test]
-    fn test_space_fills_cell() {
-        let mut app = app_playing_heart();
-        app.handle_event(&key_press(Key::Space));
-        assert_eq!(app.cell_at(0, 0), CellMark::Filled);
-    }
-
-    #[test]
-    fn test_enter_fills_cell() {
-        let mut app = app_playing_heart();
-        app.handle_event(&key_press(Key::Enter));
-        assert_eq!(app.cell_at(0, 0), CellMark::Filled);
-    }
-
-    #[test]
-    fn test_space_toggles_fill() {
-        let mut app = app_playing_heart();
-        app.handle_event(&key_press(Key::Space));
-        assert_eq!(app.cell_at(0, 0), CellMark::Filled);
-        app.handle_event(&key_press(Key::Space));
-        assert_eq!(app.cell_at(0, 0), CellMark::Empty);
-    }
-
-    #[test]
-    fn test_x_marks_empty() {
-        let mut app = app_playing_heart();
-        app.handle_event(&key_press(Key::X));
-        assert_eq!(app.cell_at(0, 0), CellMark::MarkedEmpty);
-    }
-
-    #[test]
-    fn test_x_toggles_mark() {
-        let mut app = app_playing_heart();
-        app.handle_event(&key_press(Key::X));
-        assert_eq!(app.cell_at(0, 0), CellMark::MarkedEmpty);
-        app.handle_event(&key_press(Key::X));
-        assert_eq!(app.cell_at(0, 0), CellMark::Empty);
-    }
-
-    #[test]
-    fn test_key_release_ignored() {
-        let mut app = app_playing_heart();
-        app.handle_event(&key_release(Key::Space));
-        assert_eq!(app.cell_at(0, 0), CellMark::Empty);
-    }
-
-    // ── Check mode ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_c_toggles_check_mode() {
-        let mut app = app_playing_heart();
-        assert!(!app.check_mode);
-        app.handle_event(&key_press(Key::C));
-        assert!(app.check_mode);
-        app.handle_event(&key_press(Key::C));
-        assert!(!app.check_mode);
-    }
-
-    // ── Escape returns to select ───────────────────────────────────
-
-    #[test]
-    fn test_escape_returns_to_select() {
-        let mut app = app_playing_heart();
-        app.handle_event(&key_press(Key::Escape));
-        assert_eq!(app.screen, Screen::Select);
-    }
-
-    // ── Select screen navigation ───────────────────────────────────
-
-    #[test]
-    fn test_select_cursor_moves_down() {
-        let mut app = NonogramApp::new();
-        app.handle_event(&key_press(Key::Down));
-        assert_eq!(app.select_cursor, 1);
-    }
-
-    #[test]
-    fn test_select_cursor_moves_up() {
-        let mut app = NonogramApp::new();
-        app.select_cursor = 2;
-        app.handle_event(&key_press(Key::Up));
-        assert_eq!(app.select_cursor, 1);
-    }
-
-    #[test]
-    fn test_select_cursor_clamped_at_top() {
-        let mut app = NonogramApp::new();
-        app.handle_event(&key_press(Key::Up));
-        assert_eq!(app.select_cursor, 0);
-    }
-
-    #[test]
-    fn test_select_cursor_clamped_at_bottom() {
-        let mut app = NonogramApp::new();
-        let last = app.puzzles.len() - 1;
-        app.select_cursor = last;
-        app.handle_event(&key_press(Key::Down));
-        assert_eq!(app.select_cursor, last);
-    }
-
-    #[test]
-    fn test_select_enter_starts_puzzle() {
-        let mut app = NonogramApp::new();
-        app.select_cursor = 2;
-        app.handle_event(&key_press(Key::Enter));
-        assert_eq!(app.screen, Screen::Playing);
-        assert_eq!(app.selected_puzzle, 2);
-    }
-
-    #[test]
-    fn test_select_space_starts_puzzle() {
-        let mut app = NonogramApp::new();
-        app.select_cursor = 1;
-        app.handle_event(&key_press(Key::Space));
-        assert_eq!(app.screen, Screen::Playing);
-        assert_eq!(app.selected_puzzle, 1);
-    }
-
-    // ── Win flow ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_filling_solution_triggers_win() {
-        let mut app = app_playing_heart();
-        // Fill all solution cells except the last one
-        let total = app.solution.len();
-        for i in 0..total {
-            if app.solution[i] {
-                let r = i / app.grid_side;
-                let c = i % app.grid_side;
-                app.set_cell(r, c, CellMark::Filled);
-            }
-        }
-        // Find the last filled solution cell to trigger via key
-        // We already filled everything, so check_win should be true
-        // But screen is still Playing because we used set_cell directly
-        assert!(app.check_win());
-    }
-
-    #[test]
-    fn test_win_via_keyboard() {
-        let mut app = app_playing_heart();
-        // Fill all solution cells, then unfill one and refill via keyboard
-        fill_solution(&mut app);
-        // Unfill the first filled cell
-        let first_filled = app.solution.iter().position(|&v| v).unwrap();
-        let fr = first_filled / app.grid_side;
-        let fc = first_filled % app.grid_side;
-        app.set_cell(fr, fc, CellMark::Empty);
-        assert!(!app.check_win());
-
-        // Move cursor to that cell and fill it via Space
-        app.cursor_row = fr;
-        app.cursor_col = fc;
-        app.handle_event(&key_press(Key::Space));
-        assert_eq!(app.screen, Screen::Won);
-    }
-
-    #[test]
-    fn test_won_screen_enter_returns_to_select() {
-        let mut app = app_playing_heart();
-        fill_solution(&mut app);
-        app.screen = Screen::Won;
-        app.handle_event(&key_press(Key::Enter));
-        assert_eq!(app.screen, Screen::Select);
-    }
-
-    #[test]
-    fn test_won_screen_escape_returns_to_select() {
-        let mut app = app_playing_heart();
-        fill_solution(&mut app);
-        app.screen = Screen::Won;
-        app.handle_event(&key_press(Key::Escape));
-        assert_eq!(app.screen, Screen::Select);
-    }
-
-    // ── Mouse click on select screen ───────────────────────────────
-
-    #[test]
-    fn test_mouse_click_select_starts_puzzle() {
-        let mut app = NonogramApp::new();
-        let entry_y = HEADER_HEIGHT + PADDING + 0.0 * 40.0 + 10.0;
-        app.handle_event(&left_click(30.0, entry_y));
-        assert_eq!(app.screen, Screen::Playing);
-        assert_eq!(app.selected_puzzle, 0);
-    }
-
-    // ── Mouse click on grid ────────────────────────────────────────
-
-    #[test]
-    fn test_mouse_click_grid_fills_cell() {
-        // This test used to work the grid's origin out for itself from
-        // PADDING, HEADER_HEIGHT and the clue slot sizes -- a second copy of
-        // the app's own arithmetic, which meant it would have gone on passing
-        // if the grid had moved. It now asks the app where a cell is; that the
-        // answer matches the picture is what the geometry tests below check.
-        let mut app = app_playing_heart();
-        let (cx, cy) = app.cell_center(2, 3);
-        app.handle_event(&left_click(cx, cy));
-        assert_eq!(app.cell_at(2, 3), CellMark::Filled);
-        assert_eq!((app.cursor_row, app.cursor_col), (2, 3));
-    }
-
-    // ── Max clue lengths ───────────────────────────────────────────
-
-    #[test]
-    fn test_max_row_clue_len_heart() {
-        let app = app_playing_heart();
-        // Heart row clues: [1,1], [5], [5], [3], [1] — max = 2
-        assert_eq!(app.max_row_clue_len(), 2);
-    }
-
-    #[test]
-    fn test_max_col_clue_len_heart() {
-        let app = app_playing_heart();
-        // Heart col clues: [2], [4], [4], [4], [2] — all length 1
-        assert_eq!(app.max_col_clue_len(), 1);
-    }
-
-    // ── Rendering produces commands ────────────────────────────────
-
-    #[test]
-    fn test_render_select_produces_commands() {
-        let app = NonogramApp::new();
-        let cmds = app.render();
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_playing_produces_commands() {
-        let app = app_playing_heart();
-        let cmds = app.render();
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_won_produces_commands() {
-        let mut app = app_playing_heart();
-        fill_solution(&mut app);
-        app.screen = Screen::Won;
-        let cmds = app.render();
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_select_has_fill_rects() {
-        let app = NonogramApp::new();
-        let cmds = app.render();
-        let fill_count = cmds
-            .iter()
-            .filter(|c| matches!(c, RenderCommand::FillRect { .. }))
-            .count();
-        assert!(fill_count > 0);
-    }
-
-    #[test]
-    fn test_render_playing_has_text() {
-        let app = app_playing_heart();
-        let cmds = app.render();
-        let text_count = cmds
-            .iter()
-            .filter(|c| matches!(c, RenderCommand::Text { .. }))
-            .count();
-        assert!(
-            text_count > 0,
-            "Playing screen should contain text commands"
-        );
-    }
-
-    #[test]
-    fn test_render_playing_has_stroke_rect_for_cursor() {
-        let app = app_playing_heart();
-        let cmds = app.render();
-        let stroke_count = cmds
-            .iter()
-            .filter(|c| matches!(c, RenderCommand::StrokeRect { .. }))
-            .count();
-        assert!(
-            stroke_count > 0,
-            "Playing screen should have a cursor stroke rect",
-        );
-    }
-
-    #[test]
-    fn test_render_marked_empty_has_lines() {
-        let mut app = app_playing_heart();
-        app.set_cell(0, 0, CellMark::MarkedEmpty);
-        let cmds = app.render();
-        let line_count = cmds
-            .iter()
-            .filter(|c| matches!(c, RenderCommand::Line { .. }))
-            .count();
-        assert!(line_count >= 2, "MarkedEmpty cell should render X lines");
-    }
-
-    // ── Won screen mouse click returns to select ───────────────────
-
-    #[test]
-    fn test_won_mouse_click_returns_to_select() {
-        let mut app = app_playing_heart();
-        fill_solution(&mut app);
-        app.screen = Screen::Won;
-        app.handle_event(&left_click(100.0, 100.0));
-        assert_eq!(app.screen, Screen::Select);
-    }
-
-    // ── Medium grid clues ──────────────────────────────────────────
-
-    #[test]
-    fn test_medium_puzzle_clue_consistency() {
-        let mut app = NonogramApp::new();
-        let idx = app
-            .puzzles
-            .iter()
-            .position(|p| p.size == GridSize::Medium)
-            .unwrap();
-        app.start_puzzle(idx);
-        assert_eq!(app.row_clues.len(), 10);
-        assert_eq!(app.col_clues.len(), 10);
-        // Sum of all row clue values should equal total filled cells
-        let row_sum: u32 = app
-            .row_clues
-            .iter()
-            .flat_map(|c| c.iter())
-            .map(|&v| v as u32)
-            .sum();
-        let filled = app.total_filled_in_solution() as u32;
-        assert_eq!(row_sum, filled);
-    }
-
-    #[test]
-    fn test_col_clue_sum_equals_filled() {
-        let mut app = NonogramApp::new();
-        app.start_puzzle(0);
-        let col_sum: u32 = app
-            .col_clues
-            .iter()
-            .flat_map(|c| c.iter())
-            .map(|&v| v as u32)
-            .sum();
-        let filled = app.total_filled_in_solution() as u32;
-        assert_eq!(col_sum, filled);
-    }
-
-    // ── Row and column clue sums match for all puzzles ─────────────
-
-    #[test]
-    fn test_all_puzzles_row_col_sums_match() {
-        let mut app = NonogramApp::new();
-        for i in 0..app.puzzles.len() {
-            app.start_puzzle(i);
-            let row_sum: u32 = app
-                .row_clues
-                .iter()
-                .flat_map(|c| c.iter())
-                .map(|&v| v as u32)
-                .sum();
-            let col_sum: u32 = app
-                .col_clues
-                .iter()
-                .flat_map(|c| c.iter())
-                .map(|&v| v as u32)
-                .sum();
-            assert_eq!(
-                row_sum, col_sum,
-                "Row/col clue sums should match for puzzle '{}'",
-                app.puzzles[i].name,
-            );
-        }
-    }
-
-    // ── Render medium grid with group lines ─────────────────────────
-
-    #[test]
-    fn test_render_medium_grid_has_group_lines() {
-        let mut app = NonogramApp::new();
-        let idx = app
-            .puzzles
-            .iter()
-            .position(|p| p.size == GridSize::Medium)
-            .unwrap();
-        app.start_puzzle(idx);
-        let cmds = app.render();
-        let line_count = cmds
-            .iter()
-            .filter(|c| matches!(c, RenderCommand::Line { .. }))
-            .count();
-        // 10x10 grid should have group lines at position 5 (1 vertical + 1 horizontal)
-        assert!(
-            line_count >= 2,
-            "Medium grid should have group divider lines"
-        );
-    }
-
-    // ── Grid geometry, measured against the picture ────────────────
-    //
-    // Written to the checklist in design-decisions.md §485: the lattice
-    // against the window, every point of a cell rather than its middle, all
-    // four edges inward and outward, a far sweep well past the grid, and each
-    // element's place *within* the cell that holds it. Expected values come
-    // from the render list wherever they can, never from the function under
-    // test -- the previous mouse test worked the grid's origin out for itself
-    // and would have passed with the grid drawn anywhere at all.
-
-    /// Top-left corners of the painted cells, in render order.
-    ///
-    /// A cell is the only thing drawn exactly `CELL_SIZE` square, which picks
-    /// them out of the render list without consulting `cell_origin`.
-    fn painted_cells(cmds: &[RenderCommand]) -> Vec<(f32, f32)> {
-        cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                    ..
-                } if (*width - CELL_SIZE).abs() < 0.01 && (*height - CELL_SIZE).abs() < 0.01 => {
-                    Some((*x, *y))
+    /// Fill every cell the picture wants, without going through the game -- so
+    /// a test can set up a solved grid and then ask a question about it.
+    fn paint_solution(app: &mut NonogramApp) {
+        for row in 0..app.grid_side {
+            for col in 0..app.grid_side {
+                if app.solution[row * app.grid_side + col] {
+                    app.set_cell(row, col, CellMark::Filled);
                 }
-                _ => None,
-            })
+            }
+        }
+    }
+
+    /// The first cell the picture wants filled.
+    fn a_filled_cell(app: &NonogramApp) -> (usize, usize) {
+        for row in 0..app.grid_side {
+            for col in 0..app.grid_side {
+                if app.solution[row * app.grid_side + col] {
+                    return (row, col);
+                }
+            }
+        }
+        panic!("the picture is blank");
+    }
+
+    /// The first cell the picture wants left blank.
+    fn a_blank_cell(app: &NonogramApp) -> (usize, usize) {
+        for row in 0..app.grid_side {
+            for col in 0..app.grid_side {
+                if !app.solution[row * app.grid_side + col] {
+                    return (row, col);
+                }
+            }
+        }
+        panic!("the picture is solid");
+    }
+
+    fn all_targets(app: &NonogramApp, size: (f32, f32)) -> Vec<Target> {
+        app.frame(size.0, size.1)
+            .hits()
+            .iter()
+            .map(|(t, _)| *t)
             .collect()
     }
 
-    /// The painted cell containing `(x, y)`, if any.
-    fn painted_cell_containing(cmds: &[RenderCommand], x: f32, y: f32) -> Option<(f32, f32)> {
-        painted_cells(cmds)
-            .into_iter()
-            .find(|&(cx, cy)| x >= cx && x < cx + CELL_SIZE && y >= cy && y < cy + CELL_SIZE)
-    }
-
-    /// The window the app asks for, as the background rectangle states it.
-    fn window_size(cmds: &[RenderCommand]) -> (f32, f32) {
-        match cmds.first() {
-            Some(RenderCommand::FillRect { width, height, .. }) => (*width, *height),
-            other => panic!("expected a background rect first, got {other:?}"),
-        }
-    }
-
-    // ── 1. The lattice, measured against the window ────────────
+    // ── Clues, as the puzzle states them ───────────────────────────
 
     #[test]
-    fn the_painted_grid_is_square_evenly_spaced_and_fits_the_window() {
-        // Every puzzle, because the grid's origin depends on how much room
-        // this puzzle's clues need -- a 5x5 with one-figure clues and a 15x15
-        // with four-figure ones do not start in the same place.
-        for idx in 0..NonogramApp::new().puzzles.len() {
-            let mut app = NonogramApp::new();
-            app.start_puzzle(idx);
-            let side = app.grid_side;
-            let cmds = app.render();
-            let cells = painted_cells(&cmds);
-            assert_eq!(cells.len(), side * side, "puzzle {idx}: one rect per cell");
-
-            let mut xs: Vec<f32> = cells.iter().map(|c| c.0).collect();
-            let mut ys: Vec<f32> = cells.iter().map(|c| c.1).collect();
-            xs.sort_by(f32::total_cmp);
-            xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-            ys.sort_by(f32::total_cmp);
-            ys.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-            assert_eq!(xs.len(), side, "puzzle {idx}: {side} distinct columns");
-            assert_eq!(ys.len(), side, "puzzle {idx}: {side} distinct rows");
-
-            // Stated against the constants rather than against `CELL_STEP`, so
-            // a change to the spacing has to be made here too.
-            let step = CELL_SIZE + CELL_GAP;
-            for pair in xs.windows(2) {
-                assert!(
-                    (pair[1] - pair[0] - step).abs() < 0.01,
-                    "puzzle {idx}: columns are {} apart, expected {step}",
-                    pair[1] - pair[0]
-                );
-            }
-            for pair in ys.windows(2) {
-                assert!(
-                    (pair[1] - pair[0] - step).abs() < 0.01,
-                    "puzzle {idx}: rows are {} apart, expected {step}",
-                    pair[1] - pair[0]
-                );
-            }
-
-            let (win_w, win_h) = window_size(&cmds);
-            let right = xs[side - 1] + CELL_SIZE;
-            let bottom = ys[side - 1] + CELL_SIZE;
-            assert!(
-                xs[0] > 0.0 && ys[0] > 0.0,
-                "puzzle {idx}: the grid starts inside the window"
-            );
-            assert!(
-                right < win_w,
-                "puzzle {idx}: the grid ends inside the window, {right} vs {win_w}"
-            );
-            assert!(
-                bottom < win_h,
-                "puzzle {idx}: the grid ends above the footer, {bottom} vs {win_h}"
-            );
-            assert!(
-                ys[0] >= HEADER_HEIGHT,
-                "puzzle {idx}: the grid starts below the header, {} vs {HEADER_HEIGHT}",
-                ys[0]
-            );
-
-            // The frame is even: the margin to the right of the last column is
-            // the same as the margin to the left of the clue band. "Inside the
-            // window" alone would let the window be any amount too wide, which
-            // is exactly what happens if the grid's width is measured with a
-            // trailing gap the last cell does not have.
-            let band_w = app.max_row_clue_len() as f32 * CLUE_SLOT_W;
-            let left_margin = xs[0] - band_w;
-            let right_margin = win_w - right;
-            assert!(
-                (left_margin - right_margin).abs() < 0.01,
-                "puzzle {idx}: {left_margin} of margin on the left but {right_margin} on the right"
-            );
-        }
+    fn a_run_of_filled_cells_is_one_number() {
+        assert_eq!(compute_clue(&[true, true, true]), vec![3]);
+        assert_eq!(compute_clue(&[false, true, true, false]), vec![2]);
     }
 
     #[test]
-    fn the_clue_bands_leave_room_for_the_wordiest_clue_and_no_more() {
-        // The two bands are what push the grid right and down, so their width
-        // is measured as the gap between the window's padding and the grid the
-        // renderer actually painted -- not as the app's own formula.
-        for idx in 0..NonogramApp::new().puzzles.len() {
-            let mut app = NonogramApp::new();
-            app.start_puzzle(idx);
-            let cmds = app.render();
-            let cells = painted_cells(&cmds);
-            let left = cells
-                .iter()
-                .map(|c| c.0)
-                .fold(f32::INFINITY, |a, b| if b < a { b } else { a });
-            let top = cells
-                .iter()
-                .map(|c| c.1)
-                .fold(f32::INFINITY, |a, b| if b < a { b } else { a });
-            let expected_w = app.max_row_clue_len() as f32 * CLUE_SLOT_W;
-            let expected_h = app.max_col_clue_len() as f32 * CLUE_SLOT_H;
-            assert!(
-                (left - PADDING - expected_w).abs() < 0.01,
-                "puzzle {idx}: row clue band is {} wide, expected {expected_w}",
-                left - PADDING
+    fn separate_runs_are_listed_in_the_order_they_appear() {
+        assert_eq!(
+            compute_clue(&[true, false, true, true, false, true]),
+            vec![1, 2, 1]
+        );
+    }
+
+    #[test]
+    fn an_empty_line_is_stated_as_a_single_zero() {
+        // Not an empty list: a column with nothing in it still needs a number
+        // over it, or the player cannot tell it from a column they have not
+        // been told about.
+        assert_eq!(compute_clue(&[false; 5]), vec![0]);
+        assert_eq!(compute_clue(&[]), vec![0]);
+    }
+
+    #[test]
+    fn a_run_reaching_the_end_of_the_line_is_still_counted() {
+        // The run is closed by the end of the line rather than by a blank, so
+        // a version that only pushed on the falling edge would drop it.
+        assert_eq!(compute_clue(&[false, true, true]), vec![2]);
+        assert_eq!(compute_clue(&[true]), vec![1]);
+    }
+
+    #[test]
+    fn row_clues_read_across_and_column_clues_read_down() {
+        // Two rows of two, filled diagonally:  #.
+        //                                      .#
+        let grid = [true, false, false, true];
+        assert_eq!(compute_row_clues(&grid, 2), vec![vec![1], vec![1]]);
+        assert_eq!(compute_col_clues(&grid, 2), vec![vec![1], vec![1]]);
+
+        // Now a shape that reads differently across than down:  ##
+        //                                                       #.
+        let grid = [true, true, true, false];
+        assert_eq!(compute_row_clues(&grid, 2), vec![vec![2], vec![1]]);
+        assert_eq!(compute_col_clues(&grid, 2), vec![vec![2], vec![1]]);
+
+        // ... and one that is not its own transpose:  #.
+        //                                             ##
+        let grid = [true, false, true, true];
+        assert_eq!(compute_row_clues(&grid, 2), vec![vec![1], vec![2]]);
+        assert_eq!(compute_col_clues(&grid, 2), vec![vec![2], vec![1]]);
+    }
+
+    #[test]
+    fn a_clue_line_with_no_width_is_no_clue_at_all() {
+        assert!(compute_row_clues(&[true, false], 0).is_empty());
+        assert!(compute_col_clues(&[true, false], 0).is_empty());
+    }
+
+    #[test]
+    fn a_picture_ignores_anything_past_its_own_edges() {
+        // Both the extra column and the extra row are dropped, rather than
+        // wrapping into the next row or running off the end of the vector.
+        // The picture is deliberately not its own transpose and not symmetric,
+        // so a character that wrapped onto the next row would show up as a
+        // filled cell the picture did not ask for rather than land on one it
+        // did.
+        let grid = parse_picture("#.#\n..#\n###", 2);
+        assert_eq!(grid, vec![true, false, false, false]);
+    }
+
+    #[test]
+    fn every_puzzle_in_the_catalogue_is_the_size_it_claims() {
+        for puzzle in &builtin_puzzles() {
+            let side = puzzle.size.side();
+            assert_eq!(
+                puzzle.solution.len(),
+                side * side,
+                "{} says {}x{} and has {} cells",
+                puzzle.name,
+                side,
+                side,
+                puzzle.solution.len()
             );
             assert!(
-                (top - HEADER_HEIGHT - PADDING - expected_h).abs() < 0.01,
-                "puzzle {idx}: column clue band is {} tall, expected {expected_h}",
-                top - HEADER_HEIGHT - PADDING
+                puzzle.solution.iter().any(|&v| v),
+                "{} is a blank picture",
+                puzzle.name
             );
         }
     }
 
-    // ── 2. Every point of a cell, not just its middle ──────────
+    #[test]
+    fn a_puzzles_size_is_written_once() {
+        // The label used to be a second spelling of the side length, so the two
+        // could disagree. Every label in the catalogue is now derived from the
+        // number the grid is actually built with.
+        for puzzle in &builtin_puzzles() {
+            let side = puzzle.size.side();
+            assert_eq!(size_label(puzzle.size), format!("{side}x{side}"));
+        }
+    }
+
+    // ── The rules of the game ──────────────────────────────────────
 
     #[test]
-    fn every_point_in_a_painted_cell_resolves_to_that_cell() {
-        // A mapping shifted by less than half a cell still answers correctly
-        // dead centre, which is all the old round-trip test ever asked.
-        let app = app_playing_heart();
-        let cmds = app.render();
-        let inset = 0.5;
-        let far = CELL_SIZE - 0.5;
+    fn filling_a_cell_twice_puts_it_back() {
+        let mut app = playing("Heart");
+        app.toggle_fill(0, 0);
+        assert_eq!(app.cell_at(0, 0), CellMark::Filled);
+        app.toggle_fill(0, 0);
+        assert_eq!(app.cell_at(0, 0), CellMark::Empty);
+    }
+
+    #[test]
+    fn a_mark_replaces_a_fill_and_a_fill_replaces_a_mark() {
+        let mut app = playing("Heart");
+        app.toggle_fill(1, 1);
+        app.toggle_mark_empty(1, 1);
+        assert_eq!(
+            app.cell_at(1, 1),
+            CellMark::MarkedEmpty,
+            "marking a filled cell left it filled"
+        );
+        app.toggle_fill(1, 1);
+        assert_eq!(
+            app.cell_at(1, 1),
+            CellMark::Filled,
+            "filling a marked cell left it marked"
+        );
+        app.toggle_mark_empty(1, 1);
+        app.toggle_mark_empty(1, 1);
+        assert_eq!(
+            app.cell_at(1, 1),
+            CellMark::Empty,
+            "marking twice did not clear the mark"
+        );
+    }
+
+    #[test]
+    fn a_cell_off_the_grid_is_neither_read_nor_written() {
+        let mut app = playing("Heart");
+        let side = app.grid_side;
+        app.toggle_fill(side, 0);
+        app.toggle_fill(0, side);
+        assert_eq!(app.cell_at(side, 0), CellMark::Empty);
+        assert_eq!(app.cell_at(0, side), CellMark::Empty);
+        assert!(
+            app.cells.iter().all(|&c| c == CellMark::Empty),
+            "a click off the grid changed a cell on it"
+        );
+    }
+
+    #[test]
+    fn the_puzzle_is_won_when_the_filled_cells_are_exactly_the_picture() {
+        let mut app = playing("Heart");
+        assert!(!app.check_win(), "a blank grid was taken for a solved one");
+        paint_solution(&mut app);
+        assert!(app.check_win());
+    }
+
+    #[test]
+    fn a_missing_cell_leaves_the_puzzle_unsolved() {
+        let mut app = playing("Heart");
+        paint_solution(&mut app);
+        let (r, c) = a_filled_cell(&app);
+        app.set_cell(r, c, CellMark::Empty);
+        assert!(!app.check_win(), "a hole in the picture still counted");
+    }
+
+    #[test]
+    fn an_extra_cell_leaves_the_puzzle_unsolved() {
+        let mut app = playing("Heart");
+        paint_solution(&mut app);
+        let (r, c) = a_blank_cell(&app);
+        app.set_cell(r, c, CellMark::Filled);
+        assert!(!app.check_win(), "a spare filled cell still counted");
+    }
+
+    #[test]
+    fn a_mark_is_not_a_fill_as_far_as_winning_goes() {
+        // Marking every blank cell is how the game is played, and doing it must
+        // not by itself be mistaken for filling them.
+        let mut app = playing("Heart");
+        paint_solution(&mut app);
+        let (r, c) = a_blank_cell(&app);
+        app.set_cell(r, c, CellMark::MarkedEmpty);
+        assert!(app.check_win(), "marking a blank cell unsolved the puzzle");
+    }
+
+    #[test]
+    fn check_mode_calls_out_a_cell_filled_that_should_be_blank() {
+        let mut app = playing("Heart");
+        let (r, c) = a_blank_cell(&app);
+        app.set_cell(r, c, CellMark::Filled);
+        assert!(app.is_error(r, c));
+    }
+
+    #[test]
+    fn check_mode_calls_out_a_cell_marked_blank_that_should_be_filled() {
+        let mut app = playing("Heart");
+        let (r, c) = a_filled_cell(&app);
+        app.set_cell(r, c, CellMark::MarkedEmpty);
+        assert!(app.is_error(r, c));
+    }
+
+    #[test]
+    fn check_mode_says_nothing_about_a_cell_you_have_not_touched() {
+        // Otherwise the check would report every unsolved cell of the picture
+        // as a mistake the moment you asked, which is not the question.
+        let app = playing("Heart");
+        let (r, c) = a_filled_cell(&app);
+        assert!(
+            !app.is_error(r, c),
+            "an untouched cell was called a mistake"
+        );
+        let (r, c) = a_blank_cell(&app);
+        assert!(!app.is_error(r, c));
+    }
+
+    #[test]
+    fn a_right_answer_is_never_a_mistake() {
+        let mut app = playing("Heart");
+        paint_solution(&mut app);
         for row in 0..app.grid_side {
             for col in 0..app.grid_side {
-                let (ox, oy) = app.cell_origin(row, col);
-                for dx in [inset, CELL_SIZE / 2.0, far] {
-                    for dy in [inset, CELL_SIZE / 2.0, far] {
-                        assert_eq!(
-                            app.cell_at_point(ox + dx, oy + dy),
-                            Some((row, col)),
-                            "({dx}, {dy}) into cell ({row}, {col}) missed it"
-                        );
-                    }
-                }
-                // And that cell is the one actually painted there.
-                let (mx, my) = app.cell_center(row, col);
-                assert_eq!(
-                    painted_cell_containing(&cmds, mx, my),
-                    Some((ox, oy)),
-                    "cell ({row}, {col}) is not painted where cell_origin says"
+                assert!(
+                    !app.is_error(row, col),
+                    "the solved picture reports ({row}, {col}) as wrong"
                 );
             }
         }
     }
 
-    // ── 3. All four edges, inward and outward ───────────────
-
     #[test]
-    fn the_grid_edges_take_the_same_slop_on_all_four_sides() {
-        // Each cell owns half the gap on either side of it, so the outermost
-        // cells reach exactly CELL_GAP / 2 beyond the painted grid -- the same
-        // on every side. The previous mapping gave the right and bottom edges
-        // a whole gap and the left and top none. Note the clickable region is
-        // the half-open box [near, far), so the two ends are not mirror images
-        // and no offset makes them so; state the interval (§485).
-        let app = app_playing_heart();
-        let side = app.grid_side;
-        let (left, top) = app.cell_origin(0, 0);
-        let (last_x, last_y) = app.cell_origin(side - 1, side - 1);
-        let slop = CELL_GAP / 2.0;
-        let near_x = left - slop;
-        let near_y = top - slop;
-        let far_x = last_x + CELL_SIZE + slop;
-        let far_y = last_y + CELL_SIZE + slop;
-        let mid_x = app.cell_center(0, side / 2).0;
-        let mid_y = app.cell_center(side / 2, 0).1;
-
-        assert_eq!(
-            app.cell_at_point(near_x, mid_y),
-            Some((side / 2, 0)),
-            "the left edge takes its half-gap of slop"
-        );
-        assert_eq!(
-            app.cell_at_point(mid_x, near_y),
-            Some((0, side / 2)),
-            "the top edge takes its half-gap of slop"
-        );
-        assert_eq!(
-            app.cell_at_point(far_x - 0.01, mid_y),
-            Some((side / 2, side - 1)),
-            "the right edge takes its half-gap of slop"
-        );
-        assert_eq!(
-            app.cell_at_point(mid_x, far_y - 0.01),
-            Some((side - 1, side / 2)),
-            "the bottom edge takes its half-gap of slop"
-        );
-
-        assert_eq!(
-            app.cell_at_point(near_x - 0.01, mid_y),
-            None,
-            "a hair further left than the slop is off the grid"
-        );
-        assert_eq!(
-            app.cell_at_point(mid_x, near_y - 0.01),
-            None,
-            "a hair above the slop is off the grid"
-        );
-        assert_eq!(
-            app.cell_at_point(far_x, mid_y),
-            None,
-            "a hair past the right-hand slop is off the grid"
-        );
-        assert_eq!(
-            app.cell_at_point(mid_x, far_y),
-            None,
-            "a hair below the bottom slop is off the grid"
-        );
-    }
-
-    // ── 4. A far sweep, well past the grid ──────────────────
-
-    #[test]
-    fn nothing_far_outside_the_painted_grid_lands_on_a_cell() {
-        // A hit test with no far edge answers the last cell for every point
-        // past the grid, and a single probe just outside it would not tell.
-        let app = app_playing_heart();
-        let cmds = app.render();
-        let (win_w, win_h) = window_size(&cmds);
-        let slop = CELL_GAP / 2.0;
-        let mut y = -40.0;
-        while y < win_h + 40.0 {
-            let mut x = -40.0;
-            while x < win_w + 40.0 {
-                let hit = app.cell_at_point(x, y);
-                match hit {
-                    Some((r, c)) => {
-                        let (ox, oy) = app.cell_origin(r, c);
-                        assert!(
-                            x >= ox - slop
-                                && x < ox + CELL_SIZE + slop
-                                && y >= oy - slop
-                                && y < oy + CELL_SIZE + slop,
-                            "({x}, {y}) was answered as cell ({r}, {c}) painted at ({ox}, {oy})"
-                        );
-                    }
-                    None => {
-                        assert!(
-                            painted_cell_containing(&cmds, x, y).is_none(),
-                            "({x}, {y}) is inside a painted cell but cell_at_point says otherwise"
-                        );
-                    }
-                }
-                x += 6.0;
-            }
-            y += 6.0;
-        }
-    }
-
-    // ── 5. Each element's place *within* its cell ────────────
-
-    #[test]
-    fn a_row_clue_is_painted_level_with_the_row_it_describes() {
-        // Measured against the painted cells of that row, never against
-        // `cell_origin` -- the clue has to be over its own row on screen.
-        let app = app_playing_heart();
-        let cmds = app.render();
-        let (left, _) = app.cell_origin(0, 0);
-        for (r, clue) in app.row_clues.iter().enumerate() {
-            let (_, oy) = app.cell_origin(r, 0);
-            let last = *clue.last().expect("every heart row has a clue");
-            let found = cmds.iter().any(|c| match c {
-                RenderCommand::Text { x, y, text, .. } => {
-                    *text == last.to_string() && *x < left && *y >= oy && *y < oy + CELL_SIZE
-                }
-                _ => false,
-            });
-            assert!(
-                found,
-                "row {r}'s clue {last} is not drawn left of the grid and level with the row painted at y={oy}"
-            );
-        }
+    fn a_cell_off_the_grid_is_not_a_mistake() {
+        let app = playing("Heart");
+        assert!(!app.is_error(app.grid_side, 0));
+        assert!(!app.is_error(0, app.grid_side));
     }
 
     #[test]
-    fn a_column_clue_is_painted_above_the_column_it_describes() {
-        let app = app_playing_heart();
-        let cmds = app.render();
-        let (_, top) = app.cell_origin(0, 0);
-        for (c, clue) in app.col_clues.iter().enumerate() {
-            let (ox, _) = app.cell_origin(0, c);
-            let last = *clue.last().expect("every heart column has a clue");
-            let found = cmds.iter().any(|cmd| match cmd {
-                RenderCommand::Text { x, y, text, .. } => {
-                    *text == last.to_string() && *y < top && *x >= ox && *x < ox + CELL_SIZE
-                }
-                _ => false,
-            });
-            assert!(
-                found,
-                "column {c}'s clue {last} is not drawn above the grid and over the column painted at x={ox}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_cursor_is_outlined_where_that_cell_is_painted() {
-        let mut app = app_playing_heart();
+    fn starting_a_puzzle_clears_the_one_before_it() {
+        let mut app = playing("Heart");
+        app.toggle_fill(0, 0);
+        app.check_mode = true;
         app.cursor_row = 3;
-        app.cursor_col = 1;
-        let cmds = app.render();
-        let (ox, oy) = app.cell_origin(3, 1);
-        let outline = cmds.iter().any(|c| match c {
-            RenderCommand::StrokeRect {
-                x, y, width, color, ..
-            } => {
-                *color == YELLOW
-                    && *width > CELL_SIZE
-                    && (*x - (ox - 1.0)).abs() < 0.01
-                    && (*y - (oy - 1.0)).abs() < 0.01
-            }
-            _ => false,
-        });
+        app.elapsed_ms = 90_000;
+
+        let cat = index_of(&app, "Cat");
+        app.start_puzzle(cat);
+        assert_eq!(app.grid_side, 15, "the new puzzle kept the old size");
+        assert_eq!(app.cells.len(), 15 * 15);
+        assert!(app.cells.iter().all(|&c| c == CellMark::Empty));
+        assert_eq!(app.cursor_row, 0);
+        assert_eq!(app.cursor_col, 0);
+        assert_eq!(
+            app.elapsed_ms, 0,
+            "the clock carried over from the last game"
+        );
         assert!(
-            outline,
-            "the cursor outline is not drawn around the cell painted at ({ox}, {oy})"
+            !app.check_mode,
+            "check mode carried over from the last game"
+        );
+        assert_eq!(app.row_clues.len(), 15);
+        assert_eq!(app.col_clues.len(), 15);
+    }
+
+    #[test]
+    fn a_puzzle_that_is_not_in_the_catalogue_starts_nothing() {
+        let mut app = NonogramApp::new();
+        app.start_puzzle(app.puzzles.len());
+        assert_eq!(
+            app.screen,
+            Screen::Select,
+            "an unknown puzzle started anyway"
         );
     }
 
-    // ── 6. The group rules fall between cells, not across them ──
+    // ── The keyboard ───────────────────────────────────────────────
 
     #[test]
-    fn the_group_rules_fall_in_the_gaps_between_cells() {
-        // A rule every five cells marks a boundary; if it is drawn a whole
-        // cell out it crosses the cells it is meant to separate. Checked
-        // against the painted cells: no rule may pass through one.
+    fn the_arrows_move_the_cursor_and_stop_at_the_edges() {
+        // Each arrow is first pressed from a cell it can actually move off, so
+        // that the direction it moves in is asserted and not merely the clamp
+        // at the far end of it (`known-issues.md` lesson 70).
+        for (key, from, to) in [
+            (Key::Up, (2, 2), (1, 2)),
+            (Key::Down, (2, 2), (3, 2)),
+            (Key::Left, (2, 2), (2, 1)),
+            (Key::Right, (2, 2), (2, 3)),
+        ] {
+            let mut app = playing("Heart");
+            app.cursor_row = from.0;
+            app.cursor_col = from.1;
+            assert_eq!(
+                probe::key(&mut app, &probe::press(key)),
+                EventResult::Consumed,
+                "{key:?} from {from:?} was left for someone else"
+            );
+            assert_eq!(
+                (app.cursor_row, app.cursor_col),
+                to,
+                "{key:?} from {from:?} did not go to {to:?}"
+            );
+        }
+
+        let mut app = playing("Heart");
+        probe::key(&mut app, &probe::press(Key::Up));
+        probe::key(&mut app, &probe::press(Key::Left));
+        assert_eq!(
+            (app.cursor_row, app.cursor_col),
+            (0, 0),
+            "the cursor walked off the top-left corner"
+        );
+
+        probe::key(&mut app, &probe::press(Key::Down));
+        probe::key(&mut app, &probe::press(Key::Right));
+        assert_eq!((app.cursor_row, app.cursor_col), (1, 1));
+
+        for _ in 0..20 {
+            probe::key(&mut app, &probe::press(Key::Down));
+            probe::key(&mut app, &probe::press(Key::Right));
+        }
+        assert_eq!(
+            (app.cursor_row, app.cursor_col),
+            (app.grid_side - 1, app.grid_side - 1),
+            "the cursor walked off the bottom-right corner"
+        );
+    }
+
+    #[test]
+    fn an_arrow_at_the_edge_is_left_for_whoever_wants_it() {
+        // A key that changed nothing must not ask the window to redraw.
+        //
+        // Every arrow is pressed at the edge it stops at, and the *verdict* is
+        // what carries the rule: at the edge the cursor sits still whether the
+        // key was refused outright or applied and then clamped by
+        // `saturating_sub`, so its position cannot tell a missing guard from a
+        // saturating subtraction (`known-issues.md` lesson 70).
+        let last = playing("Heart").grid_side - 1;
+        for (key, at) in [
+            (Key::Up, (0, 2)),
+            (Key::Left, (2, 0)),
+            (Key::Down, (last, 2)),
+            (Key::Right, (2, last)),
+        ] {
+            let mut app = playing("Heart");
+            app.cursor_row = at.0;
+            app.cursor_col = at.1;
+            assert_eq!(
+                probe::key(&mut app, &probe::press(key)),
+                EventResult::Ignored,
+                "{key:?} at {at:?} was answered rather than left for someone else"
+            );
+            assert_eq!(
+                (app.cursor_row, app.cursor_col),
+                at,
+                "{key:?} moved the cursor off {at:?}"
+            );
+        }
+
+        let mut app = playing("Heart");
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::Down)),
+            EventResult::Consumed
+        );
+    }
+
+    #[test]
+    fn space_and_enter_both_fill_the_cell_under_the_cursor() {
+        for key in [Key::Space, Key::Enter] {
+            let mut app = playing("Heart");
+            app.cursor_row = 2;
+            app.cursor_col = 3;
+            probe::key(&mut app, &probe::press(key));
+            assert_eq!(
+                app.cell_at(2, 3),
+                CellMark::Filled,
+                "{key:?} did not fill the cell"
+            );
+            assert_eq!(
+                app.cell_at(0, 0),
+                CellMark::Empty,
+                "{key:?} filled the wrong cell"
+            );
+        }
+    }
+
+    #[test]
+    fn x_marks_the_cell_under_the_cursor() {
+        let mut app = playing("Heart");
+        app.cursor_row = 4;
+        app.cursor_col = 2;
+        probe::key(&mut app, &probe::press(Key::X));
+        assert_eq!(app.cell_at(4, 2), CellMark::MarkedEmpty);
+    }
+
+    #[test]
+    fn c_turns_the_check_on_and_off_again() {
+        let mut app = playing("Heart");
+        assert!(!app.check_mode);
+        probe::key(&mut app, &probe::press(Key::C));
+        assert!(app.check_mode);
+        probe::key(&mut app, &probe::press(Key::C));
+        assert!(!app.check_mode, "the check would not switch off again");
+    }
+
+    #[test]
+    fn escape_goes_back_to_the_list() {
+        let mut app = playing("Heart");
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert_eq!(app.screen, Screen::Select);
+    }
+
+    #[test]
+    fn filling_the_last_cell_of_the_picture_wins_from_the_keyboard() {
+        let mut app = playing("Heart");
+        paint_solution(&mut app);
+        let (r, c) = a_filled_cell(&app);
+        app.set_cell(r, c, CellMark::Empty);
+        app.cursor_row = r;
+        app.cursor_col = c;
+        assert_eq!(app.screen, Screen::Playing);
+        probe::key(&mut app, &probe::press(Key::Space));
+        assert_eq!(app.screen, Screen::Won, "the last cell did not finish it");
+    }
+
+    #[test]
+    fn a_key_going_back_up_does_nothing() {
+        // The event stream carries a press and a release for every keystroke.
+        // A handler that does not look at `pressed` acts on both, which moves
+        // the cursor two cells for one tap.
+        let mut app = playing("Heart");
+        let mut release = probe::press(Key::Down);
+        release.pressed = false;
+        assert_eq!(probe::key(&mut app, &release), EventResult::Ignored);
+        assert_eq!(app.cursor_row, 0, "the release moved the cursor as well");
+    }
+
+    #[test]
+    fn a_modified_key_belongs_to_whoever_is_listening_for_shortcuts() {
+        let mut app = playing("Heart");
+        assert_eq!(
+            probe::key(&mut app, &probe::ctrl(Key::X)),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            app.cell_at(0, 0),
+            CellMark::Empty,
+            "Ctrl-X was taken for the X mark"
+        );
+        assert_eq!(
+            probe::key(&mut app, &probe::shift(Key::Down)),
+            EventResult::Ignored
+        );
+        assert_eq!(app.cursor_row, 0);
+    }
+
+    #[test]
+    fn a_key_the_game_has_no_use_for_is_left_alone() {
+        let mut app = playing("Heart");
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::Q)),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn the_list_cursor_stops_at_both_ends() {
+        // The verdict is asserted alongside the position: at either end the
+        // cursor stays put whether the arrow was refused or applied and
+        // clamped, and only the verdict says which happened -- one asks the
+        // window to repaint and the other does not (`known-issues.md` lesson
+        // 70).
         let mut app = NonogramApp::new();
-        let idx = app
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::Up)),
+            EventResult::Ignored,
+            "the top of the list answered an arrow it had no room for"
+        );
+        assert_eq!(app.select_cursor, 0, "the list cursor walked off the top");
+
+        // One step each way from a row that has room in both directions, so
+        // the arrows' directions are asserted and not just their clamps.
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::Down)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.select_cursor, 1, "Down did not go down the list");
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::Up)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.select_cursor, 0, "Up did not go up the list");
+
+        for _ in 0..app.puzzles.len() + 5 {
+            probe::key(&mut app, &probe::press(Key::Down));
+        }
+        assert_eq!(
+            app.select_cursor,
+            app.puzzles.len() - 1,
+            "the list cursor walked off the bottom"
+        );
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::Down)),
+            EventResult::Ignored,
+            "the bottom of the list answered an arrow it had no room for"
+        );
+    }
+
+    #[test]
+    fn enter_on_the_list_starts_the_puzzle_under_the_cursor() {
+        let mut app = NonogramApp::new();
+        probe::key(&mut app, &probe::press(Key::Down));
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert_eq!(app.screen, Screen::Playing);
+        assert_eq!(app.selected_puzzle, 1, "it started the wrong puzzle");
+    }
+
+    #[test]
+    fn any_of_three_keys_leaves_the_victory_screen() {
+        for key in [Key::Enter, Key::Space, Key::Escape] {
+            let mut app = playing("Heart");
+            app.screen = Screen::Won;
+            probe::key(&mut app, &probe::press(key));
+            assert_eq!(app.screen, Screen::Select, "{key:?} did not leave");
+        }
+    }
+
+    #[test]
+    fn the_victory_screen_ignores_the_keys_that_play_the_game() {
+        let mut app = playing("Heart");
+        app.screen = Screen::Won;
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::Down)),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            app.cursor_row, 0,
+            "the cursor moved after the game was over"
+        );
+    }
+
+    // ── The clock ──────────────────────────────────────────────────
+
+    #[test]
+    fn the_clock_runs_only_while_a_puzzle_is_being_played() {
+        let mut app = NonogramApp::new();
+        handle_event(&mut app, &Event::Tick { elapsed_ms: 5_000 });
+        assert_eq!(app.elapsed_ms, 0, "the clock ran on the puzzle list");
+
+        let mut app = playing("Heart");
+        handle_event(&mut app, &Event::Tick { elapsed_ms: 5_000 });
+        assert_eq!(app.elapsed_ms, 5_000);
+        // A second tick, of a different length. A clock that stored the tick
+        // rather than adding it would read 3_000 here, having sailed through
+        // the line above: one sample cannot tell a sum from an assignment
+        // (`known-issues.md` lesson 70).
+        handle_event(&mut app, &Event::Tick { elapsed_ms: 3_000 });
+        assert_eq!(
+            app.elapsed_ms, 8_000,
+            "the clock was set to the tick rather than advanced by it"
+        );
+
+        app.screen = Screen::Won;
+        handle_event(&mut app, &Event::Tick { elapsed_ms: 5_000 });
+        assert_eq!(
+            app.elapsed_ms, 8_000,
+            "the clock ran after the game was won"
+        );
+    }
+
+    #[test]
+    fn the_clock_reads_minutes_and_seconds() {
+        let mut app = playing("Heart");
+        assert_eq!(app.format_time(), "0:00");
+        app.elapsed_ms = 9_000;
+        assert_eq!(app.format_time(), "0:09");
+        app.elapsed_ms = 61_500;
+        assert_eq!(app.format_time(), "1:01");
+        app.elapsed_ms = 3_600_000;
+        assert_eq!(app.format_time(), "60:00");
+    }
+
+    #[test]
+    fn the_window_is_asked_for_the_ticks_the_clock_runs_on() {
+        // The clock counted ticks it was never sent: nothing in the program
+        // asked for them, so the header read 0:00 for the whole game.
+        let app = NonogramApp::new();
+        let every = App::tick_interval(&app).expect("the clock asks for no ticks");
+        assert!(
+            every <= Duration::from_secs(1),
+            "a clock that shows seconds is asking for ticks every {every:?}"
+        );
+    }
+
+    // ── The pointer ────────────────────────────────────────────────
+
+    #[test]
+    fn every_cell_is_clickable_where_its_ink_is() {
+        // The old program hit-tested the grid against a second copy of the
+        // geometry. Here the boxes come from the drawing pass, so this asks
+        // whether the box the renderer recorded actually covers the ink it
+        // drew — for every cell, at every window shape.
+        for size in SHAPES {
+            let app = playing("Heart");
+            let g = app.grid(&Layout::new(size.0, size.1));
+            if g.cell <= 0.0 {
+                continue;
+            }
+            for row in 0..app.grid_side {
+                for col in 0..app.grid_side {
+                    let ink = g.cell_rect(row, col);
+                    let hit = probe::rect_of_sized(&app, Target::Cell(row, col), size)
+                        .unwrap_or_else(|| panic!("cell {row},{col} has no box at {size:?}"));
+                    assert!(
+                        hit.x <= ink.x
+                            && hit.y <= ink.y
+                            && hit.right() >= ink.right()
+                            && hit.bottom() >= ink.bottom(),
+                        "at {size:?} cell {row},{col} draws {ink:?} but is clickable at {hit:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_click_between_two_cells_lands_in_the_nearer_one() {
+        // The gap belongs to somebody. Boxes are grown by half a gap on every
+        // side and abut exactly, so a click a hair to the left of the seam
+        // goes to the left cell and a hair to the right goes to the right one
+        // — and neither falls through to nothing.
+        let mut app = playing("Heart");
+        let g = app.grid(&Layout::new(SIZE.0, SIZE.1));
+        let left = g.cell_rect(2, 2);
+        let seam = left.right() + g.gap / 2.0;
+        assert!(
+            g.gap > 0.5,
+            "the gap is too small for this test to mean anything"
+        );
+
+        assert_eq!(
+            app.frame(SIZE.0, SIZE.1)
+                .hit_test(seam - 0.25, left.centre().1),
+            Some(Target::Cell(2, 2))
+        );
+        assert_eq!(
+            app.frame(SIZE.0, SIZE.1)
+                .hit_test(seam + 0.25, left.centre().1),
+            Some(Target::Cell(2, 3))
+        );
+        // And the click really does something, so this is a statement about
+        // the running program and not about a box nobody reads.
+        assert_eq!(app.cell_at(2, 3), CellMark::Empty);
+        app.click_at(seam + 0.25, left.centre().1, MouseButton::Left, SIZE);
+        assert_eq!(app.cell_at(2, 3), CellMark::Filled);
+    }
+
+    #[test]
+    fn a_click_outside_the_grid_does_not_reach_a_cell() {
+        let app = playing("Heart");
+        let g = app.grid(&Layout::new(SIZE.0, SIZE.1));
+        let far = g.cell_hit(0, 0);
+        let f = app.frame(SIZE.0, SIZE.1);
+        assert_eq!(f.hit_test(far.x - 1.0, far.centre().1), None);
+        assert_eq!(f.hit_test(far.centre().0, far.y - 1.0), None);
+        let last = g.cell_hit(app.grid_side - 1, app.grid_side - 1);
+        assert_eq!(f.hit_test(last.right() + 1.0, last.centre().1), None);
+    }
+
+    #[test]
+    fn right_clicking_marks_and_left_clicking_fills() {
+        // The pointer could only ever fill. X was keyboard-only, so a player
+        // using the mouse had no way to record "this one is blank" at all.
+        let mut app = playing("Heart");
+        probe::click_with(&mut app, Target::Cell(1, 1), MouseButton::Right);
+        assert_eq!(app.cell_at(1, 1), CellMark::MarkedEmpty);
+        probe::click(&mut app, Target::Cell(1, 1));
+        assert_eq!(app.cell_at(1, 1), CellMark::Filled);
+        probe::click_with(&mut app, Target::Cell(1, 1), MouseButton::Right);
+        assert_eq!(app.cell_at(1, 1), CellMark::MarkedEmpty);
+    }
+
+    #[test]
+    fn clicking_a_cell_moves_the_cursor_to_it() {
+        // Otherwise the keyboard carries on from wherever it was, and the two
+        // ways of playing disagree about where the player is.
+        //
+        // The click is aimed at a point taken from the geometry rather than at
+        // a `Target::Cell` looked up in the frame. A hit box filed under its
+        // own transpose would send `probe::click` to the transposed box and
+        // then read the transposed target back out of it, agreeing with itself
+        // the whole way round (`known-issues.md` lesson 65).
+        let mut app = playing("Heart");
+        assert_eq!((app.cursor_row, app.cursor_col), (0, 0));
+        let g = app.grid(&Layout::new(SIZE.0, SIZE.1));
+        let cell = g.cell_rect(3, 4);
+        assert!(!cell.is_empty(), "the fixture puzzle has no cell 3,4");
+        let (x, y) = cell.centre();
+        app.click_at(x, y, MouseButton::Left, SIZE);
+        assert_eq!((app.cursor_row, app.cursor_col), (3, 4));
+    }
+
+    #[test]
+    fn every_entry_in_the_list_is_clickable_across_its_whole_width() {
+        // The fault this replaces: the list was drawn from PADDING to
+        // width-PADDING and hit-tested from PADDING to 500.0, so the last four
+        // pixels of every entry were drawn as part of it and did nothing.
+        for size in SHAPES {
+            let app = NonogramApp::new();
+            let l = Layout::new(size.0, size.1);
+            let list = app.list(&l);
+            for i in 0..app.puzzles.len() {
+                let drawn = list.entry(i);
+                if drawn.is_empty() {
+                    continue;
+                }
+                let hit = probe::rect_of_sized(&app, Target::Puzzle(i), size)
+                    .unwrap_or_else(|| panic!("entry {i} has no box at {size:?}"));
+                assert_eq!(
+                    hit, drawn,
+                    "at {size:?} entry {i} is drawn at {drawn:?} and clickable at {hit:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clicking_an_entry_starts_that_puzzle() {
+        let mut app = NonogramApp::new();
+        let i = index_of(&app, "Cat");
+        probe::click(&mut app, Target::Puzzle(i));
+        assert_eq!(app.screen, Screen::Playing);
+        assert_eq!(app.selected_puzzle, i);
+        // The list cursor follows, so Escape-then-Enter replays the same one.
+        assert_eq!(app.select_cursor, i);
+    }
+
+    #[test]
+    fn the_check_switch_can_be_reached_by_the_pointer() {
+        let mut app = playing("Heart");
+        assert!(!app.check_mode);
+        probe::click(&mut app, Target::Check);
+        assert!(app.check_mode);
+        probe::click(&mut app, Target::Check);
+        assert!(!app.check_mode);
+    }
+
+    #[test]
+    fn the_menu_switch_returns_to_the_list() {
+        let mut app = playing("Heart");
+        probe::click(&mut app, Target::Menu);
+        assert_eq!(app.screen, Screen::Select);
+    }
+
+    #[test]
+    fn a_click_on_the_board_returns_from_the_victory_screen() {
+        let mut app = playing("Heart");
+        paint_solution(&mut app);
+        app.screen = Screen::Won;
+        let outcome = probe::click_background(&mut app);
+        assert_eq!(outcome, EventResult::Consumed);
+        assert_eq!(app.screen, Screen::Select);
+    }
+
+    #[test]
+    fn the_pointer_cannot_change_the_picture_after_it_is_solved() {
+        let mut app = playing("Heart");
+        paint_solution(&mut app);
+        app.screen = Screen::Won;
+        let (row, col) = a_filled_cell(&app);
+        let outcome = probe::click(&mut app, Target::Cell(row, col));
+        assert_eq!(outcome, EventResult::Ignored);
+        assert_eq!(app.cell_at(row, col), CellMark::Filled);
+        assert_eq!(
+            app.screen,
+            Screen::Won,
+            "the win was undone by a stray click"
+        );
+    }
+
+    #[test]
+    fn a_click_that_is_not_a_press_is_not_a_click() {
+        // Movement and release both arrive on the same channel. Acting on all
+        // three would fill a cell three times per click, which is twice back
+        // to blank and once too many.
+        let mut app = playing("Heart");
+        let g = app.grid(&Layout::new(SIZE.0, SIZE.1));
+        let (x, y) = g.cell_rect(1, 1).centre();
+        for kind in [
+            MouseEventKind::Move,
+            MouseEventKind::Release(MouseButton::Left),
+            MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+        ] {
+            let ev = MouseEvent {
+                x,
+                y,
+                kind: kind.clone(),
+            };
+            assert_eq!(
+                handle_event(&mut app, &Event::Mouse(ev)),
+                EventResult::Ignored,
+                "{kind:?} was taken for a click"
+            );
+            assert_eq!(app.cell_at(1, 1), CellMark::Empty);
+        }
+    }
+
+    // ── The layout, at every window ────────────────────────────────
+
+    #[test]
+    fn the_bands_tile_the_window_from_top_to_bottom() {
+        // Not a containment assertion: "the body is inside the window" is true
+        // of half the wrong answers too (known-issues.md lesson 68). The
+        // formula is asserted instead.
+        for (w, h) in SHAPES {
+            let l = Layout::new(w, h);
+            assert_eq!(l.window, Rect::new(0.0, 0.0, w.max(1.0), h.max(1.0)));
+            assert_eq!(l.header.y, 0.0, "at {w}x{h}");
+            assert_eq!(l.header.w, l.window.w, "at {w}x{h}");
+            assert_eq!(l.footer.w, l.window.w, "at {w}x{h}");
+            assert_eq!(l.footer.bottom(), l.window.bottom(), "at {w}x{h}");
+            assert_eq!(l.body.x, l.pad, "at {w}x{h}");
+            assert_eq!(l.body.y, l.header.bottom() + l.pad, "at {w}x{h}");
+            assert!(
+                l.body.bottom() <= l.footer.y + 0.001,
+                "at {w}x{h} the body runs to {} and the footer starts at {}",
+                l.body.bottom(),
+                l.footer.y
+            );
+            assert!(l.header.bottom() <= l.footer.y, "at {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn a_window_big_enough_to_play_in_has_a_body_to_play_in() {
+        // The body only degenerates below about seven pixels tall, where two
+        // pads already exceed the window. Above that it must be real, or the
+        // program is drawing a header and a footer and no game.
+        for (w, h) in SHAPES {
+            if h < 10.0 {
+                continue;
+            }
+            let l = Layout::new(w, h);
+            assert!(!l.body.is_empty(), "no body at {w}x{h}: {:?}", l.body);
+        }
+    }
+
+    #[test]
+    fn the_footer_gives_up_its_height_before_the_body_does() {
+        // A window too short for header + footer + a playable body has to take
+        // the space from somewhere. Taking it from the body first would leave
+        // a game with two full-size chrome bars and nothing between them.
+        let tall = Layout::new(400.0, 800.0);
+        let squat = Layout::new(400.0, 90.0);
+        assert!(
+            squat.footer.h < tall.footer.h,
+            "the footer kept its {} pixels in a 90-pixel window",
+            squat.footer.h
+        );
+        assert!(
+            squat.body.h >= 90.0 * BODY_SHARE - squat.pad * 2.0 - 0.001,
+            "the body was squeezed to {} instead",
+            squat.body.h
+        );
+    }
+
+    #[test]
+    fn a_band_that_runs_out_of_room_is_a_strip_of_no_height_where_it_was() {
+        // Rect::is_empty is w <= 0 || h <= 0, so a dropped band already answers
+        // "no" to the only question the drawing code asks. It still has to sit
+        // at the window edge, or the footer is drawn floating in the middle.
+        let l = Layout::new(60.0, 60.0);
+        assert!(l.footer.h < 18.0, "the footer kept its minimum at 60x60");
+        assert_eq!(l.footer.bottom(), 60.0);
+        assert_eq!(l.header.y, 0.0);
+        assert_eq!(l.footer.w, 60.0, "a dropped band is still full width");
+    }
+
+    #[test]
+    fn the_grid_is_square_at_every_window_shape() {
+        // One cell number decides the whole picture. A wide window and a tall
+        // one both get square cells; the old program computed a width from the
+        // grid and let the height fall where it may.
+        for size in SHAPES {
+            let app = playing("Heart");
+            let g = app.grid(&Layout::new(size.0, size.1));
+            assert!(
+                (g.cells.w - g.cells.h).abs() < 0.001,
+                "at {size:?} the cells span {:?}",
+                g.cells
+            );
+            for row in 0..app.grid_side {
+                for col in 0..app.grid_side {
+                    let r = g.cell_rect(row, col);
+                    assert!(!r.is_empty(), "at {size:?} cell {row},{col} is nothing");
+                    assert!(
+                        (r.w - r.h).abs() < 0.001,
+                        "at {size:?} cell {row},{col} is {r:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_cells_are_evenly_spaced_and_never_overlap() {
+        for size in SHAPES {
+            let app = playing("Heart");
+            let g = app.grid(&Layout::new(size.0, size.1));
+            if g.cell <= 0.0 {
+                continue;
+            }
+            for row in 0..app.grid_side {
+                for col in 1..app.grid_side {
+                    let a = g.cell_rect(row, col - 1);
+                    let b = g.cell_rect(row, col);
+                    assert!(
+                        b.x >= a.right() - 0.001,
+                        "at {size:?} cells {row},{col} overlap: {a:?} {b:?}"
+                    );
+                    // Spelled out as `cell + gap` rather than as `g.step()`.
+                    // `cell_rect` is laid out *by* `step`, so an assertion
+                    // phrased in terms of `step` agrees with any value it
+                    // takes, including one that had dropped the gap
+                    // (`known-issues.md` lesson 65).
+                    assert!(g.gap > 0.0, "at {size:?} there is no gap to count");
+                    assert!(
+                        (b.x - a.right() - g.gap).abs() < 0.001,
+                        "at {size:?} the space between {a:?} and {b:?} is not the gap {}",
+                        g.gap
+                    );
+                    assert!(
+                        (b.x - a.x - (g.cell + g.gap)).abs() < 0.001,
+                        "at {size:?} the step between {a:?} and {b:?} is not {} + {}",
+                        g.cell,
+                        g.gap
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_whole_picture_fits_the_space_it_was_given() {
+        // Bands included. The clue band is part of the picture's size, not an
+        // offset added afterwards, so a puzzle with deep clues gets smaller
+        // cells rather than a picture hanging off the edge of the window.
+        for size in SHAPES {
+            for name in ["Heart", "Cat", "House"] {
+                let app = playing(name);
+                let l = Layout::new(size.0, size.1);
+                let g = app.grid(&l);
+                let whole = Rect::new(
+                    g.row_clues.x,
+                    g.col_clues.y,
+                    g.row_clues.w + g.cells.w,
+                    g.col_clues.h + g.cells.h,
+                );
+                assert!(
+                    whole.x >= l.body.x - 0.001
+                        && whole.y >= l.body.y - 0.001
+                        && whole.right() <= l.body.right() + 0.001
+                        && whole.bottom() <= l.body.bottom() + 0.001,
+                    "{name} at {size:?} draws {whole:?} in a body of {:?}",
+                    l.body
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_deeper_clue_band_takes_its_room_from_the_cells() {
+        // The reason the grid is solved rather than declared. Same window, same
+        // grid side, deeper clues: the cells must come out smaller.
+        //
+        // The two bands are deepened one at a time. Deepening both at once
+        // lets either half of the fit carry the assertion by itself, so a
+        // `per_w` that had stopped counting `row_slots` would still pass on
+        // the strength of `per_h`.
+        let area = Rect::new(0.0, 0.0, 500.0, 500.0);
+        let plain = Grid::new(area, 10, 2, 2);
+        let wide = Grid::new(area, 10, 5, 2);
+        let tall = Grid::new(area, 10, 2, 5);
+        assert!(
+            wide.cell < plain.cell,
+            "five slots of row clue gave the same {} pixel cell as two",
+            wide.cell
+        );
+        assert!(
+            tall.cell < plain.cell,
+            "five slots of column clue gave the same {} pixel cell as two",
+            tall.cell
+        );
+        assert!(wide.row_clues.w > plain.row_clues.w);
+        assert!(tall.col_clues.h > plain.col_clues.h);
+    }
+
+    #[test]
+    fn the_picture_sits_in_the_middle_of_the_space_it_was_given() {
+        // `Grid::new` sizes the cells by whichever of the two fits worse, so in
+        // any one area exactly one axis is filled to the brim and has no slack
+        // at all to share out. A single fixture can therefore only test the
+        // centring on one axis; on the other, "centred" and "flush against the
+        // edge" are both 0 == 0 and the assertion says nothing. One wide area
+        // and one tall one, each asserting it has the slack it is measuring
+        // (`known-issues.md` lesson 70).
+        let area = Rect::new(10.0, 20.0, 400.0, 300.0);
+        let g = Grid::new(area, 5, 2, 3);
+        let left = g.row_clues.x - area.x;
+        let right = area.right() - g.cells.right();
+        assert!(left > 0.5, "the wide fixture has no width to share out");
+        assert!(
+            (left - right).abs() < 0.001,
+            "{left} on the left and {right} on the right"
+        );
+
+        let area = Rect::new(10.0, 20.0, 300.0, 460.0);
+        let g = Grid::new(area, 5, 2, 3);
+        let top = g.col_clues.y - area.y;
+        let bottom = area.bottom() - g.cells.bottom();
+        assert!(top > 0.5, "the tall fixture has no height to share out");
+        assert!(
+            (top - bottom).abs() < 0.001,
+            "{top} above and {bottom} below"
+        );
+    }
+
+    #[test]
+    fn a_column_clue_sits_over_its_own_column() {
+        // CLUE_HALF_WIDTH was 4.0, eyeballed, under a comment claiming no text
+        // metric was available -- so every two-digit clue sat off its column.
+        // Now a clue slot is exactly as wide as the cell it describes.
+        for size in SHAPES {
+            let app = playing("Cat");
+            let g = app.grid(&Layout::new(size.0, size.1));
+            for col in 0..app.grid_side {
+                let cell = g.cell_rect(0, col);
+                for slot in 0..g.col_slots {
+                    let clue = g.col_clue_rect(col, slot);
+                    assert_eq!(clue.x, cell.x, "at {size:?} column {col} slot {slot}");
+                    assert_eq!(clue.w, cell.w, "at {size:?} column {col} slot {slot}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_clue_sits_beside_its_own_row() {
+        for size in SHAPES {
+            let app = playing("Cat");
+            let g = app.grid(&Layout::new(size.0, size.1));
+            for row in 0..app.grid_side {
+                let cell = g.cell_rect(row, 0);
+                for slot in 0..g.row_slots {
+                    let clue = g.row_clue_rect(row, slot);
+                    assert_eq!(clue.y, cell.y, "at {size:?} row {row} slot {slot}");
+                    assert_eq!(clue.h, cell.h, "at {size:?} row {row} slot {slot}");
+                    assert!(
+                        clue.right() <= g.cells.x + 0.001,
+                        "at {size:?} row {row} slot {slot} runs into the cells"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_clue_bands_sit_against_the_cells_with_nothing_between() {
+        for size in SHAPES {
+            let app = playing("House");
+            let g = app.grid(&Layout::new(size.0, size.1));
+            assert!(
+                (g.row_clues.right() - g.cells.x).abs() < 0.001,
+                "at {size:?}"
+            );
+            assert!(
+                (g.col_clues.bottom() - g.cells.y).abs() < 0.001,
+                "at {size:?}"
+            );
+            assert!((g.row_clues.y - g.cells.y).abs() < 0.001, "at {size:?}");
+            assert!((g.col_clues.x - g.cells.x).abs() < 0.001, "at {size:?}");
+        }
+    }
+
+    #[test]
+    fn a_grid_with_no_room_is_no_grid_rather_than_a_negative_one() {
+        let none = Grid::new(Rect::EMPTY, 10, 2, 2);
+        assert_eq!(none.cell, 0.0);
+        assert!(none.cells.is_empty());
+        assert_eq!(none.cell_rect(0, 0), Rect::EMPTY);
+        assert_eq!(none.cell_hit(0, 0), Rect::EMPTY);
+        let sideless = Grid::new(Rect::new(0.0, 0.0, 100.0, 100.0), 0, 2, 2);
+        assert_eq!(sideless.cell, 0.0);
+    }
+
+    #[test]
+    fn a_cell_off_the_grid_has_no_box_at_all() {
+        let g = Grid::new(Rect::new(0.0, 0.0, 400.0, 400.0), 5, 2, 2);
+        assert_eq!(g.cell_rect(5, 0), Rect::EMPTY);
+        assert_eq!(g.cell_rect(0, 5), Rect::EMPTY);
+        assert_eq!(g.cell_hit(5, 5), Rect::EMPTY);
+        assert_eq!(g.row_clue_rect(5, 0), Rect::EMPTY);
+        assert_eq!(g.row_clue_rect(0, 2), Rect::EMPTY);
+        assert_eq!(g.col_clue_rect(5, 0), Rect::EMPTY);
+        assert_eq!(g.col_clue_rect(0, 2), Rect::EMPTY);
+    }
+
+    #[test]
+    fn the_cell_boxes_abut_without_overlapping() {
+        // Half a gap each side means neighbours share an edge exactly. Rect
+        // contains is half-open, so the shared edge belongs to the cell on the
+        // right and nothing is claimed twice.
+        let app = playing("Heart");
+        let g = app.grid(&Layout::new(SIZE.0, SIZE.1));
+        for row in 0..app.grid_side {
+            for col in 1..app.grid_side {
+                let a = g.cell_hit(row, col - 1);
+                let b = g.cell_hit(row, col);
+                assert!(
+                    (b.x - a.right()).abs() < 0.001,
+                    "boxes {a:?} and {b:?} do not meet"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_three_columns_of_a_list_entry_do_not_run_into_each_other() {
+        // The old select screen put the name at +12, the size at +160 and the
+        // thumbnail at +260 from the left margin, so a name over 144 pixels
+        // wide ran straight through the size label.
+        for size in SHAPES {
+            let app = NonogramApp::new();
+            let l = Layout::new(size.0, size.1);
+            let list = app.list(&l);
+            for i in 0..app.puzzles.len() {
+                let entry = list.entry(i);
+                if entry.is_empty() {
+                    continue;
+                }
+                let name = list.name_rect(i);
+                let sized = list.size_rect(i);
+                let thumb = list.thumb_rect(i);
+                if !sized.is_empty() {
+                    assert!(
+                        name.right() <= sized.x + 0.001,
+                        "at {size:?} entry {i}: name {name:?} runs into size {sized:?}"
+                    );
+                }
+                if !thumb.is_empty() {
+                    assert!(
+                        sized.right() <= thumb.x + 0.001,
+                        "at {size:?} entry {i}: size {sized:?} runs into thumb {thumb:?}"
+                    );
+                    assert!(
+                        thumb.right() <= entry.right() + 0.001,
+                        "at {size:?} entry {i}: thumb {thumb:?} leaves entry {entry:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_size_column_is_as_wide_as_the_widest_label_in_the_catalogue() {
+        // Measured, not guessed. The label column has to fit "15 x 15", not
+        // whatever number looked right when the screen was written.
+        let app = NonogramApp::new();
+        let l = Layout::new(SIZE.0, SIZE.1);
+        let list = app.list(&l);
+        let widest = app
             .puzzles
             .iter()
-            .position(|p| p.size == GridSize::Medium)
-            .expect("a medium puzzle");
-        app.start_puzzle(idx);
-        let cmds = app.render();
-        let cells = painted_cells(&cmds);
-        let mut verticals = 0;
-        let mut horizontals = 0;
-        for cmd in &cmds {
-            let RenderCommand::Line { x1, y1, x2, y2, .. } = cmd else {
-                continue;
-            };
-            if (x1 - x2).abs() < 0.01 {
-                verticals += 1;
-                for &(cx, _) in &cells {
-                    assert!(
-                        *x1 <= cx || *x1 >= cx + CELL_SIZE,
-                        "a vertical rule at x={x1} crosses the cell painted at x={cx}"
-                    );
+            .map(|p| text::measure(&size_label(p.size), l.font, FontWeightHint::Regular))
+            .fold(0.0f32, f32::max);
+        assert!(widest > 0.0);
+        assert!(
+            list.size_w >= widest - 0.001,
+            "the column is {} wide and the widest label is {widest}",
+            list.size_w
+        );
+    }
+
+    #[test]
+    fn a_list_with_nothing_in_it_asks_for_no_room() {
+        let none = List::new(Rect::new(0.0, 0.0, 300.0, 300.0), 0, 40.0);
+        assert_eq!(none.step, 0.0);
+        assert_eq!(none.entry(0), Rect::EMPTY);
+        assert_eq!(none.thumb_rect(0), Rect::EMPTY);
+        let roomless = List::new(Rect::EMPTY, 5, 40.0);
+        assert_eq!(roomless.entry_h, 0.0);
+    }
+
+    #[test]
+    fn a_short_list_does_not_stretch_its_entries_to_fill_the_screen() {
+        // A three-entry list in a 900-pixel body would give each entry 300
+        // pixels of height if the space were simply divided. ENTRY_SHARE caps
+        // it, so the entries stay entry-sized and the list stays a list.
+        let list = List::new(Rect::new(0.0, 0.0, 400.0, 900.0), 3, 40.0);
+        assert!(
+            list.step <= 900.0 * ENTRY_SHARE + 0.001,
+            "an entry got {} pixels of a 900-pixel body",
+            list.step
+        );
+    }
+
+    #[test]
+    fn the_entries_do_not_overlap_each_other() {
+        for size in SHAPES {
+            let app = NonogramApp::new();
+            let list = app.list(&Layout::new(size.0, size.1));
+            for i in 1..app.puzzles.len() {
+                let a = list.entry(i - 1);
+                let b = list.entry(i);
+                if a.is_empty() || b.is_empty() {
+                    continue;
                 }
-            } else if (y1 - y2).abs() < 0.01 {
-                horizontals += 1;
-                for &(_, cy) in &cells {
+                assert!(
+                    b.y >= a.bottom() - 0.001,
+                    "at {size:?} entries {} and {i} overlap: {a:?} {b:?}",
+                    i - 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_drawn_outside_the_window() {
+        // Every screen, every shape. The old program drew a 520-pixel-wide
+        // select screen into whatever window it happened to get.
+        for size in SHAPES {
+            for app in [NonogramApp::new(), playing("Cat"), {
+                let mut won = playing("Heart");
+                paint_solution(&mut won);
+                won.screen = Screen::Won;
+                won
+            }] {
+                let window = Rect::new(0.0, 0.0, size.0, size.1);
+                for (target, r) in app.frame(size.0, size.1).hits() {
                     assert!(
-                        *y1 <= cy || *y1 >= cy + CELL_SIZE,
-                        "a horizontal rule at y={y1} crosses the cell painted at y={cy}"
+                        r.x >= -0.001
+                            && r.y >= -0.001
+                            && r.right() <= window.right() + 0.001
+                            && r.bottom() <= window.bottom() + 0.001,
+                        "at {size:?} {target:?} is clickable at {r:?}, outside {window:?}"
                     );
                 }
             }
         }
-        assert_eq!(verticals, 1, "a 10-wide grid has one vertical group rule");
-        assert_eq!(horizontals, 1, "and one horizontal");
+    }
+
+    #[test]
+    fn every_string_is_told_where_to_stop() {
+        // Every string in the old program carried max_width: None, so a name
+        // or a hint longer than its column simply ran on across whatever was
+        // beside it. 140x900 is in SHAPES because the footer hint is wider
+        // than the window there.
+        for size in SHAPES {
+            for app in [NonogramApp::new(), playing("Cat")] {
+                for cmd in app.frame(size.0, size.1).commands() {
+                    if let RenderCommand::Text {
+                        text, max_width, ..
+                    } = cmd
+                    {
+                        assert!(
+                            max_width.is_some(),
+                            "at {size:?} {text:?} was drawn with no limit"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_layout_follows_the_window_rather_than_the_program() {
+        // The whole point of the rewrite: the same state drawn at two sizes
+        // must produce two different pictures.
+        let app = playing("Heart");
+        let small = app.grid(&Layout::new(400.0, 400.0));
+        let large = app.grid(&Layout::new(1200.0, 1200.0));
+        assert!(
+            large.cell > small.cell * 2.0,
+            "a window three times the size gave a {} pixel cell against {}",
+            large.cell,
+            small.cell
+        );
+    }
+
+    #[test]
+    fn every_control_the_program_has_can_be_reached_somewhere() {
+        // A hit box nobody records is a control nobody can click. Between the
+        // two screens all four must appear.
+        let mut seen: Vec<Target> = all_targets(&NonogramApp::new(), SIZE);
+        seen.extend(all_targets(&playing("Heart"), SIZE));
+        let names: Vec<String> = seen.iter().map(probe::variant_name).collect();
+        for wanted in ["Puzzle", "Cell", "Check", "Menu"] {
+            assert!(
+                names.iter().any(|n| n == wanted),
+                "nothing on either screen records a {wanted}; only {names:?}"
+            );
+        }
+    }
+
+    // ── The window ─────────────────────────────────────────────────
+
+    #[test]
+    fn rendering_records_the_size_the_next_click_is_read_against() {
+        // The old render took no size at all. This asks for a frame at a size
+        // the program is not already at, so finding that size afterwards
+        // cannot pass with render having done nothing.
+        let mut app = playing("Heart");
+        let odd = (SIZE.0 + 137.0, SIZE.1 - 61.0);
+        assert!(
+            (odd.0 - app.size_drawn().0).abs() > 0.01,
+            "the fixture size is the size the program already records"
+        );
+        let tree = app.render(odd.0, odd.1);
+        assert!(!tree.commands.is_empty(), "render produced no commands");
+        assert_eq!(app.size_drawn(), odd);
+    }
+
+    #[test]
+    fn a_resize_moves_the_layout_the_next_click_is_read_against() {
+        // A resize is a resize whether or not a frame follows it: the window
+        // may tell the program its new size before it asks for a picture, and
+        // a click can arrive in between.
+        let mut app = playing("Heart");
+        let before = app.grid(&Layout::new(app.size_drawn().0, app.size_drawn().1));
+        assert_eq!(
+            handle_event(
+                &mut app,
+                &Event::Resize {
+                    width: 900,
+                    height: 500
+                }
+            ),
+            EventResult::Consumed
+        );
+        assert_eq!(app.size_drawn(), (900.0, 500.0));
+        let after = app.grid(&Layout::new(900.0, 500.0));
+        assert_ne!(after.cells, before.cells, "the layout did not follow");
+    }
+
+    #[test]
+    fn a_click_after_a_resize_is_read_against_the_new_window() {
+        // The failure this catches is the one that makes a resized window
+        // unplayable: clicks land on the cells the old size put there.
+        let mut app = playing("House");
+        let big = (1200.0, 1000.0);
+        handle_event(
+            &mut app,
+            &Event::Resize {
+                width: 1200,
+                height: 1000,
+            },
+        );
+        let g = app.grid(&Layout::new(big.0, big.1));
+        let cell = g.cell_rect(6, 7);
+        assert!(!cell.is_empty(), "the fixture puzzle has no cell 6,7");
+        let (x, y) = cell.centre();
+        let ev = MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        };
+        assert_eq!(
+            handle_event(&mut app, &Event::Mouse(ev)),
+            EventResult::Consumed
+        );
+        assert_eq!((app.cursor_row, app.cursor_col), (6, 7));
+    }
+
+    #[test]
+    fn a_window_squashed_to_nothing_still_lays_out() {
+        // A window can be dragged to nothing. The layout must survive it
+        // rather than divide by the zero it was handed.
+        let mut app = playing("Heart");
+        app.resize(0.0, 0.0);
+        assert!(app.size_drawn().0 > 0.0 && app.size_drawn().1 > 0.0);
+        let l = Layout::new(0.0, 0.0);
+        assert!(l.window.w > 0.0 && l.window.h > 0.0);
+        let g = app.grid(&l);
+        assert!(g.cell >= 0.0 && g.gap >= 0.0);
+        // And it still draws, without panicking on the way.
+        let _ = app.frame(l.window.w, l.window.h);
+        let _ = NonogramApp::new().frame(l.window.w, l.window.h);
+    }
+
+    #[test]
+    fn closing_the_window_exits_and_nothing_else_does() {
+        let mut app = playing("Heart");
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+        assert_eq!(
+            app.on_event(&Event::FocusIn),
+            Response::Idle,
+            "an event the game does not use should not force a repaint"
+        );
+        assert_eq!(
+            app.on_event(&Event::Key(probe::press(Key::Space))),
+            Response::Redraw,
+            "a filled cell must repaint, or the grid on screen is a move behind"
+        );
+    }
+
+    #[test]
+    fn a_tick_off_the_board_does_not_repaint() {
+        // The clock only runs while a puzzle is being played, so a tick on the
+        // select screen changes nothing and must not ask for a frame -- that
+        // is five wasted repaints a second, forever, on a screen at rest.
+        let mut app = NonogramApp::new();
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 200 }),
+            Response::Idle
+        );
+        let mut playing_now = playing("Heart");
+        assert_eq!(
+            playing_now.on_event(&Event::Tick { elapsed_ms: 200 }),
+            Response::Redraw,
+            "the clock advanced without the header being redrawn"
+        );
+    }
+
+    #[test]
+    fn the_window_names_itself_and_says_the_same_thing_twice() {
+        let app = NonogramApp::new();
+        assert_eq!(app.title(), "Nonogram");
+        assert_eq!(app.app_id(), "nonogram");
+        let (w, h) = app.initial_size();
+        assert_eq!((w, h), (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
+        assert_eq!(
+            (
+                f32::from(u16::try_from(w).unwrap()),
+                f32::from(u16::try_from(h).unwrap())
+            ),
+            SIZE,
+            "the window opens at one size and the tests read clicks at another"
+        );
     }
 }

@@ -182,6 +182,16 @@ struct FieldSpec {
     /// the twelve are rewritten by [`get_header`]; the rest are used as they
     /// stand.
     caption: &'static str,
+    /// The `width` column of upstream's `field_data[]`: a *floor*, not a fixed
+    /// width. Every column is at least this wide even when its heading and all
+    /// its cells are narrower, which is why `df` on one small file system still
+    /// prints `Filesystem` padded to fourteen columns rather than to ten.
+    ///
+    /// The numbers are upstream's and are not derivable from anything else —
+    /// 14 for the source is a POSIX-era convention, and the 5s exist so that a
+    /// column of small numbers does not collapse onto its heading. Dropping
+    /// them changes the layout of every line `df` prints.
+    min_width: usize,
     align: Align,
 }
 
@@ -193,18 +203,18 @@ struct FieldSpec {
 /// tables does not have to wonder.
 #[rustfmt::skip]
 const FIELDS: &[FieldSpec] = &[
-    FieldSpec { field: Field::Source, arg: b"source", kind: Kind::Other, caption: "Filesystem", align: Align::Left },
-    FieldSpec { field: Field::FsType, arg: b"fstype", kind: Kind::Other, caption: "Type",       align: Align::Left },
-    FieldSpec { field: Field::ITotal, arg: b"itotal", kind: Kind::Inode, caption: "Inodes",     align: Align::Right },
-    FieldSpec { field: Field::IUsed,  arg: b"iused",  kind: Kind::Inode, caption: "IUsed",      align: Align::Right },
-    FieldSpec { field: Field::IAvail, arg: b"iavail", kind: Kind::Inode, caption: "IFree",      align: Align::Right },
-    FieldSpec { field: Field::IPcent, arg: b"ipcent", kind: Kind::Inode, caption: "IUse%",      align: Align::Right },
-    FieldSpec { field: Field::Size,   arg: b"size",   kind: Kind::Block, caption: "blocks",     align: Align::Right },
-    FieldSpec { field: Field::Used,   arg: b"used",   kind: Kind::Block, caption: "Used",       align: Align::Right },
-    FieldSpec { field: Field::Avail,  arg: b"avail",  kind: Kind::Block, caption: "Available",  align: Align::Right },
-    FieldSpec { field: Field::Pcent,  arg: b"pcent",  kind: Kind::Block, caption: "Use%",       align: Align::Right },
-    FieldSpec { field: Field::File,   arg: b"file",   kind: Kind::Other, caption: "File",       align: Align::Left },
-    FieldSpec { field: Field::Target, arg: b"target", kind: Kind::Other, caption: "Mounted on", align: Align::Left },
+    FieldSpec { field: Field::Source, arg: b"source", kind: Kind::Other, caption: "Filesystem", min_width: 14, align: Align::Left },
+    FieldSpec { field: Field::FsType, arg: b"fstype", kind: Kind::Other, caption: "Type",       min_width:  4, align: Align::Left },
+    FieldSpec { field: Field::ITotal, arg: b"itotal", kind: Kind::Inode, caption: "Inodes",     min_width:  5, align: Align::Right },
+    FieldSpec { field: Field::IUsed,  arg: b"iused",  kind: Kind::Inode, caption: "IUsed",      min_width:  5, align: Align::Right },
+    FieldSpec { field: Field::IAvail, arg: b"iavail", kind: Kind::Inode, caption: "IFree",      min_width:  5, align: Align::Right },
+    FieldSpec { field: Field::IPcent, arg: b"ipcent", kind: Kind::Inode, caption: "IUse%",      min_width:  4, align: Align::Right },
+    FieldSpec { field: Field::Size,   arg: b"size",   kind: Kind::Block, caption: "blocks",     min_width:  5, align: Align::Right },
+    FieldSpec { field: Field::Used,   arg: b"used",   kind: Kind::Block, caption: "Used",       min_width:  5, align: Align::Right },
+    FieldSpec { field: Field::Avail,  arg: b"avail",  kind: Kind::Block, caption: "Available",  min_width:  5, align: Align::Right },
+    FieldSpec { field: Field::Pcent,  arg: b"pcent",  kind: Kind::Block, caption: "Use%",       min_width:  4, align: Align::Right },
+    FieldSpec { field: Field::File,   arg: b"file",   kind: Kind::Other, caption: "File",       min_width:  0, align: Align::Left },
+    FieldSpec { field: Field::Target, arg: b"target", kind: Kind::Other, caption: "Mounted on", min_width:  0, align: Align::Left },
 ];
 
 /// `all_args_string` upstream: what `--output` means with no `=FIELD_LIST`.
@@ -249,7 +259,8 @@ struct Column {
     kind: Kind,
     caption: String,
     /// The widest cell seen so far, in display columns. Seeded from the
-    /// caption, then grown by every row.
+    /// field's [`FieldSpec::min_width`], raised by the caption, then grown by
+    /// every row.
     width: usize,
     align: Align,
 }
@@ -355,6 +366,15 @@ fn me_dummy(fstype: &[u8], bind: bool) -> bool {
 
 /// `ME_DUMMY_0`, verbatim from the 9.4 tarball. The comments are upstream's,
 /// and record which platform each name was added for.
+///
+/// **This list is shorter than the one in the `df` on a Debian or Ubuntu
+/// machine, and deliberately so.** Those distributions patch two more types
+/// in — `devtmpfs`, which is what `/dev` is mounted with, and `squashfs`,
+/// which is what every installed snap is — so their `df` prints neither.
+/// Neither name appears in coreutils 9.4 or in gnulib master. Following
+/// upstream is a decision, not an oversight: see `design-decisions.md` §700,
+/// which also explains why `scripts/df-diff.sh` drops those rows from *both*
+/// programs' output rather than adding the two names here.
 fn me_dummy_0(fstype: &[u8]) -> bool {
     matches!(
         fstype,
@@ -1107,6 +1127,11 @@ fn get_field_values(fsu: &FsUsage, output_block_size: u64) -> (FieldValues, Fiel
 ///   guard `ipct - 1 < pct && pct <= ipct + 1` silently declines to round
 ///   values too large for the `long int` round trip, and `ceil` would not.
 ///
+/// A negative result is `-` as well: the floating-point path is reached with
+/// `used` negative whenever a file system reports more space free than it has,
+/// and upstream's final `if (0 <= pct)` turns that into the same dash an
+/// unknown value gets.
+///
 /// The result is always integral, so the caller's `{:.0}` matches `%.0f`
 /// without a rounding-mode question.
 #[expect(
@@ -1144,12 +1169,17 @@ fn percent(v: &FieldValues) -> Option<f64> {
         // caller renders as `-`.
         return None;
     }
-    let pct = u * 100.0 / nonroot_total;
+    let mut pct = u * 100.0 / nonroot_total;
     let ipct = (pct as i64) as f64;
     // `pct = ceil (pct)`, without libm.
     if ipct - 1.0 < pct && pct <= ipct + 1.0 {
-        return Some(ipct + f64::from(u8::from(ipct < pct)));
+        pct = ipct + f64::from(u8::from(ipct < pct));
     }
+    // Upstream's `if (0 <= pct)`, which guards *every* path out of this
+    // function and not just the ones that fell through the ceiling. A file
+    // system claiming more free inodes than it has any — WSL's 9p mounts
+    // report 999 total against 1000000 free — reaches here with a negative
+    // percentage, and upstream prints `-` for it rather than `-100000%`.
     Some(pct).filter(|p| *p >= 0.0)
 }
 
@@ -1441,7 +1471,7 @@ fn alloc_field(columns: &mut Vec<Column>, field: Field, caption: Option<&str>) {
         field,
         kind: spec.kind,
         caption: caption.unwrap_or(spec.caption).to_string(),
-        width: 0,
+        width: spec.min_width,
         align: spec.align,
     });
 }
@@ -3162,6 +3192,22 @@ mod tests {
     }
 
     #[test]
+    fn a_negative_percentage_is_a_dash() {
+        // WSL's 9p mounts report 999 inodes in total and 1000000 free, so
+        // `used` is 999 - 1000000 held as a negated magnitude. The ratio is
+        // about -100000%, and df prints `-` rather than that.
+        let v = FieldValues {
+            total: 999,
+            available: 1_000_000,
+            available_to_root: 1_000_000,
+            used: 999_001u64.wrapping_neg(),
+            negate_used: true,
+            ..FieldValues::default()
+        };
+        assert_eq!(percent(&v), None);
+    }
+
+    #[test]
     fn an_unknown_count_has_no_percentage() {
         let v = FieldValues {
             used: u64::MAX,
@@ -3328,27 +3374,42 @@ mod tests {
         assert_eq!(status, 0);
         assert_eq!(
             out,
-            "Filesystem 1K-blocks Used Available Use% Mounted on\n\
-             /dev/sda1       1000  600       300  67% /\n"
+            // The gaps are upstream's per-column minimum widths at work: the
+            // source column is never narrower than fourteen columns, nor the
+            // size/used/available columns narrower than five, however short
+            // their headings and cells are.
+            "Filesystem     1K-blocks  Used Available Use% Mounted on\n\
+             /dev/sda1           1000   600       300  67% /\n"
         );
     }
 
     #[test]
     fn the_block_size_names_the_column() {
-        let (out, _, _) = go(&["-B", "1M"], &one_disk());
-        assert!(out.starts_with("Filesystem 1M-blocks"), "{out}");
-        let (out, _, _) = go(&["-B", "1MB"], &one_disk());
-        assert!(out.starts_with("Filesystem 1MB-blocks"), "{out}");
+        // The source column's fourteen-wide minimum sits between the two
+        // headings, so match on the second word rather than on the run of
+        // spaces that separates them.
+        let heading = |args: &[&str]| {
+            let (out, _, _) = go(args, &one_disk());
+            let line = out.lines().next().unwrap_or_default().to_string();
+            line.split_whitespace().nth(1).unwrap_or_default().to_string()
+        };
+        assert_eq!(heading(&["-B", "1M"]), "1M-blocks");
+        assert_eq!(heading(&["-B", "1MB"]), "1MB-blocks");
         // `-B K` is a *unit*, not a count: the header is 1K-blocks either way,
         // but `-P` prints the size in full.
-        let (out, _, _) = go(&["-B", "K"], &one_disk());
-        assert!(out.starts_with("Filesystem 1K-blocks"), "{out}");
+        assert_eq!(heading(&["-B", "K"]), "1K-blocks");
         // POSIX mode names its block size in full — 1024 bytes here, and 512
         // only when POSIXLY_CORRECT insists on the older unit.
-        let (out, _, _) = go(&["-P"], &one_disk());
-        assert!(out.starts_with("Filesystem 1024-blocks"), "{out}");
+        assert_eq!(heading(&["-P"]), "1024-blocks");
         let (out, _, _) = go_posix(&["-P"], &one_disk());
-        assert!(out.starts_with("Filesystem 512-blocks"), "{out}");
+        assert_eq!(
+            out.lines()
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .nth(1),
+            Some("512-blocks")
+        );
     }
 
     #[test]
@@ -3360,7 +3421,9 @@ mod tests {
     #[test]
     fn the_type_column_is_opt_in() {
         let (out, _, _) = go(&["-T"], &one_disk());
-        assert!(out.starts_with("Filesystem Type"), "{out}");
+        // `Type` sits in the fourth column of the heading only because the
+        // source column ahead of it is padded to its fourteen-wide minimum.
+        assert!(out.starts_with("Filesystem     Type "), "{out}");
         assert!(out.contains("ext4"), "{out}");
     }
 
@@ -3369,8 +3432,8 @@ mod tests {
         let (out, _, _) = go(&["-i"], &one_disk());
         assert_eq!(
             out,
-            "Filesystem Inodes IUsed IFree IUse% Mounted on\n\
-             /dev/sda1     100    60    40   60% /\n"
+            "Filesystem     Inodes IUsed IFree IUse% Mounted on\n\
+             /dev/sda1         100    60    40   60% /\n"
         );
     }
 

@@ -94126,7 +94126,11 @@ A wrong test was also removed. `parse_empty_errors` asserted the message
 - 108 unit tests pass; `cargo clippy` clean under the crate's
   `deny(clippy::all, clippy::pedantic)`.
 
-### The gap this leaves: `TD-COREUTILS-GREP-NEVER-DETECTS-BINARY-CONTENT`
+### The gap this leaves: `TD-COREUTILS-GREP-NEVER-DETECTS-BINARY-CONTENT` -- **FIXED 2026-08-29**, except for the encoding-error half
+
+*(The section below is the gap as it stood when the conversion landed. The NUL
+half of it is now implemented; see* `B-GREP-NEVER-DETECTED-BINARY-CONTENT`
+*further down, which also records what was left behind and why.)*
 
 `--binary-files` is one setting with three behaviours and we implement one.
 `text` -- print the bytes -- is what we always do, so it agrees with GNU. The
@@ -94153,3 +94157,127 @@ locale. `-a` / `--binary-files=text` bypasses the check, and `-z` changes it
 (NUL is the line terminator then, so it cannot be the marker). Four cases in
 `scripts/grep-diff.sh` under `# --- binary ---` are marked `!` with this reason
 and should all turn XPASS together when it lands.
+
+## B-GREP-NEVER-DETECTED-BINARY-CONTENT (lane B, 2026-08-29) -- **FIXED 2026-08-29**
+
+**In short:** `grep` had no idea what a binary file was. Searching a `.png` or
+an executable printed screenfuls of terminal-wrecking bytes, where real grep
+prints one line saying the file matched and stops. It now detects binary
+content the way GNU does, and all three `--binary-files` behaviours work. Two
+narrower gaps are left behind and tracked below; neither is reachable without
+first building something else.
+
+`--binary-files=TYPE` names three behaviours for one question -- *this file
+holds a NUL; now what?* -- and we had only the third. What landed:
+
+| | behaviour | stdout | stderr | status |
+|---|---|---|---|---|
+| `binary` (default) | the lines are withheld | nothing | `grep: F: binary file matches` | 0 |
+| `without-match` / `-I` | the file is treated as not matching | nothing | nothing | 1 |
+| `text` / `-a` | detection is skipped entirely | the bytes, NULs and all | nothing | 0 |
+
+Four details that are easy to get wrong and were each measured against the
+reference host's GNU grep 3.11 rather than inferred:
+
+- **The decision is per read buffer, not per line.** A NUL anywhere in the
+  first buffer withholds the *whole file's* output, including matches that
+  physically precede it. `printf 'ary head\nmid\0dle\nary tail\n'` prints
+  nothing at all -- not `ary head`.
+- **The diagnostic goes to stderr, and is owed only when lines were what was
+  asked for.** `-c`, `-l`, `-L` and `-q` print no lines, so there is nothing to
+  withhold and GNU stays silent -- and `-c` still counts the whole file (2 for
+  the fixture above), proving the file is searched to the end rather than
+  abandoned at the NUL. Upstream spells this `out_quiet_0`.
+- **`-I` is a third behaviour, not a quieter default.** It makes the file
+  *non-matching*, so `-L` names it and `-l` does not. Suppressing the output
+  alone would leave it matching, a difference an exit status cannot see.
+- **`-z` disables detection.** NUL is the record terminator then, so it cannot
+  also be the marker; upstream guards the whole test with `eol &&`. Without
+  this, every `-z` search would call its input binary.
+
+Implementation: `BINARY_PROBE` (32 KiB, upstream's `INITIAL_BUFSIZE`) is the
+`BufReader` capacity, and one `fill_buf()` before the first line is searched
+does the scan. `search_stream` returns an `Outcome { matched, binary_match }`
+rather than a bare `bool`, so the *decision* is made where the bytes are and
+the *printing* stays in `Run::search`. The message is assembled as bytes and
+emitted with `stdfd::diag_bytes`, not `diag!`: the file name is unquoted
+`input_filename()`, a name on this system need not be UTF-8, and formatting it
+would mean `from_utf8_lossy` -- the exact corruption the getopt conversion
+above existed to remove. That was nearly written the wrong way here.
+
+Verification:
+
+- `bash scripts/grep-diff.sh` (in WSL) -> **513 passed, 0 differed, 7 on
+  purpose, 0 unexpectedly agreed**, up from 498/0/12/0. The four `!` lines this
+  gap owned all turned XPASS together as predicted, as did a fifth (`grep foo
+  zsep` -- the `-z` fixture read *without* `-z`, whose reason had been written
+  as a separate `-z` matter). Their markers are gone and eleven further cases
+  were added around them: `-l`/`-L`/`-o`/`-n` on a binary file, `-Il`/`-IL` for
+  the matching/non-matching distinction, `-zI`, and a binary file that matches
+  nothing.
+- 114 unit tests pass (six new, plus one rewritten -- see below);
+  `cargo clippy` clean.
+
+One existing test had to be rewritten rather than kept:
+`a_nul_in_the_input_is_data_like_any_other_byte` asserted that `a\0x\n` is
+printed under default options, which was true only because of the bug. It is
+now `a_nul_makes_the_input_binary_and_only_dash_a_carries_it_through`, and
+asserts both halves -- default suppresses, `-a` passes the byte through
+unaltered -- because passing either alone would be consistent with the searcher
+mangling the NUL.
+
+### `TD-COREUTILS-GREP-DETECTS-BINARY-ONLY-IN-THE-FIRST-BUFFER`
+
+Referenced by name from `BINARY_PROBE`'s doc comment in `grep.rs`.
+
+Upstream re-runs the NUL scan on **every** read buffer until the first
+detection; we scan only the first. For any file of 32 KiB or less -- which is
+every fixture, every test, and most text -- the two are identical. Beyond that
+we differ from GNU in one direction only: a file whose first 32 KiB are clean
+but which turns binary later is printed where GNU would have started
+suppressing part-way through.
+
+The fix is not a bigger probe (that just moves the boundary) but moving the
+scan into the read loop: check each refill until `binary` is set, which needs
+`search_stream`'s line reader restructured to see buffer boundaries rather than
+`read_until` hiding them. Left for when that reader is next touched. Low harm
+in the meantime: the failure mode is *too much* output, never a wrong exit
+status or a wrong count.
+
+### `TD-COREUTILS-GREP-DOES-NOT-SUPPRESS-ON-ENCODING-ERRORS` -- blocked on locale support
+
+**In short:** real grep calls a file binary for two separate reasons -- it
+holds a NUL, or its bytes are not valid text in your language setting. We now
+implement the first. The second cannot be implemented yet because coreutils has
+no concept of a language setting at all.
+
+This is a genuinely independent mechanism, not a corner of the NUL rule, and
+the difference was established by measurement (`bin4.sh`) after a first probe
+gave the opposite answer -- `dash`'s `printf` has no `\x` escape, so a `\xff`
+fixture had silently written four literal characters and the file was plain
+ASCII. The byte must be written octal, `\377`.
+
+What GNU does with `printf 'ary a\377b\nary plain\n'` under `C.UTF-8`:
+
+| command | result |
+|---|---|
+| `grep ary enc` | prints only `ary plain`; the bad line is dropped and `grep: enc: binary file matches` goes to stderr |
+| `grep -c ary enc` | `2` -- the count is unaffected |
+| `grep -o ary enc` | prints both `ary`s and no diagnostic: the printed *segment* is valid even though its line is not |
+| `grep -I ary enc` | same as plain `grep` -- **`-I` does not suppress on encoding errors** |
+| `LC_ALL=C grep ary enc` | prints both lines, no diagnostic: in a single-byte locale no byte sequence is invalid |
+
+Upstream's mechanism is `print_line_head` dropping the segment it was about to
+print when it has encoding errors and setting `encoding_error_output`, which
+`finish_grep` then reports with the same message. So it is per printed segment,
+decided at print time -- structurally elsewhere from the per-buffer NUL scan
+that happens before searching.
+
+**The blocker is a real prerequisite, not effort.** `grep -rn 'LC_ALL|LC_CTYPE|
+fn locale' userspace/coreutils/src` finds nothing but doc comments: coreutils
+has no locale plumbing whatsoever. Hardcoding UTF-8 validation would be wrong
+under `LC_ALL=C`, where the correct answer is that *no* byte sequence is
+invalid and the whole mechanism is off -- so implementing this before there is
+something to ask "which locale?" would make the common `LC_ALL=C` case worse,
+not better. Revisit when coreutils grows locale support; the measurements above
+are the acceptance criteria and need no re-taking.

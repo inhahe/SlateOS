@@ -903,29 +903,53 @@ grep -zHc foo zsep
 grep -zl foo zsep
 grep -zZl foo zsep
 grep -z foo words
-!we never suppress binary output; GNU sees the NUL and says `grep: X: binary file matches` on stderr instead|grep foo zsep
+# `zsep` read *without* -z: the NULs that are records to the case above are
+# binary content to this one, so nothing reaches stdout and the diagnostic goes
+# to stderr. It is the same file proving that -z is what decides which the NULs
+# are, which is the guard `search_stream` carries as `sep != 0`.
+grep foo zsep
 
 # --- binary ---
 #
-# The three `--binary-files` types are one setting with three behaviours and we
-# implement only the middle one: `text` (print the bytes) is what we always do,
-# so it agrees; `binary` (the default -- print `Binary file X matches` instead
-# of the lines) and `without-match` / `-I` (treat the file as not matching at
-# all) both need content detection we do not have. Declaring the option was the
-# parser half of the job; the detection is the other half and is tracked as
-# TD-COREUTILS-GREP-NEVER-DETECTS-BINARY-CONTENT. These four `!` lines are the
-# whole of that gap, so closing it should turn all four into XPASS at once.
-!we never suppress binary output; GNU prints nothing on stdout and `grep: X: binary file matches` on stderr|grep ary binfile
-!we never suppress binary output; --binary-files=binary is the default, and is the same case as the line above|grep --binary-files=binary ary binfile
-!we never detect binary content, so -I does not suppress the file; GNU prints nothing and exits 1|grep -I ary binfile
-!we never detect binary content, so --binary-files=without-match does not suppress the file|grep --binary-files=without-match ary binfile
-# `text` is the one type whose behaviour we already have, so it must agree --
-# and `-a` is its short spelling, which is why the two lines below are the
-# control that says the gap really is the *detection* and not the option.
+# The three `--binary-files` types are one setting with three behaviours, and
+# the detection they all turn on is a scan of the first read buffer for a NUL.
+# `binary` (the default) withholds the *lines* and says `grep: X: binary file
+# matches` on **stderr** with status 0; `without-match` / `-I` makes the file
+# not match at all -- silent, status 1, and named by `-L` rather than `-l`;
+# `text` / `-a` skips the detection outright. These five lines were `!` until
+# the detection landed, which is why they are grouped: they were the whole of
+# TD-COREUTILS-GREP-NEVER-DETECTS-BINARY-CONTENT and they turned into XPASS
+# together.
+grep ary binfile
+grep --binary-files=binary ary binfile
+grep -I ary binfile
+grep --binary-files=without-match ary binfile
 grep --binary-files=text ary binfile
 grep -a ary binfile
+# The four output modes that print no lines to begin with, so the `binary` rule
+# has nothing to withhold and GNU stays silent. `-c` is the one that proves the
+# file is still searched to the end rather than abandoned at the NUL.
 grep -c ary binfile
 grep -q ary binfile
+grep -l ary binfile
+grep -L ary binfile
+# Detection is per read buffer and `-o` does not change that: the whole file is
+# suppressed, not just the matches after the NUL.
+grep -o ary binfile
+grep -n ary binfile
+# `-I` counts the file as non-matching, which `-L` can see and an exit status
+# cannot -- the distinction that makes WithoutMatch a third behaviour rather
+# than a quieter spelling of the default.
+grep -Il ary binfile
+grep -IL ary binfile
+# Detection is guarded on there being a match to report: a binary file that
+# matches nothing is silent under every type.
+grep zzz binfile
+grep -I zzz binfile
+# -z again, from the other side: with NUL as the terminator the file is not
+# binary, so `-I` must not swallow it.
+grep -z ary binfile
+grep -zI ary binfile
 
 # --- context, which nothing here had ever exercised ---
 #

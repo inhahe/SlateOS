@@ -125280,31 +125280,26 @@ fn cmd_pacct(args: &str) {
     }
 }
 
-/// `counters` — display unified kernel event counters.
+/// `counters` — display kernel event counters, grouped by subsystem.
 ///
-/// Shows all registered counters grouped by subsystem, plus built-in
-/// counters aggregated from various kernel subsystems.
 ///   `counters`       — show all counters
 ///   `counters <grp>` — filter by group (mm, sched, irq, softirq, syscall, pacct)
 fn cmd_counters(args: &str) {
     let filter = args.trim();
 
-    // Get built-in counters (from existing subsystem atomics).
-    let builtin = crate::kcounters::builtin_snapshot();
-
-    // Get explicitly-registered counters.
-    let registered = crate::kcounters::snapshot();
-
-    // Merge both lists.
-    let all: alloc::vec::Vec<_> = builtin
+    let counters = crate::kcounters::builtin_snapshot();
+    let all: alloc::vec::Vec<_> = counters
         .iter()
-        .chain(registered.iter())
         .filter(|c| filter.is_empty() || c.group == filter)
         .collect();
 
     if all.is_empty() {
         if filter.is_empty() {
-            shell_println!("No counters registered.");
+            // Only reachable if `builtin_snapshot` itself returns nothing,
+            // which would mean every subsystem accessor it reads had gone
+            // away.  Say that, rather than "none registered" -- that wording
+            // described a registration path this kernel no longer has.
+            shell_println!("No counters available.");
         } else {
             shell_println!("No counters in group '{}'.", filter);
         }
@@ -125328,12 +125323,7 @@ fn cmd_counters(args: &str) {
     }
 
     shell_println!("");
-    shell_println!(
-        "Total: {} counters ({} registered, {} built-in)",
-        all.len(),
-        registered.len(),
-        builtin.len()
-    );
+    shell_println!("Total: {} counters", all.len());
 }
 
 /// `topology` — display CPU topology (package/core/SMT mapping).

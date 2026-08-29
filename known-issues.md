@@ -89072,7 +89072,7 @@ which the same rework has to fix; this entry is the caller waiting on both.
 read and names the first failure if a block was malformed, and both refuse
 clearly (`"Cannot export: $HOME is not set"`) rather than failing silently.
 
-## `A-KCOUNTERS-REGISTRY-HAS-NO-REGISTRANTS-AND-CMD-COUNTERS-HIDES-THAT` (lane A, 2026-08-26)
+## `A-KCOUNTERS-REGISTRY-HAS-NO-REGISTRANTS-AND-CMD-COUNTERS-HIDES-THAT` (lane A, 2026-08-26) -- **fixed 2026-08-29**
 
 **In short:** `kernel/src/kcounters.rs` has two halves — a registry that
 subsystems are meant to add counters to, and a hardcoded aggregator that reads
@@ -89153,6 +89153,20 @@ files (the same search that produced the `netdev` and `irqstat` entries above);
 
 **Not a regression.** True since the module was written — it has never had a
 registrant.
+
+**Fixed 2026-08-29** by taking the first option: the registry half is gone.
+Deleted `CounterDesc`, `Registry`, `MAX_COUNTERS`, `REGISTRY`,
+`REGISTRATION_DONE`, `register()`, `seal()`, `snapshot()`, `count()` and the
+three macros -- with them a `static mut` and an `unsafe fn` whose boot-ordering
+`# Safety` contract no call had ever exercised. `cmd_counters` now reads
+`builtin_snapshot()` alone, its doc comment describes what it does rather than
+leading with the dead half, and its empty-case message says "No counters
+available" instead of "No counters registered", which named a path that no
+longer exists. The module `//!` doc, whose entire usage example was of the
+deleted API, now records why there is deliberately no registration path and what
+to do instead when a new counter is needed (add the atomic where the event
+happens, expose it via that subsystem's stats accessor, add a row to
+`builtin_snapshot`) -- so the reasoning survives the code it is about.
 
 ---
 

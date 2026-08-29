@@ -3002,6 +3002,74 @@ check_selftest_wording() {
 
 check_selftest_wording
 
+# The same defect class, everywhere the sibling gate cannot see.
+#
+# `check-selftest-wording.py` follows a kshell *command* to the text it prints,
+# so it only ever looks at rungs keyed on a command word.  A module self-test
+# that formats a string and asserts on it -- `assert!(metrics.contains("..."))`
+# in `net::dashboard`, `procfs`, `smtp`, `klog` -- has no command word to
+# resolve and no `capture_command` to key on, so the sibling never looked at it,
+# and 300 assertions of that shape were guarded by nothing.
+#
+# "Guarded by nothing" is not hyperbole: the kernel crate carries `test = false`
+# (a bare-metal binary supplies its own `panic_impl`), so no assertion in it can
+# run on the host.  The only thing that executes one is an eleven-minute QEMU
+# boot, and `cargo build` / `cargo clippy` are green on a tree whose self-test
+# panics on the first line it reaches.  Worse is the vacuous variant, which does
+# not even panic: `dashboard` asserted `contains("os_net_rx_bytes_total ")` with
+# a trailing space, which the `# HELP` / `# TYPE` lines satisfy on their own, so
+# once the metric gained a label the assertion went on nodding at a build
+# emitting no samples at all.
+check_selftest_format_wording() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Self-test format wording check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # Graded against its own fixtures first, for the reason the sibling is:
+    # every way this checker can break -- a raw string it stops parsing, a
+    # consuming position it stops recognising, a `self_test` span cut short --
+    # makes findings *disappear*, and it reports that in the same words as a
+    # clean tree.
+    echo "=== Checking the self-test format wording gate against its fixtures ==="
+    if ! "$py" "$PROJECT_ROOT/scripts/check-selftest-format-wording.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The self-test format wording gate no" >&2
+        echo "longer agrees with its own fixtures, so its verdict on the tree" >&2
+        echo "means nothing -- a gate whose analysis has collapsed reports zero" >&2
+        echo "findings just like a clean tree does." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that self-test assertions name text some literal produces ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-selftest-format-wording.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each report above is a self-test assertion" >&2
+    echo "demanding text that no string literal in the kernel can produce." >&2
+    echo "" >&2
+    echo "Usually the producer's wording moved and the assertion did not: a" >&2
+    echo "field gained a label, a header lost a colon, a unit changed.  Re-read" >&2
+    echo "what the code emits now and assert that -- as written, the assertion" >&2
+    echo "will panic the kernel on a correct boot." >&2
+    echo "" >&2
+    echo "If the text is genuinely right and merely underivable -- a value the" >&2
+    echo "code computes, or a header pasted together from byte slices -- add it" >&2
+    echo "to ALLOWED in the script with the reason.  Do not widen the analysis" >&2
+    echo "to make a real finding disappear: the pool over-approximates already," >&2
+    echo "and every widening costs a defect it would otherwise catch." >&2
+    exit 1
+}
+
+check_selftest_format_wording
+
 # A hand-written "every variant" list cannot go stale loudly.
 #
 # `const ALL: [Foo; N] = [...]` claims to name every variant of `Foo`, and the

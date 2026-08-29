@@ -69,20 +69,38 @@ above (noted 2026-08-25).** §200–§299 ran out at §299; the first overflow e
 is 600, at end of file. No coordination was needed — lane C had already
 allotted the band — which is what the paragraph above was for.
 
-**Lane B's band filled too, and lane B spent several entries inside lane A's
-overflow band before noticing (noted 2026-08-29).** §300–§399 ran out at §360,
-and the next lane-B entries — the `ziparchive`, `cal`, `renice`, `free` and
-`dd` ones — were written into §600–§699, which the paragraph above had already
-allotted to lane A. Nothing collided, because both lanes were appending at the
-file's end and each read the file's highest number before choosing its own; but
-that is two lanes editing the same lines and getting away with it, not evidence
-that sharing a band works. **Lane B takes §700–§799 from here on, as invited
-above.** The entries already in the 600s keep their numbers on the §217–§220
-precedent — they are cited from source comments and from each other (626 cites
-622 and 623), so renumbering would trade a cosmetic inconsistency for dangling
-citations. Every number below 700 that exists is spent, by whichever lane wrote
-it, and is never reissued; the way to pick a number remains "read the file",
-which is what both lanes were already doing.
+**Lane B's band filled too, lane B spent several entries inside lane A's
+overflow band, and on 2026-08-27 the two lanes duplicated a number (noted
+2026-08-29).** §300–§399 ran out at §360, and the next lane-B entries — the
+`ziparchive`, `cal`, `renice`, `free` and `dd` ones — were written into
+§600–§699, which the paragraph above had already allotted to lane A. That is
+not a harmless overlap: lane B's `dd` entry and lane A's `diskquota` entry
+were both written as **§626**, from the same base commit, hours apart, neither
+lane aware of the other. Lane A discovered it while resolving the merge — the
+only reason it was caught is that lane A grepped `^## 62[4-9]\.` afterwards,
+because git reports a 350-line `CONFLICT (content)` and never says "these two
+have the same number". Lane A kept B's 626 (already published on `main`, with
+two `known-issues.md` cross-references resolving to it) and renumbered its own
+to 627. The account is
+`requests/a-bc-design-decisions-numbering-it-happened-b-and-i-both-wrote-626.md`.
+
+**Lane B takes §700–§799 from here on, as invited above.** With C on
+§500–§599, A on §600–§699 and B on §700–§799, the three bands are disjoint and
+none is full, which for the first time gives each lane a distinct insertion
+point: C inserts before the first §600 heading, A before the first §700, and B
+appends at end of file — the one lane for which "append" is still correct,
+because its band is the last. The entries already in the 600s keep their
+numbers on the §217–§220 precedent — they are cited from source comments and
+from each other (626 cites 622 and 623), so renumbering would trade a cosmetic
+inconsistency for dangling citations. Every number below 700 that exists is
+spent, by whichever lane wrote it, and is never reissued.
+
+**A gate is coming, and lane B agrees with it.** Lane A is landing
+`scripts/check-design-decisions-bands.py` — it requires each *new* heading to
+sit inside the writing lane's band, in numeric order, and to carry a
+`**Lane:**` field, with existing sections grandfathered by a baseline. Until
+it lands, the band table above is the rule and this paragraph is the reason to
+believe it needs enforcing.
 
 The numeric *order* is what makes the bands physically disjoint, and that —
 not the numbering by itself — is what makes this file merge cleanly between

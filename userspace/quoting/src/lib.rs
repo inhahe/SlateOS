@@ -828,6 +828,52 @@ pub fn quoteaf(name: &[u8]) -> String {
     render(name, false)
 }
 
+/// Render `name` in gnulib's `escape` style: C escapes, no quotes at all.
+///
+/// [`quotef`] and [`quoteaf`] render a name so a *shell* could take it back.
+/// This renders it so a *reader* can see what is in it, and nothing more —
+/// which is what a utility wants when the name is the message rather than a
+/// fragment of one, and what a utility must have when the name is also what it
+/// prints on success.
+///
+/// A whole family of GNU tools select this style globally and then use it for
+/// listings and diagnostics alike, so the two agree with each other:
+///
+/// | Tool | Selects it by |
+/// |---|---|
+/// | `tar` | `set_quoting_style (NULL, escape_quoting_style)` at startup |
+/// | `ls -b` | `--quoting-style=escape` (plus `' '` in the extra set) |
+/// | `du`, `df` | inherited from the same default |
+///
+/// The rules, all measured against GNU tar 1.35 and `ls`:
+///
+/// * `\` doubles. It is the only printable byte escaped for its own sake —
+///   `'`, `"` and **space** all come back as themselves, because there is no
+///   delimiter here for them to end.
+/// * The C escapes are used where one exists: `\a \b \f \n \r \t \v`.
+/// * Anything else unprintable, and every byte that is not part of a valid
+///   character, becomes three octal digits: `caf\351.txt`.
+/// * Valid multi-byte characters survive: `café.txt` is left alone.
+///
+/// The result is therefore always valid UTF-8 even when `name` was not, which
+/// is why this returns a [`String`] where [`Style::Escape`] returns bytes.
+///
+/// ```
+/// use quoting::escape;
+/// assert_eq!(escape(b"notes.txt"), "notes.txt");
+/// assert_eq!(escape(b"my notes.txt"), "my notes.txt");
+/// assert_eq!(escape(b"it's"), "it's");
+/// assert_eq!(escape(b"two\nlines"), r"two\nlines");
+/// assert_eq!(escape(br"back\slash"), r"back\\slash");
+/// assert_eq!(escape("café.txt".as_bytes()), "café.txt");
+/// assert_eq!(escape(b"caf\xe9.txt"), r"caf\351.txt");
+/// assert_eq!(escape(b""), "");
+/// ```
+#[must_use]
+pub fn escape(name: &[u8]) -> String {
+    escape_style(name, b"")
+}
+
 /// The body of both shell-escaping styles.
 ///
 /// `allow_bare` is the difference between them: gnulib calls it "elide outer
@@ -1349,6 +1395,19 @@ pub fn quoteaf_os<S: AsRef<std::ffi::OsStr>>(s: S) -> String {
 #[must_use]
 pub fn quote_os<S: AsRef<std::ffi::OsStr>>(s: S) -> String {
     quote(&os_bytes(s.as_ref()))
+}
+
+/// [`escape`] for a path, a `String`, or anything else a call site holds.
+///
+/// ```
+/// use quoting::escape_os;
+/// use std::path::Path;
+/// assert_eq!(escape_os("a b"), "a b");
+/// assert_eq!(escape_os(Path::new("notes.txt")), "notes.txt");
+/// ```
+#[must_use]
+pub fn escape_os<S: AsRef<std::ffi::OsStr>>(s: S) -> String {
+    escape(&os_bytes(s.as_ref()))
 }
 
 #[cfg(test)]

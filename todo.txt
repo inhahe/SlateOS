@@ -55082,3 +55082,64 @@ REMAINING argv-utf8 BACKLOG -- 10 findings across 9 files
   was still on it, which was wrong by one in both numbers -- it counted the
   files and forgot `sh`'s second finding.  Do not maintain the count by hand;
   re-run the script.
+
+================================================================================
+
+tar's RESOLVE_BENEATH emulation -- two follow-ups, neither urgent
+--------------------------------------------------------------------------------
+
+Context: design-decisions.md sec 702.  `userspace/coreutils/src/bin/tar.rs`
+resolves every member's parent beneath the destination by hand (`Dir::locate`)
+-- opening each component with O_DIRECTORY|O_NOFOLLOW from the descriptor above
+it, reading symlink components with `readlinkat` and judging them by GNU's
+measured rule, keeping the descriptors on a stack so `..` pops one and popping
+the root is the refusal.  ~200 lines.  It is what GNU tar does and it matches
+GNU on all ten rows of the rule table, so it is not a stopgap.
+
+1. DO NOT lift it into a shared helper until there is a second caller.
+   Named explicitly in sec 702 as "not decided here".  One caller is not a
+   pattern, and the shape of the second caller's needs is what should determine
+   the interface -- does it want to *follow* in-tree links (an installer
+   probably does; tar must not)?  Does it need the parent descriptor back, or
+   only a success/failure?  Guessing those now means designing an interface
+   against one example and rewriting it at the second.
+   TRIGGER: the second tree-writing utility that needs containment.  Candidates
+   are `cp -r`, `unzip`, and a package installer -- whichever lands first.
+
+2. It can be replaced by a single `openat2(RESOLVE_BENEATH)` behind the same
+   `Dir::locate` signature, with no caller changing, IF the VFS ever enforces
+   the resolve flags.  Filed as
+   requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-and-unenforceable-in-the-vfs.md
+   (ask 1).  Do not do this speculatively -- the host build would still need
+   the emulation regardless, because glibc exports no `openat2` wrapper, and
+   the differential harness only runs the host build.  So the emulation stays
+   until *both* sides can drop it, which needs ask 1 AND a glibc-side answer.
+   TRIGGER: lane A answers the request affirmatively.
+
+3. LOAD-BEARING ASSUMPTION, flagged so it is not silently invalidated: the
+   emulation's guarantee on SlateOS rests entirely on O_NOFOLLOW being honoured
+   by the VFS (`kernel/src/fs/handle.rs`, `OpenFlags::NOFOLLOW`).  Verified
+   2026-08-29.  If that ever stops holding, `Dir::locate` weakens silently --
+   it would follow the very links it exists to refuse, with no test failing,
+   because every test fixture plants links the *walk* is supposed to catch.
+   The request tells lane A this is load-bearing.
+
+JUDGMENT CALL -- libc openat2 is stricter than the kernel on RESOLVE_NO_SYMLINKS
+--------------------------------------------------------------------------------
+
+Fixed 2026-08-29: `posix/src/file.rs::openat2` used to validate the `resolve`
+word and then discard it, so a caller asking for RESOLVE_BENEATH got an
+unconfined open and a success -- fail-open, while the kernel's `sys_openat2`
+refused the same request with EXDEV.  libc now refuses everything it cannot
+enforce, with the kernel's exact errnos.
+
+The judgment call is RESOLVE_NO_SYMLINKS specifically.  The kernel *enforces*
+it (threading OpenFlags::NO_SYMLINKS to the VFS resolver); libc cannot reach
+that, because its `openat` flattens dirfd+path into one absolute path and calls
+`open`, whose flag word has no per-component no-follow bit (O_NOFOLLOW is the
+final component only).  So libc returns EOPNOTSUPP where the kernel succeeds.
+Chose fail-closed over silently-not-enforcing.  It is the safe direction but it
+is a real capability regression for a native binary that wants the flag.
+The structural fix -- a native syscall number so libc forwards to the kernel
+rather than re-implementing the gates -- is ask 2 of the same request, and is
+explicitly conditional on ask 1.  Reversible: delete the one gate.

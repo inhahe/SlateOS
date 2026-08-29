@@ -42,6 +42,13 @@ use std::io::{Error, ErrorKind};
 /// name — an unrecognised error is still worth printing.
 #[must_use]
 pub fn strerror(e: &Error) -> String {
+    // An exact errno beats a kind, where one is available: `ErrorKind` is a
+    // *classification*, and two errnos that share a kind have different POSIX
+    // texts. See [`errno_text`], which is compiled only where the number really
+    // is an errno.
+    if let Some(text) = errno_text(e) {
+        return text.to_string();
+    }
     // The strings are `strerror(3)`'s, verbatim, because that is what the
     // things reading them were written against.
     let s = match e.kind() {
@@ -154,7 +161,7 @@ pub fn filesystem_loop() -> Error {
     Error::other(FILESYSTEM_LOOP)
 }
 
-/// POSIX text for an errno that stable `ErrorKind` cannot name.
+/// POSIX text for an errno `ErrorKind` cannot name — or names too coarsely.
 ///
 /// Compiled only where `raw_os_error` genuinely *is* an errno. That is the
 /// whole reason the module header rejects errno mapping in general: the same
@@ -164,6 +171,14 @@ pub fn filesystem_loop() -> Error {
 #[cfg(unix)]
 fn errno_text(e: &Error) -> Option<&'static str> {
     match e.raw_os_error()? {
+        // EPERM. `ErrorKind` folds it in with EACCES as `PermissionDenied`,
+        // but POSIX words the two differently and so does every utility this
+        // crate imitates: measured, `tar` extracting a device node as a
+        // non-root user prints `Cannot mknod: Operation not permitted`, where
+        // ours printed `Permission denied`. The distinction is the useful part
+        // of the message — EACCES says "your credentials do not reach this
+        // file", EPERM says "nobody but root may do this at all".
+        1 => Some("Operation not permitted"),
         // ELOOP. Distinct from `TooManyLinks` (EMLINK), which is about how many
         // *hard* links one file may have; this is a symlink chain that does not
         // terminate.

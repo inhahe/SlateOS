@@ -134,7 +134,7 @@ cmd_memcg 3
 cmd_memdiag 1
 cmd_memtest 1
 cmd_migstat 1
-cmd_mobilelink 2
+cmd_mobilelink 1
 cmd_msivec 3
 cmd_multiclip 1
 cmd_namespace 1
@@ -168,7 +168,6 @@ cmd_printqueue 1
 cmd_procstat 4
 cmd_progmgr 2
 cmd_quicknote 1
-cmd_quicksettings 2
 cmd_quota 1
 cmd_raidmgr 3
 cmd_rcustat 3

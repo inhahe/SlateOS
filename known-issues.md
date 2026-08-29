@@ -93442,7 +93442,12 @@ Reference tarball matches the installed binary exactly (findutils 4.9.0).
 Done as described: `xargs.c` and `buildcmd.c` transcribed into 2309 lines,
 argv and stdin carried as bytes end to end. Every row of the table above now
 agrees with GNU, and `xargs.rs:argv-as-string` is out of
-`scripts/argv-utf8-baseline.txt` (11 findings remain).
+`scripts/argv-utf8-baseline.txt`. **12 findings remain across 11 files** --
+`diff ed fetch grep logger more patch ps sh tar time_cmd`, where `sh` carries
+two of them (`argv-as-string` and `env-as-string`). The two numbers are easy
+to confuse and `631783b54`'s commit message got it wrong, saying "11
+findings"; `python scripts/argv-utf8.py --check` is the authority and prints
+the finding count, not the file count.
 
 **Harness after the rewrite: 334 passed, 0 differed, 2 differ on purpose** --
 up from 319 cases because the transcription exposed a gap in the harness

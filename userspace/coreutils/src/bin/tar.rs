@@ -11,7 +11,7 @@
 //! `MetadataExt`).  Listing and extraction are platform-independent at
 //! the parsing level; the cross-platform helpers
 //! (`parse_args`, `parse_octal`, `extract_string`, `TarHeader`,
-//! `list_archive`, `sanitize_member_name`) are exercised by unit tests on
+//! `list_archive`, `strip_leading`) are exercised by unit tests on
 //! every host.
 //!
 //! # An archive is untrusted input
@@ -23,9 +23,16 @@
 //! `-C` was no protection at all — an absolute name ignores the current
 //! directory entirely. That is the "tar slip" class of vulnerability, and
 //! `tar -xf` on a downloaded archive is exactly the situation it exists for.
-//! `sanitize_member_name` now stands between the header and the filesystem:
-//! every member is forced to be a relative path with no `..` in it, and one
-//! that cannot be is refused rather than adjusted. See `known-issues.md` →
+//! Two things now stand between the header and the filesystem, and they are
+//! GNU's two rather than invented ones. `strip_leading` (GNU's
+//! `safer_name_suffix`) cuts a name back past its last `..` component and
+//! announces the cut, which turns `/etc/shadow` into `etc/shadow` and
+//! `../../etc/passwd` into `etc/passwd`; `contains_dot_dot` then refuses
+//! outright the member names that survive with a `..` still in them, since
+//! `a/../b` is equivalent to `b` only if `a` is a real directory and not a
+//! symlink. The third leg is [`is_delayed_target`]: a symlink pointing out of
+//! the tree is withheld until every member has been written, so a `d -> /tmp`
+//! followed by `d/pwned` cannot land in `/tmp`. See `known-issues.md` →
 //! `B-tar-EXTRACTS-OUTSIDE-THE-DESTINATION-DIRECTORY`.
 //!
 //! The related rule is that a failed write is never silent. Creating an
@@ -41,10 +48,16 @@ use coreutils::errmsg::strerror;
 // octal for anything that is not a valid character, and no quotes at all.
 // Measured: `tar: caf\351: Not found in archive`, where a `quotef`-shaped tar
 // would have said `tar: 'caf'$'\351': Not found in archive`.
-use coreutils::quote::{escape, escape_os, os_bytes, os_from_bytes, quoteaf};
+// `quote` is the one exception to that, and it is GNU's exception too: the
+// link-target diagnostics (`Cannot hard link to ‘x’`) come out of gnulib's
+// `quote()`, which is pinned to the *locale* style and so is unaffected by the
+// `set_quoting_style` above. Measured side by side in one run of one command:
+// `tar: esc: Cannot hard link to ‘etc/passwd’: ...` next to
+// `tar: caf\351: Not found in archive`.
+use coreutils::quote::{escape, escape_os, os_bytes, os_from_bytes, quote, quoteaf};
 use coreutils::stdfd;
 #[cfg(unix)]
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -551,84 +564,35 @@ impl Verbose {
     }
 }
 
-/// Reduce an archive member name to a path that cannot escape the current
-/// directory, or refuse it.
+/// Does any whole component of this name climb a level?
 ///
-/// Two things a hostile (or merely careless) archive can do are handled
-/// differently on purpose:
+/// The test a *member name* has to pass before it is used as a path, and the
+/// one thing prefix stripping cannot make safe: `a/../b` is equivalent to `b`
+/// only if `a` is a real directory and not a symlink, and the archive is
+/// precisely the thing we are not willing to trust about that. GNU refuses
+/// such a member outright — `tar: a/../b: Member name contains '..'`, status 2
+/// — and does so *after* printing the notice about the prefix it stripped, so
+/// a run against `a/../b` produces both lines. Measured, `tar-rules2.sh`.
 ///
-/// * **A leading `/`** is *stripped*, with the same reasoning as GNU tar's
-///   "Removing leading `/' from member names": archives of system trees are
-///   routinely made with absolute paths and are perfectly safe to unpack
-///   relative to somewhere else, so refusing them would break a common case
-///   for no gain. Note this is not cosmetic — `Path::join` with an absolute
-///   path *discards* the base, so an unstripped `/etc/passwd` would ignore
-///   `-C` entirely.
-/// * **A `..` component** is *refused*, and the member is skipped. It cannot
-///   be stripped safely: `a/../b` looks equivalent to `b` only if `a` is a
-///   real directory and not a symlink, and the archive is precisely the thing
-///   we are not willing to trust about that. Refusing costs a rare, loud
-///   failure; guessing costs an arbitrary file write.
-///
-/// `.` components and repeated slashes are dropped, since they name the same
-/// path and only serve to disguise the two cases above.
-///
-/// The `..` test also splits on `\`, which is *not* a separator in this OS
-/// (`design.txt`: paths allow every byte but `/` and NUL). That is defence in
-/// depth for the host builds this file is unit-tested on, where `..\..\x` does
-/// traverse. The rebuilt name still joins with `/` only, so a slateos file
-/// legitimately containing a backslash keeps its name; the sole casualty is a
-/// file with a literal `..\` component, which is refused rather than silently
-/// renamed.
+/// A hard link's *target* is deliberately not put through this: GNU rewrites
+/// `a/../base` to `base` and links to it, and a `..` there cannot name a file
+/// the archive did not already reach.
 ///
 /// Operates on **bytes**, because the name it is given is 100 bytes out of an
 /// archive header and nothing guarantees they are text. The previous version
-/// took `&str`, which meant the name had already been through
-/// `String::from_utf8_lossy` before this function saw it — and that is not just
-/// a display problem here, it is a correctness one in both directions:
+/// of this check took `&str`, which meant the name had already been through
+/// `String::from_utf8_lossy` — and that is not just a display problem, it is a
+/// correctness one: the replacement happened *before* the `..` test, so the
+/// guarantee was being made about a string that was no longer the name being
+/// written.
 ///
-/// * A member legitimately named with a non-UTF-8 byte was **extracted under a
-///   different name**, with each bad byte replaced by U+FFFD. Silent data
-///   corruption of exactly the kind rule 7 of `CLAUDE.md` names.
-/// * Worse, the replacement happened *before* the `..` test, so the guarantee
-///   this function exists to provide was being made about a string that was no
-///   longer the name being written. Comparing bytes to bytes removes a whole
-///   class of question about whether the check and the write agree.
-///
-/// The error messages render the raw name with `escape` — tar's one quoting
-/// style — since it is attacker-chosen and printing it raw would let a crafted
-/// archive forge a line of tar's stderr.
-fn sanitize_member_name(raw: &[u8]) -> Result<Vec<u8>, String> {
-    let mut parts: Vec<&[u8]> = Vec::new();
-    for component in raw.split(|&b| b == b'/') {
-        if component.is_empty() || component == b"." {
-            // A leading empty component is the absolute-path `/`; an interior
-            // one is a doubled slash. Both are dropped.
-            continue;
-        }
-        if component == b".." || component.split(|&b| b == b'\\').any(|p| p == b"..") {
-            // GNU's sentence, and GNU's quoting of the `..` inside it. Ours
-            // said "refusing to extract X: member name escapes the destination
-            // directory", which is the same refusal described in words no other
-            // tar uses; the name is what the reader needs, and it is already
-            // there. The member is skipped either way.
-            return Err(format!(
-                "{}: Member name contains '..'",
-                escape(raw)
-            ));
-        }
-        parts.push(component);
-    }
-    if parts.is_empty() {
-        // A name that is only slashes and dots (`/`, `./.`) survives every rule
-        // above and then names nothing. This wording is ours, not measured from
-        // GNU, because GNU's own answer here depends on which of several
-        // stripping passes runs out of name first; what matters is that such a
-        // member is refused rather than resolved to `.`, which is the directory
-        // being extracted into.
-        return Err(format!("{}: Cannot extract: empty member name", escape(raw)));
-    }
-    Ok(parts.join(&b'/'))
+/// `\` is not a separator here. It was once tested as one, as defence in depth
+/// for the host builds this file is unit-tested on; that made a member
+/// legitimately named `a\..` — a name `design.txt` allows, since paths admit
+/// every byte but `/` and NUL — unextractable on the OS this tar is *for*. The
+/// path is built by joining on `/` alone, so a backslash never traverses.
+fn contains_dot_dot(name: &[u8]) -> bool {
+    name.split(|&b| b == b'/').any(|c| c == b"..")
 }
 
 /// Split a device number the way ustar stores it, into `devmajor`/`devminor`.
@@ -643,42 +607,174 @@ fn split_dev(rdev: u64) -> (u64, u64) {
     (major, minor)
 }
 
-/// Split off the leading components tar refuses to *store*, returning
-/// `(removed, rest)`.
+/// Split a name into the prefix tar refuses to honour and the rest, returning
+/// `(removed, rest)` — GNU's `safer_name_suffix`, ported.
 ///
 /// An archive holding `/etc/passwd` is a loaded gun: extracting it anywhere
 /// writes to `/etc/passwd`. GNU's answer is at both ends — it strips the prefix
-/// when writing the archive as well as when reading one — and this is the
-/// writing end.
+/// when writing the archive as well as when reading one — so this one function
+/// serves the writer, the lister and the extractor, which is why they agree.
 ///
-/// What counts as a prefix, measured against GNU tar 1.35 (`tar-lead.sh`):
+/// The rule is **not** "a leading run of `/` and `../`", which is what this
+/// used to implement. GNU scans the *whole* name for components equal to `..`
+/// and puts the cut just past the last one, then swallows the slashes after it.
+/// Measured against GNU tar 1.35 (`tar-rules.sh`, `tar-rules2.sh`):
 ///
-/// | given | stored | said |
+/// | given | removed | rest |
 /// |---|---|---|
-/// | `/a/b` | `a/b` | ``Removing leading `/' from member names`` |
-/// | `//a/b` | `a/b` | ``Removing leading `//' ...`` — the exact run, not one `/` |
-/// | `../a` | `a` | ``Removing leading `../' ...`` |
-/// | `..` | `.` | ``Removing leading `..' ...`` |
-/// | `./a` | `./a` | nothing — a leading `.` is not a prefix |
+/// | `/a/b` | `/` | `a/b` |
+/// | `//a/b` | `//` | `a/b` — the exact run, not one `/` |
+/// | `../a` | `../` | `a` |
+/// | `..` | `..` | *(empty — the caller substitutes `.`)* |
+/// | `/d/../e` | `/d/../` | `e` |
+/// | `a/../b` | `a/../` | `b` |
+/// | `d/..` | `d/..` | *(empty)* |
+/// | `./a` | *(none)* | `./a` — a leading `.` is not a prefix |
 ///
-/// So: any run of `/`, and any `..` that is a whole component, in any order and
-/// repeated. A leading `.` is deliberately not in that set; it names the
-/// directory being archived and takes the extractor nowhere it was not already.
+/// The interior case is not academic: it decides where a hard link whose target
+/// is `a/../base` points (at `base`), and it is the prefix that gets announced
+/// when a *member* named `a/../b` is refused. A leading `.` is deliberately not
+/// in the set; it names the directory being archived and takes the extractor
+/// nowhere it was not already, which is why `tar -cf - .` round-trips through
+/// `./f` unaltered.
 fn strip_leading(name: &[u8]) -> (&[u8], &[u8]) {
+    let mut cut = 0usize;
     let mut i = 0usize;
-    loop {
-        match name.get(i) {
-            Some(&b'/') => i = i.saturating_add(1),
-            Some(&b'.')
-                if name.get(i.saturating_add(1)) == Some(&b'.')
-                    && matches!(name.get(i.saturating_add(2)), None | Some(&b'/')) =>
-            {
-                i = i.saturating_add(2);
+    while i < name.len() {
+        if name.get(i..).is_some_and(|s| s.starts_with(b".."))
+            && matches!(name.get(i.saturating_add(2)), None | Some(&b'/'))
+        {
+            cut = i.saturating_add(2);
+        }
+        // Step over this component and the one slash that ends it, if any.
+        while let Some(&c) = name.get(i) {
+            i = i.saturating_add(1);
+            if c == b'/' {
+                break;
             }
-            _ => break,
         }
     }
-    (name.get(..i).unwrap_or(&[]), name.get(i..).unwrap_or(&[]))
+    while name.get(cut) == Some(&b'/') {
+        cut = cut.saturating_add(1);
+    }
+    (
+        name.get(..cut).unwrap_or(&[]),
+        name.get(cut..).unwrap_or(&[]),
+    )
+}
+
+/// Which of tar's two independent prefix notices a strip belongs to.
+#[derive(Clone, Copy)]
+enum PrefixKind {
+    MemberNames,
+    LinkTargets,
+}
+
+impl PrefixKind {
+    /// Plural, for the notice about a prefix — it describes a class of names.
+    fn label(self) -> &'static str {
+        match self {
+            Self::MemberNames => "member names",
+            Self::LinkTargets => "hard link targets",
+        }
+    }
+
+    /// Singular, for the notice about one empty name. GNU's two sentences
+    /// really do differ in number; both were measured.
+    fn one(self) -> &'static str {
+        match self {
+            Self::MemberNames => "member name",
+            Self::LinkTargets => "hard link target",
+        }
+    }
+}
+
+/// The name substituted when stripping consumes the whole name.
+const DOT: &[u8] = b".";
+
+/// [`strip_leading`] plus the once-per-*distinct*-prefix notice around it.
+///
+/// GNU announces a removal the first time it cuts that exact prefix, and keeps
+/// two independent sets — one for member names, one for hard link targets.
+/// Measured (`tar-rules4.sh`): the hard link targets `/x ../x /x //x ../x /x
+/// a/../x` produce exactly four lines, for `/`, `../`, `//` and `a/../`. The
+/// repeats say nothing.
+///
+/// Two earlier readings of this were wrong and are worth recording, because
+/// both fit the shorter probe that produced them. It is **not** "announce when
+/// the prefix changes" (that re-announces `/` after `../`), and it is **not** a
+/// high-water mark on prefix length (that would swallow the `a/../` above,
+/// since `../` is no shorter, and it swallowed every notice for a run of
+/// distinct same-length prefixes).
+///
+/// One struct for all three drivers because GNU's state is shared the same way,
+/// and because `tar -tf` prints these notices too: a listing and an extraction
+/// of the same archive produce the same stderr, and only a shared
+/// implementation keeps that true.
+struct PrefixNotice {
+    names: BTreeSet<Vec<u8>>,
+    targets: BTreeSet<Vec<u8>>,
+}
+
+impl PrefixNotice {
+    fn new() -> Self {
+        Self {
+            names: BTreeSet::new(),
+            targets: BTreeSet::new(),
+        }
+    }
+
+    /// [`Self::strip_flushing`] for the drivers that write no buffered stdout.
+    fn strip<'a>(&mut self, name: &'a [u8], kind: PrefixKind) -> &'a [u8] {
+        self.strip_flushing(name, kind, &mut || {})
+    }
+
+    /// The suffix `name` is stored or extracted under, announcing the cut the
+    /// first time this exact prefix is seen.
+    ///
+    /// Two distinct emptinesses, and GNU treats them differently. A name that
+    /// *arrives* empty is announced — `Substituting `.' for empty member name`,
+    /// on **every** such member, not once — because an empty field in a header
+    /// is a defect worth reporting. A name that merely *strips* to nothing
+    /// (`/`, `..`, `d/..`) becomes `.` silently, since the notice about the
+    /// prefix has already said everything there is to say. Both measured,
+    /// `tar-rules4.sh`; an earlier reading passed the empty target through
+    /// unchanged, which reported a link to `‘’` where GNU links to `.`.
+    ///
+    /// `flush` is called immediately before a diagnostic and not otherwise. It
+    /// exists for the lister, whose member lines go through a `BufWriter`:
+    /// gnulib's `error()` flushes stdout before writing to stderr, which is why
+    /// GNU's `-tv` interleaves a notice with its listing at the right point.
+    /// Flushing unconditionally would cost a syscall per member for a case that
+    /// arises a handful of times per archive at most.
+    fn strip_flushing<'a>(
+        &mut self,
+        name: &'a [u8],
+        kind: PrefixKind,
+        flush: &mut dyn FnMut(),
+    ) -> &'a [u8] {
+        if name.is_empty() {
+            flush();
+            diag!("tar: Substituting `.' for empty {}", kind.one());
+            return DOT;
+        }
+        let (removed, rest) = strip_leading(name);
+        if !removed.is_empty() {
+            let seen = match kind {
+                PrefixKind::MemberNames => &mut self.names,
+                PrefixKind::LinkTargets => &mut self.targets,
+            };
+            if seen.insert(removed.to_vec()) {
+                flush();
+                diag!(
+                    "tar: Removing leading `{}' from {}",
+                    escape(removed),
+                    kind.label()
+                );
+            }
+        }
+        if rest.is_empty() { DOT } else { rest }
+    }
 }
 
 /// The state one `-c` pass carries from member to member.
@@ -701,13 +797,12 @@ struct Creator<'a> {
     /// unique within one filesystem — a bare `ino` key would link together two
     /// unrelated files that happen to share a number across mount points.
     links: BTreeMap<(u64, u64), Vec<u8>>,
-    /// The last prefix [`strip_leading`] removed from a member name, and the
-    /// last one it removed from a hard link's target. GNU warns when the prefix
-    /// *changes*, not once per archive and not once per member — which is why
-    /// `tar -c ..` produces two lines, ``Removing leading `..'`` for the
-    /// directory itself and ``Removing leading `../'`` for everything in it.
-    last_name_prefix: Vec<u8>,
-    last_link_prefix: Vec<u8>,
+    /// How much has already been stripped from a member name and from a hard
+    /// link's target, so that the notice is issued once per *longer* prefix.
+    /// This is why `tar -c ..` produces two lines, ``Removing leading `..'``
+    /// for the directory itself and ``Removing leading `../'`` for everything
+    /// in it — and only two, however many members follow.
+    prefixes: PrefixNotice,
     /// `(dev, ino)` of the archive being written, when it is a file we can
     /// identify. `tar -cf backup.tar .` names the archive among the things to
     /// archive, and a tar that obliges copies the archive into itself as it
@@ -749,16 +844,10 @@ impl Creator<'_> {
     /// first and `..` becomes nothing, which is stored as `.` and listed as
     /// `./`. Appending first would have stripped the slash back off again.
     fn stored_name(&mut self, name: &[u8], dir: bool) -> Vec<u8> {
-        let (removed, rest) = strip_leading(name);
-        if !removed.is_empty() && self.last_name_prefix != removed {
-            diag!("tar: Removing leading `{}' from member names", escape(removed));
-            self.last_name_prefix = removed.to_vec();
-        }
-        let mut stored = if rest.is_empty() {
-            b".".to_vec()
-        } else {
-            rest.to_vec()
-        };
+        let mut stored = self
+            .prefixes
+            .strip(name, PrefixKind::MemberNames)
+            .to_vec();
         if dir {
             stored.push(b'/');
         }
@@ -772,19 +861,9 @@ impl Creator<'_> {
     /// absolute symlink is a legitimate thing to archive. Measured — GNU stores
     /// `/etc/passwd` for `ln -s /etc/passwd x` and says nothing.
     fn stored_link_target(&mut self, target: &[u8]) -> Vec<u8> {
-        let (removed, rest) = strip_leading(target);
-        if !removed.is_empty() && self.last_link_prefix != removed {
-            diag!(
-                "tar: Removing leading `{}' from hard link targets",
-                escape(removed)
-            );
-            self.last_link_prefix = removed.to_vec();
-        }
-        if rest.is_empty() {
-            b".".to_vec()
-        } else {
-            rest.to_vec()
-        }
+        self.prefixes
+            .strip(target, PrefixKind::LinkTargets)
+            .to_vec()
     }
 
     /// Fill in the fields every member type shares. `None` means the name
@@ -1116,8 +1195,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
         verbose,
         status: 0,
         links: BTreeMap::new(),
-        last_name_prefix: Vec::new(),
-        last_link_prefix: Vec::new(),
+        prefixes: PrefixNotice::new(),
         archive_id,
         writable: true,
     };
@@ -1168,6 +1246,11 @@ struct Member {
     typeflag: u8,
     /// The target of a symlink, or the other name of a hard link.
     linkname: Vec<u8>,
+    /// The two halves of a device node's number. Meaningful only for the `3`
+    /// and `4` type flags; zero everywhere else, since ustar leaves the fields
+    /// blank for every other type.
+    devmajor: u64,
+    devminor: u64,
     /// Owner and group *names*, which ustar stores beside the numbers. Empty
     /// in an archive written with `--numeric-owner`, and then `-tv` falls back
     /// to the numbers — which is what GNU does.
@@ -1187,8 +1270,21 @@ impl Member {
     }
 
     /// Does this member carry data blocks after its header?
+    ///
+    /// The list is of the types that *cannot*, rather than of the types that
+    /// can, and that inversion is the fix for a stream-desynchronising bug: a
+    /// type flag this tar does not know — a GNU `L` long-name block, a `Z`
+    /// nobody has defined — was assumed to carry nothing, so its data blocks
+    /// were read as the next header, failed the checksum, and aborted the whole
+    /// archive. Measured, GNU reads them: a five-byte member flagged `Z` is
+    /// extracted with its five bytes and the member after it comes out intact.
+    ///
+    /// The size is already zero for the types listed here — [`decode_member`]
+    /// clears it — so this is belt and braces; both are kept because the two
+    /// answer different questions (how many blocks to skip, and what `-tv`
+    /// prints in the size column).
     fn has_data(&self) -> bool {
-        matches!(self.typeflag, b'0' | b'\0' | b'7') && !self.is_dir()
+        !self.is_dir() && !matches!(self.typeflag, b'1' | b'2' | b'3' | b'4' | b'5' | b'6')
     }
 
     /// The type flag to *render*, which is the stored one except that a v7
@@ -1197,6 +1293,19 @@ impl Member {
     fn effective_typeflag(&self) -> u8 {
         if self.is_dir() { b'5' } else { self.typeflag }
     }
+}
+
+/// Is this a type flag with a defined meaning?
+///
+/// Anything else is rendered `?` by [`mode_string`], announced by `-tv` as an
+/// `unknown file type`, and extracted as a plain file — which is what GNU does
+/// with one, and is the only thing that can be done without knowing what it
+/// meant.
+fn known_typeflag(typeflag: u8) -> bool {
+    matches!(
+        typeflag,
+        b'0' | b'\0' | b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7'
+    )
 }
 
 /// Whether a 512-byte block's stored checksum matches its contents.
@@ -1255,18 +1364,31 @@ fn decode_member(block: &[u8; BLOCK_SIZE]) -> Member {
     let octal32 = |range: std::ops::Range<usize>| -> u32 {
         u32::try_from(parse_octal(block.get(range).unwrap_or(&[]))).unwrap_or(0)
     };
+    let typeflag = block.get(156).copied().unwrap_or(0);
+    // A link, a device or a fifo has no data, whatever its size field says, and
+    // GNU does not believe the field either: it zeroes the size for these types
+    // before anything reads it, so `-tv` prints `0` for a symlink whose header
+    // claims five bytes. Believing the field instead would let a crafted header
+    // make this program skip five blocks of a *following* member.
+    let size = if matches!(typeflag, b'1' | b'2' | b'3' | b'4' | b'5' | b'6') {
+        0
+    } else {
+        parse_octal(block.get(124..136).unwrap_or(&[]))
+    };
     Member {
         name,
         mode: octal32(100..108),
         uid: octal32(108..116),
         gid: octal32(116..124),
-        size: parse_octal(block.get(124..136).unwrap_or(&[])),
+        size,
         // A time before the epoch cannot be stored in an octal field, so the
         // only way this saturates is a hostile header; `i64::MAX` is then
         // refused by the clock rather than silently becoming a small number.
         mtime: i64::try_from(parse_octal(block.get(136..148).unwrap_or(&[]))).unwrap_or(i64::MAX),
-        typeflag: block.get(156).copied().unwrap_or(0),
+        typeflag,
         linkname: field_bytes(block.get(157..257).unwrap_or(&[])).to_vec(),
+        devmajor: parse_octal(block.get(329..337).unwrap_or(&[])),
+        devminor: parse_octal(block.get(337..345).unwrap_or(&[])),
         uname: field_bytes(block.get(265..297).unwrap_or(&[])).to_vec(),
         gname: field_bytes(block.get(297..329).unwrap_or(&[])).to_vec(),
     }
@@ -1661,6 +1783,22 @@ fn restore_metadata(name: &[u8], path: &Path, mode: u32, mtime: i64, status: &mu
 
 /// Set a path's modification time (and its access time with it — ustar stores
 /// only the one, and leaving atime at "now" would be a lie of the same size).
+///
+/// Named after the syscall rather than after `File::set_times` for a reason
+/// that only appeared once this tar could create a **fifo**: stamping a path by
+/// opening it and calling `futimens` means opening a fifo, and opening a fifo
+/// blocks until somebody opens the other end. An archive holding one named pipe
+/// was therefore a hang — `tar -xf` sat there for ever with no output and no
+/// way to tell it from slow I/O. `utimensat` acts on the name and never opens
+/// anything, which is also why GNU uses it.
+#[cfg(unix)]
+fn set_mtime(path: &Path, mtime: i64) -> io::Result<()> {
+    stamp_path(path, mtime, 0)
+}
+
+/// [`set_mtime`] for the development host, where there is no `utimensat` and no
+/// fifo to be trapped by.
+#[cfg(not(unix))]
 fn set_mtime(path: &Path, mtime: i64) -> io::Result<()> {
     use std::fs::FileTimes;
     use std::time::{Duration, SystemTime};
@@ -1697,6 +1835,264 @@ fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// Create something at `path`, replacing whatever is already standing there.
+///
+/// This is GNU's `maybe_recoverable`, and the order it does things in is
+/// observable. The creation is attempted *first*; only an `EEXIST` provokes a
+/// removal and a second attempt. That is why extracting a symlink over a
+/// **non-empty** directory reports `File exists` and not `Directory not empty`
+/// — the removal's failure is discarded and the original `EEXIST` is what the
+/// caller sees. Measured both ways: over an *empty* directory the symlink is
+/// created (so the removal is an `rmdir` as well as an `unlink`), and over a
+/// non-empty one GNU says `Cannot create symlink to ‘f’: File exists`.
+///
+/// `remove_file` is tried before `remove_dir` because the overwhelmingly common
+/// case is a file, and because `unlink` on a directory is the cheap failure.
+///
+/// `ENOENT` is the other recoverable error, and for the same reason as in
+/// [`open_for_member`]: an archive may store `a/b/link` without storing `a/`,
+/// and the ancestors have to be made. They are made *only* on that error —
+/// never speculatively — because a `mkdir -p` run before the attempt is what
+/// turns a withheld symlink into a traversal.
+fn create_replacing<F>(path: &Path, mut create: F) -> io::Result<()>
+where
+    F: FnMut() -> io::Result<()>,
+{
+    match create() {
+        Err(first) if first.kind() == io::ErrorKind::AlreadyExists => {
+            if fs::remove_file(path).is_err() && fs::remove_dir(path).is_err() {
+                return Err(first);
+            }
+            create()
+        }
+        Err(first) if first.kind() == io::ErrorKind::NotFound => {
+            let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+                return Err(first);
+            };
+            // The original error, not the `mkdir`'s: the caller's message names
+            // the member it was trying to create, and `No such file or
+            // directory` is the true reason it could not be.
+            if fs::create_dir_all(parent).is_err() {
+                return Err(first);
+            }
+            create()
+        }
+        other => other,
+    }
+}
+
+/// A path as a NUL-terminated byte string, or `None` if it contains a NUL.
+///
+/// Bytes throughout: the name came out of an archive header and nothing
+/// promises it is text, so converting through `str` would be the UTF-8
+/// assumption rule 7 forbids. A NUL inside is refused rather than truncated,
+/// because a C call handed one would act on the *prefix* — a member named
+/// `safe\0/../../etc/passwd` must not become `safe`.
+#[cfg(unix)]
+fn c_path(path: &Path) -> Option<Vec<u8>> {
+    let bytes = os_bytes(path.as_os_str());
+    if bytes.contains(&0) {
+        return None;
+    }
+    let mut buf = Vec::with_capacity(bytes.len().saturating_add(1));
+    buf.extend_from_slice(&bytes);
+    buf.push(0);
+    Some(buf)
+}
+
+/// The error a C call gets when the path it was handed cannot be expressed.
+#[cfg(unix)]
+fn embedded_nul() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte")
+}
+
+// The three creation calls `std` does not wrap, plus the timestamp call that
+// can be told not to follow a symlink. Declared here, beside their callers,
+// rather than pulled from a libc binding — this crate depends on none, and the
+// signatures are short enough to check against `posix/src/file.rs` by eye.
+#[cfg(unix)]
+unsafe extern "C" {
+    fn mkfifo(path: *const u8, mode: u32) -> i32;
+    fn mknod(path: *const u8, mode: u32, dev: u64) -> i32;
+    fn utimensat(dirfd: i32, path: *const u8, times: *const CTimespec, flags: i32) -> i32;
+}
+
+/// `struct timespec`, in the layout `posix/src/stat.rs` declares.
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[cfg_attr(not(unix), allow(dead_code))]
+struct CTimespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+/// Rebuild a `dev_t` from the two halves ustar stores it in.
+///
+/// The exact inverse of [`split_dev`], and it has to be exact: a device node
+/// archived on one machine and extracted on another must come back with the
+/// same number, and Linux's packing puts the low 8 bits of the minor and the
+/// low 12 of the major where a naive `(major << 8) | minor` would put something
+/// else entirely.
+fn make_dev(major: u64, minor: u64) -> u64 {
+    ((major & 0xfff) << 8) | ((major & !0xfff) << 32) | (minor & 0xff) | ((minor & !0xff) << 12)
+}
+
+/// The `S_IFMT` bits `mknod` wants for each of the two device flavours.
+const S_IFCHR: u32 = 0o020000;
+const S_IFBLK: u32 = 0o060000;
+
+/// Create a symlink at `path` pointing at `target`.
+///
+/// The target is stored, and used, **verbatim** — absolute targets and targets
+/// full of `..` alike. That is measured GNU behaviour (`abs -> /etc/passwd` and
+/// `up -> ../../outside` are both created, in silence, exit 0) and it is safe
+/// for the same reason it is safe in GNU: a symlink is only a name until
+/// something follows it, and whether to follow it is the *caller's* choice
+/// later, not this program's now. What must not happen is that tar itself walks
+/// through one while unpacking the rest of the archive.
+#[cfg(unix)]
+fn make_symlink(target: &[u8], path: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(os_from_bytes(target), path)
+}
+
+#[cfg(not(unix))]
+fn make_symlink(_target: &[u8], _path: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "symlinks are not supported on this host",
+    ))
+}
+
+/// Create a named pipe at `path` with the given mode.
+///
+/// The mode is applied again by the caller through [`restore_metadata`], and
+/// has to be: `mkfifo` masks what it is given by the umask, so a 0666 fifo
+/// under umask 022 arrives 0644 whatever the archive said, and `-p` would have
+/// no effect at all.
+#[cfg(unix)]
+fn make_fifo(path: &Path, mode: u32) -> io::Result<()> {
+    let Some(cpath) = c_path(path) else {
+        return Err(embedded_nul());
+    };
+    // SAFETY: `cpath` is NUL-terminated and outlives the call, which does not
+    // retain the pointer. `mode` is a permission word; `mkfifo` supplies the
+    // `S_IFIFO` bit itself.
+    if unsafe { mkfifo(cpath.as_ptr(), mode & 0o7777) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn make_fifo(_path: &Path, _mode: u32) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "named pipes are not supported on this host",
+    ))
+}
+
+/// Create a character or block device node.
+///
+/// Fails with `EPERM` for anyone but root, which is not a defect to work around
+/// — it is the kernel refusing to let an archive hand an unprivileged user a
+/// readable `/dev/sda`. GNU reports it and carries on with the next member, and
+/// so does the caller here.
+#[cfg(unix)]
+fn make_device(path: &Path, mode: u32, block: bool, major: u64, minor: u64) -> io::Result<()> {
+    let Some(cpath) = c_path(path) else {
+        return Err(embedded_nul());
+    };
+    let kind = if block { S_IFBLK } else { S_IFCHR };
+    // SAFETY: as `make_fifo`. The mode carries the `S_IFMT` bits `mknod`
+    // requires, and `dev` is a plain integer.
+    if unsafe { mknod(cpath.as_ptr(), kind | (mode & 0o7777), make_dev(major, minor)) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn make_device(_path: &Path, _mode: u32, _block: bool, _major: u64, _minor: u64) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "device nodes are not supported on this host",
+    ))
+}
+
+/// `AT_SYMLINK_NOFOLLOW` — act on the link, not on what it names.
+#[cfg(unix)]
+const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+
+/// Stamp a path's access and modification times to the same second.
+///
+/// `flags` is `0` to follow a final symlink or [`AT_SYMLINK_NOFOLLOW`] to stamp
+/// the link itself.
+#[cfg(unix)]
+fn stamp_path(path: &Path, mtime: i64, flags: i32) -> io::Result<()> {
+    /// `AT_FDCWD` — resolve a relative path against the working directory.
+    const AT_FDCWD: i32 = -100;
+
+    let Some(cpath) = c_path(path) else {
+        return Err(embedded_nul());
+    };
+    let t = CTimespec {
+        tv_sec: mtime,
+        tv_nsec: 0,
+    };
+    let times = [t, t];
+    // SAFETY: `cpath` is NUL-terminated and `times` is exactly the two-element
+    // array `utimensat` reads; both outlive the call, which retains neither.
+    if unsafe { utimensat(AT_FDCWD, cpath.as_ptr(), times.as_ptr(), flags) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Set a **symlink's own** modification time, without following it.
+///
+/// [`set_mtime`] would stamp the target instead — or fail outright on a
+/// dangling link, which is a perfectly ordinary thing for an archive to hold.
+/// Measured: GNU restores it, and a symlink archived at 2019-05-06 comes back
+/// dated 2019-05-06 even when what it points at does not exist.
+#[cfg(unix)]
+fn set_symlink_mtime(path: &Path, mtime: i64) -> io::Result<()> {
+    stamp_path(path, mtime, AT_SYMLINK_NOFOLLOW)
+}
+
+#[cfg(not(unix))]
+fn set_symlink_mtime(_path: &Path, _mtime: i64) -> io::Result<()> {
+    Ok(())
+}
+
+/// Open a path for writing, creating or truncating it — without blocking.
+///
+/// `File::create` is `open(O_WRONLY|O_CREAT|O_TRUNC)`, and on a **fifo** that
+/// blocks until a reader appears. Since this tar learned to create fifos, an
+/// archive holding a fifo named `p` followed by a regular file named `p` was a
+/// hang reachable from a 3 KiB file. `O_NONBLOCK` turns it into `ENXIO` — "No
+/// such device or address" — which is what GNU reports, and which regular
+/// files, the only other thing that reaches here, ignore entirely.
+#[cfg(unix)]
+fn create_file(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    /// `O_NONBLOCK`, as Linux numbers it.
+    const O_NONBLOCK: i32 = 0o4000;
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_file(path: &Path) -> io::Result<File> {
+    File::create(path)
+}
+
 fn do_extract(
     archive_file: Option<&OsStr>,
     directory: Option<&OsStr>,
@@ -1725,8 +2121,10 @@ fn do_extract(
     }
 
     let mut status = 0;
-    let mut warned_absolute = false;
-    let mut warned_dotdot = false;
+    // A hard link's target gets its own notice, separate from the member-name
+    // one: an archive can hold `/etc/passwd` as a target without holding it as
+    // a name, and GNU prints the two lines independently.
+    let mut prefixes = PrefixNotice::new();
     let mut selector = Selector::new(members);
     let umask = read_umask();
     // Directory metadata is applied last, in reverse order. It has to be: a
@@ -1735,64 +2133,46 @@ fn do_extract(
     // all. GNU defers both for the same reason, which is why `tar -xf` restores
     // a 0500 directory's mode *and* its timestamp, and ours restored neither.
     let mut pending_dirs: Vec<(Vec<u8>, u32, i64)> = Vec::new();
+    let mut delayed: Vec<DelayedLink> = Vec::new();
 
     let stop = walk(input.as_mut(), |member, input| {
         let raw_name = member.name.as_slice();
 
-        // GNU prints this once, not once per member, and only when it applies.
-        // The quoting is GNU's own — a grave accent opening and an apostrophe
-        // closing — and not this project's `'...'`. It is copied rather than
-        // normalised because the line is an interface: a script grepping for
-        // it is grepping for tar's wording, not for ours.
-        if raw_name.first() == Some(&b'/') && !warned_absolute {
-            diag!("tar: Removing leading `/' from member names");
-            warned_absolute = true;
-        }
-        // And the same once-only notice for a name that starts by climbing out.
-        // GNU prints it *and then still refuses the member*, which reads like a
-        // contradiction until you see that the two come from different places:
-        // the notice is about the prefix it would have stripped, the refusal is
-        // about the `..` still in the name. Both lines are reproduced because
-        // both are what a caller comparing stderr will see.
-        if raw_name
-            .split(|&b| b == b'/')
-            .find(|c| !c.is_empty())
-            .is_some_and(|c| c == b"..")
-            && !warned_dotdot
-        {
-            diag!("tar: Removing leading `../' from member names");
-            warned_dotdot = true;
-        }
+        // Stripping happens as the header is decoded, before the member is
+        // selected and before it is announced: measured, `tar -tvf` prints the
+        // notice above the line for the member that provoked it, and prints it
+        // for a member `-t` is only listing. Both names go through it here so
+        // that a listing and an extraction of one archive say the same things.
+        let name = prefixes.strip(raw_name, PrefixKind::MemberNames).to_vec();
+        let link_target = strip_link_target(member, &mut prefixes, &mut || {});
 
         // Operands select members. With none, everything is wanted — but a
         // member the caller did not ask for must be skipped *before* anything
         // is written, which is why this test comes first. `tar -xf a.tar one`
-        // used to unpack the whole archive.
+        // used to unpack the whole archive. The operand is matched against the
+        // name as *stored*, which is what the caller read out of `tar -t`.
         if !selector.wants(raw_name) {
             return Handled::Skip;
         }
 
-        // Nothing below may use `raw_name` as a path. It is attacker-chosen.
-        let name = match sanitize_member_name(raw_name) {
-            Ok(n) => n,
-            Err(e) => {
-                diag!("tar: {e}");
-                status = EXIT_FATAL;
-                return Handled::Skip;
-            }
-        };
+        // Nothing below may use `raw_name` as a path. It is attacker-chosen,
+        // and stripping a prefix does not make a `..` in the middle safe.
+        if contains_dot_dot(raw_name) {
+            diag!(
+                "tar: {}: Member name contains '..'",
+                escape(raw_name)
+            );
+            status = EXIT_FATAL;
+            return Handled::Skip;
+        }
 
-        // The announced name is the member's, with the trailing slash a
-        // directory carries — `tree/`, not `tree`. That slash is how the reader
-        // of a `-v` listing tells a directory from a file, and stripping it (as
-        // the sanitiser must, since it is building a path) threw the
-        // distinction away.
+        // The announced name is the member's as *stored*, not the path it lands
+        // at: GNU prints `/a` while extracting to `a`, and prints `./` for the
+        // `.` member of an archive made with `tar -cf x.tar .`. No slash is
+        // appended for a directory either — a type-`5` member stored without
+        // one is announced without one (`tar-rules3.sh`).
         if verbose != Verbose::Off {
-            let mut shown = name.clone();
-            if member.is_dir() {
-                shown.push(b'/');
-            }
-            verbose.line(&shown);
+            verbose.line(raw_name);
         }
 
         match member.typeflag {
@@ -1811,33 +2191,143 @@ fn do_extract(
             }
             b'0' | b'\0' | b'7' => {
                 let mode = extraction_mode(member.mode, same_permissions, umask);
-                if extract_regular_file(input, &name, member.size, mode, member.mtime, &mut status)
-                {
-                    Handled::Consumed
-                } else {
-                    Handled::Truncated
+                extract_plain(input, &name, member, mode, &mut status)
+            }
+            b'2' if is_delayed_target(&member.linkname) => {
+                // A symlink out of the destination — absolute, or climbing —
+                // is not created now. It is stood up as an empty placeholder
+                // *file* and turned into the symlink after the last member,
+                // which is GNU's design and is the whole of tar's defence
+                // against being walked through its own output: an archive
+                // holding `d -> /tmp` followed by `d/pwned` writes nothing to
+                // `/tmp`, because at the moment `d/pwned` is opened, `d` is a
+                // regular file and the open fails with `Not a directory`.
+                // Measured, `tar-rules2.sh`.
+                let path = os_from_bytes(&name);
+                let path = Path::new(&path);
+                match make_placeholder(path) {
+                    Ok(id) => delayed.push(DelayedLink {
+                        name: name.clone(),
+                        target: member.linkname.clone(),
+                        mtime: member.mtime,
+                        id,
+                    }),
+                    Err(e) => {
+                        // `Cannot open`, not `Cannot create symlink`: at this
+                        // point GNU really is opening a file, and the wording
+                        // is how the two paths are told apart in a log.
+                        diag!("tar: {}: Cannot open: {}", escape(&name), strerror(&e));
+                        status = EXIT_FATAL;
+                    }
                 }
+                Handled::Skip
+            }
+            b'2' => {
+                let path = os_from_bytes(&name);
+                let path = Path::new(&path);
+                if let Err(e) = create_replacing(path, || make_symlink(&member.linkname, path)) {
+                    diag!(
+                        "tar: {}: Cannot create symlink to {}: {}",
+                        escape(&name),
+                        quote(&member.linkname),
+                        strerror(&e)
+                    );
+                    status = EXIT_FATAL;
+                } else if let Err(e) = set_symlink_mtime(path, member.mtime) {
+                    // No mode is applied. A symlink has none of its own on any
+                    // system this runs on — `lrwxrwxrwx` is a constant — and
+                    // `chmod` through one would silently repermission whatever
+                    // it points at, which for an archived `-> /etc/passwd` is
+                    // the whole attack.
+                    diag!("tar: {}: Cannot utime: {}", escape(&name), strerror(&e));
+                    status = EXIT_FATAL;
+                }
+                Handled::Skip
+            }
+            b'1' => {
+                let path = os_from_bytes(&name);
+                let path = Path::new(&path);
+                let target_path = os_from_bytes(&link_target);
+                let target_path = Path::new(&target_path);
+                if let Err(e) = create_replacing(path, || fs::hard_link(target_path, path)) {
+                    // The one place in this program that quotes with `‘…’`
+                    // instead of tar's escape style, because it is the one
+                    // place GNU does: this sentence is built with gnulib's
+                    // `quote()`, which is pinned to the locale style and so
+                    // ignores the `escape_quoting_style` set at startup.
+                    diag!(
+                        "tar: {}: Cannot hard link to {}: {}",
+                        escape(&name),
+                        quote(&link_target),
+                        strerror(&e)
+                    );
+                    status = EXIT_FATAL;
+                }
+                // No mode and no mtime: the link *is* the target's inode, and
+                // stamping it would restamp the file it was linked to.
+                Handled::Skip
+            }
+            b'6' => {
+                let mode = extraction_mode(member.mode, same_permissions, umask);
+                let path = os_from_bytes(&name);
+                let path = Path::new(&path);
+                if let Err(e) = create_replacing(path, || make_fifo(path, mode)) {
+                    diag!("tar: {}: Cannot mkfifo: {}", escape(&name), strerror(&e));
+                    status = EXIT_FATAL;
+                } else {
+                    restore_metadata(&name, path, mode, member.mtime, &mut status);
+                }
+                Handled::Skip
+            }
+            b'3' | b'4' => {
+                let mode = extraction_mode(member.mode, same_permissions, umask);
+                let block = member.typeflag == b'4';
+                let path = os_from_bytes(&name);
+                let path = Path::new(&path);
+                let create = || make_device(path, mode, block, member.devmajor, member.devminor);
+                if let Err(e) = create_replacing(path, create) {
+                    // `Operation not permitted` for everyone but root, and that
+                    // is the point rather than a shortcoming: an archive that
+                    // could conjure a block device would be handing whoever
+                    // unpacked it raw access to a disk.
+                    diag!("tar: {}: Cannot mknod: {}", escape(&name), strerror(&e));
+                    status = EXIT_FATAL;
+                } else {
+                    restore_metadata(&name, path, mode, member.mtime, &mut status);
+                }
+                Handled::Skip
             }
             other => {
-                // Hard links, symlinks, devices, FIFOs and the GNU long-name
-                // extensions all land here. Skipping them keeps the stream in
-                // sync, but the extracted tree is then not the archive, so say
-                // so rather than pretending it worked.
-                // The type flag is one byte of the archive's own header, so it
-                // is exactly as attacker-chosen as the name beside it, which
-                // is already quoted. `char::from(b'\n')` printed a raw
-                // newline, so a crafted archive could forge a line of `tar`'s
-                // stderr; `quoteaf` renders that byte as `''$'\n'`.
+                // A type flag with no defined meaning. GNU keeps the data and
+                // exits **0** — `Unknown file type 'Z', extracted as normal
+                // file` — which is the only answer that cannot lose anything:
+                // the bytes are there, and refusing them would discard the sole
+                // copy over a byte nobody has defined.
+                //
+                // The type flag is one byte of the archive's own header, as
+                // attacker-chosen as the name beside it. GNU writes it into the
+                // message raw, so a member flagged with a newline forges a line
+                // of tar's stderr; `escape` renders that byte as `\n` inside
+                // the same `'…'` GNU uses, so the common case is identical and
+                // the hostile one is inert.
                 diag!(
-                    "tar: {}: unsupported entry type {}; skipped",
+                    "tar: {}: Unknown file type '{}', extracted as normal file",
                     escape(&name),
-                    quoteaf(&[other])
+                    escape(&[other])
                 );
-                status = EXIT_FATAL;
-                Handled::Skip
+                let mode = extraction_mode(member.mode, same_permissions, umask);
+                extract_plain(input, &name, member, mode, &mut status)
             }
         }
     });
+
+    // Links before directories, because creating one bumps the mtime of the
+    // directory it lands in. GNU reaches the same place by a longer route — it
+    // fixes every directory that is *not* an ancestor of a delayed link, then
+    // applies the links, then fixes the ancestors — and the observable result
+    // is identical: measured, an archive whose only member under `sub/` is a
+    // symlink to an absolute path leaves `sub`'s stored mtime intact.
+    apply_delayed_links(delayed, &mut status);
 
     // Deepest first: `pending_dirs` is in archive order, which is parents
     // before children, so the reverse leaves a parent's timestamp untouched by
@@ -1859,9 +2349,210 @@ fn do_extract(
     }
 }
 
+/// Extract a member as an ordinary file, returning the driver's verdict on its
+/// data blocks.
+///
+/// Shared by the regular-file arm and the unknown-type arm, which are the same
+/// operation: GNU's answer to a type flag it does not recognise is to keep the
+/// bytes and say so.
+fn extract_plain(
+    input: &mut dyn Read,
+    name: &[u8],
+    member: &Member,
+    mode: u32,
+    status: &mut i32,
+) -> Handled {
+    if extract_regular_file(input, name, member.size, mode, member.mtime, status) {
+        Handled::Consumed
+    } else {
+        Handled::Truncated
+    }
+}
+
+/// The target a hard link is made to, after the same prefix stripping a member
+/// name gets — and the linkname untouched for every other type.
+///
+/// A hard link's target is a *name in the archive*, so it is exactly as
+/// attacker-chosen as the member's own name; GNU strips it and announces the
+/// removal under a heading of its own (``Removing leading `/' from hard link
+/// targets``). It is *not* refused for containing `..`, which member names are:
+/// GNU cuts up to the last `..` and links what is left, and since the cut can
+/// only move the target further inside the destination there is nothing to
+/// refuse. Measured, `tar-rules2.sh`: a target of `a/../base` links to `base`.
+///
+/// A **symlink**'s target is not a member name at all — it is the link's data,
+/// resolved later by whoever follows it — so it is stored and restored
+/// verbatim, absolute or not. That is GNU's behaviour and the reason
+/// [`is_delayed_target`] exists to make it safe.
+fn strip_link_target(
+    member: &Member,
+    prefixes: &mut PrefixNotice,
+    flush: &mut dyn FnMut(),
+) -> Vec<u8> {
+    if member.typeflag == b'1' {
+        prefixes
+            .strip_flushing(&member.linkname, PrefixKind::LinkTargets, flush)
+            .to_vec()
+    } else {
+        member.linkname.clone()
+    }
+}
+
+/// Is this symlink target one that must not be created until the end?
+///
+/// Absolute, or containing a `..` component. Either could be followed by a
+/// later member of the same archive to somewhere outside the destination, so
+/// GNU holds these back; anything else points within the tree being unpacked
+/// and is created as it is met.
+fn is_delayed_target(target: &[u8]) -> bool {
+    target.first() == Some(&b'/') || contains_dot_dot(target)
+}
+
+/// A symlink whose creation was held back, and the placeholder standing in for
+/// it until the archive has been read.
+struct DelayedLink {
+    name: Vec<u8>,
+    target: Vec<u8>,
+    mtime: i64,
+    /// `(dev, ino)` of the placeholder as created. Checked again before the
+    /// placeholder is removed, so that a link is never made to a path that has
+    /// become something else in the meantime.
+    id: (u64, u64),
+}
+
+/// Stand up the empty file that holds a delayed symlink's place.
+///
+/// Mode 0, as GNU's `create_placeholder_file` opens it: nothing should be able
+/// to use this file for anything during the seconds it exists. Created
+/// exclusively, so an existing entry is replaced through the same
+/// remove-and-retry [`create_replacing`] does everywhere else — which is why a
+/// symlink over a *non-empty directory* reports `Cannot open: File exists`
+/// rather than the `Cannot create symlink to ‘…’` a relative one would.
+fn make_placeholder(path: &Path) -> io::Result<(u64, u64)> {
+    create_replacing(path, || create_exclusive(path))?;
+    file_identity(path)
+}
+
+#[cfg(unix)]
+fn create_exclusive(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o000)
+        .open(path)
+        .map(|_| ())
+}
+
+#[cfg(not(unix))]
+fn create_exclusive(path: &Path) -> io::Result<()> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map(|_| ())
+}
+
+#[cfg(unix)]
+fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let md = fs::symlink_metadata(path)?;
+    Ok((md.dev(), md.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
+    fs::symlink_metadata(path)?;
+    Ok((0, 0))
+}
+
+/// Replace every placeholder with the symlink it stood for.
+///
+/// A placeholder that is no longer the file this run created is left alone and
+/// nothing is said, which is GNU's handling: the archive has already been read,
+/// something else now owns that path, and unlinking it on the strength of a
+/// name would be the very substitution the placeholder exists to prevent.
+fn apply_delayed_links(links: Vec<DelayedLink>, status: &mut i32) {
+    for link in links {
+        let path = os_from_bytes(&link.name);
+        let path = Path::new(&path);
+        if file_identity(path).ok() != Some(link.id) {
+            continue;
+        }
+        if let Err(e) = fs::remove_file(path) {
+            diag!(
+                "tar: {}: Cannot unlink: {}",
+                escape(&link.name),
+                strerror(&e)
+            );
+            *status = EXIT_FATAL;
+            continue;
+        }
+        if let Err(e) = make_symlink(&link.target, path) {
+            diag!(
+                "tar: {}: Cannot create symlink to {}: {}",
+                escape(&link.name),
+                quote(&link.target),
+                strerror(&e)
+            );
+            *status = EXIT_FATAL;
+            continue;
+        }
+        if let Err(e) = set_symlink_mtime(path, link.mtime) {
+            diag!(
+                "tar: {}: Cannot utime: {}",
+                escape(&link.name),
+                strerror(&e)
+            );
+            *status = EXIT_FATAL;
+        }
+    }
+}
+
 /// The archive's name for a diagnostic: its path, or `-` for standard input.
 fn archive_label(archive_file: Option<&OsStr>) -> Vec<u8> {
     archive_file.map_or_else(|| b"-".to_vec(), |p| os_bytes(p).into_owned())
+}
+
+/// Open the file a regular member is to be written to, reporting why not.
+///
+/// The ordering here is a security property, not a style choice. This used to
+/// `create_dir_all(parent)` up front and *then* open — which quietly undid
+/// tar's traversal defence. An archive holding `d -> /tmp` followed by
+/// `d/pwned` gets the symlink withheld (see [`is_delayed_target`]), so `d` is a
+/// zero-length placeholder file when `d/pwned` arrives; `create_dir_all` saw
+/// `d` was not a directory and reported `d: Cannot mkdir: File exists`, and on
+/// a run where the placeholder had *not* been left behind it would have made
+/// the directory and written the member. GNU opens first and only reaches for
+/// `mkdir` on the `ENOENT` that says an ancestor is genuinely absent, which
+/// makes the same archive fail the way it should: `tar: d/pwned: Cannot open:
+/// Not a directory`. Measured, `tar-xmine.sh` cases `traverse`/`traverse2`.
+///
+/// The recovery still has to exist, because an archive need not store a
+/// directory before the members inside it — `tar -cf - a/b/c` with no `a/` or
+/// `a/b/` member is legal and GNU extracts it.
+fn open_for_member(path: &Path, name: &[u8], status: &mut i32) -> Option<File> {
+    let mut err = match create_file(path) {
+        Ok(f) => return Some(f),
+        Err(e) => e,
+    };
+    if err.kind() == io::ErrorKind::NotFound {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            diag!("tar: {}: Cannot mkdir: {}", escape_os(parent), strerror(&e));
+            *status = EXIT_FATAL;
+            return None;
+        }
+        match create_file(path) {
+            Ok(f) => return Some(f),
+            Err(e) => err = e,
+        }
+    }
+    diag!("tar: {}: Cannot open: {}", escape(name), strerror(&err));
+    *status = EXIT_FATAL;
+    None
 }
 
 /// Stream one regular member out of `input` into `name`. Returns false when
@@ -1880,30 +2571,15 @@ fn extract_regular_file(
     mtime: i64,
     status: &mut i32,
 ) -> bool {
-    // `name` has been through `sanitize_member_name`, so it is a relative path
-    // of `/`-separated non-`..` components — but its bytes are still the
-    // archive's, and are turned back into a path without inspecting them.
+    // `name` has been through `strip_leading` and `contains_dot_dot`, so it is
+    // a relative path of `/`-separated non-`..` components — but its bytes are
+    // still the archive's, and are turned back into a path without inspecting
+    // them.
     let path = os_from_bytes(name);
     let path = Path::new(&path);
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-        && let Err(e) = fs::create_dir_all(parent)
-    {
-        diag!("tar: {}: Cannot mkdir: {}", escape_os(parent), strerror(&e));
-        *status = EXIT_FATAL;
-        return skip_data(input, size);
-    }
-
-    let mut file = match File::create(path) {
-        Ok(f) => Some(f),
-        Err(e) => {
-            // Still consume the data: the archive may hold members after this
-            // one, and abandoning the stream would lose them too.
-            diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
-            *status = EXIT_FATAL;
-            None
-        }
-    };
+    // Still consume the data whatever happens below: the archive may hold
+    // members after this one, and abandoning the stream would lose them too.
+    let mut file = open_for_member(path, name, status);
 
     let mut remaining = size;
     let mut block = [0u8; BLOCK_SIZE];
@@ -2026,8 +2702,26 @@ fn list_archive(
 ) -> (Stop, Option<io::Error>) {
     let mut ugswidth = UGSWIDTH_MIN;
     let mut write_err: Option<io::Error> = None;
+    // Listing announces the prefixes it *would* strip, exactly as extraction
+    // does: measured, `tar -tf` on an archive holding `/a` prints ``Removing
+    // leading `/' from member names`` above the `/a` line, and exits 0. The
+    // notice belongs to reading a header, not to writing a file.
+    let mut prefixes = PrefixNotice::new();
 
     let stop = walk(input, |member, _data| {
+        // The notices go to stderr while the listing goes through a buffer, so
+        // without a flush every notice would surface after the whole listing.
+        // GNU has the same split and solves it the same way: gnulib's `error()`
+        // does `fflush(stdout)` before it writes. The hook is only invoked when
+        // a diagnostic is actually about to print, so the common member costs
+        // no extra syscall.
+        let _stored_under =
+            prefixes.strip_flushing(&member.name, PrefixKind::MemberNames, &mut || {
+                drop(out.flush());
+            });
+        let link_target = strip_link_target(member, &mut prefixes, &mut || {
+            drop(out.flush());
+        });
         if !selector.wants(&member.name) {
             return Handled::Skip;
         }
@@ -2042,7 +2736,7 @@ fn list_archive(
         // its own terms: GNU's output is not feedable back either, and a name
         // containing a newline would put two lines in the manifest.
         let line = if verbose {
-            long_line(member, &mut ugswidth, zone)
+            long_line(member, &link_target, &mut ugswidth, zone)
         } else {
             let mut l = escape(&member.name).into_bytes();
             l.push(b'\n');
@@ -2070,7 +2764,12 @@ fn list_archive(
 /// owners (`1000/1000`, 9 spaces), for names (`inhahe/inhahe`, 5), for a 20 MiB
 /// member (2), and for a 46-column `user/group` where the gap collapses to the
 /// single space the formula's `+ 1` guarantees.
-fn long_line(member: &Member, ugswidth: &mut usize, zone: &localtime::Zone) -> Vec<u8> {
+fn long_line(
+    member: &Member,
+    link_target: &[u8],
+    ugswidth: &mut usize,
+    zone: &localtime::Zone,
+) -> Vec<u8> {
     // ustar stores the owner's *name* beside the number; `--numeric-owner`
     // leaves it empty and GNU then prints the number. Falling back the other
     // way — looking the uid up in this machine's passwd file — would be wrong:
@@ -2085,10 +2784,20 @@ fn long_line(member: &Member, ugswidth: &mut usize, zone: &localtime::Zone) -> V
     } else {
         member.gname.clone()
     };
-    // A directory, a link and a device occupy no data blocks, and GNU prints 0
-    // for them whatever the header's size field happens to say.
-    let size = if member.has_data() { member.size } else { 0 };
-    let size = size.to_string().into_bytes();
+    // A device has no size to print, so GNU reuses the column for the pair the
+    // header does carry — `1,5` for `/dev/zero`, `7,0` for `loop0`. Measured;
+    // ours printed `0` there. Note there is no space after the comma: the
+    // column is one field, and the `%d,%d` keeps `-tv | awk` counting the same
+    // number of words for a device as for a file.
+    let size = match member.typeflag {
+        b'3' | b'4' => format!("{},{}", member.devmajor, member.devminor).into_bytes(),
+        // A directory and a link occupy no data blocks, and GNU prints 0 for
+        // them whatever the header's size field happens to say.
+        _ => {
+            let size = if member.has_data() { member.size } else { 0 };
+            size.to_string().into_bytes()
+        }
+    };
 
     let pad = user
         .len()
@@ -2126,8 +2835,22 @@ fn long_line(member: &Member, ugswidth: &mut usize, zone: &localtime::Zone) -> V
             line.extend_from_slice(escape(&member.linkname).as_bytes());
         }
         b'1' => {
+            // The *stripped* target, which is the name the link would be made
+            // to. Measured: an archive whose target is `../t` lists as
+            // `link to t`, under the notice about the `../` it removed. The
+            // symlink arm above is the stored target instead, because that one
+            // is data rather than a member name.
             line.extend_from_slice(b" link to ");
-            line.extend_from_slice(escape(&member.linkname).as_bytes());
+            line.extend_from_slice(escape(link_target).as_bytes());
+        }
+        // A third suffix, for the same reason as the other two: the `?` in the
+        // mode column says the type is not one of the nine, and this says which
+        // one it was. GNU's wording and GNU's `quote()` — curly marks, not the
+        // escape style the name beside it uses. Measured:
+        // `?rw-r--r-- 0/0  5 2020-01-01 22:04 weird unknown file type ‘Z’`.
+        other if !known_typeflag(member.effective_typeflag()) => {
+            line.extend_from_slice(b" unknown file type ");
+            line.extend_from_slice(quote(&[other]).as_bytes());
         }
         _ => {}
     }
@@ -2404,99 +3127,105 @@ mod tests {
         assert!(!err.as_bytes().contains(&0xe9), "{err}");
     }
 
-    // ---------------- sanitize_member_name ----------------
+    // ---------------- contains_dot_dot ----------------
     //
     // Every case here was a file written outside the destination directory
-    // before the sanitizer existed. See known-issues.md ->
-    // B-tar-EXTRACTS-OUTSIDE-THE-DESTINATION-DIRECTORY.
+    // before this check existed. See known-issues.md ->
+    // B-tar-EXTRACTS-OUTSIDE-THE-DESTINATION-DIRECTORY. What has changed since
+    // is which half does the work: `strip_leading` makes the ordinary hostile
+    // name safe and announces it, and this refuses what stripping cannot make
+    // safe -- a `..` with anything after it.
 
     #[test]
-    fn sanitize_plain_relative_name_unchanged() {
-        assert_eq!(sanitize_member_name(b"a/b/c.txt").unwrap(), b"a/b/c.txt");
-        assert_eq!(sanitize_member_name(b"file.txt").unwrap(), b"file.txt");
+    fn dot_dot_is_recognised_only_as_a_whole_component() {
+        assert!(contains_dot_dot(b".."));
+        assert!(contains_dot_dot(b"../../etc/passwd"));
+        assert!(contains_dot_dot(b"a/../b"));
+        assert!(contains_dot_dot(b"a/../../etc/passwd"));
+        assert!(contains_dot_dot(b"/../../root/.ssh/authorized_keys"));
+        assert!(contains_dot_dot(b"a/.."));
+        // The test is on the bytes, so a neighbouring component that is not
+        // text does not weaken it. When this took `&str` the caller had already
+        // replaced `\xe9` with U+FFFD, and the guarantee was being made about a
+        // string that was no longer the name being written.
+        assert!(contains_dot_dot(b"\xe9/../../etc/passwd"));
     }
 
     #[test]
-    fn sanitize_strips_leading_slash() {
-        // Critical: `Path::join` with an absolute path throws the base away,
-        // so an unstripped name would ignore `-C` entirely.
-        assert_eq!(sanitize_member_name(b"/etc/passwd").unwrap(), b"etc/passwd");
-        assert_eq!(
-            sanitize_member_name(b"///etc/passwd").unwrap(),
-            b"etc/passwd"
-        );
+    fn dotfiles_and_names_starting_with_dots_are_ordinary() {
+        assert!(!contains_dot_dot(b".bashrc"));
+        assert!(!contains_dot_dot(b"a/..foo"));
+        assert!(!contains_dot_dot(b"a/..."));
+        assert!(!contains_dot_dot(b"./a//b/./c"));
+        assert!(!contains_dot_dot(b"a/b/c.txt"));
+        assert!(!contains_dot_dot(b"caf\xe9/x"));
+        assert!(!contains_dot_dot(b""));
     }
 
     #[test]
-    fn sanitize_drops_dot_and_doubled_slashes() {
-        assert_eq!(sanitize_member_name(b"./a//b/./c").unwrap(), b"a/b/c");
+    fn backslash_is_not_a_separator() {
+        // It is one on the host these tests run on, and this check did once
+        // treat it as one, as defence in depth. That made a member legitimately
+        // named `a\..` -- a name design.txt allows, since paths admit every
+        // byte but `/` and NUL -- unextractable on the OS this tar is *for*.
+        // The path is built by joining on `/` alone, so a backslash never
+        // traverses.
+        assert!(!contains_dot_dot(b"..\\..\\windows\\system32\\x"));
+        assert!(!contains_dot_dot(b"a/..\\b"));
+        assert!(!contains_dot_dot(b"a/b\\c"));
+    }
+
+    // ---------------- PrefixNotice ----------------
+
+    #[test]
+    fn prefix_notice_strips_and_substitutes_a_dot() {
+        let mut p = PrefixNotice::new();
+        // Critical: `Path::join` with an absolute path throws the base away, so
+        // an unstripped name would ignore `-C` entirely.
+        assert_eq!(p.strip(b"/etc/passwd", PrefixKind::MemberNames), b"etc/passwd");
+        assert_eq!(p.strip(b"///etc/passwd", PrefixKind::MemberNames), b"etc/passwd");
+        // Non-UTF-8 bytes survive: the name is what gets created on disk, so
+        // any alteration here is a silent rename.
+        assert_eq!(p.strip(b"/\xff\xfe", PrefixKind::MemberNames), b"\xff\xfe");
+        // A name entirely consumed becomes `.` -- how `tar -c ..` stores the
+        // directory itself.
+        assert_eq!(p.strip(b"..", PrefixKind::MemberNames), b".");
+        assert_eq!(p.strip(b"d/..", PrefixKind::MemberNames), b".");
+        // As does a name that arrives empty, which is announced separately.
+        assert_eq!(p.strip(b"", PrefixKind::MemberNames), b".");
+        assert_eq!(p.strip(b"", PrefixKind::LinkTargets), b".");
     }
 
     #[test]
-    fn sanitize_refuses_leading_dotdot() {
-        assert!(sanitize_member_name(b"../../etc/passwd").is_err());
+    fn prefix_notice_keeps_member_names_and_link_targets_apart() {
+        // Two independent sets, and each announces a given prefix once. There
+        // is no observable return-value difference -- the point is the stderr
+        // -- so what this pins is that the bookkeeping does not make the
+        // *second* kind's strip a no-op.
+        let mut p = PrefixNotice::new();
+        assert_eq!(p.strip(b"/x", PrefixKind::MemberNames), b"x");
+        assert_eq!(p.strip(b"/x", PrefixKind::MemberNames), b"x");
+        assert_eq!(p.strip(b"/x", PrefixKind::LinkTargets), b"x");
+        assert_eq!(p.names.len(), 1);
+        assert_eq!(p.targets.len(), 1);
+        // Distinct prefixes accumulate; a repeat of a *shorter* one does not
+        // re-announce. Measured, `tar-rules4.sh`: the targets
+        // `/ ../ / // ../ / a/../` announce exactly `/`, `../`, `//`, `a/../`.
+        for t in [b"../x".as_slice(), b"//x", b"/x", b"a/../x", b"../x"] {
+            p.strip(t, PrefixKind::LinkTargets);
+        }
+        assert_eq!(p.targets.len(), 4);
     }
 
     #[test]
-    fn sanitize_refuses_interior_dotdot() {
-        // `a/../b` is only equivalent to `b` if `a` is a real directory and
-        // not a symlink -- which the archive is the last thing to trust about.
-        assert!(sanitize_member_name(b"a/../../etc/passwd").is_err());
-        assert!(sanitize_member_name(b"a/../b").is_err());
-    }
-
-    #[test]
-    fn sanitize_refuses_absolute_dotdot_combination() {
-        assert!(sanitize_member_name(b"/../../root/.ssh/authorized_keys").is_err());
-    }
-
-    #[test]
-    fn sanitize_refuses_backslash_traversal() {
-        // Not a separator on this OS, but this file's tests -- and any host
-        // build -- run where it is.
-        assert!(sanitize_member_name(b"..\\..\\windows\\system32\\x").is_err());
-        assert!(sanitize_member_name(b"a/..\\b").is_err());
-    }
-
-    #[test]
-    fn sanitize_passes_a_non_utf8_name_through_byte_for_byte() {
-        // The name is what will be created on disk, so any alteration here is
-        // a silent rename. When this function took `&str` the caller had
-        // already replaced `\xe9` with U+FFFD, so the file was extracted under
-        // a name the archive does not contain -- and the `..` check was being
-        // made about that altered string rather than about what would be
-        // written.
-        assert_eq!(sanitize_member_name(b"caf\xe9/x").unwrap(), b"caf\xe9/x");
-        assert_eq!(sanitize_member_name(b"/\xff\xfe").unwrap(), b"\xff\xfe");
-    }
-
-    #[test]
-    fn sanitize_refuses_dotdot_beside_non_utf8_components() {
-        // The traversal check is on the bytes, so it is not weakened by
-        // neighbouring components that are not text.
-        assert!(sanitize_member_name(b"\xe9/../../etc/passwd").is_err());
-    }
-
-    #[test]
-    fn sanitize_keeps_a_lone_backslash_in_a_name() {
-        // A slateos filename may contain a backslash; only a `..` component
-        // is refused, and the name is rebuilt with `/` alone.
-        assert_eq!(sanitize_member_name(b"a/b\\c").unwrap(), b"a/b\\c");
-    }
-
-    #[test]
-    fn sanitize_refuses_names_that_reduce_to_nothing() {
-        assert!(sanitize_member_name(b"").is_err());
-        assert!(sanitize_member_name(b"/").is_err());
-        assert!(sanitize_member_name(b"./.").is_err());
-    }
-
-    #[test]
-    fn sanitize_allows_dotfiles_and_names_starting_with_dots() {
-        // `..foo` and `...` are ordinary names, not traversal.
-        assert_eq!(sanitize_member_name(b".bashrc").unwrap(), b".bashrc");
-        assert_eq!(sanitize_member_name(b"a/..foo").unwrap(), b"a/..foo");
-        assert_eq!(sanitize_member_name(b"a/...").unwrap(), b"a/...");
+    fn prefix_notice_leaves_a_leading_dot_alone() {
+        // `.` names the directory being archived and takes the extractor
+        // nowhere it was not already, which is why `tar -cf - .` round-trips
+        // through `./f` unaltered.
+        let mut p = PrefixNotice::new();
+        assert_eq!(p.strip(b"./a//b/./c", PrefixKind::MemberNames), b"./a//b/./c");
+        assert_eq!(p.strip(b"a/b/c.txt", PrefixKind::MemberNames), b"a/b/c.txt");
+        assert!(p.names.is_empty());
     }
 
     // ---------------- data_blocks ----------------
@@ -2831,7 +3560,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn a_leading_dotdot_component_is_removed_but_a_leading_dot_is_not() {
+    fn a_dotdot_component_is_removed_but_a_leading_dot_is_not() {
         // Measured: GNU stores `./t` unchanged and says nothing, but turns
         // `../t` into `t` with a message. A `.` takes an extractor nowhere it
         // was not already; a `..` takes it out of the destination.
@@ -2842,9 +3571,22 @@ mod tests {
         assert_eq!(strip_leading(b".t"), (&b""[..], &b".t"[..]));
         // `...` is a legal file name and is not two dots followed by anything.
         assert_eq!(strip_leading(b".../t"), (&b""[..], &b".../t"[..]));
-        // A `..` in the middle is not a *leading* prefix and is left alone; the
-        // extractor is what refuses those.
-        assert_eq!(strip_leading(b"a/../b"), (&b""[..], &b"a/../b"[..]));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_interior_dotdot_moves_the_cut_past_itself() {
+        // This is `safer_name_suffix`'s whole point and it is not a *leading*
+        // prefix rule: GNU scans the entire name and cuts past the last `..`
+        // component. It decides where a hard link whose target is `a/../base`
+        // points -- at `base` -- and which prefix gets announced when a member
+        // named `a/../b` is refused. This tar read the rule as "a leading run
+        // of `/` and `../`" until `tar-rules2.sh` measured it.
+        assert_eq!(strip_leading(b"a/../b"), (&b"a/../"[..], &b"b"[..]));
+        assert_eq!(strip_leading(b"/d/../e"), (&b"/d/../"[..], &b"e"[..]));
+        assert_eq!(strip_leading(b"a/../base"), (&b"a/../"[..], &b"base"[..]));
+        // The cut lands past the *last* one, not the first.
+        assert_eq!(strip_leading(b"a/../b/../c"), (&b"a/../b/../"[..], &b"c"[..]));
     }
 
     #[test]
@@ -2852,8 +3594,10 @@ mod tests {
     fn a_name_that_is_nothing_but_prefix_is_left_with_nothing() {
         // `tar -c ..` -- the caller asked for the parent directory, and every
         // byte of the name is a prefix tar removes. GNU stores `.` (listed as
-        // `./`), which is the only name left that means anything.
+        // `./`), which is the only name left that means anything; the
+        // substitution is `PrefixNotice`'s, not this function's.
         assert_eq!(strip_leading(b".."), (&b".."[..], &b""[..]));
+        assert_eq!(strip_leading(b"d/.."), (&b"d/.."[..], &b""[..]));
         assert_eq!(strip_leading(b"/"), (&b"/"[..], &b""[..]));
         assert_eq!(strip_leading(b""), (&b""[..], &b""[..]));
     }
@@ -2901,9 +3645,13 @@ mod tests {
         let name = b"\xff/dir\x80/\xe9\xe9";
         let block = make_header(name, 0, b'0');
         assert_eq!(field_bytes(block.get(..100).unwrap()), name);
-        // And the sanitizer, which stands between the two, does not touch it.
+        // And the stripping that stands between the two does not touch it.
+        let mut prefixes = PrefixNotice::new();
         assert_eq!(
-            sanitize_member_name(field_bytes(block.get(..100).unwrap())).unwrap(),
+            prefixes.strip(
+                field_bytes(block.get(..100).unwrap()),
+                PrefixKind::MemberNames
+            ),
             name
         );
     }

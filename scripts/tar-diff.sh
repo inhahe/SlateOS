@@ -52,7 +52,7 @@
 set -u
 
 DIFF_PROG='tar'
-DIFF_NEED='find stat cmp od sha256sum touch'
+DIFF_NEED='find stat cmp od sha256sum touch ln readlink mkfifo'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -96,6 +96,41 @@ build_tree() {
     tree/sub tree/empty-dir tree
 }
 build_tree
+
+# A second fixture tree, for the types the first one has none of: a symlink, a
+# hard link, a fifo, and the two symlink targets an extractor has to treat as
+# hostile. It is separate rather than folded into `tree` so that the cases over
+# `tree` stay a comparison of the plain-file path alone — a symlink there would
+# make every one of them pass or fail for a reason unrelated to its name.
+#
+# `up` and `abs` are the point of the tree. A symlink whose target is absolute
+# or climbs out is the one archive member that can make a *later* member land
+# outside the destination, so GNU withholds it until the archive is finished.
+# Nothing else here can tell whether that machinery exists.
+build_special() {
+  rm -rf special
+  mkdir -p special/d
+  printf 'hello\n'      > special/f
+  ln    special/f         special/hard
+  ln -s f                 special/rel
+  ln -s /no/such/where    special/dangling
+  ln -s ../outside        special/up
+  ln -s /etc/passwd       special/abs
+  mkfifo special/pipe
+  printf 'x'            > special/d/inner
+  # 0777 does not survive a umask of 022, so it distinguishes a tar that
+  # restores the archived mode from one that lets the umask decide; 0700 on a
+  # directory catches the same thing for the deferred directory pass.
+  chmod 0777 special/f
+  chmod 0700 special/d
+  touch -d '2020-01-02 03:04:05' \
+    special/f special/hard special/pipe special/d special/d/inner special
+  # A symlink's own mtime is restored separately, without following it, so it
+  # is given a different stamp from everything else.
+  touch -h -d '2019-05-06 07:08:09' \
+    special/rel special/dangling special/up special/abs
+}
+build_special
 
 report() {
   local label="$1"
@@ -247,25 +282,80 @@ list_case() {
 # everything a restore is supposed to bring back and nothing that varies
 # between two runs. Ownership is deliberately absent: as a non-root user
 # neither side can restore it, so comparing it would compare nothing.
+#
+# One mtime cannot be compared literally: a directory the extraction *invented*
+# (or merely wrote into) is stamped with the wall clock, so the two runs disagree
+# whenever they straddle a second boundary — which they did, intermittently, on
+# the destination root itself. Rounding or ignoring mtimes wholesale would throw
+# away the check that matters, since restoring the archive's stamps is most of
+# what a manifest is for. Instead any stamp within five minutes of now is printed
+# as the token `NOW`: every fixture's stored mtimes are 2018-2020 dates, so a
+# recent stamp means "assigned by the extraction", and *that* both sides must
+# still agree about — a tar that failed to invent a directory has no line at all.
 manifest() {
   ( cd "$1" 2>/dev/null || return 0
+    now=$(date +%s)
+    # mt EPOCH — the stamp, or `NOW` if the extraction just made it up.
+    mt() {
+      d=$(( now - $1 )); [ "$d" -lt 0 ] && d=$(( -d ))
+      if [ "$d" -le 300 ]; then printf 'NOW'; else printf '%s' "$1"; fi
+    }
     find . | LC_ALL=C sort | while IFS= read -r p; do
-      if [ -d "$p" ]; then
-        printf 'd %s %s %s\n' "$p" "$(stat -c '%a %Y' "$p")" -
+      # `-h` is tested first because every other test follows the link: a
+      # symlink to a file would otherwise be reported as that file, and a
+      # dangling one would fall through to a `stat` that fails. The target is
+      # part of the comparison — restoring a symlink pointing somewhere else is
+      # precisely the failure the delayed-link machinery exists to prevent, and
+      # it is invisible in mode, size and mtime.
+      if [ -h "$p" ]; then
+        read -r mode mtime <<EOF
+$(stat -c '%a %Y' -- "$p")
+EOF
+        printf 'l %s %s %s -> %s\n' "$p" "$mode" "$(mt "$mtime")" "$(readlink -- "$p")"
+      elif [ -d "$p" ]; then
+        read -r mode mtime <<EOF
+$(stat -c '%a %Y' -- "$p")
+EOF
+        printf 'd %s %s %s %s\n' "$p" "$mode" "$(mt "$mtime")" -
       elif [ -f "$p" ]; then
-        printf 'f %s %s %s\n' "$p" "$(stat -c '%a %Y %s' "$p")" \
+        # `%h` is the link count. A tar that writes a hard link as a second
+        # copy produces identical bytes, an identical mode and an identical
+        # mtime; the count is the only field that differs.
+        read -r mode mtime size links <<EOF
+$(stat -c '%a %Y %s %h' -- "$p")
+EOF
+        printf 'f %s %s %s %s %s %s\n' "$p" "$mode" "$(mt "$mtime")" "$size" "$links" \
           "$(sha256sum <"$p" | cut -c1-16)"
       else
-        printf '? %s %s -\n' "$p" "$(stat -c '%a %Y' "$p")"
+        # A fifo, a socket, a device. `%F` names which.
+        read -r mode mtime <<EOF
+$(stat -c '%a %Y' -- "$p")
+EOF
+        printf '? %s %s %s %s\n' "$p" "$mode" "$(mt "$mtime")" \
+          "$(stat -c '%F' -- "$p" | tr ' ' '-')"
       fi
-    done )
+    done
+    # And *which* files are the same file. The inode numbers themselves differ
+    # between the two runs by construction, so what can be compared is the
+    # grouping: a hard link made to the wrong member has the right count and
+    # the wrong company.
+    find . -type f -links +1 -printf '%i %p\n' 2>/dev/null | LC_ALL=C sort \
+      | awk '{ g[$1] = g[$1] " " $2 } END { for (k in g) print "=" g[k] }' \
+      | LC_ALL=C sort )
 }
 
 # extract_case LABEL ARCHIVE [EXTRA-ARGS...]
+#
+# Honours `$PREP`: the name of a function run inside each destination before
+# the extraction. Replacing an entry that already exists is a different code
+# path from creating one — GNU attempts the creation, unlinks on EEXIST and
+# retries, and the error the caller sees is the *first* one — so the two are
+# worth separate cases.
 extract_case() {
   local label="$1" archive="$2"; shift 2
   local o_rc g_rc o_man g_man
   rm -rf od gd; mkdir od gd
+  if [ -n "${PREP:-}" ]; then ( cd od && "$PREP" ); ( cd gd && "$PREP" ); fi
   ( cd od && diff_run env PATH="$bindir/ours" tar -xf "../$archive" "$@" \
       </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err" ); o_rc=$?
   ( cd gd && diff_run env PATH="$bindir/gnu" tar -xf "../$archive" "$@" \
@@ -335,6 +425,10 @@ create_case 'a file that is not text'    tree/binary.dat
 create_case 'a name that is not UTF-8'   "tree/$NONUTF8"
 create_case 'an empty directory'         tree/empty-dir
 create_case 'several operands'           tree/a.txt tree/zero.txt tree/sub
+create_case 'symlinks, a hard link and a fifo' special
+create_case 'a symlink on its own'       special/rel
+create_case 'a dangling symlink'         special/dangling
+create_case 'a fifo'                     special/pipe
 
 # A member name longer than the 100-byte `name` field. ustar splits it at a `/`
 # into `prefix` + `name`; a tar that only fills `name` truncates it, produces a
@@ -353,6 +447,10 @@ interop_case 'a name too long for the name field' long
 interop_case 'tree'                     tree
 interop_case 'a name that is not UTF-8' "tree/$NONUTF8"
 interop_case 'an empty directory'       tree/empty-dir
+# The typeflag, linkname and devmajor/devminor fields are only exercised here.
+# A tar that stored a symlink as an empty regular file writes an archive GNU
+# reads without a murmur; the listing is the only place it shows.
+interop_case 'symlinks, a hard link and a fifo' special
 
 # ===========================================================================
 # 3. listing an archive GNU wrote
@@ -377,6 +475,106 @@ list_case 'truncated mid-header' -tf partial-header.tar
 # ===========================================================================
 extract_case 'a tree GNU wrote'   ref.tar
 extract_case 'one member by name' ref.tar tree/a.txt
+
+# Archived from *inside* `special`, so the members are `./f`, `./rel` and a
+# leading `.` for the directory itself. That is what `tar -cf - .` produces and
+# it is the common shape in the wild; it also means the destination's own mode
+# and mtime are restored from the `.` member, which is a case a `special/...`
+# archive would not reach.
+# shellcheck disable=SC2086
+( cd special && "$gnu_real" $GNUFMT -cf ../spec.tar . )
+extract_case 'symlinks, a hard link and a fifo' spec.tar
+extract_case 'a symlink alone, by name'         spec.tar ./rel
+extract_case 'a fifo alone, by name'            spec.tar ./pipe
+extract_case 'with -p'                          spec.tar -p
+# Saved and restored rather than run in a subshell: `report` increments the
+# counters, and a subshell would throw its tally away.
+saved_umask=$(umask); umask 077
+extract_case 'under a umask of 077'             spec.tar
+umask "$saved_umask"
+
+# Extracting over entries that are already there, of deliberately mismatched
+# types: a file where a symlink goes, a directory where a fifo goes, a
+# *non-empty* directory where a symlink goes. The last is the one that
+# separates `File exists` from `Directory not empty` — GNU discards the failed
+# removal and reports the original EEXIST.
+prep_existing() {
+  printf 'old\n' > rel; mkdir -p pipe; printf 'z\n' > hard
+  mkdir -p dangling; : > dangling/keep
+  # A fixed stamp: whatever tar does not replace keeps its mtime, and a
+  # wall-clock one differs between the two runs by construction.
+  touch -d '2018-03-04 05:06:07' rel pipe hard dangling dangling/keep
+}
+PREP=prep_existing extract_case 'over existing entries of the wrong type' spec.tar
+
+# `escape/` is where the traversal cases aim; the check that it stayed empty is
+# further down, but the obstacle-course cases below need it to exist already.
+mkdir -p escape
+
+# Extracting a regular member over a file that has *another name*. An `O_TRUNC`
+# open rewrites the shared inode, so `other` — which is not in the archive at
+# all — silently changes too. GNU's `O_EXCL` + unlink + retry breaks the link
+# instead, leaving `other` alone. `%h` and the `=`-grouping lines in `manifest`
+# are what make the difference visible.
+prep_hardlinked() {
+  printf 'old-and-longer\n' > f; ln f other
+  touch -d '2018-03-04 05:06:07' f other
+}
+PREP=prep_hardlinked extract_case 'over a file with another hard link' spec.tar ./f
+
+# The same open, but the obstacle is a symlink pointing *outside* the
+# destination. `O_TRUNC` follows it and writes at the far end — a traversal that
+# none of the other defences cover, because the symlink came from the
+# filesystem rather than from the archive. Both tars must replace the link.
+prep_symlink_out() {
+  ln -s ../escape/loot f
+  ln -s ../escape/loot2 rel
+}
+PREP=prep_symlink_out extract_case 'over a symlink pointing outside' spec.tar ./f ./rel
+
+# A *directory* member over a symlink that already points at a directory. The
+# trap is that `is_dir()` follows the link, sees a directory, and reports the
+# mkdir a success — leaving the link in place for `d/inner` to be written
+# through. Both tars must end with a real directory at `d` and nothing in
+# `escape/`.
+prep_dir_symlink() {
+  ln -s ../escape d
+}
+PREP=prep_dir_symlink extract_case 'a directory member over a symlink to one' spec.tar
+
+# A directory member over a plain file: replaced, not refused.
+prep_dir_over_file() {
+  printf 'in the way\n' > d
+  touch -d '2018-03-04 05:06:07' d
+}
+PREP=prep_dir_over_file extract_case 'a directory member over a plain file' spec.tar
+
+# Ancestors that are not stored in the archive. `tar -cf deep.tar a/b/c` stores
+# the one member and neither `a/` nor `a/b/`, so extracting it is the case that
+# forces the extractor to invent them.
+mkdir -p deepsrc/a/b/c
+printf 'hi\n' > deepsrc/a/b/c/d
+printf 'hi\n' > deepsrc/a/b/cc
+( cd deepsrc && "$gnu_real" $GNUFMT -cf ../deep.tar a/b/cc )
+( cd deepsrc && "$gnu_real" $GNUFMT -cf ../deeper.tar a/b/c/d )
+extract_case 'ancestors invented on demand' deep.tar
+
+# And the failures, which are the reason the ancestor walk cannot just be
+# `mkdir -p`. GNU keeps walking past an ancestor it could not make and reports
+# the *last* one it tried, so an unwritable destination two levels short of the
+# member reports `a/b: Cannot mkdir: No such file or directory` — not `a`, and
+# not `Permission denied`. `chmod 555 .` is undone by the next case's `rm -rf`,
+# which only needs the parent to be writable.
+prep_unwritable() { chmod 555 .; }
+PREP=prep_unwritable extract_case 'ancestors that cannot be made at all' deep.tar
+PREP=prep_unwritable extract_case 'ancestors, three levels short' deeper.tar
+
+# The other shape: the first ancestor is there but will not accept children, so
+# the walk gets one level further before it fails.
+prep_unwritable_a() { mkdir a; chmod 555 a; }
+PREP=prep_unwritable_a extract_case 'an ancestor that rejects children' deep.tar
+PREP=prep_unwritable_a extract_case 'the same, one level deeper' deeper.tar
+chmod -R u+w od gd 2>/dev/null
 
 # The tar-slip family. GNU strips a leading `/` with a warning and refuses
 # `..`; ours must not write outside the destination either way. The comparison
@@ -410,6 +608,110 @@ blocks[148:156] = (b"%06o\0 " % chk)
 PY
 if [ -f dotdot.tar ]; then
   extract_case 'a member that climbs out with ..' dotdot.tar
+fi
+
+# ===========================================================================
+# 4b. headers no archiver will write for you
+# ===========================================================================
+# The cases that matter most to an extractor are exactly the ones a
+# well-behaved archiver never produces, so they are built a block at a time.
+# `escape/` is the directory the traversal cases aim at; it must still be empty
+# afterwards, and that is checked separately from the tree comparison because
+# both sides can agree on a tree while both are wrong.
+mkdir -p escape
+python3 - "$work" <<'PY' 2>/dev/null || echo "note: no python3; the forged-header cases did not run" >&2
+import pathlib, sys
+w = pathlib.Path(sys.argv[1])
+
+def hdr(name, typeflag=ord('0'), mode=0o644, size=0, link=b'', major=None, minor=None):
+    b = bytearray(512)
+    def put(off, val): b[off:off + len(val)] = val
+    put(0, name); put(100, b'%07o\0' % mode)
+    put(108, b'0000000\0'); put(116, b'0000000\0')
+    put(124, b'%011o\0' % size); put(136, b'%011o\0' % 1577934245)
+    b[156] = typeflag; put(157, link)
+    put(257, b'ustar\0'); put(263, b'00')
+    if major is not None: put(329, b'%07o\0' % major)
+    if minor is not None: put(337, b'%07o\0' % minor)
+    # The checksum is computed over the block with the field itself blanked,
+    # which is the format's own rule and the reason it can be filled in last.
+    b[148:156] = b' ' * 8
+    b[148:156] = b'%06o\0 ' % sum(b)
+    return bytes(b)
+
+def pad(data): return data + b'\0' * (-len(data) % 512)
+
+esc = str(w / 'escape').encode()
+cases = {
+  # A char and a block device. As a non-root user both must fail, and the
+  # question is whether they fail with the same words: `mknod` returns EPERM,
+  # which ErrorKind folds in with EACCES.
+  'dev':        hdr(b'zero', ord('3'), 0o666, major=1, minor=5)
+                + hdr(b'loopy', ord('4'), 0o660, major=7, minor=0),
+  # A hard link to a member that is not in the archive, one to an absolute
+  # path, one that climbs out. GNU strips the last two and links what remains.
+  'orphan':     hdr(b'orphan', ord('1'), link=b'nowhere'),
+  'absl':       hdr(b'esc', ord('1'), link=b'/etc/passwd'),
+  'uplink':     hdr(b'esc2', ord('1'), link=b'../outside'),
+  # The prefix notice is once per *distinct* prefix, with separate sets for
+  # names and for link targets. A repeat, and a repeat of a shorter one after a
+  # longer one, must both stay silent.
+  'prefixes':   hdr(b'a', ord('1'), link=b'/x') + hdr(b'b', ord('1'), link=b'//x')
+                + hdr(b'c', ord('1'), link=b'/x') + hdr(b'd', ord('1'), link=b'../x')
+                + hdr(b'e', ord('1'), link=b'/x') + hdr(b'g', ord('1'), link=b'a/../x'),
+  # Names in every shape the stripping rule has to answer for, including the
+  # two that strip to nothing and the one that is refused outright.
+  'dotdot':     b''.join(hdr(n) for n in
+                [b'../x', b'a/../b', b'./c', b'd/..', b'..', b'/a']),
+  # A typeflag from no standard, with data. The reader must skip its blocks or
+  # every following header is misaligned.
+  'unknown':    hdr(b'weird', ord('Z'), size=5) + pad(b'ZZZZZ')
+                + hdr(b'after', ord('0'), size=6) + pad(b'after\n'),
+  # An empty symlink target, an empty hard link target, an empty *name*. GNU
+  # substitutes `.` for the latter two and says so, every time.
+  'emptysym':   hdr(b'sl', ord('2'), 0o777, link=b''),
+  'emptytgt':   hdr(b'lnk', ord('1'), link=b''),
+  'emptyname':  hdr(b'', ord('0')) + hdr(b'', ord('0')),
+  # A directory member stored without the trailing slash that usually marks one.
+  'dirnoslash': hdr(b'plain', ord('5'), 0o755),
+  # The traversal itself, both ways round: a symlink out of the tree followed
+  # by a member underneath it. If the link is created when it is read, the
+  # member lands outside; GNU withholds it until the archive is finished, so
+  # the member finds a mode-0 placeholder file and fails.
+  'traverse':   hdr(b'd', ord('2'), 0o777, link=esc)
+                + hdr(b'd/pwned', ord('0'), size=6) + pad(b'pwned\n'),
+  # `..` counted from the destination, which is one level under the work
+  # directory, so this names the same `escape/` the absolute one does.
+  'traverse2':  hdr(b'd', ord('2'), 0o777, link=b'../escape')
+                + hdr(b'd/pwned', ord('0'), size=6) + pad(b'pwned\n'),
+}
+for name, blocks in cases.items():
+    (w / ('h-%s.tar' % name)).write_bytes(blocks + b'\0' * 1024)
+PY
+
+for c in dev orphan absl uplink prefixes dotdot unknown emptysym emptytgt \
+         emptyname dirnoslash traverse traverse2; do
+  [ -f "h-$c.tar" ] || continue
+  extract_case "forged header: $c" "h-$c.tar"
+  # `-tv` has to agree too. The prefix notices and the `link to` suffix come
+  # out of the same stripping the extractor uses, so a listing that disagrees
+  # with GNU means the two drivers have drifted apart from each other as well.
+  list_case "forged header: $c" -tvf "h-$c.tar"
+done
+
+# The traversal cases aimed at `escape/`. A tree comparison cannot see this:
+# both sides leave `d` a symlink either way, and the difference is whether
+# anything was written through it.
+if [ -f h-traverse.tar ]; then
+  leaked=$(find escape -mindepth 1 2>/dev/null)
+  if [ -z "$leaked" ]; then
+    pass=$((pass+1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   %s\n' 'traversal: nothing was written outside the destination'
+  else
+    fail=$((fail+1))
+    printf 'DIFF %s\n  wrote outside the destination: %s\n' \
+      'traversal: nothing was written outside the destination' "$(printf '%s' "$leaked" | tr '\n' ' ')"
+  fi
 fi
 
 # ===========================================================================

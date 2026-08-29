@@ -1520,11 +1520,13 @@ where
         first = false;
 
         let member = decode_member(&block);
-        // A header that passes the checksum and still names nothing is not
-        // something to guess about.
-        if member.name.is_empty() {
-            return Stop::BadHeader;
-        }
+        // A header that passes the checksum and names nothing is *not* refused.
+        // This used to `return Stop::BadHeader`, on the reasoning that an empty
+        // name is not something to guess about — but GNU does not guess either,
+        // it substitutes: `Substituting `.' for empty member name`, then lists
+        // and extracts the member as `.`. Refusing it here made this tar abandon
+        // the rest of a readable archive over one blank name field, which is a
+        // strictly worse answer than GNU's; see [`PrefixNotice::strip`].
         let size = if member.has_data() { member.size } else { 0 };
         match handle(&member, input) {
             Handled::Consumed => {}
@@ -1847,14 +1849,24 @@ fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
 /// `remove_file` is tried before `remove_dir` because the overwhelmingly common
 /// case is a file, and because `unlink` on a directory is the cheap failure.
 ///
-/// `ENOENT` is the other recoverable error, and for the same reason as in
-/// [`open_for_member`]: an archive may store `a/b/link` without storing `a/`,
-/// and the ancestors have to be made. They are made *only* on that error —
-/// never speculatively — because a `mkdir -p` run before the attempt is what
-/// turns a withheld symlink into a traversal.
-fn create_replacing<F>(path: &Path, mut create: F) -> io::Result<()>
+/// `ENOENT` is the other recoverable error: an archive may store `a/b/link`
+/// without storing `a/`, so the ancestors have to be made. They are made *only*
+/// on that error — never speculatively — because a `mkdir -p` run before the
+/// attempt is what turns a withheld symlink into a traversal.
+///
+/// Generic in the created thing so the one recovery serves every member type.
+/// A regular member yields the open [`File`]; the others yield `()`. Before,
+/// regular files had a second, subtly different copy of this in
+/// `open_for_member`, and the two drifted: only this one replaced an existing
+/// entry, which is how `create_file` came to write through a hard link.
+fn create_recovering<T, F>(
+    path: &Path,
+    name: &[u8],
+    status: &mut i32,
+    mut create: F,
+) -> io::Result<T>
 where
-    F: FnMut() -> io::Result<()>,
+    F: FnMut() -> io::Result<T>,
 {
     match create() {
         Err(first) if first.kind() == io::ErrorKind::AlreadyExists => {
@@ -1864,18 +1876,93 @@ where
             create()
         }
         Err(first) if first.kind() == io::ErrorKind::NotFound => {
-            let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
-                return Err(first);
-            };
-            // The original error, not the `mkdir`'s: the caller's message names
-            // the member it was trying to create, and `No such file or
-            // directory` is the true reason it could not be.
-            if fs::create_dir_all(parent).is_err() {
-                return Err(first);
-            }
+            make_ancestors(name, status);
+            // Retried even when nothing was made: GNU reports the *second*
+            // attempt's error, and this is the line that puts its `Cannot mkdir`
+            // message before the caller's `Cannot open` one.
             create()
         }
         other => other,
+    }
+}
+
+/// `mkdir` for a directory *member*, where an existing directory is success.
+///
+/// The `AlreadyExists` is passed through for anything that is not a directory,
+/// so [`create_recovering`] removes the obstacle and tries again. That is GNU's
+/// behaviour and it matters twice over: a directory member extracted over a
+/// plain file replaces the file (measured, `tar-rules11.sh` case 4), and one
+/// extracted over a **symlink pointing at a directory** replaces the *symlink*
+/// (`tar-rules12.sh`) instead of quietly extracting through it into wherever it
+/// pointed. `create_dir_all`, which this replaced, did the opposite: it asks
+/// `is_dir()`, which follows the link, sees a directory and reports success —
+/// leaving the symlink in place for every member that followed to be written
+/// through. `symlink_metadata` is the whole of the difference.
+fn make_dir(path: &Path) -> io::Result<()> {
+    match fs::create_dir(path) {
+        Err(e)
+            if e.kind() == io::ErrorKind::AlreadyExists
+                && fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// Create a member's missing ancestor directories, GNU's way.
+///
+/// Not `create_dir_all`. The two agree whenever they succeed, and agree on the
+/// mode (`0777 & ~umask`) and the mtime (now) of what they invent — but they
+/// report different failures, and the message is observable. `create_dir_all`
+/// stops at the first component it cannot make and names *that* one; GNU keeps
+/// going, because a failure part-way up does not prove the rest are hopeless,
+/// and names the last one it tried.
+///
+/// The rule, measured across `tar-rules7.sh` and `tar-rules9.sh`:
+///
+/// * walk the ancestors left to right, skipping empty components (a leading or
+///   doubled `/`), and `mkdir` each;
+/// * `EEXIST` is not a failure — that ancestor is simply already there;
+/// * any other failure is *remembered* and the walk continues;
+/// * `ENOENT` is remembered and stops the walk, since a missing grandparent
+///   really does doom everything deeper;
+/// * at the end, the remembered failure — if any — is the one reported.
+///
+/// The case that forces this shape is an unwritable destination with two levels
+/// missing: `mkdir a` fails `EACCES`, and GNU nonetheless goes on to `mkdir a/b`
+/// and reports *that* — `a/b: Cannot mkdir: No such file or directory`, not
+/// `a: … Permission denied`. And with `a` present but unwritable, member
+/// `a/b/c/d` reports `a/b/c`, three components in, which no stop-at-the-first
+/// rule can produce.
+///
+/// The caller retries the creation afterwards and reports its own failure too,
+/// so a failed ancestor produces the two lines GNU prints, in GNU's order.
+fn make_ancestors(name: &[u8], status: &mut i32) {
+    // (end offset of the ancestor, why it could not be made)
+    let mut failure: Option<(usize, io::Error)> = None;
+    for (i, byte) in name.iter().enumerate() {
+        if *byte != b'/' || i == 0 || name.get(i.wrapping_sub(1)) == Some(&b'/') {
+            continue;
+        }
+        let ancestor = name.get(..i).unwrap_or(name);
+        let owned = os_from_bytes(ancestor);
+        match fs::create_dir(Path::new(&owned)) {
+            Ok(()) => failure = None,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => failure = None,
+            Err(e) => {
+                let doomed = e.kind() == io::ErrorKind::NotFound;
+                failure = Some((i, e));
+                if doomed {
+                    break;
+                }
+            }
+        }
+    }
+    if let Some((end, e)) = failure {
+        let ancestor = name.get(..end).unwrap_or(name);
+        diag!("tar: {}: Cannot mkdir: {}", escape(ancestor), strerror(&e));
+        *status = EXIT_FATAL;
     }
 }
 
@@ -2072,14 +2159,30 @@ fn set_symlink_mtime(_path: &Path, _mtime: i64) -> io::Result<()> {
     Ok(())
 }
 
-/// Open a path for writing, creating or truncating it — without blocking.
+/// Open a path for a regular member: `O_WRONLY|O_CREAT|O_EXCL|O_NONBLOCK`.
 ///
-/// `File::create` is `open(O_WRONLY|O_CREAT|O_TRUNC)`, and on a **fifo** that
-/// blocks until a reader appears. Since this tar learned to create fifos, an
-/// archive holding a fifo named `p` followed by a regular file named `p` was a
-/// hang reachable from a 3 KiB file. `O_NONBLOCK` turns it into `ENXIO` — "No
-/// such device or address" — which is what GNU reports, and which regular
-/// files, the only other thing that reaches here, ignore entirely.
+/// **Exclusive, not truncating**, which is GNU's `open_output_file` when
+/// `--overwrite` was not given, and the difference is not a nicety. This used to
+/// pass `.create(true).truncate(true)`, i.e. `O_TRUNC`, and so wrote *through*
+/// whatever already stood at the path:
+///
+/// * over a file with **other hard links**, `O_TRUNC` rewrites the shared inode,
+///   so extracting `x` silently rewrote every other name for it. GNU's
+///   `O_EXCL` fails, [`create_recovering`] unlinks the name, and the second open
+///   makes a *new* inode — the link is broken, the other names keep their
+///   contents. Measured (`tar-rules5.sh`): after extracting over a
+///   twice-linked file GNU leaves `links=1` and the other name unchanged.
+/// * over a **symlink**, `O_TRUNC` follows it and writes at the far end. An
+///   archive of `x` unpacked into a directory where `x -> ../outside` already
+///   exists therefore wrote outside the destination — a traversal that survived
+///   every other defence here, because the symlink came from the filesystem
+///   rather than from the archive. GNU replaces the symlink itself.
+///
+/// `O_NONBLOCK` remains because `open` on a **fifo** blocks until a reader
+/// appears. With `O_EXCL` an existing fifo is now unlinked and replaced rather
+/// than opened, so the flag no longer has a case to answer on the paths this
+/// program takes — but it costs nothing and the guarantee is worth stating
+/// outright rather than deducing from the flag two lines above.
 #[cfg(unix)]
 fn create_file(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -2087,15 +2190,17 @@ fn create_file(path: &Path) -> io::Result<File> {
     const O_NONBLOCK: i32 = 0o4000;
     fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .custom_flags(O_NONBLOCK)
         .open(path)
 }
 
 #[cfg(not(unix))]
 fn create_file(path: &Path) -> io::Result<File> {
-    File::create(path)
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 fn do_extract(
@@ -2179,7 +2284,13 @@ fn do_extract(
 
         match member.typeflag {
             _ if member.is_dir() => {
-                if let Err(e) = fs::create_dir_all(os_from_bytes(&name)) {
+                // A directory member is stored as `d/`, but every diagnostic
+                // about it names `d` — and the trailing slash would also make
+                // the ancestor walk treat the member itself as its own ancestor.
+                let name = trim_slashes(&name).to_vec();
+                let path = os_from_bytes(&name);
+                let path = Path::new(&path);
+                if let Err(e) = create_recovering(path, &name, &mut status, || make_dir(path)) {
                     diag!("tar: {}: Cannot mkdir: {}", escape(&name), strerror(&e));
                     status = EXIT_FATAL;
                 } else {
@@ -2207,7 +2318,7 @@ fn do_extract(
                 // Measured, `tar-rules2.sh`.
                 let path = os_from_bytes(&name);
                 let path = Path::new(&path);
-                match make_placeholder(path) {
+                match make_placeholder(path, &name, &mut status) {
                     Ok(id) => delayed.push(DelayedLink {
                         name: name.clone(),
                         target: member.linkname.clone(),
@@ -2227,7 +2338,8 @@ fn do_extract(
             b'2' => {
                 let path = os_from_bytes(&name);
                 let path = Path::new(&path);
-                if let Err(e) = create_replacing(path, || make_symlink(&member.linkname, path)) {
+                let create = || make_symlink(&member.linkname, path);
+                if let Err(e) = create_recovering(path, &name, &mut status, create) {
                     diag!(
                         "tar: {}: Cannot create symlink to {}: {}",
                         escape(&name),
@@ -2251,7 +2363,8 @@ fn do_extract(
                 let path = Path::new(&path);
                 let target_path = os_from_bytes(&link_target);
                 let target_path = Path::new(&target_path);
-                if let Err(e) = create_replacing(path, || fs::hard_link(target_path, path)) {
+                let create = || fs::hard_link(target_path, path);
+                if let Err(e) = create_recovering(path, &name, &mut status, create) {
                     // The one place in this program that quotes with `‘…’`
                     // instead of tar's escape style, because it is the one
                     // place GNU does: this sentence is built with gnulib's
@@ -2273,7 +2386,9 @@ fn do_extract(
                 let mode = extraction_mode(member.mode, same_permissions, umask);
                 let path = os_from_bytes(&name);
                 let path = Path::new(&path);
-                if let Err(e) = create_replacing(path, || make_fifo(path, mode)) {
+                if let Err(e) =
+                    create_recovering(path, &name, &mut status, || make_fifo(path, mode))
+                {
                     diag!("tar: {}: Cannot mkfifo: {}", escape(&name), strerror(&e));
                     status = EXIT_FATAL;
                 } else {
@@ -2287,7 +2402,7 @@ fn do_extract(
                 let path = os_from_bytes(&name);
                 let path = Path::new(&path);
                 let create = || make_device(path, mode, block, member.devmajor, member.devminor);
-                if let Err(e) = create_replacing(path, create) {
+                if let Err(e) = create_recovering(path, &name, &mut status, create) {
                     // `Operation not permitted` for everyone but root, and that
                     // is the point rather than a shortcoming: an archive that
                     // could conjure a block device would be handing whoever
@@ -2427,11 +2542,11 @@ struct DelayedLink {
 /// Mode 0, as GNU's `create_placeholder_file` opens it: nothing should be able
 /// to use this file for anything during the seconds it exists. Created
 /// exclusively, so an existing entry is replaced through the same
-/// remove-and-retry [`create_replacing`] does everywhere else — which is why a
+/// remove-and-retry [`create_recovering`] does everywhere else — which is why a
 /// symlink over a *non-empty directory* reports `Cannot open: File exists`
 /// rather than the `Cannot create symlink to ‘…’` a relative one would.
-fn make_placeholder(path: &Path) -> io::Result<(u64, u64)> {
-    create_replacing(path, || create_exclusive(path))?;
+fn make_placeholder(path: &Path, name: &[u8], status: &mut i32) -> io::Result<(u64, u64)> {
+    create_recovering(path, name, status, || create_exclusive(path))?;
     file_identity(path)
 }
 
@@ -2532,29 +2647,18 @@ fn archive_label(archive_file: Option<&OsStr>) -> Vec<u8> {
 ///
 /// The recovery still has to exist, because an archive need not store a
 /// directory before the members inside it — `tar -cf - a/b/c` with no `a/` or
-/// `a/b/` member is legal and GNU extracts it.
+/// `a/b/` member is legal and GNU extracts it. It now lives in
+/// [`create_recovering`], shared with every other member type; this function is
+/// just the wording of the failure.
 fn open_for_member(path: &Path, name: &[u8], status: &mut i32) -> Option<File> {
-    let mut err = match create_file(path) {
-        Ok(f) => return Some(f),
-        Err(e) => e,
-    };
-    if err.kind() == io::ErrorKind::NotFound {
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-            && let Err(e) = fs::create_dir_all(parent)
-        {
-            diag!("tar: {}: Cannot mkdir: {}", escape_os(parent), strerror(&e));
+    match create_recovering(path, name, status, || create_file(path)) {
+        Ok(file) => Some(file),
+        Err(e) => {
+            diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
             *status = EXIT_FATAL;
-            return None;
-        }
-        match create_file(path) {
-            Ok(f) => return Some(f),
-            Err(e) => err = e,
+            None
         }
     }
-    diag!("tar: {}: Cannot open: {}", escape(name), strerror(&err));
-    *status = EXIT_FATAL;
-    None
 }
 
 /// Stream one regular member out of `input` into `name`. Returns false when
@@ -4131,8 +4235,12 @@ mod tests {
 
     #[test]
     fn trim_slashes_never_empties_a_name() {
+        // Two callers: matching an operand against a member name, and turning a
+        // directory member's stored `d/` into the `d` that its diagnostics name
+        // and that `make_ancestors` must not mistake for its own ancestor.
         assert_eq!(trim_slashes(b"a/"), b"a");
         assert_eq!(trim_slashes(b"a///"), b"a");
+        assert_eq!(trim_slashes(b"a/b//"), b"a/b");
         assert_eq!(trim_slashes(b"a"), b"a");
         // `/` alone would otherwise become the empty string, which prefixes
         // every member name there is.

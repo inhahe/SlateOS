@@ -470,20 +470,33 @@ impl FontCache {
     /// rather than to another family's: a terminal that asked for
     /// [`Family::Mono`] and silently got the proportional UI face would draw a
     /// broken grid, which is worse than drawing an unfashionable one.
+    ///
+    /// The entry is built at the **key's** size, not at `px`. Every request
+    /// that rounds to the same key shares one entry, so building from the raw
+    /// `px` would let whichever caller happened to arrive first decide the size
+    /// for all of them: 13.6 and 14.4 share key 14, and which one won depended
+    /// on the order the UI drew in. Worse, it was sticky in the failing
+    /// direction — a single request of zero, a negative, or a size the face
+    /// cannot scale to made [`SystemFont::from_shared`] fail and installed the
+    /// coarse 8x16 bitmap fallback under a key that legitimate callers also
+    /// use, so a sub-pixel label elsewhere silently measured sixteen times too
+    /// tall for the rest of the process. `round_px` clamps to `1..=512`, which
+    /// every face can scale to, so keying and building agree and the fallback
+    /// is reached only when there is genuinely no usable face.
     pub fn get(&mut self, px: f32, weight: Weight, family: Family) -> &mut SystemFont {
         let face = self.faces.get(&(family, weight)).map(Arc::clone);
-        self.fonts
-            .entry((round_px(px), weight, family))
-            .or_insert_with(|| {
-                // An installed face that will not scale to this size is a
-                // per-size failure, not a reason to stop using the face: fall
-                // back for this entry and leave the face installed.
-                face.and_then(|f| SystemFont::from_shared(f, px).ok())
-                    .unwrap_or_else(|| match weight {
-                        Weight::Regular => SystemFont::builtin(px),
-                        Weight::Bold => SystemFont::builtin_bold(px),
-                    })
-            })
+        let key = round_px(px);
+        let size = key_px(key);
+        self.fonts.entry((key, weight, family)).or_insert_with(|| {
+            // An installed face that will not scale to this size is a
+            // per-size failure, not a reason to stop using the face: fall
+            // back for this entry and leave the face installed.
+            face.and_then(|f| SystemFont::from_shared(f, size).ok())
+                .unwrap_or_else(|| match weight {
+                    Weight::Regular => SystemFont::builtin(size),
+                    Weight::Bold => SystemFont::builtin_bold(size),
+                })
+        })
     }
 
     /// How many distinct fonts have been built.
@@ -514,6 +527,20 @@ fn round_px(px: f32) -> u32 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let rounded = px.clamp(1.0, 512.0).round() as u32;
     rounded
+}
+
+/// The pixel size a cache entry with key `key` is built at.
+///
+/// The inverse of [`round_px`], and the reason [`FontCache::get`] is
+/// order-independent: the key and the size it is built at are the same number,
+/// so two callers whose requests round together get the same font whichever
+/// asks first.
+fn key_px(key: u32) -> f32 {
+    // `round_px` clamps to `1..=512`; the `min` restates that bound here so
+    // the cast stays exact even if the clamp above ever moves.
+    #[allow(clippy::cast_precision_loss)]
+    let px = key.min(512) as f32;
+    px
 }
 
 /// Picks the integer scale of the built-in face closest to `px_per_em`.
@@ -693,6 +720,60 @@ mod tests {
         assert_eq!(cache.len(), 3, "size and weight each key the cache");
         cache.get(16.0, Weight::Regular, Family::Mono);
         assert_eq!(cache.len(), 4, "the family keys the cache too");
+    }
+
+    #[test]
+    fn two_requests_that_share_a_key_get_the_same_font_whichever_asks_first() {
+        // The entry is built at the key's size, so the order the UI happens to
+        // draw in cannot change anybody's metrics. Building from the raw `px`
+        // instead made 13.6 and 14.4 -- one cache key -- measure differently
+        // depending on which label was painted first.
+        for pair in [(13.6_f32, 14.4_f32), (7.5, 8.4), (100.4, 99.5)] {
+            let mut first = FontCache::new();
+            first
+                .install_face(Family::Ui, Weight::Regular, build_test_font())
+                .unwrap();
+            let mut second = FontCache::new();
+            second
+                .install_face(Family::Ui, Weight::Regular, build_test_font())
+                .unwrap();
+            first.get(pair.0, Weight::Regular, Family::Ui);
+            second.get(pair.1, Weight::Regular, Family::Ui);
+            let a = first.get(pair.1, Weight::Regular, Family::Ui).measure("Wq");
+            let b = second
+                .get(pair.0, Weight::Regular, Family::Ui)
+                .measure("Wq");
+            assert_eq!(first.len(), 1, "{pair:?} did not share one entry");
+            assert!(
+                (a - b).abs() < f32::EPSILON,
+                "{pair:?} measured {a} or {b} depending on which was asked for first"
+            );
+        }
+    }
+
+    #[test]
+    fn a_size_no_face_can_scale_to_does_not_poison_the_key_it_rounds_to() {
+        // Zero, a negative and a NaN all round into a key that real callers
+        // use: 0.0 and 1.4 both key on 1. Building from the raw size made
+        // `from_shared` fail for the bad one and installed the coarse 8x16
+        // bitmap under that key, so every later sub-pixel label measured
+        // sixteen times too tall -- for the rest of the process.
+        for bad in [0.0_f32, -3.0, f32::NAN, f32::INFINITY] {
+            let mut cache = FontCache::new();
+            cache
+                .install_face(Family::Ui, Weight::Regular, build_test_font())
+                .unwrap();
+            cache.get(bad, Weight::Regular, Family::Ui);
+            let good = if bad.is_finite() && bad > 0.0 {
+                1.4
+            } else {
+                16.2
+            };
+            assert!(
+                cache.get(good, Weight::Regular, Family::Ui).is_scalable(),
+                "a request of {bad} left {good} on the bitmap fallback"
+            );
+        }
     }
 
     #[test]

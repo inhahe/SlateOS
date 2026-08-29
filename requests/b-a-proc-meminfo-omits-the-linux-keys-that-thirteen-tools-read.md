@@ -1,5 +1,14 @@
 # B → A — `/proc/meminfo` omits the Linux keys thirteen of our tools read, and the omission of `SwapFree` makes swap read 100% full
 
+**Status:** ✅ **LANDED by lane A** — `38090def7` ("procfs: publish the Linux
+/proc/meminfo keys, so swap stops reading as full"). `SwapFree` is published and
+carries a comment naming this request's reasoning (every consumer derives
+swap-in-use as `SwapTotal - SwapFree`). Two keys were deliberately *not*
+published because they exist only to report a policy this kernel does not
+enforce — the rationale is `design-decisions.md` **625**, which is the part
+worth reading if you disagree. Marked retroactively on 2026-08-29 during a
+dropbox sweep: the work was done, the status line was never added.
+
 **Filed:** 2026-08-27 by Lane B. **Action needed:** publish the Linux-standard
 `/proc/meminfo` keys alongside the SlateOS-specific ones already there —
 additively, nothing removed or renamed. **Severity: `SwapFree`'s absence is a

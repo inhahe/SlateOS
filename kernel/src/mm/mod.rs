@@ -265,34 +265,103 @@ impl core::fmt::Display for MemoryInfo {
 ///
 /// This is a lightweight operation (no heap allocation, a few lock
 /// acquisitions for counters).  Safe to call from any context that
-/// can take spinlocks (not ISR context).
+/// can take spinlocks — **but not from an interrupt or softirq**, which is
+/// what [`try_memory_info()`] is for.
 #[must_use]
-#[allow(clippy::arithmetic_side_effects)]
 pub fn memory_info() -> MemoryInfo {
+    assemble_memory_info(
+        frame::stats(),
+        frame::zero_pool_count(),
+        swap::summary(),
+        accounting::tracked_count(),
+    )
+}
+
+/// Non-blocking variant of [`memory_info()`], for the timer softirq.
+///
+/// Returns `None` if **any** of the three locks it needs is currently held, or
+/// if the frame allocator is not yet initialised.  Callers skip the sample
+/// rather than block.
+///
+/// # Why this exists
+///
+/// `memory_info()` takes ordinary blocking locks.  The periodic metrics
+/// sampler runs in the timer softirq, so if the timer fires on a CPU whose
+/// interrupted code already holds one of them, a blocking acquire waits for a
+/// release that only the suspended code can perform.  That is an unbreakable
+/// self-deadlock, and `sync.rs` panics on it rather than hanging (lane B,
+/// `requests/b-a-kstat-sample-calls-memory-info-from-the-timer-softirq-*`).
+/// SWAP is simply the lock that lost the race first; ZERO_POOL and ALLOCATOR
+/// are reachable by the same path, so fixing only SWAP would have moved the
+/// panic rather than removed it.
+///
+/// # Why the whole body runs with interrupts masked
+///
+/// `try_lock` alone stops us blocking, but it does not stop a *nested*
+/// interrupt landing while we hold one of these locks and re-entering it —
+/// which would deadlock in the ordinary blocking way, one level further in.
+/// Softirq context runs with interrupts enabled, so that window is real.
+/// Masking for the duration closes it; the critical section is a handful of
+/// counter reads, so the added interrupt latency is negligible.  This is the
+/// same construct `frame::stats()` already uses for the same reason.
+#[must_use]
+pub fn try_memory_info() -> Option<MemoryInfo> {
+    crate::cpu::without_interrupts(|| {
+        let frame_stats = frame::try_stats()?;
+        let zero_pool_count = frame::try_zero_pool_count()?;
+        let swap_summary = swap::try_summary()?;
+        let tracked = accounting::try_tracked_count()?;
+        Some(assemble_memory_info(
+            Some(frame_stats),
+            zero_pool_count,
+            swap_summary,
+            tracked,
+        ))
+    })
+}
+
+/// Shared body of [`memory_info()`] and [`try_memory_info()`].
+///
+/// Everything the two acquire differently is passed in; everything read here
+/// is lock-free (relaxed atomic loads and per-CPU counters), so the two paths
+/// can never drift into computing a different `MemoryInfo` from the same
+/// inputs — in particular they share one `compute_fragmentation` call site.
+///
+/// Note that the frame stats are taken **once** and used for both the
+/// free/total figures and the buddy order distribution.  The previous code
+/// called `frame::stats()` twice, which both paid for the ALLOCATOR lock twice
+/// and could report an order histogram from a different instant than the free
+/// count it was displayed beside.
+#[allow(clippy::arithmetic_side_effects)]
+fn assemble_memory_info(
+    frame_stats: Option<frame::FrameAllocStats>,
+    zero_pool_count: usize,
+    swap_summary: (usize, usize, usize),
+    tracked_address_spaces: usize,
+) -> MemoryInfo {
     // Physical frame allocator.
-    let (total_frames, free_frames, free_bytes) =
-        frame::stats().map_or((0, 0, 0), |s| (s.total_frames, s.free_frames, s.free_bytes));
+    let (total_frames, free_frames, free_bytes) = frame_stats
+        .as_ref()
+        .map_or((0, 0, 0), |s| (s.total_frames, s.free_frames, s.free_bytes));
     let total_bytes = total_frames * frame::FRAME_SIZE;
     let used_bytes = total_bytes.saturating_sub(free_bytes);
 
     // Zero-page pool.
-    let zero_pool_count = frame::zero_pool_count();
     let (zero_pool_hits, zero_pool_misses) = frame::zero_pool_stats();
 
-    // Kernel heap.
+    // Kernel heap (plain atomic counters — no lock).
     let hs = heap::stats();
 
     // Swap.
-    let (swap_total, swap_used, swap_devices) = swap::summary();
+    let (swap_total, swap_used, swap_devices) = swap_summary;
 
-    // kswapd (background reclaimer).
+    // kswapd (background reclaimer) — all three are relaxed atomic loads.
     let kswapd_running = kswapd::is_running();
     let kswapd_reclaim_cycles = kswapd::reclaim_cycles();
     let kswapd_total_reclaimed = kswapd::total_reclaimed();
 
-    // Buddy order distribution and fragmentation index.
-    let order_counts =
-        frame::stats().map_or([0usize; frame::BUDDY_MAX_ORDER + 1], |s| s.order_counts);
+    // Buddy order distribution and fragmentation index, from the same snapshot.
+    let order_counts = frame_stats.map_or([0usize; frame::BUDDY_MAX_ORDER + 1], |s| s.order_counts);
     let fragmentation_pct = compute_fragmentation(&order_counts);
 
     // Per-CPU frame cache diagnostics.
@@ -325,7 +394,7 @@ pub fn memory_info() -> MemoryInfo {
         kswapd_total_reclaimed,
         oom_events: oom::oom_event_count(),
         oom_kills: oom::oom_kill_count(),
-        tracked_address_spaces: accounting::tracked_count(),
+        tracked_address_spaces,
     }
 }
 
@@ -422,11 +491,35 @@ pub struct MemoryPressure {
 /// - Swap usage (weight: 15%)
 ///
 /// The score is 0 (no pressure) to 100 (critical/OOM).
+///
+/// Takes blocking locks via [`memory_info()`]; **not** callable from an
+/// interrupt or softirq.  Use [`try_memory_pressure()`] there.
+#[must_use]
+pub fn memory_pressure() -> MemoryPressure {
+    pressure_from_info(&memory_info())
+}
+
+/// Non-blocking variant of [`memory_pressure()`], for the timer softirq.
+///
+/// Returns `None` when [`try_memory_info()`] cannot get a consistent snapshot
+/// without waiting.  See that function for why blocking here is not merely
+/// slow but fatal.
+#[must_use]
+pub fn try_memory_pressure() -> Option<MemoryPressure> {
+    Some(pressure_from_info(&try_memory_info()?))
+}
+
+/// The pressure scoring itself: a pure function of an already-collected
+/// [`MemoryInfo`], so the blocking and non-blocking entry points score
+/// identically by construction rather than by two copies agreeing.
+///
+/// Public because a caller that already holds a snapshot — the metrics
+/// sampler does — should score *that* snapshot rather than take every lock a
+/// second time to collect a second one.  Taking no locks itself, it is safe
+/// from any context.
 #[must_use]
 #[allow(clippy::arithmetic_side_effects)]
-pub fn memory_pressure() -> MemoryPressure {
-    let info = memory_info();
-
+pub fn pressure_from_info(info: &MemoryInfo) -> MemoryPressure {
     // --- Physical memory usage score (0-100) ---
     // 0% used → score 0; 100% used → score 100.
     // Non-linear: >90% used counts heavily.

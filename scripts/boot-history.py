@@ -661,13 +661,40 @@ def git_branch() -> str:
 
 
 def load_history(path: str) -> list[dict]:
-    """Read the log, skipping records that fail to parse.
+    """Read the log in chronological order, skipping records that fail to parse.
 
     A corrupt line must not destroy the rest: this file is appended to by every
     boot and is the only longitudinal record of outcomes we have, so partial
     recovery beats an exception. (Same rule as bench-history.py's loader --
     and the same reason: the file is written concurrently by three lanes'
     worktrees and merged as text.)
+
+    **The sort at the end is what makes file order non-semantic**, and that is
+    a correctness requirement, not tidiness. `bench/boot-history.jsonl` is
+    marked `merge=union` in `.gitattributes` so concurrent appends from three
+    lanes stop conflicting -- but union merge *concatenates*, it does not sort:
+    for a conflicting hunk it emits our lines then theirs, so two lanes booting
+    in the same window produce a file whose last record is not the latest boot.
+
+    `tail_clean_streak` walks `reversed(records)` from the end, and its result
+    is a published quantity that several `known-issues.md` closure bars are
+    written in terms of. Computing it from the wrong end of history would close
+    an issue that is still live -- strictly worse than the merge conflict this
+    replaces, because a conflict stops you and a wrong number does not.
+    (Filed by lane B: requests/b-a-boot-history-jsonl-conflicts-*.)
+
+    Sorted as strings, not parsed: every `ts` this file has ever carried is
+    ISO-8601 with a literal `+00:00` offset, because `iso_now()` hardcodes
+    `timezone.utc`, and same-offset ISO-8601 sorts correctly lexicographically.
+    (`test-boot-history.py` asserts that offset uniformity against the real
+    file, so a writer that started emitting local time would be caught here
+    rather than by a quietly-misordered streak.) A record with a missing or
+    blank `ts` sorts first, which is the safe direction for one too old or too
+    damaged to place: it cannot displace the genuinely-latest record from the
+    end.
+
+    The sort is **stable**, so records sharing a timestamp keep their relative
+    file order -- the only ordering information left for a same-second tie.
     """
     records: list[dict] = []
     try:
@@ -684,13 +711,35 @@ def load_history(path: str) -> list[dict]:
                         f"{path}:{lineno}", file=sys.stderr,
                     )
                     continue
-                if isinstance(rec, dict):
-                    records.append(rec)
+                # Valid JSON is not the same thing as a record: a line that
+                # parses to a bare string or number is what a half-written or
+                # mis-merged line often is. Dropping it is right, but dropping
+                # it *silently* -- as this did -- makes a shrinking history
+                # indistinguishable from a history that is simply short, so it
+                # is reported like a malformed line, while the lineno is still
+                # in hand to say which line to go and look at.
+                if not isinstance(rec, dict):
+                    print(
+                        f"boot-history: skipping non-object record at "
+                        f"{path}:{lineno} ({type(rec).__name__})",
+                        file=sys.stderr,
+                    )
+                    continue
+                records.append(rec)
     except FileNotFoundError:
         return []
     except OSError as exc:
         print(f"boot-history: cannot read {path}: {exc}", file=sys.stderr)
         return []
+    # See the docstring: this is what licenses `merge=union` on the file.
+    #
+    # `str(... or "")` rather than a bare `r.get("ts", "")`: a record whose
+    # `ts` is JSON `null`, or a number, would otherwise make the sort raise
+    # TypeError comparing None/int against str -- destroying the whole history
+    # over one damaged line, which is precisely what the per-line recovery
+    # above exists to prevent. Coercing sorts such a record early instead,
+    # the same safe direction as a missing `ts`.
+    records.sort(key=lambda r: str(r.get("ts") or ""))
     return records
 
 

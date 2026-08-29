@@ -1147,6 +1147,30 @@ pub fn device_count() -> usize {
 #[must_use]
 pub fn summary() -> (usize, usize, usize) {
     let state = SWAP.lock();
+    summarise(&state)
+}
+
+/// Non-blocking variant of [`summary()`] for interrupt/softirq context.
+///
+/// Returns `None` if the SWAP lock is currently held rather than waiting for
+/// it.  This exists because [`summary()`] is reachable from the periodic
+/// metrics sampler, which runs in the timer softirq: if the timer fires on a
+/// CPU whose interrupted code already holds SWAP, a blocking acquire can never
+/// succeed — the only thing that could release the lock is the code the
+/// interrupt just suspended.  `sync.rs` detects the recursive acquire and
+/// panics, which is how this was found (lane B,
+/// `requests/b-a-kstat-sample-calls-memory-info-from-the-timer-softirq-*`).
+///
+/// A dropped metrics sample costs nothing; the next tick gets it.
+#[must_use]
+pub fn try_summary() -> Option<(usize, usize, usize)> {
+    let state = SWAP.try_lock()?;
+    Some(summarise(&state))
+}
+
+/// Shared body of [`summary()`] and [`try_summary()`], so the two can never
+/// drift into reporting different numbers from the same state.
+fn summarise(state: &SwapState) -> (usize, usize, usize) {
     let total_bytes = (state.total_capacity as usize).saturating_mul(FRAME_SIZE);
     let used_bytes = (state.total_used() as usize).saturating_mul(FRAME_SIZE);
     let devices = state.devices.len();
@@ -1786,6 +1810,73 @@ pub fn self_test() {
         serial_println!(
             "[swap]   Multi-device priority: OK (alloc prefers priority=100, overflows to priority=0)"
         );
+    }
+
+    // --- Softirq-safety: the try_* chain refuses rather than blocks ---
+    //
+    // This is the regression test for the boot panic lane B reported in
+    // `requests/b-a-kstat-sample-calls-memory-info-from-the-timer-softirq-*`:
+    // the timer softirq called `mm::memory_pressure()` → `memory_info()` →
+    // `swap::summary()` → `SWAP.lock()` while the interrupted code on the same
+    // CPU held SWAP, and blocked for a release only the suspended code could
+    // perform.
+    //
+    // Holding SWAP here and asserting the whole chain reports busy is the
+    // property that makes that impossible.  Note it asserts about
+    // `mm::try_memory_info()`, not just `try_summary()` — a fix that made only
+    // the leaf non-blocking while some caller in the middle still took a
+    // blocking lock would pass a leaf-only test and still panic on boot.
+    {
+        let held = SWAP.lock();
+
+        assert!(
+            try_summary().is_none(),
+            "try_summary() must report busy while SWAP is held, not block"
+        );
+        assert!(
+            crate::mm::try_memory_info().is_none(),
+            "mm::try_memory_info() must report busy while SWAP is held — this is \
+             the exact path the timer softirq takes"
+        );
+        assert!(
+            crate::mm::try_memory_pressure().is_none(),
+            "mm::try_memory_pressure() must report busy while SWAP is held"
+        );
+
+        drop(held);
+
+        // And once released, the same calls must actually succeed — otherwise
+        // the assertions above would be satisfied by a function that always
+        // returns None, and the sampler would never record anything.
+        //
+        // Retried rather than asserted once: the negative direction above is
+        // deterministic (we hold the lock ourselves), but the positive one
+        // races against every other CPU, and ALLOCATOR in particular is hot.
+        // A single-shot assert here would be a flaky boot failure. A bounded
+        // retry still fails a chain that is *permanently* None, which is the
+        // regression worth catching.
+        let mut info = None;
+        for _ in 0..1000 {
+            if let Some(i) = crate::mm::try_memory_info() {
+                info = Some(i);
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        // Succeeding proves every leaf in the chain — try_summary included —
+        // can return Some, since try_memory_info requires all of them.
+        let info =
+            info.expect("try_memory_info() must succeed within 1000 tries with no lock held");
+        assert!(
+            info.total_bytes > 0,
+            "a successful snapshot must carry real numbers, not zeros"
+        );
+        assert!(
+            crate::mm::pressure_from_info(&info).score <= 100,
+            "pressure score must be a percentage"
+        );
+
+        serial_println!("[swap]   Softirq-safe try_* chain: OK (refuses while SWAP held)");
     }
 
     // Note: disk backend test is in self_test_disk(), called separately

@@ -116,8 +116,24 @@ PATH = ROOT / "kernel" / "src" / "kshell.rs"
 # the same defect wearing an `Option`: `parts.get(2).and_then(…).unwrap_or(20)`
 # cannot tell "argument omitted" from "argument unreadable", and answers both
 # with 20.
+#
+# `from_str_radix` is the same defect in a different spelling, and was added on
+# 2026-08-29 after it was noticed that two functions with the defect
+# (`cmd_pciids`, `cmd_sysrq`) were not in the ledger at all -- not exempted,
+# *invisible*. The original pattern required a literal `.parse()`, and
+# `u16::from_str_radix(v, 16).unwrap_or(0)` does not contain one, so nine sites
+# across five functions were never counted and the burn-down total was an
+# undercount by that much.
+#
+# This is the failure shape the shellcheck floor had (design-decisions §630): a
+# gate that is green because it cannot see the thing it is for. Worth stating
+# because the fix is not "add a pattern" but "notice that the count is evidence
+# about the detector, not only about the code" -- a function that *should*
+# appear and does not is the signal, and it is only visible to someone who goes
+# looking at a specific function rather than at the total.
 D1 = re.compile(
-    r"\.parse(?:::<[^>]*>)?\(\)[^;]*?\.unwrap_or(?:_default|_else)?\b"
+    r"(?:\.parse(?:::<[^>]*>)?\(\)|from_str_radix\()[^;]*?"
+    r"\.unwrap_or(?:_default|_else)?\b"
 )
 
 # --------------------------------------------------------------------------

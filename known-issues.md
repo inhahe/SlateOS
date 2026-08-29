@@ -81827,7 +81827,121 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **346 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **335 of 800 remain**
+
+> **Burn-down log.** 2026-08-29 (thirty-eighth batch): `cmd_iomem` (5),
+> `cmd_ioport` (6), `cmd_vmmap` (6), `cmd_kprobes` (4), `cmd_pciids` (4),
+> `cmd_usbpolicy` (3), `cmd_sysrq` (1) and `cmd_gpu` (1) cleared — 30 sites
+> across 8 functions. Pinned by self-test rung 102.
+>
+> **The counts moved differently from every previous batch, and that is the
+> finding.** The heading went 346 → 335, a fall of 11, while 30 sites were
+> actually fixed. Both numbers are right. The gate had been reporting 346 when
+> the true figure was **365**: `scripts/check-option-refusal.py` matched a
+> literal `.parse()`, so the base-16 spelling of the identical defect —
+> `u16::from_str_radix(v, 16).unwrap_or(0)` — was **invisible to it**. Nineteen
+> sites across eight functions had never been seen, let alone exempted. So the
+> real movement is 365 → 335 across 194 → 186 functions, and every earlier
+> total printed by this gate was an undercount by the same 19.
+>
+> **In short:** a gate that measures a debt can only be trusted about the part
+> of the debt it can see, and nothing in its own output says which part that is.
+> This one had been green for months over code it was written to catch. The
+> detector was extended in the same change that paid the debt it was hiding, so
+> the ledger gained nothing from the discovery.
+>
+> * **How it was found, which is the part worth reusing.** Not from the total —
+>   346 looked exactly as healthy as 365 would have. It was found by picking two
+>   functions that *ought* to have been in the ledger, `cmd_pciids` and
+>   `cmd_sysrq`, and noticing they were not merely un-exempted but **absent**.
+>   An entry claiming too many sites is already reported by the checker (that is
+>   what the `stale` arm is for); an entry that was never written cannot be. The
+>   only audit that catches this is to go looking at a specific function rather
+>   than at the count — the same lesson as
+>   `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR`, where the
+>   gate was matching lines and `cargo fmt` had wrapped the statements it wanted.
+>
+> * **`cmd_sysrq` continues the thirty-seventh batch's theme exactly, and is the
+>   most severe site in this one.** `sysrq mask` narrows what the magic SysRq key
+>   is permitted to do; it has no other purpose. The guess was
+>   `unwrap_or(0x7F)`, and `kernel/src/fs/sysrq.rs:205` documents `0x7F` as
+>   "All categories enabled". So a mistyped mask did not narrow the permission
+>   set, it **opened all of it** — reboot and crash included — and printed
+>   `SysRq mask set to 0x7f` as though that had been the request.
+>
+> * **`cmd_sysrq` also carried a different defect the gate cannot see at all,
+>   and it is worse.** The five key operands were read with
+>   `parts.get(1).and_then(|s| s.chars().next())`, which does not read a
+>   character — it reads the first one and discards the rest. The sysrq keys are
+>   single letters naming destructive actions, so `sysrq trigger boot` was obeyed
+>   as `b` (reboot) and `sysrq trigger info` as `i` (kill every process). This is
+>   not a guess but a *truncation*, and it is more convincing than a guess
+>   because the letter acted on is one the operator really typed. Fixed with a
+>   new `required_key` helper; the same shape had already been fixed once for
+>   `find -type`, where the valid set is closed and a whitelist sufficed.
+>
+> * **`cmd_usbpolicy` is the third instance of "the guess is the value that
+>   restricts nothing", reached by a third idiom.** A rule's vendor and product
+>   ids are `Option<u16>`, and `kernel/src/fs/usbpolicy.rs:203` matches with
+>   `rule.vendor_id.is_none_or(|v| v == vid)` — so `None` does not mean "unset",
+>   it means **match every vendor**. The old `…from_str_radix(..).ok()` turned a
+>   mistyped `vid=` into exactly that: a rule aimed at one device silently became
+>   a rule matching all of them, and with `decision=deny` that is every USB
+>   device on the machine. Note this site spells no `unwrap_or` at all, so the
+>   extended detector still does not see it; it was found by reading the
+>   function while fixing its neighbour.
+>
+> * **Two catch-alls in the same command, both of which changed the meaning
+>   rather than defaulting it.** `parse_usb_decision` ended in
+>   `_ => Decision::AskUser`, so `usbpolicy add r denny` installed an *ask* rule
+>   where a *deny* was meant and reported it added — and `usbpolicy default`,
+>   which sets the decision for every device matching no rule, ran through the
+>   same parser. `parse_usb_class` ended in `_ => UsbClass::Other`, which is not
+>   a fallback but **a real class that real devices belong to**, so
+>   `class=stroage` produced a rule quietly governing the wrong class. Both now
+>   return `Option`, and `Other` is still reachable — by spelling it.
+>
+> * **The address and id functions are the wrong-object mutation, as `cmd_cpuset`
+>   was in the previous batch, but with a sharper edge: zero is not a
+>   placeholder in any of these spaces.** Port 0 is a real port, base address 0
+>   is a real region, pid 0 is a real process, vendor id 0 is a real id. So
+>   `iomem unregister 0xFFFG` did not fail — it unregistered whatever was at base
+>   `0` and answered `iomem: unregistered 0x0`, echoing back the same
+>   hexadecimal that had just been mistyped. `kprobes register` is the same
+>   shape at its worst: it installed a probe on the **null address** and printed
+>   `Registered probe id=N` with a genuine id, which is precisely what let the
+>   mistake survive — the operator has a probe, it is simply not on the function
+>   they named, and nothing in the output says so.
+>
+> * **`cmd_pciids` is the query case, and queries are not the mild case.** A
+>   mistyped vendor id became `0` and the command answered `Vendor: Unknown` —
+>   a real answer, about a vendor that was never asked about, and
+>   **indistinguishable from the correct answer for a vendor genuinely not in
+>   the database**. A lookup that cannot read what it was asked to look up has
+>   to say so, or neither of its two outcomes can be trusted.
+>
+> * **`cmd_gpu fill` was fixed on both routes and then reordered.** A bad `0x`
+>   literal and an unlisted colour name both ended at the same default blue, and
+>   on a command whose entire output *is* the screen a wrong fill looks exactly
+>   like a right one. The argument is now validated *before*
+>   `virtio::gpu::is_available()` is consulted: a word the shell cannot read is
+>   wrong on a machine with no GPU exactly as on one with a GPU, and the old
+>   order would have made the diagnostic depend on whether QEMU was started with
+>   `-device virtio-gpu-pci` — the §604 trap, in the self-test as much as in use.
+>
+> * **New helpers.** `required_hex` (the `required_num` of base 16) and
+>   `required_key` (an operand that must be exactly one character) join
+>   `optional_hex` from the previous batch; `FromHexStr` gained a `u8` impl for
+>   `pciids`' class and subclass bytes.
+>
+> **Not fixed here, and deliberately.** `cmd_iomem`'s `name` and `cmd_ioport`'s
+> `name` previously defaulted to the placeholders `"DEV"` and `"PORT"` when
+> absent; both are now required, because a region registered under a name nobody
+> chose is unfindable in the `list` output that is the only way to see it. The
+> remaining `unwrap_or` defaults in these functions — `iomem register`'s size of
+> `0x1000` and `ioport`'s access width of `1` — are genuine documented defaults
+> for *absent* operands and are kept, now routed through `optional_hex` /
+> `optional_num` so a *present but unreadable* operand is refused instead.
 
 > **Burn-down log.** 2026-08-29 (thirty-seventh batch): `cmd_firewall` (4),
 > `cmd_parentaltime` (4), `cmd_service_limits` (4) and `cmd_cpuset` (4) cleared —
@@ -94758,7 +94872,8 @@ harness discriminates at all.
 
 What is deliberately *not* compared is the interactive screen: with stdout a
 terminal, util-linux drives it through terminfo
-(`ESC[7m--More--(Next file: x)ESC[27mESC[K`) and ours writes a plain
+(`ESC[7m--More--(Next file: x)ESC[27m
+ESC[K`) and ours writes a plain
 `--More--`. Those cannot match byte for byte without porting terminfo into a
 pager. The decision to pause, and the keystroke handling, are covered by unit
 tests in `more.rs` instead.

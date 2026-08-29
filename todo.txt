@@ -55172,3 +55172,13 @@ naming commands tar rejects.
 
 TRIGGER: none needed; this is straightforwardly doable and should be the next
 tar task.
+
+RESOLVED (2026-08-29, lane B). `-?`/`--help`, `--usage` and `--version` are
+implemented; the referral now names two commands tar answers. The help text is
+written for this tar and lists only the twelve long names it performs, so it
+cannot advertise an option the parser refuses -- a unit test asserts both
+halves of that. Precedence was measured rather than assumed and matches GNU on
+all four rows (`--help --frobnicate` -> help/0; `--frobnicate --help` ->
+unrecognized/64; `-c --help` -> help/0; `--file --help` -> `--help` is the
+archive name, then no-mode/2), which falls out of returning a `Request` from
+inside the parse loop. Shape differential vs GNU: 19 cases, 0 differences.

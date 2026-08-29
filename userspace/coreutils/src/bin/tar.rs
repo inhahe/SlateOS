@@ -7,8 +7,9 @@
 //! Each of those has GNU's long spelling too — `--create`, `--extract` (or
 //! `--get`), `--list`, `--verbose`, `--file`, `--directory`,
 //! `--preserve-permissions` (or `--same-permissions`) — abbreviable to any
-//! unambiguous prefix, and `--` ends the options. The other 162 long options
-//! GNU has are **recognised and refused** rather than ignored; see
+//! unambiguous prefix, and `--` ends the options. `-?`/`--help`, `--usage` and
+//! `--version` answer and exit 0. The other 159 long options GNU has are
+//! **recognised and refused** rather than ignored; see
 //! [`LONG_OPTIONS`] for why a table of names this tar does not implement is
 //! load-bearing rather than decorative, and [`unsupported`] for why refusing
 //! beats the two cheaper answers.
@@ -120,15 +121,20 @@ const TAR: Program = Program::new("tar", EXIT_USAGE);
 /// No leading `+`: tar **permutes**, so an option may follow an operand.
 /// Measured — `tar -tf t.tar a --verbose` applies the `--verbose` and prints a
 /// long listing, rather than treating it as a second member name.
-const SHORT_OPTIONS: &str = "cxtvpf:C:";
+///
+/// `?` is a real option letter here, not the error return: argp gives `--help`
+/// the short form `-?`, and `tar -?` prints the help and exits 0. The shared
+/// parser looks the letter up by byte and has no special case for `?`, so
+/// listing it is all that is needed.
+const SHORT_OPTIONS: &str = "cxtvpf:C:?";
 
 /// Every long option GNU tar 1.35 has — all 171 — in argp's own table order.
 ///
-/// # Why the whole set, when this tar implements nine of them
+/// # Why the whole set, when this tar implements twelve of them
 ///
 /// Because the table is what decides whether an abbreviation is *ambiguous*,
 /// and an abbreviation is resolved against every name tar knows, not every name
-/// tar acts on. Drop the 162 unimplemented entries and `tar --ex` stops being
+/// tar acts on. Drop the 159 unimplemented entries and `tar --ex` stops being
 /// an error and silently becomes `--extract` — GNU refuses it, listing
 /// fourteen candidates. A table that lists only what it implements does not
 /// merely give a worse message; it gives a *different command* than GNU would.
@@ -401,6 +407,42 @@ fn fatal() -> i32 {
 // argv parsing — pure, cross-platform
 // ============================================================================
 
+/// What the command line turned out to be asking for.
+///
+/// Three of the four answers are not archive work at all. They are separated
+/// from [`TarArgs`] rather than folded into it as flags because the difference
+/// is total: `--help` does not extract anything, does not care that no
+/// operation was given, and exits 0. Returning them from the parser also puts
+/// the **precedence** rule in one place — the parser stops at the first of
+/// them it reaches — and precedence is the whole of the observable behaviour
+/// here. Measured against GNU:
+///
+/// | Command line | GNU | Why |
+/// |---|---|---|
+/// | `tar --help --frobnicate` | help, exit 0 | `--help` came first |
+/// | `tar --frobnicate --help` | `unrecognized option`, exit 64 | the bad one came first |
+/// | `tar -c --help` | help, exit 0 | `-c` is fine; `--help` wins over doing it |
+/// | `tar --file --help` | `You must specify one of…`, exit 2 | `--help` was eaten as `--file`'s value |
+///
+/// An iterator gives all four rows for free, because it hands back one item at
+/// a time in argv order and this function acts on the first that decides the
+/// run. A parser that validated the whole of argv before returning anything
+/// would fail the first row, and one that scanned for `--help` up front would
+/// fail the second and the fourth.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum Request {
+    /// `-?`, `--help`: the full option list, on stdout, exit 0.
+    Help,
+    /// `--usage`: the one-paragraph synopsis, on stdout, exit 0. It exists
+    /// because [`TRY_HELP`] names it — a referral that points at an option the
+    /// program rejects is worse than no referral.
+    Usage,
+    /// `--version`, on stdout, exit 0.
+    Version,
+    /// Do the archive work described by these arguments.
+    Run(TarArgs),
+}
+
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct TarArgs {
@@ -457,11 +499,15 @@ struct TarArgs {
 /// splits clusters by **byte**, so `-é` is refused by its first byte instead of
 /// panicking, and a long name that is not UTF-8 can match no option and so
 /// takes the `unrecognized option` path rather than failing some third way.
-fn parse_args(args: &[OsString]) -> Result<TarArgs, getopt::Error> {
+fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     let mut out = TarArgs::default();
 
     for item in TAR.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
         match item? {
+            // Returned the moment they are reached, which is what makes
+            // `tar --help --frobnicate` print help and `tar --frobnicate
+            // --help` an error. See [`Request`].
+            Opt::Short(b'?', _) => return Ok(Request::Help),
             Opt::Short(b'c', _) => out.create = true,
             Opt::Short(b'x', _) => out.extract = true,
             Opt::Short(b't', _) => out.list = true,
@@ -489,6 +535,9 @@ fn parse_args(args: &[OsString]) -> Result<TarArgs, getopt::Error> {
                 "preserve-permissions" | "same-permissions" => out.same_permissions = true,
                 "file" => out.archive_file = value,
                 "directory" => out.directory = value,
+                "help" => return Ok(Request::Help),
+                "usage" => return Ok(Request::Usage),
+                "version" => return Ok(Request::Version),
                 other => return Err(unsupported(other)),
             },
 
@@ -496,7 +545,85 @@ fn parse_args(args: &[OsString]) -> Result<TarArgs, getopt::Error> {
         }
     }
 
-    Ok(out)
+    Ok(Request::Run(out))
+}
+
+/// The full option list, on stdout, for `-?` and `--help`.
+///
+/// **It describes this tar, not GNU's.** Reproducing GNU's help verbatim would
+/// have been the easy answer and is the wrong one: it advertises 171 long
+/// options of which twelve work here, so a reader following it would be told to
+/// use `--exclude` by the very program that refuses it. That is the same
+/// silent-lie failure that made unimplemented options a refusal rather than a
+/// no-op — see `design-decisions.md` 703 — and it would be worse in help text,
+/// because help is what someone reads *specifically* to find out what is
+/// available.
+///
+/// The shape is argp's, since that is what a tar user recognises: the `Usage:`
+/// line, an examples block, the operation modes separated from the modifiers,
+/// and the informational options last. The closing paragraph states the two
+/// facts that distinguish this tar from the one the reader has used before —
+/// ustar only, and the other names refuse rather than being ignored — because
+/// a user who does not know the second will read a refusal as a bug.
+fn help_text() -> String {
+    "\
+Usage: tar [OPTION...] [FILE]...
+Save many files together into a single archive, and restore individual files
+from an archive.
+
+Examples:
+  tar -cf archive.tar foo bar  # Create archive.tar from files foo and bar.
+  tar -tvf archive.tar         # List all files in archive.tar verbosely.
+  tar -xf archive.tar          # Extract all files from archive.tar.
+
+ Main operation mode:
+
+  -c, --create               create a new archive
+  -t, --list                 list the contents of an archive
+  -x, --extract, --get       extract files from an archive
+
+ Operation modifiers:
+
+  -C, --directory=DIR        change to directory DIR
+  -f, --file=ARCHIVE         use archive file ARCHIVE; with no -f the archive
+                               is standard input or standard output
+  -p, --preserve-permissions, --same-permissions
+                             extract the stored permissions exactly, rather
+                               than applying the umask
+  -v, --verbose              list each file as it is processed
+
+ Informational options:
+
+  -?, --help                 give this help list
+      --usage                give a short usage message
+      --version              print program version
+
+Mandatory arguments to long options are mandatory for the corresponding short
+options too.  A long option may be abbreviated to any unambiguous prefix.
+
+This tar reads and writes POSIX ustar archives.  GNU tar's other long options
+are recognised but not implemented: naming one is an error rather than being
+quietly ignored, so a command asking for something this tar cannot do stops
+instead of doing something else and reporting success.
+"
+    .to_string()
+}
+
+/// The short synopsis, on stdout, for `--usage`.
+///
+/// argp generates this by wrapping the option table into a bracketed list, and
+/// wraps it to the terminal width with continuation lines indented to clear the
+/// `Usage: ` prefix. With twelve names the whole thing fits in four lines, so
+/// it is written out rather than generated; the indent matches argp's so the
+/// two look alike side by side.
+fn usage_text() -> String {
+    "\
+Usage: tar [-ctxvp?] [-C DIR] [-f ARCHIVE] [--create] [--list] [--extract]
+            [--get] [--directory=DIR] [--file=ARCHIVE]
+            [--preserve-permissions] [--same-permissions] [--verbose] [--help]
+            [--usage] [--version] [FILE]...
+"
+    .to_string()
 }
 
 fn main() {
@@ -511,6 +638,32 @@ fn main() {
             diag!("{TRY_HELP}");
             process::exit(e.status);
         }
+    };
+
+    // The three informational requests answer and leave, before any mode
+    // check: `tar --help` prints help rather than complaining that no
+    // operation was given, and exits 0.
+    //
+    // The write is unchecked, and that is GNU's behaviour rather than an
+    // oversight: measured, `tar --help >&-` prints nothing and exits **0**,
+    // where `wc --help >&-` reports `write error: Bad file descriptor` and
+    // exits 1. argp writes help to a `FILE*` and never asks whether it landed.
+    // Matching it also keeps `tar --help | head` from failing, which is how
+    // help is most often read.
+    let parsed = match parsed {
+        Request::Help => {
+            drop(stdfd::write_all(1, help_text().as_bytes()));
+            process::exit(0);
+        }
+        Request::Usage => {
+            drop(stdfd::write_all(1, usage_text().as_bytes()));
+            process::exit(0);
+        }
+        Request::Version => {
+            drop(stdfd::write_all(1, b"tar (SlateOS coreutils) 0.1.0\n"));
+            process::exit(0);
+        }
+        Request::Run(parsed) => parsed,
     };
 
     // Every mode returns its own status rather than exiting inline, so that
@@ -3898,6 +4051,20 @@ mod tests {
         items.iter().map(|x| os_from_bytes(x)).collect()
     }
 
+    /// [`parse_args`] for the tests that are about *parsing*, not about which
+    /// [`Request`] came back.
+    ///
+    /// It panics rather than returning on `Help`/`Usage`/`Version`, so a change
+    /// that made, say, `-p` collide with `--help` would fail loudly here
+    /// instead of quietly comparing unequal against a default `TarArgs`.
+    fn run_args(args: &[OsString]) -> Result<TarArgs, getopt::Error> {
+        match parse_args(args) {
+            Ok(Request::Run(parsed)) => Ok(parsed),
+            Ok(other) => panic!("expected an archive run, got {other:?}"),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Build a single tar header block with the given name and size.
     fn make_header(name: &[u8], size: u64, typeflag: u8) -> [u8; BLOCK_SIZE] {
         let mut h = TarHeader::new();
@@ -3969,13 +4136,13 @@ mod tests {
 
     #[test]
     fn parse_empty() {
-        let a = parse_args(&s(&[])).unwrap();
+        let a = run_args(&s(&[])).unwrap();
         assert_eq!(a, TarArgs::default());
     }
 
     #[test]
     fn parse_create_with_file() {
-        let a = parse_args(&s(&["-c", "-f", "out.tar", "a", "b"])).unwrap();
+        let a = run_args(&s(&["-c", "-f", "out.tar", "a", "b"])).unwrap();
         assert!(a.create);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.files, s(&["a", "b"]));
@@ -3984,7 +4151,7 @@ mod tests {
     #[test]
     fn parse_clustered_create_verbose_file() {
         // -cvf out.tar a -- the f consumes the next argv element.
-        let a = parse_args(&s(&["-cvf", "out.tar", "a"])).unwrap();
+        let a = run_args(&s(&["-cvf", "out.tar", "a"])).unwrap();
         assert!(a.create);
         assert!(a.verbose);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
@@ -3993,7 +4160,7 @@ mod tests {
 
     #[test]
     fn parse_extract_with_directory() {
-        let a = parse_args(&s(&["-x", "-C", "/tmp", "-f", "in.tar"])).unwrap();
+        let a = run_args(&s(&["-x", "-C", "/tmp", "-f", "in.tar"])).unwrap();
         assert!(a.extract);
         assert_eq!(a.directory.as_deref(), Some(OsStr::new("/tmp")));
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("in.tar")));
@@ -4001,14 +4168,14 @@ mod tests {
 
     #[test]
     fn parse_list() {
-        let a = parse_args(&s(&["-tf", "x.tar"])).unwrap();
+        let a = run_args(&s(&["-tf", "x.tar"])).unwrap();
         assert!(a.list);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("x.tar")));
     }
 
     #[test]
     fn parse_unknown_flag_errors() {
-        let err = parse_args(&s(&["-Z"])).unwrap_err();
+        let err = run_args(&s(&["-Z"])).unwrap_err();
         // Byte for byte what GNU tar 1.35 says for `tar -Q`, less the
         // `tar: ` prefix the caller adds.
         assert_eq!(err.sentence, "invalid option -- 'Z'");
@@ -4021,20 +4188,20 @@ mod tests {
     fn parse_missing_f_value_errors() {
         // argp's wording, byte for byte: `tar -cf` says exactly this and exits
         // 64. See `scripts/tar-diff.sh`, case "-f with no argument".
-        let err = parse_args(&s(&["-f"])).unwrap_err();
+        let err = run_args(&s(&["-f"])).unwrap_err();
         assert_eq!(err.sentence, "option requires an argument -- 'f'");
     }
 
     #[test]
     fn parse_missing_c_value_errors() {
-        let err = parse_args(&s(&["-C"])).unwrap_err();
+        let err = run_args(&s(&["-C"])).unwrap_err();
         assert_eq!(err.sentence, "option requires an argument -- 'C'");
     }
 
     #[test]
     fn parse_files_with_dashes_handled() {
         // Bare positional arg starting with non-dash is a file.
-        let a = parse_args(&s(&["-c", "f1", "f2"])).unwrap();
+        let a = run_args(&s(&["-c", "f1", "f2"])).unwrap();
         assert!(a.create);
         assert_eq!(a.files, s(&["f1", "f2"]));
     }
@@ -4047,7 +4214,7 @@ mod tests {
 
     #[test]
     fn parse_keeps_an_operand_that_is_not_utf8() {
-        let a = parse_args(&b(&[b"-c", b"caf\xe9", b"ok"])).unwrap();
+        let a = run_args(&b(&[b"-c", b"caf\xe9", b"ok"])).unwrap();
         assert!(a.create);
         assert_eq!(a.files, b(&[b"caf\xe9", b"ok"]));
         // Not merely "did not crash": the bytes are the ones passed in, so the
@@ -4057,14 +4224,14 @@ mod tests {
 
     #[test]
     fn parse_keeps_a_dash_f_value_that_is_not_utf8() {
-        let a = parse_args(&b(&[b"-cf", b"\xff\xfe.tar", b"x"])).unwrap();
+        let a = run_args(&b(&[b"-cf", b"\xff\xfe.tar", b"x"])).unwrap();
         let f = a.archive_file.unwrap();
         assert_eq!(os_bytes(&f).as_ref(), b"\xff\xfe.tar");
     }
 
     #[test]
     fn parse_keeps_a_dash_c_value_that_is_not_utf8() {
-        let a = parse_args(&b(&[b"-x", b"-C", b"/tmp/d\x80r"])).unwrap();
+        let a = run_args(&b(&[b"-x", b"-C", b"/tmp/d\x80r"])).unwrap();
         assert!(a.extract);
         let d = a.directory.unwrap();
         assert_eq!(os_bytes(&d).as_ref(), b"/tmp/d\x80r");
@@ -4075,7 +4242,7 @@ mod tests {
         // A cluster is walked byte by byte, so a `-` followed by something
         // that is not UTF-8 at all is refused like any other unknown flag
         // rather than being a case the parser cannot represent.
-        let err = parse_args(&b(&[b"-\xe9"])).unwrap_err();
+        let err = run_args(&b(&[b"-\xe9"])).unwrap_err();
         assert!(err.sentence.contains("invalid option"), "{err}");
         // The byte is escaped rather than emitted raw, so the message cannot
         // forge a line of tar's stderr.
@@ -4091,7 +4258,7 @@ mod tests {
 
     #[test]
     fn parse_long_forms_of_every_short_option() {
-        let a = parse_args(&s(&[
+        let a = run_args(&s(&[
             "--create",
             "--verbose",
             "--preserve-permissions",
@@ -4114,7 +4281,7 @@ mod tests {
             s(&["--extract", "--file=in.tar"]),
             s(&["--extract", "--file", "in.tar"]),
         ] {
-            let a = parse_args(&argv).unwrap();
+            let a = run_args(&argv).unwrap();
             assert!(a.extract);
             assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("in.tar")));
         }
@@ -4123,15 +4290,15 @@ mod tests {
     #[test]
     fn parse_accepts_gnus_alias_spellings() {
         // Two names, one option, in both of GNU's pairs.
-        assert!(parse_args(&s(&["--get"])).unwrap().extract);
-        assert!(parse_args(&s(&["--extract"])).unwrap().extract);
+        assert!(run_args(&s(&["--get"])).unwrap().extract);
+        assert!(run_args(&s(&["--extract"])).unwrap().extract);
         assert!(
-            parse_args(&s(&["--same-permissions"]))
+            run_args(&s(&["--same-permissions"]))
                 .unwrap()
                 .same_permissions
         );
         assert!(
-            parse_args(&s(&["--preserve-permissions"]))
+            run_args(&s(&["--preserve-permissions"]))
                 .unwrap()
                 .same_permissions
         );
@@ -4141,7 +4308,7 @@ mod tests {
     fn parse_accepts_an_unambiguous_abbreviation() {
         // `--extr` is a prefix of `--extract` alone. The resolved name is what
         // reaches the match arm, so no arm needs to know about abbreviations.
-        let a = parse_args(&s(&["--extr", "--verbo"])).unwrap();
+        let a = run_args(&s(&["--extr", "--verbo"])).unwrap();
         assert!(a.extract && a.verbose);
     }
 
@@ -4153,20 +4320,20 @@ mod tests {
         // for no other reason, which is the clearest statement of why the table
         // carries all 171 names. Measured: GNU refuses `--verb` identically,
         // and `--verbo` lists an archive.
-        let err = parse_args(&s(&["--verb"])).unwrap_err();
+        let err = run_args(&s(&["--verb"])).unwrap_err();
         assert_eq!(
             err.sentence,
             "option '--verb' is ambiguous; possibilities: '--verbose' '--verbatim-files-from'"
         );
-        assert!(parse_args(&s(&["--verbo"])).unwrap().verbose);
+        assert!(run_args(&s(&["--verbo"])).unwrap().verbose);
     }
 
     #[test]
     fn parse_refuses_an_ambiguous_abbreviation_listing_gnus_candidates() {
-        // The reason the table carries all 171 names. With only the nine this
+        // The reason the table carries all 171 names. With only the twelve this
         // tar implements, `--ex` would be a *unique* prefix of `--extract` and
         // would silently extract.
-        let err = parse_args(&s(&["--ex"])).unwrap_err();
+        let err = run_args(&s(&["--ex"])).unwrap_err();
         assert_eq!(
             err.sentence,
             "option '--ex' is ambiguous; possibilities: '--extract' '--exclude' \
@@ -4183,7 +4350,7 @@ mod tests {
         // precedes `--exclude`, which sorting would reverse. Asserted on its
         // own so that an alphabetised table fails with an obvious message
         // rather than inside the long string above.
-        let err = parse_args(&s(&["--ex"])).unwrap_err();
+        let err = run_args(&s(&["--ex"])).unwrap_err();
         let extract = err.sentence.find("'--extract'").unwrap();
         let exclude = err.sentence.find("'--exclude'").unwrap();
         assert!(extract < exclude, "{}", err.sentence);
@@ -4191,7 +4358,7 @@ mod tests {
 
     #[test]
     fn parse_refuses_an_unknown_long_option() {
-        let err = parse_args(&s(&["--frobnicate"])).unwrap_err();
+        let err = run_args(&s(&["--frobnicate"])).unwrap_err();
         // The whole word as typed, `--` included — there is no resolved name to
         // report instead.
         assert_eq!(err.sentence, "unrecognized option '--frobnicate'");
@@ -4199,19 +4366,19 @@ mod tests {
 
     #[test]
     fn parse_refuses_a_value_given_to_a_long_option_that_takes_none() {
-        let err = parse_args(&s(&["--extract=yes"])).unwrap_err();
+        let err = run_args(&s(&["--extract=yes"])).unwrap_err();
         // Named as the table spells it, not as typed. Measured: GNU answers an
         // abbreviated `--extr=yes` with `'--extract'` too.
         assert_eq!(err.sentence, "option '--extract' doesn't allow an argument");
         assert_eq!(
-            parse_args(&s(&["--extr=yes"])).unwrap_err().sentence,
+            run_args(&s(&["--extr=yes"])).unwrap_err().sentence,
             "option '--extract' doesn't allow an argument"
         );
     }
 
     #[test]
     fn parse_refuses_a_long_option_whose_required_value_is_missing() {
-        let err = parse_args(&s(&["--file"])).unwrap_err();
+        let err = run_args(&s(&["--file"])).unwrap_err();
         // Note the word order differs from the short form's `option requires an
         // argument -- 'f'`. That is glibc's, not a slip.
         assert_eq!(err.sentence, "option '--file' requires an argument");
@@ -4219,7 +4386,7 @@ mod tests {
 
     #[test]
     fn parse_refuses_a_recognised_but_unimplemented_option() {
-        let err = parse_args(&s(&["--exclude=*.o"])).unwrap_err();
+        let err = run_args(&s(&["--exclude=*.o"])).unwrap_err();
         assert_eq!(
             err.sentence,
             "option '--exclude' is recognised but not implemented by this tar"
@@ -4233,7 +4400,7 @@ mod tests {
         // not know that, `*.o` would be left behind and archived as a file. The
         // refusal is what the user sees, but the operand list is what would
         // have been silently wrong had the table's argument class been missing.
-        let err = parse_args(&s(&["-c", "--exclude", "*.o", "src"])).unwrap_err();
+        let err = run_args(&s(&["-c", "--exclude", "*.o", "src"])).unwrap_err();
         assert!(err.sentence.contains("--exclude"), "{err}");
     }
 
@@ -4242,7 +4409,7 @@ mod tests {
         // Previously a bug, not a choice: `--` fell through to the operand
         // branch and was looked for inside the archive, so this exited 2 with
         // `tar: --: Not found in archive` where GNU exits 0.
-        let a = parse_args(&s(&["-xf", "t.tar", "--", "a"])).unwrap();
+        let a = run_args(&s(&["-xf", "t.tar", "--", "a"])).unwrap();
         assert!(a.extract);
         assert_eq!(a.files, s(&["a"]));
     }
@@ -4251,7 +4418,7 @@ mod tests {
     fn parse_after_double_dash_an_option_shaped_name_is_a_file() {
         // The point of the terminator: a member really called `--exclude` is
         // archivable, and a member called `-c` does not turn on create.
-        let a = parse_args(&s(&["-c", "--", "--exclude", "-c"])).unwrap();
+        let a = run_args(&s(&["-c", "--", "--exclude", "-c"])).unwrap();
         assert!(a.create);
         assert_eq!(a.files, s(&["--exclude", "-c"]));
     }
@@ -4260,7 +4427,7 @@ mod tests {
     fn parse_accepts_a_short_value_attached_to_its_letter() {
         // `-fout.tar` used to be read as more option letters and failed on the
         // `o`: `invalid option -- 'o'`.
-        let a = parse_args(&s(&["-cvfout.tar", "x"])).unwrap();
+        let a = run_args(&s(&["-cvfout.tar", "x"])).unwrap();
         assert!(a.create && a.verbose);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.files, s(&["x"]));
@@ -4270,7 +4437,7 @@ mod tests {
     fn parse_permutes_options_after_operands() {
         // Measured: `tar -tf t.tar a --verbose` gives a long listing, so an
         // option after an operand is still an option.
-        let a = parse_args(&s(&["-tf", "t.tar", "a", "--verbose"])).unwrap();
+        let a = run_args(&s(&["-tf", "t.tar", "a", "--verbose"])).unwrap();
         assert!(a.list && a.verbose);
         assert_eq!(a.files, s(&["a"]));
     }
@@ -4279,7 +4446,7 @@ mod tests {
     fn parse_keeps_a_long_option_value_that_is_not_utf8() {
         // The `=VALUE` half of a long option is a path like any other, and must
         // survive bytes that are not text.
-        let a = parse_args(&b(&[b"-x", b"--directory=/tmp/d\x80r"])).unwrap();
+        let a = run_args(&b(&[b"-x", b"--directory=/tmp/d\x80r"])).unwrap();
         let d = a.directory.unwrap();
         assert_eq!(os_bytes(&d).as_ref(), b"/tmp/d\x80r");
     }
@@ -4288,7 +4455,7 @@ mod tests {
     fn parse_refuses_a_long_name_that_is_not_utf8_without_panicking() {
         // No option name is non-ASCII, so such a name matches nothing; it must
         // reach the unrecognised path rather than failing some third way.
-        let err = parse_args(&b(&[b"--caf\xe9"])).unwrap_err();
+        let err = run_args(&b(&[b"--caf\xe9"])).unwrap_err();
         assert!(err.sentence.contains("unrecognized option"), "{err}");
         assert!(!err.sentence.as_bytes().contains(&0xe9), "{err}");
     }
@@ -4313,6 +4480,118 @@ mod tests {
             LONG_OPTIONS.windows(2).any(|w| w[0].0 > w[1].0),
             "table looks alphabetised; GNU's order is observable output"
         );
+    }
+
+    // ---------------- --help, --usage, --version ----------------
+
+    #[test]
+    fn parse_recognises_the_three_informational_options() {
+        assert_eq!(parse_args(&s(&["--help"])).unwrap(), Request::Help);
+        assert_eq!(parse_args(&s(&["-?"])).unwrap(), Request::Help);
+        assert_eq!(parse_args(&s(&["--usage"])).unwrap(), Request::Usage);
+        assert_eq!(parse_args(&s(&["--version"])).unwrap(), Request::Version);
+    }
+
+    #[test]
+    fn parse_abbreviates_help_and_version_but_not_usage() {
+        // `--us` is ambiguous, and not for a reason anyone would guess:
+        // `--use-compress-program` shares the prefix. Measured against GNU,
+        // which gives these two candidates in this order. `--hel` and `--vers`
+        // are each unique and resolve.
+        assert_eq!(parse_args(&s(&["--hel"])).unwrap(), Request::Help);
+        assert_eq!(parse_args(&s(&["--vers"])).unwrap(), Request::Version);
+        assert_eq!(
+            parse_args(&s(&["--us"])).unwrap_err().sentence,
+            "option '--us' is ambiguous; possibilities: '--use-compress-program' '--usage'"
+        );
+        assert_eq!(parse_args(&s(&["--usa"])).unwrap(), Request::Usage);
+    }
+
+    #[test]
+    fn help_wins_over_a_bad_option_after_it_and_loses_to_one_before_it() {
+        // The whole of the precedence rule, and the reason `parse_args` returns
+        // a `Request` from inside the loop rather than validating argv first.
+        // Both rows measured against GNU: exit 0 with help, then exit 64 with
+        // `unrecognized option`.
+        assert_eq!(
+            parse_args(&s(&["--help", "--frobnicate"])).unwrap(),
+            Request::Help
+        );
+        assert_eq!(
+            parse_args(&s(&["--frobnicate", "--help"]))
+                .unwrap_err()
+                .sentence,
+            "unrecognized option '--frobnicate'"
+        );
+    }
+
+    #[test]
+    fn help_wins_over_an_operation_that_precedes_it() {
+        // `tar -c --help` prints help; it does not create an archive. The `-c`
+        // is parsed and then discarded with the rest of `TarArgs`, which is why
+        // `Request` is an enum rather than a flag on `TarArgs`.
+        assert_eq!(parse_args(&s(&["-c", "--help"])).unwrap(), Request::Help);
+        assert_eq!(parse_args(&s(&["-c?"])).unwrap(), Request::Help);
+    }
+
+    #[test]
+    fn help_given_as_a_value_is_a_value_and_not_a_request() {
+        // `--file --help` names an archive called `--help`. GNU agrees, and
+        // then fails at exit 2 with `You must specify one of…` because no
+        // operation was given -- which is `main`'s branch, not the parser's.
+        let a = run_args(&s(&["--file", "--help"])).unwrap();
+        assert_eq!(a.archive_file, Some(OsString::from("--help")));
+    }
+
+    #[test]
+    fn parse_refuses_a_value_given_to_help() {
+        assert_eq!(
+            parse_args(&s(&["--help=x"])).unwrap_err().sentence,
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn help_text_documents_every_option_this_tar_implements_and_no_others() {
+        let help = help_text();
+        for name in [
+            "--create",
+            "--list",
+            "--extract",
+            "--get",
+            "--directory",
+            "--file",
+            "--preserve-permissions",
+            "--same-permissions",
+            "--verbose",
+            "--help",
+            "--usage",
+            "--version",
+        ] {
+            assert!(help.contains(name), "help omits {name}");
+        }
+        // The point of writing our own help rather than reproducing GNU's: an
+        // option the parser refuses must not be advertised. `--exclude` stands
+        // in for the other 158. See `design-decisions.md` 703.
+        for name in ["--exclude", "--overwrite", "--gzip", "--strip-components"] {
+            assert!(
+                !help.contains(name),
+                "help advertises {name}, which we refuse"
+            );
+        }
+    }
+
+    #[test]
+    fn help_and_usage_are_wrapped_and_end_in_a_newline() {
+        for text in [help_text(), usage_text()] {
+            assert!(text.ends_with('\n'), "{text:?}");
+            assert!(!text.ends_with("\n\n"), "{text:?}");
+            for line in text.lines() {
+                assert!(line.len() <= 79, "line too long ({}): {line}", line.len());
+            }
+        }
+        assert!(help_text().starts_with("Usage: tar [OPTION...] [FILE]...\n"));
+        assert!(usage_text().starts_with("Usage: tar [-ctxvp?]"));
     }
 
     // ---------------- contains_dot_dot ----------------

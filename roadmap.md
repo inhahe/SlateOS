@@ -177,7 +177,9 @@ directly under the title saying `✅ LANDED <date> by lane <x>`, plus one
 sentence on what actually shipped. The queue property comes from that line,
 not from the file's absence. (`**Status**:`, with the colon outside the bold,
 is read as the same marker — four files write it that way — but write the form
-above; the leniency is for files that already exist, not a second convention.)
+above; the leniency is for files that already exist, not a second convention.
+Markdown renders the two spellings identically, which is why the drift was
+invisible to everyone who introduced it.)
 
 ```bash
 python scripts/open-requests.py            # what is still open for your lane
@@ -214,7 +216,10 @@ weeks). Prefer a table word *and* the glyph; the glyph is the safety net, not
 the substitute.
 
 Anything else — `**Status:** needs a decision from you first` was a real one —
-reads as *unrecognised*, which counts as open but tells the reader nothing.
+reads as *unrecognised*, which counts as open. The report says so in those
+words and then prints this vocabulary once at the bottom, so you can fix it
+without coming back here; the list it prints is generated from the matcher, not
+copied from this table, so the two cannot say different things.
 A negated done word (`not fixed`, `never landed`) counts as open; a heading like
 `## Resolved` works as a marker on its own. Prefer a word from the table over
 inventing one: the table is what the report can act on, and a status it cannot

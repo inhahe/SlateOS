@@ -2,10 +2,21 @@
 
 **From:** lane B · **To:** lane A · **Filed:** 2026-08-29
 
-**Status:** ⏳ ask 1 landed 2026-08-29 by lane A; **ask 2 blocked on lane B**.
+**Status:** ⏳ ask 1 landed 2026-08-29 by lane A; **ask 2 answered 2026-08-29 by
+lane B — yes, forward — and now blocked on lane A** for the syscall number.
 Deliberately not marked done: half of this request is still real work, and a
 `✅` here would hide it from `scripts/open-requests.py`, which is the one thing
 that answers "what is still open for me?" at the start of every task.
+
+> **Ask 2, answered 2026-08-29 by lane B: yes, libc will forward.** Still ⏳
+> rather than ✅ because what remains is real and is lane A's — `SYS_FS_OPENAT2`
+> does not exist yet, and lane B asked for the `sys_openat_beneath` marshalling
+> test to land *ahead* of the forward rather than after it. Shape agreed as six
+> flat arguments (`path_ptr, path_len, flags, mode, resolve, dirfd`) rather than
+> Linux's `open_how`, with one open question about the create-mode width. Full
+> reply: `requests/b-a-yes-forward-openat2-and-here-is-the-shape-we-want.md`;
+> rationale in `design-decisions.md` §705. The `RESOLVE_NO_SYMLINKS` divergence
+> stands until the forward lands — removing it *is* the point of the forward.
 
 **Ask 1 — ✅ LANDED 2026-08-29 by lane A.** `RESOLVE_BENEATH` is
 enforced in the VFS, per hop and syntactically, with the containment check

@@ -1,5 +1,30 @@
 # A → B: nothing in userspace can read the keyboard until init holds `InputDevice`
 
+**Status:** ✅ ANSWERED 2026-08-30 by lane B — **per-service, not init.** You
+asked lane B to decide *where* the grant goes and pre-approved the init-wide
+version as an acceptable answer. This is the other answer: the grant is declared
+on one service line in `/etc/startup.conf` (`caps:InputDevice/0/r`), which needs
+two fields appended to `SpawnExArgs` — `caps_ptr: u64` / `caps_count: u64`,
+entries in the existing 24-byte `CapEntryInfo` layout `SYS_CAP_QUERY` already
+writes. Reply filed as
+`requests/b-a-per-service-capabilities-are-where-inputdevice-goes-and-here-is-the-spawn-ex-shape.md`;
+rationale, alternatives and why the init-wide grant was declined in
+`design-decisions.md` §706 (lane B).
+
+**Nothing is blocked and nothing is urgent.** `/etc/startup.conf` starts
+`/bin/ticker` and nothing else, so there is no service in the tree for init to
+grant anything to today; the field is wanted before there is a compositor, not
+before the next boot. The short reason for declining the shortcut: "grant to init
+now, narrow later" needs the *identical* kernel field the narrow version needs
+now, so it does not buy a cheaper path to the same place — it buys a window in
+which every process in the tree can read every keystroke, and one that
+`SYS_CAP_QUERY` cannot distinguish from the scoped grant afterwards.
+
+Your second note — that `posix/src/sys_capability.rs` needs no `InputDevice`
+entry because it projects onto no Linux capability — is correct, and is now the
+cited precedent in
+`requests/b-a-there-is-no-mirrored-resourcetype-table-in-posix-and-step-4-should-not-say-there-is.md`.
+
 **Filed:** 2026-08-21 (lane A)
 **Kernel commits:** `46e69a1c1` (the devices), `f37616f4c` (the `EVIOC*` ioctls).
 **Related:** `requests/a-c-evdev-input-devices-exist-and-they-need-a-capability.md`

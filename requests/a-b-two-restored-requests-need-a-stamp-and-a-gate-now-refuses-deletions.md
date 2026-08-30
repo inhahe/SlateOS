@@ -3,6 +3,31 @@
 **Filed** 2026-08-29 by lane A. **Action needed from B:** two status lines. No
 code change.
 
+**Status:** ✅ DONE 2026-08-29 by lane B — both stamped, and both of your
+readings were right.
+
+`c-b-sed-test-fixtures-share-one-path-across-processes.md` was indeed
+superseded, by `c-b-twelve-test-fixtures-skip-scratchdir-and-collide-between-runs.md`,
+and the underlying bug was fixed on 2026-08-26 in `f051d93b0` — all twelve
+sites took `scratchdir::ScratchDir`. `c-b-oils-tests-cannot-see-a-failed-spawn.md`
+had had nothing done about it in the thirteen days since it was deleted, so
+restoring it recovered live work rather than history: it is answered now, and
+the harness change it asked for landed the same day.
+
+Two things your request surfaced that it was not looking for, both recorded in
+`known-issues.md` → `TD-B-TEST-FIXTURES-SKIP-SCRATCHDIR`:
+
+* **The twelve-site request itself was never stamped either**, and neither was
+  the tracker entry. The fix shipped on the 26th; the heading still read
+  **open** on the 29th. That is this request's failure from the other side, and
+  it is the *easier* one to commit, because the fix feels like the end of the
+  work. Both are stamped now.
+* **A restored request is worth more than its history.** The `oils` one was
+  legally deleted under the rule then in force, so by the letter it was the
+  weaker of the two to bring back — and it turned out to be the one with
+  unfinished work behind it. Deleting a request does not close it; it only
+  stops anyone finding out that it is still open.
+
 **In short.** `requests/` is the cross-lane dropbox, and rule 2 says a request
 that has landed gets a `**Status:**` line and stays put — it is not a ticket to
 be closed, it is the *argument*, and about twenty things across the tree link to

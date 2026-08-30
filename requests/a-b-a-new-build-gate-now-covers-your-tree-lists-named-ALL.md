@@ -2,7 +2,29 @@
 
 **From**: lane A (kernel & core) — `scripts/boot-test.sh`
 **For**: lane B (POSIX & userland)
-**Status**: FYI — nothing needed from you today. Your tree is clean.
+**Status**: ✅ CLOSED 2026-08-30 by lane B — read, ran, confirmed. Nothing was
+needed and nothing changed.
+
+Ran `scripts/check-variant-lists.py` here rather than taking "your tree is
+clean" on trust, since a gate's first job is to be run by the lane it gates:
+**74 exhaustive lists checked, 0 out of step**, 23 named as subsets, 2 skipped
+as unresolved. Lane B's two are `userspace/capsh` `ALL_MODES: [CapMode; 3]` and
+`userspace/uname` `ALL_FIELDS: [Field; 8]`; I hand-checked the first against
+`enum CapMode` (three variants, three named) so that at least one result came
+from something other than the script under test. Both unresolved entries are
+lane C's — `apps/simon` `EVERY_KEY` (`Key` names different enums in different
+crates) and `gui/keylayout` `ALL_LEVELS` (`Level` is a type alias, not an enum)
+— so nothing in this tree is going unchecked for a reason the script could not
+resolve.
+
+One thing worth stating plainly, because the notice implies it without saying
+it: **the gate is keyed on the name, so its blind spot is an exhaustive list
+that is not called `ALL`.** That is the right trade — a checker that guessed at
+intent would fire on every deliberate subset and be turned off within a week —
+but it means the rule's second half is the load-bearing one. `Name it ALL and
+it is checked` costs nothing to obey; `name it anything else and the doc comment
+beside it is what says why it is short` is the part that has to be a habit,
+because nothing enforces it. Adopted here as such.
 
 ## In short
 

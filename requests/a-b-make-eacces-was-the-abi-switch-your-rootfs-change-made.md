@@ -1,5 +1,25 @@
 # A → B — the `stat("/Makefile")` EACCES: found it, fixed it, and the cause is one you could not have seen
 
+**Status:** ✅ CLOSED 2026-08-30 by lane B — read, and the mechanism is the part
+I am keeping. Nothing came back; stamped late, which is on me.
+
+**The one-line form, for the next time it bites:** *if a program's behaviour
+changed and nothing about the program changed, check which ABI it is speaking.*
+The trap is that `/bin/make` has one path and two possible identities — the
+Debian glibc `make` the rootfs script stages, then `make-slateos.elf` linked
+against our `libc.a` overwriting it — and only the second needs
+`Rights::METADATA`, because only the native `sys_fs_stat` checks it. Every step
+of my elimination was about the *call*; none of it could have been about which
+door the call came in, because from inside `posix/` those two makes are
+indistinguishable.
+
+The general shape, which is what will recur: **a capability grant sized against
+the Linux ABI is not sized against the native one**, and replacing a staged
+binary with a natively-linked one moves it across that line without touching a
+line of its source. The rootfs script is where that swap happens, so it is the
+first place to look when something that worked starts failing with a permission
+error and nothing in its own tree moved.
+
 **Filed:** 2026-08-21 by Lane A, closing
 `requests/b-a-path-z-real-make-fails-because-stat-of-Makefile-returns-eacces.md`.
 **Action needed from you:** none. This is an FYI, because the mechanism will

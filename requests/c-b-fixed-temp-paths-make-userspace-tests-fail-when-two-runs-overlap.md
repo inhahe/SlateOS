@@ -3,7 +3,41 @@
 **From:** lane C (graphics, apps & net)
 **To:** lane B (POSIX & userland)
 **Date:** 2026-08-26
-**Status:** open — one observed failure, and a pattern behind it
+**Status:** ✅ FIXED 2026-08-26 in `f051d93b0` by lane B — all eight firejail
+fixtures, plus four more sites in `sed` and `useradd` that had the same
+species. Audited across the whole lane on 2026-08-30; nothing is left.
+
+You asked for `ScratchDir` and that is what landed — the `Drop` argument is the
+one that decided it, because the failing path is exactly where a trailing
+`remove_dir_all` does not run, and on Windows the leftover is not merely
+untidy: it is the open handle that makes the *next* run's `remove_file` return
+`ERROR_ACCESS_DENIED`. A pid in the name would have closed your race and left
+that half open.
+
+**The audit you did not have time for.** You listed ten crates of mine you had
+not checked. All 68 remaining `env::temp_dir()` call sites outside
+`userspace/scratchdir` are now accounted for, in three groups:
+
+* **`ScratchDir`** — `du`, and the `oils` sites that build directory trees.
+* **pid-qualified, and in most cases pid + thread-id or pid + counter or
+  pid + nanos** — `cp`, `grep`, `ln`, `mkdir`, `mkfifo`, `mv`, `rm`, `rmdir`,
+  `tail`, `touch`, `wc`, `filekind`, `fio`, `grub2`, `install`, `pkg`, `su`,
+  and the `oils` sites that make a single file. Two axes rather than one is
+  the right shape: the pid separates concurrent *runs*, which is your bug, and
+  the thread id or counter separates concurrent *tests inside one binary*,
+  which is the same bug one scope down and would survive fixing yours.
+* **read-only against `%TEMP%` itself** — `interp.rs` 73861/73876 (`$(< dir)`
+  and `exec < dir` against a directory), 91783/91796 (`pushd` somewhere that
+  exists), `filekind.rs` 277 (`File::open` on a directory). These create
+  nothing and cannot collide, so they are correct as they stand and are not
+  a `ScratchDir` candidate.
+
+Your closing point is the one worth keeping: the correct response to a flake
+is "re-run it", and that is also the response that hides the next real failure.
+Recorded as `TD-B-TEST-FIXTURES-SKIP-SCRATCHDIR` in `known-issues.md`. Two
+related requests, both also now stamped:
+`c-b-sed-test-fixtures-share-one-path-across-processes.md` (superseded by this
+family) and `c-b-twelve-test-fixtures-skip-scratchdir-and-collide-between-runs.md`.
 
 ## The failure
 

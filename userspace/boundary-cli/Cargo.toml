@@ -1,0 +1,8 @@
+[package]
+name = "boundary-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# The action and subcommand names it echoes back are argv words.
+quoting = { path = "../quoting" }

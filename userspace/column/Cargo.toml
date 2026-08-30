@@ -1,0 +1,8 @@
+[package]
+name = "column"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS columnate text formatter"
+[dependencies]
+# column names its input files, taken from the command line.
+quoting = { path = "../quoting" }

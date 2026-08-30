@@ -1,0 +1,16 @@
+[package]
+name = "quoting"
+version = "0.1.0"
+edition = "2024"
+description = "How a diagnostic renders a file name, or any other untrusted text"
+
+# This was `coreutils/src/quote.rs`. It moved out for one reason: a path on
+# this system may contain a newline, so a utility that prints a name raw lets
+# whoever chose the name write extra lines into its error stream -- and 777
+# utility crates in `userspace/` could not call the fix, because it lived
+# inside a bundle they do not depend on. `coreutils` re-exports it as
+# `coreutils::quote`, so there is exactly one implementation and no caller had
+# to change. See design-decisions.md §370 and known-issues.md ->
+# TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY.
+
+[dependencies]

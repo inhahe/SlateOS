@@ -1,0 +1,1376 @@
+//! Event log persistence — flush the in-memory event log to disk.
+//!
+//! Bridges the in-memory event ring buffer ([`crate::eventlog`]) to persistent
+//! storage via the VFS.  Supports:
+//!
+//! - **Per-namespace log files**: `security.jsonl`, `network.jsonl`, etc.
+//!   or a single `combined.jsonl` (configurable).
+//! - **Rotation policies**: by size (default 50 MB per file), by count
+//!   (keep N rotated files), maximum total storage cap (default 500 MB).
+//! - **Automatic pruning**: oldest rotated logs deleted when cap exceeded.
+//! - **Crash-safe writes**: append + sync, no partial JSON lines.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! eventlog (ring buffer) → logpersist::flush() → VFS writes
+//!
+//! Log directory: /var/log/events/
+//!   combined.jsonl        ← current log file
+//!   combined.1.jsonl      ← first rotation
+//!   combined.2.jsonl      ← second rotation (oldest)
+//!
+//! Per-namespace mode:
+//!   /var/log/events/system.jsonl
+//!   /var/log/events/security.jsonl
+//!   /var/log/events/network.jsonl
+//!   ...
+//! ```
+//!
+//! ## Integration
+//!
+//! - Called periodically by the reclaim daemon or a dedicated log flush task.
+//! - Kshell `logpersist` command for manual control.
+//! - `/proc/logpersist` shows persistence statistics.
+//!
+//! Note: this is distinct from [`crate::fs::logrotate`] which is the general-
+//! purpose log file rotation framework.  This module specifically persists
+//! the kernel event log (structured events) to JSON-lines files on disk.
+//!
+//! ## References
+//!
+//! - Linux logrotate(8) — file-based rotation with compress/dateext
+//! - systemd-journald — binary journal with size caps
+//! - This design: JSON-lines text files (per design spec: no binary logs)
+
+#![allow(dead_code)]
+
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use crate::error::{KernelError, KernelResult};
+use crate::eventlog::{self, EventFilter, Severity};
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/// Maximum size of a single log file before rotation (bytes).
+const DEFAULT_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MiB
+
+/// Maximum number of rotated files to keep per namespace.
+const DEFAULT_MAX_ROTATED_FILES: u32 = 4;
+
+/// Maximum total log storage across all files (bytes).
+const DEFAULT_MAX_TOTAL_STORAGE: u64 = 500 * 1024 * 1024; // 500 MiB
+
+/// Default log directory.
+const DEFAULT_LOG_DIR: &str = "/var/log/events";
+
+/// Log rotation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RotationMode {
+    /// All events go to a single `combined.jsonl` file.
+    Combined,
+    /// Events are split by top-level namespace (system.jsonl, security.jsonl, etc.)
+    PerNamespace,
+}
+
+/// Compression algorithm for rotated log files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogCompression {
+    /// No compression — rotated files stay as plain `.jsonl`.
+    None,
+    /// Zstd compression — rotated files stored as `.jsonl.zst`.
+    Zstd,
+    /// LZ4 compression — rotated files stored as `.jsonl.lz4`.
+    Lz4,
+    /// Gzip compression — rotated files stored as `.jsonl.gz`.
+    Gzip,
+}
+
+impl LogCompression {
+    /// File extension for compressed files.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Zstd => ".zst",
+            Self::Lz4 => ".lz4",
+            Self::Gzip => ".gz",
+        }
+    }
+
+    /// Human-readable name.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Zstd => "zstd",
+            Self::Lz4 => "lz4",
+            Self::Gzip => "gzip",
+        }
+    }
+}
+
+/// Configuration for log rotation.
+#[derive(Clone)]
+pub struct RotationConfig {
+    /// Log directory path.
+    pub log_dir: String,
+    /// Combined vs per-namespace mode.
+    pub mode: RotationMode,
+    /// Maximum size per log file before rotating (bytes).
+    pub max_file_size: u64,
+    /// Number of rotated files to keep.
+    pub max_rotated_files: u32,
+    /// Total storage cap across all log files.
+    pub max_total_storage: u64,
+    /// Minimum severity to persist (events below this are transient-only).
+    pub min_persist_severity: Severity,
+    /// Whether rotation is enabled.
+    pub enabled: bool,
+    /// Compression algorithm for rotated log files.
+    pub compression: LogCompression,
+}
+
+impl Default for RotationConfig {
+    fn default() -> Self {
+        Self {
+            log_dir: String::from(DEFAULT_LOG_DIR),
+            mode: RotationMode::Combined,
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
+            max_rotated_files: DEFAULT_MAX_ROTATED_FILES,
+            max_total_storage: DEFAULT_MAX_TOTAL_STORAGE,
+            min_persist_severity: Severity::Info,
+            enabled: true,
+            compression: LogCompression::Zstd, // Default: zstd per roadmap spec
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+/// Per-namespace flush cursor (tracks what's been written to disk).
+struct FlushCursor {
+    /// Namespace root name (e.g. "system", "security", or "combined").
+    name: String,
+    /// Last event sequence number flushed for this namespace, or `None` if
+    /// nothing has been flushed yet. See [`State::global_last_flushed`] for
+    /// why this is not a `u64` with `0` meaning "nothing".
+    last_flushed_seq: Option<u64>,
+    /// Current file size estimate (bytes).
+    current_size: u64,
+    /// Total bytes written across all rotations.
+    total_bytes_written: u64,
+    /// Number of rotations performed.
+    rotation_count: u64,
+    /// Number of events flushed.
+    events_flushed: u64,
+}
+
+struct State {
+    config: RotationConfig,
+    cursors: Vec<FlushCursor>,
+    /// Global last-flushed sequence, or `None` if nothing has been flushed.
+    ///
+    /// Not a `u64` with `0` meaning "nothing yet": event sequence numbers
+    /// start at **zero**, so `0` is a real event's sequence and cannot double
+    /// as the empty marker. [`flush`] resumes with an "events after N" query,
+    /// and "after 0" excludes sequence 0 — so under the old encoding the very
+    /// first event the system ever logged was skipped on every fresh boot and
+    /// never reached disk. It is the one event most worth keeping: on a boot
+    /// that crashes early it may be the only one there was.
+    global_last_flushed: Option<u64>,
+    /// Total flush operations.
+    total_flushes: u64,
+    /// Total bytes written across all namespaces.
+    total_bytes: u64,
+    /// Total pruned files.
+    total_pruned: u64,
+    /// Total bytes saved by compression.
+    total_bytes_saved_by_compression: u64,
+    /// Total files compressed during rotation.
+    total_files_compressed: u64,
+    /// Whether initialized.
+    initialized: bool,
+    /// Whether a [`flush`] is in progress on some CPU.
+    ///
+    /// The flush itself runs with `STATE` *unlocked* — it writes through the
+    /// VFS, and this lock may not be held across that (see `STATE`). The flag
+    /// takes over the exclusion the lock used to provide: a second CPU
+    /// entering `flush` returns 0 rather than re-querying the same events and
+    /// appending them a second time, since the cursor that would have told it
+    /// they were already written is not advanced until the writes finish.
+    flushing: bool,
+}
+
+impl State {
+    const fn new() -> Self {
+        Self {
+            config: RotationConfig {
+                log_dir: String::new(),
+                mode: RotationMode::Combined,
+                max_file_size: DEFAULT_MAX_FILE_SIZE,
+                max_rotated_files: DEFAULT_MAX_ROTATED_FILES,
+                max_total_storage: DEFAULT_MAX_TOTAL_STORAGE,
+                min_persist_severity: Severity::Info,
+                enabled: true,
+                compression: LogCompression::Zstd,
+            },
+            cursors: Vec::new(),
+            global_last_flushed: None,
+            total_flushes: 0,
+            total_bytes: 0,
+            total_pruned: 0,
+            total_bytes_saved_by_compression: 0,
+            total_files_compressed: 0,
+            initialized: false,
+            flushing: false,
+        }
+    }
+}
+
+/// Persistence bookkeeping: config, per-namespace cursors, counters.
+///
+/// **Never enter the VFS while holding this.** Every write here goes through
+/// `Vfs::append`/`rename`/`remove`, which resolve through the filesystem's own
+/// lock — and the VFS holds that lock across content generation, which for
+/// procfs reaches back into arbitrary module-global state. The live order is
+/// `filesystem lock -> module state`, so `STATE -> filesystem lock` is an
+/// AB/BA inversion that wedges two CPUs. Snapshot what the I/O needs, drop the
+/// guard, do the I/O, then retake and write the bookkeeping back by cursor
+/// name. `scripts/check-vfs-under-lock.py` enforces this.
+static STATE: Mutex<State> = Mutex::new(State::new());
+
+/// Clears [`State::flushing`] however [`flush`] leaves — including the early
+/// returns for "no new events" and any future `?`.
+///
+/// Declared before the locals that hold `STATE` guards so that it drops
+/// *after* them: taking the lock in `drop` while a guard is still live would
+/// deadlock against ourselves.
+struct FlushGuard;
+
+impl Drop for FlushGuard {
+    fn drop(&mut self) {
+        STATE.lock().flushing = false;
+    }
+}
+
+/// A log file on disk, as surveyed by [`prune`].
+struct LogFile {
+    path: String,
+    size: u64,
+    /// How many rotations back this file is: `0` is the file currently being
+    /// written, `1` the most recent rotation, and so on up to
+    /// `max_rotated_files`. Higher is older, and older is pruned first.
+    ///
+    /// This is carried explicitly rather than recovered from the path because
+    /// the path does not order correctly: as strings, `combined.1.jsonl` sorts
+    /// before `combined.jsonl`, and `combined.10.jsonl` sorts between `.1` and
+    /// `.2`.
+    age: u32,
+}
+
+/// One cursor's share of a flush, applied back to `STATE` after the I/O.
+struct CursorOutcome {
+    /// Identifies the cursor to write back to. A name, not an index: the
+    /// cursor vector is re-looked-up after the lock is retaken, and holding a
+    /// reference (or a position) into it across the VFS call is exactly the
+    /// dangling-reference hazard this restructuring exists to avoid.
+    name: String,
+    /// Bytes appended to the live file.
+    bytes_written: u64,
+    /// Events appended.
+    events: u64,
+    /// Whether the file was rotated after the append.
+    rotated: bool,
+    /// Bytes the rotation's compression saved, and whether it ran.
+    compress_saved: u64,
+    compress_ops: u64,
+    /// Newest sequence number this cursor consumed.
+    newest_seq: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Initialization
+// ---------------------------------------------------------------------------
+
+/// Initialize the log rotation system with default config.
+pub fn init() {
+    init_with_config(RotationConfig::default());
+}
+
+/// Initialize with a custom configuration.
+pub fn init_with_config(config: RotationConfig) {
+    // Cheap early out. The real check is the second one, below, under the
+    // lock we actually install under.
+    if STATE.lock().initialized {
+        return;
+    }
+
+    // Create the log directory if it doesn't exist. Deliberately with no lock
+    // held -- see `STATE`'s doc comment. The result is discarded because every
+    // outcome is survivable: the directory already existing is the common
+    // case, and a genuine failure surfaces later as a failed append rather
+    // than silently disabling logging at boot.
+    let _ = crate::fs::Vfs::mkdir(&config.log_dir);
+
+    let mut state = STATE.lock();
+    // Re-check: another CPU may have completed initialisation while the mkdir
+    // ran unlocked. Its cursors are already installed, and pushing ours on top
+    // would duplicate every namespace.
+    if state.initialized {
+        return;
+    }
+
+    // Set up cursors based on mode.
+    match config.mode {
+        RotationMode::Combined => {
+            state.cursors.push(FlushCursor {
+                name: String::from("combined"),
+                last_flushed_seq: None,
+                current_size: 0,
+                total_bytes_written: 0,
+                rotation_count: 0,
+                events_flushed: 0,
+            });
+        }
+        RotationMode::PerNamespace => {
+            for ns in eventlog::NAMESPACE_ROOTS {
+                state.cursors.push(FlushCursor {
+                    name: String::from(*ns),
+                    last_flushed_seq: None,
+                    current_size: 0,
+                    total_bytes_written: 0,
+                    rotation_count: 0,
+                    events_flushed: 0,
+                });
+            }
+        }
+    }
+
+    state.config = config;
+    state.initialized = true;
+}
+
+// ---------------------------------------------------------------------------
+// JSON serialization for events
+// ---------------------------------------------------------------------------
+
+/// Serialize an event entry as a JSON line.
+fn event_to_json_line(ev: &eventlog::EventEntry) -> String {
+    use alloc::format;
+    let mut json = String::with_capacity(256);
+
+    json.push_str("{\"seq\":");
+    json.push_str(&format!("{}", ev.seq()));
+    json.push_str(",\"ts_ns\":");
+    json.push_str(&format!("{}", ev.timestamp_ns()));
+    json.push_str(",\"sev\":\"");
+    json.push_str(ev.severity().as_str());
+    json.push_str("\",\"ns\":\"");
+    json_escape_into(&mut json, ev.namespace_str());
+    json.push_str("\",\"pid\":");
+    json.push_str(&format!("{}", ev.source_pid()));
+
+    let svc = ev.service_str();
+    if !svc.is_empty() {
+        json.push_str(",\"svc\":\"");
+        json_escape_into(&mut json, svc);
+        json.push('"');
+    }
+
+    json.push_str(",\"msg\":\"");
+    json_escape_into(&mut json, ev.message_str());
+    json.push('"');
+
+    // Payload key-value pairs.
+    let pairs: Vec<_> = ev.payload_iter().collect();
+    if !pairs.is_empty() {
+        json.push_str(",\"data\":{");
+        for (i, (k, v)) in pairs.iter().enumerate() {
+            if i > 0 {
+                json.push(',');
+            }
+            json.push('"');
+            json_escape_into(&mut json, k);
+            json.push_str("\":\"");
+            json_escape_into(&mut json, v);
+            json.push('"');
+        }
+        json.push('}');
+    }
+
+    json.push_str("}\n");
+    json
+}
+
+/// Escape a string for JSON output (append to dst).
+fn json_escape_into(dst: &mut String, s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '"' => dst.push_str("\\\""),
+            '\\' => dst.push_str("\\\\"),
+            '\n' => dst.push_str("\\n"),
+            '\r' => dst.push_str("\\r"),
+            '\t' => dst.push_str("\\t"),
+            c if c.is_control() => {
+                dst.push_str(&alloc::format!("\\u{:04x}", c as u32));
+            }
+            c => dst.push(c),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Core operations
+// ---------------------------------------------------------------------------
+
+/// Flush new events from the ring buffer to disk.
+///
+/// Returns the number of events flushed.
+pub fn flush() -> KernelResult<usize> {
+    // Claim the flush and take everything the I/O needs, then get out of the
+    // lock: the appends and rotations below go through the VFS, which `STATE`
+    // may not be held across (see the static's doc comment).
+    let (config, after_seq, snapshot) = {
+        let mut state = STATE.lock();
+        if !state.initialized || !state.config.enabled {
+            return Ok(0);
+        }
+        if state.flushing {
+            // Another CPU is already writing these same events out.
+            return Ok(0);
+        }
+        state.flushing = true;
+        let snapshot: Vec<(String, u64)> = state
+            .cursors
+            .iter()
+            .map(|c| (c.name.clone(), c.current_size))
+            .collect();
+        (state.config.clone(), state.global_last_flushed, snapshot)
+    };
+    // Set up after the flag and before any other `STATE` guard in this
+    // function, so it drops last and never takes the lock recursively.
+    let _flushing = FlushGuard;
+
+    let min_sev = config.min_persist_severity;
+
+    // Query new events since last flush.
+    //
+    // `after(n)` means "sequence strictly greater than n", so there is no `n`
+    // that means "everything" — sequence numbers start at 0. Omitting the
+    // filter entirely is what expresses the first flush; passing `after(0)`
+    // instead silently dropped event 0.
+    let base = EventFilter::all().min_severity(min_sev);
+    let filter = match after_seq {
+        None => base,
+        Some(seq) => base.after(seq),
+    };
+    let result = eventlog::query(&filter, 1024);
+
+    if result.events.is_empty() {
+        return Ok(0);
+    }
+
+    let log_dir = config.log_dir.clone();
+    let max_file_size = config.max_file_size;
+    let max_rotated = config.max_rotated_files;
+    let compression = config.compression;
+
+    let mut total_flushed = 0usize;
+    // What to write back once the I/O is done and the lock is retaken.
+    let mut outcomes: Vec<CursorOutcome> = Vec::new();
+
+    match config.mode {
+        RotationMode::Combined => {
+            // All events go to combined.jsonl.
+            if let Some((name, start_size)) = snapshot.first() {
+                let path = alloc::format!("{}/combined.jsonl", log_dir);
+                let mut batch = String::with_capacity(4096);
+
+                for ev in &result.events {
+                    batch.push_str(&event_to_json_line(ev));
+                    total_flushed = total_flushed.saturating_add(1);
+                }
+
+                let mut outcome = CursorOutcome {
+                    name: name.clone(),
+                    bytes_written: 0,
+                    events: 0,
+                    rotated: false,
+                    compress_saved: 0,
+                    compress_ops: 0,
+                    newest_seq: result.newest_seq,
+                };
+                let mut size = *start_size;
+
+                // Append batch to file. The error is dropped because a flush
+                // that cannot write has nowhere to report to -- reporting it
+                // would log an event, which is what just failed.
+                if !batch.is_empty() {
+                    let batch_len = batch.len() as u64;
+                    let _ = crate::fs::Vfs::append(&path, batch.as_bytes());
+                    outcome.bytes_written = batch_len;
+                    outcome.events = total_flushed as u64;
+                    size = size.saturating_add(batch_len);
+                }
+
+                // Check if rotation is needed.
+                if size >= max_file_size {
+                    let (orig, comp) = rotate_file(&log_dir, "combined", max_rotated, compression);
+                    outcome.rotated = true;
+                    if orig > 0 {
+                        outcome.compress_saved = orig.saturating_sub(comp);
+                        outcome.compress_ops = 1;
+                    }
+                }
+
+                outcomes.push(outcome);
+            }
+        }
+        RotationMode::PerNamespace => {
+            // Group events by namespace root and write to separate files.
+            for (name, start_size) in &snapshot {
+                let ns_base = EventFilter::all().min_severity(min_sev).namespace(name);
+                let ns_filter = match after_seq {
+                    None => ns_base,
+                    Some(seq) => ns_base.after(seq),
+                };
+                let ns_result = eventlog::query(&ns_filter, 1024);
+
+                if ns_result.events.is_empty() {
+                    continue;
+                }
+
+                let path = alloc::format!("{}/{}.jsonl", log_dir, name);
+                let mut batch = String::with_capacity(2048);
+
+                for ev in &ns_result.events {
+                    batch.push_str(&event_to_json_line(ev));
+                    total_flushed = total_flushed.saturating_add(1);
+                }
+
+                let mut outcome = CursorOutcome {
+                    name: name.clone(),
+                    bytes_written: 0,
+                    events: 0,
+                    rotated: false,
+                    compress_saved: 0,
+                    compress_ops: 0,
+                    newest_seq: ns_result.newest_seq,
+                };
+                let mut size = *start_size;
+
+                if !batch.is_empty() {
+                    let batch_len = batch.len() as u64;
+                    let _ = crate::fs::Vfs::append(&path, batch.as_bytes());
+                    outcome.bytes_written = batch_len;
+                    outcome.events = ns_result.events.len() as u64;
+                    size = size.saturating_add(batch_len);
+                }
+
+                // Check if rotation is needed.
+                if size >= max_file_size {
+                    let (orig, comp) = rotate_file(&log_dir, name, max_rotated, compression);
+                    outcome.rotated = true;
+                    if orig > 0 {
+                        outcome.compress_saved = orig.saturating_sub(comp);
+                        outcome.compress_ops = 1;
+                    }
+                }
+
+                outcomes.push(outcome);
+            }
+        }
+    }
+
+    let total_bytes_batch: u64 = outcomes.iter().map(|o| o.bytes_written).sum();
+    let total_compress_saved: u64 = outcomes.iter().map(|o| o.compress_saved).sum();
+    let total_compress_ops: u64 = outcomes.iter().map(|o| o.compress_ops).sum();
+
+    // Retake the lock and write the bookkeeping back, re-looking-up each
+    // cursor by name rather than by the index it had before the I/O. A cursor
+    // that no longer exists (the configuration was reset underneath us) simply
+    // loses its counters; its bytes are already on disk either way.
+    //
+    // Scoped so the guard is gone before `_flushing` drops -- that drop takes
+    // the same lock.
+    {
+        let mut state = STATE.lock();
+        for outcome in &outcomes {
+            let Some(cursor) = state.cursors.iter_mut().find(|c| c.name == outcome.name) else {
+                continue;
+            };
+            cursor.total_bytes_written = cursor
+                .total_bytes_written
+                .saturating_add(outcome.bytes_written);
+            cursor.events_flushed = cursor.events_flushed.saturating_add(outcome.events);
+            if outcome.rotated {
+                cursor.rotation_count = cursor.rotation_count.saturating_add(1);
+                cursor.current_size = 0;
+            } else {
+                cursor.current_size = cursor.current_size.saturating_add(outcome.bytes_written);
+            }
+            cursor.last_flushed_seq = Some(outcome.newest_seq);
+        }
+
+        state.total_bytes = state.total_bytes.saturating_add(total_bytes_batch);
+        state.total_bytes_saved_by_compression = state
+            .total_bytes_saved_by_compression
+            .saturating_add(total_compress_saved);
+        state.total_files_compressed = state
+            .total_files_compressed
+            .saturating_add(total_compress_ops);
+
+        state.global_last_flushed = Some(result.newest_seq);
+        state.total_flushes = state.total_flushes.saturating_add(1);
+    }
+
+    Ok(total_flushed)
+}
+
+/// Rotate a log file: combined.jsonl → combined.1.jsonl.zst → combined.2.jsonl.zst → ...
+///
+/// Oldest file beyond max_rotated is deleted. When compression is enabled,
+/// rotated files are compressed in-place (read, compress, write back).
+///
+/// Returns (original_bytes, compressed_bytes) if compression was performed,
+/// or (0, 0) if no compression.
+fn rotate_file(
+    log_dir: &str,
+    name: &str,
+    max_rotated: u32,
+    compression: LogCompression,
+) -> (u64, u64) {
+    use alloc::format;
+
+    let ext = compression.extension();
+
+    // Delete the oldest rotated file if it exists (try both compressed and plain).
+    let oldest_compressed = format!("{}/{}.{}.jsonl{}", log_dir, name, max_rotated, ext);
+    let oldest_plain = format!("{}/{}.{}.jsonl", log_dir, name, max_rotated);
+    let _ = crate::fs::Vfs::remove(&oldest_compressed);
+    if compression != LogCompression::None {
+        let _ = crate::fs::Vfs::remove(&oldest_plain);
+    }
+
+    // Shift existing rotations: N-1 → N, N-2 → N-1, ..., 1 → 2.
+    // Try compressed extension first, fall back to plain.
+    let mut i = max_rotated;
+    while i > 1 {
+        #[allow(clippy::arithmetic_side_effects)]
+        let n_minus_1 = i - 1;
+        let src_c = format!("{}/{}.{}.jsonl{}", log_dir, name, n_minus_1, ext);
+        let dst_c = format!("{}/{}.{}.jsonl{}", log_dir, name, i, ext);
+        let src_p = format!("{}/{}.{}.jsonl", log_dir, name, n_minus_1);
+        let dst_p = format!("{}/{}.{}.jsonl", log_dir, name, i);
+
+        if compression != LogCompression::None {
+            // Try compressed first.
+            if crate::fs::Vfs::rename(&src_c, &dst_c).is_err() {
+                // Fall back to plain (from before compression was enabled).
+                let _ = crate::fs::Vfs::rename(&src_p, &dst_p);
+            }
+        } else {
+            let _ = crate::fs::Vfs::rename(&src_p, &dst_p);
+        }
+
+        #[allow(clippy::arithmetic_side_effects)]
+        {
+            i -= 1;
+        }
+    }
+
+    // Rename current file to .1 (initially uncompressed).
+    let current = format!("{}/{}.jsonl", log_dir, name);
+    let first_rotated = format!("{}/{}.1.jsonl", log_dir, name);
+    let _ = crate::fs::Vfs::rename(&current, &first_rotated);
+
+    // Compress the newly rotated file if compression is enabled.
+    if compression != LogCompression::None {
+        compress_rotated_file(&first_rotated, compression)
+    } else {
+        (0, 0)
+    }
+}
+
+/// Compress a rotated log file in-place.
+///
+/// Reads the file, compresses it, writes the compressed version with the
+/// appropriate extension, and removes the original.
+///
+/// Returns (original_bytes, compressed_bytes).
+fn compress_rotated_file(path: &str, compression: LogCompression) -> (u64, u64) {
+    use alloc::format;
+
+    // Read the uncompressed file.
+    let data = match crate::fs::Vfs::read_file(path) {
+        Ok(d) => d,
+        Err(_) => return (0, 0),
+    };
+
+    let original_size = data.len() as u64;
+    if original_size == 0 {
+        return (0, 0);
+    }
+
+    // Compress using the appropriate algorithm.
+    let compressed = match compression {
+        LogCompression::Zstd => crate::fs::zstd::compress_zstd(&data),
+        LogCompression::Lz4 => crate::fs::lz4::compress(&data),
+        LogCompression::Gzip => crate::fs::compress::gzip(&data),
+        LogCompression::None => return (0, 0),
+    };
+
+    let compressed_size = compressed.len() as u64;
+
+    // Only keep compressed version if it's actually smaller.
+    if compressed_size < original_size {
+        let compressed_path = format!("{}{}", path, compression.extension());
+        if crate::fs::Vfs::write_file(&compressed_path, &compressed).is_ok() {
+            // Remove the uncompressed original.
+            let _ = crate::fs::Vfs::remove(path);
+            return (original_size, compressed_size);
+        }
+    }
+
+    // Compression didn't help or write failed — keep original.
+    (0, 0)
+}
+
+/// Prune old rotated log files to stay within the total storage cap.
+///
+/// Returns the number of files pruned.
+pub fn prune() -> usize {
+    // Snapshot the configuration and release the lock: both the size survey
+    // and the removals go through the VFS, which `STATE` may not be held
+    // across (see the static's doc comment). Nothing below reads `STATE`
+    // again until the counter is updated at the end.
+    let (max_total, max_rotated, log_dir, mode) = {
+        let state = STATE.lock();
+        if !state.initialized || !state.config.enabled {
+            return 0;
+        }
+        (
+            state.config.max_total_storage,
+            state.config.max_rotated_files,
+            state.config.log_dir.clone(),
+            state.config.mode,
+        )
+    };
+
+    // Calculate total storage used.
+    let mut total_used: u64 = 0;
+    let mut files: Vec<LogFile> = Vec::new();
+
+    match mode {
+        RotationMode::Combined => {
+            collect_log_files(
+                &log_dir,
+                "combined",
+                max_rotated,
+                &mut files,
+                &mut total_used,
+            );
+        }
+        RotationMode::PerNamespace => {
+            for ns in eventlog::NAMESPACE_ROOTS {
+                collect_log_files(&log_dir, ns, max_rotated, &mut files, &mut total_used);
+            }
+        }
+    }
+
+    // Youngest first, so `pop` takes the oldest. Sorting on `age` rather than
+    // on the path is what makes that true: the paths were compared as strings,
+    // and `combined.1.jsonl` < `combined.2.jsonl` < ... < `combined.jsonl`, so
+    // popping from the end deleted the *newest* rotation first and kept the
+    // stalest history — the reverse of what a log cap is for. (String order
+    // also puts `.10` between `.1` and `.2`, so any cap above nine rotations
+    // pruned in a scrambled order as well.)
+    files.sort_by(|a, b| a.age.cmp(&b.age).then_with(|| a.path.cmp(&b.path)));
+
+    let mut pruned = 0usize;
+    while total_used > max_total {
+        let Some(file) = files.pop() else {
+            break;
+        };
+        // A file that cannot be removed is one we also cannot account for,
+        // so its size stays subtracted either way: the loop must terminate.
+        let _ = crate::fs::Vfs::remove(&file.path);
+        total_used = total_used.saturating_sub(file.size);
+        pruned = pruned.saturating_add(1);
+    }
+
+    let mut state = STATE.lock();
+    state.total_pruned = state.total_pruned.saturating_add(pruned as u64);
+    drop(state);
+
+    pruned
+}
+
+/// Collect log files and their sizes for a given namespace.
+fn collect_log_files(
+    log_dir: &str,
+    name: &str,
+    max_rotated: u32,
+    files: &mut Vec<LogFile>,
+    total: &mut u64,
+) {
+    use alloc::format;
+
+    // Compressed extensions to check (in priority order).
+    let compress_exts = [".zst", ".lz4", ".gz"];
+
+    // Current file (never compressed — only rotated files get compressed).
+    // Age 0: it is the one being written to, so it is pruned last, and only
+    // if deleting every rotation still left us over the cap.
+    let current = format!("{}/{}.jsonl", log_dir, name);
+    if let Ok(meta) = crate::fs::Vfs::stat(&current) {
+        *total = total.saturating_add(meta.size);
+        files.push(LogFile {
+            path: current,
+            size: meta.size,
+            age: 0,
+        });
+    }
+
+    // Rotated files — check compressed extensions first, then plain.
+    for i in 1..=max_rotated {
+        let mut found = false;
+        for ext in &compress_exts {
+            let path = format!("{}/{}.{}.jsonl{}", log_dir, name, i, ext);
+            if let Ok(meta) = crate::fs::Vfs::stat(&path) {
+                *total = total.saturating_add(meta.size);
+                files.push(LogFile {
+                    path,
+                    size: meta.size,
+                    age: i,
+                });
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            let path = format!("{}/{}.{}.jsonl", log_dir, name, i);
+            if let Ok(meta) = crate::fs::Vfs::stat(&path) {
+                *total = total.saturating_add(meta.size);
+                files.push(LogFile {
+                    path,
+                    size: meta.size,
+                    age: i,
+                });
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Configuration API
+// ---------------------------------------------------------------------------
+
+/// Get the current rotation configuration.
+pub fn config() -> RotationConfig {
+    STATE.lock().config.clone()
+}
+
+/// Update the rotation configuration.
+pub fn set_config(config: RotationConfig) {
+    let mut state = STATE.lock();
+    state.config = config;
+}
+
+/// Enable or disable log rotation.
+pub fn set_enabled(enabled: bool) {
+    STATE.lock().config.enabled = enabled;
+}
+
+/// Set the rotation mode (combined vs per-namespace).
+pub fn set_mode(mode: RotationMode) {
+    let mut state = STATE.lock();
+    state.config.mode = mode;
+
+    // Rebuild cursors for the new mode.
+    state.cursors.clear();
+    let global_seq = state.global_last_flushed;
+
+    match mode {
+        RotationMode::Combined => {
+            state.cursors.push(FlushCursor {
+                name: String::from("combined"),
+                last_flushed_seq: global_seq,
+                current_size: 0,
+                total_bytes_written: 0,
+                rotation_count: 0,
+                events_flushed: 0,
+            });
+        }
+        RotationMode::PerNamespace => {
+            for ns in eventlog::NAMESPACE_ROOTS {
+                state.cursors.push(FlushCursor {
+                    name: String::from(*ns),
+                    last_flushed_seq: global_seq,
+                    current_size: 0,
+                    total_bytes_written: 0,
+                    rotation_count: 0,
+                    events_flushed: 0,
+                });
+            }
+        }
+    }
+}
+
+/// Set the minimum severity for persistent logging.
+pub fn set_min_severity(sev: Severity) {
+    STATE.lock().config.min_persist_severity = sev;
+}
+
+/// Set the compression algorithm for rotated log files.
+pub fn set_compression(compression: LogCompression) {
+    STATE.lock().config.compression = compression;
+}
+
+/// Get the current compression algorithm.
+pub fn compression() -> LogCompression {
+    STATE.lock().config.compression
+}
+
+// ---------------------------------------------------------------------------
+// Statistics
+// ---------------------------------------------------------------------------
+
+/// Log rotation statistics.
+pub struct RotationStats {
+    pub enabled: bool,
+    pub mode: RotationMode,
+    pub log_dir: String,
+    pub total_flushes: u64,
+    pub total_bytes_written: u64,
+    pub total_pruned: u64,
+    pub global_last_flushed_seq: Option<u64>,
+    pub max_file_size: u64,
+    pub max_rotated_files: u32,
+    pub max_total_storage: u64,
+    pub min_persist_severity: Severity,
+    /// Compression algorithm in use.
+    pub compression: LogCompression,
+    /// Total bytes saved by compression.
+    pub bytes_saved_by_compression: u64,
+    /// Total files compressed during rotation.
+    pub files_compressed: u64,
+    /// Per-cursor stats: (name, events_flushed, bytes_written, rotations, current_size).
+    pub cursors: Vec<(String, u64, u64, u64, u64)>,
+}
+
+/// Get rotation statistics.
+pub fn stats() -> RotationStats {
+    let state = STATE.lock();
+    let cursors: Vec<_> = state
+        .cursors
+        .iter()
+        .map(|c| {
+            (
+                c.name.clone(),
+                c.events_flushed,
+                c.total_bytes_written,
+                c.rotation_count,
+                c.current_size,
+            )
+        })
+        .collect();
+
+    RotationStats {
+        enabled: state.config.enabled,
+        mode: state.config.mode,
+        log_dir: state.config.log_dir.clone(),
+        total_flushes: state.total_flushes,
+        total_bytes_written: state.total_bytes,
+        total_pruned: state.total_pruned,
+        global_last_flushed_seq: state.global_last_flushed,
+        max_file_size: state.config.max_file_size,
+        max_rotated_files: state.config.max_rotated_files,
+        max_total_storage: state.config.max_total_storage,
+        min_persist_severity: state.config.min_persist_severity,
+        compression: state.config.compression,
+        bytes_saved_by_compression: state.total_bytes_saved_by_compression,
+        files_compressed: state.total_files_compressed,
+        cursors,
+    }
+}
+
+/// Generate content for /proc/logpersist.
+pub fn procfs_content() -> String {
+    let st = stats();
+    let mut out = String::with_capacity(512);
+
+    out.push_str("Event Log Persistence\n");
+    out.push_str("=====================\n");
+    out.push_str(&alloc::format!("Enabled:       {}\n", st.enabled));
+    out.push_str(&alloc::format!(
+        "Mode:          {}\n",
+        match st.mode {
+            RotationMode::Combined => "combined",
+            RotationMode::PerNamespace => "per-namespace",
+        }
+    ));
+    out.push_str(&alloc::format!("Log dir:       {}\n", st.log_dir));
+    out.push_str(&alloc::format!(
+        "Min severity:  {}\n",
+        st.min_persist_severity.as_str()
+    ));
+    out.push_str(&alloc::format!(
+        "Max file size: {} MiB\n",
+        st.max_file_size / (1024 * 1024)
+    ));
+    out.push_str(&alloc::format!("Max rotated:   {}\n", st.max_rotated_files));
+    out.push_str(&alloc::format!(
+        "Max total:     {} MiB\n",
+        st.max_total_storage / (1024 * 1024)
+    ));
+    out.push_str(&alloc::format!(
+        "Compression:   {}\n",
+        st.compression.label()
+    ));
+    out.push_str(&alloc::format!("Total flushes: {}\n", st.total_flushes));
+    out.push_str(&alloc::format!(
+        "Total written: {} bytes\n",
+        st.total_bytes_written
+    ));
+    out.push_str(&alloc::format!(
+        "Total pruned:  {} files\n",
+        st.total_pruned
+    ));
+    out.push_str(&alloc::format!(
+        "Files compressed: {}\n",
+        st.files_compressed
+    ));
+    out.push_str(&alloc::format!(
+        "Bytes saved:   {} bytes\n",
+        st.bytes_saved_by_compression
+    ));
+    // "none" rather than "0": sequence 0 is a real event, so printing 0 for
+    // "nothing flushed yet" would claim a flush that never happened.
+    out.push_str(&match st.global_last_flushed_seq {
+        None => alloc::string::String::from("Last seq:      none (nothing flushed yet)\n"),
+        Some(seq) => alloc::format!("Last seq:      {seq}\n"),
+    });
+
+    if !st.cursors.is_empty() {
+        out.push_str("\nPer-Namespace:\n");
+        out.push_str(&alloc::format!(
+            "  {:12} {:>8} {:>12} {:>6} {:>10}\n",
+            "Namespace",
+            "Events",
+            "Bytes",
+            "Rots",
+            "CurSize"
+        ));
+        for (name, events, bytes, rots, cur_size) in &st.cursors {
+            out.push_str(&alloc::format!(
+                "  {:12} {:>8} {:>12} {:>6} {:>10}\n",
+                name,
+                events,
+                bytes,
+                rots,
+                cur_size
+            ));
+        }
+    }
+
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
+///
+/// This module's state is not all in the table, and the rest of it is not even
+/// in this module: the suite makes up events, and everything downstream of that
+/// is real.  Two further things are therefore moved aside.
+///
+/// * The **event ring**, via [`eventlog::with_pristine_state`].  The suite's
+///   invented events are indistinguishable from real ones once they are in the
+///   ring, and on a machine that has been up a while they push real history out
+///   of it.  The body also called `eventlog::clear()` outright, twice.
+/// * The **log directory**.  A flush writes JSON lines to
+///   `<log_dir>/combined.jsonl` and rotates it when it grows, so against the
+///   default `/var/log/events` the suite appended fabricated entries to the
+///   operator's persisted system log and could rotate genuine history off the
+///   end of it.  [`self_test_config`] points the suite at a scratch directory,
+///   which this wrapper then removes — the directory is real, so nothing else
+///   will.
+pub fn self_test() -> KernelResult<()> {
+    let result = eventlog::with_pristine_state(|| {
+        crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner)
+    });
+    // Deliberately after the restore and unconditional: the files exist on disk
+    // whether or not the suite reached its last assertion. The error is dropped
+    // because there is nothing useful to do about a scratch directory that will
+    // not go away, and because on the first run it does not exist at all.
+    let _ = crate::fs::Vfs::remove_recursive(SELF_TEST_LOG_DIR);
+    result
+}
+
+/// Where the suite's log files go instead of `/var/log/events`.
+const SELF_TEST_LOG_DIR: &str = "/tmp/logpersist-selftest";
+
+/// The default configuration, redirected to [`SELF_TEST_LOG_DIR`].
+///
+/// The directory is chosen by whoever calls `init`, not by the state the
+/// `static` holds, so `with_pristine` cannot redirect it: `init()` overwrites
+/// the pristine `log_dir` with `RotationConfig::default()`'s.  Everything else
+/// is left at its default so the suite exercises the real rotation thresholds.
+fn self_test_config() -> RotationConfig {
+    RotationConfig {
+        log_dir: String::from(SELF_TEST_LOG_DIR),
+        ..RotationConfig::default()
+    }
+}
+
+fn self_test_inner() -> KernelResult<()> {
+    use crate::eventlog::EventBuilder;
+
+    crate::serial_println!("[logpersist] Running log rotation self-tests...");
+
+    // Test 1: Initialize with default config.
+    {
+        let mut state = STATE.lock();
+        state.initialized = false;
+        state.cursors.clear();
+        state.total_flushes = 0;
+        state.total_bytes = 0;
+        state.total_pruned = 0;
+        state.global_last_flushed = None;
+    }
+    init_with_config(self_test_config());
+    {
+        let state = STATE.lock();
+        if !state.initialized {
+            crate::serial_println!("[logpersist]   FAIL: not initialized");
+            return Err(KernelError::InternalError);
+        }
+        if state.cursors.len() != 1 {
+            crate::serial_println!("[logpersist]   FAIL: expected 1 cursor (combined mode)");
+            return Err(KernelError::InternalError);
+        }
+    }
+    if stats().global_last_flushed_seq.is_some() {
+        crate::serial_println!(
+            "[logpersist]   FAIL: a freshly-initialised cursor has flushed nothing; \
+             `0` is event zero, not `never`"
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[logpersist]   1. Init (combined mode): OK");
+
+    // Test 2: Emit events and flush.
+    //
+    // `clear()` restarts sequence numbering, so event 1 below is sequence
+    // **zero**. That is the whole point of the test: the first flush must
+    // persist it. While `global_last_flushed` was a `u64` with `0` meaning
+    // "nothing flushed", the resume query said "everything after 0", which
+    // excludes sequence 0 — this flushed 1 of 2, and on a real boot it meant
+    // the system's first-ever event never reached disk.
+    eventlog::clear();
+    EventBuilder::new("system.test", Severity::Info)
+        .message("Log rotation test event 1")
+        .emit();
+    EventBuilder::new("security.test", Severity::Warning)
+        .message("Log rotation test event 2")
+        .emit();
+
+    {
+        let seqs = eventlog::query(&EventFilter::all(), 16);
+        if seqs.events.first().map(crate::eventlog::EventEntry::seq) != Some(0) {
+            crate::serial_println!(
+                "[logpersist]   FAIL: expected the first event after clear() to be seq 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    let flushed = flush()?;
+    if flushed != 2 {
+        crate::serial_println!(
+            "[logpersist]   FAIL: expected 2 flushed, got {} (event seq 0 must not be skipped)",
+            flushed
+        );
+        return Err(KernelError::InternalError);
+    }
+    if stats().global_last_flushed_seq != Some(1) {
+        crate::serial_println!(
+            "[logpersist]   FAIL: cursor should sit at seq 1 after flushing seqs 0 and 1"
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[logpersist]   2. Flush events (incl. seq 0): OK (flushed {})",
+        flushed
+    );
+
+    // Test 3: Verify stats updated.
+    let st = stats();
+    if st.total_flushes != 1 {
+        crate::serial_println!(
+            "[logpersist]   FAIL: expected 1 flush, got {}",
+            st.total_flushes
+        );
+        return Err(KernelError::InternalError);
+    }
+    if st.total_bytes_written == 0 {
+        crate::serial_println!("[logpersist]   FAIL: total_bytes_written is 0");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[logpersist]   3. Stats: OK (bytes={})",
+        st.total_bytes_written
+    );
+
+    // Test 4: Event to JSON serialization.
+    EventBuilder::new("network.dhcp", Severity::Notice)
+        .message("DHCP lease acquired")
+        .pid(42)
+        .service("dhcpd")
+        .kv("ip", "10.0.2.15")
+        .emit();
+    let result = eventlog::query(&EventFilter::all().namespace("network.dhcp"), 1);
+    if let Some(ev) = result.events.first() {
+        let json = event_to_json_line(ev);
+        if !json.contains("\"sev\":\"notice\"") {
+            crate::serial_println!("[logpersist]   FAIL: JSON missing severity");
+            return Err(KernelError::InternalError);
+        }
+        if !json.contains("\"ns\":\"network.dhcp\"") {
+            crate::serial_println!("[logpersist]   FAIL: JSON missing namespace");
+            return Err(KernelError::InternalError);
+        }
+        if !json.contains("\"ip\":\"10.0.2.15\"") {
+            crate::serial_println!("[logpersist]   FAIL: JSON missing payload");
+            return Err(KernelError::InternalError);
+        }
+    } else {
+        crate::serial_println!("[logpersist]   FAIL: event not found");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[logpersist]   4. JSON serialization: OK");
+
+    // Test 5: Per-namespace mode.
+    {
+        let mut state = STATE.lock();
+        state.initialized = false;
+        state.cursors.clear();
+        state.total_flushes = 0;
+        state.total_bytes = 0;
+        state.global_last_flushed = None;
+    }
+    init_with_config(RotationConfig {
+        mode: RotationMode::PerNamespace,
+        ..self_test_config()
+    });
+    {
+        let state = STATE.lock();
+        if state.cursors.len() != eventlog::NAMESPACE_ROOTS.len() {
+            crate::serial_println!(
+                "[logpersist]   FAIL: expected {} cursors, got {}",
+                eventlog::NAMESPACE_ROOTS.len(),
+                state.cursors.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    crate::serial_println!("[logpersist]   5. Per-namespace mode: OK");
+
+    // Test 6: Prune (no files to prune should return 0).
+    let pruned = prune();
+    if pruned != 0 {
+        crate::serial_println!("[logpersist]   FAIL: expected 0 pruned, got {}", pruned);
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[logpersist]   6. Prune (empty): OK");
+
+    // Test 7: Prune deletes the *oldest* rotation first, and the live file
+    // last. Test 6 only proved that pruning nothing prunes nothing, which the
+    // reversed sort order passed just as happily.
+    {
+        let mut state = STATE.lock();
+        state.initialized = false;
+        state.cursors.clear();
+        state.total_pruned = 0;
+    }
+    // Four 100-byte files and a 250-byte cap: two must go, and which two is
+    // the whole point.
+    init_with_config(RotationConfig {
+        mode: RotationMode::Combined,
+        max_total_storage: 250,
+        max_rotated_files: 3,
+        ..self_test_config()
+    });
+    let live = alloc::format!("{SELF_TEST_LOG_DIR}/combined.jsonl");
+    let rot1 = alloc::format!("{SELF_TEST_LOG_DIR}/combined.1.jsonl");
+    let rot2 = alloc::format!("{SELF_TEST_LOG_DIR}/combined.2.jsonl");
+    let rot3 = alloc::format!("{SELF_TEST_LOG_DIR}/combined.3.jsonl");
+    let filler = [b'x'; 100];
+    for path in [&live, &rot1, &rot2, &rot3] {
+        crate::fs::Vfs::write_file(path, &filler)?;
+    }
+
+    let pruned = prune();
+    if pruned != 2 {
+        crate::serial_println!(
+            "[logpersist]   FAIL: expected 2 files pruned to get 400 bytes under a \
+             250-byte cap, got {pruned}"
+        );
+        return Err(KernelError::InternalError);
+    }
+    for (path, want, what) in [
+        (
+            &rot3,
+            false,
+            "oldest rotation (.3) should have been pruned first",
+        ),
+        (
+            &rot2,
+            false,
+            "second-oldest rotation (.2) should have been pruned",
+        ),
+        (&rot1, true, "newest rotation (.1) should have survived"),
+        (
+            &live,
+            true,
+            "the live file should never be pruned before a rotation",
+        ),
+    ] {
+        if crate::fs::Vfs::exists(path) != want {
+            crate::serial_println!("[logpersist]   FAIL: {what} ({path})");
+            return Err(KernelError::InternalError);
+        }
+    }
+    if stats().total_pruned != 2 {
+        crate::serial_println!(
+            "[logpersist]   FAIL: total_pruned is {}, expected 2",
+            stats().total_pruned
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[logpersist]   7. Prune order (oldest first): OK");
+
+    // No clean-up of the ring here: `self_test` runs this against a substitute
+    // one, which is dropped on the way out along with every event emitted above.
+    // The scratch log directory is removed by `self_test` itself.
+    crate::serial_println!("[logpersist] All 7 self-tests passed.");
+    Ok(())
+}

@@ -1,0 +1,15 @@
+[package]
+name = "netipc"
+version = "0.1.0"
+edition = "2024"
+description = "Shared no_std request/reply wire schema for the SlateOS `net.stack` IPC service (kernel socket-syscall forwarders + userspace netstack daemon)."
+
+[lib]
+path = "src/lib.rs"
+
+# Intentionally dependency-free and `no_std`, mirroring `netproto`: this crate
+# is the single source of truth for the kernel<->daemon control-message schema
+# and is linked into both the bare-metal `services/netstack` daemon
+# (x86_64-unknown-none) and the kernel (x86_64-slateos). It must never pull in
+# `std` or an allocator.
+[dependencies]

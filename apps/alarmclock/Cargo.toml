@@ -1,0 +1,18 @@
+[package]
+name = "alarmclock"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS alarm clock, countdown timers and stopwatch"
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+# The window and its event loop. Without this, `fn main` was empty: the alarms,
+# the timers and the stopwatch existed only for the tests to call, and — worse
+# here than in most apps — nothing delivered `Event::Tick`, so a countdown
+# started by a user could never actually count down.
+oswindow = { path = "../../gui/window" }
+# The zone the clock face is rendered through. UTC today, explicitly and
+# greppably — see `refresh_clock`.
+tzrules = { path = "../../tzrules" }
+
+[lints]
+workspace = true

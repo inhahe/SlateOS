@@ -1,0 +1,16 @@
+[package]
+name = "diffcore"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS shared diff/merge engine — Myers line diff, character-level inline diff, and diff3 three-way merge. Used by the File Diff tool and the text editors."
+
+[dependencies]
+
+# Test fixtures only: a private temp directory per test, removed on drop --
+# named from the process id and a counter, so two tests in one process can
+# never draw the same name the way a clock-tagged name could.
+[dev-dependencies]
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

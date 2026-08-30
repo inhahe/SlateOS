@@ -1,0 +1,15 @@
+[package]
+name = "fileassoc"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS file association manager — which program opens which file type"
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+# The window and its event loop. Without this `fn main` was empty, and the
+# consequence here was starker than usual: the toolbar, the sidebar, the table
+# and the modal dialog were all drawn and *none* of them handled an event, so
+# every control in the program was a picture of a control.
+oswindow = { path = "../../gui/window" }
+
+[lints]
+workspace = true

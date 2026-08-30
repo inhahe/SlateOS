@@ -1,0 +1,1974 @@
+//! Desktop Icons — icon layer sitting beneath windows, above the wallpaper.
+//!
+//! This module manages a grid of desktop icons (files, folders, shortcuts,
+//! system items) that users can click, drag, rename, and double-click to open.
+//!
+//! # Integration
+//!
+//! ```ignore
+//! let mut icon_layer = DesktopIconLayer::new(1920, 1080, 40); // screen_w, screen_h, taskbar_h
+//! icon_layer.populate_defaults();
+//!
+//! // Each frame:
+//! let commands = icon_layer.render(&palette);
+//!
+//! // Forward mouse/key events:
+//! icon_layer.handle_mouse_down(x, y, button, modifiers);
+//! icon_layer.handle_mouse_move(x, y);
+//! icon_layer.handle_mouse_up(x, y, button);
+//! icon_layer.handle_key(key_event);
+//! icon_layer.handle_double_click(x, y);
+//! ```
+
+use appearance::Palette;
+use core::num::NonZeroU32;
+use guitk::color::Color;
+use guitk::idseq::IdSeq;
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::style::CornerRadii;
+use guitk::text;
+
+// ============================================================================
+// Colour
+// ============================================================================
+//
+// Sixteen `const … : Color` used to live here, all Catppuccin Mocha, which is
+// why the desktop's icon layer stayed dark on a Light desktop. They are gone;
+// `render` takes the `&Palette` the shell resolved. See known-issues.md
+// `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
+//
+// Three groups, and only the third needed a decision:
+//
+// - **The six translucent ones** — selection fill and border, rubber-band fill
+//   and border, drop target, label shadow — mapped onto `Palette`'s helpers
+//   alpha for alpha (`selection_fill`, `selection_border`, `hint_fill`,
+//   `hint_border`, `drop_target`, `text_shadow`). They were written from those
+//   helpers' values in the first place; this is the copy going back where it
+//   came from, and the selection ones now follow the user's accent, which the
+//   hardcoded blue never could.
+// - **The nine icon-type hues** stay categorical. A folder is yellow, the
+//   recycle bin is red, an executable is peach — that is a legend the user
+//   reads, so it must not collapse toward whatever accent they picked. A Red
+//   desktop that painted the recycle bin and every shortcut the same colour
+//   would be worse than one that ignored the setting.
+// - **The labels do not follow the mode at all**, and that is the one real
+//   decision here. They are drawn on the *wallpaper* — an arbitrary
+//   photograph, not a palette surface — under a black shadow that exists to
+//   make them legible against it. `p.text` would be dark on Latte, and dark
+//   text under a black shadow is legible against nothing. So they read
+//   `p.on_wallpaper()` / `p.on_wallpaper_dim()`, which are pale in both modes
+//   for exactly the reason `text_shadow` is black in both.
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Default grid cell width in pixels.
+const DEFAULT_GRID_WIDTH: u32 = 80;
+/// Default grid cell height in pixels.
+const DEFAULT_GRID_HEIGHT: u32 = 90;
+/// Icon glyph size (large character).
+const ICON_GLYPH_SIZE: f32 = 32.0;
+/// Label font size.
+const LABEL_FONT_SIZE: f32 = 11.0;
+/// Maximum label width (for centering and truncation).
+const LABEL_MAX_WIDTH: f32 = 72.0;
+/// Maximum number of label lines.
+const LABEL_MAX_LINES: usize = 2;
+/// Drag threshold in pixels (squared, to avoid sqrt).
+const DRAG_THRESHOLD_SQ: f32 = 25.0;
+/// Padding from top of grid cell to icon glyph.
+const ICON_TOP_PADDING: f32 = 8.0;
+/// Padding from screen edges.
+const EDGE_PADDING: u32 = 8;
+
+// ============================================================================
+// Types
+// ============================================================================
+
+/// Unique identifier for a desktop icon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct IconId(pub u64);
+
+/// The type/category of a desktop icon, determining its visual glyph and behavior.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IconType {
+    Folder,
+    File,
+    Shortcut,
+    Drive,
+    RecycleBin,
+    Computer,
+    Document,
+    Image,
+    Executable,
+}
+
+impl IconType {
+    /// Unicode glyph representing this icon type.
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Folder => "\u{1F4C1}",     // folder
+            Self::File => "\u{1F4C4}",       // page facing up
+            Self::Shortcut => "\u{1F517}",   // link
+            Self::Drive => "\u{1F4BE}",      // floppy disk (drive)
+            Self::RecycleBin => "\u{1F5D1}", // wastebasket
+            Self::Computer => "\u{1F4BB}",   // laptop
+            Self::Document => "\u{1F4DD}",   // memo
+            Self::Image => "\u{1F5BC}",      // framed picture
+            Self::Executable => "\u{2699}",  // gear
+        }
+    }
+
+    /// The hue that means this icon's type, in `p`'s mode.
+    ///
+    /// Categorical, not accented: these nine are a legend the user reads,
+    /// so they stay nine distinguishable colours whatever the desktop is
+    /// themed around.
+    fn color(self, p: &Palette) -> Color {
+        match self {
+            Self::Folder => p.yellow,
+            Self::File => p.text,
+            Self::Shortcut => p.sapphire,
+            Self::Drive => p.overlay0,
+            Self::RecycleBin => p.red,
+            Self::Computer => p.blue,
+            Self::Document => p.green,
+            Self::Image => p.mauve,
+            Self::Executable => p.peach,
+        }
+    }
+}
+
+/// Action associated with a desktop icon.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IconAction {
+    /// Open a path (file or directory).
+    OpenPath(String),
+    /// Launch a system tool/dialog.
+    LaunchSystem(String),
+    /// Custom action string.
+    Custom(String),
+}
+
+/// A single desktop icon.
+#[derive(Clone, Debug)]
+pub struct DesktopIcon {
+    pub id: IconId,
+    /// Position on the desktop (top-left of the icon cell).
+    pub x: i32,
+    pub y: i32,
+    /// Display label (file/folder name).
+    pub label: String,
+    /// Type determines the glyph and accent color.
+    pub icon_type: IconType,
+    /// What happens when the icon is activated (double-click / Enter).
+    pub action: IconAction,
+    /// Whether this icon is currently selected.
+    pub selected: bool,
+}
+
+/// Describes the current interaction state of the icon layer.
+#[derive(Clone, Debug)]
+enum InteractionState {
+    /// No interaction in progress.
+    Idle,
+    /// Mouse is down, waiting to see if it becomes a drag.
+    PendingDrag {
+        start_x: f32,
+        start_y: f32,
+        /// Icons being considered for drag.
+        icon_ids: Vec<IconId>,
+    },
+    /// Dragging selected icons.
+    Dragging {
+        start_x: f32,
+        start_y: f32,
+        current_x: f32,
+        current_y: f32,
+        /// Original positions of dragged icons (id, orig_x, orig_y).
+        originals: Vec<(IconId, i32, i32)>,
+    },
+    /// Rubber-band selection in progress (started on empty desktop area).
+    RubberBand {
+        start_x: f32,
+        start_y: f32,
+        current_x: f32,
+        current_y: f32,
+    },
+}
+
+/// Arrangement mode for desktop icons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrangementMode {
+    /// Icons snap to grid when dropped but stay where placed.
+    FreeWithSnap,
+    /// Icons are automatically sorted and placed from top-left.
+    AutoArrange,
+}
+
+/// Result of an icon interaction (returned to the desktop shell).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IconEvent {
+    /// An icon was activated (double-click or Enter).
+    Activate(IconId, IconAction),
+    /// A context menu was requested at a position.
+    ContextMenu {
+        x: i32,
+        y: i32,
+        icon_id: Option<IconId>,
+    },
+    /// Icons were deleted (moved to recycle bin).
+    Delete(Vec<IconId>),
+    /// Rename was initiated for an icon.
+    BeginRename(IconId),
+    /// No event.
+    None,
+}
+
+/// Grid configuration for icon placement.
+///
+/// The cell size is held privately and is never zero. It used to be two public
+/// `u32`s, and half the methods here defended against a zero — `columns_in` and
+/// `rows_in` returned 0 — while the other half divided by it and panicked.
+/// There was even a test for the zero grid, which called only the two guarded
+/// methods. Making the state unrepresentable is what removes the question:
+/// there is one place a cell size is admitted, and it clamps.
+///
+/// It is `NonZeroU32` rather than a `u32` that the constructor happens to
+/// clamp, because those are not the same claim. The second is a promise kept
+/// by one function that a reader has to go and find; the first is a fact the
+/// compiler carries to every division in this file, and it is what lets
+/// [`GridConfig::columns_in`] divide without a guard of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridConfig {
+    cell_width: NonZeroU32,
+    cell_height: NonZeroU32,
+}
+
+impl Default for GridConfig {
+    fn default() -> Self {
+        Self::new(DEFAULT_GRID_WIDTH, DEFAULT_GRID_HEIGHT)
+    }
+}
+
+impl GridConfig {
+    /// A grid of `cell_width` by `cell_height` pixel cells.
+    ///
+    /// A zero in either dimension is raised to one. A grid of zero-sized cells
+    /// has no meaning — every position would be in every cell — so there is
+    /// nothing to preserve by honouring it, and a one-pixel cell is the
+    /// degenerate case that still answers every question consistently.
+    #[must_use]
+    pub const fn new(cell_width: u32, cell_height: u32) -> Self {
+        Self {
+            cell_width: match NonZeroU32::new(cell_width) {
+                Some(w) => w,
+                None => NonZeroU32::MIN,
+            },
+            cell_height: match NonZeroU32::new(cell_height) {
+                Some(h) => h,
+                None => NonZeroU32::MIN,
+            },
+        }
+    }
+
+    /// Cell width in pixels. Never zero.
+    #[must_use]
+    pub const fn cell_width(&self) -> u32 {
+        self.cell_width.get()
+    }
+
+    /// Cell height in pixels. Never zero.
+    #[must_use]
+    pub const fn cell_height(&self) -> u32 {
+        self.cell_height.get()
+    }
+
+    /// Cell width as a signed value, for mixing with pixel positions.
+    fn cell_width_i32(&self) -> i32 {
+        i32::try_from(self.cell_width.get()).unwrap_or(i32::MAX)
+    }
+
+    /// Cell height as a signed value.
+    fn cell_height_i32(&self) -> i32 {
+        i32::try_from(self.cell_height.get()).unwrap_or(i32::MAX)
+    }
+
+    /// Snap a position to the origin of the cell containing it.
+    #[must_use]
+    pub fn snap(&self, x: i32, y: i32) -> (i32, i32) {
+        let (col, row) = self.to_cell(x, y);
+        self.from_cell(col, row)
+    }
+
+    /// Convert pixel position to grid column/row.
+    ///
+    /// `div_euclid` is floor division, which is what a grid coordinate needs:
+    /// pixel -1 belongs to cell -1, not to cell 0. The hand-rolled
+    /// `(x - w + 1) / w` this replaces computed the same thing for ordinary
+    /// inputs and overflowed near `i32::MIN`, where the subtraction wraps.
+    // Kept as &self for symmetry with the sibling Grid methods
+    // (snap, columns_in, rows_in) — all take &self for a consistent API.
+    #[allow(clippy::wrong_self_convention)]
+    #[must_use]
+    pub fn to_cell(&self, x: i32, y: i32) -> (i32, i32) {
+        (
+            x.div_euclid(self.cell_width_i32()),
+            y.div_euclid(self.cell_height_i32()),
+        )
+    }
+
+    /// Convert grid column/row to the pixel position of that cell's top-left.
+    // Despite the `from_*` name this is an inverse of `to_cell` that needs
+    // the grid's cell dimensions, so it stays as a method.
+    #[allow(clippy::wrong_self_convention)]
+    #[must_use]
+    pub fn from_cell(&self, col: i32, row: i32) -> (i32, i32) {
+        (
+            col.saturating_mul(self.cell_width_i32()),
+            row.saturating_mul(self.cell_height_i32()),
+        )
+    }
+
+    /// Number of whole columns that fit within a given width.
+    ///
+    /// Dividing by the `NonZeroU32` itself rather than by `.get()` uses the
+    /// `Div<NonZeroU32> for u32` impl, which cannot panic. Calling `.get()`
+    /// first would hand the compiler a plain `u32` and throw the proof away
+    /// one expression before the division that needs it. That costs `const`,
+    /// since operator impls are not const — and no caller wanted it.
+    #[must_use]
+    pub fn columns_in(&self, width: u32) -> u32 {
+        width / self.cell_width
+    }
+
+    /// Number of whole rows that fit within a given height.
+    #[must_use]
+    pub fn rows_in(&self, height: u32) -> u32 {
+        height / self.cell_height
+    }
+}
+
+// ============================================================================
+// Desktop Icon Layer
+// ============================================================================
+
+/// The desktop icon layer — manages placement, selection, drag, and rendering.
+pub struct DesktopIconLayer {
+    /// All icons on the desktop.
+    icons: Vec<DesktopIcon>,
+    /// Source of icon IDs.
+    ids: IdSeq,
+    /// Grid configuration.
+    pub grid: GridConfig,
+    /// Arrangement mode.
+    pub arrangement: ArrangementMode,
+    /// Current interaction state.
+    interaction: InteractionState,
+    /// Screen dimensions.
+    screen_width: u32,
+    screen_height: u32,
+    /// Taskbar height (icons must not overlap the taskbar).
+    taskbar_height: u32,
+}
+
+impl DesktopIconLayer {
+    /// Create a new icon layer for the given screen dimensions.
+    pub fn new(screen_width: u32, screen_height: u32, taskbar_height: u32) -> Self {
+        Self {
+            icons: Vec::new(),
+            ids: IdSeq::new(),
+            grid: GridConfig::default(),
+            arrangement: ArrangementMode::FreeWithSnap,
+            interaction: InteractionState::Idle,
+            screen_width,
+            screen_height,
+            taskbar_height,
+        }
+    }
+
+    /// Usable area height (excluding taskbar).
+    fn usable_height(&self) -> u32 {
+        self.screen_height.saturating_sub(self.taskbar_height)
+    }
+
+    // ======================================================================
+    // Icon management
+    // ======================================================================
+
+    /// Add an icon and return its ID.
+    pub fn add_icon(
+        &mut self,
+        label: &str,
+        icon_type: IconType,
+        action: IconAction,
+        x: i32,
+        y: i32,
+    ) -> IconId {
+        let id = IconId(self.ids.issue_infallible());
+
+        let (snapped_x, snapped_y) = self.grid.snap(x, y);
+
+        self.icons.push(DesktopIcon {
+            id,
+            x: snapped_x,
+            y: snapped_y,
+            label: label.to_string(),
+            icon_type,
+            action,
+            selected: false,
+        });
+
+        id
+    }
+
+    /// Add an icon at the next available grid position.
+    pub fn add_icon_auto(
+        &mut self,
+        label: &str,
+        icon_type: IconType,
+        action: IconAction,
+    ) -> IconId {
+        let pos = self.next_free_cell();
+        self.add_icon(label, icon_type, action, pos.0, pos.1)
+    }
+
+    /// Remove an icon by ID.
+    pub fn remove_icon(&mut self, id: IconId) {
+        self.icons.retain(|icon| icon.id != id);
+    }
+
+    /// Get a reference to an icon by ID.
+    pub fn get_icon(&self, id: IconId) -> Option<&DesktopIcon> {
+        self.icons.iter().find(|icon| icon.id == id)
+    }
+
+    /// Get a mutable reference to an icon by ID.
+    pub fn get_icon_mut(&mut self, id: IconId) -> Option<&mut DesktopIcon> {
+        self.icons.iter_mut().find(|icon| icon.id == id)
+    }
+
+    /// Populate default desktop icons (This PC, Recycle Bin, Documents, Home).
+    ///
+    /// Stacked down the first column. Written as a list rather than four calls
+    /// each spelling out its own row offset, because `y_start + cell_height *
+    /// 3` is a row number encoded in arithmetic, and the fourth one is where a
+    /// typo hides.
+    pub fn populate_defaults(&mut self) {
+        let defaults = [
+            (
+                "This PC",
+                IconType::Computer,
+                IconAction::LaunchSystem("explorer --computer".to_string()),
+            ),
+            (
+                "Recycle Bin",
+                IconType::RecycleBin,
+                IconAction::LaunchSystem("explorer --recycle-bin".to_string()),
+            ),
+            (
+                "Documents",
+                IconType::Folder,
+                IconAction::OpenPath("/home/user/Documents".to_string()),
+            ),
+            (
+                "Home",
+                IconType::Folder,
+                IconAction::OpenPath("/home/user".to_string()),
+            ),
+        ];
+
+        for (row, (label, icon_type, action)) in defaults.into_iter().enumerate() {
+            let (x, y) = self.cell_origin(0, i32::try_from(row).unwrap_or(i32::MAX));
+            self.add_icon(label, icon_type, action, x, y);
+        }
+    }
+
+    // ======================================================================
+    // Selection
+    // ======================================================================
+
+    /// Select a single icon, deselecting all others.
+    pub fn select_single(&mut self, id: IconId) {
+        for icon in &mut self.icons {
+            icon.selected = icon.id == id;
+        }
+    }
+
+    /// Toggle selection of a single icon (Ctrl+Click behavior).
+    pub fn toggle_selection(&mut self, id: IconId) {
+        if let Some(icon) = self.icons.iter_mut().find(|i| i.id == id) {
+            icon.selected = !icon.selected;
+        }
+    }
+
+    /// Select all icons.
+    pub fn select_all(&mut self) {
+        for icon in &mut self.icons {
+            icon.selected = true;
+        }
+    }
+
+    /// Deselect all icons.
+    pub fn deselect_all(&mut self) {
+        for icon in &mut self.icons {
+            icon.selected = false;
+        }
+    }
+
+    /// Select icons within a rectangle (rubber-band selection).
+    pub fn select_in_rect(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, additive: bool) {
+        let min_x = x1.min(x2);
+        let max_x = x1.max(x2);
+        let min_y = y1.min(y2);
+        let max_y = y1.max(y2);
+
+        for icon in &mut self.icons {
+            let icon_cx = icon.x as f32 + self.grid.cell_width() as f32 / 2.0;
+            let icon_cy = icon.y as f32 + self.grid.cell_height() as f32 / 2.0;
+
+            let in_rect =
+                icon_cx >= min_x && icon_cx <= max_x && icon_cy >= min_y && icon_cy <= max_y;
+
+            if additive {
+                if in_rect {
+                    icon.selected = true;
+                }
+            } else {
+                icon.selected = in_rect;
+            }
+        }
+    }
+
+    /// Get all currently selected icon IDs.
+    pub fn selected_ids(&self) -> Vec<IconId> {
+        self.icons
+            .iter()
+            .filter(|i| i.selected)
+            .map(|i| i.id)
+            .collect()
+    }
+
+    // ======================================================================
+    // Hit testing
+    // ======================================================================
+
+    /// Find the icon at a given pixel position, if any.
+    pub fn icon_at(&self, x: f32, y: f32) -> Option<IconId> {
+        // Iterate in reverse so topmost (last-added) icon wins on overlap.
+        for icon in self.icons.iter().rev() {
+            let ix = icon.x as f32;
+            let iy = icon.y as f32;
+            let iw = self.grid.cell_width() as f32;
+            let ih = self.grid.cell_height() as f32;
+
+            if x >= ix && x < ix + iw && y >= iy && y < iy + ih {
+                return Some(icon.id);
+            }
+        }
+        None
+    }
+
+    // ======================================================================
+    // Arrangement
+    // ======================================================================
+
+    /// Pixel position of the top-left of grid cell `(col, row)`, offset by the
+    /// desktop's edge padding.
+    ///
+    /// Every icon placed by the shell goes through here, so that "where does
+    /// cell (2, 3) start" has one answer. It did not: `auto_arrange` measured
+    /// the desktop with `self.grid` and then placed with
+    /// `GridConfig::default()`, so on any layer with a non-default cell size
+    /// the icons were laid out at the wrong pitch — overlapping if the real
+    /// cells were larger, gapped if smaller. No test caught it because they
+    /// all used the default grid.
+    fn cell_origin(&self, col: i32, row: i32) -> (i32, i32) {
+        let (px, py) = self.grid.from_cell(col, row);
+        let pad = i32::try_from(EDGE_PADDING).unwrap_or(i32::MAX);
+        (px.saturating_add(pad), py.saturating_add(pad))
+    }
+
+    /// How many columns and rows of icons fit on the usable desktop.
+    fn grid_extent(&self) -> (u32, u32) {
+        let margin = EDGE_PADDING.saturating_mul(2);
+        (
+            self.grid
+                .columns_in(self.screen_width.saturating_sub(margin)),
+            self.grid
+                .rows_in(self.usable_height().saturating_sub(margin)),
+        )
+    }
+
+    /// Find the next free grid cell (scanning top-to-bottom, left-to-right).
+    pub fn next_free_cell(&self) -> (i32, i32) {
+        let (cols, rows) = self.grid_extent();
+
+        // Map each icon's stored top-left back to its grid cell.  Icons
+        // placed via `add_icon` are snapped (no padding added), and icons
+        // placed via `auto_arrange` get `EDGE_PADDING` added on top — both
+        // still resolve to the same cell here because `EDGE_PADDING` (8) is
+        // far smaller than the cell size (80x90).
+        let occupied: Vec<(i32, i32)> = self
+            .icons
+            .iter()
+            .map(|i| self.grid.to_cell(i.x, i.y))
+            .collect();
+
+        // Scan columns first (top to bottom within each column, then next column).
+        for col in 0..i32::try_from(cols).unwrap_or(i32::MAX) {
+            for row in 0..i32::try_from(rows).unwrap_or(i32::MAX) {
+                if !occupied.contains(&(col, row)) {
+                    return self.cell_origin(col, row);
+                }
+            }
+        }
+
+        // Fallback: just place at origin.
+        self.cell_origin(0, 0)
+    }
+
+    /// Auto-arrange all icons into a grid, sorted alphabetically.
+    pub fn auto_arrange(&mut self) {
+        // Sort by label (case-insensitive).
+        self.icons.sort_by_key(|i| i.label.to_lowercase());
+
+        let (cols, rows) = self.grid_extent();
+
+        // Cell positions are computed up front because `cell_origin` reads
+        // `self` and the loop below holds the icons mutably.
+        let placements: Vec<(i32, i32)> = (0..self.icons.len())
+            .map(|idx| {
+                let idx = u32::try_from(idx).unwrap_or(u32::MAX);
+                // Fill column-first (top to bottom, then next column).
+                let col = idx.checked_div(rows).unwrap_or(idx);
+                let row = idx.checked_rem(rows).unwrap_or(0);
+                // Past the last column, wrap round and start overlapping
+                // rather than drawing icons off the edge of the screen.
+                let col = if col >= cols {
+                    col.checked_rem(cols).unwrap_or(0)
+                } else {
+                    col
+                };
+                self.cell_origin(
+                    i32::try_from(col).unwrap_or(i32::MAX),
+                    i32::try_from(row).unwrap_or(i32::MAX),
+                )
+            })
+            .collect();
+
+        for (icon, (x, y)) in self.icons.iter_mut().zip(placements) {
+            icon.x = x;
+            icon.y = y;
+        }
+    }
+
+    // ======================================================================
+    // Mouse interaction
+    // ======================================================================
+
+    /// Handle mouse button press. Returns an event if one is generated.
+    pub fn handle_mouse_down(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: MouseButton,
+        ctrl_held: bool,
+    ) -> IconEvent {
+        if button == MouseButton::Right {
+            let hit = self.icon_at(x, y);
+            if let Some(id) = hit {
+                // If right-clicking an unselected icon, select it alone.
+                if !self.icons.iter().any(|i| i.id == id && i.selected) {
+                    self.select_single(id);
+                }
+            }
+            return IconEvent::ContextMenu {
+                x: x as i32,
+                y: y as i32,
+                icon_id: hit,
+            };
+        }
+
+        if button != MouseButton::Left {
+            return IconEvent::None;
+        }
+
+        if let Some(id) = self.icon_at(x, y) {
+            // Clicked on an icon.
+            if ctrl_held {
+                self.toggle_selection(id);
+            } else if !self.icons.iter().any(|i| i.id == id && i.selected) {
+                self.select_single(id);
+            }
+
+            // Begin pending drag.
+            let selected = self.selected_ids();
+            self.interaction = InteractionState::PendingDrag {
+                start_x: x,
+                start_y: y,
+                icon_ids: selected,
+            };
+        } else {
+            // Clicked on empty desktop — start rubber-band.
+            if !ctrl_held {
+                self.deselect_all();
+            }
+            self.interaction = InteractionState::RubberBand {
+                start_x: x,
+                start_y: y,
+                current_x: x,
+                current_y: y,
+            };
+        }
+
+        IconEvent::None
+    }
+
+    /// Handle mouse movement (drag tracking).
+    pub fn handle_mouse_move(&mut self, x: f32, y: f32, ctrl_held: bool) {
+        match &self.interaction {
+            InteractionState::PendingDrag {
+                start_x,
+                start_y,
+                icon_ids,
+            } => {
+                let dx = x - start_x;
+                let dy = y - start_y;
+                if dx * dx + dy * dy >= DRAG_THRESHOLD_SQ {
+                    // Exceeded drag threshold — transition to dragging.
+                    let originals: Vec<(IconId, i32, i32)> = icon_ids
+                        .iter()
+                        .filter_map(|id| {
+                            self.icons
+                                .iter()
+                                .find(|i| i.id == *id)
+                                .map(|i| (i.id, i.x, i.y))
+                        })
+                        .collect();
+
+                    self.interaction = InteractionState::Dragging {
+                        start_x: *start_x,
+                        start_y: *start_y,
+                        current_x: x,
+                        current_y: y,
+                        originals,
+                    };
+                }
+            }
+            InteractionState::Dragging {
+                start_x,
+                start_y,
+                originals,
+                ..
+            } => {
+                // Update current drag position. Clone to satisfy borrow checker.
+                let sx = *start_x;
+                let sy = *start_y;
+                let orig = originals.clone();
+                self.interaction = InteractionState::Dragging {
+                    start_x: sx,
+                    start_y: sy,
+                    current_x: x,
+                    current_y: y,
+                    originals: orig,
+                };
+            }
+            InteractionState::RubberBand {
+                start_x, start_y, ..
+            } => {
+                let sx = *start_x;
+                let sy = *start_y;
+                self.interaction = InteractionState::RubberBand {
+                    start_x: sx,
+                    start_y: sy,
+                    current_x: x,
+                    current_y: y,
+                };
+                // Update selection based on rubber-band rectangle.
+                self.select_in_rect(sx, sy, x, y, ctrl_held);
+            }
+            InteractionState::Idle => {}
+        }
+    }
+
+    /// Handle mouse button release.
+    pub fn handle_mouse_up(&mut self, _x: f32, _y: f32, button: MouseButton) {
+        if button != MouseButton::Left {
+            return;
+        }
+
+        match &self.interaction {
+            InteractionState::Dragging {
+                start_x,
+                start_y,
+                current_x,
+                current_y,
+                originals,
+            } => {
+                // Drop: move icons by the delta, snapping to grid.
+                let dx = *current_x - *start_x;
+                let dy = *current_y - *start_y;
+
+                let originals_snapshot = originals.clone();
+                self.interaction = InteractionState::Idle;
+
+                for (id, orig_x, orig_y) in &originals_snapshot {
+                    let new_x = orig_x.saturating_add(dx as i32);
+                    let new_y = orig_y.saturating_add(dy as i32);
+                    let (snapped_x, snapped_y) = self.grid.snap(new_x, new_y);
+
+                    if let Some(icon) = self.icons.iter_mut().find(|i| i.id == *id) {
+                        icon.x = snapped_x;
+                        icon.y = snapped_y;
+                    }
+                }
+
+                if self.arrangement == ArrangementMode::AutoArrange {
+                    self.auto_arrange();
+                }
+            }
+            _ => {
+                self.interaction = InteractionState::Idle;
+            }
+        }
+    }
+
+    /// Handle double-click at a position.
+    pub fn handle_double_click(&mut self, x: f32, y: f32) -> IconEvent {
+        if let Some(id) = self.icon_at(x, y)
+            && let Some(icon) = self.icons.iter().find(|i| i.id == id)
+        {
+            return IconEvent::Activate(id, icon.action.clone());
+        }
+        IconEvent::None
+    }
+
+    /// Handle keyboard input. Returns an event if one is generated.
+    pub fn handle_key(&mut self, key: DesktopKey, ctrl_held: bool) -> IconEvent {
+        match key {
+            DesktopKey::SelectAll if ctrl_held => {
+                self.select_all();
+                IconEvent::None
+            }
+            DesktopKey::Delete => {
+                let selected = self.selected_ids();
+                if selected.is_empty() {
+                    return IconEvent::None;
+                }
+                IconEvent::Delete(selected)
+            }
+            DesktopKey::F2 => {
+                // The slice pattern is both halves of the old test at once:
+                // exactly one selection, and a name bound to it.
+                if let [only] = self.selected_ids().as_slice() {
+                    IconEvent::BeginRename(*only)
+                } else {
+                    IconEvent::None
+                }
+            }
+            DesktopKey::Enter => {
+                if let [only] = self.selected_ids().as_slice()
+                    && let Some(icon) = self.icons.iter().find(|i| i.id == *only)
+                {
+                    return IconEvent::Activate(*only, icon.action.clone());
+                }
+                IconEvent::None
+            }
+            _ => IconEvent::None,
+        }
+    }
+
+    // ======================================================================
+    // Rendering
+    // ======================================================================
+
+    /// Produce render commands for the entire icon layer.
+    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {
+        let mut cmds: Vec<RenderCommand> = Vec::new();
+
+        // Render each icon.
+        for icon in &self.icons {
+            self.render_icon(p, icon, &mut cmds);
+        }
+
+        // Render drag ghosts (translucent copies at drag position).
+        if let InteractionState::Dragging {
+            start_x,
+            start_y,
+            current_x,
+            current_y,
+            originals,
+        } = &self.interaction
+        {
+            let dx = *current_x - *start_x;
+            let dy = *current_y - *start_y;
+
+            for (id, orig_x, orig_y) in originals {
+                if let Some(icon) = self.icons.iter().find(|i| i.id == *id) {
+                    let ghost_x = *orig_x as f32 + dx;
+                    let ghost_y = *orig_y as f32 + dy;
+
+                    // Ghost background (translucent).
+                    cmds.push(RenderCommand::FillRect {
+                        x: ghost_x,
+                        y: ghost_y,
+                        width: self.grid.cell_width() as f32,
+                        height: self.grid.cell_height() as f32,
+                        // Not in the deleted `theme` block — this one was
+                        // written inline, which is how a hardcoded palette
+                        // spreads: the same blue at the same alpha as
+                        // `hint_fill`, out of reach of anything that could
+                        // have renamed it.
+                        color: p.hint_fill(),
+                        corner_radii: CornerRadii::all(4.0),
+                    });
+
+                    // Ghost glyph.
+                    let glyph_x = ghost_x + (self.grid.cell_width() as f32 - ICON_GLYPH_SIZE) / 2.0;
+                    let glyph_y = ghost_y + ICON_TOP_PADDING;
+                    cmds.push(RenderCommand::Text {
+                        x: glyph_x,
+                        y: glyph_y,
+                        text: icon.icon_type.glyph().to_string(),
+                        color: {
+                            let c = icon.icon_type.color(p);
+                            Color::rgba(c.r, c.g, c.b, 120)
+                        },
+                        font_size: ICON_GLYPH_SIZE,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: None,
+                        overflow: TextOverflow::Clip,
+                    });
+                }
+            }
+
+            // Drop target highlight at snapped position.
+            if let Some((_id, orig_x, orig_y)) = originals.first() {
+                let target_x = *orig_x as f32 + dx;
+                let target_y = *orig_y as f32 + dy;
+                let (snap_x, snap_y) = self.grid.snap(target_x as i32, target_y as i32);
+
+                cmds.push(RenderCommand::StrokeRect {
+                    x: snap_x as f32,
+                    y: snap_y as f32,
+                    width: self.grid.cell_width() as f32,
+                    height: self.grid.cell_height() as f32,
+                    color: p.drop_target(),
+                    line_width: 2.0,
+                    corner_radii: CornerRadii::all(4.0),
+                });
+            }
+        }
+
+        // Render rubber-band selection rectangle.
+        if let InteractionState::RubberBand {
+            start_x,
+            start_y,
+            current_x,
+            current_y,
+        } = &self.interaction
+        {
+            let rx = start_x.min(*current_x);
+            let ry = start_y.min(*current_y);
+            let rw = (current_x - start_x).abs();
+            let rh = (current_y - start_y).abs();
+
+            cmds.push(RenderCommand::FillRect {
+                x: rx,
+                y: ry,
+                width: rw,
+                height: rh,
+                color: p.hint_fill(),
+                corner_radii: CornerRadii::ZERO,
+            });
+            cmds.push(RenderCommand::StrokeRect {
+                x: rx,
+                y: ry,
+                width: rw,
+                height: rh,
+                color: p.hint_border(),
+                line_width: 1.0,
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+
+        cmds
+    }
+
+    /// Render a single icon into the command list.
+    fn render_icon(&self, p: &Palette, icon: &DesktopIcon, cmds: &mut Vec<RenderCommand>) {
+        let ix = icon.x as f32;
+        let iy = icon.y as f32;
+        let cw = self.grid.cell_width() as f32;
+        let ch = self.grid.cell_height() as f32;
+
+        // Selection highlight.
+        if icon.selected {
+            cmds.push(RenderCommand::FillRect {
+                x: ix,
+                y: iy,
+                width: cw,
+                height: ch,
+                color: p.selection_fill(),
+                corner_radii: CornerRadii::all(4.0),
+            });
+            cmds.push(RenderCommand::StrokeRect {
+                x: ix,
+                y: iy,
+                width: cw,
+                height: ch,
+                color: p.selection_border(),
+                line_width: 1.0,
+                corner_radii: CornerRadii::all(4.0),
+            });
+        }
+
+        // Icon glyph (centered horizontally within the cell).
+        let glyph_x = ix + (cw - ICON_GLYPH_SIZE) / 2.0;
+        let glyph_y = iy + ICON_TOP_PADDING;
+
+        cmds.push(RenderCommand::Text {
+            x: glyph_x,
+            y: glyph_y,
+            text: icon.icon_type.glyph().to_string(),
+            color: icon.icon_type.color(p),
+            font_size: ICON_GLYPH_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+
+        // Label text below icon (centered, 2-line max with ellipsis).
+        let label_y = iy + ICON_TOP_PADDING + ICON_GLYPH_SIZE + 6.0;
+        let lines = wrap_label(&icon.label, LABEL_MAX_WIDTH, LABEL_MAX_LINES);
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            let ly = label_y + line_idx as f32 * (LABEL_FONT_SIZE + 2.0);
+
+            // Shadow for readability against varied backgrounds.
+            cmds.push(RenderCommand::Text {
+                x: ix + 1.0,
+                y: ly + 1.0,
+                text: line.clone(),
+                color: p.text_shadow(),
+                font_size: LABEL_FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(LABEL_MAX_WIDTH),
+                overflow: TextOverflow::Ellipsis,
+            });
+
+            // Actual label text.
+            cmds.push(RenderCommand::Text {
+                x: ix,
+                y: ly,
+                text: line.clone(),
+                color: if icon.selected {
+                    p.on_wallpaper()
+                } else {
+                    p.on_wallpaper_dim()
+                },
+                font_size: LABEL_FONT_SIZE,
+                font_weight: if icon.selected {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(LABEL_MAX_WIDTH),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+    }
+
+    /// Update screen dimensions (e.g., on resolution change).
+    pub fn set_screen_size(&mut self, width: u32, height: u32) {
+        self.screen_width = width;
+        self.screen_height = height;
+    }
+}
+
+// ============================================================================
+// Helper types
+// ============================================================================
+
+/// Mouse button (simplified).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+/// Simplified key events relevant to the icon layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DesktopKey {
+    Delete,
+    F2,
+    Enter,
+    SelectAll,
+    Escape,
+}
+
+// ============================================================================
+// Label wrapping
+// ============================================================================
+
+/// A label broken into at most `max_lines` lines, none wider than `max_width`,
+/// with the cut marked if the whole label did not fit.
+///
+/// # Why a width and not a character budget
+///
+/// This took `max_chars: usize` — 12 characters per line — and broke the label
+/// by counting them. A desktop icon is 72 px wide, and 12 characters is 72 px
+/// only for text of average width: "WWWWWWWWWWWW" is nearly twice that and ran
+/// out under the neighbouring icon, while "iiiiiiiiiiii" left a third of the
+/// cell empty. The renderer was already being told
+/// `max_width: Some(LABEL_MAX_WIDTH)` for the same text, so a wide label was
+/// then cut a second time, by the renderer, in the middle of a word the wrapper
+/// had decided was fine. Two disagreeing answers to one question.
+///
+/// Now there is one answer, and it is measured: the breaks come from
+/// [`text::wrap_hard`], which places them with the same font cache the
+/// compositor draws with, so what this function thinks fits is what is drawn.
+///
+/// # Why `wrap_hard` and not `wrap`
+///
+/// [`text::wrap`] deliberately does *not* break inside a word — where to do
+/// that is a per-script decision belonging to a real line breaker. A desktop
+/// icon cannot take that answer: its cell is a fixed 72 px, an over-long line
+/// runs under the next icon, and a Japanese file name contains no space at all,
+/// so *every* CJK label would come back as one over-long line.
+/// [`text::wrap_hard`] breaks by measured fit when a run has no break
+/// opportunity in it, which is right for the Han and Kana that make up most
+/// such labels and merely inelegant for a long Latin word — which is what the
+/// renderer would have done to it anyway.
+///
+/// The last line kept is marked when anything was dropped, so a truncated file
+/// name is distinguishable from a short one.
+fn wrap_label(text: &str, max_width: f32, max_lines: usize) -> Vec<String> {
+    /// The mark that says text was dropped.
+    const ELLIPSIS: &str = "\u{2026}";
+
+    if text.is_empty() || max_lines == 0 || max_width <= 0.0 {
+        return vec![String::new()];
+    }
+
+    let weight = FontWeightHint::Regular;
+    let mut lines = text::wrap_hard(text, max_width, LABEL_FONT_SIZE, weight);
+    if lines.len() <= max_lines {
+        return lines;
+    }
+
+    lines.truncate(max_lines);
+    if let Some(last) = lines.last_mut() {
+        // The mark has to fit *with* the text it marks, so the room for the
+        // text is the cell less the mark. Appending it to a line that already
+        // filled the cell is how a label ends up one glyph wider than the cell
+        // it was carefully wrapped into.
+        let room = (max_width - text::measure(ELLIPSIS, LABEL_FONT_SIZE, weight)).max(0.0);
+        let cut = text::fit(last, room, LABEL_FONT_SIZE, weight);
+        let mut marked = last.get(..cut).unwrap_or("").trim_end().to_string();
+        marked.push_str(ELLIPSIS);
+        *last = marked;
+    }
+    lines
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::*;
+    use crate::palette_check;
+
+    // ------------------------------------------------------------------
+    // Grid snapping tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn grid_snap_positive_aligned() {
+        let grid = GridConfig::new(80, 90);
+        assert_eq!(grid.snap(0, 0), (0, 0));
+        assert_eq!(grid.snap(80, 90), (80, 90));
+        assert_eq!(grid.snap(160, 180), (160, 180));
+    }
+
+    #[test]
+    fn grid_snap_positive_unaligned() {
+        let grid = GridConfig::new(80, 90);
+        // Should snap to nearest lower-left cell origin.
+        assert_eq!(grid.snap(10, 10), (0, 0));
+        assert_eq!(grid.snap(79, 89), (0, 0));
+        assert_eq!(grid.snap(81, 91), (80, 90));
+        assert_eq!(grid.snap(120, 135), (80, 90));
+        assert_eq!(grid.snap(159, 179), (80, 90));
+    }
+
+    #[test]
+    fn grid_snap_negative_coords() {
+        let grid = GridConfig::new(80, 90);
+        assert_eq!(grid.snap(-1, -1), (-80, -90));
+        assert_eq!(grid.snap(-80, -90), (-80, -90));
+        assert_eq!(grid.snap(-81, -91), (-160, -180));
+    }
+
+    #[test]
+    fn grid_to_cell_and_back() {
+        let grid = GridConfig::new(80, 90);
+        assert_eq!(grid.to_cell(0, 0), (0, 0));
+        assert_eq!(grid.to_cell(80, 90), (1, 1));
+        assert_eq!(grid.to_cell(160, 270), (2, 3));
+        assert_eq!(grid.from_cell(2, 3), (160, 270));
+    }
+
+    #[test]
+    fn grid_columns_and_rows() {
+        let grid = GridConfig::new(80, 90);
+        assert_eq!(grid.columns_in(1920), 24);
+        assert_eq!(grid.rows_in(1040), 11); // 1080 - 40 taskbar
+        assert_eq!(grid.columns_in(0), 0);
+        assert_eq!(grid.rows_in(0), 0);
+    }
+
+    #[test]
+    fn a_zero_cell_size_is_raised_to_one_rather_than_dividing_by_it() {
+        // This used to build a grid of zero-sized cells and check the two
+        // methods that guarded against it. The other two — `snap` and
+        // `to_cell` — divided by the same zero and panicked; the test simply
+        // did not call them. Now the state cannot be built.
+        let grid = GridConfig::new(0, 0);
+        assert_eq!(grid.cell_width(), 1);
+        assert_eq!(grid.cell_height(), 1);
+        assert_eq!(grid.snap(37, -12), (37, -12));
+        assert_eq!(grid.to_cell(37, -12), (37, -12));
+        assert_eq!(grid.columns_in(1920), 1920);
+        assert_eq!(grid.rows_in(1080), 1080);
+    }
+
+    // ------------------------------------------------------------------
+    // Selection tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn select_single_deselects_others() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let id1 = layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
+        let id2 = layer.add_icon(
+            "B",
+            IconType::File,
+            IconAction::OpenPath("/b".into()),
+            80,
+            0,
+        );
+
+        layer.select_all();
+        assert_eq!(layer.selected_ids().len(), 2);
+
+        layer.select_single(id1);
+        assert_eq!(layer.selected_ids(), vec![id1]);
+
+        let icon2 = layer.get_icon(id2).unwrap();
+        assert!(!icon2.selected);
+    }
+
+    #[test]
+    fn toggle_selection() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let id1 = layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
+
+        assert!(!layer.get_icon(id1).unwrap().selected);
+
+        layer.toggle_selection(id1);
+        assert!(layer.get_icon(id1).unwrap().selected);
+
+        layer.toggle_selection(id1);
+        assert!(!layer.get_icon(id1).unwrap().selected);
+    }
+
+    #[test]
+    fn select_all_and_deselect_all() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
+        layer.add_icon(
+            "B",
+            IconType::File,
+            IconAction::OpenPath("/b".into()),
+            80,
+            0,
+        );
+        layer.add_icon(
+            "C",
+            IconType::File,
+            IconAction::OpenPath("/c".into()),
+            160,
+            0,
+        );
+
+        layer.select_all();
+        assert_eq!(layer.selected_ids().len(), 3);
+
+        layer.deselect_all();
+        assert_eq!(layer.selected_ids().len(), 0);
+    }
+
+    #[test]
+    fn rubber_band_selection() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        // Place icons in a known grid.
+        layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
+        layer.add_icon(
+            "B",
+            IconType::File,
+            IconAction::OpenPath("/b".into()),
+            80,
+            0,
+        );
+        layer.add_icon(
+            "C",
+            IconType::File,
+            IconAction::OpenPath("/c".into()),
+            0,
+            90,
+        );
+
+        // Select a rectangle that covers A and C (first column).
+        // Center of A = (40, 45), center of C = (40, 135), center of B = (120, 45).
+        layer.select_in_rect(0.0, 0.0, 79.0, 180.0, false);
+
+        let selected = layer.selected_ids();
+        assert_eq!(selected.len(), 2);
+        // B should not be selected (its center is at x=120, outside rect).
+        assert!(!layer.get_icon(IconId(2)).unwrap().selected);
+    }
+
+    // ------------------------------------------------------------------
+    // Arrangement tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn auto_arrange_sorts_alphabetically() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        layer.add_icon(
+            "Zebra",
+            IconType::File,
+            IconAction::OpenPath("/z".into()),
+            500,
+            500,
+        );
+        layer.add_icon(
+            "Apple",
+            IconType::File,
+            IconAction::OpenPath("/a".into()),
+            300,
+            300,
+        );
+        layer.add_icon(
+            "Mango",
+            IconType::File,
+            IconAction::OpenPath("/m".into()),
+            100,
+            100,
+        );
+
+        layer.auto_arrange();
+
+        // After auto-arrange, alphabetical order: Apple, Mango, Zebra.
+        assert_eq!(layer.icons[0].label, "Apple");
+        assert_eq!(layer.icons[1].label, "Mango");
+        assert_eq!(layer.icons[2].label, "Zebra");
+    }
+
+    #[test]
+    fn auto_arrange_places_in_grid() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        for i in 0..5 {
+            layer.add_icon(
+                &format!("Icon{i}"),
+                IconType::File,
+                IconAction::OpenPath(format!("/{i}")),
+                999,
+                999,
+            );
+        }
+
+        layer.auto_arrange();
+
+        // With default grid (80x90), screen 1920x1080, taskbar 40:
+        // usable height = 1040, minus 16 edge padding = 1024
+        // rows = 1024 / 90 = 11
+        // So 5 icons should fill first column (rows 0..4).
+        let grid = GridConfig::default();
+        for (idx, icon) in layer.icons.iter().enumerate() {
+            let expected_col = idx as u32 / 11;
+            let expected_row = idx as u32 % 11;
+            let (ex, ey) = grid.from_cell(expected_col as i32, expected_row as i32);
+            assert_eq!(icon.x, ex + EDGE_PADDING as i32, "icon {idx} x mismatch");
+            assert_eq!(icon.y, ey + EDGE_PADDING as i32, "icon {idx} y mismatch");
+        }
+    }
+
+    #[test]
+    fn auto_arrange_lays_icons_out_at_the_layers_own_pitch() {
+        // The bug this covers: `auto_arrange` counted the rows that fit using
+        // `self.grid` and then placed each icon with `GridConfig::default()`.
+        // Every existing test used a layer whose grid *was* the default, so
+        // the two agreed by accident and the mismatch was invisible.
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        layer.grid = GridConfig::new(120, 140);
+        for i in 0..3 {
+            layer.add_icon(
+                &format!("Icon{i}"),
+                IconType::File,
+                IconAction::OpenPath(format!("/{i}")),
+                999,
+                999,
+            );
+        }
+
+        layer.auto_arrange();
+
+        // Three icons fit in the first column at this pitch, so the row index
+        // is the icon index and the spacing is the layer's cell height.
+        for (row, icon) in layer.icons.iter().enumerate() {
+            let (ex, ey) = layer.grid.from_cell(0, row as i32);
+            assert_eq!(icon.x, ex + EDGE_PADDING as i32, "icon {row} x");
+            assert_eq!(icon.y, ey + EDGE_PADDING as i32, "icon {row} y");
+        }
+        // And spelled out, so the assertion above cannot pass by comparing the
+        // wrong grid against itself: 140, not the default 90.
+        assert_eq!(layer.icons[1].y - layer.icons[0].y, 140);
+    }
+
+    #[test]
+    fn the_default_icons_are_stacked_at_the_layers_own_pitch() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        layer.grid = GridConfig::new(120, 140);
+        layer.populate_defaults();
+
+        assert_eq!(layer.icons.len(), 4);
+        // No `EDGE_PADDING` in the expectation: `add_icon` snaps whatever it
+        // is given to a cell origin, so the padding is folded away on entry.
+        // (`auto_arrange` writes `icon.x` directly and so keeps it — the two
+        // paths disagree by 8px, which is far inside one cell and therefore
+        // invisible to `to_cell`. See the note on `next_free_cell`.)
+        for (row, icon) in layer.icons.iter().enumerate() {
+            let (ex, ey) = layer.grid.from_cell(0, row as i32);
+            assert_eq!(icon.x, ex, "icon {row} x");
+            assert_eq!(icon.y, ey, "icon {row} y");
+        }
+        assert_eq!(layer.icons[1].y - layer.icons[0].y, 140);
+    }
+
+    #[test]
+    fn auto_arrange_on_a_grid_coarser_than_the_screen_still_places_every_icon() {
+        // One cell taller and wider than the usable desktop: `grid_extent`
+        // reports zero columns and zero rows, so every division by it has to
+        // be the checked one.
+        let mut layer = DesktopIconLayer::new(200, 200, 40);
+        layer.grid = GridConfig::new(4096, 4096);
+        for i in 0..3 {
+            layer.add_icon(
+                &format!("Icon{i}"),
+                IconType::File,
+                IconAction::OpenPath(format!("/{i}")),
+                0,
+                0,
+            );
+        }
+
+        layer.auto_arrange();
+        layer.next_free_cell();
+
+        assert_eq!(layer.icons.len(), 3);
+    }
+
+    #[test]
+    fn next_free_cell_avoids_occupied() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        // Occupy the first cell.
+        layer.add_icon(
+            "First",
+            IconType::File,
+            IconAction::OpenPath("/first".into()),
+            EDGE_PADDING as i32,
+            EDGE_PADDING as i32,
+        );
+
+        let next = layer.next_free_cell();
+        // Should be second row, first column.
+        let (expected_x, expected_y) = layer.grid.from_cell(0, 1);
+        assert_eq!(
+            next,
+            (
+                expected_x + EDGE_PADDING as i32,
+                expected_y + EDGE_PADDING as i32
+            )
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Hit testing
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn icon_at_hit() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let id = layer.add_icon(
+            "Test",
+            IconType::File,
+            IconAction::OpenPath("/t".into()),
+            0,
+            0,
+        );
+
+        // Click inside the cell (grid snaps to 0,0).
+        assert_eq!(layer.icon_at(40.0, 45.0), Some(id));
+        // Click outside.
+        assert_eq!(layer.icon_at(200.0, 200.0), None);
+    }
+
+    #[test]
+    fn icon_at_returns_topmost() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        // Two icons at the same position (overlapping).
+        let _id1 = layer.add_icon(
+            "Under",
+            IconType::File,
+            IconAction::OpenPath("/u".into()),
+            0,
+            0,
+        );
+        let id2 = layer.add_icon(
+            "Over",
+            IconType::File,
+            IconAction::OpenPath("/o".into()),
+            0,
+            0,
+        );
+
+        // Should return the later-added (topmost) icon.
+        assert_eq!(layer.icon_at(40.0, 45.0), Some(id2));
+    }
+
+    // ------------------------------------------------------------------
+    // Label wrapping tests
+    // ------------------------------------------------------------------
+
+    /// Every line the wrapper produces has to fit the width it will be drawn
+    /// into. That is the only property that matters here, and it is the one a
+    /// character budget could not state.
+    fn assert_lines_fit(lines: &[String], max_width: f32) {
+        for line in lines {
+            let w = guitk::text::measure(line, LABEL_FONT_SIZE, FontWeightHint::Regular);
+            assert!(
+                w <= max_width + 0.5,
+                "line {line:?} measures {w}, wider than the {max_width} it is drawn into"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_short_label() {
+        let lines = wrap_label("Hello", LABEL_MAX_WIDTH, 2);
+        assert_eq!(lines, vec!["Hello"]);
+    }
+
+    /// A label too wide for one line but small enough for two is broken at the
+    /// space and shown whole — nothing is dropped and nothing is marked, because
+    /// nothing was cut.
+    ///
+    /// The label here is deliberately short. "My Documents Folder", which this
+    /// test used to carry, does *not* fit two 72 px lines at 11 px — the old
+    /// character budget of 12 per line claimed it did, which is precisely the
+    /// error being corrected. It survives below as the label that must be marked.
+    #[test]
+    fn wrap_long_label_two_lines() {
+        let label = "Holiday Photos";
+        // Stated, not assumed: this label really is too wide for one line, so
+        // the two-line result below is the wrapper working rather than the
+        // label happening to be short.
+        assert!(
+            guitk::text::measure(label, LABEL_FONT_SIZE, FontWeightHint::Regular) > LABEL_MAX_WIDTH,
+            "the test label must not fit one line"
+        );
+        let lines = wrap_label(label, LABEL_MAX_WIDTH, 2);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_lines_fit(&lines, LABEL_MAX_WIDTH);
+        assert_eq!(
+            lines.join(" "),
+            label,
+            "nothing was cut, so nothing is lost"
+        );
+    }
+
+    /// A label that does not fit even in `max_lines` lines is marked, so a
+    /// truncated file name is distinguishable from a short one.
+    #[test]
+    fn wrap_marks_a_label_that_does_not_fit() {
+        let lines = wrap_label(
+            "Quarterly Revenue Projections Final v3 reviewed.xlsx",
+            LABEL_MAX_WIDTH,
+            2,
+        );
+        assert_eq!(lines.len(), 2);
+        assert_lines_fit(&lines, LABEL_MAX_WIDTH);
+        assert!(lines[1].ends_with('\u{2026}'), "{lines:?}");
+    }
+
+    #[test]
+    fn wrap_empty_label() {
+        let lines = wrap_label("", LABEL_MAX_WIDTH, 2);
+        assert_eq!(lines, vec![""]);
+    }
+
+    #[test]
+    fn wrap_single_line_truncation() {
+        let lines = wrap_label("VeryLongFileNameThatExceedsLimit", LABEL_MAX_WIDTH, 1);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].ends_with('\u{2026}'));
+        assert_lines_fit(&lines, LABEL_MAX_WIDTH);
+    }
+
+    /// What the character budget hid: twelve wide letters and twelve narrow
+    /// ones are not the same width, so no single count can be the rule. Both
+    /// now wrap to lines that fit, and they wrap differently.
+    #[test]
+    fn wrapping_follows_the_width_of_the_letters_not_their_number() {
+        let wide = wrap_label("WWWW WWWW WWWW WWWW", LABEL_MAX_WIDTH, 2);
+        let narrow = wrap_label("iiii iiii iiii iiii", LABEL_MAX_WIDTH, 2);
+        assert_lines_fit(&wide, LABEL_MAX_WIDTH);
+        assert_lines_fit(&narrow, LABEL_MAX_WIDTH);
+        assert!(
+            narrow.join(" ").chars().count() > wide.join(" ").chars().count(),
+            "the narrow label shows more characters in the same space: {narrow:?} against {wide:?}"
+        );
+    }
+
+    /// A label in a script whose characters are far from average width must
+    /// still produce lines that fit. Under the old count, three ideographs were
+    /// "3 of 12 characters" and were drawn about twice the cell wide.
+    #[test]
+    fn a_cjk_label_wraps_to_lines_that_fit() {
+        let lines = wrap_label("日本語のファイル名です", LABEL_MAX_WIDTH, 2);
+        assert_lines_fit(&lines, LABEL_MAX_WIDTH);
+    }
+
+    // ------------------------------------------------------------------
+    // Double-click / action tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn double_click_activates_icon() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let id = layer.add_icon(
+            "Test",
+            IconType::Computer,
+            IconAction::LaunchSystem("explorer --computer".into()),
+            0,
+            0,
+        );
+
+        let event = layer.handle_double_click(40.0, 45.0);
+        assert_eq!(
+            event,
+            IconEvent::Activate(id, IconAction::LaunchSystem("explorer --computer".into()))
+        );
+    }
+
+    #[test]
+    fn double_click_on_empty_returns_none() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        layer.add_icon(
+            "Test",
+            IconType::File,
+            IconAction::OpenPath("/t".into()),
+            0,
+            0,
+        );
+
+        let event = layer.handle_double_click(500.0, 500.0);
+        assert_eq!(event, IconEvent::None);
+    }
+
+    // ------------------------------------------------------------------
+    // Keyboard action tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn delete_key_returns_selected_ids() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let id1 = layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
+        let id2 = layer.add_icon(
+            "B",
+            IconType::File,
+            IconAction::OpenPath("/b".into()),
+            80,
+            0,
+        );
+
+        layer.select_all();
+        let event = layer.handle_key(DesktopKey::Delete, false);
+        assert_eq!(event, IconEvent::Delete(vec![id1, id2]));
+    }
+
+    #[test]
+    fn f2_begins_rename_for_single_selection() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let id = layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
+
+        layer.select_single(id);
+        let event = layer.handle_key(DesktopKey::F2, false);
+        assert_eq!(event, IconEvent::BeginRename(id));
+    }
+
+    #[test]
+    fn f2_does_nothing_for_multi_selection() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
+        layer.add_icon(
+            "B",
+            IconType::File,
+            IconAction::OpenPath("/b".into()),
+            80,
+            0,
+        );
+
+        layer.select_all();
+        let event = layer.handle_key(DesktopKey::F2, false);
+        assert_eq!(event, IconEvent::None);
+    }
+
+    // ------------------------------------------------------------------
+    // Default icons test
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn populate_defaults_creates_four_icons() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        layer.populate_defaults();
+        assert_eq!(layer.icons.len(), 4);
+
+        // Verify expected icons exist.
+        assert!(layer.icons.iter().any(|i| i.label == "This PC"));
+        assert!(layer.icons.iter().any(|i| i.label == "Recycle Bin"));
+        assert!(layer.icons.iter().any(|i| i.label == "Documents"));
+        assert!(layer.icons.iter().any(|i| i.label == "Home"));
+    }
+
+    // ------------------------------------------------------------------
+    // Render produces output
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn render_produces_commands_for_icons() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        layer.populate_defaults();
+
+        for light in [false, true] {
+            let cmds = layer.render(&Palette::for_mode(light));
+            // Each icon produces: glyph text + label shadow + label text
+            // (minimum). Selected icons also get highlight rect + border.
+            assert!(!cmds.is_empty());
+            // At least 3 commands per icon (glyph + shadow + text) * 4 icons.
+            assert!(cmds.len() >= 12);
+        }
+    }
+
+    #[test]
+    fn render_selected_icon_has_highlight() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let id = layer.add_icon(
+            "Sel",
+            IconType::File,
+            IconAction::OpenPath("/s".into()),
+            0,
+            0,
+        );
+        layer.select_single(id);
+
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let cmds = layer.render(&p);
+            // First command for a selected icon should be the selection
+            // FillRect. Comparing against `p.selection_fill()` rather than a
+            // literal is what makes this survive the accent moving: the
+            // highlight is the user's accent at a wash alpha now, not a fixed
+            // blue.
+            let has_fill = cmds.iter().any(
+                |c| matches!(c, RenderCommand::FillRect { color, .. } if *color == p.selection_fill()),
+            );
+            assert!(has_fill, "Selected icon should have a selection highlight");
+        }
+    }
+
+    /// An icon's label is the same colour in both modes, because the wallpaper
+    /// is.
+    ///
+    /// This exists because the conversion sweep below *cannot* catch the
+    /// mistake it guards. The sweep finds a Mocha constant left behind in a
+    /// light render; a label wrongly converted to `p.text` is not a leftover
+    /// constant but a wrong role, and a wrong role is a member of both
+    /// palettes, so it passes the sweep in both modes. Measured, not assumed:
+    /// harness defect EE in `scripts/reintro-palette.py` swapped
+    /// `on_wallpaper`/`on_wallpaper_dim` for `text`/`subtext0` and the sweep
+    /// reported green.
+    ///
+    /// So this asserts the property directly at the call site. A label lands on
+    /// an arbitrary photograph under a black shadow — the shadow is the only
+    /// background it is guaranteed to have — which is why it must stay pale
+    /// whatever the desktop's mode is. `appearance`'s
+    /// `a_label_on_the_wallpaper_does_not_follow_the_mode` makes the same
+    /// assertion about the palette method; this one makes it about the module
+    /// that has to remember to call it.
+    #[test]
+    fn an_icon_label_does_not_change_colour_with_the_mode() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let id = layer.add_icon(
+            "Selected",
+            IconType::File,
+            IconAction::OpenPath("/s".into()),
+            0,
+            0,
+        );
+        layer.add_icon(
+            "Unselected",
+            IconType::Folder,
+            IconAction::OpenPath("/u".into()),
+            80,
+            0,
+        );
+        layer.select_single(id);
+
+        // The glyphs are Text commands too, and they *do* follow the mode
+        // (`p.text` for a plain file), so match on the label strings rather
+        // than on the command kind.
+        let labels_of = |light: bool| -> Vec<(String, Color)> {
+            layer
+                .render(&Palette::for_mode(light))
+                .into_iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, color, .. }
+                        if text == "Selected" || text == "Unselected" =>
+                    {
+                        Some((text, color))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let dark = labels_of(false);
+        let light = labels_of(true);
+        assert!(
+            !dark.is_empty(),
+            "no label was drawn, so this test asserts nothing"
+        );
+        assert_eq!(
+            dark, light,
+            "an icon label changed colour with the mode; the wallpaper it is \
+             drawn on did not, and the black shadow under it did not either — \
+             a dark label there is legible against nothing. Use \
+             `Palette::on_wallpaper`, not `Palette::text`."
+        );
+    }
+
+    /// Every colour the icon layer draws comes from the palette it was handed.
+    ///
+    /// See `security_dialog`'s equivalent for the reasoning. The states below
+    /// exist because three of this module's colours are only reachable from an
+    /// in-progress gesture: the rubber-band pair needs a marquee being dragged,
+    /// and the drop-target outline needs icons mid-drag. A sweep of a resting
+    /// desktop would cover nine of the sixteen deleted constants and quietly
+    /// certify the other seven.
+    ///
+    /// `derived` names the wallpaper inks. They are the pale extreme in *both*
+    /// modes on purpose — the wallpaper is not a surface the shell knows the
+    /// colour of, so the label does not flip with the theme — which means in a
+    /// dark render they are the one thing here that is not a role of the
+    /// palette in play, and therefore the one thing that must be declared.
+    #[test]
+    fn every_colour_the_icon_layer_draws_comes_from_its_palette() {
+        // One of each icon type, so all nine categorical hues are emitted.
+        let types = [
+            IconType::Folder,
+            IconType::File,
+            IconType::Shortcut,
+            IconType::Drive,
+            IconType::RecycleBin,
+            IconType::Computer,
+            IconType::Document,
+            IconType::Image,
+            IconType::Executable,
+        ];
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for gesture in 0..3 {
+                let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+                let mut first = None;
+                for (i, ty) in types.into_iter().enumerate() {
+                    let id = layer.add_icon(
+                        &format!("Icon {i}"),
+                        ty,
+                        IconAction::OpenPath(format!("/i{i}")),
+                        (i as i32) * 80,
+                        0,
+                    );
+                    if first.is_none() {
+                        first = Some(id);
+                    }
+                }
+                match gesture {
+                    // At rest, with one icon selected: selection fill/border.
+                    0 => {
+                        if let Some(id) = first {
+                            layer.select_single(id);
+                        }
+                    }
+                    // Drawing a marquee: rubber-band fill and border.
+                    1 => {
+                        layer.interaction = InteractionState::RubberBand {
+                            start_x: 10.0,
+                            start_y: 10.0,
+                            current_x: 400.0,
+                            current_y: 300.0,
+                        };
+                    }
+                    // Dragging the selection: the drop-target outline.
+                    _ => {
+                        if let Some(id) = first {
+                            layer.select_single(id);
+                            layer.interaction = InteractionState::Dragging {
+                                start_x: 10.0,
+                                start_y: 10.0,
+                                current_x: 200.0,
+                                current_y: 200.0,
+                                originals: vec![(id, 0, 0)],
+                            };
+                        }
+                    }
+                }
+                let cmds = layer.render(&p);
+                assert!(!cmds.is_empty());
+                palette_check::assert_drawn_from(
+                    &p,
+                    &cmds,
+                    &[p.on_wallpaper(), p.on_wallpaper_dim()],
+                    "icons",
+                );
+            }
+        }
+    }
+}

@@ -1,0 +1,6 @@
+[package]
+name = "chage"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS chage utility"
+[dependencies]

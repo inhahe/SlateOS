@@ -1,0 +1,14 @@
+[package]
+name = "game2048"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+# The game generated a board, dropped it and exited: `main` was
+# `let _app = Game2048App::new();`. `oswindow` is what makes the difference
+# between a simulation and a program.
+oswindow = { path = "../../gui/window" }
+
+[lints]
+workspace = true

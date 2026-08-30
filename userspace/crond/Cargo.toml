@@ -1,0 +1,6 @@
+[package]
+name = "crond"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS cron daemon — time-based task scheduler with crontab management"
+[dependencies]

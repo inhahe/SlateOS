@@ -1,0 +1,66 @@
+# A shell script must arrive in the working tree with LF endings, on every
+# platform and in every worktree.
+#
+# This is not a style preference. `bash` treats a CR as part of the token it
+# ends, so a CRLF script fails in ways that look like the script being wrong:
+# `set -u` becomes `set -u$'\r'` ("invalid option"), and `. "$(dirname
+# "$0")/diff-wsl.sh"` looks for a file whose name ends in a carriage
+# return. Twenty-three of this tree's differential harnesses were unrunnable
+# from a Windows worktree for exactly that reason, and silently so — with
+# `core.autocrlf=input` the CRLF is normalised away on commit, so `git status`
+# stays clean and nothing ever points at the cause.
+#
+# `text eol=lf` says: normalise to LF in the repository (as `autocrlf=input`
+# already did) *and* check out LF regardless of the platform or of any local
+# `core.autocrlf`. The second half is the one that was missing.
+*.sh text eol=lf
+
+# The same reasoning for the other files that are read by a POSIX tool rather
+# than by an editor: a CR inside them is data, not formatting.
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# The shared documents, for a different reason: to override git's guess.
+#
+# `core.autocrlf=input` normalises line endings only in files git believes are
+# text, and its test is a scan of the whole blob for a NUL byte. `known-issues.md`
+# had two, ~4.5 MB in, inside backtick spans quoting what `grep -Z` puts after a
+# filename. So git called the file binary and stopped normalising it — and on
+# 2026-08-25 an edit script that rewrote it through Python's default text mode
+# (which on Windows turns `\n` into `\r\n`) committed 4.5 MB of CRLF with no
+# warning and no visible diff hunk. The next merge saw every line as changed,
+# conflicted on the entire file, and had no three-way to offer.
+#
+# `text eol=lf` is not a guess: it *asserts* these are text, so the NUL heuristic
+# is not consulted. The NULs themselves are gone too — a document that quotes a
+# control byte should spell it — but the attribute is the part that holds if one
+# comes back. These files are the ones three lanes append to concurrently, which
+# is exactly where an unmergeable 4.5 MB conflict is most expensive.
+*.md text eol=lf
+*.txt text eol=lf
+
+# The two append-only JSONL logs, for the third variety of the same problem.
+#
+# Every lane's boot test appends one record to `boot-history.jsonl`, and every
+# benchmark run one to `history.jsonl` -- always at end of file, never touching
+# an existing line. Two lanes running in the same window therefore append at the
+# same offset and git conflicts, on a machine-generated file that nobody should
+# ever be hand-editing. Lane B hit it three times in one session
+# (requests/b-a-boot-history-jsonl-conflicts-*).
+#
+# `merge=union` keeps both sides' lines instead of conflicting, which is always
+# the right resolution here: each line is an independent record and neither side
+# has modified the other's.
+#
+# It is only safe because the loaders sort. Union merge *concatenates* -- for a
+# conflicting hunk it emits ours then theirs -- so the merged file's last line
+# need not be the latest record, and both scripts read "most recent" out of file
+# position (`tail_clean_streak` walks backwards from the end;
+# `previous_for_host` returns `window[-1]`). `load_history` in each script now
+# sorts by timestamp, which makes file order carry no meaning at all; that sort
+# is load-bearing for these two lines and must not be "optimised away".
+# `scripts/test-boot-history.py` asserts the property directly: a shuffled file
+# must yield the same answers as a sorted one.
+bench/boot-history.jsonl merge=union
+bench/history.jsonl merge=union

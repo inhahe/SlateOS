@@ -1,0 +1,14 @@
+[package]
+name = "filesearch"
+version = "0.1.0"
+edition = "2024"
+
+# `globmatch` because a search tool should not hold a private opinion about
+# what `[a-z]` means: this crate and `apps/indexer` each had their own matcher
+# and their own bugs, and both are user-facing.
+[dependencies]
+globmatch = { path = "../globmatch" }
+guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

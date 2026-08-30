@@ -1,0 +1,28 @@
+# Commits that are pure formatting and should be skipped by git blame.
+#
+# Enable locally with:
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Or one-off:  git blame --ignore-rev <rev> -- <file>
+#
+# Added under design-decisions.md §310 (operator, 2026-08-15), which approved a
+# one-shot repo-wide rustfmt to disarm the 'cargo fmt rewrites files you never
+# touched' trap. Anything listed here must contain formatting and NOTHING else.
+#
+# NOTE: this file does not reach GitHub's blame view or 'git log -S'. Those
+# still see the reformat. That cost was weighed and accepted in §310.
+
+# rustfmt: reformat the posix crate (Lane B)
+06ad616e0e9e57ed0a3dab2c66d60e09bc7355e0
+
+# rustfmt: reformat the kernel crate (Lane A) -- 733 files
+c33bfa34ffea15c6be689a0757470947a95e4e25
+
+# rustfmt: reformat the oils crate (Lane B) -- 17 files, 2016 hunks
+497181ec2578dd67f0f165cd201a91db5268953c
+
+# rustfmt: reformat the ere crate (Lane B) -- 2 files
+551b50eabb8adc73c303108f4bbc6566a0ebe095
+
+# rustfmt: coreutils head.rs and tail.rs (Lane B) -- 32 hunks
+d37bd563cad8661bc7bc42084fcfe461cbeae954

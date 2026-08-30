@@ -1,0 +1,18 @@
+[package]
+name = "localtime"
+version = "0.1.0"
+edition = "2024"
+description = "Resolving TZ the way every libc resolves it, and rendering the result — one copy, for every utility that prints a timestamp."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The rules engine and the TZif reader. This crate is the part that is missing
+# from them: `tzrules` answers "what is the offset at this instant", and every
+# caller then has to find the zone, break the instant down into a calendar, and
+# format it. Three callers had written that part three times.
+tzrules = { path = "../../tzrules" }
+
+[lints]
+workspace = true

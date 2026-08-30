@@ -1,0 +1,14 @@
+[package]
+name = "emojipicker"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS Emoji Picker — taskbar popup for emoji input"
+
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+# The window. Without it this program builds a grid of emoji, describes it once
+# as a list of draw commands, and exits before anybody can click one.
+oswindow = { path = "../../gui/window" }
+
+[lints]
+workspace = true

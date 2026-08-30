@@ -1,0 +1,19 @@
+[package]
+name = "curl"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS HTTP client"
+[dependencies]
+# The host it is resolving and the redirect URL it declines to follow both
+# come from the network or from argv, so neither is text curl chose.
+quoting = { path = "../quoting" }
+
+# Inherit the workspace lint configuration. This crate had none at all: it was
+# not in the `[lints] workspace = true` set and set no `#![deny]`/`#![warn]` of
+# its own, so `unwrap_used`, `expect_used`, `indexing_slicing` and
+# `arithmetic_side_effects` were silently off over code that
+# parses HTTP status lines, headers and chunked-transfer sizes out of a
+# response from a server it has not authenticated.
+# See known-issues.md `TD-B-USERSPACE-CRATES-DO-NOT-INHERIT-THE-WORKSPACE-LINTS`.
+[lints]
+workspace = true

@@ -1,0 +1,4 @@
+[package]
+name = "dusty3d-cli"
+version = "0.1.0"
+edition = "2024"

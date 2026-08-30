@@ -1,0 +1,6 @@
+[package]
+name = "prlimit"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS prlimit utility"
+[dependencies]

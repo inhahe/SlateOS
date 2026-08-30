@@ -1,0 +1,1418 @@
+
+
+● Kernel architecture
+
+  - Monolithic (Linux, BSD) — drivers, filesystem, networking all run in kernel space. Fast (no context switches between
+   components), but a bug in any driver can crash the whole system.
+  - Microkernel (Mach, seL4, MINIX 3) — kernel only handles IPC, scheduling, and memory. Everything else (drivers,
+  filesystems) runs as userspace processes. More robust and modular, but IPC overhead between components can hurt
+  performance.
+  - Hybrid (Windows NT, macOS/XNU) — microkernel in theory, but performance-critical stuff gets pulled back into kernel
+  space in practice.
+
+  The debate has been going for 35+ years (the famous Torvalds vs. Tanenbaum argument). Microkernels have gotten faster,
+   but monolithic still dominates in practice.
+
+  Syscall interface style
+
+  - Many specialized syscalls (Linux has ~450) — each operation gets its own syscall number. Simple to use, but the
+  interface grows over time and accumulates legacy.
+  - Few generic syscalls with message passing (microkernels, Plan 9's read/write on everything) — cleaner abstraction,
+  but you end up encoding a lot of structure into messages/buffers.
+  - Capability-based (seL4, Fuchsia) — syscalls operate on capability handles rather than global names. More secure by
+  design, but very different programming model.
+  - io_uring style submission queues — userspace writes requests into a shared ring buffer, kernel drains it. Avoids
+  syscall overhead entirely for batched I/O. Could you design an OS where all kernel interaction works this way?
+
+  Scheduling
+
+  - Completely Fair Scheduler (Linux CFS, now EEVDF) — models fairness as a resource allocation problem, uses a tree of
+  virtual runtimes. Good general-purpose behavior.
+  - Priority-based with preemption levels (real-time OSes, Windows) — fixed priority levels, highest priority runnable
+  thread always runs. Predictable latency, but priority inversion is a problem.
+  - BFS / MuQSS (Con Kolivas's schedulers) — optimized for desktop interactivity over throughput. Simpler, arguably
+  better for < 16 cores.
+  - Per-CPU run queues vs. single global queue — per-CPU scales better but makes load balancing harder.
+
+  Trade-off: throughput vs. latency vs. fairness vs. simplicity. No scheduler wins on all four.
+
+  Memory: paging model
+
+  - 4 KiB pages (standard on x86) — fine granularity, less waste, but huge page tables for large address spaces and TLB
+  pressure.
+  - Transparent huge pages (2 MiB / 1 GiB) — fewer TLB misses, but internal fragmentation and memory compaction
+  overhead.
+  - Variable page sizes — some architectures support this, but it massively complicates the page allocator.
+  - Single address space OS (no per-process page tables, everything shares one address space, use capabilities/segments
+  for protection) — radical simplification, but very different security model.
+
+  Filesystem
+
+  - Inode-based (ext4, XFS) — separate metadata structure pointing to data blocks. Battle-tested, well understood.
+  - Copy-on-write / B-tree (Btrfs, ZFS) — never overwrites data in place, writes new copies. Gets you snapshots and
+  checksums for free, but fragmentation and complexity.
+  - Log-structured (F2FS, LFS) — all writes are sequential appends. Great for flash storage, but garbage collection is
+  tricky.
+  - Database-as-filesystem (WinFS, never shipped; BeFS was partially this) — rich metadata and queries built into the
+  filesystem.
+
+  Also: do you enforce a filesystem hierarchy (/usr/bin/...) or let it be flat with tags/attributes?
+
+  IPC model
+
+  - Everything is a file descriptor (Unix) — pipes, sockets, devices, even signals (signalfd) share one abstraction.
+  Elegant, but you end up shoehorning things that aren't really byte streams.
+  - Everything is a message/RPC (Mach, QNX, Fuchsia) — structured messages between processes. Cleaner for complex
+  interactions, but more overhead for simple byte streaming.
+  - Shared memory as the primary IPC — fastest possible, but now you need synchronization primitives and trust between
+  processes.
+
+  Driver model
+
+  - In-kernel drivers (Linux) — maximum performance, but a buggy driver takes down the system. Drivers must be written
+  in the kernel's language (C, now some Rust).
+  - Userspace drivers (microkernels, Fuchsia, some USB/GPU drivers on Linux) — fault isolation, can restart a crashed
+  driver, can write drivers in any language. But you need a way to handle interrupts and DMA from userspace efficiently.
+  - Driver sandboxing (somewhere in between) — run drivers in kernel space but in restricted memory domains. IOMMU
+  hardware helps with DMA isolation.
+
+  Security model
+
+  - DAC (discretionary access control) — traditional Unix permissions. User owns files, decides who can access them.
+  Simple, but one compromised process has access to everything that user owns.
+  - MAC (mandatory access control) — system-wide policy overrides user decisions (SELinux, AppArmor). Much stronger, but
+   complex to configure and debug.
+  - Capability-based — processes can only access objects they hold a capability (unforgeable token) for. No ambient
+  authority. Theoretically the cleanest model, but existing software assumes ambient access to things like the
+  filesystem.
+  - Pledge/unveil (OpenBSD) — process voluntarily gives up syscalls and filesystem paths it doesn't need. Simple,
+  practical, but relies on programs opting in.
+
+  Graphics
+
+  - Kernel-mode graphics driver with userspace compositor (Linux DRM/KMS + Wayland) — kernel handles mode setting and
+  memory management, userspace handles window layout and compositing.
+  - Kernel-mode compositor (Windows DWM historically had kernel ties via win32k) — lower latency for window management,
+  but larger attack surface.
+  - GPU as a first-class compute device — do you expose a low-level GPU command queue (like Vulkan), a high-level
+  drawing API (like Skia/Cairo), or both? Do applications talk to the GPU directly or always through the compositor?
+
+  Init / service management
+
+  - Simple init + shell scripts (traditional Unix, OpenRC) — easy to understand, but slow sequential boot and no
+  dependency tracking.
+  - Parallel dependency-based (systemd, launchd) — fast boot, socket activation, supervision, but complex.
+  - Supervision trees (Erlang-style, s6) — each process has a supervisor that restarts it on failure. Clean fault
+  recovery model.
+
+  ABI stability
+
+  This is a policy decision more than a technical one, but it has massive consequences:
+
+  - Stable syscall ABI forever (Linux — Torvalds's #1 rule) — programs compiled 20 years ago still run. But you can
+  never fix a bad syscall design.
+  - Stable API, unstable ABI (macOS, Fuchsia) — you recompile against new headers, but the kernel can change its
+  internal interface. Allows fixing mistakes, but breaks binary distribution.
+  - No stability guarantee (research OSes) — maximum freedom, but no ecosystem.
+
+  ---
+  These are roughly in order of how early you need to decide them — kernel architecture and syscall style shape
+  everything downstream. What areas are you most interested in exploring further?
+
+✻ Worked for 52s
+
+> I have a lot of questions. Would you be able to answer them all fully in one pass, or should I ask each one in a
+  separate request?
+
+● Go ahead and ask them all at once. I can handle a long list in one pass.
+
+> Are syscalls generally handled by end programmers, or are those underneath other abstractions? Because if the latter,
+   then the "many spectialized syscalls" is worth the speed increase because programmers won't generally be using them.
+   It might be worth it either way.
+
+  What is a capability handle?
+
+  " - io_uring style submission queues — userspace writes requests into a shared ring buffer, kernel drains it. Avoids
+    syscall overhead entirely for batched I/O. Could you design an OS where all kernel interaction works this way?"
+
+  I don't know, could it? You tell me. Do syscalls have to wait for the io_uring buffer to drain before they run
+  otherwise? If not, then making them wait for the other batched i/o to run could potentially be a performance issue?
+  Any other issues?
+
+  " - Per-CPU run queues vs. single global queue — per-CPU scales better but makes load balancing harder." What do you
+  mean by harder? I mean, is this a solved problem, but the only issue is that it's complex to implement?
+
+  " - Variable page sizes — some architectures support this, but it massively complicates the page allocator.
+
+  Is the complication a problem with allocation speed, or is it only a problem with programming complexity for the os
+  programmer?
+
+  " - Single address space OS (no per-process page tables, everything shares one address space, use
+  capabilities/segments
+    for protection) — radical simplification, but very different security model."
+
+  How is the security model for that different?
+
+  "- Copy-on-write / B-tree (Btrfs, ZFS) — never overwrites data in place, writes new copies. Gets you snapshots and
+    checksums for free, but fragmentation and complexity."
+
+  Could defragmentation work with this as a background process? Would this cause too much disk wear?
+  As for the complexity, does the complexity slow down filesystem interaction? Even considering most filesystem
+  activity is cached?
+
+  " - Log-structured (F2FS, LFS) — all writes are sequential appends. Great for flash storage, but garbage collection
+  is
+    tricky"
+
+  I don't understand. It sounds like you never lose any data this way. How is that great for flash storage? Flash
+  storage is particularly limited in size. And if your point is to log everyhing, why do you need garbage collection?
+  What are you collecting? What does "garbage collection" mean for a filesystem anyway?
+
+  "  Also: do you enforce a filesystem hierarchy (/usr/bin/...) or let it be flat with tags/attributes?"
+
+  what do you mean? give an example of how file/directory access would work with tags or attributes.
+
+  "  - Everything is a file descriptor (Unix) — pipes, sockets, devices, even signals (signalfd) share one abstraction.
+    Elegant, but you end up shoehorning things that aren't really byte streams."
+
+  It sounds like this could cause a lot of awkwardness/hacks in how we use some byte streams?
+
+  Having both file descriptiors for things that really are byte streams and message/RPC for everything else is good
+  too, right? And how about offering everything as file descriptors *and* some or all things as message/rpc, so the
+  programmer can choose whichever he wants? Is there any way to do that that wouldn't slow things down?
+
+  And could we offer shared memory as a third IPC option the programmer can choose from?
+
+  "- In-kernel drivers (Linux) — maximum performance, but a buggy driver takes down the system. Drivers must be written
+    in the kernel's language (C, now some Rust)."
+
+  We talked about how ada/spark would be a good way of writing drivers with proof that they won't crash the system, for
+   use in the kernel, but our kernel is going to be written in Rust. Is there any way to do this?
+
+  "- Driver sandboxing (somewhere in between) — run drivers in kernel space but in restricted memory domains. IOMMU
+    hardware helps with DMA isolation." How common is IOMMU hardware on modern desktop computers, and what's the
+  performance penalty for driver sandboxing both with and without IOMMU hardware, compared to the other driver models?
+
+  "  - Capability-based — processes can only access objects they hold a capability (unforgeable token) for. No ambient
+    authority. Theoretically the cleanest model, but existing software assumes ambient access to things like the
+    filesystem."
+
+  Would that really be a problem, considering that if someone wants to run existing software that needs, for example,
+  the operating system, he'll be giving it the operating system capability anyway?
+
+  Also, does existing software matter when no existing software will be compatible with our OS anyway? (Except through
+  a WINE port, and it would also be nice to have something like WSL)
+
+  And what about a combination of DAC and cababilities? It should basically be: There are different users, each with
+  their own capability set, and a user can't create another user with a capability that it itself doesn't have, and
+  user capabilities include access to specific files and directories. But then that means a user has to have thousands
+  of capabilities, one for each file.. but then, we could just have named user capabilities and groups of named
+  capabilities that we can assign to files and directories and a user with the same capability can access that file or
+  directory.
+
+  "  - Kernel-mode graphics driver with userspace compositor (Linux DRM/KMS + Wayland) — kernel handles mode setting
+  and
+    memory management, userspace handles window layout and compositing.
+  "
+
+  "  - Kernel-mode compositor (Windows DWM historically had kernel ties via win32k) — lower latency for window
+  management,
+    but larger attack surface." Is the latency really noticeable? I mean, window management isn't something that's done
+   like millions of times per second, and the cost of a single IPC/API call is minute?
+
+  And by "larger attack surface", do you mean larger chance of a graphics bug crashing the OS?
+
+  "  - GPU as a first-class compute device — do you expose a low-level GPU command queue (like Vulkan), a high-level
+    drawing API (like Skia/Cairo), or both? Do applications talk to the GPU directly or always through the compositor?"
+
+  What do Windows and Linux do? Is "always through the compositor" fast enough for games, and does it allow all GPU
+  features for any GPU a card a user would probably have?
+
+  Also, no GPU as first-class compute device means that users can't use GPU for general computing -- e.g., AI.
+
+  "  - Simple init + shell scripts (traditional Unix, OpenRC) — easy to understand, but slow sequential boot and no
+    dependency tracking."
+
+  What do you mean by "init" Like operating system bootup? And what would the shell scripts typically do? And what is
+  "sequential boot", and why is it slow? Oh, I guess you mean that shell scripts mean the dependency processes boot
+  sequentially, one script command at a time, and that makes it slower? Can't you simply have a script feature that
+  allows launching a process and not waiting to the next script command?
+
+  Regarding systemd, it seems most linux users use systemd, so it must be really useful, but they all seem to hate it.
+  What does systemd do, and why do people hate it? Would something like systemd be a design choice for our OS, and if
+  so, could it be made better?
+
+  "  - Stable syscall ABI forever (Linux — Torvalds's #1 rule) — programs compiled 20 years ago still run. But you can
+    never fix a bad syscall design."
+
+  Why not just provide new syscalls to fix a bad syscall design that new programs can run, and keep the old syscalls
+  for old programs?
+
+  "  - Stable API, unstable ABI (macOS, Fuchsia) — you recompile against new headers, but the kernel can change its
+    internal interface. Allows fixing mistakes, but breaks binary distribution."
+
+  How does this break binary distribution?
+
+
+
+
+
+
+● Syscalls and abstractions
+
+  Yes, almost always behind abstractions. Application programmers call fopen(), malloc(), pthread_create() — C library
+  functions that internally invoke syscalls. Even systems programmers rarely write raw syscall instructions. So you're
+  right: having many specialized syscalls is fine. The speed benefit is real (the kernel can dispatch directly to a
+  handler without parsing a generic message), and the complexity is hidden from application developers by libc.
+
+  Capability handles
+
+  A capability is an unforgeable token that grants a specific permission to a specific object. Think of it like a file
+  descriptor, but generalized to everything.
+
+  In a traditional OS: "I am user 501, I want to open /etc/passwd" — the kernel checks whether user 501 has permission.
+  The process names a global path and the kernel decides.
+
+  In a capability OS: the process holds a capability token that says "read access to this specific file object." It
+  can't name arbitrary paths — it can only operate on objects it already holds capabilities for. If it doesn't hold a
+  capability for /etc/passwd, it can't even attempt to open it. There's no global namespace to try.
+
+  A process gets capabilities at launch (its parent gives them) or by receiving them via IPC from another process. You
+  can think of Unix file descriptors as a limited form of capabilities — once you have fd 3, you can read/write it
+  without further permission checks, and you can pass it to a child process.
+
+  io_uring for everything
+
+  The idea is feasible but has real trade-offs.
+
+  How io_uring works: userspace writes request entries into a submission queue (a shared ring buffer in memory). The
+  kernel picks them up, processes them, and writes results into a completion queue. No syscall needed per operation —
+  you can batch dozens of requests and then do a single io_uring_enter syscall to tell the kernel "go," or even
+  configure it to poll the queue automatically with no syscall at all.
+
+  Could all kernel interaction work this way? Mostly, but some operations are inherently synchronous — exec replaces
+  your entire process, fork needs to return a pid before you continue, mmap needs to return the address before you can
+  use it. You'd need to either:
+
+  - Block the userspace thread until the completion arrives (which defeats the purpose — it's just a syscall with extra
+  steps)
+  - Restructure all userspace code to be async (submit request, do other work, check completion later)
+
+  The second approach is powerful but forces an async programming model on everything, which is a big ergonomic cost.
+
+  Performance concerns: The ring buffer approach adds latency for individual operations (you write to a buffer, kernel
+  polls or gets notified, processes, writes result, you poll or get notified). For high-throughput batched I/O this is a
+   huge win because you amortize one syscall over hundreds of operations. For a single getpid() call, it's strictly
+  worse than a direct syscall.
+
+  A practical design: Offer both. Fast synchronous syscalls for things that need an immediate answer, and a submission
+  queue for batched async I/O. This is essentially what Linux does today — traditional syscalls plus io_uring as an
+  opt-in fast path for I/O-heavy workloads.
+
+  Per-CPU run queues: is load balancing "solved"?
+
+  It's solved in the sense that Linux ships a working implementation. But "harder" means ongoing performance trade-offs,
+   not just implementation complexity:
+
+  - A thread on CPU 0 finishes. CPU 0's queue is empty, CPU 3's queue has 4 threads. When does CPU 0 steal work from CPU
+   3? Check too often and you waste time scanning other queues. Check too rarely and CPU 0 sits idle while CPU 3 is
+  overloaded.
+  - When you move a thread from CPU 3 to CPU 0, its data is hot in CPU 3's cache and cold in CPU 0's cache. The
+  migration itself costs real performance (cache misses).
+  - On NUMA systems, migrating across NUMA nodes is much more expensive than migrating within a node. So the balancer
+  needs to be topology-aware.
+
+  Linux's load balancer has been rewritten multiple times and still gets patches improving edge cases. It works, but
+  there's no obviously optimal policy — it's a continuous engineering effort balancing responsiveness against migration
+  cost.
+
+  Variable page sizes: speed or complexity?
+
+  Both, but primarily allocation speed.
+
+  With fixed 4 KiB pages, the page allocator can use a buddy system — a simple, fast algorithm. Every page is the same
+  size, so "find a free page" is straightforward.
+
+  With variable page sizes, every allocation decision becomes: what size page should I use? Can I promote a group of
+  small pages into one large page? Can I split a large page? This means:
+
+  - Allocation is slower — more decisions per allocation, more bookkeeping
+  - Fragmentation management is harder — to create a 2 MiB huge page, you need 512 contiguous free 4 KiB pages. The
+  kernel may need to migrate existing pages around to create that contiguous block.
+  - TLB management is more complex — the TLB now holds entries of different sizes, and flushing/invalidation logic is
+  more involved.
+
+  Linux's Transparent Huge Pages (THP) is essentially variable page sizes bolted onto a fixed-page allocator, and it's
+  been a source of performance unpredictability for years — sometimes THP helps enormously, sometimes the background
+  compaction work to assemble huge pages causes latency spikes.
+
+  Single address space OS: security model
+
+  In a traditional OS, each process has its own page table. Process A literally cannot address process B's memory — the
+  hardware enforces this. Even if process A has a buffer overflow bug, it can only corrupt its own address space.
+
+  In a single address space OS, all processes share one address space. Process A's code and process B's code and the
+  kernel all have addresses in the same flat space. Protection must come from something else:
+
+  - Software capabilities — every pointer is tagged with permissions, checked at access time (either in software, which
+  is slow, or with special hardware like CHERI)
+  - Segment-based protection — each process can only access its designated region, enforced by segment registers or
+  bounds checking
+  - Language-level safety — if all code is written in a memory-safe language (like Singularity OS, which required all
+  code to be in managed C#), the compiler guarantees processes can't forge pointers into each other's memory
+
+  The difference: traditional page tables give you hardware-enforced isolation "for free" with every memory access.
+  Single address space requires either trusting the language/compiler, paying for software bounds checks, or having
+  specialized hardware. The benefit is that sharing memory between processes becomes trivial (it's all the same address
+  space), and context switches are cheaper (no page table swap).
+
+  Copy-on-write filesystems: defragmentation and complexity
+
+  Defragmentation as a background process: Yes, this is exactly what Btrfs does. It has an autodefrag mount option and a
+   manual btrfs filesystem defrag command. It works, but:
+
+  - Disk wear on SSDs: Defragmentation rewrites data to new locations. On HDDs this is clearly beneficial (sequential
+  reads are much faster than seeks). On SSDs, there's no seek penalty, so the main benefit is reducing metadata overhead
+   from scattered extents. The writes do consume flash write cycles, but modern SSDs have enough write endurance that
+  moderate defragmentation isn't a concern. You wouldn't want to defragment aggressively on a continuous basis, but
+  periodic defrag is fine.
+  - Snapshots complicate defrag: If you have snapshots, defragmenting a file means the snapshot and the current version
+  no longer share blocks. What was one copy of the data becomes two, increasing disk usage. This has bitten real Btrfs
+  users badly.
+
+  Does the complexity slow down filesystem interaction? Yes, measurably, but it depends on the operation:
+
+  - Sequential reads/writes of large files: Roughly comparable to ext4. The data path is similar — read blocks from disk
+   into page cache.
+  - Metadata-heavy operations (creating many small files, fsync, directory operations): CoW filesystems are slower
+  because every metadata change requires writing a new copy of the modified B-tree nodes all the way up to the root.
+  Where ext4 does an in-place journal write, Btrfs does a CoW chain.
+  - Random writes to large files: Worst case for CoW — each small write copies an entire block (or more due to B-tree
+  updates). This can be 2-5x slower than ext4.
+  - Caching helps: Yes, reads are almost entirely masked by the page cache. The overhead shows up on writes and on
+  fsync/fdatasync (which must flush CoW chains to stable storage).
+
+  ZFS and Btrfs are both production-grade, so the complexity is manageable, but ext4 still wins on raw throughput for
+  simple workloads, which is why it remains the default on most Linux distros.
+
+  Log-structured filesystems
+
+  I wasn't clear enough. A log-structured filesystem doesn't keep all data forever — it's not a log in the "audit trail"
+   sense. The name means the write pattern is log-like: all writes go sequentially to the end.
+
+  Here's how it works:
+
+  Time 1: Write file A      [AAAA____________]
+  Time 2: Write file B      [AAAABBBB________]
+  Time 3: Modify file A     [AAAABBBBAA'A'___]  (new version of A's blocks appended)
+  Time 4:                    [^^^^        ]  old A blocks are now garbage
+
+  After Time 3, the original A blocks at the beginning are stale — they've been superseded by the new A' blocks. But
+  they haven't been overwritten because the filesystem only appends.
+
+  Why great for flash: Flash memory can't overwrite a cell — it must erase an entire block (128+ KiB) before rewriting
+  it. Sequential appends align perfectly with this: you fill one erase block, move to the next, never need to
+  erase-then-rewrite in the hot path. Traditional filesystems that do in-place updates fight the flash hardware (the
+  SSD's internal firmware, the FTL, does its own log-structuring to compensate, which is redundant work).
+
+  Garbage collection means reclaiming those stale blocks. Eventually the disk fills up and you have segments that are a
+  mix of live and stale data:
+
+  [live|stale|stale|live|stale|live|stale|stale]
+
+  The GC reads the live data out of a mostly-stale segment, rewrites it to the current append point, and frees the
+  entire segment for reuse. This is tricky because:
+
+  - It consumes read and write bandwidth (write amplification)
+  - Choosing which segments to clean (and when) affects performance significantly
+  - Under heavy write load with a nearly full disk, GC can't keep up and throughput collapses
+
+  This is the same fundamental problem SSD firmware has internally (FTL garbage collection), which is why F2FS (designed
+   by Samsung for their SSDs) tries to coordinate with the flash GC rather than fighting it.
+
+  Tags/attributes instead of hierarchy
+
+  Here's the concept. Traditional filesystem:
+
+  /home/user/photos/vacation/2024/beach.jpg
+
+  To find this file, you must know or navigate the exact path. The directory hierarchy is the only organizational
+  structure.
+
+  Tag-based filesystem:
+
+  beach.jpg
+    tags: [photo, vacation, 2024, beach, family]
+
+  To find this file:
+  search(tags: photo AND vacation AND 2024)  →  [beach.jpg, sunset.jpg, hotel.jpg]
+  search(tags: photo AND beach)              →  [beach.jpg, beach2.jpg, coast.jpg]
+  search(tags: family AND 2024)              →  [beach.jpg, birthday.jpg, ...]
+
+  The file isn't "in" any single directory. It has multiple tags and can be found through any combination of them. A
+  "directory" is just a saved query — "vacation/2024" is syntactic sugar for tags: vacation AND 2024.
+
+  Real examples:
+  - Gmail uses labels instead of folders — one email can have multiple labels
+  - macOS Finder supports file tags (colored labels + custom tags) alongside the traditional hierarchy
+  - BeOS/Haiku's BFS has queryable file attributes built into the filesystem
+
+  Trade-offs: Very flexible for personal organization, but most existing software assumes a hierarchical path. You'd
+  likely want to support both — a traditional hierarchy for compatibility and a tag/attribute layer on top for search
+  and smart views.
+
+  File descriptors: awkwardness
+
+  Yes. The classic examples of shoehorning into byte streams:
+
+  - ioctl — the escape hatch. When a device doesn't fit the read/write model, you call ioctl(fd, MAGIC_NUMBER, data).
+  There are thousands of ioctl commands across Linux. It's type-unsafe (the kernel casts a void* based on the magic
+  number), hard to version, and a common source of security bugs.
+  - /proc and /sys — process info and kernel tunables exposed as fake text files. Want to change a scheduling parameter?
+   Write a string to a file. It works, but parsing text to configure the kernel is fragile and slow.
+  - Sockets — read/write work, but you also need sendmsg/recvmsg with complex msghdr structures for ancillary data
+  (passing file descriptors, getting sender credentials). The byte stream abstraction leaks everywhere.
+  - Signals over file descriptors (signalfd, timerfd, eventfd) — bolted on later because people needed signals to work
+  with epoll. Each creates a new fd type with its own read format.
+
+  Offering both fd and message IPC
+
+  Yes, this is a viable design. Fuchsia does something like this — it has channels (message-passing with capability
+  transfer) as the primary IPC, and sockets (byte streams) as a simpler option for when that's what you actually want.
+
+  Can you offer both without slowing things down? Yes, because the choice is per-communication-channel, not a global
+  mode. You're not adding overhead to byte streams by also supporting messages. Internally they'd be separate kernel
+  objects with separate code paths.
+
+  Shared memory as a third option: Absolutely. This is standard practice already. Many high-performance systems use
+  shared memory for the data plane and messages/fd for the control plane (set up the shared region, negotiate the
+  protocol, then communicate at memory speeds with no kernel involvement).
+
+  The programmer picks based on the use case:
+  - Byte stream (fd): piping data between processes, network I/O, simple serial communication
+  - Structured messages: RPC, requesting services from other processes, passing capabilities
+  - Shared memory: high-bandwidth data exchange (video frames, audio buffers, database pages), lockless queues between
+  processes
+
+  Offering all three is good design, not overengineering. They serve genuinely different needs.
+
+  In-kernel Rust drivers and formal verification
+
+  You mentioned Ada/SPARK for proving driver correctness. With a Rust kernel, your options:
+
+  - Rust's type system and borrow checker already prevent most memory safety bugs (use-after-free, buffer overflows,
+  data races) at compile time. This is weaker than SPARK's formal proofs (you can't prove functional correctness — "this
+   driver correctly implements the spec"), but it catches the class of bugs that most commonly crash kernels.
+  - Unsafe Rust is unavoidable in drivers (hardware register access, DMA buffer management). The strategy is to minimize
+   unsafe blocks and wrap them in safe abstractions. The Linux kernel's Rust-for-Linux project does exactly this.
+  - Kani and Creusot are Rust verification tools. Kani (by Amazon) does bounded model checking — it can prove that a
+  Rust function has no panics, overflows, or assertion violations for all inputs up to a certain size. Creusot allows
+  writing SPARK-style contracts (preconditions, postconditions, loop invariants) in Rust and proving them. Neither is as
+   mature as SPARK, but both are actively developed.
+  - You can call Ada/SPARK from Rust via FFI. Write the safety-critical driver logic in SPARK, prove it, compile it, and
+   link it into the Rust kernel. This is unconventional but technically works — both languages produce standard object
+  files. The interface boundary would need careful design (unsafe Rust FFI calls to SPARK functions, with Rust wrappers
+  providing safe abstractions).
+
+  Practically, for your OS: write drivers in Rust, keep unsafe minimal and audited, use Kani for critical paths. If you
+  later find you need stronger guarantees for a specific driver, you can write that one in SPARK and link it in.
+
+  IOMMU and driver sandboxing
+
+  How common is IOMMU? Every Intel CPU since ~2013 (Haswell) and every AMD CPU since ~2011 has IOMMU support (Intel VT-d
+   / AMD-Vi). On modern desktop hardware, it's universal. However, it's sometimes disabled in BIOS by default — you may
+  need to enable it.
+
+  Performance of driver sandboxing:
+
+  With IOMMU:
+  - DMA operations go through the IOMMU's page table, adding one translation step. For bulk transfers this is negligible
+   (maybe 1-3% overhead). For many small DMA operations, the overhead is higher due to IOMMU TLB misses — maybe 5-10%.
+  - The real cost is setup: programming IOMMU page tables when creating DMA mappings. For drivers that set up long-lived
+   mappings (GPU, NVMe), this is a one-time cost. For networking with many short-lived packet buffers, it's measurable.
+
+  Without IOMMU (software-only sandboxing):
+  - You'd need to bounce-buffer all DMA — the driver writes to a buffer in its restricted domain, the kernel copies it
+  to the real DMA-accessible memory. This roughly doubles memory bandwidth for DMA-heavy operations. 20-50% throughput
+  hit for disk/network I/O.
+  - Or you simply trust the driver for DMA and only sandbox its CPU memory access (using page tables / MPK). This
+  protects against bugs in the driver's logic but not against it programming the device to DMA to arbitrary memory.
+
+  Userspace drivers (full microkernel style):
+  - Every driver interaction requires IPC (context switch, message copy). Overhead depends heavily on IPC speed — L4
+  microkernels achieve ~1000 cycle IPC, which adds maybe 5-15% overhead for I/O-heavy drivers compared to in-kernel.
+  - This is why all modern microkernels focus obsessively on IPC performance.
+
+  Summary: With IOMMU (available on all modern desktops), in-kernel sandboxed drivers can approach native performance
+  (low single-digit % overhead). Without IOMMU, you either accept incomplete isolation or pay a significant DMA tax.
+
+  Capability-based security and compatibility
+
+  "Won't users just give the filesystem capability anyway?" For running a random legacy app, probably yes — you'd grant
+  it broad filesystem access and it would work. But you lose the security benefit. The power of capabilities is
+  fine-grained delegation: "this photo editor can access ~/photos and nothing else." If you always grant everything,
+  you're back to DAC.
+
+  "Does existing software matter for our OS?" You're right that if you're building a new OS with no binary
+  compatibility, the existing software argument is much weaker. Your applications will be written (or ported) for your
+  OS, so they can be designed around capabilities from the start. This is actually a significant advantage —
+  capability-based OSes like Fuchsia struggle with POSIX compatibility, but you don't have that constraint if you're
+  designing applications for your own system.
+
+  Your DAC + capabilities hybrid: What you're describing is converging toward something like Capsicum (FreeBSD) or
+  Fuchsia's namespace model. Let me untangle the design:
+
+  Your instinct to avoid "thousands of capabilities per file" is right. Here's how to think about it:
+
+  - Capabilities are not per-file. A capability is a handle to any kernel object — a file, a directory, a socket, a
+  device, a process. A capability to a directory grants access to everything inside it (like file descriptors to
+  directories in Capsicum).
+  - Users/groups are an organizational layer on top. A user identity determines what capabilities a process receives at
+  launch. The kernel doesn't check user IDs — it only checks capabilities. User IDs are a policy concern handled by the
+  login/session manager.
+  - Named capability sets (what you called "groups of named capabilities") are essentially roles or profiles. "The web
+  browser role gets: network access, the downloads directory, GPU access, the display server, and nothing else."
+
+  So the architecture would be:
+  1. Kernel only knows about capabilities (unforgeable handles to objects)
+  2. A userspace policy service maps user identity + application identity → a set of capabilities
+  3. When you launch an app, the launcher gives it only the capabilities its role specifies
+  4. The app literally cannot name or access anything it wasn't given
+
+  This is clean, enforceable, and doesn't require per-file capability lists.
+
+  Graphics: kernel vs. userspace compositor latency
+
+  Is the latency noticeable? For window management operations (open, close, resize, move), no. These happen at
+  human-interaction speed — a few microseconds of IPC overhead is invisible.
+
+  The latency concern is about the input-to-display pipeline for every frame:
+
+  Input event → app renders frame → submit to compositor → compositor composites → display
+
+  If the compositor is in userspace, the "submit to compositor" step is an IPC + buffer copy (or GPU buffer handoff). On
+   Wayland, this is well-optimized using shared memory / DMA-BUF and adds maybe 100-200 microseconds. For a 60 Hz
+  display (16.6 ms per frame), that's ~1% overhead. For competitive gaming at 360 Hz (2.7 ms per frame), it starts to
+  matter, but even then, Wayland compositors achieve acceptable latency.
+
+  Windows' win32k.sys kernel compositor wasn't faster because it avoided IPC — it was in the kernel for historical
+  reasons (dating back to Windows NT 4.0, when they moved GDI into kernel space for performance on 1996 hardware).
+  Modern Windows actually does most compositing in the userspace DWM process.
+
+  "Larger attack surface" = crashes? Partly, but more about security. win32k.sys has been the single largest source of
+  Windows kernel privilege escalation exploits for decades. A bug in a userspace compositor can crash your desktop
+  session. A bug in a kernel-mode compositor can give an attacker full kernel access.
+
+  GPU access: what Windows and Linux do
+
+  Linux:
+  - Applications can submit GPU command buffers directly (Vulkan/OpenGL talk to the DRM kernel driver, bypassing the
+  compositor for rendering)
+  - The compositor only composites the final output — it takes each application's rendered buffer and combines them onto
+   the screen
+  - Fullscreen games can bypass the compositor entirely (DRM direct scanout — the app's buffer is displayed directly
+  with no compositing step)
+
+  Windows:
+  - Similar model. Applications submit GPU commands directly via the WDDM driver model
+  - DWM composites the final output
+  - Fullscreen "exclusive" mode historically bypassed DWM; modern Windows uses "fullscreen optimizations" that keep DWM
+  in the loop but detect single-app-fullscreen and optimize the composite to a no-op
+
+  Is "always through compositor" fast enough for games? The rendering isn't through the compositor — applications talk
+  to the GPU directly for their own rendering. The compositor only handles the final "put all the windows on screen"
+  step. So yes, games get full GPU access with all features. The compositor path for the final display adds minimal
+  overhead, and fullscreen bypass eliminates even that.
+
+  General-purpose GPU compute (AI, etc.): This is independent of the compositor question. Compute shaders / CUDA /
+  OpenCL go directly from the application to the GPU driver. No compositor involvement at all. You'd need to support
+  this in your GPU driver model — expose compute queue submission alongside graphics queue submission. On Linux, this
+  goes through DRM/KMS. Your OS would need an equivalent kernel interface for GPU memory management and command
+  submission.
+
+  Init systems
+
+  What is init? The first userspace process the kernel launches after boot (PID 1). Every other process is a descendant
+  of init. Its job: bring up the rest of the system (mount filesystems, start networking, launch login, start services
+  like a web server or database).
+
+  Shell scripts: Traditionally, init runs scripts like /etc/init.d/networking, /etc/init.d/sshd, etc. Each script starts
+   one service (calls the daemon binary, writes a PID file, sets up environment).
+
+  Why sequential is slow: A naive init script does:
+
+  start_service networking     # wait until networking is up
+  start_service dns            # wait until DNS is up
+  start_service sshd           # wait until sshd is up
+  start_service database       # wait until database is up
+  start_service webserver      # wait until webserver is up
+
+  Each line waits for completion before the next starts. If networking takes 2 seconds and each service takes 1 second,
+  that's 6 seconds total.
+
+  Can't you just background them? Yes (start_service sshd &), and some init systems do this. But then you hit the
+  dependency problem: the webserver needs the database, which needs networking. If you launch everything in parallel,
+  the webserver might try to connect to the database before it's ready. You need a dependency graph and something to
+  track "service X is actually ready" (not just "the process started"). This is exactly what systemd does.
+
+  systemd: what it does and why people hate it
+
+  What it does:
+  - Parallel service startup based on a dependency graph
+  - Socket activation — creates the socket before starting the service. If a client connects before the service is
+  running, the connection queues. The service starts on demand and inherits the socket. This means you can "start
+  everything at once" without dependency ordering in many cases.
+  - Service supervision — restarts crashed services automatically
+  - Resource management — uses cgroups to limit CPU/memory/IO per service
+  - Logging (journald) — structured binary logs, queryable
+  - Timer units (replaces cron), mount units (replaces fstab entries), device units, and more
+
+  Why people hate it:
+  - Scope creep — it started as an init system and absorbed DNS resolution (resolved), network configuration (networkd),
+   logging (journald), device management (udevd), login management (logind), container management (nspawn), boot
+  management (bootctl), timers, and more. People feel one project shouldn't own all of this.
+  - Binary logs — journald stores logs in a binary format, not plain text. This breaks grep/awk/tail -f workflows that
+  Unix admins have used for decades. You need journalctl to read logs.
+  - Complexity — unit files are simpler than shell scripts for common cases, but the full system is enormous and the
+  documentation is vast. Debugging a boot failure requires understanding systemd internals.
+  - "Not Unix philosophy" — Unix tradition says each tool should do one thing well. systemd does many things in one
+  tightly integrated project. Proponents argue that tight integration is the point (socket activation requires
+  coordination between init and the socket manager).
+  - Lennart Poettering — the lead developer has an abrasive communication style that alienated parts of the community.
+  This is petty but genuinely fueled the backlash.
+
+  For your OS: You'll need a service manager. The core ideas from systemd — dependency-based parallel startup, socket
+  activation, automatic restart, cgroup resource limits — are genuinely good and worth adopting. What you can improve:
+
+  - Keep it modular. The service manager doesn't need to also be the DNS resolver and the log manager.
+  - Use structured logs but keep them in a text-based format (JSON lines, for example) so standard tools still work.
+  - Make the dependency model simple and explicit rather than having dozens of implicit ordering rules.
+
+  Stable ABI: why not keep old syscalls?
+
+  That's exactly what Linux does. When a syscall design is bad, they add a new one and keep the old one working forever.
+   Examples:
+
+  - select → poll → epoll (three generations of I/O multiplexing, all still work)
+  - stat → stat64 → statx (each fixing limitations of the previous)
+  - clone → clone3 (better thread/process creation)
+
+  The cost is: the kernel carries every old syscall forever. Linux has ~450 syscalls, many of which are superseded
+  versions that still need to be maintained, tested, and kept secure. It works, but it's a maintenance burden that grows
+   monotonically.
+
+  The alternative (what you might consider for a new OS) is versioned syscall tables. An application declares "I target
+  OS API version 3" and gets the v3 syscall table. Version 4 can break or remove old syscalls. Old apps still work
+  because the kernel keeps the v3 table around. This is cleaner than accumulating individual deprecated syscalls because
+   you can drop an entire old API version once no apps target it. Android sort of does this with its targetSdkVersion —
+  apps declare what API level they were built for, and the OS adjusts behavior accordingly.
+
+  Stable API / unstable ABI: binary distribution
+
+  "ABI" means the binary-level calling convention: what number does syscall X have, what size is struct stat, what's the
+   layout of function arguments.
+
+  If the ABI is unstable, a binary compiled against OS version 1 might call syscall number 47 expecting "open file," but
+   OS version 2 renumbered that to syscall 52. The binary crashes or does something wrong.
+
+  How this breaks binary distribution: You can't download a precompiled binary (like a .deb or .rpm package) and run it
+  on a different OS version. You must compile from source against the headers for your specific OS version. This means:
+
+  - No universal binary packages
+  - Package managers must compile per-version (like Homebrew on macOS, or ports on FreeBSD)
+  - Commercial closed-source software can't ship a single binary
+
+  macOS gets away with this because Apple controls the whole stack — Xcode rebuilds against the latest SDK, and the App
+  Store distributes version-specific binaries. On Linux, where distros and applications are decoupled, this would be
+  unworkable, which is why Torvalds insists on ABI stability.
+
+  For your OS, this is a real choice. Stable ABI gives you an ecosystem where people can distribute binaries. Unstable
+  ABI gives you freedom to fix mistakes, but requires something like app-bundled libraries or a universal package build
+  system to compensate.
+
+✻ Crunched for 3m 36s
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> So in capability based syscalls, a process would have to be passed a full list of directories and files it can
+  access, like with Docker?
+  eeeInstead, we could pass it a user capability that automatically gives it access to files according to which user
+  capability groups each file/directory has. But then that's already handled by our security model, so there's no need
+  to have capabilities in our syscalls to? Or does one depend on the other?
+
+  "  The second approach is powerful but forces an async programming model on everything, which is a big ergonomic
+  cost.
+    - Restructure all userspace code to be async (submit request, do other work, check completion later)"
+
+  Would it be possible to make this easy with futures, promises, deferreds, or callbacks?"
+
+  "  Performance concerns: The ring buffer approach adds latency for individual operations (you write to a buffer,
+  kernel
+    polls or gets notified, processes, writes result, you poll or get notified). For high-throughput batched I/O this
+  is a
+     huge win because you amortize one syscall over hundreds of operations. For a single getpid() call, it's strictly
+    worse than a direct syscall."
+
+  But isn't high-throughput i/o the only time where latency really matters? E.g., if you're running a single getpid()
+  call, you won't notice the latency.
+
+  But I guess it doesn't matter, you're right, we should offer both. I think the idea is to make all syscalls have a
+  submission queue option?
+
+  I don't understand your answer about per-cpu queues. per-cpu queues seems to imply that a queue is cpu-specific,
+  another. the performance hit only exists in the case where you balance processes across all cpus. so the only
+  question is, is the performance hit of copying the process to another cpu worth the time it saves by running it on
+  the other cpu instead of waiting till the original cpu has a core free.
+
+  is F2FS free, is it only usable on samsung ssds, is it only optimal on samsung ssds?
+
+  " - You can call Ada/SPARK from Rust via FFI. Write the safety-critical driver logic in SPARK, prove it, compile it,
+  and
+     link it into the Rust kernel. This is unconventional but technically works — both languages produce standard
+  object
+    files. The interface boundary would need careful design (unsafe Rust FFI calls to SPARK functions, with Rust
+  wrappers
+    providing safe abstractions)."
+
+  If I have to call the ada program with FFI, that defeats the purpose, because it slows it down and the point of
+  proving correctness is to be able to safely run them in kernel mode because that's faster. BUT, proving correctness
+  is useful anyway because a driver crashing is inconvenient either way. BUT, isn't FFI unacceptably slow compared to
+  normal IPC?
+
+  What's faster and better between sandboxed drivers with IOMMU and userspace drivers?
+
+  "For your OS, this is a real choice. Stable ABI gives you an ecosystem where people can distribute binaries. Unstable
+    ABI gives you freedom to fix mistakes, but requires something like app-bundled libraries or a universal package
+  build
+    system to compensate."
+
+  Aren't keeping old syscalls and adding new ones to fix ABI and versioned syscall tables both fine for not breaking
+  binary distributions?
+
+● Capabilities vs. user-based security model
+
+  You're right that there's overlap, but they operate at different levels:
+
+  User/group permissions (your security model) answer: "Who is allowed to access this file?" The kernel checks user ID
+  against file permissions on every open() call. The process names a global path, the kernel decides yes or no.
+
+  Capability-based syscalls answer: "What can this process do right now?" The process can only operate on objects it
+  holds handles to. It can't name global paths at all — there's no open("/etc/passwd"), only read(handle) where the
+  handle was given to it at launch.
+
+  You don't have to pick one. Your idea of user capability groups that map to file access is effectively the user/group
+  model with better granularity. That works fine. You'd use traditional syscalls (open with a path, kernel checks
+  permissions).
+
+  If you also wanted capability-style syscalls, the benefit is defense in depth within a user session. Without
+  capabilities, every process running as user X can access everything user X can. Your web browser, your text editor,
+  and a random downloaded program all have identical access. With capabilities, you can launch the browser with only
+  ~/Downloads and network access, even though user X owns the whole home directory.
+
+  But you're right that you can defer this. A user/group model with good granularity is a solid starting point.
+  Capability-style sandboxing (like Pledge/Unveil, or Capsicum) can be layered on later without changing the syscall
+  interface — it's additive.
+
+  Async syscalls and ergonomics
+
+  Futures/promises making it easy: Yes, this is exactly the right approach. You'd provide a userspace library where:
+
+  // Synchronous (traditional syscall underneath)
+  let data = file.read(buf);
+
+  // Async (submission queue underneath, but feels similar)
+  let data = file.read_async(buf).await;
+
+  The .await suspends the current task, the runtime submits the request to the ring buffer, runs other tasks, and
+  resumes this one when the completion arrives. The programmer writes nearly-linear code. Rust's async/await is
+  particularly good at this — zero-cost futures, no heap allocation per await point.
+
+  The ergonomic cost I mentioned is if async is the only option. If you offer both sync and async syscalls (which we
+  agreed on), then programmers who don't want async just use the sync versions. No problem.
+
+  Ring buffer latency
+
+  You're partially right. For a single getpid(), the latency is so small in absolute terms (maybe 100ns vs 50ns) that no
+   human notices. But there are cases where single-syscall latency matters even though it's not "high-throughput I/O":
+
+  - Latency-sensitive request handling — a web server handling one request might make 10 syscalls (accept, read, stat,
+  open, read, write, close...). If each is 2x slower, the per-request latency doubles. At scale, tail latency matters.
+  - Syscalls in tight loops — a program calling clock_gettime thousands of times per second to timestamp events.
+
+  But your instinct is sound: offer both, default to synchronous, and use the ring buffer when you're doing batched I/O.
+   Making all syscalls available via the submission queue is fine — the overhead only matters if someone actually uses
+  it for the wrong workcase, and that's their choice.
+
+  Per-CPU queues clarified
+
+  I think I confused the picture. Let me re-explain.
+
+  The scenario is: you have 8 CPUs and 20 runnable threads. Where do you put them?
+
+  Single global queue:
+  Global queue: [T1, T2, T3, T4, T5, ... T20]
+  Each CPU grabs the next thread when it's free.
+  Simple. Perfect load balance — no CPU is ever idle while work exists. But every CPU contends on the same queue lock.
+  At 8 CPUs, manageable. At 128 CPUs, the lock becomes a bottleneck.
+
+  Per-CPU queues:
+  CPU 0 queue: [T1, T5, T9, T13, T17]
+  CPU 1 queue: [T2, T6, T10, T14, T18]
+  CPU 2 queue: [T3, T7, T11, T15, T19]
+  CPU 3 queue: [T4, T8, T12, T16, T20]
+  CPU 4-7: empty
+
+  No lock contention — each CPU accesses its own queue. But now CPUs 4–7 are idle while CPUs 0–3 have 5 threads each.
+  This is when work stealing happens: idle CPU 4 notices it has nothing to do, looks at CPU 0's queue, and takes T17.
+
+  Your question was essentially: is the cost of migrating T17 from CPU 0 to CPU 4 worth it? And the answer is almost
+  always yes — an idle CPU doing nothing is wasting far more time than the cache miss penalty of moving a thread. A
+  cache refill might cost 10–100 microseconds. An idle CPU wastes the entire time until it would otherwise get work —
+  potentially milliseconds.
+
+  The "hard" part isn't deciding whether to migrate — it's the tuning:
+  - How often do idle CPUs check other queues? (Checking has overhead even when there's nothing to steal.)
+  - Which CPU's queue do you steal from? (Prefer same NUMA node — stealing across NUMA costs 3–5x more in cache miss
+  penalty.)
+  - How many threads do you steal at once? (Taking half the victim's queue amortizes the stealing overhead, but may
+  over-correct.)
+  - When do you migrate back? A thread that got stolen to CPU 4 has now built up cache state there. If CPU 0 becomes
+  idle, should it steal the thread back? Probably not — let sleeping threads lie.
+
+  This is a well-studied problem with good solutions (Linux's CFS/EEVDF load balancer works), but the optimal thresholds
+   depend on hardware topology, workload characteristics, and cache sizes. There's no single set of numbers that's best
+  for all machines.
+
+  F2FS
+
+  - Free and open source — GPL, included in the mainline Linux kernel since 2012.
+  - Works on any block device — SSDs from any manufacturer, eMMC, SD cards. It's not Samsung-specific hardware. Samsung
+  engineers developed it, but it's a standard filesystem.
+  - Optimized for flash in general, not Samsung flash specifically. It's aware of flash erase block sizes and write
+  patterns. Works well on any NAND flash. It's the default filesystem on most Android phones (all vendors, not just
+  Samsung).
+  - Not ideal for HDDs — the log-structured design assumes fast random reads (true for SSDs, not HDDs).
+
+  FFI performance
+
+  FFI (Foreign Function Interface) between Rust and Ada/SPARK is not slow. You might be thinking of IPC (inter-process
+  communication), which involves context switches. FFI is just a function call across language boundaries — at the
+  binary level, it's identical to a normal function call. The CPU doesn't know or care what language produced the
+  machine code.
+
+  Rust function calling Rust function:  CALL instruction → execute → RET
+  Rust function calling SPARK function: CALL instruction → execute → RET  (same thing)
+
+  The only overhead is that the Rust compiler can't inline or optimize across the FFI boundary. For a driver function
+  that does substantial work (handling an interrupt, processing a command), the call overhead is negligible.
+
+  So the approach is: write driver logic in SPARK, prove it correct, compile it to a .o file, link it into the kernel,
+  call it from Rust via FFI. It runs in kernel space at full speed. The FFI cost is effectively zero for any non-trivial
+   function.
+
+  Sandboxed in-kernel drivers vs. userspace drivers
+
+  ┌──────────────┬───────────────────────────────────────────────────────┬─────────────────────────────────────────┐
+  │              │           Sandboxed in-kernel (with IOMMU)            │            Userspace drivers            │
+  ├──────────────┼───────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Performance  │ Near-native. ~1-3% overhead from IOMMU translation.   │ ~5-15% overhead from IPC per driver     │
+  │              │                                                       │ interaction.                            │
+  ├──────────────┼───────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Fault        │ Partial. Driver can't corrupt kernel memory, IOMMU    │ Full. A crashed driver is just a        │
+  │ isolation    │ blocks rogue DMA. But a stuck driver can still hold   │ crashed process. Restart it. Other      │
+  │              │ kernel locks or consume kernel resources.             │ processes are unaffected.               │
+  ├──────────────┼───────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │              │ Difficult. Unloading a misbehaving in-kernel module   │ Clean. Kill the process, restart it.    │
+  │ Recovery     │ while the system is running is fragile.               │ The service manager handles this        │
+  │              │                                                       │ automatically.                          │
+  ├──────────────┼───────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Development  │ Must use kernel APIs, kernel build system, limited    │ Normal userspace development. Can use   │
+  │ ease         │ libraries.                                            │ any libraries, any debugger, any        │
+  │              │                                                       │ language.                               │
+  ├──────────────┼───────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │              │ Smaller attack surface than unsandboxed, but the      │ Driver runs with minimal privileges.    │
+  │ Security     │ driver is still inside the kernel's address space. A  │ Compromising it gives you only that     │
+  │              │ sandbox escape = kernel compromise.                   │ driver's capabilities.                  │
+  └──────────────┴───────────────────────────────────────────────────────┴─────────────────────────────────────────┘
+
+  For your OS, my recommendation: Use userspace drivers as the default. The performance cost is small on modern hardware
+   and the robustness benefits are large. For the few drivers where that 5-15% matters (GPU, NVMe on very
+  high-throughput workloads), offer the option of in-kernel sandboxed drivers. This gives you a safe default with an
+  escape hatch for performance-critical paths.
+
+  ABI stability and binary distribution
+
+  Yes, you're right. Both approaches preserve binary distribution:
+
+  Old syscalls + new syscalls (Linux approach):
+  - Binary compiled against old API calls syscall #47 (open). That still works forever.
+  - New binary calls syscall #52 (openat2). Also works.
+  - Binary distribution is fine — any binary runs on any future kernel.
+  - Cost: every old syscall is maintained forever. Kernel accumulates legacy.
+
+  Versioned syscall tables:
+  - Binary compiled for API v3 gets the v3 table. Works on any kernel that supports v3.
+  - Binary compiled for API v5 gets the v5 table with breaking changes.
+  - Binary distribution is fine — the binary declares its version, kernel dispatches accordingly.
+  - Cost: the kernel maintains N tables instead of accumulating individual syscalls. You can eventually drop old
+  versions (e.g., "we no longer support API v1 binaries, recompile").
+
+  Both work for binary distribution. The versioned approach is arguably cleaner because you can deprecate and eventually
+   remove entire old versions instead of carrying individual legacy syscalls forever. The Linux approach is more
+  conservative — nothing ever breaks, period.
+
+  The macOS "unstable ABI" approach is the one that actually breaks binary distribution, and it's the outlier. You don't
+   have to do that. Either of the two approaches you identified is fine.
+
+✻ Crunched for 1m 14s
+
+> So my understanding is that a single queue for all cpus is fine up to a large number of cpus, and this os is designed
+   for normal desktop use, so there's no reason not to use a single queue.
+
+● Not quite. The lock contention problem shows up earlier than you might expect. It's not just about the number of CPUs
+  — it's about how frequently threads are scheduled and descheduled.
+
+  On a desktop, you might have 8–16 cores and hundreds of threads (browser tabs, background services, GUI events). Every
+   time a thread blocks on I/O, wakes up from sleep, or exhausts its time slice, the scheduler touches the queue. That
+  can be thousands of queue operations per second.
+
+  With a single global queue protected by a lock, every one of those operations contends on that lock. On a modern
+  8-core desktop, this is measurable but probably not a user-visible problem — maybe a few percent of scheduler
+  overhead. On a 16-core system under heavy multitasking, it starts to hurt more.
+
+  But the bigger issue isn't the lock — it's cache behavior. When CPU 0 picks a thread off the global queue, it modifies
+   the queue data structure. That cache line is then invalidated on CPUs 1–7. When CPU 1 next touches the queue, it
+  takes a cache miss. This "cache line bouncing" scales poorly with core count — each added CPU makes every other CPU's
+  queue access slightly slower.
+
+  Per-CPU queues with work stealing avoid both problems: no shared lock, no cache line bouncing in the common case. The
+  work stealing path (idle CPU checks another CPU's queue) is the rare case.
+
+  My honest recommendation: Per-CPU queues with work stealing are not significantly harder to implement than a single
+  global queue — the basic algorithm is straightforward. The tuning is where complexity lives, but you can start with
+  simple defaults (idle CPU steals half the longest queue, prefer same NUMA node) and refine later. Every modern
+  general-purpose OS uses per-CPU queues for good reason, and even for a desktop-focused OS, it's the right starting
+  point. A single global queue would work, but you'd likely end up replacing it once you start profiling.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts
+
+
+
+> Regarding capability-based syscalls being more secure, i still haven't created a good mental model of how capability
+  syscalls work. What ultimately grants the app permission to use a specific capability for a syscall? I mean, if the
+  syscall itself contains the capability, then the app gets to choose what capabilities it hsa..
+
+● The capability isn't data the app puts in the syscall — it's a handle the kernel tracks per-process, like a file
+  descriptor.
+
+  Think about how file descriptors work today:
+
+  fd = open("/home/user/doc.txt")   // kernel checks permissions, returns fd 3
+  read(3, buf, size)                // kernel doesn't recheck permissions — fd 3 is proof
+
+  The process can't just invent read(7, ...) and get access to something — fd 7 doesn't exist in its table unless
+  someone gave it one. The kernel maintains a per-process table of valid file descriptors. The process can only use
+  entries that exist in its table.
+
+  Capability-based syscalls extend this to everything:
+
+  // Process starts with a capability table:
+  //   cap 0 = directory handle to /home/user/
+  //   cap 1 = network (TCP outbound only)
+  //   cap 2 = display server connection
+  //   (nothing else)
+
+  // To open a file, you use a directory capability:
+  fd = open_at(cap 0, "doc.txt")     // works — cap 0 grants /home/user/
+
+  fd = open_at(cap 0, "../../etc/passwd")  // kernel rejects — traversal outside cap scope
+
+  open("/etc/passwd")                // doesn't exist as a syscall — no global open
+
+  connect(cap 1, "1.2.3.4", 80)     // works — cap 1 grants TCP outbound
+
+  listen(cap 1, port 8080)          // rejected — cap 1 is outbound only
+
+  raw_disk_access(???)              // no capability for disk — can't even attempt it
+
+  Who decides what capabilities a process gets? Its parent — the process that launched it. Ultimately, the chain goes:
+
+  1. Kernel boots, gives init all capabilities
+  2. Init gives the login manager a subset (user management, display, etc.)
+  3. Login manager authenticates user, gives the user session capabilities based on your user/group security policy
+  4. User launches browser, the session manager gives it only: network, ~/Downloads, display, GPU
+  5. Browser can't pass capabilities it doesn't have — it can't give a plugin disk access if it doesn't have disk access
+   itself
+
+  The kernel's job is simple: maintain each process's capability table, reject any syscall that references a capability
+  the process doesn't hold, and ensure capabilities can only be delegated downward (a process can pass a subset of its
+  capabilities to a child, never create new ones).
+
+  The process never "chooses" its capabilities. It receives them from its parent, and can only give away (or narrow)
+  what it already has.
+
+> What if you wanted to give a user access to a complete filesystem except for one directory?
+
+● Good question — this is a real ergonomic problem with pure capabilities.
+
+  The naive approach: You'd have to enumerate every directory the user can access and grant a capability for each. If
+  the filesystem has 50 top-level directories and you want to exclude one, you grant 49 capabilities. Ugly, and breaks
+  every time someone creates a new directory.
+
+  The practical approach: Make capabilities support deny rules. Grant one capability for the root filesystem, with an
+  exclusion attached:
+
+  cap 0 = filesystem "/" EXCEPT "/secret-dir"
+
+  The kernel checks: does the path fall within the grant? Is it excluded? This is simple to implement — the capability
+  carries a small deny list.
+
+  How real systems handle this: This is actually where pure capability models get awkward and why most practical systems
+   use a hybrid. With traditional permissions, this is trivial — just remove read permission on that one directory. The
+  deny case is the natural default (no access unless granted), and you add one exception.
+
+  For your OS with user/group permissions as the base layer, this scenario is already handled by the permission model.
+  Capability-based syscalls would be an additional layer for sandboxing specific applications, not a replacement for the
+   permission system. The browser doesn't need access to the full filesystem minus one directory — it needs access to
+  two directories. That's where capabilities shine. The "full access minus exceptions" case stays with the permission
+  model.
+
+> But browser needs access to the full filesystem because the user may want to download a file to a particular
+  directory. I do this all the time. But there are certain directories the browser shouldn't get access to.
+
+● You're right, that's a realistic use case. A few ways to handle it:
+
+  1. Deny lists on capabilities (what I just described)
+
+  cap = filesystem "/" EXCEPT ["/secret-dir", "/other-secret"]
+
+  Clean, but now the kernel needs to check a deny list on every path resolution. Small cost, and the deny list needs to
+  be maintained — if you create a new sensitive directory, you have to remember to add it to the browser's deny list.
+
+  2. The browser asks when it needs access
+
+  The browser doesn't hold a filesystem capability at all. When the user clicks "Save As," the browser asks the desktop
+  environment (which does have filesystem access) to show a file picker dialog. The user picks a directory. The desktop
+  environment grants the browser a one-time, scoped capability for that specific directory.
+
+  // Browser has no filesystem capability at startup
+  // User clicks "Save As"
+  // Browser sends request to desktop environment: "I need to save a file"
+  // Desktop environment shows native file picker dialog
+  // User selects ~/Documents/reports/
+  // Desktop environment grants browser: cap = write to ~/Documents/reports/ (one file, one time)
+  // Browser saves the file
+  // Capability expires
+
+  The browser never sees the filesystem tree. It can't browse directories. The user is always in control of what the
+  browser accesses, through a trusted system component (the file picker) that the browser can't tamper with.
+
+  This is what macOS sandboxed apps, Flatpak on Linux, and Android's Storage Access Framework actually do today. It's
+  considered the best practice for sandboxed applications.
+
+  3. Tag sensitive directories instead of listing them per-app
+
+  In your permission model, mark certain directories with a "restricted" attribute. Any capability that grants
+  filesystem access automatically excludes restricted directories unless the capability explicitly includes the
+  "restricted-access" permission. So:
+
+  cap = filesystem "/" (does not include restricted dirs by default)
+  cap = filesystem "/" WITH restricted-access (full access, only for trusted apps)
+
+  You maintain the sensitivity on the directory, not on every app's capability. New sensitive directory? Mark it
+  restricted once, all sandboxed apps are excluded automatically.
+
+  ---
+  Option 2 is the strongest security model — the browser never has ambient filesystem access, period. Option 3 is the
+  most convenient — the browser can save anywhere non-sensitive without a dialog. You could combine them: use option 3
+  for the normal case, and if the user wants to save into a restricted directory, it escalates to option 2's file-picker
+   flow.
+
+> Regarding scheduling with different priority levels, what is priority inversion?
+
+● A low-priority thread holds a lock. A high-priority thread needs that lock. The high-priority thread blocks, waiting
+  for the low-priority thread to release it.
+
+  But here's the problem: a medium-priority thread is runnable. The scheduler runs the medium thread (it's higher
+  priority than the low thread). The low thread is starved — it can't run, so it can't release the lock, so the high
+  thread stays blocked.
+
+  The high-priority thread is effectively stuck behind the medium-priority thread, even though it has higher priority.
+  The priority order has been inverted.
+
+  High priority:   [running] → [blocked on lock] → [still blocked...] → [still blocked...]
+  Medium priority: [waiting] → [waiting]         → [RUNNING]          → [RUNNING]
+  Low priority:    [RUNNING, holds lock] → [preempted by medium] → [can't run] → [can't run]
+
+  The high thread is waiting for the low thread, but every medium-priority thread in the system gets to run before the
+  low thread. If there's a steady stream of medium-priority work, the high-priority thread waits indefinitely.
+
+  The classic real-world case: The Mars Pathfinder (1997) hit this bug. A high-priority bus management task blocked on a
+   lock held by a low-priority meteorological task, while medium-priority communication tasks kept preempting the
+  low-priority one. The system watchdog detected the high-priority task wasn't running and kept resetting the
+  spacecraft.
+
+  Solutions:
+
+  - Priority inheritance — when the high thread blocks on a lock held by the low thread, temporarily boost the low
+  thread to the high thread's priority. Now the medium thread can't preempt it, the low thread finishes quickly,
+  releases the lock, drops back to low priority. This is what fixed Pathfinder (they enabled it remotely).
+  - Priority ceiling — every lock is assigned a ceiling priority (the highest priority of any thread that might use it).
+   When a thread acquires the lock, it runs at the ceiling priority. Simpler, but requires knowing in advance which
+  threads use which locks.
+  - Lock-free data structures — avoid the problem entirely by not using locks. Not always possible.
+
+ Do BFS / MuQSS (Con Kolivas's schedulers) support priority levels? Because an OS may want to run an app that it's
+  crucial to run at a high priorit.
+
+● Yes, BFS/MuQSS support priority levels — they use the standard Linux nice levels (-20 to +19) and real-time priority
+  classes (SCHED_FIFO, SCHED_RR). Any process can be given higher or lower priority.
+
+  The difference from CFS/EEVDF isn't whether priorities exist, but how fairness is computed among threads at the same
+  priority. BFS uses a simpler model: each thread gets a time slice based on its priority, and when all threads at a
+  given priority have used their slices, the round resets. CFS uses a more mathematically rigorous virtual runtime model
+   where threads that have consumed less CPU time get preferentially scheduled.
+
+  Kolivas's argument was that on a desktop with fewer than ~16 cores, the simpler model produces better interactive
+  responsiveness (lower latency for the foreground app, smoother mouse movement, less audio stuttering) because the
+  scheduler itself does less bookkeeping work per scheduling decision. CFS was designed for server workloads with
+  hundreds of cores and thousands of threads, where the overhead pays off in better throughput and fairness at scale.
+
+  For your desktop-focused OS, the takeaway: you definitely want priority levels. The choice between CFS-style virtual
+  runtime fairness and BFS-style round-robin simplicity is a real one, and for desktop use, simpler may genuinely be
+  better. You can always add a more sophisticated scheduler later if you need server workloads. Start with something
+  simple that has priority support and priority inheritance for locks.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+What paging models do Windows and MACos use? 4kib pages, transparent huge pages, or variable-size pages?
+
+● Windows:
+  - Base page size: 4 KiB
+  - Large pages: 2 MiB, but opt-in only — applications must explicitly request them via VirtualAlloc with the
+  MEM_LARGE_PAGES flag, and the user account needs the "Lock Pages in Memory" privilege. No transparent promotion.
+  - Windows chose the explicit approach because large pages are locked in physical RAM (can't be paged to disk), so
+  letting apps use them without restriction could exhaust physical memory.
+
+  macOS (Intel):
+  - Base page size: 4 KiB
+  - Large pages: 2 MiB, available via mach_vm_allocate with a superpage flag. Like Windows, opt-in only.
+
+  macOS (Apple Silicon / ARM64):
+  - Base page size: 16 KiB — this is the notable difference. Apple chose a larger base page from the start.
+  - This means fewer TLB entries needed, fewer page table entries, less page fault overhead — but slightly more internal
+   fragmentation (a 1-byte allocation still uses 16 KiB of physical memory).
+  - Apple could do this because they control the hardware and the entire software stack. Linux on ARM supports both 4
+  KiB and 16 KiB base pages as a compile-time option, but most distros choose 4 KiB for compatibility.
+
+  Linux:
+  - The only major OS using Transparent Huge Pages — the kernel automatically promotes groups of contiguous 4 KiB pages
+  into 2 MiB pages in the background, without application involvement. As mentioned earlier, this helps when it works
+  but causes latency spikes from the background compaction work.
+
+  For your OS, the interesting question is base page size. 4 KiB was chosen in the 1980s when RAM was measured in
+  megabytes. With 16–64 GB being common on desktops today, 16 KiB (like Apple) wastes a trivial amount of extra memory
+  but meaningfully reduces TLB pressure and page table size. If you're designing from scratch with no legacy constraint,
+   16 KiB is worth considering. The trade-off is that memory-mapped I/O granularity increases (smallest file mapping is
+  16 KiB), which wastes space for very small files, but this is a minor concern.
+
+ Would combining IOMMU sandboxing and ada/spark compilation with ffi communication for a driver be possible?
+
+● Yes, and there's no conflict between them — they protect against different things.
+
+  SPARK proves the driver logic is correct: no buffer overflows, no integer overflows, no invalid state transitions. The
+   driver code does what its specification says.
+
+  IOMMU sandboxing constrains what the hardware device can do via DMA. Even if the driver is perfectly correct, the
+  hardware itself could be malicious (think a compromised USB device or PCIe card) or have firmware bugs that cause it
+  to DMA to unexpected addresses. The IOMMU prevents the device from accessing memory outside its assigned regions,
+  regardless of what the driver tells it to do.
+
+  FFI is just how you call the SPARK code from Rust. As I mentioned, it's a normal function call at the machine level —
+  no performance cost beyond the inability to inline across the boundary.
+
+  So the layers would be:
+
+  Application
+      ↓ syscall
+  Rust kernel (safe code)
+      ↓ FFI call (near-zero cost)
+  SPARK driver logic (proven correct, runs in kernel space)
+      ↓ programs the device
+  Hardware device
+      ↓ DMA (device accesses RAM)
+  IOMMU (restricts which RAM the device can touch)
+      ↓ allowed DMA only
+  Physical RAM
+
+  SPARK protects you from software bugs in the driver. IOMMU protects you from the hardware misbehaving. They're
+  complementary. And because the SPARK code runs in kernel space via FFI (not in a separate userspace process via IPC),
+  you get near-native performance with both protections active.
+
+  The only cost is the 1-3% IOMMU overhead on DMA operations, which you'd pay regardless of whether the driver is
+  written in SPARK or plain Rust. The SPARK part adds zero runtime cost — 
+
+ I guess an OS needs a package manager?
+
+● Yes, unless you expect users to compile everything from source. The core job is: download software, put it in the
+  right place, track what's installed, handle dependencies, and allow clean removal.
+
+  The main design decisions:
+
+  Binary vs. source packages:
+  - Binary (apt, pacman, rpm) — precompiled, fast to install. You or a build infrastructure compiles everything in
+  advance.
+  - Source (Gentoo's portage, FreeBSD ports) — compiles on the user's machine, allows custom optimization flags and
+  feature toggles. Slow to install.
+  - Both (Nix, AUR alongside pacman) — binary packages by default, source builds as a fallback or option.
+
+  For a desktop OS, binary packages as the default is the obvious choice. Source builds as an option is nice but not
+  essential early on.
+
+  Dependency handling:
+  - Shared dependencies (apt, pacman) — if five apps need libpng, one copy is installed and they all use it. Saves disk
+  space. But updating libpng can break an app that depends on the old version ("dependency hell").
+  - Bundled dependencies (Flatpak, Snap, macOS app bundles) — each app ships its own copy of everything it needs. No
+  conflicts, but wastes disk space and security updates to a library must be applied to every app that bundles it.
+  - Content-addressed store (Nix, Guix) — each exact version of each library lives at a unique path derived from its
+  hash. Five apps can share the exact same libpng build, but if one needs a different version, both coexist without
+  conflict. Most elegant solution, but the most complex to implement.
+
+  Package format:
+  This is just "what's in the archive." At minimum: the compiled files, metadata (name, version, dependencies), and
+  install scripts if needed. Whether it's a tarball, a custom binary format, or a directory structure is mostly an
+  implementation detail.
+
+  Repository model:
+  - Centralized (Debian, Fedora) — one official repo, curated and tested. Consistent quality, but slow to update and
+  someone has to maintain it.
+  - Decentralized / user repos (AUR, PPAs) — anyone can publish packages. More software available, faster updates, but
+  quality and security vary.
+
+  Atomic updates and rollback:
+  This is where newer package managers shine. If an update breaks something:
+  - Traditional (apt, pacman) — you're partially updated, rolling back means manually downgrading packages. Messy.
+  - Atomic (Nix, OSTree/Silverblue) — the entire system state is versioned. An update either fully applies or doesn't.
+  Rolling back is switching a pointer to the previous state. This is essentially the copy-on-write filesystem concept
+  applied to package management.
+
+  For your OS, my suggestion: Look at Nix's model seriously. The content-addressed store solves dependency hell cleanly,
+   atomic updates and rollback are built-in, and it works well for a from-scratch OS where you're not constrained by
+  legacy package format choices. The learning curve for Nix-the-tool is widely criticized, but the underlying model is
+  sound — you'd be implementing your own tool with a better interface on top of the same ideas.
+
+> How are dependency security updates done with Nix?
+
+● When a library gets a security patch in Nix, the new version gets a new hash and a new store path:
+
+  /nix/store/abc123-libpng-1.6.39/    (old, vulnerable)
+  /nix/store/def456-libpng-1.6.40/    (new, patched)
+
+  Every package that depends on libpng is then rebuilt against the new version, producing new store paths for those
+  packages too:
+
+  /nix/store/ghi789-firefox-120/      (old, linked against abc123-libpng)
+  /nix/store/jkl012-firefox-120/      (new, linked against def456-libpng)
+
+  The old versions remain on disk (nothing breaks mid-update), and once the user switches to the new generation, the old
+   versions become garbage and can be collected.
+
+  The downside: A security fix in a low-level library (openssl, glibc, zlib) triggers a rebuild of everything that
+  depends on it, which can be hundreds of packages. The Nix build infrastructure (Hydra) does this centrally and users
+  download the prebuilt binaries, so users don't have to compile anything. But someone has to run that build
+  infrastructure, and a single openssl patch means rebuilding and re-downloading a large portion of the package set.
+
+  Compare with traditional shared dependencies (apt/pacman): update the one libpng .so file in place, and every app that
+   dynamically links to it automatically uses the patched version. No rebuilds. One small download. Much faster to
+  deploy.
+
+  This is the real trade-off:
+
+  ┌─────────────────────────────┬─────────────────────────────────────────────┬────────────────────────────────────┐
+  │                             │        Shared libraries (apt/pacman)        │      Content-addressed (Nix)       │
+  ├─────────────────────────────┼─────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Security patch deployment   │ Replace one file, instant                   │ Rebuild and redistribute all       │
+  │                             │                                             │ dependents                         │
+  ├─────────────────────────────┼─────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Risk of patch breaking      │ Higher — all apps forced onto new version   │ Lower — atomic switch, easy        │
+  │ something                   │ immediately                                 │ rollback                           │
+  ├─────────────────────────────┼─────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Certainty that patch is     │ High — one copy, everyone uses it           │ High — but only after rebuild      │
+  │ applied                     │                                             │ propagates                         │
+  └─────────────────────────────┴─────────────────────────────────────────────┴────────────────────────────────────┘
+
+  Possible middle ground for your OS: Use content-addressed packages for isolation and rollback, but support dynamic
+  linking within a generation. Within one system generation, apps share .so files. A security update rebuilds the shared
+   library and creates a new generation where apps point to the new .so. You get fast security patches (rebuild one
+  library, not every dependent) with atomic rollback (switch generation pointer). The cost: you lose Nix's guarantee
+  that each package is fully self-describing, and you reintroduce the possibility of a shared library update breaking an
+   app (though rollback mitigates that).
+
+ I think I solved how to make certain directories restricted using my capabilities system. A file or directory can
+  have multiple capabilities associated with it so that all of them are required to access that file or directory. So,
+  e.g., there could be one "filesystem" capability for everything that all subdirectories inherit, and then a "system"
+  capability on some subdirectories that a user or program can't access unless he has the "system" capability.
+
+● That's a clean design. The key insight is that capabilities compose via intersection (AND) rather than union (OR) — so
+   adding a capability to a directory only ever restricts access, never broadens it. A process that has the filesystem
+  capability can see most things, but the moment it hits a directory tagged with filesystem + system, it needs both or
+  it's locked out.
+
+  A few thoughts:
+
+  Inheritance semantics are natural. A child directory inherits its parent's capability set, and can only add more
+  requirements. That means the root of a filesystem tree sets the floor (e.g., filesystem), and sensitive subtrees layer
+   on additional requirements (system, hardware, audit, whatever). No subtree can ever be less restricted than its
+  parent, which is the right default.
+
+  It maps well to real use cases. A regular user program gets filesystem at launch. It can read /home, /tmp, /usr/share
+  — anything tagged with just filesystem. But /sys, /proc, /etc/shadow require filesystem + system, so the program can't
+   touch them without explicit privilege escalation. A system daemon gets both capabilities at launch and sees
+  everything.
+
+  The interesting question is capability granting. How does a process acquire the system capability? Some options:
+  - Statically at launch time (like Unix setuid — the binary's metadata says "this process starts with system")
+  - Dynamically via a broker (the process asks a privileged service "may I have system?" and gets it if policy allows)
+  - Temporarily scoped (the process gets system for one operation, then it's revoked)
+
+  The third option is the most powerful for least-privilege — a package manager could get system just for the duration
+  of the install operation, then lose it.
+
+  One edge case to think about: can a directory require a capability that no process has? That would make it permanently
+   inaccessible (useful for sealed audit logs or write-once storage). Is that intentional in your model, or would you
+  prevent it?
+
+✻ Cogitated for 58s
+
+> Regarding the edge case, I was imagining the kernel would naturally be able to bypass all capability restrictions.
+  The only other option is to have anything and everything on the system except for the write-once storage to have the
+  "kernel" capability. But then that doesn't work either, because the capabilities work by AND, so no userpsace
+  anything wouldn't be able to access anything.
+
+● Right, you need the kernel to be outside the capability system entirely — it's the enforcer, not a participant. If you
+   tried to model the kernel as "has all capabilities," you'd need to enumerate them, and any new capability someone
+  invents would need to be retroactively added to the kernel's set. And as you noted, putting a kernel capability on
+  every directory would break userspace since they'd all suddenly require it.
+
+  So the clean model is:
+
+  - Kernel: bypasses capability checks entirely (it's the one doing the checking)
+  - Userspace processes: subject to capability checks, hold some subset of capabilities
+  - Filesystem objects: tagged with a set of required capabilities
+
+  The kernel sees the raw filesystem. Capability enforcement is a layer the kernel applies to userspace access requests.
+   Similar to how Unix root bypasses permission bits — the permission system doesn't apply to the entity enforcing it.
+
+  For the write-once storage case, you could handle it differently: instead of a capability nobody has, make it a
+  filesystem-level flag — immutable or append-only — that the kernel itself honors. The kernel could override it, but
+  chooses not to during normal operation. That's distinct from the capability system and arguably belongs at a different
+   layer anyway, since it's about the nature of the storage, not about who can access it.
+
+  That gives you a clean separation:
+  - Capabilities answer: "which processes can reach this?"
+  - Filesystem flags answer: "what operations are allowed on this, period?"
+
+  A sealed audit log would be append-only (filesystem flag) + system + audit (capabilities). Only processes with both
+  capabilities can even see it, and even they can only append.

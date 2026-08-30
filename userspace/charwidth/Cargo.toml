@@ -1,0 +1,11 @@
+[package]
+name = "charwidth"
+version = "0.1.0"
+edition = "2024"
+description = "wcwidth: how many terminal columns a character occupies, for the shell and the utilities that must lay text out on the same screen."
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

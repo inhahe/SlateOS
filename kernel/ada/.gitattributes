@@ -1,0 +1,15 @@
+# The prebuilt object is compared byte-for-byte against a fresh compile by
+# kernel/build.rs, so any line-ending translation would both fail that check and
+# corrupt the object actually linked into the kernel.  Git would almost certainly
+# infer "binary" from the NUL bytes in an ELF file and leave it alone -- but that
+# is an inference, and it is the sort that holds until the day it doesn't.  On a
+# checkout with core.autocrlf=true (this tree happens to use `input`, which only
+# converts on commit; other lanes' machines need not) a misdetection would
+# rewrite bytes in an artifact whose whole purpose is to be byte-exact.  Say it
+# explicitly instead of relying on the heuristic.
+*.o -text -diff
+
+# stamp.txt is read with .trim() on both the Rust and Python sides, so its line
+# endings do not affect the comparison -- pin it to LF anyway so the file is
+# identical everywhere and a diff never shows a whole-file change.
+stamp.txt text eol=lf

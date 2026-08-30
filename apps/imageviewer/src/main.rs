@@ -1,0 +1,2819 @@
+//! Slate OS Image Viewer
+//!
+//! Graphical photo/image viewer with:
+//! - Image display with zoom, pan, rotation, and flip transforms
+//! - Directory browsing (next/prev image navigation)
+//! - Slideshow mode with configurable intervals
+//! - Image format detection (BMP, PNG, JPEG, GIF)
+//! - Image information panel with metadata/EXIF display
+//! - Toolbar and status bar
+//! - Keyboard shortcuts for all operations
+//!
+//! Uses the guitk library for UI rendering.
+
+#[allow(unused_imports)]
+use guitk::color::Color;
+#[allow(unused_imports)]
+use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+#[allow(unused_imports)]
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+#[allow(unused_imports)]
+use guitk::style::CornerRadii;
+use guitk::wheel;
+
+mod video;
+
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+const TOOLBAR_HEIGHT: f32 = 40.0;
+const STATUS_BAR_HEIGHT: f32 = 28.0;
+const INFO_PANEL_WIDTH: f32 = 280.0;
+const THUMBNAIL_STRIP_HEIGHT: f32 = 80.0;
+
+const MIN_ZOOM: f32 = 0.25;
+const MAX_ZOOM: f32 = 4.0;
+const ZOOM_STEP: f32 = 0.25;
+
+const BG_COLOR: Color = Color::rgb(30, 30, 30);
+const TOOLBAR_BG: Color = Color::rgb(48, 48, 48);
+const STATUS_BG: Color = Color::rgb(38, 38, 38);
+const INFO_PANEL_BG: Color = Color::rgb(42, 42, 42);
+const BUTTON_BG: Color = Color::rgb(60, 60, 60);
+const BUTTON_HOVER_BG: Color = Color::rgb(80, 80, 80);
+const TEXT_PRIMARY: Color = Color::rgb(230, 230, 230);
+const TEXT_SECONDARY: Color = Color::rgb(160, 160, 160);
+const ACCENT_COLOR: Color = Color::rgb(70, 140, 220);
+const BORDER_COLOR: Color = Color::rgb(70, 70, 70);
+
+/// Supported image file extensions for directory browsing.
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "bmp", "png", "jpg", "jpeg", "gif", "webp", "ico", "tiff", "tif", "svg",
+];
+
+// ============================================================================
+// Image format detection
+// ============================================================================
+
+/// Detected image format from magic bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageFormat {
+    Bmp,
+    Png,
+    Jpeg,
+    Gif,
+    Unknown,
+}
+
+impl ImageFormat {
+    /// Detect image format from the first bytes of a file.
+    pub fn detect(data: &[u8]) -> Self {
+        if data.len() < 8 {
+            return Self::Unknown;
+        }
+
+        // BMP: starts with "BM"
+        if byteread::starts_with(data, b"BM") {
+            return Self::Bmp;
+        }
+
+        // PNG: 8-byte signature
+        if byteread::starts_with(data, &[137, 80, 78, 71, 13, 10, 26, 10]) {
+            return Self::Png;
+        }
+
+        // JPEG: starts with FF D8
+        if byteread::starts_with(data, &[0xFF, 0xD8]) {
+            return Self::Jpeg;
+        }
+
+        // GIF: starts with "GIF87a" or "GIF89a"
+        if byteread::starts_with(data, b"GIF87a") || byteread::starts_with(data, b"GIF89a") {
+            return Self::Gif;
+        }
+
+        Self::Unknown
+    }
+
+    /// Human-readable name for the format.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bmp => "BMP",
+            Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+            Self::Gif => "GIF",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+/// Parse image dimensions from header bytes.
+pub fn parse_dimensions(format: ImageFormat, data: &[u8]) -> Option<(u32, u32)> {
+    match format {
+        ImageFormat::Bmp => parse_bmp_dimensions(data),
+        ImageFormat::Png => parse_png_dimensions(data),
+        ImageFormat::Jpeg => parse_jpeg_dimensions(data),
+        ImageFormat::Gif => parse_gif_dimensions(data),
+        ImageFormat::Unknown => None,
+    }
+}
+
+fn parse_bmp_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    // BMP header: width at offset 18 (4 bytes LE), height at offset 22 (4 bytes LE)
+    let width = byteread::u32_le_at(data, 18)?;
+    // Height can be negative (top-down bitmap).
+    let height = byteread::i32_le_at(data, 22)?.unsigned_abs();
+    Some((width, height))
+}
+
+fn parse_png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    // Delegated rather than read here. This used to be two `u32_be_at` calls at
+    // offsets 16 and 20 — the place a PNG's width and height *are*, if the file
+    // has an IHDR chunk there and it is intact. Neither was checked, so a
+    // truncated download reported whatever happened to sit at those offsets and
+    // the info panel showed a confident, invented size for a file that would
+    // never open. `imagecodec` checks the signature, the chunk name, the chunk
+    // length, the bit depth and the colour type before it answers.
+    imagecodec::dimensions(data).ok()
+}
+
+fn parse_jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    // JPEG is a stream of `FF <marker>` segments, so this walks rather than
+    // indexes: a segment's length is read from the segment before it.
+    let mut reader = byteread::Reader::at(data, 2); // skip FF D8
+    loop {
+        if reader.u8()? != 0xFF {
+            // Fill bytes and payload noise: resync on the next 0xFF.
+            continue;
+        }
+        let marker = reader.u8()?;
+
+        // SOF0 (baseline), SOF1 (extended), SOF2 (progressive) carry the
+        // dimensions: length(2) + precision(1), then height(2), width(2).
+        if marker == 0xC0 || marker == 0xC1 || marker == 0xC2 {
+            let height = reader.peek::<2>(3).map(u16::from_be_bytes)?;
+            let width = reader.peek::<2>(5).map(u16::from_be_bytes)?;
+            return Some((u32::from(width), u32::from(height)));
+        }
+
+        // Any other segment: its length counts itself, so skipping `len` from
+        // the length field lands on the next marker. A length below 2 would
+        // not advance, which is a malformed file rather than a segment.
+        let seg_len = usize::from(reader.peek::<2>(0).map(u16::from_be_bytes)?);
+        if seg_len < 2 {
+            return None;
+        }
+        reader.skip(seg_len)?;
+    }
+}
+
+fn parse_gif_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    // GIF logical screen descriptor: width at offset 6 (2 bytes LE), height at offset 8 (2 bytes LE)
+    let width = byteread::u16_le_at(data, 6)?;
+    let height = byteread::u16_le_at(data, 8)?;
+    Some((u32::from(width), u32::from(height)))
+}
+
+// ============================================================================
+// Image data
+// ============================================================================
+
+/// The picture currently on screen, as the compositor holds it.
+///
+/// This used to carry a grey checkerboard: `display_image` called
+/// `ImageData::placeholder` under a comment reading "in a real implementation,
+/// this would decode the image", so every photograph in the system opened as
+/// the same 16-pixel check pattern at the right *size*. The size came from the
+/// header, which is why nothing looked obviously broken and why the whole test
+/// suite passed over it.
+#[derive(Clone, Debug)]
+pub struct ImageData {
+    /// Width in pixels, as decoded — not as the header claimed.
+    pub width: u32,
+    /// Height in pixels, as decoded.
+    pub height: u32,
+    /// The number [`RenderCommand::Image`] names it by.
+    ///
+    /// The pixels themselves are deliberately *not* here. They are moved
+    /// straight into the upload queue and thence to the compositor, which is
+    /// the only place anything draws from; a retained copy would double the
+    /// viewer's memory for a 20-megapixel photograph — 80 MB in this form — to
+    /// serve a reader that does not exist.
+    pub image_id: u64,
+}
+
+/// The image id this viewer uses for whatever picture is on screen.
+///
+/// One fixed number rather than a per-file hash, and the difference is not
+/// cosmetic. A viewer that derived an id from the path would leave every
+/// picture it had ever shown resident in the compositor: nothing drops them,
+/// and paging through a directory of photographs would climb the connection's
+/// image budget until the compositor refused — at which point the *next*
+/// picture is the one that fails, for a reason that has nothing to do with it.
+///
+/// Re-registering an id replaces what is under it, and the budget is measured
+/// against what the link would hold *after* the upload, so one id also means
+/// the viewer never holds two full-size pictures at once. That is the same
+/// property `design-decisions.md` §557 achieves for the wallpaper by dropping
+/// before uploading, arrived at more cheaply because a viewer, unlike a
+/// slideshow of wallpapers, shows exactly one picture.
+const VIEWER_IMAGE_ID: u64 = 1;
+
+// ============================================================================
+// Transform state
+// ============================================================================
+
+/// Rotation angle in 90-degree increments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rotation {
+    None,
+    Cw90,
+    Cw180,
+    Cw270,
+}
+
+impl Rotation {
+    /// Rotate clockwise by 90 degrees.
+    pub fn rotate_cw(self) -> Self {
+        match self {
+            Self::None => Self::Cw90,
+            Self::Cw90 => Self::Cw180,
+            Self::Cw180 => Self::Cw270,
+            Self::Cw270 => Self::None,
+        }
+    }
+
+    /// Rotate counter-clockwise by 90 degrees.
+    pub fn rotate_ccw(self) -> Self {
+        match self {
+            Self::None => Self::Cw270,
+            Self::Cw90 => Self::None,
+            Self::Cw180 => Self::Cw90,
+            Self::Cw270 => Self::Cw180,
+        }
+    }
+
+    /// Angle in degrees for display purposes.
+    pub fn degrees(self) -> u16 {
+        match self {
+            Self::None => 0,
+            Self::Cw90 => 90,
+            Self::Cw180 => 180,
+            Self::Cw270 => 270,
+        }
+    }
+}
+
+/// Complete transform state for the viewed image.
+#[derive(Clone, Debug)]
+pub struct Transform {
+    pub zoom: f32,
+    pub pan_x: f32,
+    pub pan_y: f32,
+    pub rotation: Rotation,
+    pub flip_h: bool,
+    pub flip_v: bool,
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+            rotation: Rotation::None,
+            flip_h: false,
+            flip_v: false,
+        }
+    }
+}
+
+impl Transform {
+    /// Reset all transforms to default.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Zoom in by one step, clamping to MAX_ZOOM.
+    pub fn zoom_in(&mut self) {
+        self.zoom = (self.zoom + ZOOM_STEP).min(MAX_ZOOM);
+    }
+
+    /// Zoom out by one step, clamping to MIN_ZOOM.
+    pub fn zoom_out(&mut self) {
+        self.zoom = (self.zoom - ZOOM_STEP).max(MIN_ZOOM);
+    }
+}
+
+// ============================================================================
+// Slideshow state
+// ============================================================================
+
+/// Slideshow interval options.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlideshowInterval {
+    ThreeSeconds,
+    FiveSeconds,
+    TenSeconds,
+    ThirtySeconds,
+}
+
+impl SlideshowInterval {
+    /// Duration in milliseconds.
+    pub fn millis(self) -> u64 {
+        match self {
+            Self::ThreeSeconds => 3000,
+            Self::FiveSeconds => 5000,
+            Self::TenSeconds => 10000,
+            Self::ThirtySeconds => 30000,
+        }
+    }
+
+    /// Human-readable label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ThreeSeconds => "3s",
+            Self::FiveSeconds => "5s",
+            Self::TenSeconds => "10s",
+            Self::ThirtySeconds => "30s",
+        }
+    }
+
+    /// Cycle to the next interval option.
+    pub fn next(self) -> Self {
+        match self {
+            Self::ThreeSeconds => Self::FiveSeconds,
+            Self::FiveSeconds => Self::TenSeconds,
+            Self::TenSeconds => Self::ThirtySeconds,
+            Self::ThirtySeconds => Self::ThreeSeconds,
+        }
+    }
+}
+
+/// Slideshow mode state.
+#[derive(Clone, Debug)]
+pub struct SlideshowState {
+    pub active: bool,
+    pub interval: SlideshowInterval,
+    pub elapsed_ms: u64,
+    pub paused: bool,
+    pub random_order: bool,
+}
+
+impl Default for SlideshowState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            interval: SlideshowInterval::FiveSeconds,
+            elapsed_ms: 0,
+            paused: false,
+            random_order: false,
+        }
+    }
+}
+
+// ============================================================================
+// Image metadata / EXIF
+// ============================================================================
+
+/// Image metadata and EXIF information.
+#[derive(Clone, Debug, Default)]
+pub struct ImageInfo {
+    pub filename: String,
+    pub file_size: u64,
+    pub format: Option<ImageFormat>,
+    pub width: u32,
+    pub height: u32,
+    pub color_depth: Option<u8>,
+    pub dpi: Option<(u32, u32)>,
+    pub date_modified: Option<String>,
+    // EXIF fields (populated if available)
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+    pub exposure_time: Option<String>,
+    pub iso: Option<u32>,
+    pub aperture: Option<String>,
+    pub focal_length: Option<String>,
+}
+
+impl ImageInfo {
+    /// Format the file size for display.
+    pub fn file_size_display(&self) -> String {
+        guitk::bytes::iec(self.file_size)
+    }
+
+    /// Dimensions as a display string.
+    pub fn dimensions_display(&self) -> String {
+        format!("{} x {}", self.width, self.height)
+    }
+}
+
+// ============================================================================
+// Directory entry for browsing
+// ============================================================================
+
+/// A single image file entry in the current directory listing.
+#[derive(Clone, Debug)]
+pub struct DirectoryEntry {
+    pub path: PathBuf,
+    pub filename: String,
+    pub file_size: u64,
+}
+
+// ============================================================================
+// Toolbar button
+// ============================================================================
+
+/// Toolbar button definition.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+struct ToolbarButton {
+    label: &'static str,
+    tooltip: &'static str,
+    action: ViewerAction,
+    x: f32,
+    width: f32,
+}
+
+/// Actions triggered by toolbar buttons or keyboard shortcuts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewerAction {
+    Open,
+    PrevImage,
+    NextImage,
+    ZoomIn,
+    ZoomOut,
+    FitToWindow,
+    ActualSize,
+    RotateCw,
+    RotateCcw,
+    FlipHorizontal,
+    FlipVertical,
+    ToggleSlideshow,
+    ToggleInfo,
+    ToggleThumbnails,
+    ToggleFullscreen,
+    FirstImage,
+    LastImage,
+    DeleteImage,
+    PauseSlideshow,
+}
+
+// ============================================================================
+// Main viewer state
+// ============================================================================
+
+/// Complete state for the image viewer application.
+pub struct ViewerState {
+    // Window dimensions
+    pub window_width: f32,
+    pub window_height: f32,
+    pub fullscreen: bool,
+
+    // Current image
+    pub current_image: Option<ImageData>,
+    pub image_info: ImageInfo,
+    pub transform: Transform,
+    /// Why the last load attempt produced no image, if it produced none.
+    /// Rendered in place of the picture, because a viewer that shows a
+    /// filename with an empty canvas and no explanation looks broken rather
+    /// than informative.
+    pub load_error: Option<String>,
+
+    // Directory browsing
+    pub directory: Option<PathBuf>,
+    pub entries: Vec<DirectoryEntry>,
+    pub current_index: usize,
+
+    // UI panels
+    pub show_info_panel: bool,
+    pub show_thumbnails: bool,
+    pub show_toolbar: bool,
+    pub show_status_bar: bool,
+
+    // Slideshow
+    pub slideshow: SlideshowState,
+
+    // Mouse interaction state
+    pub dragging: bool,
+    pub drag_start_x: f32,
+    pub drag_start_y: f32,
+    pub drag_start_pan_x: f32,
+    pub drag_start_pan_y: f32,
+
+    // Toolbar hover state
+    pub hovered_button: Option<usize>,
+
+    /// The fraction of a zoom step the wheel has earned but not yet spent.
+    ///
+    /// The zoom is a *stepped* quantity -- `zoom_in` adds a fixed `ZOOM_STEP`
+    /// -- so this is the accumulator case, not the continuous one. Without it
+    /// the handler read only the sign of `dy` and took a full step per event,
+    /// which on a precision trackpad (a stream of 0.05-notch events) ran the
+    /// zoom from minimum to maximum on a single flick of two fingers.
+    zoom_wheel: wheel::Accumulator,
+
+    /// Pictures the compositor should start or stop holding, in order, not yet
+    /// sent.
+    ///
+    /// Queued rather than sent at the point of decode because `display_image`
+    /// has no connection and must not need one: every test in this file drives
+    /// the viewer with no compositor anywhere, and a loader that dialled a
+    /// display would make the whole suite either offline-and-untested or
+    /// online-and-fragile. `oswindow::app::drive` drains this through
+    /// [`App::take_images`] between the render and the frame, which is what
+    /// puts the pixels up before the frame that names them.
+    pending_images: Vec<oswindow::app::ImageChange>,
+}
+
+impl ViewerState {
+    /// Create a new viewer state with default settings.
+    pub fn new(width: f32, height: f32) -> Self {
+        Self {
+            window_width: width,
+            window_height: height,
+            fullscreen: false,
+            current_image: None,
+            image_info: ImageInfo::default(),
+            load_error: None,
+            transform: Transform::default(),
+            directory: None,
+            entries: Vec::new(),
+            current_index: 0,
+            show_info_panel: false,
+            show_thumbnails: false,
+            show_toolbar: true,
+            show_status_bar: true,
+            slideshow: SlideshowState::default(),
+            dragging: false,
+            drag_start_x: 0.0,
+            drag_start_y: 0.0,
+            drag_start_pan_x: 0.0,
+            drag_start_pan_y: 0.0,
+            hovered_button: None,
+            zoom_wheel: wheel::Accumulator::default(),
+            pending_images: Vec::new(),
+        }
+    }
+
+    /// Open an image file by path, returning whether it could be loaded.
+    ///
+    /// The directory listing is rebuilt either way: a file that will not open
+    /// is still a place in a directory the user can browse away from, and
+    /// leaving them with no next/previous is a second failure on top of the
+    /// first.
+    pub fn open_file(&mut self, path: &Path) -> bool {
+        let loaded = self.display_image(path);
+
+        // Update directory listing. This is only done when opening a file
+        // directly (e.g. from the file picker), NOT when navigating within an
+        // already-loaded directory — see load_current_entry — so that next/prev
+        // don't re-scan and re-sort the directory on every step.
+        if let Some(parent) = path.parent() {
+            self.load_directory(parent);
+            // Find our index in the listing
+            self.current_index = self
+                .entries
+                .iter()
+                .position(|e| e.path == path)
+                .unwrap_or(0);
+        }
+        loaded
+    }
+
+    /// Load and display the image at `path` without touching the directory
+    /// listing or `current_index`. Used both by `open_file` (which then
+    /// (re)builds the listing) and by `load_current_entry` (which navigates
+    /// within the existing listing).
+    ///
+    /// Returns whether the image could be loaded.
+    ///
+    /// **Every field is replaced, not updated.** This used to assign into
+    /// `self.image_info` field by field and keep the previously-displayed
+    /// picture when the read failed, so a file the viewer could not open left
+    /// a mixture: the status bar and info panel named the *new* file, while
+    /// the canvas still showed the *old* image and the panel still listed the
+    /// old dimensions, format and EXIF. "This picture is `holiday.jpg`" is the
+    /// one claim an image viewer makes, and it was false in exactly the case
+    /// the user most needed to be told about.
+    fn display_image(&mut self, path: &Path) -> bool {
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| String::from("(unknown)"));
+
+        // Built fresh so nothing can survive from the last image.
+        let mut info = ImageInfo {
+            filename,
+            ..ImageInfo::default()
+        };
+
+        let data = match std::fs::read(path) {
+            Ok(data) => data,
+            Err(e) => {
+                // Committed anyway: the user asked for *this* file, so the UI
+                // must name this file — but with no image and no borrowed
+                // metadata beside it.
+                self.image_info = info;
+                self.fail_with(format!("{}: {}", path.display(), e));
+                return false;
+            }
+        };
+
+        // `read` already succeeded, so a failing `metadata` is a genuine
+        // oddity rather than the ordinary missing-file case; 0 is the honest
+        // answer for "unknown" here and the file itself is still displayable.
+        info.file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        info.date_modified = std::fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(|_t| String::from("(available)"));
+
+        let format = ImageFormat::detect(&data);
+        info.format = Some(format);
+        // Read before the decode and from the header alone, because it is the
+        // only size available for a format this system can identify but not yet
+        // draw. A JPEG's dimensions in the info panel are worth having beside
+        // "JPEG images cannot be displayed yet"; they are what tells the user
+        // the file is the photograph they meant.
+        if let Some((w, h)) = parse_dimensions(format, &data) {
+            info.width = w;
+            info.height = h;
+        }
+
+        let decoded = imagecodec::decode(&data, imagecodec::Limits::default());
+        let image = match decoded {
+            Ok(image) => image,
+            Err(why) => {
+                self.image_info = info;
+                self.fail_with(format!(
+                    "{}: {}",
+                    path.display(),
+                    decode_failure(format, &why)
+                ));
+                return false;
+            }
+        };
+
+        // The decoder's answer overrides the header's. They agree for any file
+        // that decoded at all — `imagecodec` allocates from the header — but
+        // saying so once here means nothing downstream has to know which of the
+        // two `fit_zoom` and the info panel are reading.
+        info.width = image.width;
+        info.height = image.height;
+
+        // Cleared, not appended to. Paging through a directory faster than the
+        // loop draws — holding an arrow key down, or a slideshow with a short
+        // interval — would otherwise queue every picture passed over and upload
+        // all of them before one frame, at a full photograph's worth of wire
+        // traffic per file nobody sees. Only the last one is ever drawn.
+        self.pending_images.clear();
+        self.pending_images
+            .push(oswindow::app::ImageChange::Upload {
+                id: VIEWER_IMAGE_ID,
+                width: image.width,
+                height: image.height,
+                stride: image.stride(),
+                format: oswindow::PixelFormat::Argb8888,
+                // Moved, not cloned. A 20-megapixel photograph is 80 MB in this
+                // form; a copy retained "in case something wants it" would
+                // double the viewer's footprint for a reader that does not
+                // exist. The compositor is where the pixels live once they are
+                // sent, and re-reading the file is how they would come back.
+                bytes: image.to_argb_bytes(),
+            });
+
+        self.image_info = info;
+        self.current_image = Some(ImageData {
+            width: image.width,
+            height: image.height,
+            image_id: VIEWER_IMAGE_ID,
+        });
+        self.load_error = None;
+
+        // Reset transform for new image
+        self.transform.reset();
+        true
+    }
+
+    /// Record that there is no picture, and stop paying for the last one.
+    ///
+    /// The drop is the half that is easy to leave out and expensive to leave
+    /// out: with no picture, `render_image` emits no `Image` command at all, so
+    /// the pixels the compositor still holds under [`VIEWER_IMAGE_ID`] are
+    /// unreachable — and a viewer parked on an unopenable file would go on
+    /// charging the connection's image budget for a full-screen photograph
+    /// nobody can see.
+    fn fail_with(&mut self, reason: String) {
+        if self.current_image.take().is_some() {
+            self.pending_images.clear();
+            self.pending_images
+                .push(oswindow::app::ImageChange::Drop(VIEWER_IMAGE_ID));
+        }
+        self.load_error = Some(reason);
+        self.transform.reset();
+    }
+
+    /// Load the image file listing for a directory.
+    pub fn load_directory(&mut self, dir: &Path) {
+        self.directory = Some(dir.to_path_buf());
+        self.entries.clear();
+
+        if let Ok(read_dir) = std::fs::read_dir(dir) {
+            for entry_result in read_dir {
+                let Ok(entry) = entry_result else { continue };
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if !IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+                    continue;
+                }
+                let filename = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let file_size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                self.entries.push(DirectoryEntry {
+                    path,
+                    filename,
+                    file_size,
+                });
+            }
+        }
+
+        // Sort alphabetically by filename
+        self.entries.sort_by(|a, b| a.filename.cmp(&b.filename));
+    }
+
+    /// Navigate to the next image in the directory.
+    pub fn next_image(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        self.current_index = (self.current_index + 1) % self.entries.len();
+        self.load_current_entry();
+    }
+
+    /// Navigate to the previous image in the directory.
+    pub fn prev_image(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        if self.current_index == 0 {
+            self.current_index = self.entries.len().saturating_sub(1);
+        } else {
+            self.current_index -= 1;
+        }
+        self.load_current_entry();
+    }
+
+    /// Navigate to the first image in the directory.
+    pub fn first_image(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        self.current_index = 0;
+        self.load_current_entry();
+    }
+
+    /// Navigate to the last image in the directory.
+    pub fn last_image(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        self.current_index = self.entries.len().saturating_sub(1);
+        self.load_current_entry();
+    }
+
+    /// Reload the image at the current index.
+    fn load_current_entry(&mut self) {
+        if let Some(entry) = self.entries.get(self.current_index) {
+            let path = entry.path.clone();
+            // Display only — do NOT reload the directory listing (that would
+            // wipe the listing and reset current_index on every navigation).
+            // The result is dropped on purpose: a file that fails to load is
+            // already reported through `load_error`, and navigation must not
+            // stop at it — the user's way out of a broken file is the arrow
+            // key that got them there.
+            let _ = self.display_image(&path);
+        }
+    }
+
+    /// Compute the fit-to-window zoom level for the current image.
+    pub fn fit_zoom(&self) -> f32 {
+        let Some(img) = &self.current_image else {
+            return 1.0;
+        };
+        let available_width = self.image_area_width();
+        let available_height = self.image_area_height();
+        if img.width == 0 || img.height == 0 {
+            return 1.0;
+        }
+        let zoom_x = available_width / img.width as f32;
+        let zoom_y = available_height / img.height as f32;
+        zoom_x.min(zoom_y).clamp(MIN_ZOOM, MAX_ZOOM)
+    }
+
+    /// Apply fit-to-window zoom.
+    pub fn fit_to_window(&mut self) {
+        self.transform.zoom = self.fit_zoom();
+        self.transform.pan_x = 0.0;
+        self.transform.pan_y = 0.0;
+    }
+
+    /// Set zoom to actual size (1:1 pixels).
+    pub fn actual_size(&mut self) {
+        self.transform.zoom = 1.0;
+        self.transform.pan_x = 0.0;
+        self.transform.pan_y = 0.0;
+    }
+
+    /// Width of the image display area.
+    fn image_area_width(&self) -> f32 {
+        let mut w = self.window_width;
+        if self.show_info_panel {
+            w -= INFO_PANEL_WIDTH;
+        }
+        w.max(1.0)
+    }
+
+    /// Height of the image display area.
+    fn image_area_height(&self) -> f32 {
+        let mut h = self.window_height;
+        if self.show_toolbar && !self.fullscreen {
+            h -= TOOLBAR_HEIGHT;
+        }
+        if self.show_status_bar && !self.fullscreen {
+            h -= STATUS_BAR_HEIGHT;
+        }
+        if self.show_thumbnails {
+            h -= THUMBNAIL_STRIP_HEIGHT;
+        }
+        h.max(1.0)
+    }
+
+    /// Execute a viewer action.
+    pub fn execute_action(&mut self, action: ViewerAction) {
+        match action {
+            ViewerAction::Open => {
+                // In a real implementation, this would open a file dialog.
+                // For now, this is a placeholder.
+            }
+            ViewerAction::PrevImage => self.prev_image(),
+            ViewerAction::NextImage => self.next_image(),
+            ViewerAction::ZoomIn => self.transform.zoom_in(),
+            ViewerAction::ZoomOut => self.transform.zoom_out(),
+            ViewerAction::FitToWindow => self.fit_to_window(),
+            ViewerAction::ActualSize => self.actual_size(),
+            ViewerAction::RotateCw => {
+                self.transform.rotation = self.transform.rotation.rotate_cw();
+            }
+            ViewerAction::RotateCcw => {
+                self.transform.rotation = self.transform.rotation.rotate_ccw();
+            }
+            ViewerAction::FlipHorizontal => {
+                self.transform.flip_h = !self.transform.flip_h;
+            }
+            ViewerAction::FlipVertical => {
+                self.transform.flip_v = !self.transform.flip_v;
+            }
+            ViewerAction::ToggleSlideshow => {
+                self.slideshow.active = !self.slideshow.active;
+                self.slideshow.elapsed_ms = 0;
+                self.slideshow.paused = false;
+            }
+            ViewerAction::PauseSlideshow => {
+                if self.slideshow.active {
+                    self.slideshow.paused = !self.slideshow.paused;
+                }
+            }
+            ViewerAction::ToggleInfo => {
+                self.show_info_panel = !self.show_info_panel;
+            }
+            ViewerAction::ToggleThumbnails => {
+                self.show_thumbnails = !self.show_thumbnails;
+            }
+            ViewerAction::ToggleFullscreen => {
+                self.fullscreen = !self.fullscreen;
+            }
+            ViewerAction::FirstImage => self.first_image(),
+            ViewerAction::LastImage => self.last_image(),
+            ViewerAction::DeleteImage => {
+                // Would move to trash via OS recycle bin integration
+            }
+        }
+    }
+
+    /// Handle a tick event for slideshow progression.
+    pub fn handle_tick(&mut self, elapsed_ms: u64) {
+        if !self.slideshow.active || self.slideshow.paused {
+            return;
+        }
+        // The only unbounded accumulator here: it is reset every interval in
+        // practice, but a caller is free to pass any elapsed time at all, and
+        // a slideshow that stops advancing beats one that aborts.
+        self.slideshow.elapsed_ms = self.slideshow.elapsed_ms.saturating_add(elapsed_ms);
+        if self.slideshow.elapsed_ms >= self.slideshow.interval.millis() {
+            self.slideshow.elapsed_ms = 0;
+            self.next_image();
+        }
+    }
+
+    /// Handle a keyboard event. Returns true if the event was consumed.
+    pub fn handle_key_event(&mut self, event: &KeyEvent) -> bool {
+        if !event.pressed {
+            return false;
+        }
+
+        let ctrl = event.modifiers.ctrl;
+        let shift = event.modifiers.shift;
+
+        match event.key {
+            // Navigation
+            Key::Left if !ctrl => {
+                self.execute_action(ViewerAction::PrevImage);
+                true
+            }
+            Key::Right if !ctrl => {
+                self.execute_action(ViewerAction::NextImage);
+                true
+            }
+            Key::Home => {
+                self.execute_action(ViewerAction::FirstImage);
+                true
+            }
+            Key::End => {
+                self.execute_action(ViewerAction::LastImage);
+                true
+            }
+
+            // Zoom
+            Key::Equals if ctrl => {
+                self.execute_action(ViewerAction::ZoomIn);
+                true
+            }
+            Key::Minus if ctrl => {
+                self.execute_action(ViewerAction::ZoomOut);
+                true
+            }
+            Key::Num0 if ctrl => {
+                self.execute_action(ViewerAction::FitToWindow);
+                true
+            }
+            Key::Num1 if ctrl => {
+                self.execute_action(ViewerAction::ActualSize);
+                true
+            }
+
+            // Rotation / flip
+            Key::R if ctrl && !shift => {
+                self.execute_action(ViewerAction::RotateCw);
+                true
+            }
+            Key::R if ctrl && shift => {
+                self.execute_action(ViewerAction::RotateCcw);
+                true
+            }
+            Key::H if ctrl => {
+                self.execute_action(ViewerAction::FlipHorizontal);
+                true
+            }
+            Key::V if ctrl => {
+                self.execute_action(ViewerAction::FlipVertical);
+                true
+            }
+
+            // Panels
+            Key::I if !ctrl => {
+                self.execute_action(ViewerAction::ToggleInfo);
+                true
+            }
+            Key::T if !ctrl => {
+                self.execute_action(ViewerAction::ToggleThumbnails);
+                true
+            }
+
+            // Slideshow
+            Key::F5 => {
+                self.execute_action(ViewerAction::ToggleSlideshow);
+                true
+            }
+            Key::Space => {
+                self.execute_action(ViewerAction::PauseSlideshow);
+                true
+            }
+
+            // Fullscreen
+            Key::F11 => {
+                self.execute_action(ViewerAction::ToggleFullscreen);
+                true
+            }
+
+            // Delete
+            Key::Delete => {
+                self.execute_action(ViewerAction::DeleteImage);
+                true
+            }
+
+            // Escape exits fullscreen or slideshow
+            Key::Escape => {
+                if self.slideshow.active {
+                    self.slideshow.active = false;
+                    true
+                } else if self.fullscreen {
+                    self.fullscreen = false;
+                    true
+                } else {
+                    false
+                }
+            }
+
+            _ => false,
+        }
+    }
+
+    /// Handle a mouse event. Returns true if the event was consumed.
+    pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> bool {
+        match &event.kind {
+            MouseEventKind::Scroll { dx: _, dy } => {
+                // One notch is one zoom step -- `rows_at(.., 1.0)` rather than
+                // the default three, because a step is already a coarse move
+                // and three of them per detent would overshoot every time.
+                //
+                // The sign is inverted against the accumulator's list
+                // convention on purpose: `dy` positive is away from the user,
+                // which scrolls a list *up* (a negative row delta) but is the
+                // near-universal gesture for zooming *in*.
+                let steps = self.zoom_wheel.rows_at(*dy, 1.0);
+                for _ in 0..steps.unsigned_abs() {
+                    if steps < 0 {
+                        self.transform.zoom_in();
+                    } else {
+                        self.transform.zoom_out();
+                    }
+                }
+                true
+            }
+            MouseEventKind::Press(MouseButton::Left) => {
+                // Start panning
+                let toolbar_y = if self.show_toolbar && !self.fullscreen {
+                    TOOLBAR_HEIGHT
+                } else {
+                    0.0
+                };
+                if event.y > toolbar_y {
+                    self.dragging = true;
+                    self.drag_start_x = event.x;
+                    self.drag_start_y = event.y;
+                    self.drag_start_pan_x = self.transform.pan_x;
+                    self.drag_start_pan_y = self.transform.pan_y;
+                    true
+                } else {
+                    false
+                }
+            }
+            MouseEventKind::Release(MouseButton::Left) => {
+                self.dragging = false;
+                true
+            }
+            MouseEventKind::Move if self.dragging => {
+                let dx = event.x - self.drag_start_x;
+                let dy = event.y - self.drag_start_y;
+                self.transform.pan_x = self.drag_start_pan_x + dx;
+                self.transform.pan_y = self.drag_start_pan_y + dy;
+                true
+            }
+            MouseEventKind::DoubleClick(MouseButton::Left) => {
+                // Double-click toggles between fit and actual size
+                if (self.transform.zoom - 1.0).abs() < 0.01 {
+                    self.fit_to_window();
+                } else {
+                    self.actual_size();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Handle any event type dispatched to the viewer.
+    pub fn handle_event(&mut self, event: &Event) -> bool {
+        match event {
+            Event::Key(key_event) => self.handle_key_event(key_event),
+            Event::Mouse(mouse_event) => self.handle_mouse_event(mouse_event),
+            Event::Resize { width, height } => {
+                self.window_width = *width as f32;
+                self.window_height = *height as f32;
+                true
+            }
+            Event::Tick { elapsed_ms } => {
+                self.handle_tick(*elapsed_ms);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+// ============================================================================
+// Rendering
+// ============================================================================
+
+/// Render the complete viewer UI into a RenderTree.
+pub fn render(state: &ViewerState) -> RenderTree {
+    let mut tree = RenderTree::new();
+
+    // Background
+    tree.fill_rect(0.0, 0.0, state.window_width, state.window_height, BG_COLOR);
+
+    let mut content_y = 0.0;
+
+    // Toolbar (hidden in fullscreen)
+    if state.show_toolbar && !state.fullscreen {
+        render_toolbar(state, &mut tree, 0.0);
+        content_y = TOOLBAR_HEIGHT;
+    }
+
+    // Main image area
+    let status_y = if state.show_status_bar && !state.fullscreen {
+        state.window_height - STATUS_BAR_HEIGHT
+    } else {
+        state.window_height
+    };
+    let thumb_y = if state.show_thumbnails {
+        status_y - THUMBNAIL_STRIP_HEIGHT
+    } else {
+        status_y
+    };
+    let image_area_height = thumb_y - content_y;
+    let image_area_width = if state.show_info_panel {
+        state.window_width - INFO_PANEL_WIDTH
+    } else {
+        state.window_width
+    };
+
+    // Clip to image area and render image
+    tree.clip(0.0, content_y, image_area_width, image_area_height);
+    render_image(
+        state,
+        &mut tree,
+        0.0,
+        content_y,
+        image_area_width,
+        image_area_height,
+    );
+    tree.unclip();
+
+    // Info panel
+    if state.show_info_panel {
+        render_info_panel(
+            state,
+            &mut tree,
+            image_area_width,
+            content_y,
+            image_area_height,
+        );
+    }
+
+    // Thumbnail strip
+    if state.show_thumbnails {
+        render_thumbnail_strip(state, &mut tree, thumb_y);
+    }
+
+    // Status bar (hidden in fullscreen)
+    if state.show_status_bar && !state.fullscreen {
+        render_status_bar(state, &mut tree, status_y);
+    }
+
+    tree
+}
+
+/// Render the toolbar with action buttons.
+fn render_toolbar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
+    // Toolbar background
+    tree.fill_rect(0.0, y, state.window_width, TOOLBAR_HEIGHT, TOOLBAR_BG);
+    // Bottom border
+    tree.fill_rect(
+        0.0,
+        y + TOOLBAR_HEIGHT - 1.0,
+        state.window_width,
+        1.0,
+        BORDER_COLOR,
+    );
+
+    let buttons = toolbar_buttons();
+    let button_y = y + 6.0;
+    let button_h = TOOLBAR_HEIGHT - 12.0;
+
+    for (idx, btn) in buttons.iter().enumerate() {
+        let bg = if state.hovered_button == Some(idx) {
+            BUTTON_HOVER_BG
+        } else {
+            BUTTON_BG
+        };
+
+        tree.push(RenderCommand::FillRect {
+            x: btn.x,
+            y: button_y,
+            width: btn.width,
+            height: button_h,
+            color: bg,
+            corner_radii: CornerRadii {
+                top_left: 3.0,
+                top_right: 3.0,
+                bottom_right: 3.0,
+                bottom_left: 3.0,
+            },
+        });
+
+        // Button label (centered)
+        tree.push(RenderCommand::Text {
+            x: btn.x + 4.0,
+            y: button_y + 7.0,
+            text: btn.label.to_string(),
+            color: TEXT_PRIMARY,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(btn.width - 8.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+}
+
+/// Render the image in the display area with current transforms.
+fn render_image(
+    state: &ViewerState,
+    tree: &mut RenderTree,
+    area_x: f32,
+    area_y: f32,
+    area_w: f32,
+    area_h: f32,
+) {
+    let Some(img) = &state.current_image else {
+        // Two different empty states, and they must not be confused: "you
+        // haven't opened anything" versus "the thing you opened would not
+        // open". The second used to render as the first, so a corrupt or
+        // unreadable file looked exactly like a freshly-started viewer.
+        let (headline, detail) = match &state.load_error {
+            Some(err) => (String::from("Cannot display this image"), err.clone()),
+            None => (
+                String::from("No image loaded"),
+                String::from("Open a file or drag an image here"),
+            ),
+        };
+        tree.push(RenderCommand::Text {
+            x: area_x + area_w / 2.0 - 80.0,
+            y: area_y + area_h / 2.0 - 8.0,
+            text: headline,
+            color: TEXT_SECONDARY,
+            font_size: 14.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+        tree.push(RenderCommand::Text {
+            x: area_x + area_w / 2.0 - 100.0,
+            y: area_y + area_h / 2.0 + 12.0,
+            text: detail,
+            color: TEXT_SECONDARY,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            // The reason is the whole point of this state; it is worth the
+            // width, and elided rather than clipped so a cut is visible.
+            max_width: Some(area_w - 32.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        return;
+    };
+
+    let zoom = state.transform.zoom;
+    let display_w = img.width as f32 * zoom;
+    let display_h = img.height as f32 * zoom;
+
+    // Center the image in the available area, then apply pan offset
+    let center_x = area_x + (area_w - display_w) / 2.0 + state.transform.pan_x;
+    let center_y = area_y + (area_h - display_h) / 2.0 + state.transform.pan_y;
+
+    // Apply translation for pan
+    tree.translate(center_x, center_y);
+
+    // Render the image command
+    tree.push(RenderCommand::Image {
+        x: 0.0,
+        y: 0.0,
+        width: display_w,
+        height: display_h,
+        image_id: img.image_id,
+    });
+
+    tree.untranslate();
+
+    // Slideshow overlay indicator
+    if state.slideshow.active {
+        let indicator_text = if state.slideshow.paused {
+            "PAUSED"
+        } else {
+            "SLIDESHOW"
+        };
+        let indicator_color = if state.slideshow.paused {
+            Color::rgba(220, 180, 50, 200)
+        } else {
+            Color::rgba(70, 180, 70, 200)
+        };
+
+        // Small badge in top-right of image area
+        tree.push(RenderCommand::FillRect {
+            x: area_x + area_w - 100.0,
+            y: area_y + 8.0,
+            width: 92.0,
+            height: 24.0,
+            color: Color::rgba(0, 0, 0, 160),
+            corner_radii: CornerRadii {
+                top_left: 4.0,
+                top_right: 4.0,
+                bottom_right: 4.0,
+                bottom_left: 4.0,
+            },
+        });
+        tree.push(RenderCommand::Text {
+            x: area_x + area_w - 92.0,
+            y: area_y + 14.0,
+            text: String::from(indicator_text),
+            color: indicator_color,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+    }
+}
+
+/// Render the image information panel on the right side.
+fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32, height: f32) {
+    // Panel background
+    tree.fill_rect(x, y, INFO_PANEL_WIDTH, height, INFO_PANEL_BG);
+    // Left border
+    tree.fill_rect(x, y, 1.0, height, BORDER_COLOR);
+
+    let pad = 12.0;
+    let mut text_y = y + pad;
+    let label_x = x + pad;
+    let value_x = x + pad + 80.0;
+    let line_height = 20.0;
+
+    // Panel title
+    tree.push(RenderCommand::Text {
+        x: label_x,
+        y: text_y,
+        text: String::from("Image Information"),
+        color: TEXT_PRIMARY,
+        font_size: 13.0,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(INFO_PANEL_WIDTH - pad * 2.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    text_y += line_height + 8.0;
+
+    // Separator
+    tree.fill_rect(
+        label_x,
+        text_y,
+        INFO_PANEL_WIDTH - pad * 2.0,
+        1.0,
+        BORDER_COLOR,
+    );
+    text_y += 8.0;
+
+    let info = &state.image_info;
+
+    // File info section
+    let fields: Vec<(&str, String)> = vec![
+        ("File:", info.filename.clone()),
+        ("Size:", info.file_size_display()),
+        ("Dimensions:", info.dimensions_display()),
+        (
+            "Format:",
+            info.format
+                .map(|f| f.name().to_string())
+                .unwrap_or_else(|| String::from("—")),
+        ),
+        (
+            "Depth:",
+            info.color_depth
+                .map(|d| format!("{} bpp", d))
+                .unwrap_or_else(|| String::from("—")),
+        ),
+        (
+            "DPI:",
+            info.dpi
+                .map(|(x, y)| format!("{} x {}", x, y))
+                .unwrap_or_else(|| String::from("—")),
+        ),
+        (
+            "Modified:",
+            info.date_modified
+                .clone()
+                .unwrap_or_else(|| String::from("—")),
+        ),
+    ];
+
+    for (label, value) in &fields {
+        tree.push(RenderCommand::Text {
+            x: label_x,
+            y: text_y,
+            text: String::from(*label),
+            color: TEXT_SECONDARY,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+        tree.push(RenderCommand::Text {
+            x: value_x,
+            y: text_y,
+            text: value.clone(),
+            color: TEXT_PRIMARY,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(INFO_PANEL_WIDTH - 80.0 - pad * 2.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        text_y += line_height;
+    }
+
+    // EXIF section (if any data available)
+    let has_exif = info.camera_make.is_some()
+        || info.camera_model.is_some()
+        || info.exposure_time.is_some()
+        || info.iso.is_some()
+        || info.aperture.is_some()
+        || info.focal_length.is_some();
+
+    if has_exif {
+        text_y += 8.0;
+        tree.fill_rect(
+            label_x,
+            text_y,
+            INFO_PANEL_WIDTH - pad * 2.0,
+            1.0,
+            BORDER_COLOR,
+        );
+        text_y += 8.0;
+
+        tree.push(RenderCommand::Text {
+            x: label_x,
+            y: text_y,
+            text: String::from("EXIF Data"),
+            color: TEXT_PRIMARY,
+            font_size: 12.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+        text_y += line_height + 4.0;
+
+        let exif_fields: Vec<(&str, Option<String>)> = vec![
+            ("Camera:", info.camera_make.clone()),
+            ("Model:", info.camera_model.clone()),
+            ("Exposure:", info.exposure_time.clone()),
+            ("ISO:", info.iso.map(|v| format!("{}", v))),
+            ("Aperture:", info.aperture.clone()),
+            ("Focal:", info.focal_length.clone()),
+        ];
+
+        for (label, value_opt) in &exif_fields {
+            if let Some(value) = value_opt {
+                tree.push(RenderCommand::Text {
+                    x: label_x,
+                    y: text_y,
+                    text: String::from(*label),
+                    color: TEXT_SECONDARY,
+                    font_size: 11.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
+                    overflow: TextOverflow::Clip,
+                });
+                tree.push(RenderCommand::Text {
+                    x: value_x,
+                    y: text_y,
+                    text: value.clone(),
+                    color: TEXT_PRIMARY,
+                    font_size: 11.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(INFO_PANEL_WIDTH - 80.0 - pad * 2.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+                text_y += line_height;
+            }
+        }
+    }
+
+    // Transform info
+    text_y += 8.0;
+    tree.fill_rect(
+        label_x,
+        text_y,
+        INFO_PANEL_WIDTH - pad * 2.0,
+        1.0,
+        BORDER_COLOR,
+    );
+    text_y += 8.0;
+
+    tree.push(RenderCommand::Text {
+        x: label_x,
+        y: text_y,
+        text: String::from("View"),
+        color: TEXT_PRIMARY,
+        font_size: 12.0,
+        font_weight: FontWeightHint::Bold,
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+    text_y += line_height + 4.0;
+
+    let zoom_pct = (state.transform.zoom * 100.0) as u32;
+    let view_fields: Vec<(&str, String)> = vec![
+        ("Zoom:", format!("{}%", zoom_pct)),
+        (
+            "Rotation:",
+            format!("{}deg", state.transform.rotation.degrees()),
+        ),
+        (
+            "Flip:",
+            match (state.transform.flip_h, state.transform.flip_v) {
+                (false, false) => String::from("None"),
+                (true, false) => String::from("Horizontal"),
+                (false, true) => String::from("Vertical"),
+                (true, true) => String::from("Both"),
+            },
+        ),
+    ];
+
+    for (label, value) in &view_fields {
+        tree.push(RenderCommand::Text {
+            x: label_x,
+            y: text_y,
+            text: String::from(*label),
+            color: TEXT_SECONDARY,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+        tree.push(RenderCommand::Text {
+            x: value_x,
+            y: text_y,
+            text: value.clone(),
+            color: TEXT_PRIMARY,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(INFO_PANEL_WIDTH - 80.0 - pad * 2.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        text_y += line_height;
+    }
+}
+
+/// Render the thumbnail strip at the bottom.
+fn render_thumbnail_strip(state: &ViewerState, tree: &mut RenderTree, y: f32) {
+    // Background
+    tree.fill_rect(
+        0.0,
+        y,
+        state.window_width,
+        THUMBNAIL_STRIP_HEIGHT,
+        TOOLBAR_BG,
+    );
+    // Top border
+    tree.fill_rect(0.0, y, state.window_width, 1.0, BORDER_COLOR);
+
+    if state.entries.is_empty() {
+        return;
+    }
+
+    let thumb_size = 60.0;
+    let thumb_pad = 4.0;
+    let thumb_y = y + (THUMBNAIL_STRIP_HEIGHT - thumb_size) / 2.0;
+    let total_thumb_width = thumb_size + thumb_pad;
+
+    // Calculate visible range centered on current image
+    let visible_count = (state.window_width / total_thumb_width) as usize;
+    let half_visible = visible_count / 2;
+    let start_idx = state.current_index.saturating_sub(half_visible);
+    let end_idx = (start_idx + visible_count).min(state.entries.len());
+
+    for (rel_idx, abs_idx) in (start_idx..end_idx).enumerate() {
+        let thumb_x = (rel_idx as f32) * total_thumb_width + thumb_pad;
+        let is_current = abs_idx == state.current_index;
+
+        // Thumbnail border (highlight current)
+        let border_color = if is_current {
+            ACCENT_COLOR
+        } else {
+            BORDER_COLOR
+        };
+        tree.push(RenderCommand::StrokeRect {
+            x: thumb_x,
+            y: thumb_y,
+            width: thumb_size,
+            height: thumb_size,
+            color: border_color,
+            line_width: if is_current { 2.0 } else { 1.0 },
+            corner_radii: CornerRadii::ZERO,
+        });
+
+        // Thumbnail placeholder (would use actual thumbnails)
+        tree.push(RenderCommand::FillRect {
+            x: thumb_x + 1.0,
+            y: thumb_y + 1.0,
+            width: thumb_size - 2.0,
+            height: thumb_size - 2.0,
+            color: Color::rgb(50, 50, 50),
+            corner_radii: CornerRadii::ZERO,
+        });
+
+        // Filename label below (truncated)
+        if let Some(entry) = state.entries.get(abs_idx) {
+            let display_name = if entry.filename.len() > 8 {
+                let truncated: String = entry.filename.chars().take(7).collect();
+                format!("{}~", truncated)
+            } else {
+                entry.filename.clone()
+            };
+            tree.push(RenderCommand::Text {
+                x: thumb_x + 2.0,
+                y: thumb_y + thumb_size - 12.0,
+                text: display_name,
+                color: if is_current {
+                    TEXT_PRIMARY
+                } else {
+                    TEXT_SECONDARY
+                },
+                font_size: 9.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(thumb_size - 4.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+    }
+}
+
+/// Render the status bar at the bottom.
+fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
+    // Background
+    tree.fill_rect(0.0, y, state.window_width, STATUS_BAR_HEIGHT, STATUS_BG);
+    // Top border
+    tree.fill_rect(0.0, y, state.window_width, 1.0, BORDER_COLOR);
+
+    let text_y = y + 8.0;
+    let pad = 10.0;
+
+    // Left: filename
+    tree.push(RenderCommand::Text {
+        x: pad,
+        y: text_y,
+        text: state.image_info.filename.clone(),
+        color: TEXT_PRIMARY,
+        font_size: 11.0,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(state.window_width * 0.4),
+        overflow: TextOverflow::Ellipsis,
+    });
+
+    // Center: dimensions
+    let dims = state.image_info.dimensions_display();
+    tree.push(RenderCommand::Text {
+        x: state.window_width * 0.4,
+        y: text_y,
+        text: dims,
+        color: TEXT_SECONDARY,
+        font_size: 11.0,
+        font_weight: FontWeightHint::Regular,
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+
+    // Right side: zoom level + image position
+    let zoom_pct = (state.transform.zoom * 100.0) as u32;
+    let zoom_text = format!("{}%", zoom_pct);
+    tree.push(RenderCommand::Text {
+        x: state.window_width - 160.0,
+        y: text_y,
+        text: zoom_text,
+        color: TEXT_SECONDARY,
+        font_size: 11.0,
+        font_weight: FontWeightHint::Regular,
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+
+    // Image N of M
+    if !state.entries.is_empty() {
+        let pos_text = format!("{} / {}", state.current_index + 1, state.entries.len());
+        tree.push(RenderCommand::Text {
+            x: state.window_width - 80.0,
+            y: text_y,
+            text: pos_text,
+            color: TEXT_SECONDARY,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+    }
+}
+
+/// Build the toolbar button definitions with positions.
+fn toolbar_buttons() -> Vec<ToolbarButton> {
+    let mut buttons = Vec::new();
+    let mut x = 8.0;
+    let gap = 4.0;
+
+    let defs: &[(&str, &str, ViewerAction, f32)] = &[
+        ("Open", "Open file (Ctrl+O)", ViewerAction::Open, 44.0),
+        ("|<", "Previous (Left)", ViewerAction::PrevImage, 28.0),
+        (">|", "Next (Right)", ViewerAction::NextImage, 28.0),
+        ("+", "Zoom in (Ctrl++)", ViewerAction::ZoomIn, 24.0),
+        ("-", "Zoom out (Ctrl+-)", ViewerAction::ZoomOut, 24.0),
+        (
+            "Fit",
+            "Fit to window (Ctrl+0)",
+            ViewerAction::FitToWindow,
+            32.0,
+        ),
+        (
+            "1:1",
+            "Actual size (Ctrl+1)",
+            ViewerAction::ActualSize,
+            32.0,
+        ),
+        ("CW", "Rotate CW (Ctrl+R)", ViewerAction::RotateCw, 30.0),
+        (
+            "CCW",
+            "Rotate CCW (Ctrl+Shift+R)",
+            ViewerAction::RotateCcw,
+            36.0,
+        ),
+        ("H", "Flip H (Ctrl+H)", ViewerAction::FlipHorizontal, 24.0),
+        ("V", "Flip V (Ctrl+V)", ViewerAction::FlipVertical, 24.0),
+        (
+            "Show",
+            "Slideshow (F5)",
+            ViewerAction::ToggleSlideshow,
+            42.0,
+        ),
+        ("Info", "Info panel (I)", ViewerAction::ToggleInfo, 36.0),
+    ];
+
+    for &(label, tooltip, action, width) in defs {
+        buttons.push(ToolbarButton {
+            label,
+            tooltip,
+            action,
+            x,
+            width,
+        });
+        x += width + gap;
+    }
+
+    buttons
+}
+
+// ============================================================================
+// Utility functions
+// ============================================================================
+
+/// Why a file that was read could not be shown, in the user's terms.
+///
+/// The decoder's own message is written for whoever has to fix the *file* —
+/// "not a picture format this system reads" — and is the wrong sentence for the
+/// commonest case by far, which is a perfectly ordinary JPEG that this system
+/// cannot decode yet. Those two are opposite diagnoses: one says the file is
+/// wrong, the other says the viewer is, and telling a user their holiday
+/// photograph is not a picture is the sort of confident wrong answer that sends
+/// people looking for a corrupt disk.
+///
+/// So the format that [`ImageFormat::detect`] recognised is folded in. It reads
+/// the signature independently of `imagecodec`, which is what lets the two
+/// disagree usefully: "these bytes begin like a JPEG" and "no decoder here
+/// claims them" together mean *unsupported*, not *unrecognised*.
+fn decode_failure(format: ImageFormat, why: &imagecodec::ImageError) -> String {
+    match (format, why) {
+        // A named format that no decoder claimed: not the file's fault.
+        (
+            ImageFormat::Bmp | ImageFormat::Jpeg | ImageFormat::Gif,
+            imagecodec::ImageError::UnknownFormat,
+        ) => format!("{} images cannot be displayed yet", format.name()),
+        _ => why.to_string(),
+    }
+}
+
+/// Check if a file extension represents a supported image format.
+pub fn is_image_extension(ext: &str) -> bool {
+    IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str())
+}
+
+// ============================================================================
+// The window
+// ============================================================================
+
+impl oswindow::app::App for ViewerState {
+    /// The file's name first, then the application's.
+    ///
+    /// That order is what a task bar full of windows needs: the strip of
+    /// buttons is elided from the right, so a viewer that led with its own name
+    /// would give every open picture the same visible label.
+    fn title(&self) -> String {
+        if self.image_info.filename.is_empty() {
+            String::from("Image Viewer")
+        } else {
+            format!("{} — Image Viewer", self.image_info.filename)
+        }
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        // Truncating a size that was built from two integers a moment ago, and
+        // clamped so a negative or absurd float cannot become a nonsense
+        // request. The render vocabulary is `f32` throughout, so the cast has
+        // to happen somewhere.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (
+            self.window_width.clamp(1.0, 16384.0) as u32,
+            self.window_height.clamp(1.0, 16384.0) as u32,
+        )
+    }
+
+    /// A clock only while a slideshow is running.
+    ///
+    /// Consulted after every event, so starting a slideshow with F5 arms the
+    /// clock and stopping it disarms one — which is what stops a viewer left
+    /// open on one photograph from holding the whole desktop awake. The
+    /// interval is the slideshow's own, not a fixed frame rate: a five-second
+    /// slideshow that woke sixty times a second to discover that four seconds
+    /// remained would be 299 wake-ups spent on arithmetic.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        (self.slideshow.active && !self.slideshow.paused)
+            .then(|| std::time::Duration::from_millis(self.slideshow.interval.millis()))
+    }
+
+    fn on_event(&mut self, event: &Event) -> oswindow::app::Response {
+        if matches!(event, Event::CloseRequested) {
+            return oswindow::app::Response::Exit;
+        }
+        if self.handle_event(event) {
+            oswindow::app::Response::Redraw
+        } else {
+            oswindow::app::Response::Idle
+        }
+    }
+
+    fn take_images(&mut self) -> Vec<oswindow::app::ImageChange> {
+        std::mem::take(&mut self.pending_images)
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the compositor last reported wins over the one the viewer
+        // remembers. They agree whenever a `Resize` event was delivered, and
+        // the case where they do not — the very first frame, drawn before any
+        // event has arrived — is exactly the one that would otherwise be drawn
+        // at the size this viewer *asked* for rather than the size it got.
+        self.window_width = width;
+        self.window_height = height;
+        render(self)
+    }
+}
+
+// ============================================================================
+// Application entry point
+// ============================================================================
+
+fn main() -> ExitCode {
+    // Parsed rather than indexed, so `--display` reaches the connection and
+    // does not get mistaken for a file called `--display`. `rest` is this
+    // viewer's own argument list; `launch_with` is the entry point for an
+    // application that has taken its own arguments, `launch` the one for an
+    // application with none.
+    let args = match oswindow::app::Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("imageviewer: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if args.rest.len() > 1 {
+        // One window, one picture. A second file would silently be the one not
+        // shown, which is worse than saying so: the user would conclude the
+        // viewer had opened it and simply drawn the wrong one.
+        eprintln!(
+            "imageviewer: only one file at a time; open a directory's other images with the arrow keys"
+        );
+        return ExitCode::from(2);
+    }
+
+    let mut state = ViewerState::new(1024.0, 768.0);
+    if let Some(file_path) = args.rest.first() {
+        let path = PathBuf::from(file_path);
+        // Existence is not the question; openability is, and only trying
+        // answers it. A file can disappear between a check and an open, and a
+        // file that exists can still be unreadable or in a format this system
+        // cannot yet decode.
+        //
+        // A failure is reported here *and* shown in the window, rather than
+        // ending the process. It used to exit(1), which was right when there
+        // was no window at all — but a graphical viewer that refuses to appear
+        // leaves nothing to act on, and `open_file` rebuilds the directory
+        // listing whether or not the file opened, precisely so that the arrow
+        // key which reached a broken file can carry the user off it again. The
+        // stderr line is what a terminal user gets immediately; the canvas is
+        // what everyone else gets. See design-decisions.md §558.
+        if !state.open_file(&path) {
+            let reason = state
+                .load_error
+                .as_deref()
+                .unwrap_or("the file could not be read");
+            eprintln!("imageviewer: {reason}");
+        }
+        // Auto-fit the first image
+        state.fit_to_window();
+    }
+
+    oswindow::app::launch_with("imageviewer", args.display.as_deref(), &mut state)
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp
+    )]
+
+    use super::*;
+    use scratchdir::ScratchDir;
+
+    /// One detent is one zoom step, and the direction is the one every other
+    /// viewer uses: wheel away from the user zooms in.
+    #[test]
+    fn one_wheel_notch_is_one_zoom_step() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        let start = state.transform.zoom;
+        state.handle_mouse_event(&MouseEvent {
+            x: 100.0,
+            y: 100.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+        });
+        assert_eq!(state.transform.zoom, start + ZOOM_STEP);
+        state.handle_mouse_event(&MouseEvent {
+            x: 100.0,
+            y: 100.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        assert_eq!(state.transform.zoom, start);
+    }
+
+    /// The bug the accumulator exists to stop. A trackpad reports a two-finger
+    /// flick as a stream of small fractions; reading only the sign of each took
+    /// a whole zoom step per event, so one gesture ran the zoom from end to end.
+    #[test]
+    fn a_trackpad_flick_does_not_zoom_from_end_to_end() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        let start = state.transform.zoom;
+        // Forty events at a twentieth of a notch is two notches of real
+        // movement -- and used to be forty steps, i.e. the entire range twice
+        // over, pinned at MAX_ZOOM.
+        for _ in 0..40 {
+            state.handle_mouse_event(&MouseEvent {
+                x: 100.0,
+                y: 100.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy: 0.05 },
+            });
+        }
+        assert_eq!(state.transform.zoom, start + 2.0 * ZOOM_STEP);
+        assert!(
+            state.transform.zoom < MAX_ZOOM,
+            "a two-notch gesture must not reach the limit"
+        );
+    }
+
+    #[test]
+    fn test_image_format_detection_bmp() {
+        let data = b"BM\x00\x00\x00\x00\x00\x00\x00\x00";
+        assert_eq!(ImageFormat::detect(data), ImageFormat::Bmp);
+    }
+
+    #[test]
+    fn test_image_format_detection_png() {
+        let data: &[u8] = &[137, 80, 78, 71, 13, 10, 26, 10, 0, 0];
+        assert_eq!(ImageFormat::detect(data), ImageFormat::Png);
+    }
+
+    #[test]
+    fn test_image_format_detection_jpeg() {
+        let data: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0];
+        assert_eq!(ImageFormat::detect(data), ImageFormat::Jpeg);
+    }
+
+    #[test]
+    fn test_image_format_detection_gif87a() {
+        let data = b"GIF87a\x00\x00\x00\x00";
+        assert_eq!(ImageFormat::detect(data), ImageFormat::Gif);
+    }
+
+    #[test]
+    fn test_image_format_detection_gif89a() {
+        let data = b"GIF89a\x00\x00\x00\x00";
+        assert_eq!(ImageFormat::detect(data), ImageFormat::Gif);
+    }
+
+    #[test]
+    fn test_image_format_detection_unknown() {
+        let data = b"RIFF\x00\x00\x00\x00\x00\x00";
+        assert_eq!(ImageFormat::detect(data), ImageFormat::Unknown);
+    }
+
+    #[test]
+    fn test_image_format_detection_too_short() {
+        let data = b"BM";
+        assert_eq!(ImageFormat::detect(data), ImageFormat::Unknown);
+    }
+
+    #[test]
+    fn test_bmp_dimensions() {
+        // Minimal BMP header with width=100, height=200
+        let mut data = vec![0u8; 30];
+        data[0] = b'B';
+        data[1] = b'M';
+        // Width at offset 18 (LE)
+        let w: u32 = 100;
+        data[18..22].copy_from_slice(&w.to_le_bytes());
+        // Height at offset 22 (LE, signed)
+        let h: i32 = 200;
+        data[22..26].copy_from_slice(&h.to_le_bytes());
+
+        assert_eq!(parse_bmp_dimensions(&data), Some((100, 200)));
+    }
+
+    #[test]
+    fn test_bmp_dimensions_negative_height() {
+        let mut data = vec![0u8; 30];
+        data[0] = b'B';
+        data[1] = b'M';
+        let w: u32 = 640;
+        data[18..22].copy_from_slice(&w.to_le_bytes());
+        let h: i32 = -480; // top-down bitmap
+        data[22..26].copy_from_slice(&h.to_le_bytes());
+
+        assert_eq!(parse_bmp_dimensions(&data), Some((640, 480)));
+    }
+
+    #[test]
+    fn test_png_dimensions() {
+        // A real PNG, not a hand-laid header. The size now comes back through
+        // `imagecodec::dimensions`, which reads the IHDR *as a chunk* -- length,
+        // type, and the fields after the size -- so a 30-byte stub with a zero
+        // bit depth is no longer a picture and would report nothing. Building
+        // the fixture the same way every other test here does keeps this test
+        // measuring what it says it measures.
+        assert_eq!(parse_png_dimensions(&png_bytes(800, 600)), Some((800, 600)));
+    }
+
+    #[test]
+    fn test_gif_dimensions() {
+        let mut data = vec![0u8; 13];
+        data[..6].copy_from_slice(b"GIF89a");
+        // Width at offset 6 (LE 16-bit)
+        data[6..8].copy_from_slice(&320u16.to_le_bytes());
+        // Height at offset 8 (LE 16-bit)
+        data[8..10].copy_from_slice(&240u16.to_le_bytes());
+
+        assert_eq!(parse_gif_dimensions(&data), Some((320, 240)));
+    }
+
+    #[test]
+    fn test_rotation() {
+        let r = Rotation::None;
+        assert_eq!(r.rotate_cw(), Rotation::Cw90);
+        assert_eq!(r.rotate_cw().rotate_cw(), Rotation::Cw180);
+        assert_eq!(r.rotate_cw().rotate_cw().rotate_cw(), Rotation::Cw270);
+        assert_eq!(
+            r.rotate_cw().rotate_cw().rotate_cw().rotate_cw(),
+            Rotation::None
+        );
+    }
+
+    #[test]
+    fn test_rotation_ccw() {
+        let r = Rotation::None;
+        assert_eq!(r.rotate_ccw(), Rotation::Cw270);
+        assert_eq!(r.rotate_ccw().rotate_ccw(), Rotation::Cw180);
+    }
+
+    #[test]
+    fn test_rotation_degrees() {
+        assert_eq!(Rotation::None.degrees(), 0);
+        assert_eq!(Rotation::Cw90.degrees(), 90);
+        assert_eq!(Rotation::Cw180.degrees(), 180);
+        assert_eq!(Rotation::Cw270.degrees(), 270);
+    }
+
+    #[test]
+    fn test_transform_zoom_clamp() {
+        let mut t = Transform::default();
+        // Zoom in repeatedly — should clamp at MAX_ZOOM
+        for _ in 0..100 {
+            t.zoom_in();
+        }
+        assert!((t.zoom - MAX_ZOOM).abs() < f32::EPSILON);
+
+        // Zoom out repeatedly — should clamp at MIN_ZOOM
+        for _ in 0..100 {
+            t.zoom_out();
+        }
+        assert!((t.zoom - MIN_ZOOM).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_transform_reset() {
+        let mut t = Transform {
+            zoom: 2.5,
+            pan_x: 100.0,
+            pan_y: -50.0,
+            rotation: Rotation::Cw180,
+            flip_h: true,
+            flip_v: true,
+        };
+        t.reset();
+        assert!((t.zoom - 1.0).abs() < f32::EPSILON);
+        assert!((t.pan_x).abs() < f32::EPSILON);
+        assert!((t.pan_y).abs() < f32::EPSILON);
+        assert_eq!(t.rotation, Rotation::None);
+        assert!(!t.flip_h);
+        assert!(!t.flip_v);
+    }
+
+    #[test]
+    fn test_slideshow_interval_cycle() {
+        let i = SlideshowInterval::ThreeSeconds;
+        assert_eq!(i.next(), SlideshowInterval::FiveSeconds);
+        assert_eq!(i.next().next(), SlideshowInterval::TenSeconds);
+        assert_eq!(i.next().next().next(), SlideshowInterval::ThirtySeconds);
+        assert_eq!(
+            i.next().next().next().next(),
+            SlideshowInterval::ThreeSeconds
+        );
+    }
+
+    #[test]
+    fn test_slideshow_interval_millis() {
+        assert_eq!(SlideshowInterval::ThreeSeconds.millis(), 3000);
+        assert_eq!(SlideshowInterval::FiveSeconds.millis(), 5000);
+        assert_eq!(SlideshowInterval::TenSeconds.millis(), 10000);
+        assert_eq!(SlideshowInterval::ThirtySeconds.millis(), 30000);
+    }
+
+    #[test]
+    fn test_viewer_state_default() {
+        let state = ViewerState::new(1024.0, 768.0);
+        assert!((state.window_width - 1024.0).abs() < f32::EPSILON);
+        assert!((state.window_height - 768.0).abs() < f32::EPSILON);
+        assert!(state.current_image.is_none());
+        assert!(!state.fullscreen);
+        assert!(!state.slideshow.active);
+        assert!(state.show_toolbar);
+        assert!(state.show_status_bar);
+        assert!(!state.show_info_panel);
+    }
+
+    #[test]
+    fn test_viewer_fit_zoom_no_image() {
+        let state = ViewerState::new(800.0, 600.0);
+        assert!((state.fit_zoom() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_is_image_extension() {
+        assert!(is_image_extension("png"));
+        assert!(is_image_extension("PNG"));
+        assert!(is_image_extension("jpg"));
+        assert!(is_image_extension("jpeg"));
+        assert!(is_image_extension("bmp"));
+        assert!(is_image_extension("gif"));
+        assert!(!is_image_extension("txt"));
+        assert!(!is_image_extension("rs"));
+        assert!(!is_image_extension("exe"));
+    }
+
+    #[test]
+    fn test_image_info_file_size_display() {
+        let mut info = ImageInfo {
+            file_size: 500,
+            ..ImageInfo::default()
+        };
+        assert_eq!(info.file_size_display(), "500 B");
+
+        info.file_size = 2048;
+        assert_eq!(info.file_size_display(), "2.0 KiB");
+
+        info.file_size = 1_500_000;
+        assert_eq!(info.file_size_display(), "1.4 MiB");
+    }
+
+    #[test]
+    fn test_render_produces_commands() {
+        let state = ViewerState::new(800.0, 600.0);
+        let tree = render(&state);
+        // Should have background + toolbar + status bar at minimum
+        assert!(!tree.is_empty());
+    }
+
+    #[test]
+    fn test_render_with_image() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        state.current_image = Some(ImageData {
+            width: 200,
+            height: 150,
+            image_id: VIEWER_IMAGE_ID,
+        });
+        state.image_info.width = 200;
+        state.image_info.height = 150;
+        state.image_info.filename = String::from("test.png");
+
+        let tree = render(&state);
+        assert!(!tree.is_empty());
+        // Should contain an Image command
+        let has_image = tree
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Image { .. }));
+        assert!(has_image);
+    }
+
+    #[test]
+    fn test_handle_tick_advances_slideshow() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        state.entries = vec![
+            DirectoryEntry {
+                path: PathBuf::from("/a.png"),
+                filename: String::from("a.png"),
+                file_size: 100,
+            },
+            DirectoryEntry {
+                path: PathBuf::from("/b.png"),
+                filename: String::from("b.png"),
+                file_size: 200,
+            },
+            DirectoryEntry {
+                path: PathBuf::from("/c.png"),
+                filename: String::from("c.png"),
+                file_size: 300,
+            },
+        ];
+        state.current_index = 0;
+        state.slideshow.active = true;
+        state.slideshow.interval = SlideshowInterval::ThreeSeconds;
+
+        // Not enough time elapsed
+        state.handle_tick(2000);
+        assert_eq!(state.current_index, 0);
+
+        // Now enough time
+        state.handle_tick(1500);
+        assert_eq!(state.current_index, 1);
+    }
+
+    #[test]
+    fn test_handle_tick_paused() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        state.entries = vec![
+            DirectoryEntry {
+                path: PathBuf::from("/a.png"),
+                filename: String::from("a.png"),
+                file_size: 100,
+            },
+            DirectoryEntry {
+                path: PathBuf::from("/b.png"),
+                filename: String::from("b.png"),
+                file_size: 200,
+            },
+        ];
+        state.current_index = 0;
+        state.slideshow.active = true;
+        state.slideshow.paused = true;
+        state.slideshow.interval = SlideshowInterval::ThreeSeconds;
+
+        state.handle_tick(10000);
+        // Should not advance when paused
+        assert_eq!(state.current_index, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Getting the picture to the compositor
+    // -----------------------------------------------------------------------
+
+    /// Every image request the viewer has queued but not yet sent, as
+    /// `("up"|"down", id, width, height, bytes)`.
+    fn queued(state: &ViewerState) -> Vec<(&'static str, u64, u32, u32, usize)> {
+        state
+            .pending_images
+            .iter()
+            .map(|c| match c {
+                oswindow::app::ImageChange::Upload {
+                    id,
+                    width,
+                    height,
+                    bytes,
+                    ..
+                } => ("up", *id, *width, *height, bytes.len()),
+                oswindow::app::ImageChange::Drop(id) => ("down", *id, 0, 0, 0),
+            })
+            .collect()
+    }
+
+    /// The defect this whole change exists to close: a viewer that named an
+    /// image id and never put pixels under it drew *nothing*, and the id it
+    /// named came from a checkerboard it had synthesised itself.
+    #[test]
+    fn opening_a_picture_queues_its_pixels_for_the_compositor() {
+        let guard = scratch("queues-pixels");
+        let dir = guard.dir().to_path_buf();
+        let file = dir.join("photo.png");
+        std::fs::write(&file, png_bytes(9, 7)).expect("write png");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&file), "the fixture PNG must decode");
+
+        assert_eq!(
+            queued(&state),
+            [("up", VIEWER_IMAGE_ID, 9, 7, 9 * 7 * 4)],
+            "the pixels must be queued, under the id the render tree names"
+        );
+        let image = state.current_image.as_ref().expect("a picture");
+        assert_eq!(image.image_id, VIEWER_IMAGE_ID);
+    }
+
+    /// The bytes are the file's, not a pattern the viewer invented.
+    ///
+    /// `png_bytes` writes a gradient, so a decoder that silently produced a
+    /// flat buffer — or the old checkerboard — fails here. Asserting on the
+    /// *content* rather than only the length is the point: the previous code
+    /// produced exactly the right number of bytes.
+    #[test]
+    fn the_pixels_are_the_files_own_and_not_a_pattern() {
+        let guard = scratch("real-pixels");
+        let dir = guard.dir().to_path_buf();
+        let file = dir.join("gradient.png");
+        std::fs::write(&file, png_bytes(4, 3)).expect("write png");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&file));
+
+        let oswindow::app::ImageChange::Upload { bytes, stride, .. } = &state.pending_images[0]
+        else {
+            panic!("expected an upload");
+        };
+        assert_eq!(*stride, 4 * 4, "this decoder never pads");
+        // Row 1, pixel 2, as little-endian 0xAARRGGBB: the fixture writes
+        // (r, g, b, a) = (x, y, 0x40, 0xFF), so this is (2, 1, 0x40, 0xFF).
+        let (x, y, width) = (2usize, 1usize, 4usize);
+        let at = (y * width + x) * 4;
+        assert_eq!(
+            &bytes[at..at + 4],
+            &[0x40, 1, 2, 0xFF],
+            "b, g, r, a in memory order — the picture was not decoded"
+        );
+    }
+
+    /// One id for the picture on screen, not one per file.
+    ///
+    /// A per-path id would leave every photograph the user had paged through
+    /// resident in the compositor, since nothing drops them: the connection's
+    /// image budget would climb until some later, innocent picture was refused.
+    #[test]
+    fn paging_through_a_directory_reuses_one_image_id() {
+        let guard = scratch("one-id");
+        let dir = guard.dir().to_path_buf();
+        std::fs::write(dir.join("a.png"), png_bytes(4, 4)).expect("write a");
+        std::fs::write(dir.join("b.png"), png_bytes(6, 5)).expect("write b");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&dir.join("a.png")));
+        state.pending_images.clear();
+
+        state.next_image();
+        assert_eq!(
+            queued(&state),
+            [("up", VIEWER_IMAGE_ID, 6, 5, 6 * 5 * 4)],
+            "the second picture must replace the first rather than join it"
+        );
+    }
+
+    /// Paging faster than the loop draws must not upload every file passed
+    /// over: only the last one is ever seen, and a held-down arrow key across a
+    /// directory of photographs would otherwise be tens of megabytes of wire
+    /// traffic per frame.
+    #[test]
+    fn skipping_past_pictures_uploads_only_the_one_that_lands() {
+        let guard = scratch("supersede");
+        let dir = guard.dir().to_path_buf();
+        std::fs::write(dir.join("a.png"), png_bytes(4, 4)).expect("write a");
+        std::fs::write(dir.join("b.png"), png_bytes(6, 6)).expect("write b");
+        std::fs::write(dir.join("c.png"), png_bytes(8, 8)).expect("write c");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&dir.join("a.png")));
+        state.next_image();
+        state.next_image();
+
+        assert_eq!(
+            queued(&state),
+            [("up", VIEWER_IMAGE_ID, 8, 8, 8 * 8 * 4)],
+            "a, b and c were all queued; only c is drawn"
+        );
+    }
+
+    /// A viewer parked on a file it cannot show must stop paying for the one it
+    /// showed before. With no picture, `render_image` emits no `Image` command
+    /// at all, so the pixels the compositor still held would be unreachable and
+    /// still charged to the connection's image budget.
+    #[test]
+    fn a_file_that_will_not_open_gives_the_last_picture_back() {
+        let guard = scratch("drops-on-failure");
+        let dir = guard.dir().to_path_buf();
+        let good = dir.join("real.png");
+        std::fs::write(&good, png_bytes(8, 8)).expect("write png");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&good));
+        state.pending_images.clear();
+
+        assert!(!state.open_file(&dir.join("gone.png")));
+        assert_eq!(
+            queued(&state),
+            [("down", VIEWER_IMAGE_ID, 0, 0, 0)],
+            "the unreachable picture must be released"
+        );
+    }
+
+    /// ...but only if there was one. A failure with nothing on screen has
+    /// nothing to give back, and a `Drop` sent regardless would be a round trip
+    /// per keystroke through a directory of files none of which open.
+    #[test]
+    fn a_failure_with_nothing_on_screen_asks_for_nothing() {
+        let guard = scratch("no-spurious-drop");
+        let dir = guard.dir().to_path_buf();
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(!state.open_file(&dir.join("never-existed.png")));
+        assert!(queued(&state).is_empty());
+    }
+
+    /// A format this system recognises but cannot decode must not be reported
+    /// as "not a picture". Those are opposite diagnoses — one blames the file,
+    /// the other the viewer — and telling a user their photograph is not a
+    /// picture sends them looking for a corrupt disk.
+    #[test]
+    fn an_undecodable_but_recognised_format_says_which_it_is() {
+        let guard = scratch("unsupported-format");
+        let dir = guard.dir().to_path_buf();
+        let jpeg = dir.join("holiday.jpg");
+        // A real JPEG signature, then a plausible APP0 segment: enough for
+        // `ImageFormat::detect`, and nothing this system can decode.
+        std::fs::write(&jpeg, [0xFF, 0xD8, 0xFF, 0xE0, 0, 16, b'J', b'F']).expect("write jpeg");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(!state.open_file(&jpeg));
+        let reason = state.load_error.as_deref().expect("a reason");
+        assert!(
+            reason.contains("JPEG images cannot be displayed yet"),
+            "the reason must name the format, not blame the file: {reason}"
+        );
+    }
+
+    /// A truncated PNG used to report a size: `parse_png_dimensions` read
+    /// offsets 16 and 20 with no check that an IHDR was there or intact, so the
+    /// info panel showed a confident, invented size for a file that would never
+    /// open.
+    #[test]
+    fn a_png_with_no_real_header_reports_no_size() {
+        // The signature, then bytes that would read as 0x01020304 by
+        // 0x05060708 at the old offsets.
+        let mut data = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        data.extend_from_slice(&[0, 0, 0, 13]);
+        data.extend_from_slice(b"IHDR");
+        data.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        assert_eq!(
+            parse_dimensions(ImageFormat::Png, &data),
+            None,
+            "a chunk that ends mid-header must not yield a size"
+        );
+    }
+
+    #[test]
+    fn test_key_event_zoom_in() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        let initial_zoom = state.transform.zoom;
+        let event = KeyEvent {
+            key: Key::Equals,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        };
+        assert!(state.handle_key_event(&event));
+        assert!(state.transform.zoom > initial_zoom);
+    }
+
+    #[test]
+    fn test_key_event_zoom_out() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        state.transform.zoom = 2.0;
+        let event = KeyEvent {
+            key: Key::Minus,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        };
+        assert!(state.handle_key_event(&event));
+        assert!(state.transform.zoom < 2.0);
+    }
+
+    #[test]
+    fn test_key_event_not_consumed_on_release() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        let event = KeyEvent {
+            key: Key::Left,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        assert!(!state.handle_key_event(&event));
+    }
+
+    #[test]
+    fn test_mouse_scroll_zoom() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        let initial_zoom = state.transform.zoom;
+        let event = MouseEvent {
+            x: 400.0,
+            y: 300.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+        };
+        assert!(state.handle_mouse_event(&event));
+        assert!(state.transform.zoom > initial_zoom);
+    }
+
+    #[test]
+    fn test_fullscreen_toggle() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(!state.fullscreen);
+        state.execute_action(ViewerAction::ToggleFullscreen);
+        assert!(state.fullscreen);
+        state.execute_action(ViewerAction::ToggleFullscreen);
+        assert!(!state.fullscreen);
+    }
+
+    #[test]
+    fn test_escape_exits_slideshow_first() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        state.slideshow.active = true;
+        state.fullscreen = true;
+        let event = KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        // First escape should stop slideshow
+        state.handle_key_event(&event);
+        assert!(!state.slideshow.active);
+        assert!(state.fullscreen);
+        // Second escape should exit fullscreen
+        state.handle_key_event(&event);
+        assert!(!state.fullscreen);
+    }
+
+    #[test]
+    fn test_navigation_wraps() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        state.entries = vec![
+            DirectoryEntry {
+                path: PathBuf::from("/a.png"),
+                filename: String::from("a.png"),
+                file_size: 100,
+            },
+            DirectoryEntry {
+                path: PathBuf::from("/b.png"),
+                filename: String::from("b.png"),
+                file_size: 200,
+            },
+            DirectoryEntry {
+                path: PathBuf::from("/c.png"),
+                filename: String::from("c.png"),
+                file_size: 300,
+            },
+        ];
+        state.current_index = 2;
+        state.next_image();
+        assert_eq!(state.current_index, 0); // wraps around
+
+        state.current_index = 0;
+        state.prev_image();
+        assert_eq!(state.current_index, 2); // wraps around
+    }
+
+    // ---- A failed load must not leave the previous image on screen ----
+
+    /// A private temporary directory for one test, removed when the returned
+    /// guard drops.
+    ///
+    /// The name used to be a fixed string per test, which two runs of the suite
+    /// at once -- or one run under `cargo test` on a machine where a previous
+    /// run was killed -- would collide on; the old code papered over that by
+    /// deleting the directory on the way in, which silently destroys the other
+    /// run's tree. `ScratchDir` names itself from the process id and a
+    /// per-process atomic counter, so no two live tests can ever pick the same
+    /// name and nothing has to be deleted on the way in.
+    ///
+    /// Bind the guard to a named local, never to `_`: a bare `_` drops it
+    /// immediately and the directory is gone before the test's first line.
+    fn scratch(label: &str) -> ScratchDir {
+        ScratchDir::new(&format!("slateos-imageviewer-{label}"))
+    }
+
+    /// A genuine, decodable 8-bit RGBA PNG of the given size.
+    ///
+    /// This used to stop after the IHDR fields — enough for
+    /// `ImageFormat::detect` to say "PNG" and for the old
+    /// `parse_png_dimensions` to read two integers out of offsets 16 and 20.
+    /// That was sufficient exactly because nothing decoded: the viewer took the
+    /// header's word for the size and drew a checkerboard. A fixture that a
+    /// real decoder rejects would now fail every test that opens a file, and
+    /// the *right* repair is to make the fixture a real picture rather than to
+    /// weaken the tests — a viewer whose whole test suite runs on files no
+    /// decoder accepts is the position this crate is being moved out of.
+    ///
+    /// The encoder that produces it lives in `imagecodec`, next to the decoder
+    /// that has to read it, because `apps/explorer` needed the same thing and
+    /// a `#[cfg(test)]` helper cannot be shared across a crate boundary even
+    /// in principle. The gradient is the one this module always used — red
+    /// follows *x*, green follows *y*, blue a constant `0x40`, opaque — so the
+    /// pixel assertions below are unchanged by the move.
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        imagecodec::testing::png_gradient(w, h)
+    }
+
+    /// The bug: `display_image` assigned into `image_info` field by field and
+    /// left `current_image` alone when the read failed, so the viewer showed
+    /// the *new* filename over the *old* picture and the old dimensions.
+    #[test]
+    fn a_file_that_will_not_open_does_not_keep_the_last_image_on_screen() {
+        let guard = scratch("stale-image");
+        let dir = guard.dir().to_path_buf();
+        let good = dir.join("real.png");
+        std::fs::write(&good, png_bytes(640, 480)).expect("write png");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&good), "the fixture PNG must load");
+        assert!(state.current_image.is_some());
+        assert_eq!(state.image_info.width, 640);
+        assert_eq!(state.image_info.height, 480);
+
+        let missing = dir.join("gone.png");
+        assert!(
+            !state.open_file(&missing),
+            "a missing file must report failure"
+        );
+
+        assert!(
+            state.current_image.is_none(),
+            "the previous picture must not survive a failed load"
+        );
+        assert_eq!(
+            state.image_info.filename, "gone.png",
+            "the UI must name the file the user actually asked for"
+        );
+        assert_eq!(
+            (state.image_info.width, state.image_info.height),
+            (0, 0),
+            "the old image's dimensions must not be shown beside the new name"
+        );
+        assert!(
+            state.image_info.format.is_none(),
+            "the old image's format must not be shown beside the new name"
+        );
+        assert!(state.load_error.is_some(), "the failure must be explained");
+    }
+
+    /// The two empty states must render differently: "you opened nothing" and
+    /// "what you opened would not open" used to be the same screen.
+    #[test]
+    fn a_failed_load_renders_its_reason_rather_than_the_welcome_text() {
+        let mut state = ViewerState::new(800.0, 600.0);
+
+        let fresh = render(&state);
+        let fresh_text = collect_text(&fresh);
+        assert!(fresh_text.iter().any(|t| t.contains("No image loaded")));
+
+        let guard = scratch("render-error");
+        let dir = guard.dir().to_path_buf();
+        assert!(!state.open_file(&dir.join("nope.png")));
+
+        let failed = render(&state);
+        let failed_text = collect_text(&failed);
+        assert!(
+            failed_text
+                .iter()
+                .any(|t| t.contains("Cannot display this image")),
+            "the failure state must say so: {failed_text:?}"
+        );
+        assert!(
+            !failed_text.iter().any(|t| t.contains("drag an image here")),
+            "the failure state must not look like a freshly-started viewer"
+        );
+        assert!(
+            failed_text.iter().any(|t| t.contains("nope.png")),
+            "the reason must name the file: {failed_text:?}"
+        );
+    }
+
+    /// A successful load after a failed one must clear the failure, or the
+    /// viewer keeps apologising for a file the user has moved on from.
+    #[test]
+    fn a_successful_load_clears_the_previous_failure() {
+        let guard = scratch("clears-error");
+        let dir = guard.dir().to_path_buf();
+        let good = dir.join("real.png");
+        std::fs::write(&good, png_bytes(32, 16)).expect("write png");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(!state.open_file(&dir.join("absent.png")));
+        assert!(state.load_error.is_some());
+
+        assert!(state.open_file(&good));
+        assert!(state.load_error.is_none());
+        assert_eq!(state.image_info.filename, "real.png");
+        assert_eq!((state.image_info.width, state.image_info.height), (32, 16));
+    }
+
+    /// Navigating onto a file whose dimensions cannot be read must show *no*
+    /// dimensions, not the previous image's — and must not strand the user
+    /// there: the arrow key that reached it has to carry them off it again.
+    #[test]
+    fn navigation_onto_an_unreadable_file_shows_no_stale_dimensions() {
+        let guard = scratch("nav-broken");
+        let dir = guard.dir().to_path_buf();
+        std::fs::write(dir.join("a.png"), png_bytes(10, 10)).expect("write a");
+        std::fs::write(dir.join("b.png"), b"not a png at all").expect("write b");
+        std::fs::write(dir.join("c.png"), png_bytes(30, 30)).expect("write c");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&dir.join("a.png")));
+        assert_eq!(state.entries.len(), 3, "all three are listed");
+
+        state.next_image();
+        assert_eq!(state.image_info.filename, "b.png");
+        assert_eq!(
+            (state.image_info.width, state.image_info.height),
+            (0, 0),
+            "a file with no readable dimensions must not borrow a.png's"
+        );
+
+        state.next_image();
+        assert_eq!(
+            state.image_info.filename, "c.png",
+            "navigation must not stop at the file it could not display"
+        );
+        assert_eq!((state.image_info.width, state.image_info.height), (30, 30));
+    }
+
+    /// Every `Text` command in a render tree, so a test can assert on what the
+    /// user would actually read.
+    fn collect_text(tree: &RenderTree) -> Vec<String> {
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+}

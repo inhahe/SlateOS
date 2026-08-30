@@ -1,0 +1,13 @@
+[package]
+name = "bignum"
+version = "0.1.0"
+edition = "2024"
+description = "Arbitrary-precision signed integers and fixed-point decimals, shared by the calculators and by expr."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

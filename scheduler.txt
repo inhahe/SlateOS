@@ -1,0 +1,114 @@
+you: should i study bfs/muqss for my own schedular, or were those abandoned for a reason? are newer schedulars better?
+claude: They were abandoned because Con Kolivas got frustrated with the Linux kernel community, not because the
+        schedulers were bad. He felt the kernel developers prioritized server workloads over desktop responsiveness, and
+        he eventually gave up trying to get his work merged. It was a political/social outcome, not a technical one.
+
+        His core insight — that a simpler scheduler with less bookkeeping overhead produces better interactive
+        responsiveness on machines with fewer cores — was sound and is still valid.
+
+        **What happened after BFS/MuQSS:**
+
+        Linux replaced CFS with **EEVDF** (Earliest Eligible Virtual Deadline First) in 2023. EEVDF addresses some of
+        the latency complaints that motivated BFS in the first place — it's better at ensuring interactive tasks get CPU
+        time quickly. It's the current state of the art in mainline Linux.
+
+        There's also **sched-ext** (landed in Linux 6.12, 2024), which lets you write scheduler policies as eBPF
+        programs that load at runtime. This means you can experiment with scheduling algorithms without recompiling the
+        kernel. Several desktop-optimized schedulers have been written as sched-ext plugins.
+
+        **What to study:**
+
+        - **BFS/MuQSS** — yes, study these for the core ideas (simplicity, desktop optimization, single-queue design
+        choices). The source code is straightforward and well-documented.
+        - **EEVDF** — study this as the current best general-purpose algorithm. It handles the fairness-vs-latency
+        trade-off better than CFS did.
+        - **sched-ext examples** — study these for modern thinking about what desktop users actually need from a
+        scheduler.
+
+        Don't copy any of them directly. Take the principles — favor simplicity, optimize for interactive latency, use
+        priority inheritance, per-CPU queues with work stealing — and build your own. Your scheduler will be simpler
+        than Linux's regardless, because you don't have 30 years of edge cases to handle.
+
+you: i'm not going to study a scheduler, i'm going to just have ai make one, should i tell it to use sched-ext, or to
+     work with bfs and/or muqss, or just use eevdf and i can implement any of thos ewith ebpf files+
+claude: None of those directly. Here's why:
+
+        - **sched-ext** is a Linux-specific framework for loading scheduler policies as eBPF programs into the Linux
+        kernel. It's a Linux plugin system, not a portable scheduler design. Your kernel isn't Linux, so sched-ext
+        doesn't apply.
+        - **eBPF** is also Linux-specific infrastructure. You could design your own equivalent, but that's a separate
+        project.
+        - **EEVDF** is a good algorithm but it was designed to handle Linux's enormous complexity (thousands of threads,
+        128+ cores, NUMA, containers, cgroups). For a desktop-focused OS, it's more machinery than you need.
+        - **BFS/MuQSS** are patches against the Linux kernel. The code is entangled with Linux internals and can't be
+        ported, only studied for ideas.
+
+        **What to tell the AI:**
+
+        Tell it to implement a scheduler with these properties:
+        - Priority-based with N priority levels (e.g., 32 or 64), real-time levels at the top
+        - Round-robin within each priority level, with configurable time slices per level (shorter at higher priorities
+        for lower latency)
+        - Per-CPU run queues with work stealing from longest queue when idle
+        - Priority inheritance on mutex contention
+        - NUMA-aware work stealing (prefer same node) if applicable
+        - Runtime-tunable time slice durations
+        - Favor interactive tasks: detect tasks that frequently block on I/O or user input (short CPU bursts) and give
+        them a small priority boost
+
+        That's a complete, clean scheduler suitable for desktop use. It doesn't need to reference any existing
+        implementation — these are well-understood building blocks. The AI can implement it from the specification
+        without needing to adapt someone else's Linux-entangled code.
+you: might users want a seletion of schedulers in case they have a different workload? i mean, could i do something like
+     eevdf but ported to my own os, and then could your implementation ideas be made into a file to be plugged into that
+     eevdf-like scheduler with tunable parameters?
+claude: Not quite — EEVDF and the scheduler I described aren't a framework + plugin relationship. They're fundamentally
+        different algorithms. EEVDF uses virtual deadlines and eligibility tracking. The one I described uses priority
+        levels with round-robin. You can't plug one into the other.
+
+        But the underlying idea — swappable scheduler policies — is good and feasible. Here's how:
+
+        Define a **scheduler interface** in your kernel — a trait in Rust terms — that any scheduler must implement:
+
+        ```
+        - pick_next_task(cpu) → task
+        - enqueue_task(task)
+        - dequeue_task(task)
+        - task_tick(task)  (called on timer interrupt)
+        - balance_load()   (called periodically)
+        ```
+
+        Then implement multiple schedulers behind that interface:
+        - **Simple priority round-robin** (what I described) — good default for desktop
+        - **EEVDF-style** — for users who want more sophisticated fairness
+        - **Deadline scheduler** — for real-time/audio workloads
+
+        The user selects one in settings. Switching requires a reboot (swapping a live scheduler is possible but
+        extremely tricky and not worth the engineering effort).
+
+        The tunable parameters (time slice durations, priority boost thresholds, work stealing frequency, etc.) would be
+        per-scheduler and adjustable at runtime without reboot.
+
+        **My honest recommendation though:** implement one good scheduler first — the priority round-robin I described.
+        Get the OS working. Only add alternative schedulers if real users report workloads where it's insufficient.
+        Scheduler swapping is a cool feature, but defining the interface upfront and implementing one scheduler behind
+        it is enough. The interface makes adding alternatives later straightforward without replumbing the kernel.
+[turn done -- success -- ctx~76586 tok -- 15.9s]
+> does your described scheduler allow process priority, pausing and resuming processes, and changing their priority as
+  they're running?
+you: does your described scheduler allow process priority, pausing and resuming processes, and changing their priority
+     as they're running?
+claude: Yes, all of those are inherent to the design:
+
+        **Changing priority while running:** The process is in a per-CPU run queue. Changing its priority means removing
+        it from its current priority level's list and inserting it into the new priority level's list. A few pointer
+        operations, trivially fast.
+
+        **Pausing (suspending) a process:** Remove it from the run queue entirely and mark it as suspended. The
+        scheduler never sees it, so it never gets CPU time. Its memory stays intact.
+
+        **Resuming:** Put it back in the run queue at its assigned priority level. It starts getting scheduled again on
+        the next scheduling cycle.
+
+        These aren't features you have to design in — they fall out naturally from how a priority queue scheduler works.
+        The run queue is just a set of lists. Moving a task between lists, adding it, or removing

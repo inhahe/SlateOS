@@ -1,0 +1,9 @@
+[package]
+name = "inetd"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS inetd - internet super-server daemon"
+[dependencies]
+
+[lints]
+workspace = true

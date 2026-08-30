@@ -1,0 +1,40 @@
+[package]
+name = "logind"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS logind - session manager (logind/loginctl)"
+
+# Unlocking a locked session is a password check, and this is the one crate
+# that performs one. `logind` runs privileged and can read `/etc/shadow`; the
+# screen-lock app that asks the question cannot, and must not be handed a hash
+# to check for itself. See `design-decisions.md` §341 and
+# `requests/b-c-desktop-password-checks-go-through-a-privileged-verifier.md`.
+#
+# `libservicebus` is the transport: it carries the desktop's question to this
+# daemon, and — once the kernel can report a peer — it is also where the
+# answer to "who is asking?" comes from. Both halves matter; a privileged
+# method reached over an endpoint that cannot identify its caller is not a
+# privileged method.
+[dependencies]
+authlib = { path = "../authlib" }
+libservicebus = { path = "../libservicebus" }
+
+# Tests only, to compute the `$6$` entry in the shadow fixture rather than
+# paste one: a pasted hash silently stops testing anything the day the hasher
+# changes.
+[dev-dependencies]
+posix = { path = "../../posix" }
+# And `scratchdir` for the fixture's store itself. These tests decide whether a
+# password unlocks a locked screen, so two of them sharing one file can produce
+# a false green as easily as a red. See known-issues.md
+# `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE`.
+scratchdir = { path = "../scratchdir" }
+
+# Inherit the workspace lint configuration. This crate had none at all: it was
+# not in the `[lints] workspace = true` set and set no `#![deny]`/`#![warn]` of
+# its own, so `unwrap_used`, `expect_used`, `indexing_slicing` and
+# `arithmetic_side_effects` -- the four the workspace keeps at `warn` precisely
+# because they flag real panic and overflow risks -- were silently off over code
+# that decides whether a password unlocks a locked screen.
+[lints]
+workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "hearts"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+randrange = { path = "../../randrange" }
+
+[lints]
+workspace = true

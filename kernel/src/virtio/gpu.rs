@@ -1,0 +1,1940 @@
+//! Virtio GPU device driver (virtio device type 16).
+//!
+//! Implements 2D framebuffer operations via QEMU's `virtio-gpu-pci` device.
+//! Uses the **modern** virtio PCI transport (MMIO BARs + PCI capabilities)
+//! because virtio-gpu only supports modern mode (no legacy I/O port access).
+//!
+//! Two virtqueues:
+//! - Queue 0 (controlq): all 2D commands (create resource, attach backing,
+//!   set scanout, transfer, flush)
+//! - Queue 1 (cursorq): hardware cursor updates
+//!
+//! ## Protocol Overview
+//!
+//! 1. Reset device, negotiate features, set up queues.
+//! 2. `GET_DISPLAY_INFO` → learn display resolution and scanout count.
+//! 3. `RESOURCE_CREATE_2D` → create a host-side 2D resource.
+//! 4. `RESOURCE_ATTACH_BACKING` → map guest physical memory to the resource.
+//! 5. `SET_SCANOUT` → wire the resource to a display output.
+//! 6. For each frame update:
+//!    a. Write pixels to guest memory (the attached backing).
+//!    b. `TRANSFER_TO_HOST_2D` → push dirty region to host resource.
+//!    c. `RESOURCE_FLUSH` → signal host to display the resource.
+//!
+//! ## Modern Virtio PCI Transport
+//!
+//! The modern transport uses PCI vendor-specific capabilities (ID 0x09) to
+//! locate configuration regions in MMIO BARs:
+//! - cfg_type 1: Common configuration (device status, features, queue config)
+//! - cfg_type 2: Notifications (queue kick doorbell)
+//! - cfg_type 3: ISR status
+//! - cfg_type 4: Device-specific configuration
+//!
+//! ## QEMU Usage
+//!
+//! ```text
+//! -device virtio-gpu-pci
+//! ```
+//!
+//! ## References
+//!
+//! - Virtio 1.1+ spec, Section 5.7 "GPU Device"
+//! - Virtio 1.1+ spec, Section 4.1 "PCI Transport"
+//! - QEMU hw/display/virtio-gpu.c
+
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+use crate::error::{KernelError, KernelResult};
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+use crate::pci::{self, PciDevice};
+use crate::serial_println;
+use crate::virtio::modern::{ModernTransport, STATUS_DRIVER_OK, VIRTIO_VENDOR};
+use crate::virtio::queue::{VRING_DESC_F_WRITE, Virtqueue};
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Serial-log prefix, passed to the shared transport so its diagnostics name
+/// this driver rather than the module they are emitted from.
+const LOG_TAG: &str = "[virtio-gpu]";
+
+/// Virtio-GPU transitional PCI device ID (type 16 → 0x1040 + 16 = 0x1050).
+const VIRTIO_GPU_DEVICE_ID: u16 = 0x1050;
+
+/// Maximum number of scanouts (displays) the spec allows.
+const VIRTIO_GPU_MAX_SCANOUTS: usize = 16;
+
+// ---------------------------------------------------------------------------
+// GPU command types (virtio 1.1 §5.7.6.7)
+// ---------------------------------------------------------------------------
+
+const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
+#[allow(dead_code)]
+const VIRTIO_GPU_CMD_RESOURCE_UNREF: u32 = 0x0102;
+const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
+const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
+const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
+const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+/// `RESOURCE_CREATE_3D` — the first command in the 3D block (0x0200 is
+/// `CTX_CREATE`, so this is 0x0200 + 4).  Only sent when the device offered
+/// `VIRTIO_GPU_F_VIRGL`; see [`create_resource_3d`] for why we need it at all.
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_3D: u32 = 0x0204;
+
+// GPU response types.
+const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
+const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
+
+// GPU pixel formats.
+const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
+
+// ---------------------------------------------------------------------------
+// Feature bits and 3D resource parameters
+// ---------------------------------------------------------------------------
+
+/// `VIRTIO_GPU_F_VIRGL` (page-0 bit 0): the device understands the 3D command
+/// block.  We accept it not to render 3D but to be allowed to *create* the
+/// scanout resource with the 3D command, which is the only way to ask for the
+/// `SCANOUT` bind — see [`create_resource_3d`].
+const VIRTIO_GPU_F_VIRGL: u32 = 1 << 0;
+
+/// `PIPE_TEXTURE_2D`.  The `target` of a 3D resource that is a flat 2D image.
+const VIRGL_TARGET_TEXTURE_2D: u32 = 2;
+
+// Bind flags (virglrenderer `virglrenderer.h`, `VIRGL_RES_BIND_*`).  These are
+// the exact three the working configuration was verified with; see
+// `create_resource_3d`.
+const VIRGL_RES_BIND_RENDER_TARGET: u32 = 1 << 1;
+const VIRGL_RES_BIND_SAMPLER_VIEW: u32 = 1 << 3;
+const VIRGL_RES_BIND_SCANOUT: u32 = 1 << 18;
+
+/// `VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP`: row 0 of the backing store is the top
+/// row of the image.  QEMU's `RESOURCE_CREATE_2D` sets this unconditionally,
+/// and our framebuffer is laid out the same way, so the 3D path must set it too
+/// or the picture comes out vertically mirrored.
+const VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP: u32 = 1 << 0;
+
+// ---------------------------------------------------------------------------
+// GPU control message structures (repr(C) for DMA)
+// ---------------------------------------------------------------------------
+
+/// Common control header (24 bytes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuCtrlHdr {
+    hdr_type: u32,
+    flags: u32,
+    fence_id: u64,
+    ctx_id: u32,
+    _padding: u32,
+}
+
+impl VirtioGpuCtrlHdr {
+    const fn new(cmd_type: u32) -> Self {
+        Self {
+            hdr_type: cmd_type,
+            flags: 0,
+            fence_id: 0,
+            ctx_id: 0,
+            _padding: 0,
+        }
+    }
+}
+
+/// A rectangle.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct VirtioGpuRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+/// Display info for one scanout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct VirtioGpuDisplayOne {
+    r: VirtioGpuRect,
+    enabled: u32,
+    flags: u32,
+}
+
+/// Full GET_DISPLAY_INFO response.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuRespDisplayInfo {
+    hdr: VirtioGpuCtrlHdr,
+    pmodes: [VirtioGpuDisplayOne; VIRTIO_GPU_MAX_SCANOUTS],
+}
+
+/// RESOURCE_CREATE_2D request.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuResourceCreate2d {
+    hdr: VirtioGpuCtrlHdr,
+    resource_id: u32,
+    format: u32,
+    width: u32,
+    height: u32,
+}
+
+/// RESOURCE_CREATE_3D request.
+///
+/// The trailing `_padding` is part of the wire format, not Rust padding: the
+/// device compares the descriptor length against `sizeof(struct
+/// virtio_gpu_resource_create_3d)` and *silently drops* a short command
+/// (QEMU's `VIRTIO_GPU_FILL_CMD` returns without setting an error, so the
+/// guest sees `OK_NODATA` for a command that did nothing).  The static
+/// assertion below is what keeps that failure mode from ever being reached.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuResourceCreate3d {
+    hdr: VirtioGpuCtrlHdr,
+    resource_id: u32,
+    target: u32,
+    format: u32,
+    bind: u32,
+    width: u32,
+    height: u32,
+    depth: u32,
+    array_size: u32,
+    last_level: u32,
+    nr_samples: u32,
+    flags: u32,
+    _padding: u32,
+}
+
+// The wire size the device checks against.  24-byte header + 12 little-endian
+// u32s.  A mismatch here is not a compile error anywhere else in this file --
+// the command would simply be accepted and ignored at run time -- so it is
+// asserted at compile time instead.
+const _: () = assert!(core::mem::size_of::<VirtioGpuResourceCreate3d>() == 72);
+const _: () = assert!(core::mem::size_of::<VirtioGpuCtrlHdr>() == 24);
+
+/// RESOURCE_ATTACH_BACKING request header.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuResourceAttachBacking {
+    hdr: VirtioGpuCtrlHdr,
+    resource_id: u32,
+    nr_entries: u32,
+}
+
+/// RESOURCE_UNREF request.
+///
+/// `virtio_gpu_resource_unref` in the spec: the control header, the id, and an
+/// explicit padding word.  The padding is part of the wire format rather than
+/// compiler slack, so it is named and zeroed rather than left implicit.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuResourceUnref {
+    hdr: VirtioGpuCtrlHdr,
+    resource_id: u32,
+    _padding: u32,
+}
+
+/// A single memory entry for attach_backing.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuMemEntry {
+    addr: u64,
+    length: u32,
+    _padding: u32,
+}
+
+/// SET_SCANOUT request.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuSetScanout {
+    hdr: VirtioGpuCtrlHdr,
+    r: VirtioGpuRect,
+    scanout_id: u32,
+    resource_id: u32,
+}
+
+/// TRANSFER_TO_HOST_2D request.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuTransferToHost2d {
+    hdr: VirtioGpuCtrlHdr,
+    r: VirtioGpuRect,
+    offset: u64,
+    resource_id: u32,
+    _padding: u32,
+}
+
+/// RESOURCE_FLUSH request.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuResourceFlush {
+    hdr: VirtioGpuCtrlHdr,
+    r: VirtioGpuRect,
+    resource_id: u32,
+    _padding: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Device state
+// ---------------------------------------------------------------------------
+
+/// Virtio GPU device state.
+struct VirtioGpuDevice {
+    /// Modern PCI transport.
+    transport: ModernTransport,
+    /// Control virtqueue (queue 0).
+    controlq: Virtqueue,
+    /// Cursor virtqueue (queue 1).
+    #[allow(dead_code)]
+    cursorq: Virtqueue,
+    /// HHDM offset for phys→virt conversion.
+    hhdm_offset: u64,
+    /// DMA frame for control request/response messages.
+    ctl_frame: PhysFrame,
+    /// Physical frames backing the framebuffer resource.
+    fb_frames: alloc::vec::Vec<PhysFrame>,
+    /// Width of the active display (pixels).
+    width: u32,
+    /// Height of the active display (pixels).
+    height: u32,
+    /// Resource ID for the primary framebuffer (0 = none).
+    resource_id: u32,
+    /// Next resource ID to allocate.
+    next_resource_id: u32,
+}
+
+// SAFETY: VirtioGpuDevice contains raw pointers (inside Virtqueue and transport)
+// that point to DMA/MMIO memory accessible from any CPU.  All access is
+// serialized by the DEVICE Mutex, so sending between threads is safe.
+unsafe impl Send for VirtioGpuDevice {}
+
+/// Global device instance.
+static DEVICE: spin::Mutex<Option<VirtioGpuDevice>> = spin::Mutex::new(None);
+
+/// Whether the device is initialized and a framebuffer is active.
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Display width (cached for fast lock-free query).
+static DISPLAY_WIDTH: AtomicU32 = AtomicU32::new(0);
+
+/// Display height (cached for fast lock-free query).
+static DISPLAY_HEIGHT: AtomicU32 = AtomicU32::new(0);
+
+// ---------------------------------------------------------------------------
+// Initialization
+// ---------------------------------------------------------------------------
+
+/// Probe PCI for a virtio-gpu device and initialize it.
+///
+/// Uses the modern PCI transport (MMIO BARs via PCI capabilities).
+/// Returns Ok(()) on success, or an error if no device or init fails.
+#[allow(clippy::too_many_lines)]
+pub fn init(hhdm_offset: u64) -> KernelResult<()> {
+    serial_println!("[virtio-gpu] Probing for virtio-gpu device...");
+
+    let dev = find_device()?;
+    serial_println!(
+        "[virtio-gpu] Found at {:02x}:{:02x}.{} (ID {:04x}:{:04x})",
+        dev.address.bus,
+        dev.address.device,
+        dev.address.function,
+        dev.vendor_id,
+        dev.device_id
+    );
+
+    // Enable bus mastering and memory space.
+    pci::enable_bus_master(dev.address);
+
+    // Parse PCI capabilities to locate virtio config regions.
+    let transport = ModernTransport::probe(LOG_TAG, &dev, hhdm_offset)?;
+
+    // --- Device initialization sequence (modern transport §3.1) ---
+
+    // Steps 1-5 (reset, ACKNOWLEDGE, DRIVER, feature negotiation, FEATURES_OK).
+    // `negotiate` accepts VIRTIO_F_VERSION_1 on our behalf, which the previous
+    // open-coded sequence here did not.  QEMU's virtio-gpu tolerated that
+    // omission; a stricter device would not have.
+    //
+    // The one page-0 feature we ask for is VIRGL, and not because we render 3D:
+    // it is the device's own statement that it understands the 3D command
+    // block, and on such a device the framebuffer *must* be created with
+    // RESOURCE_CREATE_3D or it can never be scanned out.  See
+    // `create_resource_3d`.  A plain 2D device does not offer the bit, we do
+    // not get it, and the 2D path below is used unchanged.
+    let accepted = transport.negotiate(VIRTIO_GPU_F_VIRGL)?;
+    let virgl = accepted & VIRTIO_GPU_F_VIRGL != 0;
+
+    // 6. Read device config.
+    let _events_read = transport.read_device_config32(0);
+    let num_scanouts = transport.read_device_config32(8);
+    serial_println!("[virtio-gpu] Config: num_scanouts={}", num_scanouts);
+
+    // 7. Set up virtqueues.
+    let num_queues = transport.num_queues();
+    serial_println!("[virtio-gpu] {} queues available", num_queues);
+
+    if num_queues < 2 {
+        serial_println!("[virtio-gpu] Need at least 2 queues (controlq + cursorq)");
+        transport.reset();
+        return Err(KernelError::NoSuchDevice);
+    }
+
+    // Setup controlq (queue 0).
+    let mut controlq = transport.setup_queue(0, hhdm_offset)?;
+    // Setup cursorq (queue 1).
+    let mut cursorq = transport.setup_queue(1, hhdm_offset)?;
+
+    // This driver completes every request by polling `poll_used` and never
+    // registers an IRQ handler, so tell the device not to raise one.  Left
+    // unset the avail flags are zero, which *requests* interrupts: the device
+    // would then assert its INTx line on every command completion and nothing
+    // would ever acknowledge it at the device, leaving a level-triggered line
+    // stuck asserted.  Done before DRIVER_OK so it holds from the first
+    // command the device may process.
+    controlq.set_no_interrupt();
+    cursorq.set_no_interrupt();
+
+    // 8. Set DRIVER_OK — device is live.
+    transport.add_status(STATUS_DRIVER_OK);
+    serial_println!(
+        "[virtio-gpu] Device status: DRIVER_OK ({:#x})",
+        transport.status()
+    );
+
+    // Allocate DMA frame for control messages.
+    let ctl_frame = frame::alloc_frame()?;
+    // SAFETY: We just allocated this frame; the HHDM maps it as writable
+    // kernel memory.  Zeroing the entire frame is within bounds.
+    unsafe {
+        let ctl_virt = (ctl_frame.addr() + hhdm_offset) as *mut u8;
+        core::ptr::write_bytes(ctl_virt, 0, FRAME_SIZE);
+    }
+
+    let mut device = VirtioGpuDevice {
+        transport,
+        controlq,
+        cursorq,
+        hhdm_offset,
+        ctl_frame,
+        fb_frames: alloc::vec::Vec::new(),
+        width: 0,
+        height: 0,
+        resource_id: 0,
+        next_resource_id: 1,
+    };
+
+    // Query display info.
+    let (width, height) = get_display_info(&mut device)?;
+    serial_println!("[virtio-gpu] Display 0: {}x{}", width, height);
+    device.width = width;
+    device.height = height;
+
+    // Create a 2D resource.
+    // On a virgl device the 3D create is the only one that can be scanned out.
+    // If it fails anyway we still try the 2D create rather than giving up: a
+    // device that offers VIRGL but rejects the 3D create is not one we have
+    // seen, and on it the 2D path is no worse than not coming up at all.  The
+    // retry cannot collide with the failed resource id — `next_resource_id`
+    // has already advanced past it.
+    let resource_id = if virgl {
+        match create_resource_3d(&mut device, width, height) {
+            Ok(id) => id,
+            Err(e) => {
+                serial_println!(
+                    "[virtio-gpu] 3D resource create failed ({e:?}); falling back to 2D \
+                     (scanout is unlikely to work)"
+                );
+                create_resource_2d(&mut device, width, height)?
+            }
+        }
+    } else {
+        create_resource_2d(&mut device, width, height)?
+    };
+    device.resource_id = resource_id;
+    serial_println!(
+        "[virtio-gpu] Created resource {} ({}x{}, {})",
+        resource_id,
+        width,
+        height,
+        if virgl { "3D/scanout bind" } else { "2D" }
+    );
+
+    // Allocate framebuffer backing memory.
+    let fb_bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|v| v.checked_mul(4))
+        .ok_or(KernelError::InvalidArgument)?;
+    let frames_needed = fb_bytes.div_ceil(FRAME_SIZE);
+
+    let mut fb_frames = alloc::vec::Vec::new();
+    for i in 0..frames_needed {
+        let f = frame::alloc_frame().inspect_err(|&e| {
+            serial_println!("[virtio-gpu] Failed to alloc FB frame {}: {:?}", i, e);
+            // Free already allocated.
+            for frame in &fb_frames {
+                // SAFETY: These frames were allocated above and are not
+                // aliased.  Failure to free is logged but not fatal.
+                unsafe {
+                    let _ = frame::free_frame(*frame);
+                }
+            }
+        })?;
+        // Zero the frame.
+        // SAFETY: Just allocated; HHDM maps it writable.  Zeroing one
+        // FRAME_SIZE region stays within bounds of the allocated frame.
+        unsafe {
+            let virt = (f.addr() + hhdm_offset) as *mut u8;
+            core::ptr::write_bytes(virt, 0, FRAME_SIZE);
+        }
+        fb_frames.push(f);
+    }
+    serial_println!(
+        "[virtio-gpu] Allocated {} frames ({} KiB) for {}x{} framebuffer",
+        frames_needed,
+        frames_needed * FRAME_SIZE / 1024,
+        width,
+        height
+    );
+    device.fb_frames = fb_frames;
+
+    // Attach backing memory.
+    attach_backing(&mut device, resource_id)?;
+    serial_println!("[virtio-gpu] Attached backing memory");
+
+    // Set scanout.
+    set_scanout(&mut device, 0, resource_id, width, height)?;
+    serial_println!("[virtio-gpu] Scanout 0 configured");
+
+    // Initial transfer + flush (show black screen).
+    transfer_to_host_2d(&mut device, resource_id, 0, 0, width, height, 0)?;
+    resource_flush(&mut device, resource_id, 0, 0, width, height)?;
+
+    DISPLAY_WIDTH.store(width, Ordering::Release);
+    DISPLAY_HEIGHT.store(height, Ordering::Release);
+
+    *DEVICE.lock() = Some(device);
+    INITIALIZED.store(true, Ordering::Release);
+
+    serial_println!(
+        "[virtio-gpu] Initialization complete ({}x{} active)",
+        width,
+        height
+    );
+    Ok(())
+}
+
+/// Find the virtio-gpu PCI device.
+fn find_device() -> KernelResult<PciDevice> {
+    if let Some(dev) = pci::find_device(VIRTIO_VENDOR, VIRTIO_GPU_DEVICE_ID) {
+        return Ok(dev);
+    }
+    // Class 0x03 (Display), subclass 0x00 or 0x80.
+    for &subclass in &[0x00u8, 0x80] {
+        let devices = pci::find_devices_by_class(0x03, subclass);
+        for dev in devices {
+            if dev.vendor_id == VIRTIO_VENDOR {
+                return Ok(dev);
+            }
+        }
+    }
+    serial_println!("[virtio-gpu] No virtio-gpu device found");
+    Err(KernelError::NoSuchDevice)
+}
+
+// ---------------------------------------------------------------------------
+// Control queue commands
+// ---------------------------------------------------------------------------
+
+/// Send a control command and wait for the response.
+#[allow(clippy::arithmetic_side_effects)]
+fn send_ctrl_cmd(
+    dev: &mut VirtioGpuDevice,
+    req_data: &[u8],
+    resp_offset: usize,
+    resp_size: usize,
+) -> KernelResult<u32> {
+    let ctl_phys = dev.ctl_frame.addr();
+    let ctl_virt = (ctl_phys + dev.hhdm_offset) as *mut u8;
+
+    // Write request at offset 0.
+    // SAFETY: ctl_virt points to the DMA control frame (FRAME_SIZE bytes,
+    // HHDM-mapped).  req_data.len() < FRAME_SIZE (all GPU commands are
+    // small), so this stays in bounds.  No aliasing — we own ctl_frame.
+    unsafe {
+        core::ptr::copy_nonoverlapping(req_data.as_ptr(), ctl_virt, req_data.len());
+    }
+    // Zero response area.
+    // SAFETY: resp_offset + resp_size <= FRAME_SIZE (checked by callers
+    // that compute offsets from known struct sizes).
+    unsafe {
+        core::ptr::write_bytes(ctl_virt.add(resp_offset), 0, resp_size);
+    }
+
+    let req_phys = ctl_phys;
+    let resp_phys = ctl_phys + resp_offset as u64;
+
+    dev.controlq.submit(&[
+        (req_phys, req_data.len() as u32, 0),
+        (resp_phys, resp_size as u32, VRING_DESC_F_WRITE),
+    ])?;
+    dev.transport.notify_queue(0);
+
+    // Poll for completion.
+    let mut attempts = 0u32;
+    let head = loop {
+        if let Some((head, _len)) = dev.controlq.poll_used() {
+            break head;
+        }
+        attempts = attempts.wrapping_add(1);
+        if attempts > 5_000_000 {
+            // Timing out leaves this chain owned by the device, so its
+            // descriptors are deliberately *not* freed here — the device may
+            // still write to them.  The queue is down two descriptors until
+            // something resets it, which is the right trade against handing a
+            // live DMA target back to the allocator.
+            return Err(KernelError::TimedOut);
+        }
+        core::hint::spin_loop();
+    };
+
+    // Return the chain to the free list.  The response lives in the DMA
+    // control frame, not in the descriptors, so it is still readable below.
+    //
+    // Without this, every control command leaked its two descriptors.  That
+    // was survivable for the handful issued at init, but flush_rect and
+    // flush_full each run two commands per screen update, so the control queue
+    // lost four descriptors per frame and submit() started returning WouldBlock
+    // after roughly sixteen flushes — the display would come up and then
+    // freeze.
+    dev.controlq.free_chain(head);
+
+    // Read response type.
+    // SAFETY: The device has written the response at resp_offset within
+    // the DMA frame.  Volatile read because the device writes asynchronously.
+    let resp_type = unsafe { core::ptr::read_volatile(ctl_virt.add(resp_offset) as *const u32) };
+    Ok(resp_type)
+}
+
+/// Query display information.
+fn get_display_info(dev: &mut VirtioGpuDevice) -> KernelResult<(u32, u32)> {
+    let hdr = VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_GET_DISPLAY_INFO);
+    // SAFETY: VirtioGpuCtrlHdr is #[repr(C)], so its byte layout is
+    // well-defined and matches the virtio wire format.  The slice covers
+    // exactly size_of::<VirtioGpuCtrlHdr>() bytes from a valid local.
+    let req_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &hdr as *const _ as *const u8,
+            core::mem::size_of::<VirtioGpuCtrlHdr>(),
+        )
+    };
+
+    let resp_offset = 256;
+    let resp_size = core::mem::size_of::<VirtioGpuRespDisplayInfo>();
+    let resp_type = send_ctrl_cmd(dev, req_bytes, resp_offset, resp_size)?;
+
+    if resp_type != VIRTIO_GPU_RESP_OK_DISPLAY_INFO {
+        serial_println!("[virtio-gpu] GET_DISPLAY_INFO: resp={:#x}", resp_type);
+        return Err(KernelError::IoError);
+    }
+
+    let ctl_virt = (dev.ctl_frame.addr() + dev.hhdm_offset) as *mut u8;
+    // SAFETY: The device wrote a VirtioGpuRespDisplayInfo at resp_offset
+    // within the DMA frame.  The struct is #[repr(C)] and the response
+    // type was validated above.  Reading it fully is within frame bounds
+    // (resp_offset + size_of::<VirtioGpuRespDisplayInfo>() < FRAME_SIZE).
+    let resp =
+        unsafe { core::ptr::read(ctl_virt.add(resp_offset) as *const VirtioGpuRespDisplayInfo) };
+
+    for (i, pmode) in resp.pmodes.iter().enumerate() {
+        if pmode.enabled != 0 && pmode.r.width > 0 && pmode.r.height > 0 {
+            serial_println!(
+                "[virtio-gpu]   Scanout {}: {}x{} enabled",
+                i,
+                pmode.r.width,
+                pmode.r.height
+            );
+            return Ok((pmode.r.width, pmode.r.height));
+        }
+    }
+
+    serial_println!("[virtio-gpu] No enabled scanout, using 1280x800");
+    Ok((1280, 800))
+}
+
+/// Create a 2D resource.
+fn create_resource_2d(dev: &mut VirtioGpuDevice, width: u32, height: u32) -> KernelResult<u32> {
+    let resource_id = dev.next_resource_id;
+    dev.next_resource_id = dev.next_resource_id.wrapping_add(1);
+
+    let req = VirtioGpuResourceCreate2d {
+        hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_CREATE_2D),
+        resource_id,
+        format: VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+        width,
+        height,
+    };
+    // SAFETY: VirtioGpuResourceCreate2d is #[repr(C)], so its byte layout
+    // matches the virtio wire format.  The slice covers exactly its size.
+    let req_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &req as *const _ as *const u8,
+            core::mem::size_of::<VirtioGpuResourceCreate2d>(),
+        )
+    };
+
+    let resp_type = send_ctrl_cmd(
+        dev,
+        req_bytes,
+        512,
+        core::mem::size_of::<VirtioGpuCtrlHdr>(),
+    )?;
+
+    if resp_type != VIRTIO_GPU_RESP_OK_NODATA {
+        serial_println!("[virtio-gpu] RESOURCE_CREATE_2D: resp={:#x}", resp_type);
+        return Err(KernelError::IoError);
+    }
+    Ok(resource_id)
+}
+
+/// Create the framebuffer as a 2D texture via the *3D* command, so we can ask
+/// for the `SCANOUT` bind.
+///
+/// This exists for one reason: on a virgl-capable device, a resource created
+/// with `RESOURCE_CREATE_2D` can never be scanned out on a Windows host, and
+/// nothing in the protocol says so.  The chain is:
+///
+/// 1. QEMU routes *every* command through the virgl path as soon as the device
+///    is `virtio-gpu-gl`, whether or not the guest negotiated
+///    `VIRTIO_GPU_F_VIRGL`.
+/// 2. Its `RESOURCE_CREATE_2D` handler hardcodes `bind = RENDER_TARGET`.  The
+///    guest cannot influence it — the 2D command has no `bind` field.
+/// 3. virglrenderer only allocates the shared D3D11 texture for a resource
+///    whose bind includes `SCANOUT` (`vrend_resource_d3d_init`).
+/// 4. On Windows, `virgl_renderer_resource_get_info_ext` — which QEMU calls on
+///    `SET_SCANOUT` — returns `EINVAL` for any resource that has no D3D11
+///    texture.
+///
+/// So `SET_SCANOUT` answers `ERR_INVALID_RESOURCE_ID` (0x1203) for a resource
+/// the device itself just created successfully, and every intermediate step
+/// reports success: virglrenderer's create/attach/transfer return codes are
+/// discarded by QEMU, so this is the *only* observable symptom.  OVMF's own
+/// VirtioGpuDxe driver fails identically, which is what ruled out a bug on our
+/// side.  Verified against QEMU 11.1.0-rc3 with `-device virtio-gpu-gl-pci
+/// -display egl-headless`; `virgl_renderer_init` is called with
+/// `D3D11_SHARE_TEXTURE`, confirming step 3 is live on this host.
+///
+/// `RESOURCE_CREATE_3D` carries an explicit `bind`, is dispatched by QEMU
+/// unconditionally, and passes the guest's value through verbatim — so it is
+/// the only way for the guest to say "this one is a scanout".  The bind set
+/// below is exactly the one the fix was verified with.
+fn create_resource_3d(dev: &mut VirtioGpuDevice, width: u32, height: u32) -> KernelResult<u32> {
+    let resource_id = dev.next_resource_id;
+    dev.next_resource_id = dev.next_resource_id.wrapping_add(1);
+
+    let req = VirtioGpuResourceCreate3d {
+        hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_CREATE_3D),
+        resource_id,
+        target: VIRGL_TARGET_TEXTURE_2D,
+        format: VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+        bind: VIRGL_RES_BIND_RENDER_TARGET | VIRGL_RES_BIND_SAMPLER_VIEW | VIRGL_RES_BIND_SCANOUT,
+        width,
+        height,
+        depth: 1,
+        array_size: 1,
+        last_level: 0,
+        nr_samples: 0,
+        flags: VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
+        _padding: 0,
+    };
+    // SAFETY: VirtioGpuResourceCreate3d is #[repr(C)], so its byte layout
+    // matches the virtio wire format.  The slice covers exactly its size.
+    let req_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &req as *const _ as *const u8,
+            core::mem::size_of::<VirtioGpuResourceCreate3d>(),
+        )
+    };
+
+    let resp_type = send_ctrl_cmd(
+        dev,
+        req_bytes,
+        512,
+        core::mem::size_of::<VirtioGpuCtrlHdr>(),
+    )?;
+
+    if resp_type != VIRTIO_GPU_RESP_OK_NODATA {
+        serial_println!("[virtio-gpu] RESOURCE_CREATE_3D: resp={:#x}", resp_type);
+        return Err(KernelError::IoError);
+    }
+    Ok(resource_id)
+}
+
+/// Attach guest memory backing to a resource.
+#[allow(clippy::arithmetic_side_effects)]
+fn attach_backing(dev: &mut VirtioGpuDevice, resource_id: u32) -> KernelResult<()> {
+    // Collect the addresses before calling, because `attach_backing_addrs`
+    // takes `dev` mutably and `dev.fb_frames` cannot stay borrowed across it.
+    let addrs: alloc::vec::Vec<u64> = dev.fb_frames.iter().map(|f| f.addr()).collect();
+    attach_backing_addrs(dev, resource_id, &addrs)
+}
+
+/// `RESOURCE_ATTACH_BACKING` for an arbitrary list of guest physical frames.
+///
+/// This is the general form of [`attach_backing`], which is now a thin wrapper
+/// that passes the primary framebuffer's frames.  Split out so render-node
+/// resources — which have their own backing, unrelated to the scanout — can use
+/// the same command path rather than a second copy of it.
+///
+/// Every entry describes exactly one [`FRAME_SIZE`] frame; the device is free to
+/// coalesce them.  The whole request (header + entries) must fit in the single
+/// DMA control frame, which caps a resource at
+/// `(FRAME_SIZE - size_of::<header>() - size_of::<hdr>()) / size_of::<entry>()`
+/// frames — about 1000 at a 16 KiB frame, i.e. ~16 MiB of backing.  A larger
+/// resource reports `InvalidArgument` rather than silently attaching a prefix,
+/// which would leave the tail of the resource reading as host garbage.
+#[allow(clippy::arithmetic_side_effects)]
+fn attach_backing_addrs(
+    dev: &mut VirtioGpuDevice,
+    resource_id: u32,
+    addrs: &[u64],
+) -> KernelResult<()> {
+    let num_frames = addrs.len();
+    let ctl_phys = dev.ctl_frame.addr();
+    let ctl_virt = (ctl_phys + dev.hhdm_offset) as *mut u8;
+
+    let header_size = core::mem::size_of::<VirtioGpuResourceAttachBacking>();
+    let entry_size = core::mem::size_of::<VirtioGpuMemEntry>();
+    let entries_size = num_frames * entry_size;
+    let total_req_size = header_size + entries_size;
+    let resp_offset = align_up(total_req_size, 64);
+    let resp_size = core::mem::size_of::<VirtioGpuCtrlHdr>();
+
+    if resp_offset + resp_size > FRAME_SIZE {
+        serial_println!("[virtio-gpu] attach_backing: too many frames for DMA frame");
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Write header.
+    let req_hdr = VirtioGpuResourceAttachBacking {
+        hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING),
+        resource_id,
+        nr_entries: num_frames as u32,
+    };
+    // SAFETY: ctl_virt points to the start of the DMA control frame.
+    // VirtioGpuResourceAttachBacking is #[repr(C)] and fits within the
+    // frame (header_size < FRAME_SIZE).
+    unsafe {
+        core::ptr::write(ctl_virt as *mut VirtioGpuResourceAttachBacking, req_hdr);
+    }
+
+    // Write memory entries.
+    for (i, addr) in addrs.iter().enumerate() {
+        let entry = VirtioGpuMemEntry {
+            addr: *addr,
+            length: FRAME_SIZE as u32,
+            _padding: 0,
+        };
+        // SAFETY: header_size + i * entry_size < total_req_size, which was
+        // checked against FRAME_SIZE above.  VirtioGpuMemEntry is #[repr(C)].
+        unsafe {
+            core::ptr::write(
+                ctl_virt.add(header_size + i * entry_size) as *mut VirtioGpuMemEntry,
+                entry,
+            );
+        }
+    }
+
+    // Zero response.
+    // SAFETY: resp_offset + resp_size <= FRAME_SIZE (checked above).
+    unsafe {
+        core::ptr::write_bytes(ctl_virt.add(resp_offset), 0, resp_size);
+    }
+
+    // Submit.
+    let resp_phys = ctl_phys + resp_offset as u64;
+    dev.controlq.submit(&[
+        (ctl_phys, total_req_size as u32, 0),
+        (resp_phys, resp_size as u32, VRING_DESC_F_WRITE),
+    ])?;
+    dev.transport.notify_queue(0);
+
+    // Poll.
+    let mut attempts = 0u32;
+    let head = loop {
+        if let Some((head, _len)) = dev.controlq.poll_used() {
+            break head;
+        }
+        attempts = attempts.wrapping_add(1);
+        if attempts > 5_000_000 {
+            // As in send_ctrl_cmd: a timed-out chain is still the device's, so
+            // it is not returned to the free list.
+            return Err(KernelError::TimedOut);
+        }
+        core::hint::spin_loop();
+    };
+
+    // Return the chain to the free list; the response is in the DMA frame.
+    dev.controlq.free_chain(head);
+
+    // SAFETY: Device wrote the response at resp_offset within the DMA
+    // frame.  Volatile read because the device writes asynchronously.
+    let resp_type = unsafe { core::ptr::read_volatile(ctl_virt.add(resp_offset) as *const u32) };
+    if resp_type != VIRTIO_GPU_RESP_OK_NODATA {
+        serial_println!("[virtio-gpu] ATTACH_BACKING: resp={:#x}", resp_type);
+        return Err(KernelError::IoError);
+    }
+    Ok(())
+}
+
+/// Set scanout.
+fn set_scanout(
+    dev: &mut VirtioGpuDevice,
+    scanout_id: u32,
+    resource_id: u32,
+    width: u32,
+    height: u32,
+) -> KernelResult<()> {
+    let req = VirtioGpuSetScanout {
+        hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_SET_SCANOUT),
+        r: VirtioGpuRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
+        scanout_id,
+        resource_id,
+    };
+    // SAFETY: VirtioGpuSetScanout is #[repr(C)]; the slice covers
+    // exactly its size from a valid stack local.
+    let req_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &req as *const _ as *const u8,
+            core::mem::size_of::<VirtioGpuSetScanout>(),
+        )
+    };
+    let resp_type = send_ctrl_cmd(
+        dev,
+        req_bytes,
+        512,
+        core::mem::size_of::<VirtioGpuCtrlHdr>(),
+    )?;
+    if resp_type != VIRTIO_GPU_RESP_OK_NODATA {
+        serial_println!("[virtio-gpu] SET_SCANOUT: resp={:#x}", resp_type);
+        return Err(KernelError::IoError);
+    }
+    Ok(())
+}
+
+/// Transfer a region from guest memory to the host resource.
+///
+/// `offset` is the byte offset *into the resource's backing* at which the
+/// region's first pixel lives.  The scanout path passes 0 because its backing
+/// starts at the top-left of the image; a render-node client chooses its own,
+/// which is why this is a parameter rather than the hardcoded 0 it used to be.
+fn transfer_to_host_2d(
+    dev: &mut VirtioGpuDevice,
+    resource_id: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    offset: u64,
+) -> KernelResult<()> {
+    let req = VirtioGpuTransferToHost2d {
+        hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D),
+        r: VirtioGpuRect {
+            x,
+            y,
+            width,
+            height,
+        },
+        offset,
+        resource_id,
+        _padding: 0,
+    };
+    // SAFETY: VirtioGpuTransferToHost2d is #[repr(C)]; the slice covers
+    // exactly its size from a valid stack local.
+    let req_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &req as *const _ as *const u8,
+            core::mem::size_of::<VirtioGpuTransferToHost2d>(),
+        )
+    };
+    let resp_type = send_ctrl_cmd(
+        dev,
+        req_bytes,
+        512,
+        core::mem::size_of::<VirtioGpuCtrlHdr>(),
+    )?;
+    if resp_type != VIRTIO_GPU_RESP_OK_NODATA {
+        serial_println!("[virtio-gpu] TRANSFER_TO_HOST_2D: resp={:#x}", resp_type);
+        return Err(KernelError::IoError);
+    }
+    Ok(())
+}
+
+/// Flush a region.
+fn resource_flush(
+    dev: &mut VirtioGpuDevice,
+    resource_id: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> KernelResult<()> {
+    let req = VirtioGpuResourceFlush {
+        hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_FLUSH),
+        r: VirtioGpuRect {
+            x,
+            y,
+            width,
+            height,
+        },
+        resource_id,
+        _padding: 0,
+    };
+    // SAFETY: VirtioGpuResourceFlush is #[repr(C)]; the slice covers
+    // exactly its size from a valid stack local.
+    let req_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &req as *const _ as *const u8,
+            core::mem::size_of::<VirtioGpuResourceFlush>(),
+        )
+    };
+    let resp_type = send_ctrl_cmd(
+        dev,
+        req_bytes,
+        512,
+        core::mem::size_of::<VirtioGpuCtrlHdr>(),
+    )?;
+    if resp_type != VIRTIO_GPU_RESP_OK_NODATA {
+        serial_println!("[virtio-gpu] RESOURCE_FLUSH: resp={:#x}", resp_type);
+        return Err(KernelError::IoError);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Is the virtio-gpu device active?
+pub fn is_available() -> bool {
+    INITIALIZED.load(Ordering::Acquire)
+}
+
+/// Get display dimensions: (width, height).
+pub fn dimensions() -> (u32, u32) {
+    (
+        DISPLAY_WIDTH.load(Ordering::Acquire),
+        DISPLAY_HEIGHT.load(Ordering::Acquire),
+    )
+}
+
+/// Virtual address of the **first frame** of the scanout framebuffer.
+///
+/// # This is not a framebuffer pointer
+///
+/// The scanout is backed by [`FRAME_SIZE`]-sized frames taken one at a time
+/// from the buddy allocator ([`VirtioGpuDevice::fb_frames`]), so it is
+/// physically discontiguous in general: at 1280×800 it is 250 unrelated
+/// frames. Only the first `FRAME_SIZE` bytes from this address belong to the
+/// framebuffer. Byte `FRAME_SIZE` is not the framebuffer's byte `FRAME_SIZE`,
+/// it is whatever the allocator placed next — other frames, heap slabs, page
+/// cache.
+///
+/// The name says `first_frame` rather than `framebuffer` because the old name
+/// (`framebuffer_addr`) invited exactly that arithmetic and got it: both
+/// virtio-gpu blit paths in `drm::driver` computed `base + row * pitch` and
+/// wrote ~4 MiB of pixels across arbitrary kernel memory. See
+/// `known-issues.md` → `B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE`.
+///
+/// **To write pixels, use [`with_scanout`]**, which walks the frame list and
+/// clamps to the end of the buffer. This accessor exists only for a bounded
+/// read or write *within the first frame* (the self-test's pixel read-back)
+/// and for reporting the address to a human.
+#[must_use]
+pub fn first_frame_addr() -> Option<u64> {
+    let guard = DEVICE.lock();
+    let dev = guard.as_ref()?;
+    let first = dev.fb_frames.first()?;
+    first.addr().checked_add(dev.hhdm_offset)
+}
+
+/// How many frames back the scanout framebuffer.
+#[must_use]
+pub fn scanout_frame_count() -> usize {
+    let guard = DEVICE.lock();
+    guard.as_ref().map_or(0, |dev| dev.fb_frames.len())
+}
+
+/// A borrowed, bounds-checked view of the scanout framebuffer's backing store.
+///
+/// Handed to the closure passed to [`with_scanout`]. It exists so that the one
+/// fact callers keep getting wrong — that the framebuffer is a *list of
+/// frames*, not a flat buffer — is expressed once, here, instead of being
+/// re-derived (and mis-derived) at every blit site.
+pub struct ScanoutMem<'a> {
+    frames: &'a [PhysFrame],
+    hhdm: u64,
+    width: u32,
+    height: u32,
+}
+
+impl ScanoutMem<'_> {
+    /// Display width in pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Display height in pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Bytes per row. The scanout is always 32 bits per pixel.
+    #[must_use]
+    pub const fn pitch(&self) -> usize {
+        (self.width as usize).saturating_mul(4)
+    }
+
+    /// Total addressable size of the framebuffer, in bytes.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.pitch().saturating_mul(self.height as usize)
+    }
+
+    /// Whether the framebuffer has no addressable bytes.
+    ///
+    /// Present because `clippy::len_without_is_empty` requires it beside
+    /// [`Self::len`], not because anything calls it: a scanout with no bytes
+    /// means no device, which callers learn from [`with_scanout`] returning
+    /// `None`.
+    #[must_use]
+    #[allow(dead_code)]
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Copy `len` bytes from `src` into the framebuffer at byte offset
+    /// `dst_offset`, splitting the copy at every frame boundary it crosses.
+    ///
+    /// Bytes that would fall past the end of the framebuffer — or into a frame
+    /// the list does not have — are **discarded, not written**. A caller that
+    /// gets its arithmetic wrong therefore draws a wrong picture rather than
+    /// corrupting the kernel, which is the whole point of routing blits
+    /// through here.
+    ///
+    /// Returns the number of bytes actually written.
+    ///
+    /// # Safety
+    ///
+    /// `src` must be valid for reads of `len` bytes and must not alias the
+    /// framebuffer.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub unsafe fn write_at(&self, dst_offset: usize, src: *const u8, len: usize) -> usize {
+        let total = self.len();
+        if dst_offset >= total {
+            return 0;
+        }
+        // Saturating, not wrapping: `len` comes from pixel arithmetic that a
+        // caller could overflow, and the clamp to `total` is the bound that
+        // matters.
+        let end = dst_offset.saturating_add(len).min(total);
+        let mut off = dst_offset;
+        let mut done = 0usize;
+        while off < end {
+            let idx = off / FRAME_SIZE;
+            let within = off % FRAME_SIZE;
+            let Some(pf) = self.frames.get(idx) else {
+                break;
+            };
+            let n = (FRAME_SIZE - within).min(end - off);
+            // SAFETY: `src + done` is within the caller's `len` bytes because
+            // `done < len`. The destination is `pf`'s HHDM mapping at
+            // `within < FRAME_SIZE`, and `n <= FRAME_SIZE - within`, so the
+            // write stays inside that one frame. The caller guarantees no
+            // aliasing.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src.add(done),
+                    (pf.addr() + self.hhdm + within as u64) as *mut u8,
+                    n,
+                );
+            }
+            off += n;
+            done += n;
+        }
+        done
+    }
+}
+
+/// Run `f` with a bounds-checked view of the scanout framebuffer.
+///
+/// Returns `None` if there is no device.
+///
+/// ## The device lock is held for the whole of `f`
+///
+/// `f` must not call back into this module — in particular it must not flush;
+/// do that after this returns. `DEVICE` is a plain spin lock and would
+/// deadlock, not re-enter.
+///
+/// Holding it across a full-surface blit is deliberate. The frame list it
+/// lends out is `dev.fb_frames`, and the previous API handed out a bare
+/// address under the lock and then wrote through it after releasing — so a
+/// concurrent mode-set that replaced `fb_frames` would have left the blit
+/// writing into freed frames. Nothing in an interrupt or panic path touches
+/// this device (the only callers outside `drm::driver` are `kshell`, in task
+/// context), and `flush_rect`/`flush_full` already hold the same lock across a
+/// virtqueue round-trip to the host, which is far longer than a memcpy — so
+/// this widens no window that was not already wider elsewhere.
+pub fn with_scanout<R>(f: impl FnOnce(&ScanoutMem<'_>) -> R) -> Option<R> {
+    let guard = DEVICE.lock();
+    let dev = guard.as_ref()?;
+    let view = ScanoutMem {
+        frames: &dev.fb_frames,
+        hhdm: dev.hhdm_offset,
+        width: dev.width,
+        height: dev.height,
+    };
+    Some(f(&view))
+}
+
+/// Write a pixel. Does NOT auto-flush.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn set_pixel(x: u32, y: u32, color: u32) {
+    let guard = DEVICE.lock();
+    let dev = match guard.as_ref() {
+        Some(d) => d,
+        None => return,
+    };
+    if x >= dev.width || y >= dev.height {
+        return;
+    }
+
+    let offset = ((y as usize) * (dev.width as usize) + (x as usize)) * 4;
+    let frame_idx = offset / FRAME_SIZE;
+    let frame_offset = offset % FRAME_SIZE;
+
+    if let Some(frame) = dev.fb_frames.get(frame_idx) {
+        let virt = (frame.addr() + dev.hhdm_offset) as *mut u8;
+        // SAFETY: frame_offset < FRAME_SIZE (since offset < total_bytes =
+        // width*height*4, and frame_idx/frame_offset partition it into
+        // FRAME_SIZE chunks).  We use volatile because the framebuffer
+        // memory is accessed by the GPU device.
+        unsafe {
+            core::ptr::write_volatile(virt.add(frame_offset) as *mut u32, color);
+        }
+    }
+}
+
+/// Read a pixel back out of the scanout, walking the frame list the same way
+/// [`set_pixel`] does.
+///
+/// Returns `None` if there is no device or the coordinate is off-screen. This
+/// is a verification path, not a drawing one: it exists so a self-test can
+/// prove a blit landed where it claimed to, including in the *last* frame.
+#[must_use]
+#[allow(clippy::arithmetic_side_effects)]
+pub fn read_pixel(x: u32, y: u32) -> Option<u32> {
+    let guard = DEVICE.lock();
+    let dev = guard.as_ref()?;
+    if x >= dev.width || y >= dev.height {
+        return None;
+    }
+    let offset = ((y as usize) * (dev.width as usize) + (x as usize)) * 4;
+    let frame = dev.fb_frames.get(offset / FRAME_SIZE)?;
+    let within = offset % FRAME_SIZE;
+    let virt = (frame.addr() + dev.hhdm_offset) as *const u8;
+    // SAFETY: `within + 4 <= FRAME_SIZE` because a pixel offset is 4-aligned
+    // and `FRAME_SIZE` is a multiple of 4, so the read stays inside the frame
+    // the index selected. Volatile because the device also reads this memory.
+    Some(unsafe { core::ptr::read_volatile(virt.add(within).cast::<u32>()) })
+}
+
+/// Flush a rectangular region to host.
+pub fn flush_rect(x: u32, y: u32, width: u32, height: u32) -> KernelResult<()> {
+    let mut guard = DEVICE.lock();
+    let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
+    let rid = dev.resource_id;
+    if rid == 0 {
+        return Err(KernelError::NoSuchDevice);
+    }
+    transfer_to_host_2d(dev, rid, x, y, width, height, 0)?;
+    resource_flush(dev, rid, x, y, width, height)
+}
+
+/// Flush the entire display.
+pub fn flush_full() -> KernelResult<()> {
+    let (w, h) = dimensions();
+    if w == 0 || h == 0 {
+        return Err(KernelError::NoSuchDevice);
+    }
+    flush_rect(0, 0, w, h)
+}
+
+/// Fill with a solid color and flush.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn fill(color: u32) -> KernelResult<()> {
+    let mut guard = DEVICE.lock();
+    let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
+    let rid = dev.resource_id;
+    let (width, height) = (dev.width, dev.height);
+    if rid == 0 {
+        return Err(KernelError::NoSuchDevice);
+    }
+
+    let total_pixels = (width as usize) * (height as usize);
+    let total_bytes = total_pixels * 4;
+    let mut filled = 0usize;
+
+    for frame in &dev.fb_frames {
+        let virt = (frame.addr() + dev.hhdm_offset) as *mut u32;
+        let remaining = total_bytes.saturating_sub(filled);
+        let pixels = remaining.min(FRAME_SIZE) / 4;
+        // SAFETY: pixels * 4 <= FRAME_SIZE, so all writes stay within
+        // the allocated frame.  Volatile because the GPU reads this memory.
+        unsafe {
+            for p in 0..pixels {
+                core::ptr::write_volatile(virt.add(p), color);
+            }
+        }
+        filled = filled.wrapping_add(pixels * 4);
+    }
+
+    transfer_to_host_2d(dev, rid, 0, 0, width, height, 0)?;
+    resource_flush(dev, rid, 0, 0, width, height)
+}
+
+// ---------------------------------------------------------------------------
+// Render-node resources
+// ---------------------------------------------------------------------------
+//
+// Everything above this line serves the *scanout*: one resource, created at
+// init, wired to a display, owned by the kernel.  A DRM render node
+// (`/dev/dri/renderD128`) needs something different -- resources created on
+// demand by a userspace client, with their own guest backing, never scanned
+// out.  `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE` and friends land here.
+//
+// **Lock order: `RESOURCES` before `DEVICE`.**  Every entry point below takes
+// `RESOURCES`, decides what to do, and only then takes `DEVICE` to issue the
+// command.  Nothing in this file takes them the other way round.  A caller that
+// did would deadlock against a concurrent create.
+//
+// **Backing is allocated zeroed, and that is load-bearing, not tidiness.** A
+// resource's frames are handed to the host (`RESOURCE_ATTACH_BACKING`) and are
+// mapped into a userspace process.  Recycled kernel frames still hold whatever
+// the previous owner left in them, so anything but `alloc_frame_zeroed` leaks
+// kernel memory to both a ring-3 client and the hypervisor.
+
+/// One render-node resource: a host-side 2D resource plus the guest frames
+/// backing it.
+struct Resource {
+    /// Device-scope resource id, allocated from the same counter as the
+    /// scanout's so the two can never collide.
+    id: u32,
+    width: u32,
+    height: u32,
+    /// virtio-gpu format code (`VIRTIO_GPU_FORMAT_*`), as given by the client.
+    format: u32,
+    /// Guest frames attached as this resource's backing store.  Freed on unref.
+    frames: alloc::vec::Vec<PhysFrame>,
+    /// Logical size in bytes (`width * height * 4`).  Always `<=` the frames'
+    /// total capacity, which is rounded up to a whole number of frames.
+    bytes: usize,
+}
+
+/// All live render-node resources.  See the lock-order note above.
+static RESOURCES: spin::Mutex<alloc::vec::Vec<Resource>> = spin::Mutex::new(alloc::vec::Vec::new());
+
+/// What [`resource_info`] reports about a live resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceInfo {
+    /// Width in pixels, as created.
+    pub width: u32,
+    /// Height in pixels, as created.
+    pub height: u32,
+    /// virtio-gpu format code the resource was created with.
+    pub format: u32,
+    /// Logical byte size of the image (`width * height * 4`).
+    pub bytes: usize,
+    /// Byte size actually reserved -- `bytes` rounded up to whole frames.
+    /// This, not `bytes`, is what a client may map.
+    pub mapped_bytes: usize,
+}
+
+/// Largest resource the single DMA control frame can describe a backing for.
+///
+/// `RESOURCE_ATTACH_BACKING` sends one [`VirtioGpuMemEntry`] per frame in one
+/// request, and that request shares the control frame with its response.  A
+/// client asking for more gets `InvalidArgument` rather than a resource whose
+/// tail is never actually attached.
+const MAX_RESOURCE_FRAMES: usize = (FRAME_SIZE
+    - core::mem::size_of::<VirtioGpuResourceAttachBacking>()
+    - core::mem::size_of::<VirtioGpuCtrlHdr>()
+    - 64)
+    / core::mem::size_of::<VirtioGpuMemEntry>();
+
+/// Create a guest-backed 2D resource for a render-node client.
+///
+/// Allocates zeroed backing, creates the host resource, and attaches the
+/// backing to it.  Returns the new resource id.
+///
+/// # Errors
+///
+/// Reports `NoSuchDevice` if no GPU is initialised, `InvalidArgument` for
+/// degenerate or too-large geometry, `OutOfMemory` if the backing cannot be
+/// allocated, and `IoError` if the device rejects a command.  Every error path
+/// frees whatever it allocated: a half-built resource would otherwise sit in
+/// the table holding memory no client can reach or release.
+pub fn resource_create_2d(width: u32, height: u32, format: u32) -> KernelResult<u32> {
+    if !INITIALIZED.load(Ordering::Acquire) {
+        return Err(KernelError::NoSuchDevice);
+    }
+    // Reject degenerate and overflowing geometry up front: `width * height * 4`
+    // is computed below and must not wrap.  The dimensions are 32-bit in the
+    // ABI, so the multiply is done in `u64` and range-checked, not trusted.
+    if width == 0 || height == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let bytes_u64 = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|p| p.checked_mul(4))
+        .ok_or(KernelError::InvalidArgument)?;
+    let bytes = usize::try_from(bytes_u64).map_err(|_| KernelError::InvalidArgument)?;
+    let num_frames = bytes.div_ceil(FRAME_SIZE);
+    if num_frames > MAX_RESOURCE_FRAMES {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Zeroed, for the reason in the section comment above.
+    let mut frames: alloc::vec::Vec<PhysFrame> = alloc::vec::Vec::new();
+    frames
+        .try_reserve(num_frames)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    for _ in 0..num_frames {
+        match frame::alloc_frame_zeroed() {
+            Ok(f) => frames.push(f),
+            Err(e) => {
+                for f in &frames {
+                    // Best effort: we are already unwinding an allocation
+                    // failure and have nothing better to report than `e`.
+                    // SAFETY: every frame in `frames` came from
+                    // `alloc_frame_zeroed` in this loop, has not been freed,
+                    // and is referenced by nothing -- the resource table push
+                    // and the ATTACH_BACKING command are both still ahead.
+                    let _ = unsafe { frame::free_frame(*f) };
+                }
+                return Err(e);
+            }
+        }
+    }
+    let addrs: alloc::vec::Vec<u64> = frames.iter().map(|f| f.addr()).collect();
+
+    // Lock order: RESOURCES, then DEVICE.
+    let mut table = RESOURCES.lock();
+    let mut guard = DEVICE.lock();
+    let Some(dev) = guard.as_mut() else {
+        drop(guard);
+        drop(table);
+        for f in &frames {
+            // The device vanished between the check and here; nothing was
+            // attached, so the frames are ours to release.
+            // SAFETY: allocated above by `alloc_frame_zeroed`, freed once, and
+            // unreferenced -- no host command has named them.
+            let _ = unsafe { frame::free_frame(*f) };
+        }
+        return Err(KernelError::NoSuchDevice);
+    };
+
+    let id = dev.next_resource_id;
+    dev.next_resource_id = dev.next_resource_id.wrapping_add(1);
+
+    let req = VirtioGpuResourceCreate2d {
+        hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_CREATE_2D),
+        resource_id: id,
+        format,
+        width,
+        height,
+    };
+    // SAFETY: VirtioGpuResourceCreate2d is #[repr(C)], so its byte layout
+    // matches the virtio wire format; the slice covers exactly its size from a
+    // valid stack local that outlives the call.
+    let req_bytes = unsafe {
+        core::slice::from_raw_parts(
+            core::ptr::from_ref(&req).cast::<u8>(),
+            core::mem::size_of::<VirtioGpuResourceCreate2d>(),
+        )
+    };
+    let created = send_ctrl_cmd(
+        dev,
+        req_bytes,
+        512,
+        core::mem::size_of::<VirtioGpuCtrlHdr>(),
+    )
+    .and_then(|resp| {
+        if resp == VIRTIO_GPU_RESP_OK_NODATA {
+            Ok(())
+        } else {
+            serial_println!("[virtio-gpu] render RESOURCE_CREATE_2D: resp={:#x}", resp);
+            Err(KernelError::IoError)
+        }
+    })
+    .and_then(|()| attach_backing_addrs(dev, id, &addrs));
+
+    if let Err(e) = created {
+        // The host may or may not hold a resource by now -- CREATE can succeed
+        // and ATTACH fail.  Unref is harmless if it does not, and leaking a
+        // host resource if it does would be worse, so it is always attempted.
+        // The original error `e` is the one worth reporting, not this one.
+        let _ = resource_unref_locked(dev, id);
+        drop(guard);
+        drop(table);
+        for f in &frames {
+            // Nothing references these now: the table push below never ran,
+            // and the RESOURCE_UNREF above told the host to drop any backing
+            // it had accepted.
+            // SAFETY: allocated above by `alloc_frame_zeroed` and freed once.
+            let _ = unsafe { frame::free_frame(*f) };
+        }
+        return Err(e);
+    }
+    drop(guard);
+
+    table.try_reserve(1).map_err(|_| KernelError::OutOfMemory)?;
+    table.push(Resource {
+        id,
+        width,
+        height,
+        format,
+        frames,
+        bytes,
+    });
+    Ok(id)
+}
+
+/// Send `RESOURCE_UNREF` for `id`.  Caller holds the device lock.
+fn resource_unref_locked(dev: &mut VirtioGpuDevice, id: u32) -> KernelResult<()> {
+    let req = VirtioGpuResourceUnref {
+        hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_UNREF),
+        resource_id: id,
+        _padding: 0,
+    };
+    // SAFETY: VirtioGpuResourceUnref is #[repr(C)]; the slice covers exactly
+    // its size from a valid stack local that outlives the call.
+    let req_bytes = unsafe {
+        core::slice::from_raw_parts(
+            core::ptr::from_ref(&req).cast::<u8>(),
+            core::mem::size_of::<VirtioGpuResourceUnref>(),
+        )
+    };
+    let resp = send_ctrl_cmd(
+        dev,
+        req_bytes,
+        512,
+        core::mem::size_of::<VirtioGpuCtrlHdr>(),
+    )?;
+    if resp == VIRTIO_GPU_RESP_OK_NODATA {
+        Ok(())
+    } else {
+        serial_println!("[virtio-gpu] RESOURCE_UNREF: resp={:#x}", resp);
+        Err(KernelError::IoError)
+    }
+}
+
+/// Destroy a render-node resource and free its backing.
+///
+/// # Errors
+///
+/// Unknown ids report `InvalidArgument` -- a client may only unref a resource
+/// that exists, and the DRM layer additionally checks that it is *that
+/// client's*.  The frames are freed even when the host command fails, because
+/// the alternative is leaking guest memory on every failed teardown; the host
+/// error is still returned.
+pub fn resource_unref(id: u32) -> KernelResult<()> {
+    let mut table = RESOURCES.lock();
+    let Some(pos) = table.iter().position(|r| r.id == id) else {
+        return Err(KernelError::InvalidArgument);
+    };
+    let res = table.swap_remove(pos);
+    let mut guard = DEVICE.lock();
+    let host = match guard.as_mut() {
+        Some(dev) => resource_unref_locked(dev, id),
+        None => Err(KernelError::NoSuchDevice),
+    };
+    drop(guard);
+    drop(table);
+    for f in &res.frames {
+        // Freed regardless of `host`; see the doc comment.
+        // SAFETY: these frames were allocated by `resource_create_2d` via
+        // `alloc_frame_zeroed`; `swap_remove` above took the resource out of
+        // the table under the lock, so this is the only path that can free
+        // them and it runs exactly once.
+        let _ = unsafe { frame::free_frame(*f) };
+    }
+    host
+}
+
+/// Report a live resource's geometry, or `None` if `id` is not a resource.
+#[must_use]
+pub fn resource_info(id: u32) -> Option<ResourceInfo> {
+    let table = RESOURCES.lock();
+    table.iter().find(|r| r.id == id).map(|r| ResourceInfo {
+        width: r.width,
+        height: r.height,
+        format: r.format,
+        bytes: r.bytes,
+        mapped_bytes: r.frames.len().saturating_mul(FRAME_SIZE),
+    })
+}
+
+/// Physical addresses of a resource's backing frames, in image order.
+///
+/// This is what the mmap path needs in order to build a userspace mapping of
+/// the resource.  Returns `None` for an unknown id.
+#[must_use]
+pub fn resource_backing(id: u32) -> Option<alloc::vec::Vec<u64>> {
+    let table = RESOURCES.lock();
+    table
+        .iter()
+        .find(|r| r.id == id)
+        .map(|r| r.frames.iter().map(|f| f.addr()).collect())
+}
+
+/// Push a rectangle of a resource's guest backing to the host copy.
+///
+/// # Errors
+///
+/// The rectangle is validated against the resource's own geometry, not against
+/// the display's -- a render resource has no relationship to the scanout.  An
+/// out-of-bounds rectangle reports `InvalidArgument` rather than being clamped,
+/// because a client that asked to transfer more than it created has a bug that
+/// clamping would hide.
+pub fn resource_transfer_to_host(
+    id: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    offset: u64,
+) -> KernelResult<()> {
+    let table = RESOURCES.lock();
+    let Some(res) = table.iter().find(|r| r.id == id) else {
+        return Err(KernelError::InvalidArgument);
+    };
+    // Bounds: x+width and y+height must fit, computed in u64 so a client
+    // cannot wrap them past the check.
+    let right = u64::from(x).saturating_add(u64::from(width));
+    let bottom = u64::from(y).saturating_add(u64::from(height));
+    if width == 0
+        || height == 0
+        || right > u64::from(res.width)
+        || bottom > u64::from(res.height)
+        || offset > res.bytes as u64
+    {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut guard = DEVICE.lock();
+    let Some(dev) = guard.as_mut() else {
+        return Err(KernelError::NoSuchDevice);
+    };
+    transfer_to_host_2d(dev, id, x, y, width, height, offset)
+}
+
+/// Status string for diagnostics.
+#[allow(dead_code)]
+pub fn status_info() -> &'static str {
+    if INITIALIZED.load(Ordering::Acquire) {
+        "virtio-gpu: active"
+    } else {
+        "virtio-gpu: not present"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Self-test: verify detection and basic operations.
+pub fn self_test() {
+    serial_println!("[virtio-gpu] Running self-test...");
+
+    let available = is_available();
+    serial_println!("[virtio-gpu]   is_available: {}", available);
+
+    if !available {
+        serial_println!("[virtio-gpu] Self-test PASSED (no device)");
+        return;
+    }
+
+    let (w, h) = dimensions();
+    serial_println!("[virtio-gpu]   Dimensions: {}x{}", w, h);
+
+    if let Some(addr) = first_frame_addr() {
+        serial_println!(
+            "[virtio-gpu]   FB: {} frame(s), first at {:#x}",
+            scanout_frame_count(),
+            addr
+        );
+
+        // Write a pixel, read back.
+        set_pixel(0, 0, 0xFF_FF0000);
+        // SAFETY: `addr` is the HHDM mapping of the framebuffer's *first*
+        // frame. Pixel (0, 0) is at byte 0, so reading the first u32 is inside
+        // that frame — the one offset for which this raw address is valid.
+        let pixel = unsafe { core::ptr::read_volatile(addr as *const u32) };
+        if pixel == 0xFF_FF0000 {
+            serial_println!("[virtio-gpu]   Pixel write/read: OK");
+        } else {
+            serial_println!("[virtio-gpu]   Pixel write/read: FAIL ({:#x})", pixel);
+        }
+        set_pixel(0, 0, 0xFF_000000);
+
+        // The regression test for B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE: write
+        // through the blit API at an offset in the *last* frame and read it
+        // back with `set_pixel`'s frame walk. A `write_at` that treated the
+        // buffer as flat would deposit these bytes ~4 MiB past the first frame
+        // — in someone else's memory — and the read-back would find zeros.
+        let (w, h) = dimensions();
+        if w > 0 && h > 0 {
+            let marker: u32 = 0xFF_00_BE_EF;
+            let (last_x, last_y) = (w.saturating_sub(1), h.saturating_sub(1));
+            let last_px_off = (last_y as usize)
+                .saturating_mul(w as usize)
+                .saturating_add(last_x as usize)
+                .saturating_mul(4);
+            let wrote = with_scanout(|sc| {
+                // SAFETY: `marker` is a live local, valid for 4 bytes, and is
+                // not part of the framebuffer.
+                unsafe {
+                    sc.write_at(
+                        last_px_off,
+                        core::ptr::addr_of!(marker).cast::<u8>(),
+                        core::mem::size_of::<u32>(),
+                    )
+                }
+            });
+            let back = read_pixel(last_x, last_y);
+            if wrote == Some(4) && back == Some(marker) {
+                serial_println!("[virtio-gpu]   Scanout blit reaches the last frame: OK");
+            } else {
+                serial_println!(
+                    "[virtio-gpu]   Scanout blit reaches the last frame: FAIL (wrote {wrote:?}, read {back:?})"
+                );
+            }
+            // A write past the end must be dropped, not spill into the next
+            // allocation.
+            let past = with_scanout(|sc| {
+                // SAFETY: as above.
+                unsafe {
+                    sc.write_at(
+                        sc.len(),
+                        core::ptr::addr_of!(marker).cast::<u8>(),
+                        core::mem::size_of::<u32>(),
+                    )
+                }
+            });
+            if past == Some(0) {
+                serial_println!("[virtio-gpu]   Blit past the end is refused: OK");
+            } else {
+                serial_println!("[virtio-gpu]   Blit past the end is refused: FAIL ({past:?})");
+            }
+            set_pixel(last_x, last_y, 0xFF_000000);
+        }
+    }
+
+    match flush_rect(0, 0, 1, 1) {
+        Ok(()) => serial_println!("[virtio-gpu]   flush_rect: OK"),
+        Err(e) => serial_println!("[virtio-gpu]   flush_rect: {:?}", e),
+    }
+
+    serial_println!("[virtio-gpu] Self-test PASSED");
+}
+
+/// Self-test for the render-node resource manager.
+///
+/// Exercises the driver half of the virtio-gpu render ioctls directly:
+/// creation, geometry reporting, backing enumeration, a real
+/// `TRANSFER_TO_HOST_2D` against the device, the validation that rejects
+/// out-of-range requests, and destruction — including that destruction gives
+/// the guest frames back rather than leaking them.
+///
+/// Skipped (returns `Ok`) when no device is present, since every operation
+/// here needs one.
+///
+/// # Errors
+///
+/// [`KernelError::InternalError`] on the first failed invariant.
+pub fn resource_self_test() -> KernelResult<()> {
+    macro_rules! check {
+        ($cond:expr, $msg:expr) => {
+            if !($cond) {
+                serial_println!("[virtio-gpu] RESOURCE SELF-TEST FAILED: {}", $msg);
+                return Err(KernelError::InternalError);
+            }
+        };
+    }
+
+    if !is_available() {
+        serial_println!("[virtio-gpu] Skipping resource self-test — no device.");
+        return Ok(());
+    }
+    serial_println!("[virtio-gpu] Running render-resource self-test...");
+
+    // Degenerate geometry is refused before anything is allocated.
+    check!(
+        resource_create_2d(0, 64, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM).is_err(),
+        "zero width is rejected"
+    );
+    check!(
+        resource_create_2d(64, 0, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM).is_err(),
+        "zero height is rejected"
+    );
+    // Larger than one control frame can describe a backing for.  At 4096 px a
+    // row is 16 KiB — exactly one frame — so `MAX_RESOURCE_FRAMES + 1` rows is
+    // the smallest geometry over the bound.  Derived from the real constant so
+    // this stays honest if MAX_RESOURCE_FRAMES ever changes, and deliberately
+    // *one* frame over rather than absurdly large, since a wildly out-of-range
+    // request would also be caught by the `checked_mul` above it and would not
+    // prove this bound is enforced at all.
+    let too_tall = u32::try_from(MAX_RESOURCE_FRAMES.saturating_add(1)).unwrap_or(u32::MAX);
+    check!(
+        resource_create_2d(4096, too_tall, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM).is_err(),
+        "a resource one frame over the backing-descriptor bound is rejected"
+    );
+    // ...and the largest one that *does* fit is accepted, so the bound is not
+    // accidentally off by one in the other direction.
+    let at_limit = u32::try_from(MAX_RESOURCE_FRAMES).unwrap_or(u32::MAX);
+    match resource_create_2d(4096, at_limit, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM) {
+        Ok(id) => resource_unref(id)?,
+        Err(e) => {
+            serial_println!(
+                "[virtio-gpu] RESOURCE SELF-TEST FAILED: a resource exactly at the bound was \
+                 rejected: {}",
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    let free_before = frame::stats().map(|s| s.free_frames);
+
+    // 64x64x4 = 16 KiB — exactly one frame, so the frame accounting below is
+    // unambiguous.
+    let id = resource_create_2d(64, 64, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM)?;
+
+    let info = match resource_info(id) {
+        Some(i) => i,
+        None => {
+            serial_println!("[virtio-gpu] RESOURCE SELF-TEST FAILED: created id has no info");
+            return Err(KernelError::InternalError);
+        }
+    };
+    check!(
+        info.width == 64 && info.height == 64,
+        "geometry round-trips"
+    );
+    check!(info.bytes == 64 * 64 * 4, "logical size is width*height*4");
+    check!(
+        info.mapped_bytes == FRAME_SIZE,
+        "16 KiB of pixels occupies exactly one frame"
+    );
+    check!(
+        info.format == VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+        "format round-trips"
+    );
+
+    let backing = match resource_backing(id) {
+        Some(b) => b,
+        None => {
+            serial_println!("[virtio-gpu] RESOURCE SELF-TEST FAILED: created id has no backing");
+            return Err(KernelError::InternalError);
+        }
+    };
+    check!(backing.len() == 1, "one frame of backing");
+
+    // The backing must arrive zeroed: these frames are both handed to the host
+    // and (via MAP) mapped into a ring-3 process, so a recycled frame's old
+    // contents would leak kernel memory in two directions at once.
+    if let Some(hhdm) = crate::mm::page_table::hhdm() {
+        if let Some(&pa) = backing.first() {
+            if let Some(va) = pa.checked_add(hhdm) {
+                // SAFETY: `pa` is a frame this module just allocated and still
+                // owns; the HHDM maps all physical memory, so `va` is a valid
+                // readable/writable kernel address for FRAME_SIZE bytes.
+                let nonzero = unsafe {
+                    core::slice::from_raw_parts(va as *const u8, FRAME_SIZE)
+                        .iter()
+                        .any(|b| *b != 0)
+                };
+                check!(!nonzero, "fresh backing is zeroed");
+                // Write a pattern so the transfer below moves real bytes
+                // rather than a page of zeros the host may special-case.
+                // SAFETY: as above — we own the frame exclusively.
+                unsafe {
+                    core::ptr::write_bytes(va as *mut u8, 0xA5, FRAME_SIZE);
+                }
+            }
+        }
+    }
+
+    // A real command to the device, not a simulated one.
+    resource_transfer_to_host(id, 0, 0, 64, 64, 0)?;
+    // And a partial rectangle, which is the interesting case for the offset.
+    resource_transfer_to_host(id, 8, 8, 16, 16, 0)?;
+
+    // Validation: a rectangle that leaves the resource is refused, not clamped.
+    check!(
+        resource_transfer_to_host(id, 0, 0, 65, 64, 0).is_err(),
+        "a too-wide transfer is rejected"
+    );
+    check!(
+        resource_transfer_to_host(id, 60, 60, 8, 8, 0).is_err(),
+        "a transfer running off the right/bottom edge is rejected"
+    );
+    check!(
+        resource_transfer_to_host(id, 0, 0, 64, 64, u64::MAX).is_err(),
+        "an out-of-range offset is rejected"
+    );
+    check!(
+        resource_transfer_to_host(id.wrapping_add(0x1000), 0, 0, 1, 1, 0).is_err(),
+        "an unknown resource id is rejected"
+    );
+
+    resource_unref(id)?;
+    check!(resource_info(id).is_none(), "unref removes the resource");
+    check!(
+        resource_backing(id).is_none(),
+        "unref removes the backing mapping"
+    );
+    check!(
+        resource_unref(id).is_err(),
+        "a second unref reports an unknown id rather than double-freeing"
+    );
+
+    // The frames came back.  Compared rather than asserted-equal-to-a-constant
+    // because other CPUs may allocate concurrently; a *decrease* would still
+    // catch the leak this checks for.
+    if let (Some(before), Some(after)) = (free_before, frame::stats().map(|s| s.free_frames)) {
+        check!(
+            after >= before,
+            "unref returned the backing frames to the allocator"
+        );
+    }
+
+    serial_println!("[virtio-gpu] render-resource self-test PASSED");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::arithmetic_side_effects)]
+const fn align_up(value: usize, align: usize) -> usize {
+    (value + align - 1) & !(align - 1)
+}

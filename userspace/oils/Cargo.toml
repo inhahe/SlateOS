@@ -1,0 +1,48 @@
+[package]
+name = "oils"
+version = "0.1.0"
+edition = "2024"
+description = "Oils (OSH) — a bash/POSIX-superset shell for SlateOS (Rust reimplementation; see design-decisions.md §72)"
+
+[[bin]]
+name = "osh"
+path = "src/main.rs"
+
+[lib]
+name = "osh"
+path = "src/lib.rs"
+
+[dependencies]
+# `alloc` and not `std`, though the shell is unambiguously a `std` program.
+# `bstr/std` buys `io`-shaped helpers (`BufRead::byte_lines`, `io::Error` impls)
+# that nothing here calls; what the shell actually uses — `find`, `replace`,
+# `split_str`, `lines`, `chars`, `char_indices` — needs `alloc` at most.
+#
+# Asking for the smaller set matters because of a crate that is not this one.
+# `ere` links into `kernel`, which is `no_std`, and Cargo unions a dependency's
+# features across a build graph: one `bstr/std` anywhere in the kernel's graph
+# would be `bstr/std` in the kernel too, however carefully `ere/Cargo.toml` was
+# written. The two crates are in separate graphs today, so this is belt as well
+# as braces — but it is a one-word belt.
+bstr = { version = "1.13.0", default-features = false, features = ["alloc"] }
+
+# The POSIX regex engine, shared with the coreutils. It was `src/ere.rs` here
+# until `grep`, `sed`, `awk` and `expr` were each found to be matching regular
+# expressions with `str::contains`; a shell's `[[ =~ ]]` and a `grep` on the
+# same machine disagreeing about what `[a-z]` matches is a real divergence, not
+# a cosmetic one. Same reasoning as `tzrules` below — and it carries the
+# character model (`ere::ch`) that `bytes` re-exports, for the same reason.
+ere = { path = "../ere" }
+
+# `wcwidth`, shared with the coreutils. It was the bulk of `src/width.rs` here
+# until `wc -L` needed the same answer. A `select` menu and a `wc -L` count are
+# measuring the same terminal, so a second copy of the Unicode tables would be a
+# second opinion about how wide U+4E00 is. Same reasoning as `ere` above.
+charwidth = { path = "../charwidth" }
+
+# The POSIX `TZ`-string engine, shared verbatim with the libc (`posix`). osh
+# renders broken-down time itself — `printf '%(FMT)T'` and the `\D{…}` prompt
+# escapes never call `strftime` — so without a shared engine the shell and every
+# C program on the machine would disagree about what local time is. See
+# tzrules/src/lib.rs's "Why this is a crate and not a module".
+tzrules = { path = "../../tzrules" }

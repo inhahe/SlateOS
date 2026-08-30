@@ -1,0 +1,209 @@
+ ## 1. Shared memory
+
+        The fastest possible IPC. Two processes map the same physical pages into their address spaces. After the
+        one-time kernel setup, communication is just memory reads and writes — no kernel involvement, no copying.
+
+        **How it works:** Process A calls a syscall to create a shared memory region. The kernel allocates physical
+        pages and maps them into A's address space. Process B requests access, the kernel maps the same physical pages
+        into B's address space. Now both processes read and write the same memory directly.
+
+        **The catch:** You need a synchronization mechanism on top. Two processes writing to the same memory without
+        coordination means data corruption. Typical approaches:
+
+        - **Lock-free ring buffers** — producer writes to one slot, advances a write pointer (atomic operation),
+        consumer reads from another slot, advances a read pointer. No locks, no kernel involvement per message. This is
+        what io_uring, LMAX Disruptor, and high-frequency trading systems use. Throughput: hundreds of millions of
+        messages per second.
+        - **Futex-based signaling** — when the ring buffer is empty, the consumer needs to sleep instead of
+        busy-waiting. Futexes let you sleep on a memory address and wake up when another process writes to it. The fast
+        path (buffer not empty) is pure userspace. The slow path (need to sleep) is one syscall.
+        - **Sequence locks (seqlocks)** — good for one writer, many readers. Writer increments a sequence number before
+        and after writing. Reader reads the sequence number, reads the data, reads the sequence number again — if it
+        changed or is odd, the data was being modified, retry. No locks at all, readers never block the writer.
+
+        **Where it's used:** Database shared buffer pools, audio/video streaming between processes (PulseAudio,
+        PipeWire), GPU buffer sharing (DMA-BUF), memory-mapped files for inter-process data sharing.
+
+        **Latency:** ~10-50 nanoseconds per message (just memory access + atomic operation). Nothing else comes close.
+
+        **Downside:** No capability transfer, no built-in framing (you have to design your own protocol), no
+        cross-machine support, requires trust between processes (a malicious process can corrupt shared data).
+
+        ## 2. Message passing with channels
+
+        A process sends a structured message through a kernel-managed channel. The kernel copies the message from sender
+        to receiver (or transfers page ownership to avoid copying).
+
+        **How it works:** The kernel maintains a channel object with a send queue and a receive queue. Sender writes a
+        message, kernel copies it (or remaps the pages), receiver reads it. The kernel can enforce capability checks,
+        size limits, and ordering.
+
+        **Variants:**
+
+        - **Synchronous (rendezvous)** — sender blocks until receiver reads the message. Used by L4 microkernels.
+        Extremely fast because no buffering is needed — the kernel copies directly from sender's buffer to receiver's
+        buffer in one operation. L4/seL4 achieves ~500-1000 cycles for a synchronous IPC round trip.
+        - **Asynchronous (buffered)** — sender writes to a buffer and continues immediately. Receiver reads when ready.
+        More flexible but requires buffer management and the kernel must handle buffer-full conditions.
+        - **Capability-passing** — the message can contain capability handles. The kernel transfers the capability from
+        sender's table to receiver's table. This is how Fuchsia, seL4, and Mach pass access rights between processes.
+
+        **Where it's used:** Fuchsia (channels), Mach/macOS (Mach ports), QNX (message passing is the entire OS model),
+        seL4.
+
+        **Latency:** ~1-10 microseconds depending on message size and whether it's synchronous.
+
+        **Key optimization — page flipping:** For large messages, instead of copying data, the kernel remaps the
+        physical page from sender's address space into receiver's address space. Sender loses access to the page,
+        receiver gains it. Cost: a few page table operations instead of copying megabytes. Mach did this (but it was
+        complex and had performance problems in practice due to COW overhead).
+
+        **Key optimization — fast-path register passing:** For tiny messages (a few words), L4 microkernels pass the
+        message entirely in CPU registers during the context switch from sender to receiver. No memory access at all.
+        This is how L4 achieves its famous ~100-cycle IPC on some architectures.
+
+        ## 3. Pipes (byte streams)
+
+        An unstructured, unidirectional byte stream between two processes. One end writes bytes, the other reads bytes.
+        Kernel buffers data in between.
+
+        **How it works:** The kernel allocates a buffer (typically 64 KiB on Linux). Writer appends bytes to the buffer.
+        Reader consumes bytes from the buffer. If the buffer is full, writer blocks (or returns EAGAIN in non-blocking
+        mode). If empty, reader blocks.
+
+        **Why they still matter:** Pipes are the simplest IPC and compose beautifully in shells (`ls | grep foo | wc
+        -l`). For serial byte-stream data (log output, process stdin/stdout, network proxying), they're the right
+        abstraction.
+
+        **Splice/vmsplice optimization (Linux):** Instead of copying data from pipe buffer to/from userspace, `splice`
+        moves pages between a pipe and a file descriptor (or between two pipes) without copying to userspace at all. The
+        kernel just moves buffer references. `vmsplice` maps userspace pages directly into the pipe buffer. This makes
+        pipes nearly zero-copy for large transfers.
+
+        **Latency:** ~1-5 microseconds per read/write syscall. Throughput limited by buffer size and syscall overhead —
+        typically 2-5 GB/s.
+
+        ## 4. Unix domain sockets
+
+        Like network sockets but local-only. Support both byte streams (like pipes but bidirectional) and datagrams
+        (message boundaries preserved).
+
+        **How it works:** Two processes connect via a filesystem path or an anonymous pair. The kernel manages
+        send/receive buffers. Supports `sendmsg`/`recvmsg` with ancillary data (can pass file descriptors, credentials).
+
+        **Why they matter:** They're the workhorse IPC on Linux/macOS. D-Bus runs on top of them. Wayland uses them. X11
+        uses them. They support passing file descriptors between processes (the kernel moves the descriptor from one
+        process's table to another's), which is a limited form of capability passing.
+
+        **Performance trick — `SO_PASSCRED`:** The kernel can automatically attach the sender's credentials (PID, UID,
+        GID) to each message, so the receiver can authenticate without a separate auth protocol.
+
+        **Latency:** Similar to pipes for data, plus extra overhead for socket bookkeeping. ~2-10 microseconds.
+
+        ## 5. Signal-based notification
+
+        A lightweight kernel-to-process or process-to-process notification that interrupts the receiver.
+
+        **How it works:** Sender tells the kernel "send signal X to process Y." The kernel sets a bit in the target
+        process's pending signal mask. When the target is next scheduled (or immediately if it's running), the kernel
+        interrupts it and runs the signal handler.
+
+        **Unix signals are terrible for IPC.** They carry almost no data (just a signal number), they're
+        async-signal-unsafe (most library functions can't be called from a signal handler), they can be lost (if the
+        same signal arrives twice before being handled, the second is dropped), and their interaction with threading is
+        a nightmare.
+
+        **Modern replacement — eventfd / signalfd (Linux):** Convert signals into file descriptor reads, so they
+        integrate with epoll/poll. An eventfd is a kernel-maintained counter: one process increments it (write), another
+        blocks until it's nonzero (read). Very fast for simple wake-up notifications.
+
+        **For your OS:** Don't implement Unix signals. Use channel messages for shutdown/notification. If you need a
+        lightweight wake-up mechanism (just "hey, check your queue"), an eventfd-like counter is the right primitive.
+
+        ## 6. RPC (Remote Procedure Call)
+
+        Not a kernel primitive — it's a protocol pattern built on top of other IPC. One process calls a function in
+        another process as if it were local.
+
+        **How it works:** Client serializes function name + arguments into a message, sends it over a channel/socket,
+        server deserializes, executes, serializes the result, sends it back. A stub generator produces the
+        serialization/deserialization code from an interface definition.
+
+        **Implementations:**
+        - **D-Bus** (Linux) — XML-based interface definitions, runs over Unix domain sockets. Used everywhere on Linux
+        desktops (system services, desktop environment, applications). Slow because of XML introspection and message
+        serialization overhead (~50-200 microseconds per call).
+        - **gRPC** (Google) — Protocol Buffers serialization, runs over HTTP/2. Designed for network services but works
+        locally too. ~10-50 microseconds locally.
+        - **Cap'n Proto** — zero-copy serialization (the wire format IS the in-memory format, no serialization step).
+        Can layer capability-based security on top. ~1-5 microseconds locally. Created by the original author of
+        Protocol Buffers as a "Protocol Buffers done right."
+        - **Binder** (Android) — kernel-assisted RPC. The kernel itself understands RPC structure (transaction with ID,
+        data, reply). Optimized for many-small-calls patterns. Reference counting of remote objects built in. ~5-15
+        microseconds per transaction.
+
+        **For your OS:** A service discovery + RPC mechanism is essential for the desktop (how apps talk to system
+        services, how the file picker talks to the file indexer, etc.). The key choice is serialization format. Cap'n
+        Proto's zero-copy approach is the performance leader. A simpler option is FlatBuffers (similar idea, from
+        Google). Either avoids the serialization overhead that makes D-Bus slow.
+
+        ## 7. Memory-mapped files
+
+        A file's contents mapped directly into a process's address space. Multiple processes mapping the same file share
+        the same physical pages (via the page cache).
+
+        **How it works:** Process calls mmap on a file. The kernel sets up page table entries pointing to the file's
+        pages in the page cache. Reads and writes are just memory access — the kernel lazily loads pages on first access
+        (page fault), and writes are flushed to disk by the kernel's page writeback mechanism.
+
+        **As IPC:** Two processes mmap the same file. Changes by one are visible to the other (with MAP_SHARED). This is
+        essentially shared memory with persistence — if the machine crashes, the data is on disk.
+
+        **Where it's used:** Database engines (SQLite, PostgreSQL, LMDB all mmap their data files), dynamic linker
+        (shared libraries are mmap'd, so all processes sharing a library use the same physical pages).
+
+        ## Comparison for your OS
+
+        | Mechanism | Latency | Throughput | Structured? | Capabilities? | Best for |
+        |---|---|---|---|---|---|
+        | Shared memory + ring buffer | ~10-50ns | Highest | No (DIY) | No | Audio/video streams, GPU buffers,
+        high-frequency data |
+        | Synchronous message passing | ~0.5-2us | Medium | Yes | Yes | Driver ↔ kernel, security-critical IPC |
+        | Async channel messages | ~1-5us | Medium-high | Yes | Yes | General app ↔ service communication |
+        | Pipes | ~1-5us | High (with splice) | No (byte stream) | No | Shell pipelines, stdin/stdout |
+        | RPC (Cap'n Proto style) | ~1-5us | Medium | Yes (typed) | Possible | App ↔ system service calls |
+        | eventfd-like counter | ~0.5-1us | N/A (notification only) | No | No | Lightweight wake-up signals |
+
+        You've already decided on channels as the primary IPC, shared memory as an option, and one-way pipes for byte
+        streams. The remaining decision is the RPC/service-discovery layer on top of channels — that's where Cap'n Proto
+        or FlatBuffers comes in as the serialization format, paired with your named service registry.
+you: Should I think more about my decision to maybe incorporate more of the above methods or incorporate some instead?
+claude: No, your current set is right. Let me check it against what each layer of the OS actually needs:
+
+        **Channels** (your primary IPC) cover the general case — structured messages between processes, capability
+        passing, driver-to-kernel control path, app-to-service communication. The RPC/service-discovery layer will be
+        built on top of these.
+
+        **Shared memory** covers the high-performance case — audio/video streaming between processes, GPU buffer
+        sharing, any case where two processes need to exchange large amounts of data at near-zero latency.
+
+        **One-way pipes** cover the shell/byte-stream case — process stdin/stdout, shell pipelines, log streaming.
+
+        The other mechanisms I described either fall into one of these three categories or are additions you'd want:
+
+        - **Synchronous message passing** (L4-style) — this is just a mode of your channels. A channel send that blocks
+        until the receiver reads it. Worth offering as an option on channels, not a separate mechanism.
+        - **RPC** — built on top of channels with a serialization library (Cap'n Proto or FlatBuffers). Not a kernel
+        primitive, just a userspace library.
+        - **eventfd-like wake-up counter** — this one is worth adding as a fourth primitive. It's tiny to implement (a
+        kernel-managed integer counter with wait/wake) and it's the most efficient way to do "wake up and check your
+        queue." Your IOCP-like unified wait system should be able to wait on these alongside channels, timers, and I/O
+        completions.
+        - **Unix domain sockets / network sockets** — these go through your networking stack, not the IPC layer. You'll
+        have sockets, but they're a networking primitive, not an IPC primitive.
+        - **Signals** — you've already decided not to implement these. Correct.
+        - **Memory-mapped files** — this is a memory management feature, not an IPC decision. You'll support mmap
+        regardless.
+
+        So: your three choices plus an eventfd-like lightweight counter. That's a complete IPC set. Everything else is
+        either a mode of these four, a userspace protocol on top of them, or a feature from a different subsystem.

@@ -1,0 +1,9 @@
+[package]
+name = "gdb"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS gdb - debugger (gdb/gdbserver)"
+[dependencies]
+
+[lints]
+workspace = true

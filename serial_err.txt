@@ -1,0 +1,1 @@
+C:\Program Files\qemu\qemu-system-x86_64.exe: -drive format=raw,file=target/x86_64-unknown-none/debug/disk.img: Could not open 'target/x86_64-unknown-none/debug/disk.img': The system cannot find the file specified.

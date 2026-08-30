@@ -1,0 +1,5530 @@
+//! Slate OS Device Manager
+//!
+//! Graphical hardware device manager inspired by Windows Device Manager.
+//! Features:
+//! - Device tree with expandable categories (Display, Audio, Network, etc.)
+//! - Device status indicators (working, warning, error, disabled, unknown)
+//! - Detailed properties panel (name, type, vendor, driver, IRQ, MMIO)
+//! - Driver information (name, version, provider, date)
+//! - Enable/disable devices and driver uninstall
+//! - Scan for hardware changes
+//! - Device search/filter
+//! - Toolbar with common actions
+//! - Resource view (IRQ assignments, MMIO ranges, DMA channels)
+//! - Problem device highlighting
+//! - Driver update check model
+//! - Device event history (connected, disconnected, error)
+//! - Export hardware report
+//!
+//! Uses the guitk library for UI rendering. Hardware data is gathered
+//! through Slate OS syscalls; stubbed with representative data for initial
+//! development.
+
+#[allow(unused_imports)]
+use guitk::color::Color;
+#[allow(unused_imports)]
+use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
+use guitk::fold;
+#[allow(unused_imports)]
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, content_bottom};
+#[allow(unused_imports)]
+use guitk::style::CornerRadii;
+use guitk::{scroll_window, wheel};
+use oswindow::app::Response;
+
+use std::collections::HashMap;
+use std::process::ExitCode;
+
+// ============================================================================
+// Constants -- layout dimensions
+// ============================================================================
+
+/// Width of the device tree sidebar.
+const SIDEBAR_WIDTH: f32 = 280.0;
+/// Height of the title bar.
+const TITLE_BAR_HEIGHT: f32 = 36.0;
+/// Height of the toolbar.
+const TOOLBAR_HEIGHT: f32 = 38.0;
+/// Height of the status bar at the bottom.
+const STATUS_BAR_HEIGHT: f32 = 24.0;
+/// Height of each tree node row.
+const TREE_ROW_HEIGHT: f32 = 24.0;
+/// Indentation per tree level.
+const TREE_INDENT: f32 = 20.0;
+/// Height of each property row in the detail panels.
+const PROPERTY_ROW_HEIGHT: f32 = 22.0;
+/// Height of property/resource section headers.
+const SECTION_HEADER_HEIGHT: f32 = 28.0;
+/// Height of tab bar in properties panel.
+const TAB_BAR_HEIGHT: f32 = 28.0;
+/// Default window width.
+const DEFAULT_WIDTH: f32 = 1100.0;
+/// Default window height.
+const DEFAULT_HEIGHT: f32 = 720.0;
+/// Height of search bar.
+const SEARCH_BAR_HEIGHT: f32 = 30.0;
+/// Height of each event history row.
+const EVENT_ROW_HEIGHT: f32 = 20.0;
+/// Maximum number of event history entries retained.
+const MAX_EVENT_HISTORY: usize = 200;
+/// Toolbar button width.
+const TOOLBAR_BTN_WIDTH: f32 = 90.0;
+/// Toolbar button height.
+const TOOLBAR_BTN_HEIGHT: f32 = 26.0;
+
+// ============================================================================
+// Color palette -- Catppuccin Mocha
+// ============================================================================
+
+/// Base background (Crust).
+const COLOR_BASE: Color = Color::rgb(17, 17, 27);
+/// Slightly lighter surface (Mantle).
+const COLOR_MANTLE: Color = Color::rgb(24, 24, 37);
+/// Surface for panels (Surface0).
+const COLOR_SURFACE0: Color = Color::rgb(30, 30, 46);
+/// Lighter surface for selected items (Surface1).
+const COLOR_SURFACE1: Color = Color::rgb(49, 50, 68);
+/// Overlay surface (Surface2).
+const COLOR_SURFACE2: Color = Color::rgb(69, 71, 90);
+/// Primary text (Text).
+const COLOR_TEXT: Color = Color::rgb(205, 214, 244);
+/// Secondary/dimmed text (Subtext0).
+const COLOR_SUBTEXT: Color = Color::rgb(166, 173, 200);
+/// Overlay text (Overlay1).
+const COLOR_OVERLAY: Color = Color::rgb(147, 153, 178);
+/// Blue accent.
+const COLOR_BLUE: Color = Color::rgb(137, 180, 250);
+/// Lavender accent.
+const COLOR_LAVENDER: Color = Color::rgb(180, 190, 254);
+/// Green (success/working).
+const COLOR_GREEN: Color = Color::rgb(166, 227, 161);
+/// Yellow (warning).
+const COLOR_YELLOW: Color = Color::rgb(249, 226, 175);
+/// Red (error/danger).
+const COLOR_RED: Color = Color::rgb(243, 139, 168);
+/// Peach.
+const COLOR_PEACH: Color = Color::rgb(250, 179, 135);
+/// Mauve.
+const COLOR_MAUVE: Color = Color::rgb(203, 166, 247);
+/// Teal.
+const COLOR_TEAL: Color = Color::rgb(148, 226, 213);
+/// Sapphire.
+const COLOR_SAPPHIRE: Color = Color::rgb(116, 199, 236);
+
+// ============================================================================
+// Device categories
+// ============================================================================
+
+/// Hardware device category for the tree view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DeviceCategory {
+    Display,
+    Audio,
+    Network,
+    Storage,
+    Usb,
+    Input,
+    System,
+    Other,
+}
+
+impl DeviceCategory {
+    /// Human-readable label for this category.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Display => "Display Adapters",
+            Self::Audio => "Audio Devices",
+            Self::Network => "Network Adapters",
+            Self::Storage => "Storage Controllers",
+            Self::Usb => "USB Controllers",
+            Self::Input => "Input Devices",
+            Self::System => "System Devices",
+            Self::Other => "Other Devices",
+        }
+    }
+
+    /// Icon character for this category (simple ASCII marker).
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Display => "[D]",
+            Self::Audio => "[A]",
+            Self::Network => "[N]",
+            Self::Storage => "[S]",
+            Self::Usb => "[U]",
+            Self::Input => "[I]",
+            Self::System => "[Y]",
+            Self::Other => "[?]",
+        }
+    }
+
+    /// Color accent for this category.
+    pub fn color(self) -> Color {
+        match self {
+            Self::Display => COLOR_BLUE,
+            Self::Audio => COLOR_MAUVE,
+            Self::Network => COLOR_TEAL,
+            Self::Storage => COLOR_PEACH,
+            Self::Usb => COLOR_SAPPHIRE,
+            Self::Input => COLOR_LAVENDER,
+            Self::System => COLOR_GREEN,
+            Self::Other => COLOR_OVERLAY,
+        }
+    }
+
+    /// All categories in display order.
+    pub fn all() -> &'static [DeviceCategory] {
+        &[
+            Self::Display,
+            Self::Audio,
+            Self::Network,
+            Self::Storage,
+            Self::Usb,
+            Self::Input,
+            Self::System,
+            Self::Other,
+        ]
+    }
+}
+
+// ============================================================================
+// Device status
+// ============================================================================
+
+/// Operating status of a hardware device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DeviceStatus {
+    /// Device is functioning correctly.
+    Working,
+    /// Device has a non-critical issue.
+    Warning,
+    /// Device has a critical error.
+    Error,
+    /// Device is administratively disabled.
+    Disabled,
+    /// Device status cannot be determined.
+    Unknown,
+}
+
+impl DeviceStatus {
+    /// Human-readable label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Working => "Working",
+            Self::Warning => "Warning",
+            Self::Error => "Error",
+            Self::Disabled => "Disabled",
+            Self::Unknown => "Unknown",
+        }
+    }
+
+    /// Color for this status indicator.
+    pub fn color(self) -> Color {
+        match self {
+            Self::Working => COLOR_GREEN,
+            Self::Warning => COLOR_YELLOW,
+            Self::Error => COLOR_RED,
+            Self::Disabled => COLOR_OVERLAY,
+            Self::Unknown => COLOR_SUBTEXT,
+        }
+    }
+
+    /// Status icon marker.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Working => "+",
+            Self::Warning => "!",
+            Self::Error => "X",
+            Self::Disabled => "-",
+            Self::Unknown => "?",
+        }
+    }
+
+    /// Whether this status indicates a problem.
+    pub fn is_problem(self) -> bool {
+        matches!(self, Self::Warning | Self::Error)
+    }
+}
+
+// ============================================================================
+// Device event types
+// ============================================================================
+
+/// Type of device event in the history log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceEventKind {
+    Connected,
+    Disconnected,
+    Error,
+    DriverLoaded,
+    DriverUnloaded,
+    Enabled,
+    Disabled,
+    Reset,
+}
+
+impl DeviceEventKind {
+    /// Human-readable label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Connected => "Connected",
+            Self::Disconnected => "Disconnected",
+            Self::Error => "Error",
+            Self::DriverLoaded => "Driver Loaded",
+            Self::DriverUnloaded => "Driver Unloaded",
+            Self::Enabled => "Enabled",
+            Self::Disabled => "Disabled",
+            Self::Reset => "Reset",
+        }
+    }
+
+    /// Color for this event kind.
+    pub fn color(self) -> Color {
+        match self {
+            Self::Connected | Self::DriverLoaded | Self::Enabled => COLOR_GREEN,
+            Self::Disconnected | Self::DriverUnloaded | Self::Disabled => COLOR_OVERLAY,
+            Self::Error => COLOR_RED,
+            Self::Reset => COLOR_YELLOW,
+        }
+    }
+}
+
+// ============================================================================
+// Device event
+// ============================================================================
+
+/// A recorded event in device history.
+#[derive(Clone, Debug)]
+pub struct DeviceEvent {
+    /// Unique device ID this event pertains to.
+    pub device_id: u32,
+    /// Kind of event.
+    pub kind: DeviceEventKind,
+    /// Timestamp as a formatted string (e.g. "2026-05-18 14:32:01").
+    pub timestamp: String,
+    /// Optional detail message.
+    pub detail: String,
+}
+
+impl DeviceEvent {
+    /// Create a new event.
+    pub fn new(device_id: u32, kind: DeviceEventKind, timestamp: &str, detail: &str) -> Self {
+        Self {
+            device_id,
+            kind,
+            timestamp: timestamp.to_string(),
+            detail: detail.to_string(),
+        }
+    }
+}
+
+// ============================================================================
+// Driver info
+// ============================================================================
+
+/// Information about the driver backing a device.
+#[derive(Clone, Debug)]
+pub struct DriverInfo {
+    /// Driver name.
+    pub name: String,
+    /// Driver version string.
+    pub version: String,
+    /// Driver provider (vendor).
+    pub provider: String,
+    /// Driver release date string.
+    pub date: String,
+    /// Whether a newer version is available.
+    pub update_available: bool,
+}
+
+impl DriverInfo {
+    /// Create a new driver info record.
+    pub fn new(
+        name: &str,
+        version: &str,
+        provider: &str,
+        date: &str,
+        update_available: bool,
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            version: version.to_string(),
+            provider: provider.to_string(),
+            date: date.to_string(),
+            update_available,
+        }
+    }
+}
+
+// ============================================================================
+// Resource types
+// ============================================================================
+
+/// An IRQ (interrupt request) assignment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrqAssignment {
+    /// IRQ number.
+    pub irq: u32,
+    /// Device name using this IRQ.
+    pub device_name: String,
+    /// Whether the IRQ is shared with other devices.
+    pub shared: bool,
+}
+
+/// An MMIO (Memory-Mapped I/O) range.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MmioRange {
+    /// Start address.
+    pub start: u64,
+    /// End address (inclusive).
+    pub end: u64,
+    /// Device name using this range.
+    pub device_name: String,
+}
+
+impl MmioRange {
+    /// Format the address range as a hex string.
+    pub fn format_range(&self) -> String {
+        format!("0x{:08X} - 0x{:08X}", self.start, self.end)
+    }
+
+    /// Size of the MMIO region in bytes.
+    pub fn size(&self) -> u64 {
+        self.end.saturating_sub(self.start).saturating_add(1)
+    }
+}
+
+/// A DMA channel assignment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DmaChannel {
+    /// DMA channel number.
+    pub channel: u32,
+    /// Device name using this channel.
+    pub device_name: String,
+}
+
+/// System resource view aggregating IRQs, MMIO, and DMA.
+#[derive(Clone, Debug, Default)]
+pub struct ResourceView {
+    pub irqs: Vec<IrqAssignment>,
+    pub mmio_ranges: Vec<MmioRange>,
+    pub dma_channels: Vec<DmaChannel>,
+}
+
+impl ResourceView {
+    /// Create from a list of devices.
+    pub fn from_devices(devices: &[DeviceInfo]) -> Self {
+        let mut irqs = Vec::new();
+        let mut mmio_ranges = Vec::new();
+        let mut dma_channels = Vec::new();
+
+        for dev in devices {
+            if let Some(irq) = dev.irq {
+                irqs.push(IrqAssignment {
+                    irq,
+                    device_name: dev.name.clone(),
+                    shared: false,
+                });
+            }
+            if let Some((start, end)) = dev.mmio_range {
+                mmio_ranges.push(MmioRange {
+                    start,
+                    end,
+                    device_name: dev.name.clone(),
+                });
+            }
+            if let Some(ch) = dev.dma_channel {
+                dma_channels.push(DmaChannel {
+                    channel: ch,
+                    device_name: dev.name.clone(),
+                });
+            }
+        }
+
+        // Mark shared IRQs.
+        let mut irq_counts: HashMap<u32, usize> = HashMap::new();
+        for a in &irqs {
+            irq_counts
+                .entry(a.irq)
+                .and_modify(|n| *n = n.saturating_add(1))
+                .or_insert(1);
+        }
+        for a in &mut irqs {
+            if irq_counts.get(&a.irq).copied().unwrap_or(0) > 1 {
+                a.shared = true;
+            }
+        }
+
+        irqs.sort_by_key(|a| a.irq);
+        mmio_ranges.sort_by_key(|r| r.start);
+        dma_channels.sort_by_key(|c| c.channel);
+
+        Self {
+            irqs,
+            mmio_ranges,
+            dma_channels,
+        }
+    }
+
+    /// Total number of resource entries.
+    pub fn total_count(&self) -> usize {
+        self.irqs
+            .len()
+            .saturating_add(self.mmio_ranges.len())
+            .saturating_add(self.dma_channels.len())
+    }
+}
+
+// ============================================================================
+// Device info
+// ============================================================================
+
+/// Complete information about a hardware device.
+#[derive(Clone, Debug)]
+pub struct DeviceInfo {
+    /// Unique device identifier.
+    pub id: u32,
+    /// Device display name.
+    pub name: String,
+    /// Category this device belongs to.
+    pub category: DeviceCategory,
+    /// Current operating status.
+    pub status: DeviceStatus,
+    /// Hardware vendor name.
+    pub vendor: String,
+    /// Device type/model description.
+    pub device_type: String,
+    /// PCI vendor:device ID if applicable (e.g. "8086:1234").
+    pub hw_id: Option<String>,
+    /// IRQ number if assigned.
+    pub irq: Option<u32>,
+    /// MMIO address range (start, end) if assigned.
+    pub mmio_range: Option<(u64, u64)>,
+    /// DMA channel if assigned.
+    pub dma_channel: Option<u32>,
+    /// Driver information.
+    pub driver: Option<DriverInfo>,
+    /// Whether the device is currently enabled.
+    pub enabled: bool,
+    /// Location path in the device tree (e.g. "PCI Bus 0, Device 2, Function 0").
+    pub location: String,
+    /// Status detail message (e.g. error description).
+    pub status_detail: String,
+}
+
+impl DeviceInfo {
+    /// Whether this device has any problem.
+    pub fn has_problem(&self) -> bool {
+        self.status.is_problem()
+    }
+
+    /// Whether a driver update is available.
+    pub fn has_driver_update(&self) -> bool {
+        self.driver.as_ref().is_some_and(|d| d.update_available)
+    }
+
+    /// Format the MMIO range for display.
+    pub fn format_mmio(&self) -> String {
+        match self.mmio_range {
+            Some((start, end)) => format!("0x{start:08X} - 0x{end:08X}"),
+            None => "N/A".to_string(),
+        }
+    }
+
+    /// Format the IRQ for display.
+    pub fn format_irq(&self) -> String {
+        match self.irq {
+            Some(irq) => format!("IRQ {irq}"),
+            None => "N/A".to_string(),
+        }
+    }
+}
+
+// ============================================================================
+// Driver update check model
+// ============================================================================
+
+/// Status of a driver update check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateCheckStatus {
+    /// Not yet checked.
+    NotChecked,
+    /// Check in progress.
+    Checking,
+    /// Up to date.
+    UpToDate,
+    /// Update available.
+    UpdateAvailable,
+    /// Check failed.
+    Failed,
+}
+
+impl UpdateCheckStatus {
+    /// Label for display.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotChecked => "Not Checked",
+            Self::Checking => "Checking...",
+            Self::UpToDate => "Up to Date",
+            Self::UpdateAvailable => "Update Available",
+            Self::Failed => "Check Failed",
+        }
+    }
+
+    /// Display color.
+    pub fn color(self) -> Color {
+        match self {
+            Self::NotChecked => COLOR_SUBTEXT,
+            Self::Checking => COLOR_BLUE,
+            Self::UpToDate => COLOR_GREEN,
+            Self::UpdateAvailable => COLOR_YELLOW,
+            Self::Failed => COLOR_RED,
+        }
+    }
+}
+
+/// Result of checking for driver updates for a specific device.
+#[derive(Clone, Debug)]
+pub struct DriverUpdateCheck {
+    /// Device ID.
+    pub device_id: u32,
+    /// Current check status.
+    pub status: UpdateCheckStatus,
+    /// Available version (if any).
+    pub available_version: Option<String>,
+    /// Last checked timestamp.
+    pub last_checked: Option<String>,
+}
+
+impl DriverUpdateCheck {
+    /// Create a new unchecked entry.
+    pub fn new(device_id: u32) -> Self {
+        Self {
+            device_id,
+            status: UpdateCheckStatus::NotChecked,
+            available_version: None,
+            last_checked: None,
+        }
+    }
+
+    /// Mark as checking.
+    pub fn start_check(&mut self) {
+        self.status = UpdateCheckStatus::Checking;
+    }
+
+    /// Complete the check with a result.
+    pub fn finish_check(&mut self, available: Option<String>, timestamp: &str) {
+        self.last_checked = Some(timestamp.to_string());
+        if let Some(ver) = available {
+            self.status = UpdateCheckStatus::UpdateAvailable;
+            self.available_version = Some(ver);
+        } else {
+            self.status = UpdateCheckStatus::UpToDate;
+            self.available_version = None;
+        }
+    }
+
+    /// Mark the check as failed.
+    pub fn fail_check(&mut self, timestamp: &str) {
+        self.status = UpdateCheckStatus::Failed;
+        self.last_checked = Some(timestamp.to_string());
+    }
+}
+
+// ============================================================================
+// Tree node (for the sidebar)
+// ============================================================================
+
+/// A node in the device tree sidebar.
+#[derive(Clone, Debug)]
+pub struct TreeNode {
+    /// Category this node represents (for category-level nodes).
+    pub category: Option<DeviceCategory>,
+    /// Device ID (for device-level nodes).
+    pub device_id: Option<u32>,
+    /// Display label.
+    pub label: String,
+    /// Tree depth (0 = root category, 1 = device).
+    pub depth: u32,
+    /// Whether this node is expanded (category nodes only).
+    pub expanded: bool,
+    /// Whether this node is visible (after filtering).
+    pub visible: bool,
+}
+
+impl TreeNode {
+    /// Create a category node.
+    pub fn category(cat: DeviceCategory) -> Self {
+        Self {
+            category: Some(cat),
+            device_id: None,
+            label: cat.label().to_string(),
+            depth: 0,
+            expanded: true,
+            visible: true,
+        }
+    }
+
+    /// Create a device node.
+    pub fn device(id: u32, name: &str) -> Self {
+        Self {
+            category: None,
+            device_id: Some(id),
+            label: name.to_string(),
+            depth: 1,
+            expanded: false,
+            visible: true,
+        }
+    }
+}
+
+// ============================================================================
+// Properties panel tab
+// ============================================================================
+
+/// Tab in the properties/detail panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertiesTab {
+    /// General device properties.
+    General,
+    /// Driver information.
+    Driver,
+    /// Hardware resources (IRQ, MMIO, DMA).
+    Resources,
+    /// Event history for this device.
+    Events,
+}
+
+impl PropertiesTab {
+    /// Label for the tab.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Driver => "Driver",
+            Self::Resources => "Resources",
+            Self::Events => "Events",
+        }
+    }
+
+    /// All tabs in order.
+    pub fn all() -> &'static [PropertiesTab] {
+        &[Self::General, Self::Driver, Self::Resources, Self::Events]
+    }
+}
+
+// ============================================================================
+// Toolbar action
+// ============================================================================
+
+/// Action button in the toolbar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolbarAction {
+    Scan,
+    Properties,
+    Enable,
+    Disable,
+    Uninstall,
+    Export,
+}
+
+impl ToolbarAction {
+    /// Label for the toolbar button.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Scan => "Scan",
+            Self::Properties => "Properties",
+            Self::Enable => "Enable",
+            Self::Disable => "Disable",
+            Self::Uninstall => "Uninstall",
+            Self::Export => "Export",
+        }
+    }
+
+    /// All toolbar actions in display order.
+    pub fn all() -> &'static [ToolbarAction] {
+        &[
+            Self::Scan,
+            Self::Properties,
+            Self::Enable,
+            Self::Disable,
+            Self::Uninstall,
+            Self::Export,
+        ]
+    }
+}
+
+// ============================================================================
+// Main application state
+// ============================================================================
+
+/// Top-level state for the device manager application.
+pub struct DeviceManagerState {
+    /// Window width.
+    pub width: f32,
+    /// Window height.
+    pub height: f32,
+    /// All known devices.
+    pub devices: Vec<DeviceInfo>,
+    /// Flattened tree nodes for the sidebar.
+    pub tree_nodes: Vec<TreeNode>,
+    /// Index of the selected tree node.
+    pub selected_tree_index: Option<usize>,
+    /// Currently active properties tab.
+    pub active_tab: PropertiesTab,
+    /// Search/filter query string.
+    pub search_query: String,
+    /// Whether the search bar is focused.
+    pub search_focused: bool,
+    /// Event history log.
+    pub event_history: Vec<DeviceEvent>,
+    /// Resource view (computed from devices).
+    pub resource_view: ResourceView,
+    /// Driver update check results, keyed by device ID.
+    pub update_checks: HashMap<u32, DriverUpdateCheck>,
+    /// First visible row of the tree sidebar, as an index into
+    /// [`visible_tree_indices`] — not a pixel offset.
+    ///
+    /// It was pixels, and as pixels it was wrong twice over. The wheel
+    /// subtracted `dy * 20.0`, but `dy` counts wheel *notches* rather than
+    /// pixels, so a notch moved not-quite-one 24px row and the tree crept.
+    /// And nothing clamped the far end: `.max(0.0)` stops the offset going
+    /// negative and says nothing about the bottom, so scrolling past the last
+    /// device kept incrementing an offset the renderer had already run out of
+    /// rows for. The list stood still while the number climbed, and the user
+    /// then had to wind back exactly as far as they had overshot before
+    /// anything moved.
+    pub tree_scroll: usize,
+    /// Pixels the properties panel is scrolled down by.
+    ///
+    /// Pixels here and rows in the sidebar is deliberate. The properties tabs
+    /// are not a list: they stack headings, property rows of one height, event
+    /// rows of another, separators and a conditional badge, so there is no row
+    /// index that could name a position part way down one. This is the
+    /// continuous case [`wheel::pixels`] exists for. Its upper bound comes from
+    /// [`properties_content_height`], which measures the panel by rendering it.
+    pub properties_scroll: f32,
+    /// Wheel remainder for the sidebar; see [`wheel::Accumulator`].
+    tree_wheel: wheel::Accumulator,
+    /// Hovered tree node index.
+    pub hovered_tree_index: Option<usize>,
+    /// Hovered toolbar action index.
+    pub hovered_toolbar_action: Option<usize>,
+    /// Whether we are showing the resource view (instead of per-device).
+    pub show_resource_view: bool,
+    /// Hovered properties tab index.
+    pub hovered_tab_index: Option<usize>,
+}
+
+impl DeviceManagerState {
+    /// Create a new device manager with sample data.
+    pub fn new() -> Self {
+        let devices = sample_devices();
+        let resource_view = ResourceView::from_devices(&devices);
+        let tree_nodes = build_tree_nodes(&devices);
+        let mut update_checks = HashMap::new();
+        for dev in &devices {
+            update_checks.insert(dev.id, DriverUpdateCheck::new(dev.id));
+        }
+
+        Self {
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+            devices,
+            tree_nodes,
+            selected_tree_index: None,
+            active_tab: PropertiesTab::General,
+            search_query: String::new(),
+            search_focused: false,
+            event_history: sample_events(),
+            resource_view,
+            update_checks,
+            tree_scroll: 0,
+            properties_scroll: 0.0,
+            tree_wheel: wheel::Accumulator::default(),
+            hovered_tree_index: None,
+            hovered_toolbar_action: None,
+            show_resource_view: false,
+            hovered_tab_index: None,
+        }
+    }
+
+    /// Get the currently selected device, if any.
+    pub fn selected_device(&self) -> Option<&DeviceInfo> {
+        let idx = self.selected_tree_index?;
+        let node = self.tree_nodes.get(idx)?;
+        let dev_id = node.device_id?;
+        self.devices.iter().find(|d| d.id == dev_id)
+    }
+
+    // -- Layout ------------------------------------------------------------
+    //
+    // The sidebar's geometry used to be spelled out at each place that needed
+    // it: the renderer computed `top`/`bottom` from the three bar heights, the
+    // click handler computed the same pair again, and the hover handler a third
+    // time. Three copies of a layout are three layouts, and they agree only
+    // until someone edits one of them. These are the one copy.
+
+    /// Top edge of the sidebar and the properties panel: below the title bar,
+    /// the toolbar and the search bar.
+    pub fn panel_top(&self) -> f32 {
+        TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + SEARCH_BAR_HEIGHT
+    }
+
+    /// Bottom edge of both panels: above the status bar.
+    pub fn panel_bottom(&self) -> f32 {
+        self.height - STATUS_BAR_HEIGHT
+    }
+
+    /// Height of the sidebar's scrollable area.
+    pub fn tree_height(&self) -> f32 {
+        self.panel_bottom() - self.panel_top()
+    }
+
+    /// Left edge of the properties panel, past the sidebar's separator line.
+    pub fn panel_x(&self) -> f32 {
+        SIDEBAR_WIDTH + 1.0
+    }
+
+    /// The tree nodes the sidebar draws, in the order it draws them.
+    ///
+    /// This is the single source of truth for "which rows exist". The rule is
+    /// not simply `node.visible`: a device row also depends on whether its
+    /// category is expanded, and a category hidden by the search filter never
+    /// gets to set that flag. The renderer, the hit-test and the up/down arrow
+    /// keys used to each carry their own copy of the rule — the first two as
+    /// the same loop written out twice, the third (`is_node_visible`) as a
+    /// backwards scan for the nearest category, which disagreed with the other
+    /// two whenever a filter hid one. Now all three walk this.
+    pub fn visible_tree_indices(&self) -> Vec<usize> {
+        let mut out = Vec::with_capacity(self.tree_nodes.len());
+        let mut parent_expanded = true;
+        for (i, node) in self.tree_nodes.iter().enumerate() {
+            if !node.visible {
+                continue;
+            }
+            if node.depth == 1 && !parent_expanded {
+                continue;
+            }
+            if node.depth == 0 {
+                parent_expanded = node.expanded;
+            }
+            out.push(i);
+        }
+        out
+    }
+
+    /// The window of sidebar rows currently on screen.
+    fn tree_rows(&self) -> scroll_window::Rows {
+        scroll_window::visible(
+            self.visible_tree_indices().len(),
+            TREE_ROW_HEIGHT,
+            self.tree_height(),
+            self.tree_scroll,
+        )
+    }
+
+    /// The largest [`tree_scroll`](Self::tree_scroll) that still shows a full
+    /// screen of rows — i.e. the offset at which the last row sits at the
+    /// bottom. Scrolling past this shows blank space below a list that has
+    /// stopped moving.
+    pub fn max_tree_scroll(&self) -> usize {
+        scroll_window::visible(
+            self.visible_tree_indices().len(),
+            TREE_ROW_HEIGHT,
+            self.tree_height(),
+            usize::MAX,
+        )
+        .start
+    }
+
+    /// Top edge of the properties panel's scrollable body.
+    ///
+    /// The tab bar is drawn only when a device is selected; in the resource
+    /// view and the empty-selection placeholder the body starts at the top of
+    /// the panel. The hit-test for the tab bar and this must agree, which is
+    /// why both read it from here.
+    pub fn properties_body_top(&self) -> f32 {
+        if self.shows_tab_bar() {
+            self.panel_top() + TAB_BAR_HEIGHT
+        } else {
+            self.panel_top()
+        }
+    }
+
+    /// Whether the properties panel currently draws its tab bar.
+    pub fn shows_tab_bar(&self) -> bool {
+        !self.show_resource_view && self.selected_device().is_some()
+    }
+
+    /// Height of the properties panel's scrollable body — the window, not the
+    /// content.
+    pub fn properties_body_height(&self) -> f32 {
+        self.panel_bottom() - self.properties_body_top()
+    }
+
+    /// How far the properties panel may be scrolled before its last line
+    /// reaches the bottom of the window. Zero when the content fits.
+    pub fn max_properties_scroll(&self) -> f32 {
+        (properties_content_height(self) - self.properties_body_height()).max(0.0)
+    }
+
+    /// Get the category of the selected tree node.
+    pub fn selected_category(&self) -> Option<DeviceCategory> {
+        let idx = self.selected_tree_index?;
+        let node = self.tree_nodes.get(idx)?;
+        node.category
+    }
+
+    /// Count devices with problems.
+    pub fn problem_device_count(&self) -> usize {
+        self.devices.iter().filter(|d| d.has_problem()).count()
+    }
+
+    /// Count devices with driver updates available.
+    pub fn update_available_count(&self) -> usize {
+        self.devices
+            .iter()
+            .filter(|d| d.has_driver_update())
+            .count()
+    }
+
+    /// Count total enabled devices.
+    pub fn enabled_device_count(&self) -> usize {
+        self.devices.iter().filter(|d| d.enabled).count()
+    }
+
+    /// Count devices matching the search query.
+    pub fn matching_device_count(&self) -> usize {
+        if self.search_query.is_empty() {
+            return self.devices.len();
+        }
+        let q = self.search_query.to_lowercase();
+        self.devices
+            .iter()
+            .filter(|d| device_matches_query(d, &q))
+            .count()
+    }
+
+    /// Toggle the expanded state of a category node.
+    pub fn toggle_category(&mut self, index: usize) {
+        if let Some(node) = self.tree_nodes.get_mut(index)
+            && node.category.is_some()
+        {
+            node.expanded = !node.expanded;
+        }
+    }
+
+    /// Select a tree node by index.
+    pub fn select_tree_node(&mut self, index: usize) {
+        if index < self.tree_nodes.len() {
+            self.selected_tree_index = Some(index);
+            self.properties_scroll = 0.0;
+            // If selecting a category, show resource view mode.
+            if let Some(node) = self.tree_nodes.get(index) {
+                self.show_resource_view = node.category.is_some();
+            }
+        }
+    }
+
+    /// Apply search filter to tree nodes.
+    pub fn apply_search_filter(&mut self) {
+        let q = self.search_query.to_lowercase();
+        for node in &mut self.tree_nodes {
+            if q.is_empty() {
+                node.visible = true;
+            } else if let Some(cat) = node.category {
+                // Category nodes: visible if any child matches.
+                node.visible = self
+                    .devices
+                    .iter()
+                    .any(|d| d.category == cat && device_matches_query(d, &q));
+            } else if let Some(dev_id) = node.device_id {
+                node.visible = self
+                    .devices
+                    .iter()
+                    .any(|d| d.id == dev_id && device_matches_query(d, &q));
+            }
+        }
+    }
+
+    /// Enable or disable a device by ID.
+    pub fn set_device_enabled(&mut self, device_id: u32, enabled: bool) {
+        if let Some(dev) = self.devices.iter_mut().find(|d| d.id == device_id) {
+            dev.enabled = enabled;
+            if enabled {
+                if dev.status == DeviceStatus::Disabled {
+                    dev.status = DeviceStatus::Working;
+                }
+            } else {
+                dev.status = DeviceStatus::Disabled;
+            }
+        }
+    }
+
+    /// Uninstall the driver for a device by ID.
+    pub fn uninstall_driver(&mut self, device_id: u32) {
+        if let Some(dev) = self.devices.iter_mut().find(|d| d.id == device_id) {
+            dev.driver = None;
+            dev.status = DeviceStatus::Warning;
+            dev.status_detail = "Driver uninstalled".to_string();
+        }
+    }
+
+    /// Simulate scanning for hardware changes (re-builds tree).
+    pub fn scan_hardware(&mut self) {
+        self.resource_view = ResourceView::from_devices(&self.devices);
+        self.tree_nodes = build_tree_nodes(&self.devices);
+        self.apply_search_filter();
+    }
+
+    /// Add an event to the history.
+    pub fn add_event(&mut self, event: DeviceEvent) {
+        self.event_history.push(event);
+        if self.event_history.len() > MAX_EVENT_HISTORY {
+            self.event_history.remove(0);
+        }
+    }
+
+    /// Get events for a specific device.
+    pub fn events_for_device(&self, device_id: u32) -> Vec<&DeviceEvent> {
+        self.event_history
+            .iter()
+            .filter(|e| e.device_id == device_id)
+            .collect()
+    }
+
+    /// Generate a hardware report as text.
+    ///
+    /// Every interpolated device string goes through [`report_field`]. The
+    /// report's structure is made of line breaks, `--- Section ---` headers
+    /// and two-space indentation, and the strings here are supplied by the
+    /// hardware: a USB device chooses its own product and manufacturer
+    /// descriptors, and nothing in the descriptor format forbids a line break
+    /// in one. A device calling itself
+    /// `"Mouse\n--- Storage ---\n  Disk [OK] (ACME)"` therefore writes a whole
+    /// forged section into the report of the machine it is plugged into.
+    ///
+    /// There is no importer, which is worth stating rather than using as a
+    /// reason to skip this: the absence of a parser does not make the output
+    /// correct, it only changes who is misled -- a person reading the report,
+    /// or whoever they send it to for diagnosis.
+    pub fn export_report(&self) -> String {
+        let mut report = String::new();
+        report.push_str("=== Slate OS Hardware Report ===\n\n");
+        report.push_str(&format!("Total Devices: {}\n", self.devices.len()));
+        report.push_str(&format!(
+            "Problem Devices: {}\n",
+            self.problem_device_count()
+        ));
+        report.push_str(&format!("Enabled: {}\n\n", self.enabled_device_count()));
+
+        for cat in DeviceCategory::all() {
+            let cat_devices: Vec<&DeviceInfo> =
+                self.devices.iter().filter(|d| d.category == *cat).collect();
+            if cat_devices.is_empty() {
+                continue;
+            }
+            report.push_str(&format!("--- {} ---\n", cat.label()));
+            for dev in &cat_devices {
+                report.push_str(&format!(
+                    "  {} [{}] ({})\n",
+                    report_field(&dev.name),
+                    dev.status.label(),
+                    report_field(&dev.vendor),
+                ));
+                report.push_str(&format!("    Type: {}\n", report_field(&dev.device_type)));
+                if let Some(ref hw_id) = dev.hw_id {
+                    report.push_str(&format!("    HW ID: {}\n", report_field(hw_id)));
+                }
+                report.push_str(&format!("    IRQ: {}\n", dev.format_irq()));
+                report.push_str(&format!("    MMIO: {}\n", dev.format_mmio()));
+                report.push_str(&format!("    Location: {}\n", report_field(&dev.location)));
+                if let Some(ref drv) = dev.driver {
+                    report.push_str(&format!(
+                        "    Driver: {} v{} ({})\n",
+                        report_field(&drv.name),
+                        report_field(&drv.version),
+                        report_field(&drv.provider),
+                    ));
+                }
+                report.push('\n');
+            }
+        }
+
+        // Resources section
+        report.push_str("--- IRQ Assignments ---\n");
+        for irq in &self.resource_view.irqs {
+            report.push_str(&format!(
+                "  IRQ {:>3}: {} {}\n",
+                irq.irq,
+                report_field(&irq.device_name),
+                if irq.shared { "(shared)" } else { "" },
+            ));
+        }
+        report.push('\n');
+
+        report.push_str("--- MMIO Ranges ---\n");
+        for mmio in &self.resource_view.mmio_ranges {
+            report.push_str(&format!(
+                "  {} : {}\n",
+                mmio.format_range(),
+                report_field(&mmio.device_name),
+            ));
+        }
+        report.push('\n');
+
+        report.push_str("--- DMA Channels ---\n");
+        for dma in &self.resource_view.dma_channels {
+            report.push_str(&format!(
+                "  Channel {:>2}: {}\n",
+                dma.channel,
+                report_field(&dma.device_name),
+            ));
+        }
+
+        report
+    }
+
+    /// Process a toolbar action.
+    pub fn handle_toolbar_action(&mut self, action: ToolbarAction) {
+        match action {
+            ToolbarAction::Scan => self.scan_hardware(),
+            ToolbarAction::Properties => {
+                // Switch to general tab if a device is selected.
+                if self.selected_device().is_some() {
+                    self.active_tab = PropertiesTab::General;
+                    self.show_resource_view = false;
+                }
+            }
+            ToolbarAction::Enable => {
+                if let Some(dev) = self.selected_device() {
+                    let id = dev.id;
+                    self.set_device_enabled(id, true);
+                }
+            }
+            ToolbarAction::Disable => {
+                if let Some(dev) = self.selected_device() {
+                    let id = dev.id;
+                    self.set_device_enabled(id, false);
+                }
+            }
+            ToolbarAction::Uninstall => {
+                if let Some(dev) = self.selected_device() {
+                    let id = dev.id;
+                    self.uninstall_driver(id);
+                }
+            }
+            ToolbarAction::Export => {
+                let _report = self.export_report();
+                // In a real app, we would save to a file or show in a dialog.
+            }
+        }
+    }
+}
+
+impl Default for DeviceManagerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fold a hardware-supplied string into something that can occupy one field of
+/// the text report without redrawing it.
+///
+/// A sanitise rather than an escape, and the choice is deliberate: the report
+/// is read by a person, so there is no reader to undo an escape, and a literal
+/// `\n` in the output would be noise to them where a real newline is a forged
+/// section header. See [`guitk::fold`] for the full argument and the guarantee
+/// this relies on -- that the report indents every field, so a folded value
+/// can never start a line and therefore can never be read as a header.
+fn report_field(s: &str) -> String {
+    fold::line(s)
+}
+
+// ============================================================================
+// Helper: check if a device matches a search query
+// ============================================================================
+
+/// Check if a device matches the given lowercase query string.
+fn device_matches_query(dev: &DeviceInfo, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    dev.name.to_lowercase().contains(query)
+        || dev.vendor.to_lowercase().contains(query)
+        || dev.device_type.to_lowercase().contains(query)
+        || dev.category.label().to_lowercase().contains(query)
+        || dev.status.label().to_lowercase().contains(query)
+        || dev
+            .hw_id
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains(query)
+        || dev.location.to_lowercase().contains(query)
+        || dev
+            .driver
+            .as_ref()
+            .is_some_and(|d| d.name.to_lowercase().contains(query))
+}
+
+// ============================================================================
+// Build tree nodes
+// ============================================================================
+
+/// Build the flattened tree node list from a set of devices.
+fn build_tree_nodes(devices: &[DeviceInfo]) -> Vec<TreeNode> {
+    let mut nodes = Vec::new();
+    for cat in DeviceCategory::all() {
+        let cat_devices: Vec<&DeviceInfo> = devices.iter().filter(|d| d.category == *cat).collect();
+        if cat_devices.is_empty() {
+            continue;
+        }
+        nodes.push(TreeNode::category(*cat));
+        for dev in &cat_devices {
+            nodes.push(TreeNode::device(dev.id, &dev.name));
+        }
+    }
+    nodes
+}
+
+// ============================================================================
+// Sample data
+// ============================================================================
+
+/// Generate sample device data for development/testing.
+fn sample_devices() -> Vec<DeviceInfo> {
+    vec![
+        DeviceInfo {
+            id: 1,
+            name: "Virtio GPU Display".to_string(),
+            category: DeviceCategory::Display,
+            status: DeviceStatus::Working,
+            vendor: "Red Hat".to_string(),
+            device_type: "VGA Compatible Controller".to_string(),
+            hw_id: Some("1AF4:1050".to_string()),
+            irq: Some(11),
+            mmio_range: Some((0xFD00_0000, 0xFDFF_FFFF)),
+            dma_channel: None,
+            driver: Some(DriverInfo::new(
+                "virtio-gpu",
+                "1.2.0",
+                "Slate OS Project",
+                "2026-04-01",
+                false,
+            )),
+            enabled: true,
+            location: "PCI Bus 0, Device 2, Function 0".to_string(),
+            status_detail: "Device is functioning correctly".to_string(),
+        },
+        DeviceInfo {
+            id: 2,
+            name: "Intel HD Audio Controller".to_string(),
+            category: DeviceCategory::Audio,
+            status: DeviceStatus::Working,
+            vendor: "Intel".to_string(),
+            device_type: "Audio Controller".to_string(),
+            hw_id: Some("8086:2668".to_string()),
+            irq: Some(5),
+            mmio_range: Some((0xFE80_0000, 0xFE80_3FFF)),
+            dma_channel: Some(1),
+            driver: Some(DriverInfo::new(
+                "hda-intel",
+                "3.1.4",
+                "Slate OS Project",
+                "2026-03-15",
+                true,
+            )),
+            enabled: true,
+            location: "PCI Bus 0, Device 27, Function 0".to_string(),
+            status_detail: "Device is functioning correctly".to_string(),
+        },
+        DeviceInfo {
+            id: 3,
+            name: "Virtio Network Adapter".to_string(),
+            category: DeviceCategory::Network,
+            status: DeviceStatus::Working,
+            vendor: "Red Hat".to_string(),
+            device_type: "Ethernet Controller".to_string(),
+            hw_id: Some("1AF4:1000".to_string()),
+            irq: Some(10),
+            mmio_range: Some((0xFE00_0000, 0xFE00_0FFF)),
+            dma_channel: Some(2),
+            driver: Some(DriverInfo::new(
+                "virtio-net",
+                "2.0.1",
+                "Slate OS Project",
+                "2026-04-10",
+                false,
+            )),
+            enabled: true,
+            location: "PCI Bus 0, Device 3, Function 0".to_string(),
+            status_detail: "Device is functioning correctly".to_string(),
+        },
+        DeviceInfo {
+            id: 4,
+            name: "Virtio Block Storage".to_string(),
+            category: DeviceCategory::Storage,
+            status: DeviceStatus::Working,
+            vendor: "Red Hat".to_string(),
+            device_type: "SCSI Storage Controller".to_string(),
+            hw_id: Some("1AF4:1001".to_string()),
+            irq: Some(9),
+            mmio_range: Some((0xFE01_0000, 0xFE01_0FFF)),
+            dma_channel: Some(3),
+            driver: Some(DriverInfo::new(
+                "virtio-blk",
+                "1.5.0",
+                "Slate OS Project",
+                "2026-02-20",
+                false,
+            )),
+            enabled: true,
+            location: "PCI Bus 0, Device 4, Function 0".to_string(),
+            status_detail: "Device is functioning correctly".to_string(),
+        },
+        DeviceInfo {
+            id: 5,
+            name: "XHCI USB 3.0 Host Controller".to_string(),
+            category: DeviceCategory::Usb,
+            status: DeviceStatus::Working,
+            vendor: "Intel".to_string(),
+            device_type: "USB Controller".to_string(),
+            hw_id: Some("8086:A12F".to_string()),
+            irq: Some(16),
+            mmio_range: Some((0xFE20_0000, 0xFE20_FFFF)),
+            dma_channel: None,
+            driver: Some(DriverInfo::new(
+                "xhci-hcd",
+                "1.0.3",
+                "Slate OS Project",
+                "2026-01-10",
+                false,
+            )),
+            enabled: true,
+            location: "PCI Bus 0, Device 20, Function 0".to_string(),
+            status_detail: "Device is functioning correctly".to_string(),
+        },
+        DeviceInfo {
+            id: 6,
+            name: "PS/2 Keyboard".to_string(),
+            category: DeviceCategory::Input,
+            status: DeviceStatus::Working,
+            vendor: "Generic".to_string(),
+            device_type: "Keyboard".to_string(),
+            hw_id: None,
+            irq: Some(1),
+            mmio_range: None,
+            dma_channel: None,
+            driver: Some(DriverInfo::new(
+                "i8042-kbd",
+                "1.0.0",
+                "Slate OS Project",
+                "2025-12-01",
+                false,
+            )),
+            enabled: true,
+            location: "ISA, Port 0x60".to_string(),
+            status_detail: "Device is functioning correctly".to_string(),
+        },
+        DeviceInfo {
+            id: 7,
+            name: "PS/2 Mouse".to_string(),
+            category: DeviceCategory::Input,
+            status: DeviceStatus::Working,
+            vendor: "Generic".to_string(),
+            device_type: "Mouse".to_string(),
+            hw_id: None,
+            irq: Some(12),
+            mmio_range: None,
+            dma_channel: None,
+            driver: Some(DriverInfo::new(
+                "i8042-mouse",
+                "1.0.0",
+                "Slate OS Project",
+                "2025-12-01",
+                false,
+            )),
+            enabled: true,
+            location: "ISA, Port 0x60".to_string(),
+            status_detail: "Device is functioning correctly".to_string(),
+        },
+        DeviceInfo {
+            id: 8,
+            name: "ACPI Power Management".to_string(),
+            category: DeviceCategory::System,
+            status: DeviceStatus::Working,
+            vendor: "ACPI".to_string(),
+            device_type: "System Device".to_string(),
+            hw_id: Some("PNP0C0A".to_string()),
+            irq: Some(9),
+            mmio_range: None,
+            dma_channel: None,
+            driver: Some(DriverInfo::new(
+                "acpi-pm",
+                "1.0.0",
+                "Slate OS Project",
+                "2025-11-15",
+                false,
+            )),
+            enabled: true,
+            location: "ACPI".to_string(),
+            status_detail: "Device is functioning correctly".to_string(),
+        },
+        DeviceInfo {
+            id: 9,
+            name: "PCI-to-ISA Bridge".to_string(),
+            category: DeviceCategory::System,
+            status: DeviceStatus::Working,
+            vendor: "Intel".to_string(),
+            device_type: "ISA Bridge".to_string(),
+            hw_id: Some("8086:7000".to_string()),
+            irq: None,
+            mmio_range: None,
+            dma_channel: None,
+            driver: Some(DriverInfo::new(
+                "piix3-isa",
+                "1.0.0",
+                "Slate OS Project",
+                "2025-11-15",
+                false,
+            )),
+            enabled: true,
+            location: "PCI Bus 0, Device 1, Function 0".to_string(),
+            status_detail: "Device is functioning correctly".to_string(),
+        },
+        DeviceInfo {
+            id: 10,
+            name: "Unknown PCI Device".to_string(),
+            category: DeviceCategory::Other,
+            status: DeviceStatus::Warning,
+            vendor: "Unknown".to_string(),
+            device_type: "PCI Device".to_string(),
+            hw_id: Some("DEAD:BEEF".to_string()),
+            irq: Some(11),
+            mmio_range: Some((0xFE30_0000, 0xFE30_0FFF)),
+            dma_channel: None,
+            driver: None,
+            enabled: true,
+            location: "PCI Bus 0, Device 31, Function 0".to_string(),
+            status_detail: "No compatible driver found".to_string(),
+        },
+        DeviceInfo {
+            id: 11,
+            name: "Realtek RTL8139 (Broken)".to_string(),
+            category: DeviceCategory::Network,
+            status: DeviceStatus::Error,
+            vendor: "Realtek".to_string(),
+            device_type: "Ethernet Controller".to_string(),
+            hw_id: Some("10EC:8139".to_string()),
+            irq: Some(10),
+            mmio_range: Some((0xFE40_0000, 0xFE40_00FF)),
+            dma_channel: None,
+            driver: Some(DriverInfo::new(
+                "rtl8139",
+                "0.9.0",
+                "Community",
+                "2025-06-01",
+                true,
+            )),
+            enabled: false,
+            location: "PCI Bus 0, Device 5, Function 0".to_string(),
+            status_detail: "Device reported a hardware error (code 10)".to_string(),
+        },
+        DeviceInfo {
+            id: 12,
+            name: "USB Mass Storage".to_string(),
+            category: DeviceCategory::Usb,
+            status: DeviceStatus::Disabled,
+            vendor: "SanDisk".to_string(),
+            device_type: "USB Storage Device".to_string(),
+            hw_id: Some("0781:5567".to_string()),
+            irq: None,
+            mmio_range: None,
+            dma_channel: None,
+            driver: Some(DriverInfo::new(
+                "usb-storage",
+                "1.1.0",
+                "Slate OS Project",
+                "2026-01-20",
+                false,
+            )),
+            enabled: false,
+            location: "USB Bus 1, Port 2".to_string(),
+            status_detail: "Device is disabled by administrator".to_string(),
+        },
+    ]
+}
+
+/// Generate sample event history for development/testing.
+fn sample_events() -> Vec<DeviceEvent> {
+    vec![
+        DeviceEvent::new(
+            1,
+            DeviceEventKind::Connected,
+            "2026-05-18 08:00:12",
+            "Virtio GPU enumerated at boot",
+        ),
+        DeviceEvent::new(
+            1,
+            DeviceEventKind::DriverLoaded,
+            "2026-05-18 08:00:13",
+            "virtio-gpu v1.2.0 loaded",
+        ),
+        DeviceEvent::new(
+            3,
+            DeviceEventKind::Connected,
+            "2026-05-18 08:00:14",
+            "Virtio NIC enumerated",
+        ),
+        DeviceEvent::new(
+            3,
+            DeviceEventKind::DriverLoaded,
+            "2026-05-18 08:00:15",
+            "virtio-net v2.0.1 loaded",
+        ),
+        DeviceEvent::new(
+            11,
+            DeviceEventKind::Connected,
+            "2026-05-18 08:00:16",
+            "RTL8139 detected",
+        ),
+        DeviceEvent::new(
+            11,
+            DeviceEventKind::Error,
+            "2026-05-18 08:00:17",
+            "Hardware error code 10",
+        ),
+        DeviceEvent::new(
+            11,
+            DeviceEventKind::Disabled,
+            "2026-05-18 08:01:00",
+            "Disabled by user",
+        ),
+        DeviceEvent::new(
+            12,
+            DeviceEventKind::Connected,
+            "2026-05-18 09:15:30",
+            "USB device plugged in",
+        ),
+        DeviceEvent::new(
+            12,
+            DeviceEventKind::DriverLoaded,
+            "2026-05-18 09:15:31",
+            "usb-storage v1.1.0 loaded",
+        ),
+        DeviceEvent::new(
+            12,
+            DeviceEventKind::Disabled,
+            "2026-05-18 09:20:00",
+            "Disabled by administrator",
+        ),
+        DeviceEvent::new(
+            10,
+            DeviceEventKind::Connected,
+            "2026-05-18 08:00:18",
+            "Unknown PCI device found",
+        ),
+    ]
+}
+
+// ============================================================================
+// Rendering
+// ============================================================================
+
+/// Render the complete device manager UI into render commands.
+pub fn render(state: &DeviceManagerState) -> Vec<RenderCommand> {
+    let mut cmds = Vec::new();
+
+    // Background
+    cmds.push(RenderCommand::FillRect {
+        x: 0.0,
+        y: 0.0,
+        width: state.width,
+        height: state.height,
+        color: COLOR_BASE,
+        corner_radii: CornerRadii::ZERO,
+    });
+
+    render_title_bar(state, &mut cmds);
+    render_toolbar(state, &mut cmds);
+    render_search_bar(state, &mut cmds);
+    render_sidebar(state, &mut cmds);
+    render_properties_panel(state, &mut cmds);
+    render_status_bar(state, &mut cmds);
+
+    cmds
+}
+
+/// Render the title bar.
+fn render_title_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
+    cmds.push(RenderCommand::FillRect {
+        x: 0.0,
+        y: 0.0,
+        width: state.width,
+        height: TITLE_BAR_HEIGHT,
+        color: COLOR_MANTLE,
+        corner_radii: CornerRadii::ZERO,
+    });
+
+    cmds.push(RenderCommand::Text {
+        x: 12.0,
+        y: 10.0,
+        text: "Device Manager".to_string(),
+        font_size: 15.0,
+        color: COLOR_TEXT,
+        font_weight: FontWeightHint::Bold,
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+
+    // Problem count badge
+    let problems = state.problem_device_count();
+    if problems > 0 {
+        let badge_text = format!("{problems} problem(s)");
+        let badge_x = 160.0;
+        cmds.push(RenderCommand::FillRect {
+            x: badge_x,
+            y: 8.0,
+            width: 100.0,
+            height: 20.0,
+            color: COLOR_RED,
+            corner_radii: CornerRadii::all(4.0),
+        });
+        cmds.push(RenderCommand::Text {
+            x: badge_x + 8.0,
+            y: 11.0,
+            text: badge_text,
+            font_size: 11.0,
+            color: COLOR_BASE,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(84.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    // Separator line
+    cmds.push(RenderCommand::Line {
+        x1: 0.0,
+        y1: TITLE_BAR_HEIGHT,
+        x2: state.width,
+        y2: TITLE_BAR_HEIGHT,
+        color: COLOR_SURFACE1,
+        width: 1.0,
+    });
+}
+
+/// Render the toolbar with action buttons.
+fn render_toolbar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
+    let y = TITLE_BAR_HEIGHT;
+
+    cmds.push(RenderCommand::FillRect {
+        x: 0.0,
+        y,
+        width: state.width,
+        height: TOOLBAR_HEIGHT,
+        color: COLOR_SURFACE0,
+        corner_radii: CornerRadii::ZERO,
+    });
+
+    let actions = ToolbarAction::all();
+    for (i, action) in actions.iter().enumerate() {
+        let btn_x = 8.0 + i as f32 * (TOOLBAR_BTN_WIDTH + 6.0);
+        let btn_y = y + (TOOLBAR_HEIGHT - TOOLBAR_BTN_HEIGHT) / 2.0;
+
+        let is_hovered = state.hovered_toolbar_action == Some(i);
+        let bg = if is_hovered {
+            COLOR_SURFACE2
+        } else {
+            COLOR_SURFACE1
+        };
+
+        cmds.push(RenderCommand::FillRect {
+            x: btn_x,
+            y: btn_y,
+            width: TOOLBAR_BTN_WIDTH,
+            height: TOOLBAR_BTN_HEIGHT,
+            color: bg,
+            corner_radii: CornerRadii::all(4.0),
+        });
+
+        cmds.push(RenderCommand::Text {
+            x: btn_x + 8.0,
+            y: btn_y + 6.0,
+            text: action.label().to_string(),
+            font_size: 12.0,
+            color: COLOR_TEXT,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(TOOLBAR_BTN_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    // Separator line
+    cmds.push(RenderCommand::Line {
+        x1: 0.0,
+        y1: y + TOOLBAR_HEIGHT,
+        x2: state.width,
+        y2: y + TOOLBAR_HEIGHT,
+        color: COLOR_SURFACE1,
+        width: 1.0,
+    });
+}
+
+/// Render the search bar below the toolbar.
+fn render_search_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
+    let y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
+
+    cmds.push(RenderCommand::FillRect {
+        x: 0.0,
+        y,
+        width: SIDEBAR_WIDTH,
+        height: SEARCH_BAR_HEIGHT,
+        color: COLOR_MANTLE,
+        corner_radii: CornerRadii::ZERO,
+    });
+
+    // Search input background
+    let input_x = 8.0;
+    let input_y = y + 4.0;
+    let input_w = SIDEBAR_WIDTH - 16.0;
+    let input_h = SEARCH_BAR_HEIGHT - 8.0;
+
+    let border_color = if state.search_focused {
+        COLOR_BLUE
+    } else {
+        COLOR_SURFACE2
+    };
+
+    cmds.push(RenderCommand::FillRect {
+        x: input_x,
+        y: input_y,
+        width: input_w,
+        height: input_h,
+        color: COLOR_SURFACE0,
+        corner_radii: CornerRadii::all(3.0),
+    });
+    cmds.push(RenderCommand::StrokeRect {
+        x: input_x,
+        y: input_y,
+        width: input_w,
+        height: input_h,
+        color: border_color,
+        line_width: 1.0,
+        corner_radii: CornerRadii::all(3.0),
+    });
+
+    let display_text = if state.search_query.is_empty() {
+        "Search devices...".to_string()
+    } else {
+        state.search_query.clone()
+    };
+    let text_color = if state.search_query.is_empty() {
+        COLOR_OVERLAY
+    } else {
+        COLOR_TEXT
+    };
+
+    cmds.push(RenderCommand::Text {
+        x: input_x + 8.0,
+        y: input_y + 4.0,
+        text: display_text,
+        font_size: 11.0,
+        color: text_color,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(input_w - 16.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+/// Distance from the top of a scroll window down to the `slot`-th drawn row.
+///
+/// `slot` counts from the first row on screen, not from the first row in the
+/// list, so this is bounded by the window's height however far the list is
+/// scrolled. The clamp matters because the cast is saturating: a `usize` too
+/// large for an `f32` to hold exactly would otherwise turn into a coordinate
+/// that is merely nearby, and rows would drift apart as the list got longer.
+fn slot_offset(slot: usize, row_h: f32) -> f32 {
+    f32::from(u16::try_from(slot).unwrap_or(u16::MAX)) * row_h
+}
+
+/// Render the device tree sidebar.
+fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
+    let top = state.panel_top();
+    let bottom = state.panel_bottom();
+    let sidebar_height = state.tree_height();
+
+    // Sidebar background
+    cmds.push(RenderCommand::FillRect {
+        x: 0.0,
+        y: top,
+        width: SIDEBAR_WIDTH,
+        height: sidebar_height,
+        color: COLOR_MANTLE,
+        corner_radii: CornerRadii::ZERO,
+    });
+
+    // Clip to sidebar area
+    cmds.push(RenderCommand::PushClip {
+        x: 0.0,
+        y: top,
+        width: SIDEBAR_WIDTH,
+        height: sidebar_height,
+    });
+
+    let indices = state.visible_tree_indices();
+    let rows = state.tree_rows();
+
+    for (slot, &i) in indices.iter().skip(rows.start).take(rows.count).enumerate() {
+        let Some(node) = state.tree_nodes.get(i) else {
+            continue;
+        };
+        let y_offset = top + slot_offset(slot, TREE_ROW_HEIGHT);
+
+        let is_selected = state.selected_tree_index == Some(i);
+        let is_hovered = state.hovered_tree_index == Some(i);
+
+        // Row background
+        let row_bg = if is_selected {
+            COLOR_SURFACE1
+        } else if is_hovered {
+            COLOR_SURFACE0
+        } else {
+            Color::TRANSPARENT
+        };
+
+        if row_bg != Color::TRANSPARENT {
+            cmds.push(RenderCommand::FillRect {
+                x: 0.0,
+                y: y_offset,
+                width: SIDEBAR_WIDTH,
+                height: TREE_ROW_HEIGHT,
+                color: row_bg,
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+
+        // Selection indicator
+        if is_selected {
+            cmds.push(RenderCommand::FillRect {
+                x: 0.0,
+                y: y_offset,
+                width: 3.0,
+                height: TREE_ROW_HEIGHT,
+                color: COLOR_BLUE,
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+
+        let indent = node.depth as f32 * TREE_INDENT + 8.0;
+
+        if let Some(cat) = node.category {
+            // Category node: show expand/collapse arrow and category icon
+            let arrow = if node.expanded { "v" } else { ">" };
+            cmds.push(RenderCommand::Text {
+                x: indent,
+                y: y_offset + 5.0,
+                text: arrow.to_string(),
+                font_size: 11.0,
+                color: COLOR_OVERLAY,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+
+            cmds.push(RenderCommand::Text {
+                x: indent + 14.0,
+                y: y_offset + 5.0,
+                text: cat.icon().to_string(),
+                font_size: 11.0,
+                color: cat.color(),
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+
+            cmds.push(RenderCommand::Text {
+                x: indent + 40.0,
+                y: y_offset + 5.0,
+                text: node.label.clone(),
+                font_size: 12.0,
+                color: COLOR_TEXT,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(SIDEBAR_WIDTH - indent - 48.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        } else if let Some(dev_id) = node.device_id {
+            // Device node: show status icon and name
+            let dev = state.devices.iter().find(|d| d.id == dev_id);
+            if let Some(dev) = dev {
+                // Status icon
+                cmds.push(RenderCommand::Text {
+                    x: indent + 4.0,
+                    y: y_offset + 5.0,
+                    text: dev.status.icon().to_string(),
+                    font_size: 11.0,
+                    color: dev.status.color(),
+                    font_weight: FontWeightHint::Bold,
+                    max_width: None,
+                    overflow: TextOverflow::Clip,
+                });
+
+                // Device name
+                let name_color = if dev.has_problem() {
+                    dev.status.color()
+                } else if !dev.enabled {
+                    COLOR_OVERLAY
+                } else {
+                    COLOR_SUBTEXT
+                };
+
+                cmds.push(RenderCommand::Text {
+                    x: indent + 18.0,
+                    y: y_offset + 5.0,
+                    text: node.label.clone(),
+                    font_size: 11.0,
+                    color: name_color,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(SIDEBAR_WIDTH - indent - 26.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+
+                // Driver update indicator
+                if dev.has_driver_update() {
+                    cmds.push(RenderCommand::FillRect {
+                        x: SIDEBAR_WIDTH - 16.0,
+                        y: y_offset + 8.0,
+                        width: 8.0,
+                        height: 8.0,
+                        color: COLOR_YELLOW,
+                        corner_radii: CornerRadii::all(4.0),
+                    });
+                }
+            }
+        }
+    }
+
+    cmds.push(RenderCommand::PopClip);
+
+    // Vertical separator between sidebar and properties panel
+    cmds.push(RenderCommand::Line {
+        x1: SIDEBAR_WIDTH,
+        y1: top,
+        x2: SIDEBAR_WIDTH,
+        y2: bottom,
+        color: COLOR_SURFACE1,
+        width: 1.0,
+    });
+}
+
+/// Render the properties panel (right side).
+fn render_properties_panel(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
+    let top = state.panel_top();
+    let panel_x = state.panel_x();
+    let panel_width = state.width - panel_x;
+    let panel_height = state.panel_bottom() - top;
+
+    // Panel background
+    cmds.push(RenderCommand::FillRect {
+        x: panel_x,
+        y: top,
+        width: panel_width,
+        height: panel_height,
+        color: COLOR_BASE,
+        corner_radii: CornerRadii::ZERO,
+    });
+
+    if state.shows_tab_bar() {
+        render_tab_bar(state, cmds, panel_x, top, panel_width);
+    }
+
+    let body_top = state.properties_body_top();
+    let body_height = state.properties_body_height();
+
+    // Clip to the body area. Everything below is drawn shifted up by the
+    // scroll offset, so without this it would spill over the tab bar above and
+    // the status bar below.
+    cmds.push(RenderCommand::PushClip {
+        x: panel_x,
+        y: body_top,
+        width: panel_width,
+        height: body_height,
+    });
+
+    render_properties_body(
+        state,
+        cmds,
+        panel_x,
+        body_top
+            - state
+                .properties_scroll
+                .clamp(0.0, state.max_properties_scroll()),
+        panel_width,
+        body_height,
+    );
+
+    cmds.push(RenderCommand::PopClip);
+}
+
+/// Draw whatever the properties panel currently shows, with its top edge at
+/// `y` — the resource overview, the empty-selection placeholder, or the
+/// selected device's active tab.
+///
+/// Split out from [`render_properties_panel`] so that
+/// [`properties_content_height`] can measure it by drawing it into a list it
+/// throws away. That is the only honest way to measure a panel that stacks
+/// sections of several different heights, some of them conditional: a separate
+/// `measure_*` function would be a second derivation of the same layout, right
+/// up until someone edited one of the two.
+fn render_properties_body(
+    state: &DeviceManagerState,
+    cmds: &mut Vec<RenderCommand>,
+    panel_x: f32,
+    y: f32,
+    panel_width: f32,
+    body_height: f32,
+) {
+    if state.show_resource_view {
+        render_resource_view(state, cmds, panel_x, y, panel_width, body_height);
+        return;
+    }
+
+    let Some(dev) = state.selected_device() else {
+        // No device selected: show placeholder
+        cmds.push(RenderCommand::Text {
+            x: panel_x + 20.0,
+            y: y + body_height / 2.0 - 10.0,
+            text: "Select a device to view its properties".to_string(),
+            font_size: 14.0,
+            color: COLOR_OVERLAY,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(panel_width - 40.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        return;
+    };
+
+    match state.active_tab {
+        PropertiesTab::General => render_general_tab(state, dev, cmds, panel_x, y, panel_width),
+        PropertiesTab::Driver => render_driver_tab(state, dev, cmds, panel_x, y, panel_width),
+        PropertiesTab::Resources => render_resources_tab(dev, cmds, panel_x, y, panel_width),
+        PropertiesTab::Events => render_events_tab(state, dev, cmds, panel_x, y, panel_width),
+    }
+}
+
+/// How tall the properties panel's content is, measured by drawing it.
+///
+/// Renders the body at the origin into a throwaway command list and asks
+/// [`content_bottom`] where the ink stopped. The panel has no other way to know
+/// its own height: its sections are of several different heights and some are
+/// conditional on the device (a driver badge, a status detail line, an event
+/// list of any length), so the answer is not a count times a row height.
+///
+/// A body that draws nothing measures zero, which makes
+/// [`max_properties_scroll`](DeviceManagerState::max_properties_scroll) zero
+/// and pins the panel — correct, since there is nothing below to reach.
+fn properties_content_height(state: &DeviceManagerState) -> f32 {
+    let mut scratch: Vec<RenderCommand> = Vec::new();
+    render_properties_body(
+        state,
+        &mut scratch,
+        state.panel_x(),
+        0.0,
+        state.width - state.panel_x(),
+        state.properties_body_height(),
+    );
+    content_bottom(&scratch).unwrap_or(0.0).max(0.0)
+}
+
+/// Render the tab bar for the properties panel.
+fn render_tab_bar(
+    state: &DeviceManagerState,
+    cmds: &mut Vec<RenderCommand>,
+    x: f32,
+    y: f32,
+    width: f32,
+) {
+    cmds.push(RenderCommand::FillRect {
+        x,
+        y,
+        width,
+        height: TAB_BAR_HEIGHT,
+        color: COLOR_MANTLE,
+        corner_radii: CornerRadii::ZERO,
+    });
+
+    let tabs = PropertiesTab::all();
+    let tab_width = width / tabs.len() as f32;
+
+    for (i, tab) in tabs.iter().enumerate() {
+        let tab_x = x + i as f32 * tab_width;
+        let is_active = *tab == state.active_tab;
+        let is_hovered = state.hovered_tab_index == Some(i);
+
+        if is_active {
+            cmds.push(RenderCommand::FillRect {
+                x: tab_x,
+                y: y + TAB_BAR_HEIGHT - 2.0,
+                width: tab_width,
+                height: 2.0,
+                color: COLOR_BLUE,
+                corner_radii: CornerRadii::ZERO,
+            });
+        } else if is_hovered {
+            cmds.push(RenderCommand::FillRect {
+                x: tab_x,
+                y,
+                width: tab_width,
+                height: TAB_BAR_HEIGHT,
+                color: COLOR_SURFACE0,
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+
+        let text_color = if is_active { COLOR_BLUE } else { COLOR_SUBTEXT };
+
+        cmds.push(RenderCommand::Text {
+            x: tab_x + tab_width / 2.0 - 20.0,
+            y: y + 7.0,
+            text: tab.label().to_string(),
+            font_size: 12.0,
+            color: text_color,
+            font_weight: if is_active {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            },
+            max_width: Some(tab_width - 8.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+}
+
+/// Render the General properties tab for a device.
+fn render_general_tab(
+    _state: &DeviceManagerState,
+    dev: &DeviceInfo,
+    cmds: &mut Vec<RenderCommand>,
+    x: f32,
+    y: f32,
+    width: f32,
+) {
+    let mut row_y = y + 8.0;
+    let label_x = x + 16.0;
+    let value_x = x + 140.0;
+    let max_val_w = width - 156.0;
+
+    // Device name header
+    cmds.push(RenderCommand::Text {
+        x: label_x,
+        y: row_y,
+        text: dev.name.clone(),
+        font_size: 15.0,
+        color: COLOR_TEXT,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    row_y += 24.0;
+
+    // Status indicator
+    let status_color = dev.status.color();
+    cmds.push(RenderCommand::FillRect {
+        x: label_x,
+        y: row_y + 2.0,
+        width: 10.0,
+        height: 10.0,
+        color: status_color,
+        corner_radii: CornerRadii::all(5.0),
+    });
+    cmds.push(RenderCommand::Text {
+        x: label_x + 16.0,
+        y: row_y,
+        text: dev.status.label().to_string(),
+        font_size: 12.0,
+        color: status_color,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width - 48.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    row_y += 20.0;
+
+    if !dev.status_detail.is_empty() {
+        cmds.push(RenderCommand::Text {
+            x: label_x + 16.0,
+            y: row_y,
+            text: dev.status_detail.clone(),
+            font_size: 11.0,
+            color: COLOR_SUBTEXT,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width - 48.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        row_y += 18.0;
+    }
+
+    row_y += 8.0;
+
+    // Separator
+    cmds.push(RenderCommand::Line {
+        x1: label_x,
+        y1: row_y,
+        x2: x + width - 16.0,
+        y2: row_y,
+        color: COLOR_SURFACE1,
+        width: 1.0,
+    });
+    row_y += 12.0;
+
+    // Property rows
+    let properties: Vec<(&str, String)> = vec![
+        ("Type", dev.device_type.clone()),
+        ("Vendor", dev.vendor.clone()),
+        ("Category", dev.category.label().to_string()),
+        (
+            "HW ID",
+            dev.hw_id.clone().unwrap_or_else(|| "N/A".to_string()),
+        ),
+        ("IRQ", dev.format_irq()),
+        ("MMIO", dev.format_mmio()),
+        (
+            "DMA",
+            dev.dma_channel
+                .map_or("N/A".to_string(), |c| format!("Channel {c}")),
+        ),
+        ("Location", dev.location.clone()),
+        (
+            "Enabled",
+            if dev.enabled { "Yes" } else { "No" }.to_string(),
+        ),
+    ];
+
+    for (label, value) in &properties {
+        // Alternating row backgrounds
+        cmds.push(RenderCommand::Text {
+            x: label_x,
+            y: row_y,
+            text: (*label).to_string(),
+            font_size: 11.0,
+            color: COLOR_OVERLAY,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cmds.push(RenderCommand::Text {
+            x: value_x,
+            y: row_y,
+            text: value.clone(),
+            font_size: 11.0,
+            color: COLOR_TEXT,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(max_val_w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        row_y += PROPERTY_ROW_HEIGHT;
+    }
+}
+
+/// Render the Driver properties tab for a device.
+fn render_driver_tab(
+    state: &DeviceManagerState,
+    dev: &DeviceInfo,
+    cmds: &mut Vec<RenderCommand>,
+    x: f32,
+    y: f32,
+    width: f32,
+) {
+    let mut row_y = y + 8.0;
+    let label_x = x + 16.0;
+    let value_x = x + 140.0;
+    let max_val_w = width - 156.0;
+
+    // Section header
+    cmds.push(RenderCommand::Text {
+        x: label_x,
+        y: row_y,
+        text: "Driver Information".to_string(),
+        font_size: 13.0,
+        color: COLOR_LAVENDER,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    row_y += SECTION_HEADER_HEIGHT;
+
+    match &dev.driver {
+        Some(drv) => {
+            let driver_props: Vec<(&str, &str)> = vec![
+                ("Name", &drv.name),
+                ("Version", &drv.version),
+                ("Provider", &drv.provider),
+                ("Date", &drv.date),
+            ];
+
+            for (label, value) in &driver_props {
+                cmds.push(RenderCommand::Text {
+                    x: label_x,
+                    y: row_y,
+                    text: (*label).to_string(),
+                    font_size: 11.0,
+                    color: COLOR_OVERLAY,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(120.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+                cmds.push(RenderCommand::Text {
+                    x: value_x,
+                    y: row_y,
+                    text: (*value).to_string(),
+                    font_size: 11.0,
+                    color: COLOR_TEXT,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(max_val_w),
+                    overflow: TextOverflow::Ellipsis,
+                });
+                row_y += PROPERTY_ROW_HEIGHT;
+            }
+
+            // Update status
+            row_y += 8.0;
+            cmds.push(RenderCommand::Line {
+                x1: label_x,
+                y1: row_y,
+                x2: x + width - 16.0,
+                y2: row_y,
+                color: COLOR_SURFACE1,
+                width: 1.0,
+            });
+            row_y += 12.0;
+
+            cmds.push(RenderCommand::Text {
+                x: label_x,
+                y: row_y,
+                text: "Update Status".to_string(),
+                font_size: 13.0,
+                color: COLOR_LAVENDER,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(width - 32.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            row_y += SECTION_HEADER_HEIGHT;
+
+            if let Some(check) = state.update_checks.get(&dev.id) {
+                cmds.push(RenderCommand::Text {
+                    x: label_x,
+                    y: row_y,
+                    text: "Status".to_string(),
+                    font_size: 11.0,
+                    color: COLOR_OVERLAY,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(120.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+                cmds.push(RenderCommand::Text {
+                    x: value_x,
+                    y: row_y,
+                    text: check.status.label().to_string(),
+                    font_size: 11.0,
+                    color: check.status.color(),
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(max_val_w),
+                    overflow: TextOverflow::Ellipsis,
+                });
+                row_y += PROPERTY_ROW_HEIGHT;
+
+                if let Some(ref ver) = check.available_version {
+                    cmds.push(RenderCommand::Text {
+                        x: label_x,
+                        y: row_y,
+                        text: "Available".to_string(),
+                        font_size: 11.0,
+                        color: COLOR_OVERLAY,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(120.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                    cmds.push(RenderCommand::Text {
+                        x: value_x,
+                        y: row_y,
+                        text: ver.clone(),
+                        font_size: 11.0,
+                        color: COLOR_YELLOW,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(max_val_w),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                    row_y += PROPERTY_ROW_HEIGHT;
+                }
+
+                if let Some(ref ts) = check.last_checked {
+                    cmds.push(RenderCommand::Text {
+                        x: label_x,
+                        y: row_y,
+                        text: "Last Check".to_string(),
+                        font_size: 11.0,
+                        color: COLOR_OVERLAY,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(120.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                    cmds.push(RenderCommand::Text {
+                        x: value_x,
+                        y: row_y,
+                        text: ts.clone(),
+                        font_size: 11.0,
+                        color: COLOR_TEXT,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(max_val_w),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
+            }
+
+            if drv.update_available {
+                row_y += PROPERTY_ROW_HEIGHT + 8.0;
+                cmds.push(RenderCommand::FillRect {
+                    x: label_x,
+                    y: row_y,
+                    width: 140.0,
+                    height: 24.0,
+                    color: COLOR_YELLOW,
+                    corner_radii: CornerRadii::all(4.0),
+                });
+                cmds.push(RenderCommand::Text {
+                    x: label_x + 10.0,
+                    y: row_y + 5.0,
+                    text: "Update Available".to_string(),
+                    font_size: 11.0,
+                    color: COLOR_BASE,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: Some(120.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
+        None => {
+            cmds.push(RenderCommand::Text {
+                x: label_x,
+                y: row_y,
+                text: "No driver installed".to_string(),
+                font_size: 12.0,
+                color: COLOR_OVERLAY,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width - 32.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+    }
+}
+
+/// Render the Resources tab for a device.
+fn render_resources_tab(
+    dev: &DeviceInfo,
+    cmds: &mut Vec<RenderCommand>,
+    x: f32,
+    y: f32,
+    width: f32,
+) {
+    let mut row_y = y + 8.0;
+    let label_x = x + 16.0;
+    let value_x = x + 140.0;
+    let max_val_w = width - 156.0;
+
+    // IRQ section
+    cmds.push(RenderCommand::Text {
+        x: label_x,
+        y: row_y,
+        text: "Interrupt Request (IRQ)".to_string(),
+        font_size: 13.0,
+        color: COLOR_LAVENDER,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    row_y += SECTION_HEADER_HEIGHT;
+
+    cmds.push(RenderCommand::Text {
+        x: label_x,
+        y: row_y,
+        text: "IRQ".to_string(),
+        font_size: 11.0,
+        color: COLOR_OVERLAY,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(120.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    cmds.push(RenderCommand::Text {
+        x: value_x,
+        y: row_y,
+        text: dev.format_irq(),
+        font_size: 11.0,
+        color: COLOR_TEXT,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(max_val_w),
+        overflow: TextOverflow::Ellipsis,
+    });
+    row_y += PROPERTY_ROW_HEIGHT + 8.0;
+
+    // MMIO section
+    cmds.push(RenderCommand::Line {
+        x1: label_x,
+        y1: row_y,
+        x2: x + width - 16.0,
+        y2: row_y,
+        color: COLOR_SURFACE1,
+        width: 1.0,
+    });
+    row_y += 12.0;
+
+    cmds.push(RenderCommand::Text {
+        x: label_x,
+        y: row_y,
+        text: "Memory-Mapped I/O (MMIO)".to_string(),
+        font_size: 13.0,
+        color: COLOR_LAVENDER,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    row_y += SECTION_HEADER_HEIGHT;
+
+    cmds.push(RenderCommand::Text {
+        x: label_x,
+        y: row_y,
+        text: "Range".to_string(),
+        font_size: 11.0,
+        color: COLOR_OVERLAY,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(120.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    cmds.push(RenderCommand::Text {
+        x: value_x,
+        y: row_y,
+        text: dev.format_mmio(),
+        font_size: 11.0,
+        color: COLOR_TEXT,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(max_val_w),
+        overflow: TextOverflow::Ellipsis,
+    });
+    row_y += PROPERTY_ROW_HEIGHT;
+
+    if let Some((start, end)) = dev.mmio_range {
+        let size = end.saturating_sub(start).saturating_add(1);
+        let size_str = if size >= 1024 * 1024 {
+            format!("{} MiB", size / (1024 * 1024))
+        } else if size >= 1024 {
+            format!("{} KiB", size / 1024)
+        } else {
+            format!("{size} B")
+        };
+        cmds.push(RenderCommand::Text {
+            x: label_x,
+            y: row_y,
+            text: "Size".to_string(),
+            font_size: 11.0,
+            color: COLOR_OVERLAY,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cmds.push(RenderCommand::Text {
+            x: value_x,
+            y: row_y,
+            text: size_str,
+            font_size: 11.0,
+            color: COLOR_TEXT,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(max_val_w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        row_y += PROPERTY_ROW_HEIGHT;
+    }
+
+    row_y += 8.0;
+
+    // DMA section
+    cmds.push(RenderCommand::Line {
+        x1: label_x,
+        y1: row_y,
+        x2: x + width - 16.0,
+        y2: row_y,
+        color: COLOR_SURFACE1,
+        width: 1.0,
+    });
+    row_y += 12.0;
+
+    cmds.push(RenderCommand::Text {
+        x: label_x,
+        y: row_y,
+        text: "DMA Channel".to_string(),
+        font_size: 13.0,
+        color: COLOR_LAVENDER,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    row_y += SECTION_HEADER_HEIGHT;
+
+    cmds.push(RenderCommand::Text {
+        x: label_x,
+        y: row_y,
+        text: "Channel".to_string(),
+        font_size: 11.0,
+        color: COLOR_OVERLAY,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(120.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    cmds.push(RenderCommand::Text {
+        x: value_x,
+        y: row_y,
+        text: dev
+            .dma_channel
+            .map_or("N/A".to_string(), |c| format!("{c}")),
+        font_size: 11.0,
+        color: COLOR_TEXT,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(max_val_w),
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+/// Render the Events tab for a device.
+fn render_events_tab(
+    state: &DeviceManagerState,
+    dev: &DeviceInfo,
+    cmds: &mut Vec<RenderCommand>,
+    x: f32,
+    y: f32,
+    width: f32,
+) {
+    let label_x = x + 16.0;
+    let mut row_y = y + 8.0;
+
+    cmds.push(RenderCommand::Text {
+        x: label_x,
+        y: row_y,
+        text: "Event History".to_string(),
+        font_size: 13.0,
+        color: COLOR_LAVENDER,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    row_y += SECTION_HEADER_HEIGHT;
+
+    let events = state.events_for_device(dev.id);
+    if events.is_empty() {
+        cmds.push(RenderCommand::Text {
+            x: label_x,
+            y: row_y,
+            text: "No events recorded".to_string(),
+            font_size: 11.0,
+            color: COLOR_OVERLAY,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width - 32.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        return;
+    }
+
+    // Column headers
+    cmds.push(RenderCommand::FillRect {
+        x: x + 8.0,
+        y: row_y,
+        width: width - 16.0,
+        height: EVENT_ROW_HEIGHT,
+        color: COLOR_SURFACE0,
+        corner_radii: CornerRadii::ZERO,
+    });
+    cmds.push(RenderCommand::Text {
+        x: label_x,
+        y: row_y + 3.0,
+        text: "Time".to_string(),
+        font_size: 10.0,
+        color: COLOR_OVERLAY,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(140.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    cmds.push(RenderCommand::Text {
+        x: x + 170.0,
+        y: row_y + 3.0,
+        text: "Event".to_string(),
+        font_size: 10.0,
+        color: COLOR_OVERLAY,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(100.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    cmds.push(RenderCommand::Text {
+        x: x + 280.0,
+        y: row_y + 3.0,
+        text: "Detail".to_string(),
+        font_size: 10.0,
+        color: COLOR_OVERLAY,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width - 296.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    row_y += EVENT_ROW_HEIGHT;
+
+    for (i, event) in events.iter().enumerate() {
+        let bg = if i % 2 == 0 {
+            Color::TRANSPARENT
+        } else {
+            COLOR_MANTLE
+        };
+
+        if bg != Color::TRANSPARENT {
+            cmds.push(RenderCommand::FillRect {
+                x: x + 8.0,
+                y: row_y,
+                width: width - 16.0,
+                height: EVENT_ROW_HEIGHT,
+                color: bg,
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+
+        cmds.push(RenderCommand::Text {
+            x: label_x,
+            y: row_y + 3.0,
+            text: event.timestamp.clone(),
+            font_size: 10.0,
+            color: COLOR_SUBTEXT,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(140.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cmds.push(RenderCommand::Text {
+            x: x + 170.0,
+            y: row_y + 3.0,
+            text: event.kind.label().to_string(),
+            font_size: 10.0,
+            color: event.kind.color(),
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cmds.push(RenderCommand::Text {
+            x: x + 280.0,
+            y: row_y + 3.0,
+            text: event.detail.clone(),
+            font_size: 10.0,
+            color: COLOR_TEXT,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width - 296.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        row_y += EVENT_ROW_HEIGHT;
+    }
+}
+
+/// Render the full resource view (IRQs, MMIO, DMA system-wide).
+fn render_resource_view(
+    state: &DeviceManagerState,
+    cmds: &mut Vec<RenderCommand>,
+    x: f32,
+    y: f32,
+    width: f32,
+    _height: f32,
+) {
+    let label_x = x + 16.0;
+    let mut row_y = y + 8.0;
+
+    // Title
+    cmds.push(RenderCommand::Text {
+        x: label_x,
+        y: row_y,
+        text: "System Resource Overview".to_string(),
+        font_size: 15.0,
+        color: COLOR_TEXT,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    row_y += 28.0;
+
+    // IRQ section
+    cmds.push(RenderCommand::Text {
+        x: label_x,
+        y: row_y,
+        text: format!("IRQ Assignments ({})", state.resource_view.irqs.len()),
+        font_size: 13.0,
+        color: COLOR_LAVENDER,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    row_y += SECTION_HEADER_HEIGHT;
+
+    for irq in &state.resource_view.irqs {
+        let shared_tag = if irq.shared { " (shared)" } else { "" };
+        cmds.push(RenderCommand::Text {
+            x: label_x,
+            y: row_y,
+            text: format!("IRQ {:>3}", irq.irq),
+            font_size: 11.0,
+            color: COLOR_TEAL,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cmds.push(RenderCommand::Text {
+            x: x + 110.0,
+            y: row_y,
+            text: format!("{}{shared_tag}", irq.device_name),
+            font_size: 11.0,
+            color: COLOR_TEXT,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width - 126.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        row_y += PROPERTY_ROW_HEIGHT;
+    }
+
+    row_y += 8.0;
+    cmds.push(RenderCommand::Line {
+        x1: label_x,
+        y1: row_y,
+        x2: x + width - 16.0,
+        y2: row_y,
+        color: COLOR_SURFACE1,
+        width: 1.0,
+    });
+    row_y += 12.0;
+
+    // MMIO section
+    cmds.push(RenderCommand::Text {
+        x: label_x,
+        y: row_y,
+        text: format!("MMIO Ranges ({})", state.resource_view.mmio_ranges.len()),
+        font_size: 13.0,
+        color: COLOR_LAVENDER,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    row_y += SECTION_HEADER_HEIGHT;
+
+    for mmio in &state.resource_view.mmio_ranges {
+        cmds.push(RenderCommand::Text {
+            x: label_x,
+            y: row_y,
+            text: mmio.format_range(),
+            font_size: 11.0,
+            color: COLOR_PEACH,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(220.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cmds.push(RenderCommand::Text {
+            x: x + 250.0,
+            y: row_y,
+            text: mmio.device_name.clone(),
+            font_size: 11.0,
+            color: COLOR_TEXT,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width - 266.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        row_y += PROPERTY_ROW_HEIGHT;
+    }
+
+    row_y += 8.0;
+    cmds.push(RenderCommand::Line {
+        x1: label_x,
+        y1: row_y,
+        x2: x + width - 16.0,
+        y2: row_y,
+        color: COLOR_SURFACE1,
+        width: 1.0,
+    });
+    row_y += 12.0;
+
+    // DMA section
+    cmds.push(RenderCommand::Text {
+        x: label_x,
+        y: row_y,
+        text: format!("DMA Channels ({})", state.resource_view.dma_channels.len()),
+        font_size: 13.0,
+        color: COLOR_LAVENDER,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    row_y += SECTION_HEADER_HEIGHT;
+
+    for dma in &state.resource_view.dma_channels {
+        cmds.push(RenderCommand::Text {
+            x: label_x,
+            y: row_y,
+            text: format!("Ch {:>2}", dma.channel),
+            font_size: 11.0,
+            color: COLOR_SAPPHIRE,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(60.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cmds.push(RenderCommand::Text {
+            x: x + 90.0,
+            y: row_y,
+            text: dma.device_name.clone(),
+            font_size: 11.0,
+            color: COLOR_TEXT,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width - 106.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        row_y += PROPERTY_ROW_HEIGHT;
+    }
+}
+
+/// Render the status bar at the bottom of the window.
+fn render_status_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
+    let y = state.height - STATUS_BAR_HEIGHT;
+
+    cmds.push(RenderCommand::FillRect {
+        x: 0.0,
+        y,
+        width: state.width,
+        height: STATUS_BAR_HEIGHT,
+        color: COLOR_MANTLE,
+        corner_radii: CornerRadii::ZERO,
+    });
+
+    cmds.push(RenderCommand::Line {
+        x1: 0.0,
+        y1: y,
+        x2: state.width,
+        y2: y,
+        color: COLOR_SURFACE1,
+        width: 1.0,
+    });
+
+    let total = state.devices.len();
+    let problems = state.problem_device_count();
+    let enabled = state.enabled_device_count();
+    let matching = state.matching_device_count();
+
+    let status_text = if state.search_query.is_empty() {
+        format!("{total} devices | {enabled} enabled | {problems} problem(s)")
+    } else {
+        format!("{matching}/{total} matching | {enabled} enabled | {problems} problem(s)")
+    };
+
+    cmds.push(RenderCommand::Text {
+        x: 12.0,
+        y: y + 5.0,
+        text: status_text,
+        font_size: 11.0,
+        color: COLOR_SUBTEXT,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(state.width - 24.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+// ============================================================================
+// Event handling
+// ============================================================================
+
+/// Handle an event and return the result.
+pub fn handle_event(state: &mut DeviceManagerState, event: &Event) -> EventResult {
+    match event {
+        Event::Resize { width, height } => {
+            state.width = *width as f32;
+            state.height = *height as f32;
+            EventResult::Consumed
+        }
+        Event::Key(key_event) => handle_key_event(state, key_event),
+        Event::Mouse(mouse_event) => handle_mouse_event(state, mouse_event),
+        _ => EventResult::Ignored,
+    }
+}
+
+/// Handle keyboard events.
+fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResult {
+    if !key.pressed {
+        return EventResult::Ignored;
+    }
+
+    // Search bar text input
+    if state.search_focused {
+        match key.key {
+            Key::Escape => {
+                state.search_focused = false;
+                return EventResult::Consumed;
+            }
+            Key::Backspace => {
+                state.search_query.pop();
+                state.apply_search_filter();
+                return EventResult::Consumed;
+            }
+            Key::Enter => {
+                state.search_focused = false;
+                return EventResult::Consumed;
+            }
+            _ => {
+                if key.types_text() {
+                    state.search_query.extend(key.typed());
+                    state.apply_search_filter();
+                    return EventResult::Consumed;
+                }
+            }
+        }
+        return EventResult::Consumed;
+    }
+
+    // Global shortcuts
+    if key.modifiers.ctrl {
+        match key.key {
+            Key::F => {
+                state.search_focused = true;
+                return EventResult::Consumed;
+            }
+            Key::E => {
+                state.handle_toolbar_action(ToolbarAction::Export);
+                return EventResult::Consumed;
+            }
+            Key::R => {
+                state.handle_toolbar_action(ToolbarAction::Scan);
+                return EventResult::Consumed;
+            }
+            _ => {}
+        }
+    }
+
+    match key.key {
+        Key::Up => {
+            if let Some(idx) = state.selected_tree_index {
+                // Find previous visible node
+                let mut new_idx = idx;
+                // `checked_sub` rather than `- 1`: the loop stops at index 0
+                // because that is where the subtraction runs out, so the bound
+                // and the step are the same fact stated once.
+                while let Some(prev) = new_idx.checked_sub(1) {
+                    new_idx = prev;
+                    if is_node_visible(state, new_idx) {
+                        state.select_tree_node(new_idx);
+                        break;
+                    }
+                }
+            } else if !state.tree_nodes.is_empty() {
+                state.select_tree_node(0);
+            }
+            EventResult::Consumed
+        }
+        Key::Down => {
+            if let Some(idx) = state.selected_tree_index {
+                let mut new_idx = idx;
+                // The `filter` carries the end-of-list bound; `checked_add`
+                // carries the (unreachable, but free) overflow one.
+                while let Some(next) = new_idx
+                    .checked_add(1)
+                    .filter(|n| *n < state.tree_nodes.len())
+                {
+                    new_idx = next;
+                    if is_node_visible(state, new_idx) {
+                        state.select_tree_node(new_idx);
+                        break;
+                    }
+                }
+            } else if !state.tree_nodes.is_empty() {
+                state.select_tree_node(0);
+            }
+            EventResult::Consumed
+        }
+        Key::Left => {
+            // Collapse category or move to parent category
+            if let Some(idx) = state.selected_tree_index
+                && let Some(node) = state.tree_nodes.get(idx)
+            {
+                if node.category.is_some() && node.expanded {
+                    state.toggle_category(idx);
+                } else if node.device_id.is_some() {
+                    // Move to parent category
+                    for i in (0..idx).rev() {
+                        if state
+                            .tree_nodes
+                            .get(i)
+                            .is_some_and(|n| n.category.is_some())
+                        {
+                            state.select_tree_node(i);
+                            break;
+                        }
+                    }
+                }
+            }
+            EventResult::Consumed
+        }
+        Key::Right => {
+            // Expand category
+            if let Some(idx) = state.selected_tree_index
+                && let Some(node) = state.tree_nodes.get(idx)
+                && node.category.is_some()
+                && !node.expanded
+            {
+                state.toggle_category(idx);
+            }
+            EventResult::Consumed
+        }
+        Key::Enter | Key::Space => {
+            if let Some(idx) = state.selected_tree_index
+                && let Some(node) = state.tree_nodes.get(idx)
+                && node.category.is_some()
+            {
+                state.toggle_category(idx);
+            }
+            EventResult::Consumed
+        }
+        Key::Tab => {
+            // Cycle through properties tabs
+            let tabs = PropertiesTab::all();
+            if let Some(pos) = tabs.iter().position(|t| *t == state.active_tab) {
+                // Wrap by comparison rather than `%`: `tabs` is a fixed array,
+                // so a remainder could never divide by zero, but saying so
+                // costs a lint suppression where this costs nothing.
+                let next = pos.saturating_add(1);
+                let next = if next < tabs.len() { next } else { 0 };
+                if let Some(tab) = tabs.get(next) {
+                    state.active_tab = *tab;
+                }
+            }
+            EventResult::Consumed
+        }
+        Key::F5 => {
+            state.handle_toolbar_action(ToolbarAction::Scan);
+            EventResult::Consumed
+        }
+        Key::Delete => {
+            state.handle_toolbar_action(ToolbarAction::Uninstall);
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+/// Handle mouse events.
+fn handle_mouse_event(
+    state: &mut DeviceManagerState,
+    mouse: &guitk::event::MouseEvent,
+) -> EventResult {
+    let mx = mouse.x;
+    let my = mouse.y;
+
+    match &mouse.kind {
+        MouseEventKind::Press(MouseButton::Left) => {
+            // Check toolbar buttons
+            let toolbar_y = TITLE_BAR_HEIGHT;
+            if my >= toolbar_y && my < toolbar_y + TOOLBAR_HEIGHT {
+                let actions = ToolbarAction::all();
+                for (i, action) in actions.iter().enumerate() {
+                    let btn_x = 8.0 + i as f32 * (TOOLBAR_BTN_WIDTH + 6.0);
+                    let btn_y = toolbar_y + (TOOLBAR_HEIGHT - TOOLBAR_BTN_HEIGHT) / 2.0;
+                    if mx >= btn_x
+                        && mx < btn_x + TOOLBAR_BTN_WIDTH
+                        && my >= btn_y
+                        && my < btn_y + TOOLBAR_BTN_HEIGHT
+                    {
+                        state.handle_toolbar_action(*action);
+                        return EventResult::Consumed;
+                    }
+                }
+            }
+
+            // Check search bar
+            let search_y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
+            if mx < SIDEBAR_WIDTH && my >= search_y && my < search_y + SEARCH_BAR_HEIGHT {
+                state.search_focused = true;
+                return EventResult::Consumed;
+            }
+
+            state.search_focused = false;
+
+            // Check tree sidebar
+            if mx < SIDEBAR_WIDTH && my >= state.panel_top() && my < state.panel_bottom() {
+                if let Some(idx) = tree_hit_test(state, my) {
+                    if let Some(node) = state.tree_nodes.get(idx)
+                        && node.category.is_some()
+                    {
+                        state.toggle_category(idx);
+                        // Folding a category removes rows from under the view.
+                        // Without this the offset stays where it was and the
+                        // sidebar shows blank space below a shortened list.
+                        state.tree_scroll = state.tree_scroll.min(state.max_tree_scroll());
+                    }
+                    state.select_tree_node(idx);
+                    return EventResult::Consumed;
+                }
+            }
+
+            // Check tab bar
+            let tab_y = state.panel_top();
+            let panel_x = state.panel_x();
+            let panel_width = state.width - panel_x;
+            if mx > panel_x && my >= tab_y && my < tab_y + TAB_BAR_HEIGHT && state.shows_tab_bar() {
+                let tabs = PropertiesTab::all();
+                let tab_width = panel_width / tabs.len() as f32;
+                let tab_idx = ((mx - panel_x) / tab_width) as usize;
+                if let Some(tab) = tabs.get(tab_idx) {
+                    state.active_tab = *tab;
+                    state.properties_scroll = 0.0;
+                    return EventResult::Consumed;
+                }
+            }
+
+            EventResult::Consumed
+        }
+        MouseEventKind::Move => {
+            // Update hover states
+            state.hovered_tree_index = None;
+            state.hovered_toolbar_action = None;
+            state.hovered_tab_index = None;
+
+            // Toolbar hover
+            let toolbar_y = TITLE_BAR_HEIGHT;
+            if my >= toolbar_y && my < toolbar_y + TOOLBAR_HEIGHT {
+                let actions = ToolbarAction::all();
+                for (i, _) in actions.iter().enumerate() {
+                    let btn_x = 8.0 + i as f32 * (TOOLBAR_BTN_WIDTH + 6.0);
+                    let btn_y = toolbar_y + (TOOLBAR_HEIGHT - TOOLBAR_BTN_HEIGHT) / 2.0;
+                    if mx >= btn_x
+                        && mx < btn_x + TOOLBAR_BTN_WIDTH
+                        && my >= btn_y
+                        && my < btn_y + TOOLBAR_BTN_HEIGHT
+                    {
+                        state.hovered_toolbar_action = Some(i);
+                        break;
+                    }
+                }
+            }
+
+            // Tree hover
+            if mx < SIDEBAR_WIDTH && my >= state.panel_top() && my < state.panel_bottom() {
+                state.hovered_tree_index = tree_hit_test(state, my);
+            }
+
+            // Tab hover
+            let tab_y = state.panel_top();
+            let panel_x = state.panel_x();
+            let panel_width = state.width - panel_x;
+            if mx > panel_x && my >= tab_y && my < tab_y + TAB_BAR_HEIGHT {
+                let tabs = PropertiesTab::all();
+                let tab_width = panel_width / tabs.len() as f32;
+                let tab_idx = ((mx - panel_x) / tab_width) as usize;
+                if tab_idx < tabs.len() {
+                    state.hovered_tab_index = Some(tab_idx);
+                }
+            }
+
+            EventResult::Consumed
+        }
+        MouseEventKind::Scroll { dy, .. } => {
+            // `dy` counts wheel *notches*, not pixels: 1.0 per detent of an
+            // ordinary wheel, positive away from the user, and a fraction of
+            // one from a trackpad. Both branches below used to multiply it by
+            // 20.0 on the assumption it was a distance.
+            //
+            // Scroll the tree sidebar
+            if mx < SIDEBAR_WIDTH && my >= state.panel_top() && my < state.panel_bottom() {
+                let rows = state.tree_wheel.rows(*dy);
+                state.tree_scroll =
+                    scroll_window::shift(state.tree_scroll, rows).min(state.max_tree_scroll());
+                return EventResult::Consumed;
+            }
+
+            // Scroll the properties panel. Pixels rather than rows, because
+            // the tabs stack sections of several heights and there is no row
+            // index that could name a position part way down one.
+            if mx >= SIDEBAR_WIDTH {
+                let moved = state.properties_scroll + wheel::pixels(*dy, PROPERTY_ROW_HEIGHT);
+                state.properties_scroll = moved.clamp(0.0, state.max_properties_scroll());
+                return EventResult::Consumed;
+            }
+
+            EventResult::Ignored
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+/// Which tree node the sidebar drew at window y-coordinate `my`, if any.
+///
+/// Takes a window coordinate rather than a tree-relative one so that the
+/// subtraction of the panel top and the addition of the scroll offset happen
+/// in exactly one place. Both callers used to do it themselves, which is two
+/// chances to get the sign of the offset wrong.
+fn tree_hit_test(state: &DeviceManagerState, my: f32) -> Option<usize> {
+    let offset = my - state.panel_top();
+    if !offset.is_finite() || offset < 0.0 || offset >= state.tree_height() {
+        return None;
+    }
+    // Saturating on purpose: `offset` is bounded above by the check just made,
+    // so the cast cannot reach a slot that is not on screen.
+    let slot = (offset / TREE_ROW_HEIGHT) as usize;
+    let row = state.tree_scroll.checked_add(slot)?;
+    state.visible_tree_indices().get(row).copied()
+}
+
+/// Check if a tree node at the given index is currently visible.
+///
+/// Delegates to [`visible_tree_indices`](DeviceManagerState::visible_tree_indices)
+/// rather than re-deriving the rule, which is what it used to do: it scanned
+/// backwards for the nearest category node and returned that category's
+/// `expanded`, while the sidebar walked forwards carrying the last *visible*
+/// category's flag. The two disagree about a device whose category is hidden by
+/// the search filter — the backwards scan hides it, the forward walk does not.
+///
+/// That state was unreachable, but only because of an invariant kept in a third
+/// function: [`apply_search_filter`](DeviceManagerState::apply_search_filter)
+/// hides a category exactly when it hides all of its devices, so the disputed
+/// row was always hidden by the `visible` flag before the disagreement could
+/// matter. Nothing tied the three together, and the invariant is not one a
+/// future filter has to keep — making a category match on its own name, an
+/// obvious improvement, breaks it and lets the arrow keys land the selection on
+/// a row the sidebar is not drawing.
+fn is_node_visible(state: &DeviceManagerState, index: usize) -> bool {
+    state.visible_tree_indices().contains(&index)
+}
+
+// ============================================================================
+// Entry point
+// ============================================================================
+
+impl oswindow::app::App for DeviceManagerState {
+    fn title(&self) -> String {
+        String::from("Device Manager")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        // `as` rather than `try_into`: both are small positive literals a few
+        // dozen lines above, so the conversion cannot fail and a fallible one
+        // would only add a branch nothing can take.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (DEFAULT_WIDTH as u32, DEFAULT_HEIGHT as u32)
+    }
+
+    /// No clock. Nothing in this window ages.
+    ///
+    /// Left at the default deliberately rather than by omission — see
+    /// [`oswindow::app::App::tick_interval`], which is the method five programs
+    /// in this tree got wrong by saying nothing. Every visible change here is
+    /// the direct consequence of a key or a click: selection, hover, scroll,
+    /// the search filter, expanding a category. The device list itself is
+    /// re-read only when the user asks for a rescan. If a future version polls
+    /// for hotplug, or animates the scroll, this method grows a body — and
+    /// `handle_event` grows an `Event::Tick` arm, which
+    /// `scripts/check-tick-wiring.py` will insist on.
+    fn on_event(&mut self, event: &Event) -> Response {
+        // Events here all arrive at human speed — a key, a click, a wheel
+        // notch — so an occasional wasted frame costs less than working out
+        // whether it was wasted. An app with a tick would have to be pickier;
+        // see `diskcleanup`, which answers `Idle` on ticks that changed nothing.
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Record what the compositor granted before drawing to it. The first
+        // frame goes out before any `Event::Resize` arrives, so a renderer
+        // trusting `self.width` alone would draw its first picture at the size
+        // it *asked* for rather than the one it was given — and put the sidebar
+        // divider and the status bar somewhere the hit-test does not look.
+        self.width = width;
+        self.height = height;
+        RenderTree {
+            commands: render(self),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    oswindow::app::launch("devicemanager", &mut DeviceManagerState::new())
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    // Panicking on bad data is what a test is *for*: an index that is out of
+    // range or an `Option` that is `None` should stop the run and name the
+    // line, not be handled into a pass. The lints these suppress are aimed at
+    // production code, where the same panic would be a denial of service.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::*;
+
+    // -- DeviceCategory tests ------------------------------------------------
+
+    #[test]
+    fn test_category_label() {
+        assert_eq!(DeviceCategory::Display.label(), "Display Adapters");
+        assert_eq!(DeviceCategory::Audio.label(), "Audio Devices");
+        assert_eq!(DeviceCategory::Network.label(), "Network Adapters");
+        assert_eq!(DeviceCategory::Storage.label(), "Storage Controllers");
+        assert_eq!(DeviceCategory::Usb.label(), "USB Controllers");
+        assert_eq!(DeviceCategory::Input.label(), "Input Devices");
+        assert_eq!(DeviceCategory::System.label(), "System Devices");
+        assert_eq!(DeviceCategory::Other.label(), "Other Devices");
+    }
+
+    #[test]
+    fn test_category_icon() {
+        assert_eq!(DeviceCategory::Display.icon(), "[D]");
+        assert_eq!(DeviceCategory::Audio.icon(), "[A]");
+        assert_eq!(DeviceCategory::Network.icon(), "[N]");
+        assert_eq!(DeviceCategory::Storage.icon(), "[S]");
+        assert_eq!(DeviceCategory::Usb.icon(), "[U]");
+        assert_eq!(DeviceCategory::Input.icon(), "[I]");
+        assert_eq!(DeviceCategory::System.icon(), "[Y]");
+        assert_eq!(DeviceCategory::Other.icon(), "[?]");
+    }
+
+    #[test]
+    fn test_category_color_is_distinct() {
+        let cats = DeviceCategory::all();
+        for i in 0..cats.len() {
+            for j in (i + 1)..cats.len() {
+                assert_ne!(
+                    cats[i].color(),
+                    cats[j].color(),
+                    "Categories {:?} and {:?} share a color",
+                    cats[i],
+                    cats[j]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_category_all_returns_eight() {
+        assert_eq!(DeviceCategory::all().len(), 8);
+    }
+
+    // -- DeviceStatus tests --------------------------------------------------
+
+    #[test]
+    fn test_status_label() {
+        assert_eq!(DeviceStatus::Working.label(), "Working");
+        assert_eq!(DeviceStatus::Warning.label(), "Warning");
+        assert_eq!(DeviceStatus::Error.label(), "Error");
+        assert_eq!(DeviceStatus::Disabled.label(), "Disabled");
+        assert_eq!(DeviceStatus::Unknown.label(), "Unknown");
+    }
+
+    #[test]
+    fn test_status_is_problem() {
+        assert!(!DeviceStatus::Working.is_problem());
+        assert!(DeviceStatus::Warning.is_problem());
+        assert!(DeviceStatus::Error.is_problem());
+        assert!(!DeviceStatus::Disabled.is_problem());
+        assert!(!DeviceStatus::Unknown.is_problem());
+    }
+
+    #[test]
+    fn test_status_icon() {
+        assert_eq!(DeviceStatus::Working.icon(), "+");
+        assert_eq!(DeviceStatus::Error.icon(), "X");
+        assert_eq!(DeviceStatus::Disabled.icon(), "-");
+    }
+
+    #[test]
+    fn test_status_color_nonzero_alpha() {
+        for status in &[
+            DeviceStatus::Working,
+            DeviceStatus::Warning,
+            DeviceStatus::Error,
+            DeviceStatus::Disabled,
+            DeviceStatus::Unknown,
+        ] {
+            assert_eq!(status.color().a, 255);
+        }
+    }
+
+    // -- DeviceEventKind tests -----------------------------------------------
+
+    #[test]
+    fn test_event_kind_label() {
+        assert_eq!(DeviceEventKind::Connected.label(), "Connected");
+        assert_eq!(DeviceEventKind::Disconnected.label(), "Disconnected");
+        assert_eq!(DeviceEventKind::Error.label(), "Error");
+        assert_eq!(DeviceEventKind::DriverLoaded.label(), "Driver Loaded");
+        assert_eq!(DeviceEventKind::DriverUnloaded.label(), "Driver Unloaded");
+        assert_eq!(DeviceEventKind::Enabled.label(), "Enabled");
+        assert_eq!(DeviceEventKind::Disabled.label(), "Disabled");
+        assert_eq!(DeviceEventKind::Reset.label(), "Reset");
+    }
+
+    #[test]
+    fn test_event_kind_color_is_opaque() {
+        let kinds = [
+            DeviceEventKind::Connected,
+            DeviceEventKind::Disconnected,
+            DeviceEventKind::Error,
+            DeviceEventKind::Reset,
+        ];
+        for k in &kinds {
+            assert_eq!(k.color().a, 255);
+        }
+    }
+
+    // -- DeviceEvent tests ---------------------------------------------------
+
+    #[test]
+    fn test_device_event_new() {
+        let ev = DeviceEvent::new(
+            42,
+            DeviceEventKind::Connected,
+            "2026-01-01 00:00:00",
+            "test detail",
+        );
+        assert_eq!(ev.device_id, 42);
+        assert_eq!(ev.kind, DeviceEventKind::Connected);
+        assert_eq!(ev.timestamp, "2026-01-01 00:00:00");
+        assert_eq!(ev.detail, "test detail");
+    }
+
+    // -- DriverInfo tests ----------------------------------------------------
+
+    #[test]
+    fn test_driver_info_new() {
+        let drv = DriverInfo::new("test-drv", "1.0.0", "TestCo", "2026-01-01", true);
+        assert_eq!(drv.name, "test-drv");
+        assert_eq!(drv.version, "1.0.0");
+        assert_eq!(drv.provider, "TestCo");
+        assert_eq!(drv.date, "2026-01-01");
+        assert!(drv.update_available);
+    }
+
+    #[test]
+    fn test_driver_info_no_update() {
+        let drv = DriverInfo::new("drv", "2.0", "X", "2026-05-01", false);
+        assert!(!drv.update_available);
+    }
+
+    // -- MmioRange tests -----------------------------------------------------
+
+    #[test]
+    fn test_mmio_range_format() {
+        let r = MmioRange {
+            start: 0xFD00_0000,
+            end: 0xFDFF_FFFF,
+            device_name: "GPU".to_string(),
+        };
+        assert_eq!(r.format_range(), "0xFD000000 - 0xFDFFFFFF");
+    }
+
+    #[test]
+    fn test_mmio_range_size() {
+        let r = MmioRange {
+            start: 0x1000,
+            end: 0x1FFF,
+            device_name: "Test".to_string(),
+        };
+        assert_eq!(r.size(), 0x1000);
+    }
+
+    #[test]
+    fn test_mmio_range_size_zero() {
+        let r = MmioRange {
+            start: 0x5000,
+            end: 0x5000,
+            device_name: "Test".to_string(),
+        };
+        assert_eq!(r.size(), 1);
+    }
+
+    // -- ResourceView tests --------------------------------------------------
+
+    #[test]
+    fn test_resource_view_from_empty() {
+        let rv = ResourceView::from_devices(&[]);
+        assert!(rv.irqs.is_empty());
+        assert!(rv.mmio_ranges.is_empty());
+        assert!(rv.dma_channels.is_empty());
+        assert_eq!(rv.total_count(), 0);
+    }
+
+    #[test]
+    fn test_resource_view_from_devices() {
+        let devices = sample_devices();
+        let rv = ResourceView::from_devices(&devices);
+        assert!(!rv.irqs.is_empty());
+        assert!(!rv.mmio_ranges.is_empty());
+        assert!(rv.total_count() > 0);
+    }
+
+    #[test]
+    fn test_resource_view_irq_sorted() {
+        let devices = sample_devices();
+        let rv = ResourceView::from_devices(&devices);
+        for i in 1..rv.irqs.len() {
+            assert!(rv.irqs[i].irq >= rv.irqs[i - 1].irq, "IRQs not sorted");
+        }
+    }
+
+    #[test]
+    fn test_resource_view_mmio_sorted() {
+        let devices = sample_devices();
+        let rv = ResourceView::from_devices(&devices);
+        for i in 1..rv.mmio_ranges.len() {
+            assert!(
+                rv.mmio_ranges[i].start >= rv.mmio_ranges[i - 1].start,
+                "MMIO ranges not sorted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resource_view_dma_sorted() {
+        let devices = sample_devices();
+        let rv = ResourceView::from_devices(&devices);
+        for i in 1..rv.dma_channels.len() {
+            assert!(
+                rv.dma_channels[i].channel >= rv.dma_channels[i - 1].channel,
+                "DMA channels not sorted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resource_view_shared_irq_detection() {
+        let devices = sample_devices();
+        let rv = ResourceView::from_devices(&devices);
+        // IRQ 9 and IRQ 10 are each used by two devices in sample data.
+        let shared_irqs: Vec<&IrqAssignment> = rv.irqs.iter().filter(|a| a.shared).collect();
+        assert!(
+            !shared_irqs.is_empty(),
+            "Should detect shared IRQs in sample data"
+        );
+    }
+
+    // -- DeviceInfo tests ----------------------------------------------------
+
+    #[test]
+    fn test_device_has_problem() {
+        let devices = sample_devices();
+        let warning_dev = devices.iter().find(|d| d.status == DeviceStatus::Warning);
+        assert!(warning_dev.is_some());
+        assert!(warning_dev.expect("checked").has_problem());
+
+        let working_dev = devices.iter().find(|d| d.status == DeviceStatus::Working);
+        assert!(working_dev.is_some());
+        assert!(!working_dev.expect("checked").has_problem());
+    }
+
+    #[test]
+    fn test_device_has_driver_update() {
+        let devices = sample_devices();
+        // Intel HD Audio has update_available = true
+        let audio = devices.iter().find(|d| d.id == 2);
+        assert!(audio.is_some());
+        assert!(audio.expect("checked").has_driver_update());
+
+        // Virtio GPU has update_available = false
+        let gpu = devices.iter().find(|d| d.id == 1);
+        assert!(gpu.is_some());
+        assert!(!gpu.expect("checked").has_driver_update());
+    }
+
+    #[test]
+    fn test_device_format_irq() {
+        let devices = sample_devices();
+        let dev = &devices[0]; // Has IRQ 11
+        assert!(dev.format_irq().contains("11"));
+
+        // PCI-to-ISA bridge (id=9) has no IRQ
+        let bridge = devices.iter().find(|d| d.id == 9).expect("exists");
+        assert_eq!(bridge.format_irq(), "N/A");
+    }
+
+    #[test]
+    fn test_device_format_mmio() {
+        let devices = sample_devices();
+        let dev = &devices[0]; // Has MMIO
+        assert!(dev.format_mmio().contains("0x"));
+
+        // PS/2 Keyboard has no MMIO
+        let kbd = devices.iter().find(|d| d.id == 6).expect("exists");
+        assert_eq!(kbd.format_mmio(), "N/A");
+    }
+
+    // -- TreeNode tests ------------------------------------------------------
+
+    #[test]
+    fn test_tree_node_category() {
+        let node = TreeNode::category(DeviceCategory::Display);
+        assert!(node.category.is_some());
+        assert!(node.device_id.is_none());
+        assert_eq!(node.depth, 0);
+        assert!(node.expanded);
+        assert!(node.visible);
+    }
+
+    #[test]
+    fn test_tree_node_device() {
+        let node = TreeNode::device(42, "Test Device");
+        assert!(node.category.is_none());
+        assert_eq!(node.device_id, Some(42));
+        assert_eq!(node.depth, 1);
+        assert!(!node.expanded);
+        assert!(node.visible);
+    }
+
+    // -- build_tree_nodes tests ----------------------------------------------
+
+    #[test]
+    fn test_build_tree_nodes_nonempty() {
+        let devices = sample_devices();
+        let nodes = build_tree_nodes(&devices);
+        assert!(!nodes.is_empty());
+    }
+
+    #[test]
+    fn test_build_tree_nodes_categories_first() {
+        let devices = sample_devices();
+        let nodes = build_tree_nodes(&devices);
+        // First node should be a category
+        assert!(nodes[0].category.is_some());
+    }
+
+    #[test]
+    fn test_build_tree_nodes_device_follows_category() {
+        let devices = sample_devices();
+        let nodes = build_tree_nodes(&devices);
+        for i in 1..nodes.len() {
+            if nodes[i].device_id.is_some() {
+                // There must be a category before it
+                let found_cat = nodes[..i].iter().rev().any(|n| n.category.is_some());
+                assert!(
+                    found_cat,
+                    "Device node at index {i} has no preceding category"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_tree_nodes_empty_category_excluded() {
+        let nodes = build_tree_nodes(&[]);
+        assert!(nodes.is_empty());
+    }
+
+    // -- PropertiesTab tests -------------------------------------------------
+
+    #[test]
+    fn test_properties_tab_all() {
+        let tabs = PropertiesTab::all();
+        assert_eq!(tabs.len(), 4);
+        assert_eq!(tabs[0], PropertiesTab::General);
+        assert_eq!(tabs[1], PropertiesTab::Driver);
+        assert_eq!(tabs[2], PropertiesTab::Resources);
+        assert_eq!(tabs[3], PropertiesTab::Events);
+    }
+
+    #[test]
+    fn test_properties_tab_label() {
+        assert_eq!(PropertiesTab::General.label(), "General");
+        assert_eq!(PropertiesTab::Driver.label(), "Driver");
+        assert_eq!(PropertiesTab::Resources.label(), "Resources");
+        assert_eq!(PropertiesTab::Events.label(), "Events");
+    }
+
+    // -- ToolbarAction tests -------------------------------------------------
+
+    #[test]
+    fn test_toolbar_action_all() {
+        let actions = ToolbarAction::all();
+        assert_eq!(actions.len(), 6);
+    }
+
+    #[test]
+    fn test_toolbar_action_labels() {
+        assert_eq!(ToolbarAction::Scan.label(), "Scan");
+        assert_eq!(ToolbarAction::Properties.label(), "Properties");
+        assert_eq!(ToolbarAction::Enable.label(), "Enable");
+        assert_eq!(ToolbarAction::Disable.label(), "Disable");
+        assert_eq!(ToolbarAction::Uninstall.label(), "Uninstall");
+        assert_eq!(ToolbarAction::Export.label(), "Export");
+    }
+
+    // -- UpdateCheckStatus tests ---------------------------------------------
+
+    #[test]
+    fn test_update_check_status_label() {
+        assert_eq!(UpdateCheckStatus::NotChecked.label(), "Not Checked");
+        assert_eq!(UpdateCheckStatus::Checking.label(), "Checking...");
+        assert_eq!(UpdateCheckStatus::UpToDate.label(), "Up to Date");
+        assert_eq!(
+            UpdateCheckStatus::UpdateAvailable.label(),
+            "Update Available"
+        );
+        assert_eq!(UpdateCheckStatus::Failed.label(), "Check Failed");
+    }
+
+    #[test]
+    fn test_update_check_status_color_opaque() {
+        for s in &[
+            UpdateCheckStatus::NotChecked,
+            UpdateCheckStatus::Checking,
+            UpdateCheckStatus::UpToDate,
+            UpdateCheckStatus::UpdateAvailable,
+            UpdateCheckStatus::Failed,
+        ] {
+            assert_eq!(s.color().a, 255);
+        }
+    }
+
+    // -- DriverUpdateCheck tests ---------------------------------------------
+
+    #[test]
+    fn test_driver_update_check_new() {
+        let c = DriverUpdateCheck::new(5);
+        assert_eq!(c.device_id, 5);
+        assert_eq!(c.status, UpdateCheckStatus::NotChecked);
+        assert!(c.available_version.is_none());
+        assert!(c.last_checked.is_none());
+    }
+
+    #[test]
+    fn test_driver_update_check_start() {
+        let mut c = DriverUpdateCheck::new(1);
+        c.start_check();
+        assert_eq!(c.status, UpdateCheckStatus::Checking);
+    }
+
+    #[test]
+    fn test_driver_update_check_finish_with_update() {
+        let mut c = DriverUpdateCheck::new(1);
+        c.start_check();
+        c.finish_check(Some("2.0.0".to_string()), "2026-05-18");
+        assert_eq!(c.status, UpdateCheckStatus::UpdateAvailable);
+        assert_eq!(c.available_version, Some("2.0.0".to_string()));
+        assert_eq!(c.last_checked, Some("2026-05-18".to_string()));
+    }
+
+    #[test]
+    fn test_driver_update_check_finish_up_to_date() {
+        let mut c = DriverUpdateCheck::new(1);
+        c.start_check();
+        c.finish_check(None, "2026-05-18");
+        assert_eq!(c.status, UpdateCheckStatus::UpToDate);
+        assert!(c.available_version.is_none());
+    }
+
+    #[test]
+    fn test_driver_update_check_fail() {
+        let mut c = DriverUpdateCheck::new(1);
+        c.start_check();
+        c.fail_check("2026-05-18");
+        assert_eq!(c.status, UpdateCheckStatus::Failed);
+        assert_eq!(c.last_checked, Some("2026-05-18".to_string()));
+    }
+
+    // -- DeviceManagerState tests --------------------------------------------
+
+    #[test]
+    fn test_state_new_has_devices() {
+        let state = DeviceManagerState::new();
+        assert!(!state.devices.is_empty());
+    }
+
+    #[test]
+    fn test_state_new_has_tree_nodes() {
+        let state = DeviceManagerState::new();
+        assert!(!state.tree_nodes.is_empty());
+    }
+
+    #[test]
+    fn test_state_new_has_events() {
+        let state = DeviceManagerState::new();
+        assert!(!state.event_history.is_empty());
+    }
+
+    #[test]
+    fn test_state_new_has_resource_view() {
+        let state = DeviceManagerState::new();
+        assert!(state.resource_view.total_count() > 0);
+    }
+
+    #[test]
+    fn test_state_default_selection() {
+        let state = DeviceManagerState::new();
+        assert!(state.selected_tree_index.is_none());
+        assert!(state.selected_device().is_none());
+    }
+
+    #[test]
+    fn test_state_select_device() {
+        let mut state = DeviceManagerState::new();
+        // Find a device node
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("has device nodes");
+        state.select_tree_node(dev_idx);
+        assert_eq!(state.selected_tree_index, Some(dev_idx));
+        assert!(state.selected_device().is_some());
+    }
+
+    #[test]
+    fn test_state_select_category() {
+        let mut state = DeviceManagerState::new();
+        state.select_tree_node(0); // First node is always a category
+        assert!(state.selected_category().is_some());
+        assert!(state.show_resource_view);
+    }
+
+    #[test]
+    fn test_state_problem_device_count() {
+        let state = DeviceManagerState::new();
+        let count = state.problem_device_count();
+        // Sample data has at least 1 warning and 1 error device
+        assert!(
+            count >= 2,
+            "Expected at least 2 problem devices, got {count}"
+        );
+    }
+
+    #[test]
+    fn test_state_enabled_device_count() {
+        let state = DeviceManagerState::new();
+        let count = state.enabled_device_count();
+        assert!(count > 0);
+        assert!(count <= state.devices.len());
+    }
+
+    #[test]
+    fn test_state_update_available_count() {
+        let state = DeviceManagerState::new();
+        let count = state.update_available_count();
+        // Sample data has some devices with update_available
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn test_state_toggle_category() {
+        let mut state = DeviceManagerState::new();
+        let first_cat = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.category.is_some())
+            .expect("has categories");
+        assert!(state.tree_nodes[first_cat].expanded);
+        state.toggle_category(first_cat);
+        assert!(!state.tree_nodes[first_cat].expanded);
+        state.toggle_category(first_cat);
+        assert!(state.tree_nodes[first_cat].expanded);
+    }
+
+    #[test]
+    fn test_state_set_device_enabled() {
+        let mut state = DeviceManagerState::new();
+        let id = state.devices[0].id;
+        assert!(state.devices[0].enabled);
+
+        state.set_device_enabled(id, false);
+        let dev = state.devices.iter().find(|d| d.id == id).expect("exists");
+        assert!(!dev.enabled);
+        assert_eq!(dev.status, DeviceStatus::Disabled);
+
+        state.set_device_enabled(id, true);
+        let dev = state.devices.iter().find(|d| d.id == id).expect("exists");
+        assert!(dev.enabled);
+        assert_eq!(dev.status, DeviceStatus::Working);
+    }
+
+    #[test]
+    fn test_state_uninstall_driver() {
+        let mut state = DeviceManagerState::new();
+        let id = state.devices[0].id;
+        assert!(state.devices[0].driver.is_some());
+
+        state.uninstall_driver(id);
+        let dev = state.devices.iter().find(|d| d.id == id).expect("exists");
+        assert!(dev.driver.is_none());
+        assert_eq!(dev.status, DeviceStatus::Warning);
+    }
+
+    #[test]
+    fn test_state_scan_hardware() {
+        let mut state = DeviceManagerState::new();
+        let old_node_count = state.tree_nodes.len();
+        state.scan_hardware();
+        // After scan, tree should be rebuilt with same data
+        assert_eq!(state.tree_nodes.len(), old_node_count);
+    }
+
+    #[test]
+    fn test_state_add_event() {
+        let mut state = DeviceManagerState::new();
+        let initial_count = state.event_history.len();
+        state.add_event(DeviceEvent::new(
+            1,
+            DeviceEventKind::Reset,
+            "2026-05-18 12:00:00",
+            "test",
+        ));
+        assert_eq!(state.event_history.len(), initial_count + 1);
+    }
+
+    #[test]
+    fn test_state_add_event_max_cap() {
+        let mut state = DeviceManagerState::new();
+        state.event_history.clear();
+        for i in 0..MAX_EVENT_HISTORY + 50 {
+            state.add_event(DeviceEvent::new(
+                1,
+                DeviceEventKind::Reset,
+                &format!("2026-05-18 12:{i:02}:00"),
+                "overflow test",
+            ));
+        }
+        assert_eq!(state.event_history.len(), MAX_EVENT_HISTORY);
+    }
+
+    #[test]
+    fn test_state_events_for_device() {
+        let state = DeviceManagerState::new();
+        let events = state.events_for_device(1);
+        assert!(!events.is_empty());
+        for ev in &events {
+            assert_eq!(ev.device_id, 1);
+        }
+    }
+
+    #[test]
+    fn test_state_events_for_nonexistent_device() {
+        let state = DeviceManagerState::new();
+        let events = state.events_for_device(99999);
+        assert!(events.is_empty());
+    }
+
+    // -- Search/filter tests -------------------------------------------------
+
+    #[test]
+    fn test_search_empty_matches_all() {
+        let state = DeviceManagerState::new();
+        assert_eq!(state.matching_device_count(), state.devices.len());
+    }
+
+    #[test]
+    fn test_search_filter_applies() {
+        let mut state = DeviceManagerState::new();
+        state.search_query = "virtio".to_string();
+        state.apply_search_filter();
+        let count = state.matching_device_count();
+        assert!(count > 0);
+        assert!(count < state.devices.len());
+    }
+
+    #[test]
+    fn test_search_filter_no_match() {
+        let mut state = DeviceManagerState::new();
+        state.search_query = "xyznonexistent123".to_string();
+        state.apply_search_filter();
+        assert_eq!(state.matching_device_count(), 0);
+    }
+
+    #[test]
+    fn test_search_matches_vendor() {
+        let q = "intel";
+        let devices = sample_devices();
+        let matches: Vec<&DeviceInfo> = devices
+            .iter()
+            .filter(|d| device_matches_query(d, q))
+            .collect();
+        assert!(!matches.is_empty());
+        // All matched devices should have "Intel" somewhere
+        for m in &matches {
+            let combined = format!(
+                "{} {} {} {} {} {}",
+                m.name,
+                m.vendor,
+                m.device_type,
+                m.category.label(),
+                m.status.label(),
+                m.hw_id.as_deref().unwrap_or(""),
+            )
+            .to_lowercase();
+            assert!(
+                combined.contains(q),
+                "Device {:?} should match '{q}'",
+                m.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_search_matches_hw_id() {
+        assert!(device_matches_query(&sample_devices()[0], "1af4"));
+    }
+
+    #[test]
+    fn test_search_matches_driver_name() {
+        assert!(device_matches_query(&sample_devices()[0], "virtio-gpu"));
+    }
+
+    #[test]
+    fn test_search_matches_location() {
+        assert!(device_matches_query(&sample_devices()[0], "pci bus"));
+    }
+
+    // -- Export report tests -------------------------------------------------
+
+    #[test]
+    fn test_export_report_nonempty() {
+        let state = DeviceManagerState::new();
+        let report = state.export_report();
+        assert!(!report.is_empty());
+    }
+
+    #[test]
+    fn test_export_report_contains_header() {
+        let state = DeviceManagerState::new();
+        let report = state.export_report();
+        assert!(report.contains("Hardware Report"));
+    }
+
+    #[test]
+    fn test_export_report_contains_devices() {
+        let state = DeviceManagerState::new();
+        let report = state.export_report();
+        assert!(report.contains("Virtio GPU"));
+        assert!(report.contains("Intel HD Audio"));
+    }
+
+    /// Strings a device can genuinely put in its own descriptors. A USB device
+    /// chooses its product and manufacturer strings, and the descriptor format
+    /// constrains neither their content nor their length.
+    const HOSTILE_NAMES: &[&str] = &[
+        "Mouse\n--- Storage ---\n  Fake Disk [OK] (ACME)",
+        "Mouse\r\n    Driver: rootkit v1.0 (Trusted)",
+        "Mouse\tTabbed",
+        "\u{7}bell",
+        "  padded  ",
+    ];
+
+    /// Count the lines that *are* a section header, rather than the places the
+    /// text `--- ` appears.
+    ///
+    /// The distinction is the whole test. A correctly folded name keeps the
+    /// characters of its payload -- `--- Storage ---` is still in there, now
+    /// harmlessly mid-sentence -- so any assertion phrased as `contains` or as
+    /// a substring count fails against output that is perfectly safe. What the
+    /// fold actually guarantees is structural: every interpolated field is
+    /// preceded on its line by the report's own indentation, so no field can
+    /// begin a line, and therefore none can *be* a header.
+    fn header_lines(report: &str) -> usize {
+        report
+            .lines()
+            .filter(|l| l.starts_with("--- ") && l.ends_with(" ---"))
+            .count()
+    }
+
+    #[test]
+    fn a_device_name_cannot_forge_a_report_section() {
+        let clean = DeviceManagerState::new();
+        let baseline = clean.export_report();
+        let want_headers = header_lines(&baseline);
+        let want_lines = baseline.lines().count();
+
+        for name in HOSTILE_NAMES {
+            let mut state = DeviceManagerState::new();
+            let dev = state.devices.first_mut().expect("a device to rename");
+            dev.name = (*name).to_string();
+            let report = state.export_report();
+            assert_eq!(
+                header_lines(&report),
+                want_headers,
+                "{name:?} forged a section header"
+            );
+            assert_eq!(
+                report.lines().count(),
+                want_lines,
+                "{name:?} changed the line count"
+            );
+        }
+    }
+
+    #[test]
+    fn every_reported_device_string_is_folded() {
+        // Not just the name: vendor, type, hardware ID, location and the three
+        // driver strings are all supplied by the same source, and a report is
+        // only as trustworthy as its least-checked field.
+        let mut state = DeviceManagerState::new();
+        let payload = String::from("x\n--- Forged ---");
+        {
+            let dev = state.devices.first_mut().expect("a device");
+            dev.vendor = payload.clone();
+            dev.device_type = payload.clone();
+            dev.hw_id = Some(payload.clone());
+            dev.location = payload.clone();
+            if let Some(drv) = dev.driver.as_mut() {
+                drv.name = payload.clone();
+                drv.version = payload.clone();
+                drv.provider = payload.clone();
+            }
+        }
+        let clean = DeviceManagerState::new().export_report();
+        let report = state.export_report();
+        // Again per line, not `contains`: the payload's characters survive the
+        // fold on purpose, they just cannot be a line of their own any more.
+        assert_eq!(
+            header_lines(&report),
+            header_lines(&clean),
+            "a forged header reached the report"
+        );
+        assert_eq!(
+            report.lines().count(),
+            clean.lines().count(),
+            "a field added lines to the report"
+        );
+    }
+
+    #[test]
+    fn folding_a_name_keeps_it_readable() {
+        assert_eq!(report_field("Virtio GPU"), "Virtio GPU");
+        assert_eq!(
+            report_field("Mouse\n--- Storage ---"),
+            "Mouse --- Storage ---"
+        );
+        assert_eq!(report_field("a\r\n\r\nb"), "a b");
+        assert_eq!(report_field("\u{7}bell"), "bell");
+    }
+
+    #[test]
+    fn test_export_report_contains_irqs() {
+        let state = DeviceManagerState::new();
+        let report = state.export_report();
+        assert!(report.contains("IRQ Assignments"));
+    }
+
+    #[test]
+    fn test_export_report_contains_mmio() {
+        let state = DeviceManagerState::new();
+        let report = state.export_report();
+        assert!(report.contains("MMIO Ranges"));
+    }
+
+    #[test]
+    fn test_export_report_contains_dma() {
+        let state = DeviceManagerState::new();
+        let report = state.export_report();
+        assert!(report.contains("DMA Channels"));
+    }
+
+    // -- Render tests --------------------------------------------------------
+
+    #[test]
+    fn test_render_produces_commands() {
+        let state = DeviceManagerState::new();
+        let cmds = render(&state);
+        assert!(!cmds.is_empty());
+    }
+
+    #[test]
+    fn test_render_with_selected_device() {
+        let mut state = DeviceManagerState::new();
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("has devices");
+        state.select_tree_node(dev_idx);
+        let cmds = render(&state);
+        assert!(!cmds.is_empty());
+    }
+
+    #[test]
+    fn test_render_resource_view() {
+        let mut state = DeviceManagerState::new();
+        state.select_tree_node(0); // Select a category
+        assert!(state.show_resource_view);
+        let cmds = render(&state);
+        assert!(!cmds.is_empty());
+    }
+
+    #[test]
+    fn test_render_all_tabs() {
+        let mut state = DeviceManagerState::new();
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("has devices");
+        state.select_tree_node(dev_idx);
+        state.show_resource_view = false;
+
+        for tab in PropertiesTab::all() {
+            state.active_tab = *tab;
+            let cmds = render(&state);
+            assert!(!cmds.is_empty(), "Tab {:?} produced no commands", tab);
+        }
+    }
+
+    // -- Event handling tests ------------------------------------------------
+
+    // Exact comparison is the point of this test, not an oversight: `Resize`
+    // copies its integers straight into the two fields with no arithmetic in
+    // between, so anything but an exact match is a bug. A tolerance here would
+    // pass against a handler that quietly scaled the window.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn test_handle_resize() {
+        let mut state = DeviceManagerState::new();
+        let result = handle_event(
+            &mut state,
+            &Event::Resize {
+                width: 800,
+                height: 600,
+            },
+        );
+        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(state.width, 800.0);
+        assert_eq!(state.height, 600.0);
+    }
+
+    #[test]
+    fn test_handle_key_down() {
+        let mut state = DeviceManagerState::new();
+        state.select_tree_node(0);
+        let result = handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::Down,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }),
+        );
+        assert_eq!(result, EventResult::Consumed);
+    }
+
+    #[test]
+    fn test_handle_key_up() {
+        let mut state = DeviceManagerState::new();
+        state.select_tree_node(1);
+        let result = handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::Up,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }),
+        );
+        assert_eq!(result, EventResult::Consumed);
+    }
+
+    #[test]
+    fn test_handle_key_tab_cycles_tabs() {
+        let mut state = DeviceManagerState::new();
+        assert_eq!(state.active_tab, PropertiesTab::General);
+        handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::Tab,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }),
+        );
+        assert_eq!(state.active_tab, PropertiesTab::Driver);
+    }
+
+    #[test]
+    fn test_handle_key_f5_scans() {
+        let mut state = DeviceManagerState::new();
+        let result = handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::F5,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }),
+        );
+        assert_eq!(result, EventResult::Consumed);
+    }
+
+    #[test]
+    fn test_handle_ctrl_f_focuses_search() {
+        let mut state = DeviceManagerState::new();
+        assert!(!state.search_focused);
+        handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::F,
+                pressed: true,
+                modifiers: Modifiers::ctrl(),
+                text: String::new(),
+            }),
+        );
+        assert!(state.search_focused);
+    }
+
+    #[test]
+    fn test_handle_search_typing() {
+        let mut state = DeviceManagerState::new();
+        state.search_focused = true;
+        handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: "a".to_string(),
+            }),
+        );
+        assert_eq!(state.search_query, "a");
+    }
+
+    #[test]
+    fn test_handle_search_backspace() {
+        let mut state = DeviceManagerState::new();
+        state.search_focused = true;
+        state.search_query = "abc".to_string();
+        handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::Backspace,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }),
+        );
+        assert_eq!(state.search_query, "ab");
+    }
+
+    #[test]
+    fn test_handle_search_escape() {
+        let mut state = DeviceManagerState::new();
+        state.search_focused = true;
+        handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::Escape,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }),
+        );
+        assert!(!state.search_focused);
+    }
+
+    #[test]
+    fn test_handle_left_collapses_category() {
+        let mut state = DeviceManagerState::new();
+        let cat_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.category.is_some())
+            .expect("has categories");
+        state.select_tree_node(cat_idx);
+        assert!(state.tree_nodes[cat_idx].expanded);
+        handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::Left,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }),
+        );
+        assert!(!state.tree_nodes[cat_idx].expanded);
+    }
+
+    #[test]
+    fn test_handle_right_expands_category() {
+        let mut state = DeviceManagerState::new();
+        let cat_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.category.is_some())
+            .expect("has categories");
+        state.select_tree_node(cat_idx);
+        state.tree_nodes[cat_idx].expanded = false;
+        handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::Right,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }),
+        );
+        assert!(state.tree_nodes[cat_idx].expanded);
+    }
+
+    #[test]
+    fn test_handle_key_release_ignored() {
+        let mut state = DeviceManagerState::new();
+        let result = handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::A,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }),
+        );
+        assert_eq!(result, EventResult::Ignored);
+    }
+
+    // -- tree_hit_test / is_node_visible tests -------------------------------
+
+    // `tree_hit_test` takes a *window* y, not a tree-relative one: the panel
+    // top and the scroll offset are its job, so that its two callers cannot
+    // apply them differently.
+
+    #[test]
+    fn test_tree_hit_test_first_node() {
+        let state = DeviceManagerState::new();
+        let hit = tree_hit_test(&state, state.panel_top() + 5.0);
+        assert_eq!(hit, Some(0));
+    }
+
+    #[test]
+    fn test_tree_hit_test_out_of_bounds() {
+        let state = DeviceManagerState::new();
+        assert!(tree_hit_test(&state, 100_000.0).is_none());
+        assert!(
+            tree_hit_test(&state, state.panel_top() - 1.0).is_none(),
+            "above the panel is not row 0"
+        );
+    }
+
+    #[test]
+    fn test_is_node_visible_category() {
+        let state = DeviceManagerState::new();
+        assert!(is_node_visible(&state, 0));
+    }
+
+    #[test]
+    fn test_is_node_visible_device_under_expanded() {
+        let state = DeviceManagerState::new();
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("has devices");
+        assert!(is_node_visible(&state, dev_idx));
+    }
+
+    #[test]
+    fn test_is_node_visible_device_under_collapsed() {
+        let mut state = DeviceManagerState::new();
+        // Collapse first category
+        state.tree_nodes[0].expanded = false;
+        // The device right after should not be visible
+        if let Some(dev_idx) = state.tree_nodes.iter().position(|n| n.device_id.is_some()) {
+            assert!(!is_node_visible(&state, dev_idx));
+        }
+    }
+
+    #[test]
+    fn test_is_node_visible_out_of_bounds() {
+        let state = DeviceManagerState::new();
+        assert!(!is_node_visible(&state, 99999));
+    }
+
+    // -- Toolbar action handling tests ---------------------------------------
+
+    #[test]
+    fn test_toolbar_enable_action() {
+        let mut state = DeviceManagerState::new();
+        // Find a disabled device
+        let disabled_idx = state.tree_nodes.iter().position(|n| {
+            n.device_id
+                .is_some_and(|id| state.devices.iter().any(|d| d.id == id && !d.enabled))
+        });
+        if let Some(idx) = disabled_idx {
+            state.select_tree_node(idx);
+            state.show_resource_view = false;
+            state.handle_toolbar_action(ToolbarAction::Enable);
+            let dev_id = state.tree_nodes[idx].device_id.expect("device node");
+            let dev = state
+                .devices
+                .iter()
+                .find(|d| d.id == dev_id)
+                .expect("exists");
+            assert!(dev.enabled);
+        }
+    }
+
+    #[test]
+    fn test_toolbar_disable_action() {
+        let mut state = DeviceManagerState::new();
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| {
+                n.device_id
+                    .is_some_and(|id| state.devices.iter().any(|d| d.id == id && d.enabled))
+            })
+            .expect("has enabled device");
+        state.select_tree_node(dev_idx);
+        state.show_resource_view = false;
+        state.handle_toolbar_action(ToolbarAction::Disable);
+        let dev_id = state.tree_nodes[dev_idx].device_id.expect("device node");
+        let dev = state
+            .devices
+            .iter()
+            .find(|d| d.id == dev_id)
+            .expect("exists");
+        assert!(!dev.enabled);
+    }
+
+    #[test]
+    fn test_toolbar_properties_action() {
+        let mut state = DeviceManagerState::new();
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("has devices");
+        state.select_tree_node(dev_idx);
+        state.show_resource_view = false;
+        state.active_tab = PropertiesTab::Events;
+        state.handle_toolbar_action(ToolbarAction::Properties);
+        assert_eq!(state.active_tab, PropertiesTab::General);
+    }
+
+    // -- device_matches_query exhaustive tests --------------------------------
+
+    #[test]
+    fn test_match_query_empty() {
+        let dev = &sample_devices()[0];
+        assert!(device_matches_query(dev, ""));
+    }
+
+    #[test]
+    fn test_match_query_category_label() {
+        let dev = &sample_devices()[0]; // Display category
+        assert!(device_matches_query(dev, "display"));
+    }
+
+    #[test]
+    fn test_match_query_status_label() {
+        let dev = &sample_devices()[0]; // Working status
+        assert!(device_matches_query(dev, "working"));
+    }
+
+    // -- Default trait -------------------------------------------------------
+
+    #[test]
+    fn test_state_default() {
+        let state = DeviceManagerState::default();
+        assert!(!state.devices.is_empty());
+    }
+
+    // -- Constant sanity checks ----------------------------------------------
+
+    #[test]
+    fn test_layout_constants_positive() {
+        const {
+            assert!(SIDEBAR_WIDTH > 0.0);
+            assert!(TITLE_BAR_HEIGHT > 0.0);
+            assert!(TOOLBAR_HEIGHT > 0.0);
+            assert!(STATUS_BAR_HEIGHT > 0.0);
+            assert!(TREE_ROW_HEIGHT > 0.0);
+            assert!(TREE_INDENT > 0.0);
+            assert!(PROPERTY_ROW_HEIGHT > 0.0);
+            assert!(DEFAULT_WIDTH > 0.0);
+            assert!(DEFAULT_HEIGHT > 0.0);
+            assert!(TOOLBAR_BTN_WIDTH > 0.0);
+            assert!(TOOLBAR_BTN_HEIGHT > 0.0);
+        };
+    }
+
+    #[test]
+    fn test_color_constants_opaque() {
+        let colors = [
+            COLOR_BASE,
+            COLOR_MANTLE,
+            COLOR_SURFACE0,
+            COLOR_SURFACE1,
+            COLOR_SURFACE2,
+            COLOR_TEXT,
+            COLOR_SUBTEXT,
+            COLOR_OVERLAY,
+            COLOR_BLUE,
+            COLOR_LAVENDER,
+            COLOR_GREEN,
+            COLOR_YELLOW,
+            COLOR_RED,
+            COLOR_PEACH,
+            COLOR_MAUVE,
+            COLOR_TEAL,
+            COLOR_SAPPHIRE,
+        ];
+        for c in &colors {
+            assert_eq!(c.a, 255, "Color constant has non-opaque alpha");
+        }
+    }
+
+    // -- Scrolling -----------------------------------------------------------
+    //
+    // Everything below is written in the units the bug was in. `dy` is a count
+    // of wheel *notches*; a test that asserted the offset merely "moved" would
+    // pass against `dy * 20.0`, `dy * 1.0` and every other misreading of that
+    // unit, because all of them move it. The assertions are therefore about
+    // *rows*, and the expected row counts come from `wheel::ROWS_PER_NOTCH`
+    // rather than from a literal 3 — a test that hard-codes the constant it is
+    // checking is testing itself.
+
+    /// One turn of the wheel at window point (`x`, `y`).
+    ///
+    /// `dy` is in **notches**, positive away from the user — the unit the
+    /// compositor produces and the one this app used to misread as pixels.
+    fn wheel_at(x: f32, y: f32, dy: f32) -> Event {
+        Event::Mouse(guitk::event::MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })
+    }
+
+    fn click_at(x: f32, y: f32) -> Event {
+        Event::Mouse(guitk::event::MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    fn move_to(x: f32, y: f32) -> Event {
+        Event::Mouse(guitk::event::MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        })
+    }
+
+    /// Rows one notch moves a list, as a `usize`.
+    fn rows_per_notch() -> usize {
+        wheel::ROWS_PER_NOTCH as usize
+    }
+
+    /// A point inside the sidebar's scrollable area.
+    fn tree_point(state: &DeviceManagerState) -> (f32, f32) {
+        (SIDEBAR_WIDTH / 2.0, state.panel_top() + 10.0)
+    }
+
+    /// A point inside the properties panel.
+    fn panel_point(state: &DeviceManagerState) -> (f32, f32) {
+        (state.panel_x() + 40.0, state.properties_body_top() + 10.0)
+    }
+
+    /// A window short enough that the device tree overflows it.
+    ///
+    /// The assertion is not decoration. A fixture that cannot overflow makes
+    /// every scroll test below vacuously true — the offset would be pinned at
+    /// zero and each assertion would be checking that nothing happened, which
+    /// is exactly what a broken wheel also produces.
+    fn app_with_scrollable_tree() -> DeviceManagerState {
+        let mut state = DeviceManagerState::new();
+        state.height = 260.0;
+        assert!(
+            state.max_tree_scroll() > 0,
+            "fixture cannot overflow, so it cannot fail"
+        );
+        state
+    }
+
+    /// The tree node indices the sidebar actually emitted a row for, read back
+    /// out of the render commands.
+    ///
+    /// Compares against the selection highlight rather than the labels: a row's
+    /// label is a category name or a device name, but the highlight is drawn at
+    /// a known `x` and height for whichever row is selected. Instead we take
+    /// the y-coordinates of the row labels, which is enough to count rows and
+    /// to tell which one is first.
+    fn drawn_row_tops(state: &DeviceManagerState) -> Vec<f32> {
+        let mut cmds = Vec::new();
+        render_sidebar(state, &mut cmds);
+        let mut tops: Vec<f32> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                // Every row draws its label at `y_offset + 5.0`, whether it is
+                // a category or a device; nothing else in the sidebar draws
+                // text at all.
+                RenderCommand::Text { y, .. } => Some(y - 5.0),
+                _ => None,
+            })
+            .collect();
+        tops.dedup();
+        tops
+    }
+
+    /// The labels the sidebar drew, in the order it drew them.
+    fn drawn_labels(state: &DeviceManagerState) -> Vec<String> {
+        let mut cmds = Vec::new();
+        render_sidebar(state, &mut cmds);
+        let known: Vec<&str> = state.tree_nodes.iter().map(|n| n.label.as_str()).collect();
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } if known.contains(&text.as_str()) => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The one clip rectangle the sidebar pushes.
+    fn sidebar_clip(state: &DeviceManagerState) -> (f32, f32) {
+        let mut cmds = Vec::new();
+        render_sidebar(state, &mut cmds);
+        cmds.iter()
+            .find_map(|c| match c {
+                RenderCommand::PushClip { y, height, .. } => Some((*y, *height)),
+                _ => None,
+            })
+            .expect("the sidebar clips its rows")
+    }
+
+    // -- The sidebar's wheel -------------------------------------------------
+
+    #[test]
+    fn one_notch_scrolls_the_tree_by_whole_rows() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -1.0));
+        assert_eq!(
+            state.tree_scroll,
+            rows_per_notch(),
+            "a notch is a whole number of rows, not a pixel distance"
+        );
+    }
+
+    #[test]
+    fn the_tree_wheel_scrolls_both_ways() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -2.0));
+        assert_eq!(state.tree_scroll, 2 * rows_per_notch());
+        handle_event(&mut state, &wheel_at(x, y, 1.0));
+        assert_eq!(state.tree_scroll, rows_per_notch());
+        handle_event(&mut state, &wheel_at(x, y, 5.0));
+        assert_eq!(state.tree_scroll, 0, "and stops at the top, not below it");
+    }
+
+    /// The bug the old `.max(0.0)` left open: it bounds the near end and says
+    /// nothing about the far one. The offset climbed while the list stood
+    /// still, and the user then had to wind back exactly as far as they had
+    /// overshot before anything moved.
+    #[test]
+    fn the_tree_wheel_cannot_scroll_into_empty_space() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        for _ in 0..100 {
+            handle_event(&mut state, &wheel_at(x, y, -1.0));
+        }
+        assert_eq!(state.tree_scroll, state.max_tree_scroll());
+
+        // And the last row is on screen at that offset, which is what makes
+        // the bound the *right* one rather than merely some bound.
+        let last = *state
+            .visible_tree_indices()
+            .last()
+            .expect("the tree has rows");
+        let drawn = drawn_labels(&state);
+        assert!(
+            drawn.contains(&state.tree_nodes[last].label),
+            "the last row must be visible at the maximum offset"
+        );
+
+        // One notch back must move the view again immediately.
+        handle_event(&mut state, &wheel_at(x, y, 1.0));
+        assert!(state.tree_scroll < state.max_tree_scroll());
+    }
+
+    #[test]
+    fn a_tree_that_fits_cannot_be_scrolled() {
+        let mut state = DeviceManagerState::new();
+        state.height = 4000.0;
+        assert_eq!(state.max_tree_scroll(), 0, "the whole tree fits");
+        let (x, y) = tree_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -10.0));
+        assert_eq!(state.tree_scroll, 0);
+    }
+
+    /// A precision trackpad sends a stream of small fractions. A converter that
+    /// rounded each one on its own would return zero every time and the device
+    /// would feel dead.
+    #[test]
+    fn a_trackpads_fractions_of_a_notch_eventually_scroll() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        for _ in 0..10 {
+            handle_event(&mut state, &wheel_at(x, y, -0.1));
+        }
+        assert_eq!(
+            state.tree_scroll,
+            rows_per_notch(),
+            "ten tenths of a notch is one notch"
+        );
+    }
+
+    #[test]
+    fn a_wheel_over_the_properties_panel_leaves_the_tree_alone() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = panel_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -3.0));
+        assert_eq!(state.tree_scroll, 0, "the sidebar is not under the cursor");
+    }
+
+    // -- The sidebar's renderer and hit-test agree ---------------------------
+
+    /// A renderer that ignored its offset would pass every other render test
+    /// ever written for it, because the picture it draws is a valid picture of
+    /// the top of the list.
+    #[test]
+    fn a_scrolled_tree_draws_the_rows_the_offset_selects() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -1.0));
+        assert!(state.tree_scroll > 0, "the fixture scrolled");
+
+        let indices = state.visible_tree_indices();
+        let rows = state.tree_rows();
+        let expected: Vec<String> = indices
+            .iter()
+            .skip(rows.start)
+            .take(rows.count)
+            .map(|&i| state.tree_nodes[i].label.clone())
+            .collect();
+        assert_eq!(drawn_labels(&state), expected);
+        assert_eq!(
+            drawn_labels(&state).len(),
+            rows.count,
+            "no more rows than the window holds"
+        );
+    }
+
+    /// The rows are drawn one row height apart starting at the top of the
+    /// panel, which is the assumption the hit-test's division makes.
+    #[test]
+    fn the_drawn_rows_are_evenly_spaced_from_the_panel_top() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -1.0));
+        for (slot, top) in drawn_row_tops(&state).into_iter().enumerate() {
+            let want = state.panel_top() + slot as f32 * TREE_ROW_HEIGHT;
+            assert!(
+                (top - want).abs() < 0.01,
+                "row {slot} drawn at {top}, hit-test expects {want}"
+            );
+        }
+    }
+
+    /// Renderer and hit-test used to derive the sidebar's rectangle separately
+    /// — three times over, counting the hover handler. This compares the clip
+    /// the renderer actually pushed against the bounds the hit-test measures,
+    /// which needs no pixel coordinates of its own and so does not need
+    /// rewriting when the design changes.
+    #[test]
+    fn the_sidebars_clip_matches_what_the_hit_test_uses() {
+        for height in [260.0, 500.0, 900.0] {
+            let mut state = DeviceManagerState::new();
+            state.height = height;
+            let (clip_y, clip_h) = sidebar_clip(&state);
+            assert!((clip_y - state.panel_top()).abs() < 0.01, "top at {height}");
+            assert!(
+                (clip_h - state.tree_height()).abs() < 0.01,
+                "height at {height}"
+            );
+            // And the hit-test rejects exactly what the clip cuts off.
+            assert!(tree_hit_test(&state, clip_y - 0.5).is_none());
+            assert!(tree_hit_test(&state, clip_y + clip_h).is_none());
+        }
+    }
+
+    #[test]
+    fn clicking_a_device_selects_the_one_that_was_drawn_there() {
+        let mut state = app_with_scrollable_tree();
+        let indices = state.visible_tree_indices();
+        for slot in 0..state.tree_rows().count.min(4) {
+            let y = state.panel_top() + slot as f32 * TREE_ROW_HEIGHT + TREE_ROW_HEIGHT / 2.0;
+            handle_event(&mut state, &click_at(SIDEBAR_WIDTH / 2.0, y));
+            assert_eq!(
+                state.selected_tree_index,
+                Some(indices[slot]),
+                "slot {slot} selected the wrong node"
+            );
+            // Clicking a category toggles it, which changes the row list; undo
+            // that so the next slot still refers to the same node.
+            if state.tree_nodes[indices[slot]].category.is_some() {
+                state.toggle_category(indices[slot]);
+            }
+        }
+    }
+
+    /// The click handler must read the same offset the renderer did. Before,
+    /// it added a pixel offset to a pixel coordinate; the two agreed only
+    /// because both were wrong in the same way.
+    #[test]
+    fn a_scrolled_tree_selects_by_what_is_visible() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -1.0));
+        let first_visible = state.visible_tree_indices()[state.tree_scroll];
+        let top_row = click_at(SIDEBAR_WIDTH / 2.0, state.panel_top() + 2.0);
+        handle_event(&mut state, &top_row);
+        assert_eq!(state.selected_tree_index, Some(first_visible));
+    }
+
+    #[test]
+    fn hovering_outside_the_tree_hovers_nothing() {
+        let mut state = app_with_scrollable_tree();
+        let onto_row_0 = move_to(SIDEBAR_WIDTH / 2.0, state.panel_top() + 2.0);
+        handle_event(&mut state, &onto_row_0);
+        assert!(state.hovered_tree_index.is_some(), "hovering row 0");
+        let below_the_tree = move_to(SIDEBAR_WIDTH / 2.0, state.panel_bottom() + 2.0);
+        handle_event(&mut state, &below_the_tree);
+        assert_eq!(
+            state.hovered_tree_index, None,
+            "the status bar is not a row"
+        );
+    }
+
+    /// Folding a category takes rows out from under the view. Without a clamp
+    /// the offset stays where it was and the sidebar shows blank space below a
+    /// list that has got shorter.
+    #[test]
+    fn folding_a_category_pulls_the_view_back_into_the_list() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        for _ in 0..100 {
+            handle_event(&mut state, &wheel_at(x, y, -1.0));
+        }
+        assert!(state.tree_scroll > 0, "scrolled to the bottom");
+
+        // Fold every category by clicking the first row repeatedly; each fold
+        // shortens the list.
+        let top_row = click_at(SIDEBAR_WIDTH / 2.0, state.panel_top() + 2.0);
+        for _ in 0..state.tree_nodes.len() {
+            handle_event(&mut state, &top_row);
+            assert!(
+                state.tree_scroll <= state.max_tree_scroll(),
+                "offset {} ran past the shortened list's maximum {}",
+                state.tree_scroll,
+                state.max_tree_scroll()
+            );
+        }
+    }
+
+    /// The arrow keys move the selection between rows; the rows they may land
+    /// on are exactly the ones the sidebar draws. That was two derivations —
+    /// the sidebar walked forwards carrying the last visible category's
+    /// `expanded`, `is_node_visible` scanned backwards for the nearest category
+    /// whether it was visible or not.
+    #[test]
+    fn is_node_visible_agrees_with_the_rows_the_sidebar_draws() {
+        let mut state = DeviceManagerState::new();
+        for query in ["", "audio", "nic", "zzzz"] {
+            state.search_query = query.to_string();
+            state.apply_search_filter();
+            for collapse_first in [false, true] {
+                state.tree_nodes[0].expanded = !collapse_first;
+                let drawn = state.visible_tree_indices();
+                for i in 0..state.tree_nodes.len() {
+                    assert_eq!(
+                        is_node_visible(&state, i),
+                        drawn.contains(&i),
+                        "node {i} with query {query:?}, first collapsed {collapse_first}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The same equivalence for a state the search filter cannot currently
+    /// produce: a hidden category with a visible device under it.
+    ///
+    /// Built by hand rather than through `apply_search_filter`, because the
+    /// filter happens to hide a category only when it hides all of that
+    /// category's devices — and that invariant, kept in a third function, is
+    /// the only reason the two old derivations ever agreed. Letting a category
+    /// match on its own name would break it, which is an obvious enough
+    /// improvement that the contract had better be pinned first: `is_node_visible`
+    /// is true exactly when the sidebar draws the row, for *any* state.
+    #[test]
+    fn is_node_visible_agrees_even_where_the_filters_invariant_does_not_hold() {
+        let mut state = DeviceManagerState::new();
+        let cat = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.category.is_some())
+            .expect("has categories");
+        state.tree_nodes[cat].visible = false;
+        state.tree_nodes[cat].expanded = false;
+
+        let drawn = state.visible_tree_indices();
+        for i in 0..state.tree_nodes.len() {
+            assert_eq!(
+                is_node_visible(&state, i),
+                drawn.contains(&i),
+                "node {i} under a hidden, collapsed category"
+            );
+        }
+    }
+
+    // -- The properties panel's wheel ----------------------------------------
+
+    /// A device whose General tab is long enough to overflow a short window.
+    fn app_with_scrollable_panel() -> DeviceManagerState {
+        let mut state = DeviceManagerState::new();
+        state.height = 260.0;
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("has devices");
+        state.select_tree_node(dev_idx);
+        state.show_resource_view = false;
+        assert!(
+            state.max_properties_scroll() > 0.0,
+            "fixture cannot overflow, so it cannot fail"
+        );
+        state
+    }
+
+    /// The properties panel is the continuous case: a notch moves the same
+    /// distance it would over a list of property rows.
+    #[test]
+    fn one_notch_scrolls_the_properties_panel_by_three_rows() {
+        let mut state = app_with_scrollable_panel();
+        let (x, y) = panel_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -1.0));
+        let want = (wheel::ROWS_PER_NOTCH * PROPERTY_ROW_HEIGHT).min(state.max_properties_scroll());
+        assert!(
+            (state.properties_scroll - want).abs() < 0.01,
+            "moved {} px, expected {want}",
+            state.properties_scroll
+        );
+        assert!(
+            state.properties_scroll >= PROPERTY_ROW_HEIGHT,
+            "a notch must move at least one whole property row; \
+             moved {} px, a row is {PROPERTY_ROW_HEIGHT}",
+            state.properties_scroll
+        );
+    }
+
+    /// The half that was missing entirely: `properties_scroll` was written by
+    /// the wheel and read by nobody, so the panel could not scroll however far
+    /// its content ran.
+    #[test]
+    fn the_properties_body_moves_with_its_scroll_offset() {
+        let mut state = app_with_scrollable_panel();
+        let before = properties_body_tops(&state);
+        let (x, y) = panel_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -1.0));
+        let after = properties_body_tops(&state);
+
+        assert_eq!(before.len(), after.len(), "same content, moved");
+        let moved = before[0] - after[0];
+        assert!(
+            moved >= PROPERTY_ROW_HEIGHT,
+            "the panel drew its content {moved} px higher; a scroll of {} px \
+             should have moved it at least one {PROPERTY_ROW_HEIGHT}px row",
+            state.properties_scroll
+        );
+        for (b, a) in before.iter().zip(&after) {
+            assert!(
+                ((b - a) - moved).abs() < 0.01,
+                "the whole body moves together: {b} -> {a}, expected -{moved}"
+            );
+        }
+    }
+
+    /// Top edges of the text the properties *body* draws, as the whole panel
+    /// renders it.
+    ///
+    /// Takes only what falls between the body's `PushClip` and its `PopClip`,
+    /// which is exactly the definition of "the body" that the renderer itself
+    /// uses. Filtering by y-coordinate instead quietly included the tab bar's
+    /// labels — and those do not scroll, so a renderer that ignored its offset
+    /// entirely still showed an unmoved first row and the test passed.
+    fn properties_body_tops(state: &DeviceManagerState) -> Vec<f32> {
+        let mut cmds = Vec::new();
+        render_properties_panel(state, &mut cmds);
+        let mut inside = false;
+        let mut tops = Vec::new();
+        for cmd in &cmds {
+            match cmd {
+                RenderCommand::PushClip { .. } => inside = true,
+                RenderCommand::PopClip => inside = false,
+                RenderCommand::Text { y, .. } if inside => tops.push(*y),
+                _ => {}
+            }
+        }
+        assert!(!tops.is_empty(), "the body drew no text to measure");
+        tops
+    }
+
+    #[test]
+    fn the_properties_wheel_cannot_scroll_into_empty_space() {
+        let mut state = app_with_scrollable_panel();
+        let (x, y) = panel_point(&state);
+        for _ in 0..100 {
+            handle_event(&mut state, &wheel_at(x, y, -1.0));
+        }
+        assert!(
+            (state.properties_scroll - state.max_properties_scroll()).abs() < 0.01,
+            "stopped at {} rather than {}",
+            state.properties_scroll,
+            state.max_properties_scroll()
+        );
+        handle_event(&mut state, &wheel_at(x, y, 1.0));
+        assert!(state.properties_scroll < state.max_properties_scroll());
+    }
+
+    #[test]
+    fn a_properties_panel_that_fits_cannot_be_scrolled() {
+        let mut state = DeviceManagerState::new();
+        state.height = 4000.0;
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("has devices");
+        state.select_tree_node(dev_idx);
+        state.show_resource_view = false;
+        assert!(state.max_properties_scroll() < 0.01, "the content fits");
+        let (x, y) = panel_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -10.0));
+        assert!(state.properties_scroll < 0.01);
+    }
+
+    /// The measurement has to reach past the clip that hides the overflow,
+    /// or the panel's bound is its own window height and it never scrolls.
+    #[test]
+    fn the_measured_content_covers_the_last_line_the_panel_draws() {
+        let state = app_with_scrollable_panel();
+        let measured = properties_content_height(&state);
+        assert!(
+            measured > state.properties_body_height(),
+            "measured {measured} but the window is {} — the fixture overflows",
+            state.properties_body_height()
+        );
+
+        // Every line the body draws must sit above the measured bottom.
+        let mut cmds = Vec::new();
+        render_properties_body(
+            &state,
+            &mut cmds,
+            state.panel_x(),
+            0.0,
+            state.width - state.panel_x(),
+            state.properties_body_height(),
+        );
+        let bottom = content_bottom(&cmds).expect("the body drew something");
+        assert!((bottom - measured).abs() < 0.01);
+    }
+
+    #[test]
+    fn switching_tabs_returns_the_properties_panel_to_the_top() {
+        let mut state = app_with_scrollable_panel();
+        let (x, y) = panel_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -2.0));
+        assert!(state.properties_scroll > 0.0);
+
+        let tabs = PropertiesTab::all();
+        let tab_width = (state.width - state.panel_x()) / tabs.len() as f32;
+        let second_tab = click_at(
+            state.panel_x() + tab_width * 1.5,
+            state.panel_top() + TAB_BAR_HEIGHT / 2.0,
+        );
+        handle_event(&mut state, &second_tab);
+        assert_ne!(state.active_tab, tabs[0], "a different tab is showing");
+        assert!(
+            state.properties_scroll < 0.01,
+            "a new tab starts at its own top, not at the old tab's offset"
+        );
+    }
+
+    /// The resource overview is the panel's other long view, and it draws no
+    /// tab bar — so its body starts higher up. Both facts have to come from
+    /// the same predicate or the clip and the content disagree by 28px.
+    #[test]
+    fn the_resource_view_scrolls_and_starts_at_the_panel_top() {
+        let mut state = DeviceManagerState::new();
+        state.height = 260.0;
+        let cat_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.category.is_some())
+            .expect("has categories");
+        state.select_tree_node(cat_idx);
+        assert!(state.show_resource_view, "a category shows the overview");
+        assert!(!state.shows_tab_bar());
+        assert!(
+            (state.properties_body_top() - state.panel_top()).abs() < 0.01,
+            "no tab bar means the body starts at the panel top"
+        );
+        assert!(state.max_properties_scroll() > 0.0, "the overview is long");
+
+        let (x, y) = panel_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -1.0));
+        assert!(state.properties_scroll > 0.0);
+    }
+
+    /// The clip the panel pushes and the region the wheel measures against
+    /// must be the same rectangle.
+    #[test]
+    fn the_properties_clip_matches_the_body_it_measures() {
+        let mut state = app_with_scrollable_panel();
+        for height in [260.0, 500.0, 900.0] {
+            state.height = height;
+            let mut cmds = Vec::new();
+            render_properties_panel(&state, &mut cmds);
+            let (clip_y, clip_h) = cmds
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::PushClip { y, height, .. } => Some((*y, *height)),
+                    _ => None,
+                })
+                .expect("the panel clips its body");
+            assert!(
+                (clip_y - state.properties_body_top()).abs() < 0.01,
+                "top at {height}"
+            );
+            assert!(
+                (clip_h - state.properties_body_height()).abs() < 0.01,
+                "height at {height}"
+            );
+        }
+    }
+
+    /// A window so short that the panel has no room at all must not produce a
+    /// negative bound, which would clamp the offset to a negative number and
+    /// scroll the content off the top.
+    #[test]
+    fn an_impossibly_short_window_still_bounds_the_offsets() {
+        let mut state = DeviceManagerState::new();
+        state.height = 1.0;
+        assert_eq!(state.max_tree_scroll(), 0);
+        assert!(state.max_properties_scroll() >= 0.0);
+        let (x, y) = tree_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -5.0));
+        let over_the_panel = wheel_at(state.width - 5.0, y, -5.0);
+        handle_event(&mut state, &over_the_panel);
+        assert_eq!(state.tree_scroll, 0);
+        assert!(state.properties_scroll >= 0.0);
+    }
+
+    /// Input events come from outside the process. A NaN reaching either stored
+    /// offset would freeze that view for the life of the app.
+    #[test]
+    fn a_nonfinite_wheel_event_cannot_freeze_a_view() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut state = app_with_scrollable_panel();
+            let (tx, ty) = tree_point(&state);
+            let (px, py) = panel_point(&state);
+            handle_event(&mut state, &wheel_at(tx, ty, bad));
+            handle_event(&mut state, &wheel_at(px, py, bad));
+            assert_eq!(state.tree_scroll, 0, "{bad} moved the tree");
+            assert!(
+                state.properties_scroll.is_finite(),
+                "{bad} poisoned the panel"
+            );
+
+            // And the next ordinary notch still works.
+            handle_event(&mut state, &wheel_at(tx, ty, -1.0));
+            handle_event(&mut state, &wheel_at(px, py, -1.0));
+            assert_eq!(state.tree_scroll, rows_per_notch());
+            assert!(state.properties_scroll > 0.0);
+        }
+    }
+
+    // -- the window ----------------------------------------------------------
+
+    use oswindow::app::App as _;
+
+    /// The first frame is drawn before any `Event::Resize` arrives, so `render`
+    /// must believe the size it is *handed* rather than the one it asked for.
+    ///
+    /// Trusting `self.width` instead is not a cosmetic bug: the sidebar
+    /// divider, the properties panel and the status bar are all placed from it,
+    /// and `handle_event` hit-tests clicks against the same fields. A window
+    /// the compositor made narrower would draw its status bar off the right
+    /// edge and put the toolbar buttons where the mouse is not.
+    #[test]
+    fn render_believes_the_size_it_is_given_not_the_one_it_asked_for() {
+        let mut state = DeviceManagerState::new();
+        let given_w = 640.0_f32;
+        let given_h = 480.0_f32;
+        // The test proves nothing unless the granted size differs from the
+        // requested one. Asserted in integers, where the comparison is exact:
+        // asking whether two floats differ is the one float comparison that is
+        // never what the writer meant.
+        assert_ne!(
+            state.initial_size(),
+            (640, 480),
+            "the granted size must differ from the requested one"
+        );
+
+        let tree = state.render(given_w, given_h);
+
+        assert!(
+            (state.width - given_w).abs() < f32::EPSILON,
+            "render kept width {} instead of the granted {given_w}",
+            state.width
+        );
+        assert!(
+            (state.height - given_h).abs() < f32::EPSILON,
+            "render kept height {} instead of the granted {given_h}",
+            state.height
+        );
+        assert!(!tree.commands.is_empty(), "the window drew nothing");
+    }
+
+    /// An event nothing reacted to must not cost a frame.
+    ///
+    /// `Response::Redraw` unconditionally is the easy mistake, and it costs a
+    /// full composite per mouse move — on a window this size, for the entire
+    /// time a user drags the pointer across it on the way to something else.
+    #[test]
+    fn an_ignored_event_does_not_ask_for_a_frame() {
+        let mut state = DeviceManagerState::new();
+        // A tick is the clearest case: this app asks for no clock, so it has no
+        // handler for one, and one arriving anyway must change nothing.
+        let ignored = state.on_event(&Event::Tick { elapsed_ms: 16 });
+        assert_eq!(ignored, Response::Idle);
+
+        // ...while something the app does act on does ask for one.
+        let consumed = state.on_event(&Event::Resize {
+            width: 900,
+            height: 600,
+        });
+        assert_eq!(consumed, Response::Redraw);
+    }
+
+    /// This app ages nothing, so it must not hold the desktop awake.
+    ///
+    /// The reverse of `known-issues.md` lesson 47: that one is about an app
+    /// that needed a clock and did not ask: this is about not asking for one
+    /// with nothing to advance. A window requesting 60 ticks a second while
+    /// sitting idle keeps the compositor compositing for as long as it is open.
+    #[test]
+    fn a_window_with_nothing_moving_asks_for_no_clock() {
+        assert!(DeviceManagerState::new().tick_interval().is_none());
+    }
+}

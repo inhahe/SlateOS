@@ -99428,3 +99428,38 @@ is unconditional there since 2.39, and `-u` (suppress underlining) has no
 effect because the program no longer emits underlining. Ours accepts both so a
 script written for util-linux runs, and ignores both because there is nothing
 to do. This is *not* an unimplemented option.
+
+### Lesson 81 addendum: the inventory is 55 sites in 20 apps, not seven (lane C, 2026-08-30)
+
+**In short:** Lesson 81's "where else to look" said "the seven `is_some()`-only
+visibility assertions". Counted rather than recalled, there are **55** of them
+across **20** apps. The number matters because a backlog of seven is something
+you fix in passing and a backlog of 55 is a task that has to be scheduled, and
+because "seven" was a guess written from memory while the lesson was fresh --
+exactly the kind of unmeasured number this campaign keeps finding inside the
+production code it audits.
+
+    grep -rn 'rect_of\(_sized\)\?(.*)\.is_some()' apps/*/src/main.rs
+
+| app | sites | | app | sites |
+|---|---|---|---|---|
+| snippets | 8 | | taskscheduler | 2 |
+| pdfviewer | 6 | | mahjong | 2 |
+| netmanager | 6 | | credmanager | 2 |
+| sokoban | 5 | | charmap | 2 |
+| vpnmanager | 4 | | calculator | 2 |
+| diskanalyzer | 4 | | breakout | 2 |
+| stickynotes | 3 | | worldclock, tictactoe, nim, memory, defrag, checkers, calendar | 1 each |
+
+**Not all 55 are faults, and the audit is per-site.** The form is only wrong
+when the test's *claim* is that something is visible. Where the claim is that
+something is **clickable** -- and especially where it is paired with an
+`is_none()` for a target that should have been dropped, as in `apps/calculator`'s
+scrolled-away history row or `apps/charmap`'s "the Copy button goes but the grid
+stays" -- a recorded box is exactly the right evidence and no paint assertion is
+owed. `apps/mahjong`'s two sites are of a third kind: each sits on the line
+after a `text_saying(&f, ...)` that has already established the paint, so the
+`is_some()` is a separate and legitimate claim about the hit box. Read the test
+name before touching the assertion; the fix for a genuine one is Lesson 83's
+containment-the-other-way (a paint command that *fits inside* the box), not a
+point-containment check, which the background fill makes vacuous.

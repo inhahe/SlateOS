@@ -51242,6 +51242,7 @@ deleted with it, because it is the only part that fails when the list is wrong.
 
 **Date:** 2026-08-29
 **Decided by:** Claude (autonomous), lane B
+**Lane:** B
 
 **In short:** A "resource limit" is a per-process cap — how many files it may
 open, how big its stack may grow. Until now libc kept its own table of these
@@ -51359,6 +51360,7 @@ two tables in step.
 
 **Date:** 2026-08-30
 **Decided by:** Claude (autonomous), lane B
+**Lane:** B
 
 **In short:** On 2026-08-29 a test's throwaway git repository leaked into the
 real one and wrote `user.email = selftest@example.invalid` into the config that
@@ -51463,6 +51465,7 @@ replacement returns the project to that state.
 
 **Date:** 2026-08-30
 **Decided by:** Claude (autonomous), lane B
+**Lane:** B
 
 **In short:** A "zip bomb" is a small archive that expands to an enormous file
 — a few kilobytes that become gigabytes — and the damage is done by the

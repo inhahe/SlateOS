@@ -1504,6 +1504,8 @@ fn command_parses_own_quotes(cmd: &str) -> bool {
 ///   - `${NAME%%suffix}` — remove longest suffix match
 ///   - `${NAME#prefix}` — remove shortest prefix match
 ///   - `${NAME##prefix}` — remove longest prefix match
+///   - `${NAME:offset}`, `${NAME:offset:length}` — substring; see
+///     [`expand_substring`], which is where the two arithmetic operands live
 fn expand_brace_expr(inner: &str, result: &mut String) {
     // ${#NAME[@]} — array length.
     if let Some(name) = inner.strip_prefix('#') {
@@ -1515,9 +1517,15 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
             result.push_str(&alloc::format!("{}", len));
             return;
         }
-        // ${#NAME} — string length (scalar).
+        // ${#NAME} — string length (scalar), in *characters*.
+        //
+        // Not `val.len()`, which is bytes. A shell that measures a string one
+        // way and cuts it another is worse than one that is consistently wrong
+        // in either: `${x:0:${#x}}` would then be an expression whose two
+        // halves disagree about what a unit is. `${NAME:off:len}` counts
+        // characters (see `expand_substring` for why), so this must too.
         let val = env_get(name).unwrap_or_default();
-        result.push_str(&alloc::format!("{}", val.len()));
+        result.push_str(&alloc::format!("{}", val.chars().count()));
         return;
     }
 
@@ -1616,43 +1624,11 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
         && !rest.starts_with(":?")
     {
         // ${NAME:offset} or ${NAME:offset:length} — substring extraction.
-        let spec = rest.get(1..).unwrap_or("");
-        let val = val.unwrap_or_default();
-
-        // Split on the second `:` to get offset and optional length.
-        let (offset_str, length_str) = if let Some(colon2) = spec.find(':') {
-            (
-                spec.get(..colon2).unwrap_or(""),
-                Some(spec.get(colon2.saturating_add(1)..).unwrap_or("")),
-            )
-        } else {
-            (spec, None)
-        };
-
-        let offset_str = offset_str.trim();
-        // Parse offset (supports negative values counting from end).
-        if let Ok(raw_offset) = offset_str.parse::<i64>() {
-            let str_len = val.len() as i64;
-            let start = if raw_offset < 0 {
-                // Negative offset: count from end.
-                (str_len.saturating_add(raw_offset)).max(0) as usize
-            } else {
-                (raw_offset as usize).min(val.len())
-            };
-
-            let end = if let Some(len_s) = length_str {
-                if let Ok(len) = len_s.trim().parse::<usize>() {
-                    start.saturating_add(len).min(val.len())
-                } else {
-                    val.len()
-                }
-            } else {
-                val.len()
-            };
-
-            result.push_str(val.get(start..end).unwrap_or(""));
-        }
-        // Non-numeric offset: silently expand to empty (like bash).
+        expand_substring(
+            val.as_deref().unwrap_or(""),
+            rest.get(1..).unwrap_or(""),
+            result,
+        );
     } else if let Some(pattern) = rest.strip_prefix("%%") {
         // ${NAME%%pattern} — remove longest suffix match.
         let val = val.unwrap_or_default();
@@ -1780,6 +1756,109 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
             result.push_str(&v);
         }
     }
+}
+
+/// `${NAME:offset}` / `${NAME:offset:length}` — substring expansion.
+///
+/// `spec` is everything after the first `:`, so `"1:2"` or `"-3"`.
+///
+/// Split out of [`expand_brace_expr`] because it is the only operator there
+/// with a grammar of its own rather than a pattern, and because all four of the
+/// bugs below lived in one arm of an eleven-arm chain.
+///
+/// **Both operands are arithmetic expressions**, evaluated exactly as `$(( ))`
+/// evaluates them — a bare name is that variable's value, an unset name is `0`,
+/// and an empty expression is `0`. Reading them with `parse::<i64>()` instead,
+/// as this did, is correct on every literal and wrong on every name, which is
+/// why it survived: nobody writes `${x:1:abc}` on purpose, but `${x:0:n}` is
+/// ordinary shell. Four divergences from bash came out of that one decision,
+/// and which way they failed depended on *which* operand it could not read —
+/// an unreadable length fell through to a default of "the rest of the string",
+/// an unreadable offset skipped the expansion entirely:
+///
+/// | Expression (`x=abcdefgh`) | bash | was | |
+/// |---|---|---|---|
+/// | `${x:1:abc}` | `` (unset ⇒ 0) | `bcdefgh` | too much |
+/// | `${x:0:n}`, `n=3` | `abc` | `abcdefgh` | too much |
+/// | `${x:2:-2}` | `cdef` | `cdefgh` | too much |
+/// | `${x:1+1:2}` | `cd` | `` | too little |
+/// | `${x:abc}` | `abcdefgh` (offset 0) | `` | too little |
+///
+/// The too-much half is the reason this lasted: `${x:1:abc}` handing back
+/// `bcdefgh` looks exactly like a working expansion, and is only wrong if you
+/// know what was asked.
+///
+/// The third is a rule, not an off-by-one: a **negative length is an offset
+/// from the end of the whole value**, not a count, so `${x:2:-2}` means "from
+/// character 2 up to two from the end". `parse::<usize>()` rejected it and the
+/// old code fell through to "the rest of the string" — the opposite of dropping
+/// the tail. A negative length that lands *before* `offset` is the one case
+/// bash diagnoses rather than swallowing (`substring expression < 0`); an
+/// out-of-range *offset* it silently expands to nothing, and the asymmetry is
+/// bash's, deliberately kept.
+///
+/// **Indices count characters, not bytes.** A byte index that lands inside a
+/// UTF-8 sequence makes `str::get` return `None`, which the old code turned
+/// into the empty string — so `${x:2}` on `héllo` expanded to nothing at all,
+/// silently. Characters is also what SlateOS's real shell does
+/// (`userspace/oils`, `known-issues.md` → `TD-OILS-STRLEN-CHARS`) and what bash
+/// does in a UTF-8 locale, which is the only locale this OS has; a debug shell
+/// that disagreed with the system shell about `${x:1:2}` would be its own trap.
+fn expand_substring(val: &str, spec: &str, result: &mut String) {
+    let (offset_expr, length_expr) = match spec.find(':') {
+        Some(colon) => (
+            spec.get(..colon).unwrap_or(""),
+            Some(spec.get(colon.saturating_add(1)..).unwrap_or("")),
+        ),
+        None => (spec, None),
+    };
+
+    // Saturating rather than `?`: a value long enough to overflow `i64` cannot
+    // exist, and a length that silently became `0` would be a worse answer than
+    // one that is merely unreachable.
+    let char_len = i64::try_from(val.chars().count()).unwrap_or(i64::MAX);
+
+    let raw_offset = eval_arithmetic(offset_expr);
+    let start = if raw_offset < 0 {
+        raw_offset.saturating_add(char_len)
+    } else {
+        raw_offset
+    };
+    // Out of range in either direction expands to nothing, with no diagnostic:
+    // `${x: -100}` and `${x:100}` are both silently empty in bash.
+    if start < 0 || start > char_len {
+        return;
+    }
+
+    let end = match length_expr {
+        None => char_len,
+        Some(expr) => {
+            let raw_len = eval_arithmetic(expr);
+            if raw_len < 0 {
+                let end = raw_len.saturating_add(char_len);
+                // `start` is non-negative here, so this one comparison covers
+                // both of bash's error cases: an end before the start, and an
+                // end before the string began.
+                if end < start {
+                    shell_println!("{}: substring expression < 0", expr.trim());
+                    set_exit(1);
+                    return;
+                }
+                end
+            } else {
+                raw_len.saturating_add(start).min(char_len)
+            }
+        }
+    };
+
+    // Both bounds are now in `0..=char_len`, so each maps to a real character
+    // boundary and the slice cannot split a UTF-8 sequence.
+    let byte_of = |n: i64| -> usize {
+        usize::try_from(n).map_or(val.len(), |n| {
+            val.char_indices().nth(n).map_or(val.len(), |(i, _)| i)
+        })
+    };
+    result.push_str(val.get(byte_of(start)..byte_of(end)).unwrap_or(""));
 }
 
 /// Replace the first occurrence of `pattern` in `s` with `replacement`.
@@ -20869,6 +20948,139 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"filelock: pid: `1O' is not a pid",
         );
         assert_eq!(last_exit(), 1, "`filelock pid 1O` errors");
+    }
+
+    serial_println!(
+        "  kshell::self_test 105: ${{VAR:offset:length}} evaluates both operands as \
+         arithmetic and counts characters -- a name, a negative length and a \
+         multi-byte value each cut where bash cuts"
+    );
+    {
+        // Rung 105 -- the substring expansion. All but four of the assertions
+        // below failed against the old code; the four that already passed are
+        // marked `(passed before)` and are here because a rewrite of one arm
+        // breaks the cases it was not aimed at, not the ones it was.
+        //
+        // The failures did not share a direction, and that is worth stating
+        // because the tempting summary -- "it returned too much" -- would send
+        // the next reader looking for a clamp. An unreadable *length* fell
+        // through to a default of "the rest of the string"; an unreadable
+        // *offset* skipped the expansion entirely; and the byte-indexed slice
+        // returned nothing whenever it landed inside a UTF-8 sequence. Only the
+        // first of those is why the bug lasted: `${x:1:abc}` handing back
+        // `bcdefgh` looks exactly like a working expansion.
+        //
+        // Driven through `expand_vars` rather than `expand_substring` directly,
+        // because the operand split lives in `expand_brace_expr`'s eleven-arm
+        // chain and a `:`-prefixed spec has four earlier arms (`:-`, `:+`,
+        // `:=`, `:?`) to get past first. Calling the helper would test the
+        // arithmetic while leaving untested the question of whether anything
+        // reaches it.
+        let saved = env_get("KSHELL_SELFTEST_VAR");
+        let saved_n = env_get("KSHELL_SELFTEST_N");
+        assert!(env_set("KSHELL_SELFTEST_VAR", "abcdefgh"));
+
+        // The reported bug. `abc` is unset, an unset name in arithmetic is 0,
+        // and a zero length is the empty string -- not "no length given".
+        //
+        // The precondition is asserted rather than assumed: the whole assertion
+        // turns on `abc` being unset, so a tree that happened to export it
+        // would fail this line with no hint as to why.
+        assert!(
+            env_get("abc").is_none(),
+            "rung 105 needs `abc` unset -- it is the unset name under test"
+        );
+        assert_eq!(expand_vars("[${KSHELL_SELFTEST_VAR:1:abc}]"), "[]");
+        // The same rule with a name that *is* set, which is the case anyone
+        // would actually write and the reason this matters at all.
+        assert!(env_set("KSHELL_SELFTEST_N", "3"));
+        assert_eq!(
+            expand_vars("${KSHELL_SELFTEST_VAR:0:KSHELL_SELFTEST_N}"),
+            "abc"
+        );
+        // An arithmetic *expression*, to pin that this is a full evaluation and
+        // not a lookup with a numeric fast path.
+        assert_eq!(expand_vars("${KSHELL_SELFTEST_VAR:1+1:2}"), "cd");
+
+        // A negative length is an offset from the end, not a count. The old
+        // code could not parse it and fell through to the rest of the string,
+        // so this asserted `cdefgh`.
+        assert_eq!(expand_vars("${KSHELL_SELFTEST_VAR:2:-2}"), "cdef");
+        // Landing exactly on the offset is empty and legal; one past it is the
+        // single case bash diagnoses. Both are asserted, because a fix that
+        // reported the error one character early would still satisfy the first.
+        assert_eq!(expand_vars("[${KSHELL_SELFTEST_VAR:6:-2}]"), "[]");
+        {
+            // Captured around `expand_vars` rather than around a command,
+            // because the diagnostic is the *expander's* and not any command's.
+            // The first draft ran `echo ${...}` through `capture_command`, and
+            // check-selftest-wording.py refused it: it traces the command word
+            // to `cmd_echo`, `cmd_echo` cannot print this text, and the rung
+            // would therefore have failed a correct kernel the day the message
+            // moved. It was right, and the fix is the better test anyway --
+            // this asserts the message and the empty expansion together, which
+            // a command capture could not, since `echo` prints the expansion.
+            let capture = capture_start();
+            let expanded = expand_vars("[${KSHELL_SELFTEST_VAR:7:-2}]");
+            let out = capture.finish();
+            assert_output_contains(
+                "a length reaching back past the offset is named, not silently clamped",
+                &out,
+                b"substring expression < 0",
+            );
+            assert_eq!(expanded, "[]", "and nothing is substituted in its place");
+            assert_eq!(last_exit(), 1, "a refused substring sets a failure status");
+        }
+
+        // A non-numeric *offset* is 0, so the whole string -- and it is not an
+        // error, unlike the length above. The asymmetry is bash's; it is
+        // asserted here so that a later "tidy-up" making the two consistent has
+        // to argue with a test rather than with a comment.
+        assert_eq!(expand_vars("${KSHELL_SELFTEST_VAR:abc}"), "abcdefgh");
+        // Out of range in either direction is silently empty. (passed before)
+        assert_eq!(expand_vars("[${KSHELL_SELFTEST_VAR:100}]"), "[]");
+        assert_eq!(expand_vars("[${KSHELL_SELFTEST_VAR:-100:2}]"), "[abcdefgh]");
+        // `:-` binds before the substring reading, which is why the line above
+        // is the whole string and not the last two characters -- the space is
+        // what selects a negative offset.
+        assert_eq!(expand_vars("${KSHELL_SELFTEST_VAR: -3}"), "fgh"); // passed before
+        assert_eq!(expand_vars("${KSHELL_SELFTEST_VAR: -3:-1}"), "fg");
+        // A length past the end clamps rather than erroring. (passed before)
+        assert_eq!(expand_vars("${KSHELL_SELFTEST_VAR:2:100}"), "cdefgh");
+
+        // Characters, not bytes -- and this is the arm that used to return
+        // *less*, not more: byte index 2 lands inside the `é`, `str::get`
+        // returned `None`, and the expansion was silently empty.
+        assert!(env_set("KSHELL_SELFTEST_VAR", "héllo"));
+        assert_eq!(expand_vars("${KSHELL_SELFTEST_VAR:2}"), "llo");
+        assert_eq!(expand_vars("${KSHELL_SELFTEST_VAR:1:2}"), "él");
+        // Byte lengths are compared explicitly, as rung 9 does: a slice taken
+        // at a byte boundary that happens to look right in one place would
+        // still carry the wrong number of bytes.
+        assert_eq!(expand_vars("${KSHELL_SELFTEST_VAR:1:1}").len(), 2);
+        // `${#x}` counts the same unit the cut uses. Asserted together with a
+        // cut of that exact length, since the property is that the two agree --
+        // a shell where `${#x}` said 6 would make this line return `héllo` from
+        // a five-character string only by clamping.
+        assert_eq!(expand_vars("${#KSHELL_SELFTEST_VAR}"), "5");
+        assert_eq!(expand_vars("${KSHELL_SELFTEST_VAR:0:5}"), "héllo");
+
+        match saved {
+            Some(v) => {
+                assert!(env_set("KSHELL_SELFTEST_VAR", &v));
+            }
+            None => {
+                env_remove("KSHELL_SELFTEST_VAR");
+            }
+        }
+        match saved_n {
+            Some(v) => {
+                assert!(env_set("KSHELL_SELFTEST_N", &v));
+            }
+            None => {
+                env_remove("KSHELL_SELFTEST_N");
+            }
+        }
     }
 
     serial_println!("  kshell::self_test PASSED");

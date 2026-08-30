@@ -1442,6 +1442,20 @@ impl App {
             color: GREEN,
         });
 
+        // One folder inside another, so the sidebar opens on a tree rather
+        // than on a flat list. `Folder::parent_id`, the indent in
+        // `draw_folder_tree`, the twisty and the recursion in `walk_folders`
+        // were all written for nesting the seeded library never had — nothing
+        // a user opened the program on could exercise any of them.
+        let snippets_id = id_gen.next_id();
+        folders.push(Folder {
+            id: snippets_id,
+            name: "Regex".into(),
+            parent_id: Some(utils_id),
+            expanded: true,
+            color: TEAL,
+        });
+
         // Sample snippets
         snippets.push(Snippet {
             id: id_gen.next_id(),
@@ -1934,6 +1948,29 @@ impl App {
         EventResult::Consumed
     }
 
+    /// Pick the first row of the list on show, or the last.
+    ///
+    /// Home and End are absolute, not a very large relative move. Routing
+    /// them through `move_selection(isize::MIN)` and `isize::MAX` gave the
+    /// right answer only while something was already selected: the
+    /// no-selection branch there reads the *sign* of the delta and enters
+    /// the list from the end a walk would enter it from, so on a fresh
+    /// window End landed on the first row and Home on the last — each one
+    /// doing the other's job.
+    fn select_end(&mut self, last: bool) -> EventResult {
+        let ids = self.filtered_ids();
+        let Some(bottom) = ids.len().checked_sub(1) else {
+            return EventResult::Ignored;
+        };
+        let row = if last { bottom } else { 0 };
+        let Some(&id) = ids.get(row) else {
+            return EventResult::Ignored;
+        };
+        self.select(id);
+        self.scroll_row_into_view(row);
+        EventResult::Consumed
+    }
+
     /// Show the next of the six sidebar views, or the previous one.
     fn cycle_view(&mut self, back: bool) {
         self.sidebar_view = if back {
@@ -2126,8 +2163,8 @@ impl App {
             Key::Down => self.move_selection(1),
             Key::PageUp => self.move_selection(self.page().saturating_neg()),
             Key::PageDown => self.move_selection(self.page()),
-            Key::Home => self.move_selection(isize::MIN),
-            Key::End => self.move_selection(isize::MAX),
+            Key::Home => self.select_end(false),
+            Key::End => self.select_end(true),
             Key::Tab => {
                 self.cycle_view(ev.modifiers.shift);
                 EventResult::Consumed
@@ -3516,13 +3553,20 @@ fn label_left(f: &mut Frame<Target>, l: &Label, r: Rect) {
 /// at, so the two cannot disagree; and because that width is never more than
 /// `r.w`, `(r.w - w) / 2.0` is never negative, which is what keeps a string too
 /// wide for its box starting at the box rather than to the left of it.
+///
+/// That claim was, for a while, only a claim: the centre was computed from the
+/// measured `w` and the renderer was handed `r.w`, so a label offset into the
+/// middle of its box was allowed to run half the leftover slack past the box's
+/// right edge before it was told to stop. The empty editor's headline, centred
+/// in the whole column, was permitted to reach 229 pixels outside a 1100-wide
+/// window on that arithmetic.
 fn label_centred(f: &mut Frame<Target>, l: &Label, r: Rect) {
     if r.is_empty() {
         return;
     }
     let w = text::measure(l.text, l.size, l.weight).min(r.w);
     let lh = text::line_height(l.size, l.weight);
-    push_text(f, l, r.x + (r.w - w) / 2.0, r.y + (r.h - lh) / 2.0, r.w);
+    push_text(f, l, r.x + (r.w - w) / 2.0, r.y + (r.h - lh) / 2.0, w);
 }
 
 /// Take `w` off the right-hand end of `area`, leaving `gap` between what was
@@ -3699,683 +3743,2090 @@ fn main() -> ExitCode {
 // ============================================================================
 // Tests
 // ============================================================================
-
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::float_cmp,
+    reason = "a test that panics on bad data is a test that failed, which is the point"
 )]
 mod tests {
     use super::*;
+    use guitk::probe::{
+        bare_point, click, click_background, click_matching, control_names, ctrl, key, press,
+        rect_of, shift, type_str,
+    };
 
-    // --- Language tests ---
+    // ── Helpers ─────────────────────────────────────────────────────────
+
+    /// The window every test that does not say otherwise is read against.
+    const W: (f32, f32) = App::SIZE;
+
+    fn app() -> App {
+        App::new()
+    }
+
+    /// An app whose library is exactly the snippets named, in that order, so a
+    /// test can say "row two" and mean something.
+    fn app_with(titles: &[&str]) -> App {
+        let mut a = App::new();
+        a.snippets.clear();
+        a.folders.clear();
+        a.recently_used.clear();
+        a.selected_snippet_id = None;
+        a.selected_folder_id = None;
+        a.sort_order = SortOrder::DateAsc;
+        for title in titles {
+            let id = a.create_snippet(title, "", Language::PlainText).unwrap();
+            // `DateAsc` sorts by `created_at`, which is the id, so the order
+            // the titles were given in is the order they are listed in.
+            assert!(id > 0);
+        }
+        a
+    }
+
+    fn titles(a: &App) -> Vec<String> {
+        a.filtered_snippets()
+            .iter()
+            .map(|s| s.title.clone())
+            .collect()
+    }
+
+    fn selected_title(a: &App) -> Option<String> {
+        a.selected_snippet().map(|s| s.title.clone())
+    }
+
+    /// Every string the app draws at this size, in the order it draws them.
+    ///
+    /// What is on the screen, asked of the frame rather than of the model, so
+    /// a test can tell "the model knows" from "the user can see".
+    fn texts(a: &App, size: (f32, f32)) -> Vec<String> {
+        a.frame(size.0, size.1)
+            .into_tree()
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn shows(a: &App, needle: &str) -> bool {
+        texts(a, W).iter().any(|t| t == needle)
+    }
+
+    /// A document of `n` numbered lines: long enough that the code panel has
+    /// to scroll, and numbered so a test can name the line it expects to see.
+    fn numbered_lines(n: usize) -> String {
+        use std::fmt::Write as _;
+        let mut body = String::new();
+        for i in 1..=n {
+            let _ = writeln!(body, "line {i}");
+        }
+        body
+    }
+
+    fn id_of(a: &App, title: &str) -> SnippetId {
+        a.snippets
+            .iter()
+            .find(|s| s.title == title)
+            .unwrap_or_else(|| panic!("no snippet titled {title}"))
+            .id
+    }
+
+    // ── Languages ───────────────────────────────────────────────────────
 
     #[test]
-    fn test_language_name() {
-        assert_eq!(Language::Rust.name(), "Rust");
-        assert_eq!(Language::Python.name(), "Python");
-        assert_eq!(Language::PlainText.name(), "Plain Text");
+    fn a_language_has_a_name_an_extension_and_a_colour() {
+        for &lang in Language::all() {
+            assert!(!lang.name().is_empty(), "{lang:?} has no name");
+            assert!(!lang.extension().is_empty(), "{lang:?} has no extension");
+        }
     }
 
     #[test]
-    fn test_language_extension() {
-        assert_eq!(Language::Rust.extension(), "rs");
-        assert_eq!(Language::Python.extension(), "py");
-        assert_eq!(Language::JavaScript.extension(), "js");
+    fn every_language_is_reachable_from_its_own_extension() {
+        // Except plain text, which is what an unknown extension answers, so it
+        // has nothing of its own to be reached by.
+        for &lang in Language::all() {
+            if lang == Language::PlainText {
+                continue;
+            }
+            assert_eq!(
+                Language::from_extension(lang.extension()),
+                lang,
+                "{lang:?}'s own extension does not name it"
+            );
+        }
     }
 
     #[test]
-    fn test_language_from_extension() {
-        assert_eq!(Language::from_extension("rs"), Language::Rust);
-        assert_eq!(Language::from_extension("py"), Language::Python);
-        assert_eq!(Language::from_extension("ts"), Language::TypeScript);
-        assert_eq!(Language::from_extension("unknown"), Language::PlainText);
+    fn an_unknown_extension_is_plain_text() {
+        assert_eq!(Language::from_extension("wat"), Language::PlainText);
+        assert_eq!(Language::from_extension(""), Language::PlainText);
     }
 
     #[test]
-    fn test_language_detect_rust() {
-        let content = "fn main() {\n    let x = 5;\n    println!(\"hello\");\n}";
-        assert_eq!(Language::detect_from_content(content), Language::Rust);
+    fn an_extension_is_recognised_whatever_its_case() {
+        assert_eq!(Language::from_extension("RS"), Language::Rust);
+        assert_eq!(Language::from_extension("Py"), Language::Python);
     }
 
     #[test]
-    fn test_language_detect_python() {
-        let content = "import os\ndef hello():\n    print('hello')";
-        assert_eq!(Language::detect_from_content(content), Language::Python);
-    }
-
-    #[test]
-    fn test_language_detect_python_shebang() {
-        let content = "#!/usr/bin/env python3\nimport sys";
-        assert_eq!(Language::detect_from_content(content), Language::Python);
-    }
-
-    #[test]
-    fn test_language_detect_sql() {
-        let content = "SELECT * FROM users WHERE id = 1";
-        assert_eq!(Language::detect_from_content(content), Language::Sql);
-    }
-
-    #[test]
-    fn test_language_detect_html() {
-        let content = "<!DOCTYPE html>\n<html><head></head></html>";
-        assert_eq!(Language::detect_from_content(content), Language::Html);
-    }
-
-    #[test]
-    fn test_language_keywords_not_empty() {
-        assert!(!Language::Rust.keywords().is_empty());
-        assert!(!Language::Python.keywords().is_empty());
-        assert!(Language::PlainText.keywords().is_empty());
-    }
-
-    #[test]
-    fn test_language_all() {
-        let all = Language::all();
-        assert!(all.len() >= 12);
-        assert!(all.contains(&Language::Rust));
-        assert!(all.contains(&Language::PlainText));
-    }
-
-    // --- Tokenizer tests ---
-
-    #[test]
-    fn test_tokenize_empty() {
-        let result = tokenize("", Language::PlainText);
-        assert_eq!(result.len(), 1); // one empty line
-    }
-
-    #[test]
-    fn test_tokenize_keyword() {
-        let result = tokenize("fn main", Language::Rust);
-        assert_eq!(result.len(), 1);
-        assert!(
-            result[0]
-                .iter()
-                .any(|t| t.kind == TokenKind::Keyword && t.text == "fn")
-        );
-    }
-
-    #[test]
-    fn test_tokenize_string() {
-        let result = tokenize("let x = \"hello\"", Language::Rust);
-        assert!(result[0].iter().any(|t| t.kind == TokenKind::String));
-    }
-
-    #[test]
-    fn test_tokenize_number() {
-        let result = tokenize("let x = 42", Language::Rust);
-        assert!(
-            result[0]
-                .iter()
-                .any(|t| t.kind == TokenKind::Number && t.text == "42")
-        );
-    }
-
-    #[test]
-    fn test_tokenize_comment() {
-        let result = tokenize("// this is a comment", Language::Rust);
-        assert!(result[0].iter().any(|t| t.kind == TokenKind::Comment));
-    }
-
-    #[test]
-    fn test_tokenize_python_comment() {
-        let result = tokenize("# python comment", Language::Python);
-        assert!(result[0].iter().any(|t| t.kind == TokenKind::Comment));
-    }
-
-    #[test]
-    fn test_tokenize_sql_comment() {
-        let result = tokenize("-- sql comment", Language::Sql);
-        assert!(result[0].iter().any(|t| t.kind == TokenKind::Comment));
-    }
-
-    #[test]
-    fn test_tokenize_operator() {
-        let result = tokenize("x + y", Language::Rust);
-        assert!(result[0].iter().any(|t| t.kind == TokenKind::Operator));
-    }
-
-    #[test]
-    fn test_tokenize_multiline() {
-        let result = tokenize("fn main() {\n    println!(\"hello\");\n}", Language::Rust);
-        assert_eq!(result.len(), 3);
-    }
-
-    // --- Search tests ---
-
-    #[test]
-    fn test_search_empty_query() {
-        let snippets = vec![make_test_snippet(1, "Hello", "world", Language::Rust)];
-        let results = search_snippets(&snippets, "", SearchScope::All);
-        assert_eq!(results.len(), 1);
-    }
-
-    #[test]
-    fn test_search_by_title() {
-        let snippets = vec![
-            make_test_snippet(1, "Hello World", "content", Language::Rust),
-            make_test_snippet(2, "Goodbye", "other", Language::Python),
-        ];
-        let results = search_snippets(&snippets, "hello", SearchScope::Title);
-        assert_eq!(results.len(), 1);
-    }
-
-    #[test]
-    fn test_search_by_content() {
-        let snippets = vec![
-            make_test_snippet(1, "Test", "fn main() {}", Language::Rust),
-            make_test_snippet(2, "Other", "print hello", Language::Python),
-        ];
-        let results = search_snippets(&snippets, "main", SearchScope::Content);
-        assert_eq!(results.len(), 1);
-    }
-
-    #[test]
-    fn test_search_case_insensitive() {
-        let snippets = vec![make_test_snippet(1, "RUST Code", "content", Language::Rust)];
-        let results = search_snippets(&snippets, "rust", SearchScope::All);
-        assert_eq!(results.len(), 1);
-    }
-
-    // --- Template tests ---
-
-    #[test]
-    fn test_extract_template_vars() {
-        let content = "fn ${name}(${params}) -> ${ret} {}";
-        let vars = extract_template_vars(content);
-        assert_eq!(vars.len(), 3);
-        assert!(vars.contains(&"name".to_string()));
-        assert!(vars.contains(&"params".to_string()));
-        assert!(vars.contains(&"ret".to_string()));
-    }
-
-    #[test]
-    fn test_extract_no_vars() {
-        let vars = extract_template_vars("fn main() {}");
-        assert!(vars.is_empty());
-    }
-
-    #[test]
-    fn test_extract_duplicate_vars() {
-        let vars = extract_template_vars("${x} and ${x} again");
-        assert_eq!(vars.len(), 1);
-    }
-
-    #[test]
-    fn test_apply_template() {
-        let content = "Hello ${name}, you are ${age}";
-        let vars = vec![
-            ("name".to_string(), "Alice".to_string()),
-            ("age".to_string(), "30".to_string()),
-        ];
-        let result = apply_template(content, &vars);
-        assert_eq!(result, "Hello Alice, you are 30");
-    }
-
-    // --- Export tests ---
-
-    #[test]
-    fn test_export_json() {
-        let snippets = vec![make_test_snippet(1, "Test", "fn main() {}", Language::Rust)];
-        let json = export_snippets_json(&snippets);
-        assert!(json.contains("\"title\""));
-        assert!(json.contains("Test"));
-        assert!(json.contains("Rust"));
-    }
-
-    #[test]
-    fn test_json_escape() {
-        assert_eq!(json_escape("hello"), "\"hello\"");
-        assert_eq!(json_escape("he\"llo"), "\"he\\\"llo\"");
-        assert_eq!(json_escape("line1\nline2"), "\"line1\\nline2\"");
-    }
-
-    // --- App state tests ---
-
-    #[test]
-    fn test_app_new() {
-        let app = App::new();
-        assert!(!app.snippets.is_empty()); // has sample snippets
-        assert!(!app.folders.is_empty()); // has default folders
-    }
-
-    #[test]
-    fn test_app_create_snippet() {
-        let mut app = App::new();
-        let initial = app.snippets.len();
-        let id = app.create_snippet("Test", "fn test() {}", Language::Rust);
-        assert!(id > 0);
-        assert_eq!(app.snippets.len(), initial + 1);
-    }
-
-    #[test]
-    fn test_app_delete_snippet() {
-        let mut app = App::new();
-        let id = app.create_snippet("Delete Me", "content", Language::PlainText);
-        let count = app.snippets.len();
-        app.delete_snippet(id);
-        assert_eq!(app.snippets.len(), count - 1);
-    }
-
-    #[test]
-    fn test_app_create_folder() {
-        let mut app = App::new();
-        let initial = app.folders.len();
-        let id = app.create_folder("New Folder");
-        assert!(id > 0);
-        assert_eq!(app.folders.len(), initial + 1);
-    }
-
-    #[test]
-    fn test_app_delete_folder() {
-        let mut app = App::new();
-        let id = app.create_folder("To Delete");
-        let count = app.folders.len();
-        app.delete_folder(id);
-        assert_eq!(app.folders.len(), count - 1);
-    }
-
-    #[test]
-    fn test_app_toggle_favorite() {
-        let mut app = App::new();
-        let id = app.create_snippet("Test", "content", Language::PlainText);
-        assert!(!app.snippets.iter().find(|s| s.id == id).unwrap().favorite);
-        app.toggle_favorite(id);
-        assert!(app.snippets.iter().find(|s| s.id == id).unwrap().favorite);
-        app.toggle_favorite(id);
-        assert!(!app.snippets.iter().find(|s| s.id == id).unwrap().favorite);
-    }
-
-    #[test]
-    fn test_app_use_snippet() {
-        let mut app = App::new();
-        let id = app.create_snippet("Test", "content", Language::PlainText);
+    fn a_shebang_names_the_language() {
         assert_eq!(
-            app.snippets.iter().find(|s| s.id == id).unwrap().use_count,
-            0
+            Language::detect_from_content("#!/usr/bin/env python3\nx = 1\n"),
+            Language::Python
         );
-        app.use_snippet(id);
         assert_eq!(
-            app.snippets.iter().find(|s| s.id == id).unwrap().use_count,
+            Language::detect_from_content("#!/usr/bin/env node\nlet x = 1\n"),
+            Language::JavaScript
+        );
+        assert_eq!(
+            Language::detect_from_content("#!/bin/bash\necho hi\n"),
+            Language::Shell
+        );
+    }
+
+    #[test]
+    fn rust_is_detected_from_a_function_and_one_other_token() {
+        assert_eq!(
+            Language::detect_from_content("fn main() { let x = 1; }"),
+            Language::Rust
+        );
+        // `fn ` on its own is not enough — it is a word in English too.
+        assert_ne!(
+            Language::detect_from_content("the fn abbreviation"),
+            Language::Rust
+        );
+    }
+
+    #[test]
+    fn content_nobody_recognises_is_plain_text() {
+        assert_eq!(
+            Language::detect_from_content("just some prose, honestly"),
+            Language::PlainText
+        );
+    }
+
+    #[test]
+    fn a_name_beats_the_content_it_disagrees_with() {
+        // The extension is what the user typed; the content sniffer is a guess.
+        assert_eq!(
+            guess_language("notes.py", "fn main() { let x = 1; }"),
+            Language::Python
+        );
+    }
+
+    #[test]
+    fn a_name_with_no_useful_extension_falls_through_to_the_content() {
+        assert_eq!(
+            guess_language("notes", "fn main() { let x = 1; }"),
+            Language::Rust
+        );
+        assert_eq!(
+            guess_language("notes.wat", "fn main() { let x = 1; }"),
+            Language::Rust
+        );
+        assert_eq!(
+            guess_language("notes.", "fn main() { let x = 1; }"),
+            Language::Rust
+        );
+    }
+
+    #[test]
+    fn every_language_offers_keywords_to_colour() {
+        for &lang in Language::all() {
+            if lang == Language::PlainText {
+                continue;
+            }
+            assert!(
+                !lang.keywords().is_empty(),
+                "{lang:?} highlights nothing at all"
+            );
+        }
+    }
+
+    // ── Tokenizing ──────────────────────────────────────────────────────
+
+    fn kinds(line: &str, lang: Language) -> Vec<(String, TokenKind)> {
+        let lines = tokenize(line, lang);
+        lines
+            .into_iter()
+            .flatten()
+            .map(|t| (t.text, t.kind))
+            .collect()
+    }
+
+    #[test]
+    fn an_empty_document_still_has_one_line() {
+        assert_eq!(tokenize("", Language::Rust).len(), 1);
+    }
+
+    #[test]
+    fn a_document_has_one_entry_per_line() {
+        assert_eq!(tokenize("a\nb\nc", Language::Rust).len(), 3);
+    }
+
+    #[test]
+    fn a_keyword_is_a_keyword_and_a_name_is_not() {
+        let got = kinds("fn main", Language::Rust);
+        assert_eq!(got[0], ("fn".to_string(), TokenKind::Keyword));
+        assert!(
+            got.iter()
+                .any(|(t, k)| t == "main" && *k == TokenKind::Identifier)
+        );
+    }
+
+    #[test]
+    fn a_capitalised_name_is_a_type_except_in_sql() {
+        assert!(
+            kinds("Vec", Language::Rust)
+                .iter()
+                .any(|(_, k)| *k == TokenKind::Type)
+        );
+        assert!(
+            !kinds("SELECT", Language::Sql)
+                .iter()
+                .any(|(_, k)| *k == TokenKind::Type)
+        );
+    }
+
+    #[test]
+    fn a_string_keeps_its_quotes_and_its_escapes() {
+        let got = kinds(r#""a\"b" x"#, Language::Rust);
+        assert_eq!(got[0].1, TokenKind::String);
+        assert_eq!(got[0].0, r#""a\"b""#);
+    }
+
+    #[test]
+    fn an_unterminated_string_runs_to_the_end_of_the_line() {
+        let got = kinds("\"never closed", Language::Rust);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "\"never closed");
+    }
+
+    #[test]
+    fn a_number_is_a_number_including_hex() {
+        assert!(
+            kinds("42", Language::Rust)
+                .iter()
+                .any(|(t, k)| t == "42" && *k == TokenKind::Number)
+        );
+        assert!(
+            kinds("0xFF", Language::Rust)
+                .iter()
+                .any(|(t, k)| t == "0xFF" && *k == TokenKind::Number)
+        );
+        assert!(
+            kinds("3.14", Language::Rust)
+                .iter()
+                .any(|(t, k)| t == "3.14" && *k == TokenKind::Number)
+        );
+    }
+
+    #[test]
+    fn each_language_family_has_its_own_comment_marker() {
+        for (line, lang) in [
+            ("// gone", Language::Rust),
+            ("# gone", Language::Python),
+            ("# gone", Language::Shell),
+            ("-- gone", Language::Sql),
+        ] {
+            let got = kinds(line, lang);
+            assert_eq!(got.len(), 1, "{lang:?} did not take {line} as one comment");
+            assert_eq!(got[0].1, TokenKind::Comment, "{lang:?} on {line}");
+        }
+    }
+
+    #[test]
+    fn a_hash_is_not_a_comment_in_a_language_that_does_not_use_one() {
+        assert!(
+            !kinds("# not a comment", Language::Rust)
+                .iter()
+                .any(|(_, k)| *k == TokenKind::Comment)
+        );
+    }
+
+    #[test]
+    fn a_single_dash_is_an_operator_not_the_start_of_a_comment() {
+        let got = kinds("a - b", Language::Sql);
+        assert!(
+            got.iter()
+                .any(|(t, k)| t == "-" && *k == TokenKind::Operator)
+        );
+    }
+
+    #[test]
+    fn a_two_character_operator_is_one_token() {
+        assert!(
+            kinds("a == b", Language::Rust)
+                .iter()
+                .any(|(t, k)| t == "==" && *k == TokenKind::Operator)
+        );
+    }
+
+    #[test]
+    fn tokenizing_loses_nothing() {
+        // Every character of the line comes back, in order: a highlighter that
+        // drops a character draws source that is not the source.
+        for (line, lang) in [
+            ("fn main() { let x = 0xFF; } // done", Language::Rust),
+            ("SELECT * FROM t -- all", Language::Sql),
+            ("x = \"a\\\"b\" # note", Language::Python),
+        ] {
+            let joined: String = kinds(line, lang).into_iter().map(|(t, _)| t).collect();
+            assert_eq!(joined, line, "{lang:?}");
+        }
+    }
+
+    // ── Templates ───────────────────────────────────────────────────────
+
+    #[test]
+    fn a_template_variable_is_found_once_however_often_it_appears() {
+        assert_eq!(
+            extract_template_vars("${a} ${b} ${a}"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn text_with_no_placeholder_has_no_variables() {
+        assert!(extract_template_vars("plain text $ { } ${}").is_empty());
+    }
+
+    #[test]
+    fn an_unclosed_placeholder_is_still_a_variable() {
+        assert_eq!(extract_template_vars("${name"), vec!["name".to_string()]);
+    }
+
+    #[test]
+    fn applying_a_template_replaces_every_copy_of_a_variable() {
+        let filled = apply_template("${a}-${a}", &[("a".to_string(), "z".to_string())]);
+        assert_eq!(filled, "z-z");
+    }
+
+    #[test]
+    fn applying_a_template_leaves_variables_nobody_gave_a_value_for() {
+        assert_eq!(apply_template("${a}", &[]), "${a}");
+    }
+
+    // ── Searching ───────────────────────────────────────────────────────
+
+    #[test]
+    fn an_empty_query_matches_everything() {
+        let a = app();
+        assert_eq!(
+            search_snippets(&a.snippets, "", SearchScope::Title).len(),
+            a.snippets.len()
+        );
+    }
+
+    #[test]
+    fn a_scope_looks_only_where_it_says() {
+        let mut a = app_with(&["alpha"]);
+        a.snippets[0].content = "beta".into();
+        a.snippets[0].tags = vec!["gamma".into()];
+        for (scope, hits) in [
+            (SearchScope::Title, ["alpha"]),
+            (SearchScope::Content, ["beta"]),
+            (SearchScope::Tags, ["gamma"]),
+        ] {
+            assert_eq!(
+                search_snippets(&a.snippets, hits[0], scope).len(),
+                1,
+                "{scope:?} did not find {}",
+                hits[0]
+            );
+            let elsewhere = if scope == SearchScope::Title {
+                "beta"
+            } else {
+                "alpha"
+            };
+            assert_eq!(
+                search_snippets(&a.snippets, elsewhere, scope).len(),
+                0,
+                "{scope:?} found {elsewhere}, which is not in its scope"
+            );
+        }
+    }
+
+    #[test]
+    fn the_all_scope_looks_everywhere() {
+        let mut a = app_with(&["alpha"]);
+        a.snippets[0].content = "beta".into();
+        a.snippets[0].tags = vec!["gamma".into()];
+        a.snippets[0].description = "delta".into();
+        for needle in ["alpha", "beta", "gamma", "delta"] {
+            assert_eq!(
+                search_snippets(&a.snippets, needle, SearchScope::All).len(),
+                1,
+                "All missed {needle}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_query_ignores_case() {
+        let a = app_with(&["Alpha"]);
+        assert_eq!(
+            search_snippets(&a.snippets, "ALPHA", SearchScope::Title).len(),
             1
         );
-        assert_eq!(app.recently_used[0], id);
+    }
+
+    // ── Export ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn an_export_names_every_snippet() {
+        let a = app_with(&["one", "two"]);
+        let json = export_snippets_json(&a.snippets);
+        assert!(json.contains("\"one\""), "{json}");
+        assert!(json.contains("\"two\""), "{json}");
     }
 
     #[test]
-    fn test_app_filtered_snippets_all() {
-        let app = App::new();
-        let filtered = app.filtered_snippets();
-        assert!(!filtered.is_empty());
+    fn an_export_escapes_what_would_break_it() {
+        let mut a = app_with(&["a"]);
+        a.snippets[0].content = "say \"hi\"\n\tthen stop".into();
+        let json = export_snippets_json(&a.snippets);
+        assert!(
+            !json.contains("say \"hi\""),
+            "the quotes went in raw: {json}"
+        );
+        assert!(json.contains("\\\"hi\\\""), "{json}");
+        assert!(json.contains("\\n"), "{json}");
+        assert!(json.contains("\\t"), "{json}");
     }
 
     #[test]
-    fn test_app_filtered_favorites() {
-        let mut app = App::new();
-        app.sidebar_view = SidebarView::Favorites;
-        let filtered = app.filtered_snippets();
-        assert!(filtered.iter().all(|s| s.favorite));
+    fn an_export_of_nothing_is_still_json() {
+        let json = export_snippets_json(&[]);
+        assert!(json.starts_with('{'), "{json}");
+        assert!(json.trim_end().ends_with('}'), "{json}");
+    }
+
+    // ── Layout ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_layout_fills_the_window_it_is_given() {
+        for size in [W, (640.0, 480.0), (1920.0, 1080.0), (400.0, 300.0)] {
+            let l = Layout::new(size.0, size.1);
+            assert_eq!(l.window, Rect::new(0.0, 0.0, size.0, size.1), "{size:?}");
+        }
     }
 
     #[test]
-    fn test_app_filtered_templates() {
-        let mut app = App::new();
-        app.sidebar_view = SidebarView::Templates;
-        let filtered = app.filtered_snippets();
-        assert!(filtered.iter().all(|s| s.is_template));
+    fn the_columns_lie_side_by_side_and_leave_no_gap() {
+        for size in [W, (1400.0, 900.0), (900.0, 600.0)] {
+            let l = Layout::new(size.0, size.1);
+            assert_eq!(l.sidebar.x, 0.0, "{size:?}");
+            assert_eq!(l.sidebar.right(), l.list.x, "{size:?} sidebar to list");
+            assert_eq!(l.list.right(), l.editor.x, "{size:?} list to editor");
+            assert_eq!(l.editor.right(), size.0, "{size:?} editor to edge");
+        }
     }
 
     #[test]
-    fn test_app_all_tags() {
-        let app = App::new();
-        let tags = app.all_tags();
-        assert!(!tags.is_empty());
+    fn the_toolbar_is_above_the_columns_and_they_reach_the_bottom() {
+        let l = Layout::new(W.0, W.1);
+        assert_eq!(l.toolbar.y, 0.0);
+        for column in [l.sidebar, l.list, l.editor] {
+            assert_eq!(column.y, l.toolbar.bottom());
+            assert_eq!(column.bottom(), W.1);
+        }
     }
 
     #[test]
-    fn test_app_stats() {
-        let app = App::new();
-        let stats = app.stats();
-        assert!(stats.total_snippets > 0);
-        assert!(stats.total_folders > 0);
+    fn a_wider_window_widens_the_editor_not_the_chrome() {
+        // The columns are capped; the editor is what is left. A window twice
+        // as wide is an editor much more than twice as wide, which is the
+        // point of a cap.
+        let narrow = Layout::new(1400.0, 750.0);
+        let wide = Layout::new(2800.0, 750.0);
+        assert_eq!(wide.sidebar.w, narrow.sidebar.w);
+        assert_eq!(wide.list.w, narrow.list.w);
+        assert!(
+            wide.editor.w > narrow.editor.w * 1.9,
+            "{} {}",
+            narrow.editor.w,
+            wide.editor.w
+        );
     }
 
     #[test]
-    fn test_app_render() {
-        let app = App::new();
-        let cmds = app.render();
-        assert!(!cmds.is_empty());
+    fn a_narrow_window_drops_the_sidebar_before_the_list() {
+        // The list is the one that says which snippet is on screen, so it is
+        // the one that survives longer.
+        let l = Layout::new(650.0, 750.0);
+        assert_eq!(l.sidebar.w, 0.0, "the sidebar should have gone");
+        assert!(l.list.w > 0.0, "the list should not have");
     }
 
     #[test]
-    fn test_app_render_with_selection() {
-        let mut app = App::new();
-        app.selected_snippet_id = Some(app.snippets[0].id);
-        let cmds = app.render();
-        assert!(!cmds.is_empty());
+    fn a_window_too_narrow_for_either_column_is_all_editor() {
+        let l = Layout::new(450.0, 750.0);
+        assert_eq!(l.sidebar.w, 0.0);
+        assert_eq!(l.list.w, 0.0);
+        assert_eq!(l.editor.w, 450.0);
     }
 
     #[test]
-    fn test_app_render_stats_overlay() {
-        let mut app = App::new();
-        app.show_stats = true;
-        let cmds = app.render();
-        assert!(cmds.len() > 20); // Overlay adds many commands
+    fn the_editor_is_never_squeezed_out_by_the_columns() {
+        // Sweep, because a rule that holds at three widths and fails at the
+        // fourth is a rule nobody has checked.
+        let mut w = 200.0_f32;
+        while w <= 3000.0 {
+            let l = Layout::new(w, 750.0);
+            assert!(
+                l.editor.w >= l.font * 24.0 || l.editor.w == w,
+                "at {w} the editor got {} px",
+                l.editor.w
+            );
+            w += 7.0;
+        }
     }
 
     #[test]
-    fn test_app_create_empty_folder_rejected() {
-        let mut app = App::new();
-        let initial = app.folders.len();
-        app.create_folder("");
-        assert_eq!(app.folders.len(), initial);
+    fn no_part_of_the_layout_leaves_the_window() {
+        let mut h = 200.0_f32;
+        while h <= 1600.0 {
+            let l = Layout::new(1000.0, h);
+            for r in [l.toolbar, l.sidebar, l.list, l.editor] {
+                assert!(r.x >= 0.0 && r.y >= 0.0, "at h={h}: {r:?}");
+                assert!(r.right() <= 1000.0 + 0.01, "at h={h}: {r:?}");
+                assert!(r.bottom() <= h + 0.01, "at h={h}: {r:?}");
+            }
+            h += 13.0;
+        }
     }
 
     #[test]
-    fn test_app_create_large_snippet_rejected() {
-        let mut app = App::new();
-        let large = "x".repeat(MAX_CONTENT_LEN + 1);
-        let id = app.create_snippet("Big", &large, Language::PlainText);
-        assert_eq!(id, 0);
+    fn a_taller_window_does_not_make_the_text_bigger_for_ever() {
+        // Capped, or a 4K window would draw a menu in 40pt.
+        let l = Layout::new(1000.0, 4000.0);
+        assert!(l.font <= 16.0, "{}", l.font);
+        let tiny = Layout::new(1000.0, 100.0);
+        assert!(tiny.font >= 8.0, "{}", tiny.font);
     }
 
-    // --- Utility tests ---
-
-    /// A snippet title is cut to the width of the list column it is drawn in.
-    /// The old helper compared `s.len()` — bytes — against a budget of 32
-    /// "characters", so an accented title was cut short while it still fitted
-    /// the column, and a title of wide glyphs ran past it.
     #[test]
-    fn a_long_title_is_cut_to_the_list_column() {
-        let room = LIST_WIDTH - 20.0;
-        for title in [
-            "a snippet title far too long to fit the list column beside it",
-            "un titre de fragment beaucoup trop long pour la colonne de gauche",
+    fn the_text_sizes_keep_their_order() {
+        for h in [120.0, 300.0, 750.0, 2000.0] {
+            let l = Layout::new(1000.0, h);
+            assert!(l.tiny < l.small, "at h={h}");
+            assert!(l.small < l.font, "at h={h}");
+            assert!(l.font < l.head, "at h={h}");
+            assert!(l.head < l.title, "at h={h}");
+        }
+    }
+
+    #[test]
+    fn a_row_is_tall_enough_for_the_text_that_goes_in_it() {
+        for h in [200.0, 750.0, 1600.0] {
+            let l = Layout::new(1000.0, h);
+            assert!(
+                l.row >= text::line_height(l.small, FontWeightHint::Regular),
+                "at h={h}: row {} vs text {}",
+                l.row,
+                text::line_height(l.small, FontWeightHint::Regular)
+            );
+            assert!(
+                l.list_row >= text::line_height(l.font, FontWeightHint::Bold),
+                "at h={h}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_list_header_sits_on_top_of_the_list_body() {
+        let a = app();
+        let l = a.layout();
+        let head = a.list_header(&l);
+        let body = a.list_body(&l);
+        assert_eq!(head.y, l.list.y);
+        assert_eq!(head.bottom(), body.y);
+        assert_eq!(body.bottom(), l.list.bottom());
+    }
+
+    #[test]
+    fn the_editor_is_a_header_a_code_panel_and_a_status_bar_in_that_order() {
+        let a = app();
+        let l = a.layout();
+        let p = a.editor_parts(&l);
+        assert_eq!(p.header.y, l.editor.y);
+        assert_eq!(p.code.y, p.header.bottom());
+        assert_eq!(p.code.bottom(), p.status.y);
+        assert_eq!(p.status.bottom(), l.editor.bottom());
+    }
+
+    #[test]
+    fn the_editor_parts_survive_an_editor_with_no_room_in_it() {
+        // A window short enough that the header alone would overflow: the
+        // parts must still be inside the column rather than upside down.
+        let l = Layout::new(1000.0, 100.0);
+        let a = app();
+        let p = a.editor_parts(&l);
+        for r in [p.header, p.code, p.status] {
+            assert!(r.w >= 0.0 && r.h >= 0.0, "{r:?}");
+            assert!(r.bottom() <= l.editor.bottom() + 0.01, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn the_code_panel_holds_as_many_lines_as_it_draws() {
+        // Asked of the drawing, not of a second copy of the arithmetic: the
+        // capacity is what the keyboard scrolls by, and a capacity that
+        // disagrees with the panel scrolls past lines nobody saw.
+        let mut a = app_with(&["long"]);
+        let body = numbered_lines(400);
+        a.snippets[0].content = body;
+        a.select(id_of(&a, "long"));
+        let capacity = a.code_capacity(&a.layout());
+        assert!(capacity > 0, "a 750px window should show some code");
+        let drawn = texts(&a, W);
+        assert!(
+            drawn.iter().any(|t| t == &capacity.to_string()),
+            "line {capacity} was counted as visible but not drawn"
+        );
+        assert!(
+            !drawn
+                .iter()
+                .any(|t| t == &capacity.saturating_add(1).to_string()),
+            "line {} was drawn but not counted",
+            capacity + 1
+        );
+    }
+
+    // ── Clicks ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn every_control_the_toolbar_draws_can_be_clicked() {
+        let a = app();
+        for target in [Target::New, Target::Export, Target::Stats, Target::Search] {
+            assert!(
+                rect_of(&a, target).is_some(),
+                "{target:?} is drawn with no hit box"
+            );
+        }
+    }
+
+    #[test]
+    fn a_toolbar_button_does_not_sit_on_top_of_the_search_box() {
+        // It used to: the buttons were laid out from a fixed x and the search
+        // box from a fixed width, and at the default size they overlapped, so
+        // one of the two was unclickable wherever they crossed.
+        let a = app();
+        let search = rect_of(&a, Target::Search).unwrap();
+        for target in [Target::New, Target::Export, Target::Stats] {
+            let r = rect_of(&a, target).unwrap();
+            assert!(
+                r.right() <= search.x || r.x >= search.right(),
+                "{target:?} at {r:?} overlaps the search box at {search:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_toolbar_buttons_do_not_sit_on_top_of_each_other() {
+        let a = app();
+        let rects: Vec<(Target, Rect)> = [Target::New, Target::Export, Target::Stats]
+            .into_iter()
+            .map(|t| (t, rect_of(&a, t).unwrap()))
+            .collect();
+        for (i, (ta, ra)) in rects.iter().enumerate() {
+            for (tb, rb) in rects.iter().skip(i + 1) {
+                assert!(
+                    ra.right() <= rb.x || rb.right() <= ra.x,
+                    "{ta:?} at {ra:?} overlaps {tb:?} at {rb:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_control_is_inside_the_window_it_is_drawn_in() {
+        for size in [W, (700.0, 500.0), (1600.0, 1000.0)] {
+            let a = app();
+            for (_, r) in a.frame(size.0, size.1).hits() {
+                assert!(r.x >= 0.0 && r.y >= 0.0, "{r:?} at {size:?}");
+                assert!(r.right() <= size.0 + 0.01, "{r:?} at {size:?}");
+                assert!(r.bottom() <= size.1 + 0.01, "{r:?} at {size:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn clicking_new_makes_a_snippet_and_shows_it() {
+        let mut a = app_with(&["one"]);
+        assert_eq!(click(&mut a, Target::New), EventResult::Consumed);
+        assert_eq!(a.snippets.len(), 2);
+        assert_eq!(selected_title(&a).as_deref(), Some("Untitled"));
+    }
+
+    #[test]
+    fn a_new_snippet_takes_its_name_from_the_search_box() {
+        let mut a = app_with(&["one"]);
+        a.search_query = "helper.py".into();
+        click(&mut a, Target::New);
+        assert_eq!(selected_title(&a).as_deref(), Some("helper.py"));
+    }
+
+    #[test]
+    fn a_new_snippet_takes_its_language_from_its_name() {
+        let mut a = app_with(&["one"]);
+        a.search_query = "helper.py".into();
+        click(&mut a, Target::New);
+        assert_eq!(a.selected_snippet().unwrap().language, Language::Python);
+    }
+
+    #[test]
+    fn a_full_library_refuses_a_new_snippet_rather_than_pretending() {
+        let mut a = app_with(&["one"]);
+        while a.snippets.len() < MAX_SNIPPETS {
+            a.snippets.push(a.snippets[0].clone());
+        }
+        assert_eq!(click(&mut a, Target::New), EventResult::Ignored);
+        assert_eq!(a.snippets.len(), MAX_SNIPPETS);
+    }
+
+    #[test]
+    fn clicking_a_row_selects_that_snippet() {
+        let mut a = app_with(&["one", "two", "three"]);
+        let id = id_of(&a, "two");
+        assert_eq!(click(&mut a, Target::Row(id)), EventResult::Consumed);
+        assert_eq!(selected_title(&a).as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn a_row_is_where_its_own_title_is_drawn() {
+        // Not merely "a click somewhere reached it" — lesson 71: asking only
+        // whether a click landed cannot tell a hit box in the right place from
+        // one a whole row away.
+        let a = app_with(&["alpha", "beta", "gamma"]);
+        let l = a.layout();
+        let body = a.list_body(&l);
+        for (row, title) in ["alpha", "beta", "gamma"].iter().enumerate() {
+            let r = rect_of(&a, Target::Row(id_of(&a, title))).unwrap();
+            let expected_y = body.y + f32_from_usize(row) * l.list_row;
+            assert!(
+                (r.y - expected_y).abs() < 0.01,
+                "{title} is row {row} but its box is at y={} not {expected_y}",
+                r.y
+            );
+        }
+    }
+
+    #[test]
+    fn the_star_on_a_row_is_inside_that_row() {
+        let a = app_with(&["one", "two"]);
+        for title in ["one", "two"] {
+            let id = id_of(&a, title);
+            let row = rect_of(&a, Target::Row(id)).unwrap();
+            let star = rect_of(&a, Target::Star(id)).unwrap();
+            assert!(
+                star.y >= row.y - 0.01 && star.bottom() <= row.bottom() + 0.01,
+                "{title}: star {star:?} is not inside row {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn clicking_a_star_favourites_only_that_snippet() {
+        let mut a = app_with(&["one", "two"]);
+        let two = id_of(&a, "two");
+        click(&mut a, Target::Star(two));
+        assert!(
+            !a.snippets
+                .iter()
+                .find(|s| s.title == "one")
+                .unwrap()
+                .favorite
+        );
+        assert!(
+            a.snippets
+                .iter()
+                .find(|s| s.title == "two")
+                .unwrap()
+                .favorite
+        );
+    }
+
+    #[test]
+    fn a_star_click_does_not_also_select_the_row() {
+        // The star is recorded after the row, and the last hit wins, so a
+        // click on the star is a star click and nothing else.
+        let mut a = app_with(&["one", "two"]);
+        a.select(id_of(&a, "one"));
+        let two = id_of(&a, "two");
+        click(&mut a, Target::Star(two));
+        assert_eq!(selected_title(&a).as_deref(), Some("one"));
+    }
+
+    #[test]
+    fn clicking_use_counts_a_use_and_remembers_it() {
+        let mut a = app_with(&["one"]);
+        a.select(id_of(&a, "one"));
+        click(&mut a, Target::Use);
+        assert_eq!(a.snippets[0].use_count, 1);
+        assert_eq!(a.recently_used, vec![id_of(&a, "one")]);
+    }
+
+    #[test]
+    fn using_with_nothing_selected_changes_nothing() {
+        let mut a = app_with(&["one"]);
+        a.selected_snippet_id = None;
+        assert_eq!(a.press(Target::Use), EventResult::Ignored);
+        assert!(a.recently_used.is_empty());
+    }
+
+    #[test]
+    fn using_a_snippet_twice_leaves_one_entry_in_the_recent_list() {
+        let mut a = app_with(&["one"]);
+        a.select(id_of(&a, "one"));
+        click(&mut a, Target::Use);
+        click(&mut a, Target::Use);
+        assert_eq!(a.recently_used.len(), 1);
+        assert_eq!(a.snippets[0].use_count, 2);
+    }
+
+    #[test]
+    fn the_recent_list_holds_the_most_recent_first() {
+        let mut a = app_with(&["one", "two"]);
+        a.select(id_of(&a, "one"));
+        click(&mut a, Target::Use);
+        a.select(id_of(&a, "two"));
+        click(&mut a, Target::Use);
+        assert_eq!(a.recently_used, vec![id_of(&a, "two"), id_of(&a, "one")]);
+    }
+
+    #[test]
+    fn the_recent_list_never_grows_past_its_limit() {
+        let mut a = app();
+        a.recently_used.clear();
+        for i in 0..(MAX_RECENT + 5) {
+            let id = a
+                .create_snippet(&format!("s{i}"), "", Language::PlainText)
+                .unwrap();
+            a.use_snippet(id);
+        }
+        assert_eq!(a.recently_used.len(), MAX_RECENT);
+    }
+
+    #[test]
+    fn an_id_that_is_not_a_snippet_takes_no_place_in_the_recent_list() {
+        // It used to: the count bump found nothing and the insert ran anyway,
+        // so a phantom id pushed a real entry off the end, where the Recent
+        // view — which only lists ids that match a snippet — hid the loss.
+        let mut a = app_with(&["one"]);
+        assert_eq!(a.use_snippet(9_999), EventResult::Ignored);
+        assert!(a.recently_used.is_empty());
+    }
+
+    #[test]
+    fn using_a_template_leaves_a_filled_copy_behind() {
+        let mut a = app_with(&["t"]);
+        a.snippets[0].content = "hello ${name}, you are ${age}".into();
+        a.snippets[0].is_template = true;
+        a.snippets[0].template_vars = vec!["name".into(), "age".into()];
+        a.select(id_of(&a, "t"));
+        click(&mut a, Target::Use);
+        assert_eq!(a.snippets.len(), 2);
+        let made = a.selected_snippet().unwrap();
+        assert_eq!(made.title, "t (filled)");
+        assert_eq!(made.content, "hello <name>, you are <age>");
+    }
+
+    #[test]
+    fn using_an_ordinary_snippet_leaves_no_copy() {
+        let mut a = app_with(&["plain"]);
+        a.select(id_of(&a, "plain"));
+        click(&mut a, Target::Use);
+        assert_eq!(a.snippets.len(), 1);
+    }
+
+    #[test]
+    fn clicking_delete_removes_the_selected_snippet_and_only_that_one() {
+        let mut a = app_with(&["one", "two"]);
+        a.select(id_of(&a, "two"));
+        click(&mut a, Target::Delete);
+        assert_eq!(titles(&a), vec!["one".to_string()]);
+        assert!(a.selected_snippet_id.is_none());
+    }
+
+    #[test]
+    fn deleting_with_nothing_selected_changes_nothing() {
+        let mut a = app_with(&["one"]);
+        a.selected_snippet_id = None;
+        assert_eq!(a.press(Target::Delete), EventResult::Ignored);
+        assert_eq!(a.snippets.len(), 1);
+    }
+
+    #[test]
+    fn a_deleted_snippet_leaves_the_recent_list_too() {
+        let mut a = app_with(&["one"]);
+        let id = id_of(&a, "one");
+        a.select(id);
+        click(&mut a, Target::Use);
+        click(&mut a, Target::Delete);
+        assert!(a.recently_used.is_empty());
+    }
+
+    #[test]
+    fn clicking_the_scope_button_steps_through_every_scope_and_comes_back() {
+        let mut a = app();
+        let first = a.search_scope;
+        let mut seen = vec![first];
+        for _ in 0..3 {
+            click(&mut a, Target::Scope);
+            seen.push(a.search_scope);
+        }
+        click(&mut a, Target::Scope);
+        assert_eq!(a.search_scope, first, "it should have come back round");
+        seen.sort_by_key(|s| format!("{s:?}"));
+        seen.dedup();
+        assert_eq!(seen.len(), 4, "a scope was skipped: {seen:?}");
+    }
+
+    #[test]
+    fn clicking_the_sort_button_steps_through_every_order_and_comes_back() {
+        let mut a = app();
+        let first = a.sort_order;
+        let mut seen = vec![first];
+        for _ in 0..5 {
+            click(&mut a, Target::Sort);
+            seen.push(a.sort_order);
+        }
+        click(&mut a, Target::Sort);
+        assert_eq!(a.sort_order, first);
+        seen.sort_by_key(|s| format!("{s:?}"));
+        seen.dedup();
+        assert_eq!(seen.len(), 6, "an order was skipped: {seen:?}");
+    }
+
+    #[test]
+    fn every_sidebar_view_has_a_button_and_the_button_selects_it() {
+        let mut a = app();
+        for view in SidebarView::ALL {
+            assert_eq!(click(&mut a, Target::View(view)), EventResult::Consumed);
+            assert_eq!(a.sidebar_view, view);
+        }
+    }
+
+    #[test]
+    fn clicking_a_folder_selects_it_and_clicking_it_again_lets_go() {
+        let mut a = app();
+        let id = a.folders[0].id;
+        click(&mut a, Target::Folder(id));
+        assert_eq!(a.selected_folder_id, Some(id));
+        click(&mut a, Target::Folder(id));
+        assert_eq!(a.selected_folder_id, None);
+    }
+
+    #[test]
+    fn a_twisty_opens_and_shuts_its_own_folder_and_no_other() {
+        let mut a = app();
+        let parent = a
+            .folders
+            .iter()
+            .find(|f| a.has_children(f.id))
+            .map(|f| f.id)
+            .expect("the seeded library has a folder with children");
+        let others: Vec<(FolderId, bool)> = a
+            .folders
+            .iter()
+            .filter(|f| f.id != parent)
+            .map(|f| (f.id, f.expanded))
+            .collect();
+        let before = a.folders.iter().find(|f| f.id == parent).unwrap().expanded;
+        click(&mut a, Target::Twisty(parent));
+        assert_eq!(
+            a.folders.iter().find(|f| f.id == parent).unwrap().expanded,
+            !before
+        );
+        for (id, was) in others {
+            assert_eq!(a.folders.iter().find(|f| f.id == id).unwrap().expanded, was);
+        }
+    }
+
+    #[test]
+    fn a_twisty_is_drawn_only_where_there_is_something_to_open() {
+        let a = app();
+        for folder in &a.folders {
+            let has = rect_of(&a, Target::Twisty(folder.id)).is_some();
+            assert_eq!(
+                has,
+                a.has_children(folder.id),
+                "folder {} has a twisty it cannot use",
+                folder.name
+            );
+        }
+    }
+
+    #[test]
+    fn shutting_a_folder_hides_its_children_from_the_tree() {
+        let mut a = app();
+        let parent = a
+            .folders
+            .iter()
+            .find(|f| a.has_children(f.id))
+            .map(|f| f.id)
+            .unwrap();
+        let child = a
+            .folders
+            .iter()
+            .find(|f| f.parent_id == Some(parent))
+            .unwrap()
+            .id;
+        assert!(a.folder_rows().iter().any(|&(id, _)| id == child));
+        click(&mut a, Target::Twisty(parent));
+        assert!(!a.folder_rows().iter().any(|&(id, _)| id == child));
+    }
+
+    #[test]
+    fn a_folder_cycle_does_not_hang_the_tree() {
+        // Nothing stops two folders naming each other as parent, and the walk
+        // must end on the data it is given rather than on the data it hopes for.
+        let mut a = app();
+        let (a_id, b_id) = (a.folders[0].id, a.folders[1].id);
+        a.folders[0].parent_id = Some(b_id);
+        a.folders[1].parent_id = Some(a_id);
+        for f in &mut a.folders {
+            f.expanded = true;
+        }
+        assert!(a.folder_rows().len() <= a.folders.len() * MAX_FOLDER_DEPTH);
+    }
+
+    #[test]
+    fn clicking_new_folder_makes_one_under_the_selected_folder() {
+        let mut a = app();
+        let parent = a.folders[0].id;
+        a.selected_folder_id = Some(parent);
+        let before = a.folders.len();
+        a.search_query = "Scratch".into();
+        assert_eq!(click(&mut a, Target::NewFolder), EventResult::Consumed);
+        assert_eq!(a.folders.len(), before + 1);
+        let made = a.folders.last().unwrap();
+        assert_eq!(made.name, "Scratch");
+        assert_eq!(made.parent_id, Some(parent));
+    }
+
+    #[test]
+    fn a_new_folder_with_nothing_typed_still_gets_a_name() {
+        let mut a = app();
+        a.search_query.clear();
+        click(&mut a, Target::NewFolder);
+        assert_eq!(a.folders.last().unwrap().name, "Folder");
+    }
+
+    #[test]
+    fn a_full_shelf_of_folders_refuses_another() {
+        let mut a = app();
+        while a.folders.len() < MAX_FOLDERS {
+            a.folders.push(a.folders[0].clone());
+        }
+        assert_eq!(a.press(Target::NewFolder), EventResult::Ignored);
+        assert_eq!(a.folders.len(), MAX_FOLDERS);
+    }
+
+    #[test]
+    fn only_the_selected_folder_offers_to_be_deleted() {
+        let mut a = app();
+        let id = a.folders[0].id;
+        assert!(rect_of(&a, Target::DeleteFolder(id)).is_none());
+        click(&mut a, Target::Folder(id));
+        assert!(rect_of(&a, Target::DeleteFolder(id)).is_some());
+    }
+
+    #[test]
+    fn deleting_a_folder_keeps_its_snippets_and_moves_them_to_the_root() {
+        let mut a = app();
+        let id = a.folders.iter().find(|f| !a.has_children(f.id)).unwrap().id;
+        let mut kept = a.snippets.len();
+        if !a.snippets.iter().any(|s| s.folder_id == Some(id)) {
+            a.snippets[0].folder_id = Some(id);
+            kept = a.snippets.len();
+        }
+        click(&mut a, Target::Folder(id));
+        click(&mut a, Target::DeleteFolder(id));
+        assert!(!a.folders.iter().any(|f| f.id == id));
+        assert_eq!(a.snippets.len(), kept, "a snippet went with the folder");
+        assert!(!a.snippets.iter().any(|s| s.folder_id == Some(id)));
+    }
+
+    #[test]
+    fn clicking_stats_opens_the_overlay_and_clicking_outside_shuts_it() {
+        let mut a = app();
+        click(&mut a, Target::Stats);
+        assert!(a.show_stats);
+        click(&mut a, Target::CloseStats);
+        assert!(!a.show_stats);
+    }
+
+    #[test]
+    fn the_overlay_covers_everything_behind_it() {
+        // Every hit box the frame offers while the overlay is up either closes
+        // it or is the dialog itself; nothing behind can be reached.
+        let mut a = app();
+        a.show_stats = true;
+        let frame = a.frame(W.0, W.1);
+        for (target, r) in frame.hits() {
+            // What a click at the middle of that box would actually reach, not
+            // merely what was recorded: the backdrop is recorded last and the
+            // last hit wins, which is the mechanism being checked.
+            let reached = frame.hit_test(r.x + r.w / 2.0, r.y + r.h / 2.0);
+            assert_eq!(
+                reached,
+                Some(Target::CloseStats),
+                "a click on {target:?} at {r:?} reaches {reached:?} behind a modal"
+            );
+        }
+    }
+
+    #[test]
+    fn clicking_the_cross_empties_the_search_box() {
+        let mut a = app();
+        a.search_query = "abc".into();
+        assert!(rect_of(&a, Target::ClearSearch).is_some());
+        click(&mut a, Target::ClearSearch);
+        assert!(a.search_query.is_empty());
+    }
+
+    #[test]
+    fn there_is_no_cross_when_there_is_nothing_to_clear() {
+        let mut a = app();
+        a.search_query.clear();
+        assert!(rect_of(&a, Target::ClearSearch).is_none());
+    }
+
+    #[test]
+    fn a_click_on_nothing_is_ignored() {
+        let mut a = app();
+        assert_eq!(click_background(&mut a), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_click_on_a_panel_body_is_not_a_click_on_a_thing() {
+        let mut a = app();
+        assert_eq!(a.press(Target::List), EventResult::Ignored);
+        assert_eq!(a.press(Target::Code), EventResult::Ignored);
+    }
+
+    // ── The keyboard ────────────────────────────────────────────────────
+
+    #[test]
+    fn down_walks_the_list_and_stops_at_the_end() {
+        let mut a = app_with(&["one", "two", "three"]);
+        for expected in ["one", "two", "three", "three"] {
+            key(&mut a, &press(Key::Down));
+            assert_eq!(selected_title(&a).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn up_walks_back_and_stops_at_the_top() {
+        let mut a = app_with(&["one", "two", "three"]);
+        a.select(id_of(&a, "three"));
+        for expected in ["two", "one", "one"] {
+            key(&mut a, &press(Key::Up));
+            assert_eq!(selected_title(&a).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn up_with_nothing_selected_starts_at_the_bottom() {
+        // Symmetrical with Down starting at the top: the key that walks
+        // backwards should enter the list from the end it walks from.
+        let mut a = app_with(&["one", "two", "three"]);
+        key(&mut a, &press(Key::Up));
+        assert_eq!(selected_title(&a).as_deref(), Some("three"));
+    }
+
+    #[test]
+    fn home_and_end_reach_the_ends() {
+        let mut a = app_with(&["one", "two", "three"]);
+        key(&mut a, &press(Key::End));
+        assert_eq!(selected_title(&a).as_deref(), Some("three"));
+        key(&mut a, &press(Key::Home));
+        assert_eq!(selected_title(&a).as_deref(), Some("one"));
+    }
+
+    #[test]
+    fn a_page_is_more_than_a_row_and_no_more_than_the_list_holds() {
+        let a = app();
+        let l = a.layout();
+        let capacity = scroll_window::capacity(l.list_row, a.list_body(&l).h);
+        let page = a.page();
+        assert!(page > 1, "a page of {page} rows is not a page");
+        assert!(
+            usize::try_from(page).unwrap_or(usize::MAX) <= capacity,
+            "a page of {page} is bigger than the {capacity} rows on screen"
+        );
+    }
+
+    #[test]
+    fn page_down_moves_a_page_and_page_up_brings_it_back() {
+        let names: Vec<String> = (0..60).map(|i| format!("s{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut a = app_with(&refs);
+        key(&mut a, &press(Key::Home));
+        key(&mut a, &press(Key::PageDown));
+        let after = a.selected_row().unwrap();
+        assert_eq!(isize::try_from(after).unwrap(), a.page());
+        key(&mut a, &press(Key::PageUp));
+        assert_eq!(a.selected_row(), Some(0));
+    }
+
+    #[test]
+    fn moving_the_selection_on_an_empty_list_is_ignored() {
+        let mut a = app_with(&[]);
+        assert_eq!(key(&mut a, &press(Key::Down)), EventResult::Ignored);
+        assert_eq!(key(&mut a, &press(Key::Up)), EventResult::Ignored);
+        assert!(a.selected_snippet_id.is_none());
+    }
+
+    #[test]
+    fn the_selection_follows_the_order_the_list_is_sorted_in() {
+        // Not the order the library is stored in — the arrow keys walk what is
+        // on screen, or they walk somewhere the user is not looking.
+        let mut a = app_with(&["b", "a", "c"]);
+        a.sort_order = SortOrder::NameAsc;
+        key(&mut a, &press(Key::Down));
+        assert_eq!(selected_title(&a).as_deref(), Some("a"));
+        key(&mut a, &press(Key::Down));
+        assert_eq!(selected_title(&a).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn walking_the_list_scrolls_the_row_into_view() {
+        let names: Vec<String> = (0..80).map(|i| format!("s{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut a = app_with(&refs);
+        key(&mut a, &press(Key::End));
+        let row = a.selected_row().unwrap();
+        let l = a.layout();
+        let capacity = scroll_window::capacity(l.list_row, a.list_body(&l).h);
+        assert!(row >= a.list_scroll, "row {row} is above the window");
+        assert!(
+            row < a.list_scroll + capacity,
+            "row {row} is below a window of {capacity} starting at {}",
+            a.list_scroll
+        );
+        assert!(rect_of(&a, Target::Row(a.selected_snippet_id.unwrap())).is_some());
+    }
+
+    #[test]
+    fn enter_uses_the_selected_snippet() {
+        let mut a = app_with(&["one"]);
+        a.select(id_of(&a, "one"));
+        key(&mut a, &press(Key::Enter));
+        assert_eq!(a.snippets[0].use_count, 1);
+    }
+
+    #[test]
+    fn delete_deletes_the_selected_snippet() {
+        let mut a = app_with(&["one", "two"]);
+        a.select(id_of(&a, "two"));
+        key(&mut a, &press(Key::Delete));
+        assert_eq!(titles(&a), vec!["one".to_string()]);
+    }
+
+    #[test]
+    fn f_favourites_the_selected_snippet() {
+        let mut a = app_with(&["one"]);
+        a.select(id_of(&a, "one"));
+        key(&mut a, &press(Key::F));
+        assert!(a.snippets[0].favorite);
+        key(&mut a, &press(Key::F));
+        assert!(!a.snippets[0].favorite);
+    }
+
+    #[test]
+    fn s_opens_the_statistics_and_closes_them_again() {
+        let mut a = app();
+        key(&mut a, &press(Key::S));
+        assert!(a.show_stats);
+        key(&mut a, &press(Key::S));
+        assert!(!a.show_stats);
+    }
+
+    #[test]
+    fn escape_shuts_the_statistics() {
+        let mut a = app();
+        a.show_stats = true;
+        key(&mut a, &press(Key::Escape));
+        assert!(!a.show_stats);
+    }
+
+    #[test]
+    fn the_statistics_overlay_swallows_the_keys_behind_it() {
+        // A modal that lets Delete through is a modal that deletes what is
+        // behind it while the user is reading a dialog.
+        let mut a = app_with(&["one"]);
+        a.select(id_of(&a, "one"));
+        a.show_stats = true;
+        assert_eq!(key(&mut a, &press(Key::Delete)), EventResult::Ignored);
+        assert_eq!(key(&mut a, &press(Key::N)), EventResult::Ignored);
+        assert_eq!(a.snippets.len(), 1);
+    }
+
+    #[test]
+    fn n_makes_a_snippet() {
+        let mut a = app_with(&["one"]);
+        key(&mut a, &press(Key::N));
+        assert_eq!(a.snippets.len(), 2);
+    }
+
+    #[test]
+    fn o_steps_the_sort_order() {
+        let mut a = app();
+        let before = a.sort_order;
+        key(&mut a, &press(Key::O));
+        assert_ne!(a.sort_order, before);
+    }
+
+    #[test]
+    fn tab_and_shift_tab_step_the_sidebar_the_two_ways() {
+        let mut a = app();
+        let first = a.sidebar_view;
+        key(&mut a, &press(Key::Tab));
+        assert_ne!(a.sidebar_view, first);
+        key(&mut a, &shift(Key::Tab));
+        assert_eq!(a.sidebar_view, first);
+    }
+
+    #[test]
+    fn tab_reaches_every_view_and_comes_back_round() {
+        let mut a = app();
+        let first = a.sidebar_view;
+        let mut seen = vec![first];
+        for _ in 0..(SidebarView::ALL.len() - 1) {
+            key(&mut a, &press(Key::Tab));
+            seen.push(a.sidebar_view);
+        }
+        key(&mut a, &press(Key::Tab));
+        assert_eq!(a.sidebar_view, first);
+        seen.sort_by_key(|v| format!("{v:?}"));
+        seen.dedup();
+        assert_eq!(seen.len(), SidebarView::ALL.len(), "a view was skipped");
+    }
+
+    #[test]
+    fn shift_tab_reaches_every_view_too() {
+        let mut a = app();
+        let mut seen = vec![a.sidebar_view];
+        for _ in 0..(SidebarView::ALL.len() - 1) {
+            key(&mut a, &shift(Key::Tab));
+            seen.push(a.sidebar_view);
+        }
+        seen.sort_by_key(|v| format!("{v:?}"));
+        seen.dedup();
+        assert_eq!(seen.len(), SidebarView::ALL.len());
+    }
+
+    #[test]
+    fn changing_view_puts_the_list_back_at_the_top() {
+        // The new view is a different list; an offset carried over from the
+        // old one points at a row that is not there.
+        let names: Vec<String> = (0..80).map(|i| format!("s{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut a = app_with(&refs);
+        key(&mut a, &press(Key::End));
+        assert!(a.list_scroll > 0);
+        key(&mut a, &press(Key::Tab));
+        assert_eq!(a.list_scroll, 0);
+    }
+
+    #[test]
+    fn a_key_nothing_is_bound_to_is_ignored() {
+        let mut a = app();
+        assert_eq!(key(&mut a, &press(Key::F9)), EventResult::Ignored);
+    }
+
+    // ── The search box ──────────────────────────────────────────────────
+
+    #[test]
+    fn slash_and_ctrl_f_both_reach_the_search_box() {
+        for opener in [press(Key::Slash), ctrl(Key::F)] {
+            let mut a = app();
+            key(&mut a, &opener);
+            assert!(a.search_focus, "{opener:?} did not focus the search box");
+        }
+    }
+
+    #[test]
+    fn the_key_that_opens_the_search_box_is_not_also_typed_into_it() {
+        let mut a = app();
+        key(&mut a, &press(Key::Slash));
+        assert!(a.search_query.is_empty(), "got {:?}", a.search_query);
+    }
+
+    #[test]
+    fn typing_into_the_search_box_narrows_the_list() {
+        let mut a = app_with(&["alpha", "beta"]);
+        click(&mut a, Target::Search);
+        type_str(&mut a, "alp");
+        assert_eq!(a.search_query, "alp");
+        assert_eq!(titles(&a), vec!["alpha".to_string()]);
+    }
+
+    #[test]
+    fn typing_with_the_search_box_shut_still_works_the_shortcuts() {
+        // A real keystroke carries both a key and the text it types. With the
+        // box shut the letter has to run the shortcut and leave the query
+        // alone; with it open, the other test above, the opposite.
+        let mut a = app_with(&["one"]);
+        a.search_focus = false;
+        let mut ev = press(Key::N);
+        ev.text = "n".to_string();
+        key(&mut a, &ev);
+        assert_eq!(a.snippets.len(), 2, "N should have made a snippet");
+        assert!(a.search_query.is_empty());
+    }
+
+    #[test]
+    fn backspace_takes_a_character_back_off_the_query() {
+        let mut a = app();
+        a.search_focus = true;
+        type_str(&mut a, "abc");
+        key(&mut a, &press(Key::Backspace));
+        assert_eq!(a.search_query, "ab");
+    }
+
+    #[test]
+    fn backspace_on_an_empty_query_is_ignored_rather_than_pretending() {
+        let mut a = app();
+        a.search_focus = true;
+        a.search_query.clear();
+        assert_eq!(key(&mut a, &press(Key::Backspace)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn backspace_takes_back_a_character_not_a_byte() {
+        // A query is text, and text is not bytes: popping a byte off "é"
+        // leaves half a character behind.
+        let mut a = app();
+        a.search_focus = true;
+        type_str(&mut a, "aé");
+        key(&mut a, &press(Key::Backspace));
+        assert_eq!(a.search_query, "a");
+    }
+
+    #[test]
+    fn enter_and_escape_both_leave_the_search_box() {
+        for closer in [press(Key::Enter), press(Key::Escape)] {
+            let mut a = app();
+            a.search_focus = true;
+            key(&mut a, &closer);
+            assert!(!a.search_focus, "{closer:?} did not leave the box");
+        }
+    }
+
+    #[test]
+    fn the_arrows_still_walk_the_list_while_the_search_box_has_the_keyboard() {
+        // Typing a query and then picking from the results is one motion; a
+        // search box that swallowed Down would break it in half.
+        let mut a = app_with(&["one", "two"]);
+        a.search_focus = true;
+        key(&mut a, &press(Key::Down));
+        assert_eq!(selected_title(&a).as_deref(), Some("one"));
+        assert!(a.search_focus, "walking the list should not close the box");
+    }
+
+    #[test]
+    fn escape_outside_the_search_box_clears_a_query() {
+        let mut a = app();
+        a.search_focus = false;
+        a.search_query = "abc".into();
+        key(&mut a, &press(Key::Escape));
+        assert!(a.search_query.is_empty());
+    }
+
+    #[test]
+    fn escape_with_nothing_to_clear_is_ignored() {
+        let mut a = app();
+        a.search_focus = false;
+        a.search_query.clear();
+        assert_eq!(key(&mut a, &press(Key::Escape)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_narrowed_query_puts_the_list_back_at_the_top() {
+        let names: Vec<String> = (0..80).map(|i| format!("s{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut a = app_with(&refs);
+        key(&mut a, &press(Key::End));
+        assert!(a.list_scroll > 0);
+        a.search_focus = true;
+        type_str(&mut a, "s0");
+        assert_eq!(a.list_scroll, 0);
+    }
+
+    // ── The wheel ───────────────────────────────────────────────────────
+
+    #[test]
+    fn the_wheel_over_the_list_scrolls_the_list_and_not_the_code() {
+        let names: Vec<String> = (0..80).map(|i| format!("s{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut a = app_with(&refs);
+        assert_eq!(a.scroll(Target::List, -3.0), EventResult::Consumed);
+        assert!(a.list_scroll > 0, "the list did not move");
+        assert_eq!(a.code_scroll, 0, "the code moved instead");
+    }
+
+    #[test]
+    fn the_wheel_over_the_code_scrolls_the_code_and_not_the_list() {
+        let mut a = app_with(&["long"]);
+        a.snippets[0].content = numbered_lines(400);
+        a.select(id_of(&a, "long"));
+        assert_eq!(a.scroll(Target::Code, -3.0), EventResult::Consumed);
+        assert!(a.code_scroll > 0, "the code did not move");
+        assert_eq!(a.list_scroll, 0, "the list moved instead");
+    }
+
+    #[test]
+    fn the_wheel_stops_at_the_top() {
+        let names: Vec<String> = (0..80).map(|i| format!("s{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut a = app_with(&refs);
+        a.scroll(Target::List, 30.0);
+        assert_eq!(a.list_scroll, 0);
+    }
+
+    #[test]
+    fn the_wheel_stops_where_the_last_row_is_at_the_bottom() {
+        // Neither offset had any upper bound at all, because neither was ever
+        // assigned to; an unbounded one scrolls into blank space for ever.
+        let names: Vec<String> = (0..80).map(|i| format!("s{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut a = app_with(&refs);
+        for _ in 0..50 {
+            a.scroll(Target::List, -10.0);
+        }
+        let l = a.layout();
+        let capacity = scroll_window::capacity(l.list_row, a.list_body(&l).h);
+        assert_eq!(a.list_scroll, 80 - capacity);
+        assert!(rect_of(&a, Target::Row(id_of(&a, "s79"))).is_some());
+    }
+
+    #[test]
+    fn a_list_that_fits_does_not_scroll_at_all() {
+        let mut a = app_with(&["one", "two"]);
+        for _ in 0..10 {
+            a.scroll(Target::List, -10.0);
+        }
+        assert_eq!(a.list_scroll, 0);
+    }
+
+    #[test]
+    fn the_wheel_banks_the_fractions_a_trackpad_sends() {
+        // A tenth of a notch rounds to no rows, but ten of them are a notch,
+        // and a wheel that dropped each one would never move under a finger.
+        let names: Vec<String> = (0..80).map(|i| format!("s{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut a = app_with(&refs);
+        for _ in 0..10 {
+            a.scroll(Target::List, -0.1);
+        }
+        assert!(a.list_scroll > 0, "ten tenths of a notch moved nothing");
+    }
+
+    #[test]
+    fn the_wheel_over_nothing_scrolls_nothing() {
+        let mut a = app();
+        assert_eq!(a.scroll(Target::New, -3.0), EventResult::Ignored);
+    }
+
+    #[test]
+    fn picking_a_snippet_starts_it_at_its_first_line() {
+        let mut a = app_with(&["a", "b"]);
+        let body = numbered_lines(400);
+        a.snippets[0].content = body.clone();
+        a.snippets[1].content = body;
+        a.select(id_of(&a, "a"));
+        a.scroll(Target::Code, -20.0);
+        assert!(a.code_scroll > 0);
+        a.select(id_of(&a, "b"));
+        assert_eq!(a.code_scroll, 0);
+    }
+
+    // ── What is drawn ───────────────────────────────────────────────────
+
+    /// Every string the app draws, with the box it was told to stop at.
+    ///
+    /// `texts` answers "what does it say"; this answers "where, in what
+    /// colour, and how wide", which is what the elision and the colouring
+    /// tests need and what a bare string cannot tell them.
+    fn drawn(a: &App, size: (f32, f32)) -> Vec<(String, f32, f32, f32, Color)> {
+        a.frame(size.0, size.1)
+            .into_tree()
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    max_width,
+                    color,
+                    ..
+                } => Some((text, x, y, max_width.unwrap_or(f32::INFINITY), color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_string_is_drawn_with_a_width_to_stop_at() {
+        // A `max_width` of `None` is a title that runs out of its panel and
+        // over the one beside it. Every label in this program goes through
+        // `push_text`, which is the one place the limit is set, so this
+        // asserts that no drawing site has since grown its own way round it.
+        let mut a = app();
+        a.show_stats = true;
+        for (text, _, _, limit, _) in drawn(&a, W) {
+            assert!(
+                limit.is_finite() && limit > 0.0,
+                "{text:?} is drawn with no width to stop at"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_is_drawn_off_the_right_edge() {
+        // The limit is where the renderer stops, so `x + limit` is the
+        // rightmost pixel a string can reach. Rounding in the layout can put
+        // it a hair over; a whole character over is a label in the next
+        // column.
+        let mut a = app();
+        a.show_stats = true;
+        for (text, x, _, limit, _) in drawn(&a, W) {
+            assert!(
+                x + limit <= W.0 + 1.0,
+                "{text:?} reaches {} in a {} window",
+                x + limit,
+                W.0
+            );
+        }
+    }
+
+    #[test]
+    fn the_status_line_says_how_long_the_selected_snippet_is() {
+        let mut a = app_with(&["one"]);
+        let id = id_of(&a, "one");
+        a.snippets[0].content = "a\nb\nc".to_string();
+        a.select(id);
+        assert!(shows(&a, "3 lines"), "{:?}", texts(&a, W));
+    }
+
+    #[test]
+    fn with_nothing_selected_the_status_line_counts_nothing() {
+        let a = app_with(&["one"]);
+        assert!(a.selected_snippet_id.is_none());
+        assert!(!texts(&a, W).iter().any(|t| t.ends_with(" lines")));
+    }
+
+    #[test]
+    fn an_export_that_worked_says_so_in_green() {
+        let dir = std::env::temp_dir().join("snippets-export-ok");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut a = app_with(&["one"]);
+        a.export_path = dir.join("out.json");
+        click(&mut a, Target::Export);
+        let note = drawn(&a, W)
+            .into_iter()
+            .find(|(t, ..)| t.starts_with("Exported "))
+            .unwrap_or_else(|| panic!("no export note in {:?}", texts(&a, W)));
+        assert_eq!(note.4, GREEN);
+        assert!(a.export_path.exists());
+        let _ = std::fs::remove_file(&a.export_path);
+    }
+
+    #[test]
+    fn an_export_that_failed_says_so_in_red() {
+        // The note used to be a bare `String` set on both paths, so a write
+        // that failed reported the same cheerful "Exported 6 snippets" as one
+        // that worked — the `Result` was dropped with a `let _ =`.
+        let mut a = app_with(&["one"]);
+        a.export_path = std::env::temp_dir()
+            .join("snippets-no-such-directory")
+            .join("out.json");
+        click(&mut a, Target::Export);
+        let note = drawn(&a, W)
+            .into_iter()
+            .find(|(t, ..)| t.starts_with("Could not write "))
+            .unwrap_or_else(|| panic!("no failure note in {:?}", texts(&a, W)));
+        assert_eq!(note.4, RED);
+        assert!(!a.export_path.exists());
+    }
+
+    #[test]
+    fn the_export_note_takes_the_line_the_tags_were_on() {
+        // Both want the status line. The note is news and the tags are not,
+        // so while there is a note the tags stand down — and a test that only
+        // asked "is the note drawn" would pass with the two overprinted.
+        //
+        // Asked of the status line's own rectangle, not of the whole window:
+        // the list row draws the same tag, so `shows(&a, "#alpha")` answers
+        // "somewhere" and would be true either way.
+        let mut a = app_with(&["one"]);
+        let id = id_of(&a, "one");
+        a.snippets[0].tags = vec!["alpha".to_string()];
+        a.select(id);
+        let status = a.editor_parts(&a.layout()).status;
+        let tags_on_the_status_line = |a: &App| {
+            drawn(a, W)
+                .into_iter()
+                .filter(|&(ref t, x, y, ..)| t.starts_with('#') && status.contains(x, y))
+                .count()
+        };
+        assert_eq!(tags_on_the_status_line(&a), 1);
+        a.export_path = std::env::temp_dir()
+            .join("snippets-no-such-directory")
+            .join("out.json");
+        click(&mut a, Target::Export);
+        assert_eq!(tags_on_the_status_line(&a), 0, "{:?}", texts(&a, W));
+    }
+
+    #[test]
+    fn a_list_row_shows_no_more_tags_than_fit_on_it() {
+        let mut a = app_with(&["one"]);
+        a.snippets[0].tags = (0..12).map(|i| format!("t{i}")).collect();
+        let row = texts(&a, W)
+            .into_iter()
+            .find(|t| t.starts_with("#t0"))
+            .unwrap_or_else(|| panic!("the row drew no tags"));
+        assert_eq!(row.split_whitespace().count(), TAGS_ON_A_ROW);
+    }
+
+    #[test]
+    fn the_overlay_lists_every_statistic() {
+        let mut a = app();
+        a.show_stats = true;
+        let seen = texts(&a, W);
+        let stats = a.stats();
+        for (name, value) in a.stat_rows(&stats) {
+            assert!(seen.contains(&name.to_string()), "{name} is not on it");
+            assert!(seen.contains(&value), "{name}'s value {value} is not on it");
+        }
+    }
+
+    #[test]
+    fn the_overlay_lists_no_more_languages_than_it_has_room_for() {
+        let mut a = app();
+        a.show_stats = true;
+        let counted = texts(&a, W)
+            .iter()
+            .filter(|t| {
+                Language::all()
+                    .iter()
+                    .any(|l| t.starts_with(&format!("{}: ", l.name())))
+            })
+            .count();
+        assert!(
+            counted <= LANGUAGES_ON_OVERLAY,
+            "{counted} languages on an overlay sized for {LANGUAGES_ON_OVERLAY}"
+        );
+        assert!(counted > 0, "the overlay named no languages at all");
+    }
+
+    #[test]
+    fn the_overlay_fits_in_the_window_it_covers() {
+        // Sized from what it holds, then held to the window — it used to be
+        // 400x300 whatever it was in, so in a 320-wide window it hung off
+        // both edges.
+        let mut a = app();
+        a.show_stats = true;
+        for size in [(320.0, 240.0), W, (2000.0, 1400.0)] {
+            a.resize(size.0, size.1);
+            for (text, x, y, limit, _) in drawn(&a, size) {
+                assert!(
+                    x >= -1.0 && y >= -1.0 && x + limit <= size.0 + 1.0,
+                    "{text:?} at ({x}, {y}) +{limit} in a {size:?} window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_list_says_so_rather_than_showing_nothing() {
+        let a = app_with(&[]);
+        assert!(shows(&a, EMPTY_LIST));
+    }
+
+    #[test]
+    fn an_empty_editor_says_what_to_do_next() {
+        let a = app_with(&["one"]);
+        assert!(a.selected_snippet_id.is_none());
+        assert!(shows(&a, EMPTY_HEADLINE));
+        assert!(shows(&a, EMPTY_SUBLINE));
+    }
+
+    #[test]
+    fn the_empty_editor_gives_way_to_a_snippet() {
+        let mut a = app_with(&["one"]);
+        click_matching(&mut a, |t| matches!(t, Target::Row(_)), "a row");
+        assert!(!shows(&a, EMPTY_HEADLINE));
+        assert!(shows(&a, "one"));
+    }
+
+    #[test]
+    fn the_template_badge_is_only_on_a_template() {
+        let mut a = app_with(&["plain", "shaped"]);
+        let plain = id_of(&a, "plain");
+        let shaped = id_of(&a, "shaped");
+        a.snippets[1].is_template = true;
+        a.select(plain);
+        assert!(!shows(&a, TEMPLATE_LABEL));
+        a.select(shaped);
+        assert!(shows(&a, TEMPLATE_LABEL));
+    }
+
+    #[test]
+    fn the_editor_header_names_the_language_and_the_extension_it_is_guessed_from() {
+        let mut a = app_with(&["one"]);
+        let id = id_of(&a, "one");
+        a.snippets[0].language = Language::Rust;
+        a.select(id);
+        assert!(shows(&a, "Rust .rs"), "{:?}", texts(&a, W));
+    }
+
+    #[test]
+    fn the_gutter_numbers_the_lines_from_one() {
+        let mut a = app_with(&["one"]);
+        let id = id_of(&a, "one");
+        a.snippets[0].content = "a\nb\nc".to_string();
+        a.select(id);
+        let seen = texts(&a, W);
+        for n in 1..=3 {
+            assert!(seen.contains(&n.to_string()), "line {n} is unnumbered");
+        }
+        assert!(!seen.contains(&"4".to_string()), "a fourth line was drawn");
+    }
+
+    // ── The window ──────────────────────────────────────────────────────
+
+    #[test]
+    fn a_resize_is_what_the_next_click_is_read_against() {
+        // The model holds a size for exactly one reason: a click arrives as a
+        // point with no window attached. If the resize does not reach it, every
+        // click after the first drag is read against the old geometry.
+        let mut a = app();
+        handle_event(
+            &mut a,
+            &Event::Resize {
+                width: 1600,
+                height: 900,
+            },
+        );
+        assert_eq!(a.size, (1600.0, 900.0));
+        let l = a.layout();
+        assert_eq!(l.window, Rect::new(0.0, 0.0, 1600.0, 900.0));
+    }
+
+    #[test]
+    fn a_click_lands_where_the_window_it_was_resized_to_put_the_control() {
+        // Not just "the number was stored": the hit box has to move with it.
+        // A test that only checked `a.size` would pass with `frame` still
+        // drawing at the old size.
+        let mut a = app();
+        handle_event(
+            &mut a,
+            &Event::Resize {
+                width: 1600,
+                height: 900,
+            },
+        );
+        let wide = a.frame(1600.0, 900.0).rect_of(|t| *t == Target::Stats);
+        let narrow = a.frame(W.0, W.1).rect_of(|t| *t == Target::Stats);
+        let wide = wide.unwrap();
+        let narrow = narrow.unwrap();
+        assert!(wide.x > narrow.x, "the toolbar did not follow the window");
+        let (cx, cy) = wide.centre();
+        assert_eq!(
+            a.handle_mouse(&MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+            EventResult::Consumed
+        );
+        assert!(a.show_stats);
+    }
+
+    #[test]
+    fn the_window_forwards_the_events_it_has_a_use_for() {
+        let mut a = app_with(&["one"]);
+        assert_eq!(
+            handle_event(&mut a, &Event::Key(press(Key::Down))),
+            EventResult::Consumed
+        );
+        assert_eq!(selected_title(&a).as_deref(), Some("one"));
+    }
+
+    #[test]
+    fn the_window_ignores_the_events_it_has_no_use_for() {
+        let mut a = app();
+        assert_eq!(
+            handle_event(&mut a, &Event::Tick { elapsed_ms: 16 }),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            handle_event(&mut a, &Event::CloseRequested),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn the_close_button_ends_the_program() {
+        // `Ignored` from `handle_event` and `Exit` from the window are not in
+        // conflict: the model has nothing to do with a close, and the window
+        // has everything to do with it.
+        let mut a = app();
+        assert_eq!(
+            WindowApp::on_event(&mut a, &Event::CloseRequested),
+            Response::Exit
+        );
+    }
+
+    #[test]
+    fn a_keystroke_that_changes_nothing_does_not_ask_for_a_redraw() {
+        let mut a = app_with(&[]);
+        assert_eq!(
+            WindowApp::on_event(&mut a, &Event::Key(press(Key::Down))),
+            Response::Idle
+        );
+        assert_eq!(
+            WindowApp::on_event(&mut a, &Event::Key(press(Key::S))),
+            Response::Redraw
+        );
+    }
+
+    #[test]
+    fn rendering_lays_the_frame_out_at_the_size_it_is_given() {
+        // `render` resizes before it draws, which is what keeps a window that
+        // was never sent a `Resize` — the first frame — from being drawn at
+        // the default and clicked at the real size.
+        let mut a = app();
+        let tree = WindowApp::render(&mut a, 1600.0, 900.0);
+        assert_eq!(a.size, (1600.0, 900.0));
+        assert!(!tree.commands.is_empty());
+    }
+
+    #[test]
+    fn the_window_is_named_and_identified() {
+        let a = app();
+        assert!(!WindowApp::title(&a).is_empty());
+        assert!(!WindowApp::app_id(&a).is_empty());
+        let (w, h) = WindowApp::initial_size(&a);
+        assert_eq!(f32_from_u32(w), WINDOW_WIDTH);
+        assert_eq!(f32_from_u32(h), WINDOW_HEIGHT);
+    }
+
+    #[test]
+    fn nothing_here_animates_so_nothing_here_ticks() {
+        let a = app();
+        assert!(WindowApp::tick_interval(&a).is_none());
+    }
+
+    // ── Every control, once ─────────────────────────────────────────────
+
+    #[test]
+    fn every_kind_of_control_is_on_the_first_screen() {
+        // The list is written out rather than derived, so a control that
+        // stops being drawn fails here instead of quietly leaving the
+        // program. `Target` variants that only exist in a state the opening
+        // screen is not in are named in the second list, with the state.
+        let a = app();
+        let seen: Vec<String> = control_names(&a);
+        for want in [
+            "New",
+            "Export",
+            "Stats",
+            "Sort",
+            "Scope",
+            "View",
+            "Search",
+            "Row",
+            "Star",
+            "Folder",
+            "Twisty",
+            "NewFolder",
+            "List",
         ] {
-            let out = text::elide(title, room, "...", NORMAL_TEXT, FontWeightHint::Bold);
-            let w = text::measure(&out, NORMAL_TEXT, FontWeightHint::Bold);
-            assert!(w <= room + 0.01, "{out:?} is {w} px in {room} px of room");
-            assert!(out.ends_with("..."), "a cut title should say so");
-        }
-    }
-
-    #[test]
-    fn a_short_title_is_left_alone() {
-        let title = "Quick sort";
-        let out = text::elide(
-            title,
-            LIST_WIDTH - 20.0,
-            "...",
-            NORMAL_TEXT,
-            FontWeightHint::Bold,
-        );
-        assert_eq!(out, title);
-    }
-
-    #[test]
-    fn test_format_size_bytes() {
-        assert_eq!(format_size(500), "500 B");
-    }
-
-    #[test]
-    fn test_format_size_kb() {
-        let result = format_size(2048);
-        assert!(result.contains("KiB"));
-    }
-
-    #[test]
-    fn test_format_size_mb() {
-        let result = format_size(2 * 1024 * 1024);
-        assert!(result.contains("MiB"));
-    }
-
-    #[test]
-    fn test_sidebar_view_label() {
-        assert_eq!(SidebarView::Folders.label(), "Folders");
-        assert_eq!(SidebarView::Tags.label(), "Tags");
-    }
-
-    #[test]
-    fn test_sort_order_label() {
-        assert_eq!(SortOrder::NameAsc.label(), "Name A-Z");
-        assert_eq!(SortOrder::DateDesc.label(), "Newest");
-    }
-
-    #[test]
-    fn test_search_scope_label() {
-        assert_eq!(SearchScope::All.label(), "All");
-        assert_eq!(SearchScope::Content.label(), "Content");
-    }
-
-    #[test]
-    fn test_token_kind_color() {
-        // Just verify colors are assigned
-        let _ = TokenKind::Keyword.color();
-        let _ = TokenKind::String.color();
-        let _ = TokenKind::Comment.color();
-    }
-
-    #[test]
-    fn test_compute_stats() {
-        let snippets = vec![
-            make_test_snippet(1, "A", "content", Language::Rust),
-            make_test_snippet(2, "B", "content", Language::Python),
-        ];
-        let folders = vec![];
-        let stats = compute_stats(&snippets, &folders);
-        assert_eq!(stats.total_snippets, 2);
-        assert_eq!(stats.by_language.len(), 2);
-    }
-
-    // --- Helper ---
-
-    fn make_test_snippet(id: u64, title: &str, content: &str, lang: Language) -> Snippet {
-        Snippet {
-            id,
-            title: title.into(),
-            content: content.into(),
-            language: lang,
-            folder_id: None,
-            tags: vec!["test".into()],
-            favorite: false,
-            created_at: id,
-            use_count: 0,
-            description: String::new(),
-            is_template: false,
-            template_vars: Vec::new(),
-        }
-    }
-
-    // --- Text measurement ---
-
-    /// The width of one mono cell. Production code no longer has this idea —
-    /// the pen measures — but the tests below still compare against it to say
-    /// what "a grid" would have meant, and why assuming one was survivable for
-    /// so long.
-    fn cell() -> f32 {
-        text::cell_advance(NORMAL_TEXT, FontWeightHint::Regular)
-    }
-
-    /// A tab is the concrete bug the nominal cell count had, and it is not
-    /// exotic: it is how most of the source anyone would paste into a snippet
-    /// is indented.
-    ///
-    /// A tab is one `char`, so the old pen advanced one cell for it — while the
-    /// face draws it four cells wide. Every token on a tab-indented line was
-    /// therefore drawn three cells left of where the indentation actually
-    /// ended, i.e. *on top of* the whitespace it was supposed to follow, and
-    /// the further in the code was nested the worse it got. Measured on the
-    /// built-in mono face at 14 px: drawn 33.6 px against a nominal 8.4 px.
-    #[test]
-    fn a_tab_advances_by_the_width_it_is_drawn_at_not_by_one_cell() {
-        let drawn = text::measure_in("\t", NORMAL_TEXT, FontWeightHint::Regular, FontFamily::Mono);
-        assert!(
-            drawn > cell() * 1.5,
-            "a tab drawn {drawn} against a {} cell — if a tab really is one \
-             cell wide on this face, this test has stopped testing anything",
-            cell()
-        );
-    }
-
-    /// The claim that replaced the cell count: wherever the pen stops is
-    /// exactly where the token before it finished being drawn — by
-    /// construction, since it is the same measurement the renderer makes.
-    ///
-    /// Stated over the kinds of text a cell count gets wrong: a tab, an
-    /// ideograph the face renders wide or substitutes, a combining mark that
-    /// advances nothing. Plain Latin tokens are included to show where the two
-    /// answers *do* agree, which is why the old code survived review.
-    #[test]
-    fn the_pen_advances_by_what_is_drawn() {
-        for token in ["let", "  ", "héllo", "日本語", "e\u{0301}", "\t", "x"] {
-            for weight in [FontWeightHint::Regular, FontWeightHint::Bold] {
-                let drawn = text::measure_in(token, NORMAL_TEXT, weight, FontFamily::Mono);
-                assert!(
-                    drawn >= 0.0,
-                    "{token:?} measures negative, which would step the pen backwards"
-                );
-                // Concatenation is what the pen actually does: it draws one
-                // token, advances, draws the next. If measuring a run were not
-                // additive the panel would drift across a line no matter which
-                // width the pen used, so this is the property the fix rests on.
-                let joined = format!("{token}{token}");
-                let both = text::measure_in(&joined, NORMAL_TEXT, weight, FontFamily::Mono);
-                assert!(
-                    (both - drawn * 2.0).abs() < 0.01,
-                    "{token:?} twice measures {both}, but two pen steps land at {}",
-                    drawn * 2.0
-                );
-            }
-        }
-        // And where a cell count and the truth diverge, the pen follows the
-        // truth: one `char`, four cells.
-        assert!(
-            text::measure_in("\t", NORMAL_TEXT, FontWeightHint::Regular, FontFamily::Mono)
-                > cell() * 1.5
-        );
-    }
-
-    /// The cell comes from the face, so it stays true if the face changes.
-    #[test]
-    fn the_code_cell_is_derived_from_the_face() {
-        let cell = cell();
-        assert!(cell > 0.0, "an empty cell would collapse the code panel");
-        assert!(
-            cell <= NORMAL_TEXT,
-            "a cell wider than the em box would space the code out absurdly"
-        );
-    }
-
-    /// Why the old cell count looked correct for so long: for Latin source in
-    /// the mono face, a character really does fit a cell. This is the premise
-    /// that failed silently for everything else.
-    #[test]
-    fn a_code_character_fits_a_cell() {
-        let cell = cell();
-        for ch in ['0', 'W', 'i', '#', 'é', 'M', '@', '_', '{', ' '] {
-            let w = text::measure_in(
-                &ch.to_string(),
-                NORMAL_TEXT,
-                FontWeightHint::Regular,
-                FontFamily::Mono,
-            );
-            assert!(w <= cell + 0.01, "{ch:?} measures {w} in a {cell} cell");
-        }
-    }
-
-    /// Keywords are drawn bold and measured bold — the pen asks for the same
-    /// weight it draws in, so this no longer has to hold for the layout to be
-    /// correct. It is kept because a face where bold advanced differently would
-    /// make the panel's columns stop lining up between a keyword line and a
-    /// plain one, which is a legibility claim rather than a positioning one.
-    #[test]
-    fn a_bold_keyword_character_fits_the_same_cell() {
-        let cell = cell();
-        for ch in ['0', 'W', 'M', 'f', 'n'] {
-            let w = text::measure_in(
-                &ch.to_string(),
-                NORMAL_TEXT,
-                FontWeightHint::Bold,
-                FontFamily::Mono,
-            );
             assert!(
-                w <= cell + 0.01,
-                "bold {ch:?} measures {w} in a {cell} cell"
+                seen.iter().any(|s| s == want),
+                "{want} is not on the opening screen; it drew {seen:?}"
             );
         }
     }
 
-    /// The code area is placed on a mono cell, so it must be drawn in the mono
-    /// face. Everything around it — toolbar, sidebar, list, tags — must not be.
     #[test]
-    fn the_code_area_is_drawn_in_the_family_it_was_measured_in() {
-        let mut app = App::new();
-        let id = app.create_snippet(
-            "Wide",
-            "fn main() {\n    let WWWW = iiii;\n}\n",
-            Language::Rust,
-        );
-        app.selected_snippet_id = Some(id);
-        let cmds = app.render();
+    fn the_controls_that_need_a_state_appear_in_that_state() {
+        let mut a = app();
+        assert!(!control_names(&a).iter().any(|s| s == "CloseStats"));
+        a.show_stats = true;
+        assert!(control_names(&a).iter().any(|s| s == "CloseStats"));
 
-        let mut depth = 0_i32;
-        let mut deepest = 0_i32;
-        let mut inside = 0_usize;
-        for cmd in &cmds {
-            match cmd {
-                RenderCommand::PushFont { family } => {
-                    assert_eq!(family, &FontFamily::Mono, "only the code area pushes");
-                    depth += 1;
-                    deepest = deepest.max(depth);
-                }
-                RenderCommand::PopFont => {
-                    depth -= 1;
-                    assert!(depth >= 0, "a PopFont without a matching PushFont");
-                }
-                RenderCommand::Text { .. } if depth > 0 => inside += 1,
-                _ => {}
-            }
-        }
-        assert_eq!(depth, 0, "the font scopes do not balance");
-        assert_eq!(deepest, 1, "the code area's scope was never opened");
-        assert!(inside > 0, "no code was drawn inside the mono scope");
+        // The sidebar shows one list at a time, so the tag and language rows
+        // exist only in the view that is theirs.
+        let mut a = app();
+        assert!(!control_names(&a).iter().any(|s| s == "Tag"));
+        a.sidebar_view = SidebarView::Tags;
+        assert!(control_names(&a).iter().any(|s| s == "Tag"));
+        a.sidebar_view = SidebarView::Languages;
+        let seen = control_names(&a);
+        assert!(seen.iter().any(|s| s == "Lang"));
+        assert!(!seen.iter().any(|s| s == "Tag"));
+
+        let mut a = app_with(&["one"]);
+        assert!(!control_names(&a).iter().any(|s| s == "Use"));
+        click_matching(&mut a, |t| matches!(t, Target::Row(_)), "a row");
+        let seen = control_names(&a);
+        assert!(seen.iter().any(|s| s == "Use"));
+        assert!(seen.iter().any(|s| s == "Delete"));
+        // The folder cross belongs to the *selected* folder, and picking a
+        // snippet does not select one.
+        assert!(!seen.iter().any(|s| s == "DeleteFolder"));
     }
 
-    /// Toolbar labels are drawn bold, so they are measured bold — measuring a
-    /// bold label at regular weight is exactly how a button overflows.
     #[test]
-    fn toolbar_labels_fit_their_buttons() {
-        for label in ["+ New", "Import", "Export", "Stats"] {
-            let bw = text::measure(label, SMALL_TEXT, FontWeightHint::Bold) + 16.0;
-            let drawn = text::measure(label, SMALL_TEXT, FontWeightHint::Bold);
-            assert!(drawn + 16.0 <= bw + 0.01, "{label:?} overflows its button");
-            assert!(bw > 16.0, "{label:?} produced an empty button");
-        }
-    }
-
-    /// Every language badge has to fit the pill drawn behind it.
-    #[test]
-    fn language_badges_fit_their_pills() {
-        for lang in Language::all() {
-            let name = lang.name();
-            let badge_w = text::measure(name, BADGE_TEXT, FontWeightHint::Bold) + 8.0;
-            assert!(
-                text::measure(name, BADGE_TEXT, FontWeightHint::Bold) + 8.0 <= badge_w + 0.01,
-                "{name:?} does not fit its badge"
+    fn every_control_drawn_can_actually_be_clicked() {
+        // Overlapping boxes are not wrong in themselves — the last one wins,
+        // which is how the star sits inside its row and how the overlay
+        // dismisses — but a box that resolves to *nothing but* another
+        // target at its own centre is a control the user cannot reach. That
+        // is the question worth asking, not "do any two rectangles touch".
+        //
+        // `List` and `Code` are the exceptions and are meant to be: they are
+        // whole panels recorded so the wheel has something to aim at, and the
+        // rows and lines are drawn over them on purpose.
+        let a = app();
+        let frame = a.frame(W.0, W.1);
+        for &(target, rect) in frame
+            .hits()
+            .iter()
+            .filter(|(t, _)| !matches!(t, Target::List | Target::Code))
+        {
+            let (cx, cy) = rect.centre();
+            let reached = frame.hit_test(cx, cy);
+            assert_eq!(
+                reached,
+                Some(target),
+                "{target:?} at {rect:?} is covered by {reached:?}"
             );
         }
     }
 
-    /// A tag pill is drawn as `#tag`, so it has to be measured that way. The
-    /// old estimate sized it from the bare tag and left the last character
-    /// sitting on the pill's rounded edge.
     #[test]
-    fn a_tag_pill_is_measured_with_its_hash() {
-        let bare = text::measure("rust", BADGE_TEXT, FontWeightHint::Regular);
-        let hashed = text::measure("#rust", BADGE_TEXT, FontWeightHint::Regular);
-        assert!(hashed > bare, "the hash is drawn, so it has to be measured");
+    fn there_is_somewhere_to_click_that_is_not_a_control() {
+        // `click_background` needs one, and so does a user who wants to
+        // deselect. A layout with no gap at all would make every test that
+        // clicks "nothing" silently click something.
+        let a = app();
+        assert!(bare_point(&a, W).is_some());
     }
 }

@@ -156,6 +156,29 @@ pub trait Probe {
     /// that scrolls a selection into view has to know how tall the pane is.
     /// Programs whose handler takes no size ignore it.
     fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome;
+
+    /// Deliver `dy` notches of wheel at window coordinates `(x, y)`, or `None`
+    /// from a program that has no wheel.
+    ///
+    /// This exists because a wheel test written the obvious way tests the wrong
+    /// half of the wheel. A program routes a scroll in two steps — ask the hit
+    /// map which panel the pointer is over, then scroll *that* panel — and a
+    /// test that calls the second step directly (`app.scroll(Target::List, -3.0)`)
+    /// has supplied the answer to the first. snippets' `f.hit(Target::List, body)`
+    /// could be deleted outright with all four of its wheel tests still passing:
+    /// not one of them had ever asked the hit map anything. Going in at a
+    /// *point* is what makes the routing observable.
+    ///
+    /// The default returns `None`, so the fifty-odd programs with no wheel need
+    /// no impl. It deliberately does not return a plausible `Outcome`: a default
+    /// that quietly did nothing would let a program which forgot to override it
+    /// pass a wheel test that never scrolled anything — the same silence this
+    /// method exists to break. [`scroll_at_point`] turns the `None` into a
+    /// named panic.
+    fn scroll_at(&mut self, x: f32, y: f32, dy: f32, size: (f32, f32)) -> Option<Self::Outcome> {
+        let _ = (x, y, dy, size);
+        None
+    }
 }
 
 /// The box the renderer drew for `target`, or `None` if it drew nothing for it
@@ -301,6 +324,44 @@ pub fn click_matching_sized<P: Probe>(
     app.click_at(cx, cy, button, size)
 }
 
+/// Turn `dy` notches of wheel over the middle of `target`'s own box.
+///
+/// This is the wheel's [`click`]: it finds where the program drew the panel and
+/// goes in *there*, so the hit box and the routing are both under test. A test
+/// that instead calls the program's scroll handler with a target in hand has
+/// tested only what the handler does once the routing has already happened —
+/// which is the half that was never in doubt.
+///
+/// # Panics
+///
+/// If nothing was drawn for `target` in this state, as [`click`]; or if the
+/// program did not override [`Probe::scroll_at`], since a test asking for a
+/// wheel of a program that has no wheel is asking for something that cannot
+/// happen, and the default `None` must not be mistaken for "scrolled nothing".
+pub fn scroll_at_point<P: Probe>(app: &mut P, target: P::Target, dy: f32) -> P::Outcome {
+    scroll_at_point_sized(app, target, dy, P::SIZE)
+}
+
+/// [`scroll_at_point`] at a size other than [`Probe::SIZE`].
+///
+/// # Panics
+///
+/// As [`scroll_at_point`].
+pub fn scroll_at_point_sized<P: Probe>(
+    app: &mut P,
+    target: P::Target,
+    dy: f32,
+    size: (f32, f32),
+) -> P::Outcome {
+    let what = format!("{target:?}");
+    let rect = rect_matching_sized(app, |t| *t == target, size)
+        .unwrap_or_else(|| panic!("{}", missing(app, &what, size)));
+    let (cx, cy) = rect.centre();
+    app.scroll_at(cx, cy, dy, size).unwrap_or_else(|| {
+        panic!("{what} was scrolled at, but this program does not implement Probe::scroll_at")
+    })
+}
+
 /// Click a point that nothing was drawn at, which is how a test says "the
 /// user clicked the background".
 ///
@@ -377,6 +438,22 @@ pub fn press_with(key: Key, modifiers: Modifiers) -> KeyEvent {
         key,
         pressed: true,
         modifiers,
+        text: String::new(),
+    }
+}
+
+/// The same key coming back up — [`press`] with `pressed: false`.
+///
+/// Every program that reads the keyboard is handed both halves of a keystroke
+/// and has to act on one of them. A suite built only from [`press`] cannot tell
+/// a program that ignores the release from one that runs the shortcut twice per
+/// keystroke, because it never delivers a release at all.
+#[must_use]
+pub fn release(key: Key) -> KeyEvent {
+    KeyEvent {
+        key,
+        pressed: false,
+        modifiers: Modifiers::NONE,
         text: String::new(),
     }
 }

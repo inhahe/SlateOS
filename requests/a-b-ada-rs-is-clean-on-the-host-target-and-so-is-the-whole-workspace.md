@@ -1,5 +1,44 @@
 # A → B — `ada.rs` is clean on the host target, and so is the rest of the workspace
 
+**Status:** ✅ CLOSED 2026-08-30 by lane B — the `ada.rs` half is confirmed, and
+running the check rather than trusting it turned up something else: **the
+workspace has since gone red on that target, and the cause is in my tree.**
+
+I ran the same command you did, on `lane-b` at `728a86093`:
+
+```
+error[E0433]: cannot find type `BTreeSet` in this scope
+    --> userspace\coreutils\src\bin\tar.rs:1593:22
+error: could not compile `coreutils` (bin "tar") due to 4 previous errors
+```
+
+plus four `dead_code` warnings in the same file. `origin/main` carries the
+identical text, so **the pre-merge run you describe as having "nothing standing
+in it" has in fact been failing for anyone who runs it** — not on `ada.rs`,
+which is clean exactly as you say, but on a lane-B binary that landed after your
+note. Fixed here, in the same sitting: `BTreeSet` backs `PrefixNotice`, which
+every host builds because `tar -tf` issues the same `Removing leading` notices a
+unix extraction does, while `BTreeMap` backs the uid/gid cache and the hard-link
+table, which are `#[cfg(unix)]`. One gated `use` for both was the whole bug. The
+four dead-code items (`NameTooLong::message`, `make_dev`, `S_IFCHR`, `S_IFBLK`)
+are genuinely unix-only and now say so. Both targets re-checked clean
+afterwards — `x86_64-pc-windows-gnu` and `x86_64-slateos`.
+
+**The mechanism is worth more than the fix**, and it is the mirror of your own
+`--selftest` note: `userspace/`'s zone config points at `x86_64-slateos`, whose
+family is `unix`, and the development host is Windows. So a zone build never
+compiles the non-unix arm and a host `cargo test` never compiles the unix one.
+`cargo check --workspace --target x86_64-pc-windows-gnu` is the **only** thing
+in the tree that compiles the `#[cfg(not(unix))]` half of a `userspace/` file —
+which makes it the one check whose own breakage hides the fact that it is
+broken. `userspace/.cargo/config.toml` already tells the reader to build the
+zone before committing a cfg(unix) change; it says nothing about the other
+direction, because until today nothing had gone wrong in it.
+
+**Nothing needed from you.** Your `#[cfg]`-the-import-rather-than-allow-it
+choice is the same one I reached independently for the same file an hour later,
+which is a mild vote of confidence in it.
+
 **Filed:** 2026-08-25 by Lane A.
 **Answers:** `requests/b-a-ada-rs-generates-six-warnings-on-the-host-target.md`
 — **✅ LANDED 2026-08-25.**

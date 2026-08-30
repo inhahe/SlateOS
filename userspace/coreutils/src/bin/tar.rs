@@ -82,8 +82,17 @@ use coreutils::quote::{escape, escape_os, os_bytes, quote};
 // member's bytes; on unix every component is handed to `openat` as it stands.
 use coreutils::quote::os_from_bytes;
 use coreutils::stdfd;
+// Split, and not merged back: `BTreeSet` backs [`PrefixNotice`], which every
+// host builds because `tar -tf` issues the same `Removing leading` notices a
+// unix extraction does. `BTreeMap` backs the uid/gid name cache and the
+// hard-link table, both of which only exist behind `#[cfg(unix)]`, so importing
+// it unconditionally would be an unused import on Windows. A single gated
+// `use` for both was a build failure on the host target, caught by
+// `cargo check --workspace --target x86_64-pc-windows-gnu`, which is the only
+// thing in the tree that compiles this file for a non-unix host.
 #[cfg(unix)]
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -1126,6 +1135,11 @@ enum NameTooLong {
     CannotSplit,
 }
 
+// The variants are classified on every host — `set_name` is shared — but only
+// the archive-creation path ever renders one, and that path reads `meta.mode()`
+// and so exists only on unix. Ungated, this is a `dead_code` warning on the
+// Windows host target.
+#[cfg(unix)]
 impl NameTooLong {
     /// GNU's wording, which names the limit in the first case and not in the
     /// second. Both end `; not dumped`, and both leave the archive otherwise
@@ -3647,12 +3661,20 @@ const _: () = assert!(core::mem::size_of::<CStat>() == 144);
 /// same number, and Linux's packing puts the low 8 bits of the minor and the
 /// low 12 of the major where a naive `(major << 8) | minor` would put something
 /// else entirely.
+///
+/// `#[cfg(unix)]` with its three callers: the only thing that rebuilds a
+/// `dev_t` is `Located::make_device`, and the non-unix twin of that refuses the
+/// member outright rather than inventing a device number for a system with no
+/// `mknod`.
+#[cfg(unix)]
 fn make_dev(major: u64, minor: u64) -> u64 {
     ((major & 0xfff) << 8) | ((major & !0xfff) << 32) | (minor & 0xff) | ((minor & !0xff) << 12)
 }
 
 /// The `S_IFMT` bits `mknod` wants for each of the two device flavours.
+#[cfg(unix)]
 const S_IFCHR: u32 = 0o020000;
+#[cfg(unix)]
 const S_IFBLK: u32 = 0o060000;
 
 /// The file-type field of `st_mode`, and the value in it that means "directory".
@@ -5094,6 +5116,18 @@ mod tests {
 
     /// Build an argv out of raw byte strings, so a test can pass an argument
     /// that no `&str` can hold.
+    ///
+    /// `#[cfg(unix)]`, along with every test that calls it, because on a
+    /// Windows host it cannot do what its name says: `os_from_bytes` there is
+    /// `String::from_utf8_lossy`, documented as lossy in `quoting`, so
+    /// `b"caf\xe9"` arrives as `caf\u{FFFD}` and the byte the test is about
+    /// never reaches the parser. Ungated, six of these fail outright and two
+    /// pass while testing the replacement character rather than the byte —
+    /// which is worse, because a green test that checked something else is a
+    /// claim of coverage that is not there. This went unnoticed until
+    /// 2026-08-30 only because the whole binary failed to compile for a
+    /// non-unix host; see the import split at the top of this file.
+    #[cfg(unix)]
     fn b(items: &[&[u8]]) -> Vec<OsString> {
         items.iter().map(|x| os_from_bytes(x)).collect()
     }
@@ -5264,6 +5298,7 @@ mod tests {
     // `B-tar-READ-EVERY-PATH-AS-UTF-8`.
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn parse_keeps_an_operand_that_is_not_utf8() {
         let a = run_args(&b(&[b"-c", b"caf\xe9", b"ok"])).unwrap();
         assert_eq!(a.mode, Mode::Create);
@@ -5274,6 +5309,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn parse_keeps_a_dash_f_value_that_is_not_utf8() {
         let a = run_args(&b(&[b"-cf", b"\xff\xfe.tar", b"x"])).unwrap();
         let f = a.archive_file.unwrap();
@@ -5281,6 +5317,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn parse_keeps_a_dash_c_value_that_is_not_utf8() {
         let a = run_args(&b(&[b"-x", b"-C", b"/tmp/d\x80r"])).unwrap();
         assert_eq!(a.mode, Mode::Extract);
@@ -5289,6 +5326,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn parse_refuses_a_cluster_byte_that_is_not_an_option_without_panicking() {
         // A cluster is walked byte by byte, so a `-` followed by something
         // that is not UTF-8 at all is refused like any other unknown flag
@@ -5675,6 +5713,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn an_old_option_cluster_may_hold_bytes_that_are_not_utf8() {
         // A cluster is argv, so it can hold any byte, and the byte has to reach
         // the parser as itself. Going through `char` would widen `0xE9` into
@@ -5835,6 +5874,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn parse_keeps_a_long_option_value_that_is_not_utf8() {
         // The `=VALUE` half of a long option is a path like any other, and must
         // survive bytes that are not text.
@@ -5844,6 +5884,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn parse_refuses_a_long_name_that_is_not_utf8_without_panicking() {
         // No option name is non-ASCII, so such a name matches nothing; it must
         // reach the unrecognised path rather than failing some third way.
@@ -5860,9 +5901,7 @@ mod tests {
         // `scripts/getopt-ambiguity-check.py` re-derives the whole thing from
         // `tar --=x` at push time; this is the cheap local guard.
         assert_eq!(LONG_OPTIONS.len(), 172);
-        // Fully qualified: the file's `BTreeSet` import is `#[cfg(unix)]`, and
-        // this test is not.
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen = BTreeSet::new();
         for (name, _) in LONG_OPTIONS {
             assert!(seen.insert(*name), "duplicate long option: --{name}");
         }
@@ -7124,6 +7163,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn selector_takes_an_operand_that_is_not_utf8() {
         let mut sel = Selector::new(&b(&[b"caf\xe9"]));
         assert!(sel.wants(b"caf\xe9"));

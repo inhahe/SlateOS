@@ -51607,3 +51607,429 @@ differential cases in favour of the 2724-line one that no harness measures.
 **How to reverse.** Nothing to revert in code. If a regenerating script is
 written later, the argument above is what it has to answer: say why a generated
 table beats reading `DIFF_PKG`, given that the generated one is also a copy.
+
+## 711. Under `-x`, each archive member goes where *its own* operand's `-C` said — and the destinations are held open as descriptors rather than re-entered by path
+
+**Date:** 2026-08-30
+**Decided by:** Claude (autonomous), lane B
+**Lane:** B
+
+**In short:** `tar -C somewhere ...` means "do the rest of this command from
+inside `somewhere`". You may write several, and they stack: `-C a -C b` means
+`a/b`. When you also name which members to unpack, the two lists interleave —
+`tar -xf a.tar -C d1 one.txt -C d2 two.txt` puts `one.txt` in `d1` and
+`two.txt` in `d1/d2`. Our tar used to fold all the `-C`s into a single
+destination and put everything there, which silently unpacked files into the
+wrong directory. The fix has to be able to go *back up* — the archive may hold
+`two.txt` before `one.txt`, so tar can be inside `d1/d2` when it meets a member
+that belongs in `d1`. This entry records how "back up" is done, and what happens
+when two operands both claim the same member.
+
+**Date measured against:** GNU tar 1.35, x86_64 Debian, `LC_ALL=C.UTF-8`.
+
+### The decision, part one: held descriptors, not a second chdir
+
+A process has exactly one working directory. Having walked `d1` → `d1/d2`, the
+obvious way back to `d1` is another `chdir` — either `chdir("..")` or
+`chdir(<the path we were given>)`. Both were rejected.
+
+*What is wrong with `chdir("..")`:* it is a path resolution, and the thing it
+resolves is a directory an untrusted archive is at that moment writing into. If
+`d1/d2` is renamed or replaced between the two members, `..` is whatever the new
+parent is. `tar` already refuses to walk through a symlink it did not create
+(`Dir::locate`); re-resolving the destination itself would put the hole back one
+level up.
+
+*What is wrong with re-`chdir`ing the original path:* the same, plus it makes
+the cost of a destination proportional to how often members alternate between
+them.
+
+*What was chosen:* `struct Roots` keeps one open `Dir` per `-C` level. The
+working directory only ever walks **forward**, one `-C` at a time, and every
+level it passes through is captured on the way. Going "back up" is then just
+indexing a `Vec`, and every destination keeps the property the single root
+already had: a directory renamed mid-extraction carries the extraction with it
+instead of spilling into whatever took the old name.
+
+*What it costs:* one open descriptor per `-C` on the command line, held for the
+length of the run. That is bounded by argv, not by the archive — an archive with
+a million members still costs one descriptor per `-C` — so it cannot be made
+large by a hostile archive, only by a hostile command line, which the user wrote.
+The alternative's cost is a re-resolution per member, which *is* archive-driven.
+
+### The decision, part two: entering is lazy, and a `-C` nobody follows is dead
+
+Measured, and copied: a `-C` is entered when a member belonging to it is met, not
+up front.
+
+| Command | GNU |
+|---|---|
+| `-C d1 a.txt -C d2 z.txt`, `d1/d2` absent | extracts `a.txt` into `d1`, *then* `d2: Cannot open`, exit 2 |
+| `-C d1 a.txt -C nosuchdir not-in-archive` | `not-in-archive: Not found in archive` — `nosuchdir` never mentioned, never entered |
+| `-C d1 a.txt -C nosuchdir` (nothing after) | exit **0**; the trailing `-C` is never reached |
+
+The last row is the one that surprises: under `-c` a trailing `-C` is executed
+*and* draws GNU's positional-options refusal (§ the trailing-`-C` block in
+`do_create`), while under `-x`/`-t` it is silently dead. `-C` is a *step in a
+sequence* when creating and a *destination for what follows* when extracting,
+and the two readings genuinely differ. Both are reproduced as measured rather
+than unified, because unifying them would mean changing observable behaviour in
+whichever direction was picked.
+
+One consequence is that a failure to enter is fatal *where it is met*: GNU prints
+`Error is not recoverable: exiting now` and exits on the spot, so nothing that
+would normally round off a run happens — not the delayed symlinks, not the
+deferred directory stamps, and not the `Not found in archive` notices for
+operands the archive had not reached yet. `do_extract` and `do_list_main` both
+return early on a handler-initiated stop for exactly this reason.
+
+Listing is lazy in the same way, which is visible in the *ordering*:
+`tar -tf a.tar -C d1 one -C nosuchdir two` prints `one` before it reports
+`nosuchdir`. A listing writes nothing to the filesystem, so it would have been
+easy to argue the chdir does not matter and skip it — that argument is what left
+`tar -tf a.tar -C nosuchdir` exiting 0 until 2026-08-30. The buffered stdout is
+flushed before the diagnostic so the two streams interleave as GNU's do.
+
+### The decision, part three: overlapping operands take the *first* one's level
+
+`-C d1 t -C d2 t/a.txt` names one member twice, at two levels. There is no
+correct answer to copy, because GNU's is incoherent: it walks its operand list
+with a cursor rather than testing every operand, and measured on 1.35 that line
+extracts everything into `d1` while simultaneously complaining
+`t/sub/b.bin: Cannot open: File exists` and `t/a.txt: Not found in archive` —
+it reports a member as absent from an archive it has just unpacked.
+
+*Alternatives:* (a) reproduce the cursor, (b) extract the member once per
+matching operand, (c) first match wins.
+
+(a) was rejected because it means giving up the operand model this tar uses
+everywhere else — every other name-matching path here tests all operands — to
+gain bug-compatibility with a message that is self-contradictory. (b) was
+rejected because it writes the same bytes twice and the second write has to
+decide what to do about the first, which is the overwrite question with no user
+input to answer it. (c) is what shipped: `Selector::wants` marks *every* matching
+operand (so `Not found in archive` stays right) but returns the **first**
+match's level, so the member is extracted once, into the destination the user
+wrote first.
+
+*What it costs:* one measured GNU line we deliberately do not reproduce, and it
+is not in the differential harness as an xfail because the case is a command
+line no one writes on purpose. If it ever needs to be, it belongs in
+`tar-diff.sh` § 9 with this section as its reason.
+
+**How to reverse.** `Roots` is ~60 lines in `userspace/coreutils/src/bin/tar.rs`
+and the level is threaded through `Selector::wants`, `pending_dirs`, and
+`DelayedLink::dir`. Reverting to one destination means dropping the level and
+calling `enter_chdirs(chdirs, &mut n, chdirs.len())` once — and re-breaking the
+eight `-C` cases in `scripts/tar-diff.sh` § 8 that this entry exists to explain.
+
+---
+
+## 638. `deflate_level` takes the level→effort table lane B asked for, verbatim, rather than zlib's
+
+**Date:** 2026-08-30
+**Lane:** A
+**Decided by:** Claude (autonomous, lane A) — fulfilling
+`requests/b-a-deflate-cannot-express-a-compression-level.md`.
+
+**In short:** compressors take an "effort level" from 1 (fast, bigger output)
+to 9 (slow, smaller output). Ours had no such knob, so lane B's `gzip -9` and
+`zip -1` had nowhere to send the number. Adding the knob means choosing how
+hard the encoder tries at each of the nine settings. Lane B proposed a table
+in their request; zlib, the reference implementation everyone else copies, uses
+a different one. We took lane B's.
+
+**The two tables** (the number is the hash-chain depth — how many earlier
+positions the encoder examines looking for a repeat):
+
+| Level | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| zlib | 4 | 8 | 32 | 16 | 32 | 128 | 256 | 1024 | 4096 |
+| ours (lane B's) | 4 | 8 | 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
+
+**For zlib's table:** it is the one every other DEFLATE encoder's output has
+been compared against for thirty years, so matching it makes our sizes
+directly comparable to `gzip`'s at the same flag. Anyone who knows what `-6`
+costs elsewhere would know what it costs here.
+
+**Against it, and why we did not:**
+
+- **It is not monotonic.** Level 3 searches 32 chains and level 4 searches 16
+   — a documented quirk of zlib's history, not a design. A user who raises
+  their level and gets *worse* compression has hit a bug as far as they are
+  concerned, and the explanation is "zlib did it too", which is not one.
+- **The comparability argument is weaker than it looks.** Chain depth is only
+  one of zlib's four per-level parameters (`good_length`, `max_lazy`,
+  `nice_length`, `max_chain`), and we implement one of the four. Copying that
+  one number would produce a *resemblance* to zlib's ratios, not a match —
+  which is worse than an honest difference, because it invites a comparison
+  that does not hold.
+- **Lane B's switch becomes a pure deletion.** They already carry a
+  `level → effort` mapping of their own to feed a compressor that ignored it;
+  adopting their table means their change is "delete the dead mapping and pass
+  the level through", with no archive anywhere changing size for a reason
+  unrelated to the level. Had we imposed zlib's, their level 3 and 4 outputs
+  would have swapped for no reason the user could see.
+
+**What this does not decide:** the format. Every level emits a valid DEFLATE
+stream that any inflater reads; the level trades encoder time for ratio and
+nothing else. So this table can be changed later without invalidating a single
+archive already written — which is the reason it was safe to decide without
+the operator.
+
+**A consequence worth stating plainly:** `deflate(data)` is level **3**, not
+the level 6 that `gzip` defaults to. The default was left where it was rather
+than raised to match `gzip`, because raising it silently changes the cost of
+every existing call site — the kernel compresses filesystem blocks through
+this path — and that is a performance decision that should be taken on
+measurement of *those* call sites, not inherited from a command-line tool's
+convention. Callers who want `gzip`'s default can now ask for it by name.
+
+**Out-of-range levels clamp rather than erroring.** `level_max_chain` is
+infallible and saturates at both ends. The alternative — returning a `Result`
+— pushes an `unwrap` into every call site for an input that is a `u8` with
+nine meaningful values, and `CLAUDE.md` forbids exactly that unwrap. A
+caller passing 0 or 200 has a bug in the caller, and giving them the nearest
+sensible effort is a better failure than a panic in a kernel.
+
+---
+
+## 639. `SYS_FS_OPENAT2` numbers its own `resolve` bits far away from Linux's, and takes the full twelve-bit create mode
+
+**Date:** 2026-08-30
+**Lane:** A
+**Decided by:** Claude (autonomous, lane A) — answering the one width lane B
+left to us in `requests/b-a-yes-forward-openat2-and-here-is-the-shape-we-want.md`,
+and settling the one they did not think to ask about.
+
+**In short:** Linux has a system call, `openat2`, that opens a file *and* takes
+a set of "resolve" rules constraining how the path is allowed to be walked —
+notably "do not follow symbolic links" and "do not escape this directory". Our
+kernel is growing a native equivalent so lane B's libc can forward to it instead
+of refusing. Two numbers had to be chosen: what the resolve rules are numbered,
+and how many permission bits the call accepts when it creates a file. We
+deliberately numbered the resolve rules so that they *cannot* collide with
+Linux's, and we accept all twelve permission bits rather than the nine our
+sibling call accepts.
+
+### Decision 1 — the `resolve` bits are `1 << 16` and `1 << 17`, not Linux's `0x04` and `0x08`
+
+```rust
+pub const RESOLVE_NO_SYMLINKS: u64 = 1 << 16;
+pub const RESOLVE_BENEATH:     u64 = 1 << 17;
+```
+
+Linux numbers its six from `0x01` (`RESOLVE_NO_XDEV`) to `0x20`
+(`RESOLVE_CACHED`), with `NO_SYMLINKS = 0x04` and `BENEATH = 0x08`. We support
+exactly two rules and reject every other bit with `InvalidArgument`.
+
+**For copying Linux's values:** the libc forward becomes a pass-through with no
+translation table to get wrong or to drift, and anyone reading both sources at
+once sees one number rather than two.
+
+**Against, and this is what decided it:** a pass-through is precisely the thing
+that fails *silently* when it is wrong. If we reused Linux's numbering and lane
+B ever forwarded the raw `open_how.resolve` — by intent, or by a refactor that
+drops a translation line — then `RESOLVE_NO_XDEV` (`0x01`, "do not cross a
+mount point") would arrive as some other rule of ours, and `RESOLVE_CACHED`
+(`0x20`, "fail rather than do I/O") as another. The caller would be told the
+open succeeded under the containment it asked for. It would not be. That is the
+same failure class as `TD-OPENAT2-BENEATH-INROOT` and as the fail-open libc bug
+that started this whole exchange: **the security promise is what is silently
+wrong, and nothing downstream can detect it.**
+
+Numbering ours at bit 16 and above makes that mistake impossible to make
+quietly. Every Linux resolve value lies in `0x00..=0x3f`; any of them passed
+through untranslated has *no* known bit set and *at least one* unknown bit set,
+so the kernel returns `InvalidArgument` on the first call. A forgotten
+translation becomes a hard, immediate, first-test failure instead of a
+confinement that is quietly anchored somewhere else. `resolve == 0` means the
+same thing in both numbering schemes — no extra rules — which is the one value
+where a pass-through is harmless, and it stays harmless.
+
+This is also the precedent the native `SYS_FS_*` family already sets:
+`OpenFlags::NO_SYMLINKS` is `1 << 8` and shares no value with Linux's
+`O_NOFOLLOW`, for the same reason.
+
+**What it costs:** two lines in `posix/src/file.rs` that lane B was writing
+anyway — they already validate unknown resolve bits to `EINVAL` in step 4, so
+the set of bits is enumerated on their side no matter which numbering we pick.
+The translation is not new work; it is the same work, spelled explicitly.
+
+### Decision 2 — the create mode is `0o7777`, and the three extra bits are *applied*, not refused
+
+Lane B offered two acceptable answers and asked us to rule out a third with
+them: take `0o7777` and honour it, or take `0o777` and have libc refuse
+`mode & 0o7000` with `EOPNOTSUPP` — but never mask silently.
+
+We take `0o7777` and honour it, because **the storage layer already does**.
+`ext4`'s `set_permissions_ino` writes `permissions & 0o7777` and its
+`metadata` reads `i_mode & 0o7777`; `memfs` stores the `u16` unmasked. Setuid,
+setgid and sticky round-trip through `stat` today. There is nothing to refuse:
+the nine-bit width of `SYS_FS_OPEN_MODE` is not a limit of the filesystem, it
+is a `& 0o777` in one line of one handler.
+
+Refusing in libc (lane B's option 2) was the weaker choice for a reason worth
+recording: it leaves *native* callers — anything that calls `SYS_FS_OPENAT2`
+directly rather than through the POSIX layer — with the silent mask, because the
+refusal would live in a library they do not link. A rule enforced in libc is a
+rule enforced for POSIX programs only, and the whole point of the native
+`SYS_FS_*` family is that it is callable without one.
+
+**A note on setuid not being enforced.** Nothing in `exec` honours `S_ISUID`
+today. Storing a bit no one acts on is nevertheless safe *in this direction*:
+an unenforced setuid bit grants no privilege, so the failure mode is
+"less privilege than the metadata claims", which is fail-closed. The reverse —
+enforcing a bit we do not store — would not be.
+
+### Decision 3 — `SYS_FS_OPEN_MODE` and `SYS_FS_MKDIR_MODE` are widened to match
+
+Having decided the mask is wrong, leaving it in place on the two sibling calls
+would mean `open(O_CREAT, 0o4755)` and `openat2(..., 0o4755)` create files with
+different permissions, which is a worse outcome than either width consistently
+applied. Both are widened to `& 0o7777`.
+
+This is an observable change to two existing syscalls, and it is recorded here
+rather than treated as a bug fix because of that. The change can only *stop*
+bits from being discarded — a caller passing `0o0644` is unaffected, and a
+caller passing `0o4755` currently gets `0o0755` with no indication that the
+`0o4000` was dropped. No caller can reasonably depend on the drop, because no
+caller can observe that it was asked for.
+
+### Decision 4 — six flat arguments, no `open_how`, at syscall number 661
+
+Lane B's shape, adopted verbatim:
+
+```
+SYS_FS_OPENAT2(path_ptr, path_len, flags, mode, resolve, dirfd) -> fd
+```
+
+Their argument is recorded in full in their request and in their §705, and it
+is right: `open_how` exists in Linux to be extensible *by struct size*, which is
+a solution to a problem `design.txt` already solves differently and better with
+**versioned syscall tables**. Taking the struct would give one call two
+extensibility mechanisms and pin three field widths neither lane chose. The
+first four arguments are `SYS_FS_OPEN_MODE`'s, in its order, so the forward
+reads line for line against its sibling.
+
+`dirfd == 0` means "resolve relative to the process's cwd" — native file handle
+0 is never valid, so no in-band sentinel is being invented. 661 is the first
+free number; 600–660 are contiguous.
+
+---
+
+## 712. `tar`'s record size is one setting with two spellings, and a record reaches the stream only when the *next* write needs the room
+
+**Date:** 2026-08-30
+**Decided by:** Claude (autonomous), lane B
+**Lane:** B
+
+**In short:** tar was born as a tape program, and a tape is written in
+fixed-size chunks called *records* — 10240 bytes by default. GNU pads the last
+record of every archive with zeros so it comes out a whole number of records;
+ours used to stop as soon as it had written the two all-zero blocks that mark
+the end. Both files are valid and either program reads either one, but they are
+different lengths and therefore have different checksums, so nothing that
+compares an archive byte-for-byte against GNU's could ever agree. Ours now pads.
+This entry records three choices that came with the padding: keeping the two
+ways of setting the record size as one value rather than two, implementing the
+byte-counting spelling completely rather than in part, and the exact moment a
+finished record is handed to the stream.
+
+**Date measured against:** GNU tar 1.35, x86_64 Debian, `LC_ALL=C.UTF-8`.
+
+### One setting, not two
+
+`-b` / `--blocking-factor=BLOCKS` counts 512-byte blocks; `--record-size=NUMBER`
+counts bytes. It is tempting to store them as two fields and combine them, and
+that is wrong — measurably so:
+
+| command line | GNU's record |
+|---|---|
+| `-b 3 --record-size=1024` | 1024 bytes |
+| `--record-size=1024 -b 3` | 1536 bytes |
+
+The last one on the line wins, whichever spelling it used, which only one
+`u64` field can express. Two fields would have to invent a precedence rule, and
+every rule you could invent gets one of those two rows wrong.
+
+*What it costs:* nothing, and it is worth recording only because the two-field
+version is the one you write if you do not measure first.
+
+### `--record-size` is implemented, suffixes and all
+
+The alternative was to accept `-b` and leave `--record-size` in the set of GNU
+options this tar does not have — the honest-refusal policy of §703. It was
+rejected because the two options are the *same* setting, so "supported, but only
+if you spell it the short way" is a worse story than either supporting it or
+not. And a half version is the specific failure §703 exists to prevent:
+`--record-size=1K` is valid GNU, and a version that parsed only bare digits
+would refuse a command line that works everywhere else.
+
+Implementing it means implementing its suffix table, which is a tape utility's
+and not `du`'s. The letters are exactly `bBcGgKkMmPTtw`, and two of them are
+traps: `b` is 512 while `B` is 1024 (so `--record-size=3b` is 1536 and
+`--record-size=3B` is 3072), and uppercase `P` is a suffix while lowercase `p`
+is not. There is no `E`, `Z` or `Y`. A two-letter suffix — `1kB`, which `du`
+takes — is invalid outright. Values are parsed with `strtoul`'s grammar rather
+than a trim: leading whitespace (C's `isspace`, so a vertical tab counts, which
+Rust's `is_ascii_whitespace` does not) and a leading `+` are skipped, trailing
+whitespace is not, and the base is always ten, so `0x10` is refused and `0777`
+is seven hundred and seventy-seven.
+
+*What it costs:* about sixty lines and a suffix table that has to be got right
+from measurement, since none of it is guessable.
+
+### The buffering rule: spill on the write that needs the room
+
+The obvious implementation is `std::io::BufWriter` with the record as its
+capacity. It produces the wrong bytes, and there is exactly one command line in
+existence that shows it — one that dies with a partly-filled record and so never
+pads:
+
+```
+tar -b 1 -cf o.tar -C tree a.txt -C nosuchdir   # GNU leaves 512 bytes
+tar      -cf o.tar -C tree a.txt -C nosuchdir   # GNU leaves 0 bytes
+```
+
+`a.txt` hands 1024 bytes (a header and a data block) to a 512-byte record. GNU
+leaves *half* of them in the file. That is only consistent with one rule: a full
+record is written when the *next* write needs the room, not when the byte that
+fills it arrives. Flushing on the filling byte would leave 1024 in the first row;
+`BufWriter`, which bypasses its buffer entirely for a write at least as large as
+its capacity, would leave 1024 in both rows.
+
+*Alternatives:* (a) `BufWriter`, (b) flush the moment the buffer is full, (c)
+spill only when the buffer is already full and a further write has arrived.
+
+(c) is what shipped, as a ~30-line `RecordWriter`. It is the simplest of the
+three to state and the only one that reproduces the artefact. Deliberately, it
+has **no** `Drop` — the tail of an aborted archive is *meant* to be lost, so
+finishing is an explicit `finish()` call that the error paths never make. Adding
+a `Drop` that flushed would silently re-break the case above.
+
+The buffer also grows lazily rather than being allocated at `record` bytes up
+front. `-b` accepts up to 2147483647 (INT_MAX, measured at both ends), which is a
+1 TB record; reserving it would make `tar -b 2147483647 -cf o.tar tiny.txt` cost
+what the *record* costs instead of what the archive costs. The bytes written are
+identical either way. (Learned the hard way: an early measurement run asked GNU
+for that record on a live WSL instance and took the instance down with it.)
+
+*What it costs:* a hand-written writer where a standard one would have compiled,
+and a comment on it explaining why it must not be "tidied" back into a
+`BufWriter`.
+
+### What this changed in the harness
+
+`scripts/tar-diff.sh` normalised GNU with `--blocking-factor=1` precisely so
+that the missing padding would not swamp every create case. That flag is gone,
+so all ~30 create cases now compare the archive's *length* as well as its
+contents. `archive_delta` grew a second sentence for it: `cmp` names a differing
+byte on stdout but reports a file that merely ran out only on stderr, so the
+length case used to fall through the offset arithmetic and print nonsense.
+
+**How to reverse.** `RecordWriter` and the two parsers are contiguous in
+`userspace/coreutils/src/bin/tar.rs`; dropping them means passing the sink to
+`Creator` directly again and putting `--blocking-factor=1` back in `GNUFMT`,
+which re-breaks the twenty-odd record-size cases in `scripts/tar-diff.sh` § 1
+and the two in § 8 that this entry exists to explain.

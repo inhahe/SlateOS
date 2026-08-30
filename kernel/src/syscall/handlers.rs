@@ -166,6 +166,48 @@ fn caller_pid() -> Option<u64> {
     crate::proc::thread::owner_process(task_id)
 }
 
+/// Check that the caller actually holds this open-file handle.
+///
+/// # Why this exists
+///
+/// A file handle is `NEXT_HANDLE.fetch_add(1)` from 1
+/// ([`crate::fs::handle`]), i.e. a machine-wide counting sequence, and
+/// `OPEN_FILES` is a single global table keyed by that number. Treating the
+/// value as self-authorising — "the handle *is* the capability" — is only
+/// sound when the value is unguessable, which a counter is emphatically not.
+/// Without this check any process can walk 1, 2, 3… and read, write or
+/// truncate whatever files other processes have open, without ever holding a
+/// `File` capability of its own: the `require_cap_type` gate sits on *open*,
+/// and an attacker exercising this never opens anything.
+///
+/// [`crate::proc::pcb::owns_ipc_handle`] already makes exactly this argument
+/// for `ResourceType::Pty`, whose raw form `(tty_id << 1) | end` is likewise
+/// enumerable. File handles are the same class and were simply missed.
+///
+/// # Why the error is `InvalidHandle` and not `PermissionDenied`
+///
+/// The two answers must be indistinguishable, or the errno becomes an oracle
+/// for "is some *other* process holding handle N?" — which leaks the shape of
+/// the system's open files to a caller that cannot touch them. Same reasoning
+/// that puts `beneath_fragment_ok` ahead of the dirfd lookup in
+/// `sys_openat_beneath`.
+///
+/// # Kernel callers
+///
+/// Returns `Ok(())` when there is no calling *process* (a bare kernel task).
+/// Such a caller holds handles that were never registered against a pid, and
+/// there is no authority to verify because no user process is claiming any.
+/// This mirrors the `options.parent != 0` condition on the pty arm of
+/// [`crate::proc::spawn`]'s `fd_map` loop.
+fn require_file_handle_owner(handle: u64) -> Result<(), KernelError> {
+    match caller_pid() {
+        Some(pid) if !pcb::owns_ipc_handle(pid, ResourceType::File, handle) => {
+            Err(KernelError::InvalidHandle)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Get the calling process's PML4 physical address.
 fn caller_pml4() -> Option<u64> {
     let pid = caller_pid()?;
@@ -9076,6 +9118,9 @@ pub fn sys_fs_open_mode(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_CLOSE` — close a file handle.
 pub fn sys_fs_close(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
     match crate::fs::handle::close(handle) {
         Ok(()) => {
             // Drop the per-process ownership record so the handle is not
@@ -9094,6 +9139,9 @@ pub fn sys_fs_close(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_READ` — read from a file handle at the current offset.
 pub fn sys_fs_read(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     // POSIX/Linux: a zero-length read returns 0 with no other effect.  It does
@@ -9129,6 +9177,9 @@ pub fn sys_fs_read(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_WRITE` — write to a file handle at the current offset.
 pub fn sys_fs_write(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
     let data_len = args.arg2 as usize;
 
     if args.arg1 == 0 && data_len > 0 {
@@ -9155,6 +9206,9 @@ pub fn sys_fs_write(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_SEEK` — seek to a new position in a file.
 pub fn sys_fs_seek(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
     #[allow(clippy::cast_possible_wrap)]
     let offset_raw = args.arg1 as i64;
     let whence = args.arg2;
@@ -9495,6 +9549,9 @@ pub fn sys_fs_trim(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_FSTAT` — stat a file by handle.
 pub fn sys_fs_fstat(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
 
     if args.arg1 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -10734,6 +10791,9 @@ pub fn sys_fs_append(args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: new size in bytes.
 pub fn sys_fs_ftruncate(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
     let size = args.arg1;
 
     match crate::fs::handle::ftruncate(handle, size) {
@@ -10749,9 +10809,21 @@ pub fn sys_fs_ftruncate(args: &SyscallArgs) -> SyscallResult {
 /// Returns: new file handle.
 pub fn sys_fs_dup(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
 
     match crate::fs::handle::dup(handle) {
         Ok(new_handle) => {
+            // Register the duplicate to the caller.  Without this the new
+            // handle is owned by nobody: exit cleanup walks only
+            // `proc.ipc_handles` (see `pcb::destroy_process_resources`), so
+            // the entry would never be closed and `OPEN_FILES` would grow for
+            // the life of the boot.  `sys_fs_close` already deregisters for
+            // the symmetric reason; this is the missing half of that pair.
+            if let Some(pid) = caller_pid() {
+                pcb::register_ipc_handle(pid, ResourceType::File, new_handle);
+            }
             #[allow(clippy::cast_possible_wrap)]
             let h = new_handle as i64;
             SyscallResult::ok(h)
@@ -10774,6 +10846,9 @@ pub fn sys_fs_dup(args: &SyscallArgs) -> SyscallResult {
 /// and a truncated path is a different path that may well exist.
 pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
     let out_cap = args.arg2 as usize;
 
     if args.arg1 == 0 || out_cap == 0 {

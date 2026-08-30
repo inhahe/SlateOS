@@ -876,12 +876,56 @@ const HASH_SIZE: usize = 4096;
 /// Maximum backward distance for LZ77 (32 KiB DEFLATE window).
 const MAX_DISTANCE: usize = 32768;
 
-/// Maximum chain length for hash chain traversal.
+/// Default maximum chain length for hash chain traversal.
 ///
 /// Longer chains find better matches but slow down compression.
 /// zlib default at compression level 6 uses chain=128.  We use 16
 /// as a good balance for kernel use (fast enough, good compression).
-const MAX_CHAIN: usize = 16;
+///
+/// This is what [`deflate`] uses, which by [`level_max_chain`]'s table makes
+/// `deflate()` equivalent to level **3**.  It is deliberately *not* level 6:
+/// every existing caller (`kernel::fs::compress`, `ziparchive`, [`gzip`],
+/// [`zlib_deflate`]) was tuned against this value, and changing it would
+/// silently re-encode all of them.  Callers that want to choose pay for the
+/// choice explicitly via [`deflate_level`].
+const DEFAULT_MAX_CHAIN: usize = 16;
+
+/// Map a compression level, 1 (fastest) … 9 (smallest), to a hash-chain depth.
+///
+/// Levels outside 1..=9 clamp rather than error: every caller validates its
+/// own flag before reaching here, so a `Result` would be an error they could
+/// prove impossible and would have to `unwrap` or plumb — and an `unwrap` in
+/// production code is exactly what `CLAUDE.md` forbids. Clamping keeps the
+/// signature total.
+///
+/// # Why this table and not zlib's
+///
+/// Real zlib's `max_chain` per level is 4, 8, 32, 16, 32, 128, 256, 1024,
+/// 4096 — not monotonic at levels 3–4 (it varies `good_length`/`nice_length`
+/// alongside, which we do not), and much steeper at the top. The table here
+/// is the one `userspace/zip` already maps its `-1`..`-9` flags onto, adopted
+/// verbatim on purpose: it makes lane B's switch to this crate a pure
+/// deletion with **no change to any archive `zip` produces**, which is worth
+/// more than nominal fidelity to a table we would not be implementing
+/// faithfully anyway. Monotonicity is the property callers actually rely on,
+/// and this table has it where zlib's does not.
+///
+/// Do not "correct" this toward zlib's numbers without re-reading that: it
+/// would change `zip`'s output for every level.
+#[must_use]
+pub fn level_max_chain(level: u8) -> usize {
+    match level {
+        0 | 1 => 4,
+        2 => 8,
+        3 => 16,
+        4 => 32,
+        5 => 64,
+        6 => 128,
+        7 => 256,
+        8 => 512,
+        _ => 1024,
+    }
+}
 
 /// Compute a hash for 3 bytes.
 fn lz77_hash(data: &[u8], pos: usize) -> usize {
@@ -900,6 +944,15 @@ fn lz77_hash(data: &[u8], pos: usize) -> usize {
 // ---------------------------------------------------------------------------
 
 /// An LZ77 token: either a literal byte or a length/distance match.
+///
+/// `Copy` so the encoders can take an `Iterator<Item = LzToken>` rather than a
+/// `&[LzToken]`. That is what lets `deflate` try a literals-only encoding of
+/// the same input without materialising a second, `data.len()`-entry token
+/// vector — the literal stream is `data.iter().map(LzToken::Literal)`, which
+/// allocates nothing. At six bytes a token that second vector would have cost
+/// six bytes per input byte, which is not a price a kernel compressing a
+/// filesystem block should pay for a candidate it usually discards.
+#[derive(Clone, Copy)]
 enum LzToken {
     Literal(u8),
     Match { length: u16, distance: u16 },
@@ -932,21 +985,36 @@ fn insert_hash(data: &[u8], pos: usize, head: &mut [u32], prev: &mut [u32]) -> u
 ///
 /// Returns (length, distance) of the best match found, or (0, 0) if
 /// no match of at least `MIN_MATCH` bytes exists.
-fn find_best_match(data: &[u8], pos: usize, head: &[u32], prev: &[u32]) -> (usize, usize) {
+/// `chain_start` must be the value [`insert_hash`] returned for this `pos` —
+/// the head of the chain *before* `pos` was linked into it.
+///
+/// It is deliberately a parameter rather than a re-read of `head[h]`. The
+/// caller inserts before it searches, so by this point `head[h] == pos`, and
+/// a search starting there fails the `candidate < pos` guard on its very
+/// first iteration and returns "no match" for every position of every input.
+/// That was a real defect, not a hypothetical: the LZ77 stage found zero
+/// matches on all data, and `deflate` silently degraded to Huffman-only
+/// coding. See `known-issues.md` → `A-DEFLATE-LZ77-NEVER-FOUND-A-MATCH`.
+fn find_best_match(
+    data: &[u8],
+    pos: usize,
+    chain_start: usize,
+    prev: &[u32],
+    max_chain: usize,
+) -> (usize, usize) {
     let remaining = data.len().wrapping_sub(pos);
     if remaining < MIN_MATCH {
         return (0, 0);
     }
 
-    let h = lz77_hash(data, pos);
-    let mut candidate = head.get(h).copied().unwrap_or(0) as usize;
+    let mut candidate = chain_start;
     let max_len = remaining.min(MAX_MATCH);
 
     let mut best_len: usize = MIN_MATCH.wrapping_sub(1);
     let mut best_dist: usize = 0;
     let mut chain_count = 0usize;
 
-    while candidate < pos && pos.wrapping_sub(candidate) <= MAX_DISTANCE && chain_count < MAX_CHAIN
+    while candidate < pos && pos.wrapping_sub(candidate) <= MAX_DISTANCE && chain_count < max_chain
     {
         // Compare bytes at candidate vs pos, starting from the current
         // best length downward (zlib trick: check the last matching byte
@@ -983,6 +1051,20 @@ fn find_best_match(data: &[u8], pos: usize, head: &[u32], prev: &[u32]) -> (usiz
         chain_count = chain_count.wrapping_add(1);
     }
 
+    // Reject a bare 3-byte match at a long distance: encoding it costs a
+    // length symbol plus a distance symbol with up to 13 extra bits, which is
+    // routinely *more* than the three literals it replaces.  zlib calls the
+    // threshold TOO_FAR and applies exactly this rule in `deflate_slow`.
+    //
+    // This is not a micro-optimisation, it is what keeps incompressible input
+    // from inflating.  Without it, repairing the match-finding bug above made
+    // random data 12% *larger* than the (accidentally) Huffman-only encoder it
+    // replaced — matches were being found, and every one of them was a loss.
+    const TOO_FAR: usize = 4096;
+    if best_len == MIN_MATCH && best_dist > TOO_FAR {
+        return (0, 0);
+    }
+
     if best_len >= MIN_MATCH {
         (best_len, best_dist)
     } else {
@@ -992,7 +1074,7 @@ fn find_best_match(data: &[u8], pos: usize, head: &[u32], prev: &[u32]) -> (usiz
 
 /// Run the LZ77 pass over `data` and return a token stream.
 ///
-/// Uses hash chains (up to MAX_CHAIN candidates per position) with
+/// Uses hash chains (up to `max_chain` candidates per position) with
 /// lazy matching: when a match is found at position P, also check P+1.
 /// If P+1 has a strictly longer match, emit a literal for P and use
 /// the longer match.
@@ -1003,7 +1085,7 @@ fn find_best_match(data: &[u8], pos: usize, head: &[u32], prev: &[u32]) -> (usiz
 ///
 /// Based on zlib's deflate.c (compress.c) by Jean-loup Gailly.
 #[allow(clippy::arithmetic_side_effects)]
-fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
+fn lz77_tokenize(data: &[u8], max_chain: usize) -> Vec<LzToken> {
     let mut tokens = Vec::with_capacity(data.len() / 2);
 
     // Hash chain: head[h] = most recent pos with hash h.
@@ -1059,11 +1141,14 @@ fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
             continue;
         }
 
-        // Insert this position into the hash chain.
-        insert_hash(data, pos, &mut head, &mut prev);
+        // Insert this position into the hash chain, keeping the previous head
+        // as the point to start searching from.  Discarding this return value
+        // is what disabled match-finding entirely: the search would then begin
+        // at `head[h]`, which the insert has just set to `pos` itself.
+        let chain_start = insert_hash(data, pos, &mut head, &mut prev) as usize;
 
         // Find the best match at this position using the chain.
-        let (cur_len, cur_dist) = find_best_match(data, pos, &head, &prev);
+        let (cur_len, cur_dist) = find_best_match(data, pos, chain_start, &prev, max_chain);
 
         if pending_len >= MIN_MATCH {
             // We have a pending match from pos-1.  Compare with current.
@@ -1455,24 +1540,32 @@ fn code_for(codes: &[(u16, u8)], sym: usize) -> (u16, u8) {
 ///
 /// Builds optimal Huffman trees from the token frequencies, encodes
 /// the tree in the block header, then encodes all tokens.
+///
+/// `tokens` is an iterator rather than a slice, and must be `Clone`, because
+/// this function walks it twice: once to histogram the symbols and once to
+/// emit them. The `Clone` bound is what lets a caller pass a synthesised
+/// stream (`data.iter().map(LzToken::Literal)`) with no backing allocation.
 #[allow(clippy::arithmetic_side_effects)]
-fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
+fn encode_dynamic<I>(writer: &mut BitWriter, tokens: I, bfinal: bool)
+where
+    I: Iterator<Item = LzToken> + Clone,
+{
     // --- Count symbol frequencies ---
     let mut lit_freq = [0u32; 286]; // 0-255 literals, 256 end, 257-285 lengths
     let mut dist_freq = [0u32; 30]; // 0-29 distance codes
 
     bump(&mut lit_freq, 256); // End-of-block always present.
 
-    for token in tokens {
+    for token in tokens.clone() {
         match token {
             LzToken::Literal(b) => {
-                bump(&mut lit_freq, *b as usize);
+                bump(&mut lit_freq, b as usize);
             }
             LzToken::Match { length, distance } => {
-                if let Some((sym, _, _)) = encode_length(*length as usize) {
+                if let Some((sym, _, _)) = encode_length(length as usize) {
                     bump(&mut lit_freq, sym as usize);
                 }
-                if let Some((sym, _, _)) = encode_distance(*distance as usize) {
+                if let Some((sym, _, _)) = encode_distance(distance as usize) {
                     bump(&mut dist_freq, sym as usize);
                 }
             }
@@ -1571,7 +1664,7 @@ fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
     for token in tokens {
         match token {
             LzToken::Literal(b) => {
-                let (code, bits) = code_for(&lit_codes, *b as usize);
+                let (code, bits) = code_for(&lit_codes, b as usize);
                 writer.write_bits(u32::from(code), bits);
             }
             LzToken::Match { length, distance } => {
@@ -1579,8 +1672,8 @@ fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
                     Some((len_sym, len_extra, len_ebits)),
                     Some((dist_sym, dist_extra, dist_ebits)),
                 ) = (
-                    encode_length(*length as usize),
-                    encode_distance(*distance as usize),
+                    encode_length(length as usize),
+                    encode_distance(distance as usize),
                 ) {
                     let (lcode, lbits) = code_for(&lit_codes, len_sym as usize);
                     writer.write_bits(u32::from(lcode), lbits);
@@ -1603,15 +1696,21 @@ fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
 }
 
 /// Encode tokens using fixed Huffman codes (BTYPE=01).
+///
+/// Takes an iterator for the same reason [`encode_dynamic`] does, though this
+/// one walks it only once, so the `Clone` bound is not needed here.
 #[allow(clippy::arithmetic_side_effects)]
-fn encode_fixed(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
+fn encode_fixed<I>(writer: &mut BitWriter, tokens: I, bfinal: bool)
+where
+    I: Iterator<Item = LzToken>,
+{
     writer.write_bits(u32::from(bfinal), 1); // BFINAL
     writer.write_bits(1, 2); // BTYPE=01
 
     for token in tokens {
         match token {
             LzToken::Literal(b) => {
-                let (code, bits) = fixed_code(u16::from(*b));
+                let (code, bits) = fixed_code(u16::from(b));
                 writer.write_bits(u32::from(code), bits);
             }
             LzToken::Match { length, distance } => {
@@ -1619,8 +1718,8 @@ fn encode_fixed(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
                     Some((len_sym, len_extra, len_ebits)),
                     Some((dist_sym, dist_extra, dist_ebits)),
                 ) = (
-                    encode_length(*length as usize),
-                    encode_distance(*distance as usize),
+                    encode_length(length as usize),
+                    encode_distance(distance as usize),
                 ) {
                     let (lcode, lbits) = fixed_code(len_sym);
                     writer.write_bits(u32::from(lcode), lbits);
@@ -1650,51 +1749,218 @@ fn encode_fixed(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
 ///
 /// Based on RFC 1951 §3.2.5–3.2.7 and zlib's deflate strategy.
 pub fn deflate(data: &[u8]) -> Vec<u8> {
+    deflate_with_chain(data, DEFAULT_MAX_CHAIN)
+}
+
+/// Compress with an explicit effort level, 1 (fastest) … 9 (smallest).
+///
+/// Identical to [`deflate`] except for how hard the LZ77 pass looks for a
+/// match: the level selects the hash-chain depth via [`level_max_chain`].
+/// The output is a valid DEFLATE stream at every level and decodes with
+/// [`inflate`] regardless — the level trades encoder time for ratio and
+/// changes nothing about the format.
+///
+/// Levels outside 1..=9 clamp; see [`level_max_chain`] for why this is not a
+/// `Result`.
+///
+/// `deflate(data)` is **not** `deflate_level(data, 6)` — it is level 3. See
+/// [`DEFAULT_MAX_CHAIN`] for why the default was left where it was.
+///
+/// # Example
+///
+/// ```
+/// let data = b"the quick brown fox jumps over the lazy dog".repeat(20);
+/// let small = deflate::deflate_level(&data, 9);
+/// let fast = deflate::deflate_level(&data, 1);
+/// assert_eq!(deflate::inflate(&small).unwrap(), data);
+/// assert_eq!(deflate::inflate(&fast).unwrap(), data);
+/// ```
+#[must_use]
+pub fn deflate_level(data: &[u8], level: u8) -> Vec<u8> {
+    deflate_with_chain(data, level_max_chain(level))
+}
+
+/// The largest payload one stored (BTYPE=00) block can carry.
+///
+/// RFC 1951 §3.2.4 gives a stored block a 16-bit LEN, so a longer run of
+/// incompressible data has to be split across several blocks.
+const MAX_STORED_BLOCK: usize = 65535;
+
+/// The fixed overhead a stored block adds to its payload: one byte holding the
+/// three header bits after the flush to a byte boundary, then LEN and NLEN.
+const STORED_BLOCK_OVERHEAD: usize = 5;
+
+/// An upper bound, in bytes, on a literals-only dynamic-Huffman block header.
+///
+/// HLIT/HDIST/HCLEN and the permuted code-length lengths come to at most 71
+/// bits; the RLE of the 286 literal lengths plus the single (empty) distance
+/// length is at most 287 symbols at 7 code bits + 7 extra bits each. That is
+/// 4089 bits, or 512 bytes, and 600 leaves room without being so slack that
+/// the estimate stops discriminating. Used only to decide whether the
+/// literals-only candidate is worth *encoding* — never to size a buffer.
+const DYNAMIC_HEADER_BOUND: usize = 600;
+
+/// Exact payload size, plus a header bound, for encoding `data` as literals
+/// only under a dynamic Huffman code.
+///
+/// The payload figure is not a guess: it runs the same [`build_code_lengths`]
+/// the real encoder would, over the same histogram, and sums length × freq.
+/// So this answers "could switching the LZ77 stage off possibly win here?"
+/// cheaply — one pass over the data and one 286-symbol tree build — and lets
+/// the common case (data that actually compresses) skip a whole extra encode.
+fn literal_only_size_estimate(data: &[u8]) -> usize {
+    let mut freq = [0u32; 286];
+    for &b in data {
+        bump(&mut freq, b as usize);
+    }
+    bump(&mut freq, 256); // End-of-block.
+
+    let lengths = build_code_lengths(&freq, MAX_CODE_BITS);
+    let mut bits: u64 = 0;
+    for (f, l) in freq.iter().zip(lengths.iter()) {
+        bits = bits.saturating_add(u64::from(*f).saturating_mul(u64::from(*l)));
+    }
+    let bytes = usize::try_from(bits.div_ceil(8)).unwrap_or(usize::MAX);
+    bytes.saturating_add(DYNAMIC_HEADER_BOUND)
+}
+
+/// The exact size [`deflate_stored`] will produce for `data`.
+fn stored_size(data: &[u8]) -> usize {
+    let blocks = data.len().div_ceil(MAX_STORED_BLOCK).max(1);
+    data.len()
+        .saturating_add(blocks.saturating_mul(STORED_BLOCK_OVERHEAD))
+}
+
+/// Compress `data`, choosing among every encoding this crate can produce.
+///
+/// # Why there are four candidates and not two
+///
+/// DEFLATE lets an encoder pick per block, and the only way to be sure the
+/// pick is right is to price each one. Two of these exist to bound the damage
+/// rather than to win often:
+///
+/// | Candidate | Wins on | Guarantee it provides |
+/// |---|---|---|
+/// | LZ77 + fixed Huffman | short, repetitive input where a tree costs more than it saves | — |
+/// | LZ77 + dynamic Huffman | almost everything real | — |
+/// | literals + dynamic Huffman | data with a skewed byte distribution but no usable repeats | never worse than order-0 Huffman coding |
+/// | stored | data with neither | never meaningfully larger than the input |
+///
+/// The last two are not hypothetical. `deflate` used to inflate 32 KiB of
+/// random bytes to 32816 — *larger than its input* — because the stored path
+/// was reachable only for inputs of 64 bytes or fewer. And repairing the LZ77
+/// match-finder (see [`find_best_match`]) made low-alphabet random data, DNA
+/// being the obvious real example, 12% larger than the accidentally
+/// Huffman-only encoder it replaced: matches were found, and at two bits per
+/// literal every one of them cost more than the literals it displaced. zlib
+/// carries the same weakness; pricing a literals-only candidate removes it.
+///
+/// Neither guard costs anything on data that compresses. The literals-only
+/// candidate is *estimated* first ([`literal_only_size_estimate`]) and only
+/// encoded if the estimate beats the best LZ77 result, and the stored size is
+/// arithmetic, not an encode.
+fn deflate_with_chain(data: &[u8], max_chain: usize) -> Vec<u8> {
     // For very small inputs, just use a stored block.
+    //
+    // Level-independent on purpose: below the threshold there is no match to
+    // find at any chain depth, so every level agrees here and the effort knob
+    // is genuinely irrelevant rather than merely ignored.
     if data.len() <= 64 {
         let mut writer = BitWriter::new();
         deflate_stored(&mut writer, data, true);
         return writer.into_bytes();
     }
 
-    // Run LZ77 once, then encode with both strategies.
-    let tokens = lz77_tokenize(data);
+    // Run LZ77 once, then encode with both Huffman strategies.
+    let tokens = lz77_tokenize(data, max_chain);
 
-    // Try fixed Huffman.
-    let mut fixed_writer = BitWriter::new();
-    encode_fixed(&mut fixed_writer, &tokens, true);
-    let fixed_output = fixed_writer.into_bytes();
+    let mut best = {
+        let mut writer = BitWriter::new();
+        encode_fixed(&mut writer, tokens.iter().copied(), true);
+        writer.into_bytes()
+    };
 
-    // Try dynamic Huffman.
-    let mut dynamic_writer = BitWriter::new();
-    encode_dynamic(&mut dynamic_writer, &tokens, true);
-    let dynamic_output = dynamic_writer.into_bytes();
-
-    // Pick the smaller output.
-    if dynamic_output.len() < fixed_output.len() {
-        dynamic_output
-    } else {
-        fixed_output
+    {
+        let mut writer = BitWriter::new();
+        encode_dynamic(&mut writer, tokens.iter().copied(), true);
+        let dynamic_output = writer.into_bytes();
+        if dynamic_output.len() < best.len() {
+            best = dynamic_output;
+        }
     }
+
+    // Candidate 3: the same bytes with the LZ77 stage switched off. Only worth
+    // pricing if LZ77 actually emitted a match — with no match the two streams
+    // are identical — and only worth encoding if the exact payload arithmetic
+    // says it could win.
+    let has_match = tokens.iter().any(|t| matches!(t, LzToken::Match { .. }));
+    if has_match && literal_only_size_estimate(data) < best.len() {
+        let mut writer = BitWriter::new();
+        encode_dynamic(
+            &mut writer,
+            data.iter().copied().map(LzToken::Literal),
+            true,
+        );
+        let literal_output = writer.into_bytes();
+        if literal_output.len() < best.len() {
+            best = literal_output;
+        }
+    }
+
+    // Candidate 4: stored. Its size is known without encoding, so this costs a
+    // division unless it wins.
+    if stored_size(data) < best.len() {
+        let mut writer = BitWriter::new();
+        deflate_stored(&mut writer, data, true);
+        return writer.into_bytes();
+    }
+
+    best
 }
 
-/// Write a stored (uncompressed) DEFLATE block.
+/// Write `data` as stored (uncompressed) DEFLATE blocks.
+///
+/// Emits as many blocks as it takes: LEN is 16 bits, so a payload above
+/// [`MAX_STORED_BLOCK`] cannot go in one. `bfinal` applies to the *last* block
+/// only, the earlier ones being interior blocks of the same stream.
+///
+/// The split is not cosmetic. This function previously wrote a single block
+/// with `data.len() as u16`, which for any payload above 65535 bytes declared
+/// a truncated LEN and emitted the full data behind it — a silently corrupt
+/// stream. It was unreachable then, because the only caller was a
+/// 64-byte-or-fewer fast path; the stored candidate in [`deflate_with_chain`]
+/// makes it reachable for any size, which is why it is fixed here rather than
+/// noted as a latent hazard.
 fn deflate_stored(writer: &mut BitWriter, data: &[u8], bfinal: bool) {
-    writer.write_bits(u32::from(bfinal), 1); // BFINAL
-    writer.write_bits(0, 2); // BTYPE=00 (stored)
-    writer.flush(); // align to byte
+    let mut offset = 0usize;
+    loop {
+        let end = data.len().min(offset.saturating_add(MAX_STORED_BLOCK));
+        let chunk = data.get(offset..end).unwrap_or(&[]);
+        let last = end >= data.len();
 
-    let len = data.len() as u16;
-    // LEN
-    writer.write_byte(len as u8);
-    writer.write_byte((len >> 8) as u8);
-    // NLEN
-    let nlen = !len;
-    writer.write_byte(nlen as u8);
-    writer.write_byte((nlen >> 8) as u8);
-    // Raw data.
-    for &b in data {
-        writer.write_byte(b);
+        writer.write_bits(u32::from(bfinal && last), 1); // BFINAL
+        writer.write_bits(0, 2); // BTYPE=00 (stored)
+        writer.flush(); // align to byte
+
+        // `chunk.len() <= MAX_STORED_BLOCK` by construction, so this conversion
+        // is exact and the fallback is unreachable.
+        let len = u16::try_from(chunk.len()).unwrap_or(u16::MAX);
+        // LEN
+        writer.write_byte(len as u8);
+        writer.write_byte((len >> 8) as u8);
+        // NLEN
+        let nlen = !len;
+        writer.write_byte(nlen as u8);
+        writer.write_byte((nlen >> 8) as u8);
+        // Raw data.
+        for &b in chunk {
+            writer.write_byte(b);
+        }
+
+        offset = end;
+        if last {
+            break;
+        }
     }
 }
 
@@ -2038,15 +2304,17 @@ pub fn zlib_deflate(data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
+    clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects
 )]
 mod tests {
     use super::{
-        BitWriter, Error, HuffmanTable, MAX_OUTPUT, adler32, deflate, encode_dynamic, encode_fixed,
-        fixed_lit_lengths, gunzip, gunzip_limited, gzip, inflate, inflate_limited, lz77_tokenize,
-        zlib_deflate, zlib_inflate, zlib_inflate_limited,
+        BitWriter, DEFAULT_MAX_CHAIN, Error, HuffmanTable, LzToken, MAX_OUTPUT, adler32, deflate,
+        deflate_level, deflate_stored, encode_dynamic, encode_fixed, fixed_lit_lengths, gunzip,
+        gunzip_limited, gzip, inflate, inflate_limited, level_max_chain, lz77_tokenize,
+        stored_size, zlib_deflate, zlib_inflate, zlib_inflate_limited,
     };
     use alloc::format;
     use alloc::string::String;
@@ -2339,13 +2607,13 @@ mod tests {
             });
         }
 
-        let tokens = lz77_tokenize(&skewed);
+        let tokens = lz77_tokenize(&skewed, DEFAULT_MAX_CHAIN);
         let mut fixed_w = BitWriter::new();
-        encode_fixed(&mut fixed_w, &tokens, true);
+        encode_fixed(&mut fixed_w, tokens.iter().copied(), true);
         let fixed_size = fixed_w.into_bytes().len();
 
         let mut dyn_w = BitWriter::new();
-        encode_dynamic(&mut dyn_w, &tokens, true);
+        encode_dynamic(&mut dyn_w, tokens.iter().copied(), true);
         let dyn_size = dyn_w.into_bytes().len();
 
         assert!(
@@ -2484,5 +2752,251 @@ mod tests {
             Some(Error::InvalidHuffmanTable),
             "over-subscription must still be rejected"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Compression levels
+    // -----------------------------------------------------------------
+
+    /// Data over a deliberately tiny alphabet, which is what makes chain depth
+    /// observable.
+    ///
+    /// The naive choice — repeated English phrases — does *not* work, and the
+    /// reason is worth recording because it looks like a passing test. With
+    /// highly repetitive input the very first candidate on the chain already
+    /// yields a `MAX_MATCH` (258-byte) match, so `find_best_match` takes its
+    /// `break` on iteration one and every level produces **byte-identical**
+    /// output. That is indistinguishable from the bug this test exists to
+    /// catch.
+    ///
+    /// A small alphabet alone does not work either: uniformly random symbols
+    /// have no exploitable redundancy at all, so the encoder emits literals
+    /// at the entropy limit and, again, every level agrees exactly.
+    ///
+    /// What chain depth actually discriminates on is a position where the
+    /// *nearest* candidate match is shorter than a *farther* one — a shallow
+    /// search takes the near, short match; a deep one walks past it to the
+    /// long one. So the corpus is built the way LZ77 expects to find data:
+    /// mostly copies of random-length runs from random earlier offsets, with
+    /// occasional literals. That yields many candidates per hash bucket with
+    /// genuinely varied lengths, which is the only shape that makes the level
+    /// knob measurable.
+    fn level_test_corpus() -> Vec<u8> {
+        // A small LCG, so the corpus is deterministic across runs and
+        // platforms -- a flaky ratio assertion would be worse than no test.
+        let mut state: u32 = 0x1234_5678;
+        let mut rand = move || {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (state >> 16) & 0x7fff
+        };
+
+        let mut v = Vec::with_capacity(49152);
+        for _ in 0..64 {
+            v.push(b'a' + (rand() % 26) as u8);
+        }
+        while v.len() < 49152 {
+            if rand() % 5 == 0 {
+                v.push(b'a' + (rand() % 26) as u8);
+            } else {
+                let src = (rand() as usize) % v.len();
+                let len = 4 + (rand() as usize) % 40;
+                let end = (src + len).min(v.len());
+                // Copy through an index range rather than extend_from_within,
+                // so the source is a snapshot and cannot overlap the tail we
+                // are appending to.
+                for i in src..end {
+                    let b = v[i];
+                    v.push(b);
+                }
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn every_level_round_trips() {
+        let data = level_test_corpus();
+        // 0 and 10 are outside 1..=9 and must clamp, not panic or corrupt.
+        for level in 0..=10u8 {
+            let out = deflate_level(&data, level);
+            assert_eq!(
+                inflate(&out).expect("level output must inflate"),
+                data,
+                "level {level} did not round-trip"
+            );
+        }
+    }
+
+    /// The property `zip -1..-9` actually depends on: the levels must not all
+    /// be the same setting wearing nine names.  This is the regression that
+    /// lane B's request was filed to prevent — adopting a level-less
+    /// `deflate()` would have made every flag produce identical bytes.
+    /// `n` pseudo-random bytes drawn from an `alphabet`-symbol alphabet.
+    ///
+    /// The alphabet size is the knob that matters: at 256 the data is
+    /// incompressible by any means and only a stored block can avoid making it
+    /// bigger; at 4 it is DNA-shaped — two bits per byte of genuine order-0
+    /// redundancy, and no repeats an LZ77 match can profitably name.
+    fn random_alphabet(n: usize, alphabet: u32) -> Vec<u8> {
+        let mut state: u32 = 0xDEAD_BEEF;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            out.push(((state >> 16) % alphabet) as u8);
+        }
+        out
+    }
+
+    /// Compressing must never make data meaningfully bigger.
+    ///
+    /// It used to: 32 KiB of random bytes came back as 32816, larger than the
+    /// input, because the stored-block path was reachable only for inputs of
+    /// 64 bytes or fewer and every longer input was forced through Huffman
+    /// coding that had nothing to exploit. `.zip` and the kernel's filesystem
+    /// compression both feed this already-compressed data routinely — a JPEG
+    /// inside a zip is exactly this case — so it was not a corner.
+    ///
+    /// The bound is the input plus five bytes per stored block, which is the
+    /// format's own floor (RFC 1951 §3.2.4: three header bits padded to a byte,
+    /// then LEN and NLEN), not a tolerance chosen to make the test pass.
+    #[test]
+    fn incompressible_input_is_never_inflated() {
+        for len in [65, 1000, 32768, 200_000] {
+            let data = random_alphabet(len, 256);
+            let out = deflate(&data);
+            let floor = len + 5 * len.div_ceil(65535).max(1);
+            assert!(
+                out.len() <= floor,
+                "deflate inflated {len} incompressible bytes to {} (stored floor is {floor})",
+                out.len()
+            );
+            assert_eq!(inflate(&out).unwrap(), data, "{len}-byte round trip");
+        }
+    }
+
+    /// Running LZ77 must never cost more than not running it.
+    ///
+    /// On a four-symbol alphabet a literal costs two bits, while the shortest
+    /// match costs a length symbol plus a distance symbol plus up to thirteen
+    /// extra bits — so every match the finder reports is a net loss, and a
+    /// greedy encoder takes them anyway. Before the literals-only candidate
+    /// existed this input encoded to 10298 bytes; the same bytes coded as
+    /// literals take 9217. zlib has the same weakness and simply lives with it.
+    ///
+    /// The comparison is against the literal encoding computed here rather than
+    /// a hard-coded number, so the test states the property ("never worse than
+    /// order-0 Huffman") instead of pinning today's output size.
+    #[test]
+    fn lz77_never_loses_to_plain_huffman() {
+        let data = random_alphabet(32768, 4);
+
+        let mut writer = BitWriter::new();
+        encode_dynamic(
+            &mut writer,
+            data.iter().copied().map(LzToken::Literal),
+            true,
+        );
+        let literals_only = writer.into_bytes().len();
+
+        let out = deflate(&data);
+        assert!(
+            out.len() <= literals_only,
+            "deflate produced {} bytes where coding the same input as plain \
+             literals takes {literals_only}",
+            out.len()
+        );
+        assert_eq!(inflate(&out).unwrap(), data);
+    }
+
+    /// A stored payload above 65535 bytes has to become several blocks.
+    ///
+    /// `deflate_stored` used to write `data.len() as u16`, which above 65535
+    /// declared a truncated LEN and then emitted the whole payload behind it —
+    /// a corrupt stream. It was unreachable while the only caller was the
+    /// 64-byte fast path. Adding the stored candidate to `deflate_with_chain`
+    /// made it reachable at any size, so this pins both halves: that the
+    /// multi-block stream decodes, and that `stored_size` — which is what
+    /// decides whether stored wins, without encoding — predicts the exact size.
+    #[test]
+    fn stored_blocks_split_above_the_sixteen_bit_length() {
+        for len in [0usize, 1, 65535, 65536, 131_070, 200_000] {
+            let data = random_alphabet(len, 256);
+            let mut writer = BitWriter::new();
+            deflate_stored(&mut writer, &data, true);
+            let out = writer.into_bytes();
+            assert_eq!(
+                out.len(),
+                stored_size(&data),
+                "stored_size mispredicted the {len}-byte encoding"
+            );
+            assert_eq!(inflate(&out).unwrap(), data, "{len}-byte stored round trip");
+        }
+    }
+
+    #[test]
+    fn levels_are_distinguishable_and_monotonic_in_ratio() {
+        let data = level_test_corpus();
+        let sizes: Vec<usize> = (1..=9u8).map(|l| deflate_level(&data, l).len()).collect();
+
+        assert!(
+            sizes[8] < sizes[0],
+            "level 9 must beat level 1: got {} vs {}",
+            sizes[8],
+            sizes[0]
+        );
+
+        // Not strictly monotonic — a deeper search can occasionally pick a
+        // match that encodes one bit worse — so the assertion is on the trend,
+        // which is what the level knob actually promises.
+        for (i, w) in sizes.windows(2).enumerate() {
+            assert!(
+                w[1] <= w[0].saturating_add(w[0] / 100).saturating_add(8),
+                "level {} was materially worse than level {}: {} vs {}",
+                i + 2,
+                i + 1,
+                w[1],
+                w[0]
+            );
+        }
+    }
+
+    /// `deflate()` must keep producing exactly what it produced before the
+    /// level parameter existed, because `kernel::fs::compress`, `ziparchive`,
+    /// `gzip` and `zlib_deflate` were all tuned against it.  Pinned by
+    /// equivalence to its documented level rather than to a stored blob, so
+    /// the test explains *why* the bytes are what they are.
+    #[test]
+    fn default_deflate_is_level_three() {
+        assert_eq!(level_max_chain(3), DEFAULT_MAX_CHAIN);
+        let data = level_test_corpus();
+        assert_eq!(
+            deflate(&data),
+            deflate_level(&data, 3),
+            "deflate() must stay byte-identical to level 3"
+        );
+    }
+
+    /// Levels out of range clamp to the ends rather than erroring — the
+    /// signature is total on purpose (see `level_max_chain`).
+    #[test]
+    fn out_of_range_levels_clamp() {
+        assert_eq!(level_max_chain(0), level_max_chain(1));
+        assert_eq!(level_max_chain(10), level_max_chain(9));
+        assert_eq!(level_max_chain(255), level_max_chain(9));
+
+        let data = level_test_corpus();
+        assert_eq!(deflate_level(&data, 200), deflate_level(&data, 9));
+    }
+
+    /// Below the stored-block threshold the level cannot matter, and must not
+    /// be silently *pretended* to matter either: all levels agree exactly.
+    #[test]
+    fn tiny_input_is_level_independent() {
+        let tiny = b"short".to_vec();
+        let base = deflate_level(&tiny, 1);
+        for level in 1..=9u8 {
+            assert_eq!(deflate_level(&tiny, level), base);
+        }
+        assert_eq!(inflate(&base).expect("tiny must inflate"), tiny);
     }
 }

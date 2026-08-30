@@ -22,12 +22,9 @@
 # ## Normalising GNU, and why each flag is fair
 #
 # GNU tar's defaults produce its own extended format, which ours does not claim
-# to write. Three flags bring it to the format ours does claim:
+# to write. Two flags bring it to the format ours does claim:
 #
 #   --format=ustar        ustar is what `tar.rs` implements and says it does.
-#   --blocking-factor=1   GNU pads the archive to a 10 KiB record; ours ends
-#                         after the two zero blocks that ustar requires. The
-#                         padding is a tape-drive artefact, not a format rule.
 #   --sort=name           GNU walks a directory in whatever order `readdir`
 #                         returns; ours sorts, so that archiving the same tree
 #                         twice gives the same bytes. ustar imposes no order at
@@ -41,7 +38,12 @@
 # backup exists to preserve. `--numeric-owner` used to be in that list, to keep
 # ours leaving uname/gname empty from masking every other difference in the same
 # 512 bytes; it came out when ours started filling them, so the owner names are
-# now compared like everything else.
+# now compared like everything else. `--blocking-factor=1` used to be in it too,
+# to hide that GNU pads the archive up to a 10 KiB record and ours stopped after
+# the two zero blocks that ustar requires; that came out when ours started
+# padding, so the archive *length* is now compared like everything else — which
+# is the whole point, since a short archive has a different checksum from a
+# padded one even when every header in it is identical.
 #
 # Run `OURS=/usr/bin/tar ./scripts/tar-diff.sh` to confirm the harness still
 # discriminates: it should report every xfail as XPASS and nothing else. (The
@@ -57,7 +59,7 @@ DIFF_NEED='find stat cmp od sha256sum touch ln readlink mkfifo'
 pass=0; fail=0; xfail=0; xpass=0
 
 # GNU's format normalisation. See the header.
-GNUFMT="--format=ustar --blocking-factor=1 --sort=name"
+GNUFMT="--format=ustar --sort=name"
 
 work=$DIFF_TMP/work
 mkdir -p "$work"
@@ -187,11 +189,25 @@ settle() {
 # saying only "they differ". The first differing 512-byte block is what a tar
 # bug is almost always confined to, and the header layout is fixed, so an
 # offset within it identifies the field.
+#
+# Two archives can disagree in two quite different ways, and one sentence cannot
+# describe both. A *differing byte* is a header bug and wants the offset; a
+# common prefix that simply runs out is a *length* bug — the padding, an archive
+# truncated by a fatal error — and wants the two sizes instead. `cmp` already
+# separates them: it names a differing byte on stdout, and reports the shorter
+# file only as `cmp: EOF on X after byte N` on stderr. So an empty match on the
+# stdout form is the signal that this is the length case, not the byte case.
 archive_delta() {
   local a=$1 b=$2
   if cmp -s "$a" "$b"; then printf 'same'; return; fi
   local off
-  off=$(cmp "$a" "$b" 2>/dev/null | sed 's/.*byte \([0-9]*\),.*/\1/')
+  off=$(cmp "$a" "$b" 2>/dev/null | sed -n 's/^.* differ: byte \([0-9][0-9]*\),.*$/\1/p')
+  if [ -z "$off" ]; then
+    printf 'agree then one ends: ours %s bytes, gnu %s bytes' \
+      "$(stat -c %s "$a" 2>/dev/null || printf 'absent')" \
+      "$(stat -c %s "$b" 2>/dev/null || printf 'absent')"
+    return
+  fi
   printf 'differ at byte %s (block %s, offset %s: %s)' \
     "$off" "$(( (off-1) / 512 ))" "$(( (off-1) % 512 ))" \
     "$(header_field $(( (off-1) % 512 )))"
@@ -479,6 +495,80 @@ touch -d '2020-01-02 03:04:05' "long/$LONGDIR/$LONGFILE" "long/$LONGDIR" long
 create_case 'a name too long for the name field' long
 interop_case 'a name too long for the name field' long
 
+# An archive of nothing. GNU declines rather than truncating whatever `-f`
+# names, and the check runs on argv alone -- before the archive is opened and
+# before any `-C` is entered, which is what the second and third cases pin down:
+# neither the unopenable path nor the missing directory is mentioned. Ours wrote
+# a valid 10240-byte archive of no members and exited 0.
+plain_case 'no operands at all'            -cf o.tar
+plain_case 'no operands, spelled long'     --create --file=o.tar
+plain_case 'no operands and -v'            -cvf o.tar
+plain_case 'no operands, unwritable -f'    -cf /nosuchdir/o.tar
+plain_case 'no operands, only a -C'        -cf o.tar -C tree
+plain_case 'no operands, only a missing -C' -cf o.tar -C nosuchdir
+plain_case 'no operands, to stdout'        -c
+
+# ---------------------------------------------------------------------------
+# the record size — how far the archive is padded past its last member
+# ---------------------------------------------------------------------------
+# Every `create_case` above is now also a test of this, because the default
+# record came out of GNUFMT: an archive that stops after the two zero blocks is
+# a *prefix* of the one GNU writes, and `archive_delta` says so. The cases here
+# are for the knob itself.
+#
+# `-b`/`--blocking-factor` counts 512-byte blocks and `--record-size` counts
+# bytes, but they are one setting and not two: the last one on the line wins,
+# whichever spelling it used. Two independent fields would make `-b 3
+# --record-size=1024` mean 1536 and it means 1024.
+create_case 'a one-block record'         -b 1 tree
+create_case 'a three-block record'       -b 3 tree
+create_case 'a record bigger than the archive' -b 40 tree
+create_case 'the record size in bytes'   --record-size=1024 tree
+create_case 'a record size below the archive' --record-size=1536 tree/a.txt
+create_case 'record size wins when it is last' -b 3 --record-size=1024 tree
+create_case 'blocking factor wins when it is last' --record-size=1024 -b 3 tree
+# The suffix letters are a tape utility's, not `du`'s: `b` is a 512-byte block
+# and `B` is 1024, so these two differ by a factor of two. A tar that reached
+# for the familiar `1K = 1024, 1b = 1` reading would write the same bytes for
+# both.
+create_case 'a record size with a 512-byte suffix'  --record-size=3b tree
+create_case 'a record size with a 1024-byte suffix' --record-size=3B tree
+create_case 'a record size in KiB'                  --record-size=2K tree/a.txt
+
+# Refusing a value. There are three sentences and they are not interchangeable:
+# a blocking factor that will not parse names itself, a record size that will
+# not parse names itself with different wording, and a record size that parses
+# but is not a multiple of 512 names nothing at all. Which one you get is
+# decided by whether it *parsed*, not by whether it was sane -- 2^64-1 parses
+# and takes the multiple-of-512 sentence, 2^64 does not and takes the other.
+plain_case 'a blocking factor of zero'     -b 0 -cf o.tar tree
+plain_case 'a blocking factor past INT_MAX' -b 2147483648 -cf o.tar tree
+plain_case 'a blocking factor that is not a number' -b abc -cf o.tar tree
+plain_case 'a blocking factor in hex'      -b 0x10 -cf o.tar tree
+plain_case 'a blocking factor with a suffix' -b 3b -cf o.tar tree
+plain_case 'a record size that is not a multiple of 512' --record-size=1000 -cf o.tar tree
+plain_case 'a record size of 2^64-1'       --record-size=18446744073709551615 -cf o.tar tree
+plain_case 'a record size of 2^64'         --record-size=18446744073709551616 -cf o.tar tree
+plain_case 'a record size with two suffix letters' --record-size=1kB -cf o.tar tree
+plain_case 'a record size with a suffix we lack' --record-size=1E -cf o.tar tree
+# `strtoul`'s grammar, not a trim: leading space and a leading `+` are skipped,
+# trailing space is not, and the base is ten however the digits look.
+plain_case 'a blocking factor with a leading space' -b ' 3' -cf o.tar tree
+plain_case 'a blocking factor with a leading plus'  -b '+3' -cf o.tar tree
+plain_case 'a blocking factor with a trailing space' -b '3 ' -cf o.tar tree
+plain_case 'a blocking factor with a leading zero'  -b 0010 -cf o.tar tree
+
+# Zero is refused by both spellings, but not at the same moment. `-b 0` is the
+# parser's refusal and beats everything, `--record-size=0` gets through the
+# parser and is refused by the run -- after the check for no mode at all, and
+# after the refusal to archive nothing, but before `-f` is opened.
+plain_case 'a record size of zero'         --record-size=0 -cf o.tar tree
+plain_case 'a record size of zero and no mode'  --record-size=0 -f o.tar
+plain_case 'a record size of zero and no operands' --record-size=0 -cf o.tar
+plain_case 'a record size of zero, unwritable -f' --record-size=0 -cf /nosuchdir/o.tar tree
+plain_case 'a record size of zero and a missing -C' --record-size=0 -cf o.tar -C nosuchdir tree
+plain_case 'a blocking factor of zero and no mode' -b 0 -f o.tar
+
 # ===========================================================================
 # 2. GNU reading what we wrote
 # ===========================================================================
@@ -513,6 +603,46 @@ list_case 'truncated mid-header' -tf partial-header.tar
 # ===========================================================================
 extract_case 'a tree GNU wrote'   ref.tar
 extract_case 'one member by name' ref.tar tree/a.txt
+
+# Truncation on *extract* is a different code path from truncation on list, and
+# the difference is the whole point of the three cases below. A listing reader
+# only ever stops at a header boundary; an extractor can also run out of bytes
+# in the middle of a member's data, having already created the file and written
+# part of it. GNU gives two different answers, and the split is not where you
+# would guess:
+#
+#   cut inside (or at) a header   silent, exit 0. A short read where a header
+#                                 should begin is end-of-archive, not an error,
+#                                 so everything complete so far is kept and
+#                                 nothing is said about the remainder.
+#   cut inside member data        `Unexpected EOF in archive' *twice*, then
+#                                 `Error is not recoverable: exiting now',
+#                                 exit 2 -- and the partial member is left on
+#                                 disk holding the whole blocks that arrived.
+#
+# The doubled line is not a transcription slip: GNU 1.35 really prints it twice,
+# measured at every mid-data offset tried. It matters here because `settle`
+# compares stderr verbatim, so a tar that says it once is a difference.
+#
+# `tree`'s members are all one block or less, so a mid-data cut is unreachable
+# in `ref.tar` -- hence a fixture with a member six blocks long. Its layout is
+# fixed by `--sort=name`: [0] `bigsrc/', [1] `a.txt' header, [2] `a.txt' data,
+# [3] `big.bin' header, [4..9] `big.bin' data. The three offsets are one per
+# behaviour, and 2200 and 3072 are kept apart because they differ in what is
+# left behind (an empty `big.bin' versus a 1024-byte one) rather than in what is
+# printed -- a difference only `manifest` can see.
+mkdir -p bigsrc
+printf 'aaaa\n' > bigsrc/a.txt
+head -c 3000 /dev/zero | tr '\0' 'B' > bigsrc/big.bin
+touch -d '2001-09-09 01:46:40' bigsrc/a.txt bigsrc/big.bin bigsrc
+# shellcheck disable=SC2086
+"$gnu_real" $GNUFMT -cf big.tar bigsrc
+head -c 1724 big.tar > cut-header.tar
+head -c 2200 big.tar > cut-data-0.tar
+head -c 3072 big.tar > cut-data-1k.tar
+extract_case 'truncated inside a header'       cut-header.tar
+extract_case 'truncated before any data block' cut-data-0.tar
+extract_case 'truncated after one data block'  cut-data-1k.tar
 
 # Archived from *inside* `special`, so the members are `./f`, `./rel` and a
 # leading `.` for the directory itself. That is what `tar -cf - .` produces and
@@ -1119,7 +1249,128 @@ old_case 'an empty first argument, alone'   ''
 old_case 'a -- before the cluster'          -- cf o.tar src
 
 # ===========================================================================
-# 8. the known divergences
+# 8. -C, the change-directory instruction
+# ===========================================================================
+# `-C` is not an option carrying a value. It is an instruction executed *where
+# it appears* in the operand list, it may be given any number of times, and
+# each one is resolved relative to the one before it rather than to the
+# directory tar started in.
+#
+# Until 2026-08-30 this tar stored it as one `Option<OsString>` and acted on it
+# in exactly one place, inside the extractor. So a second `-C` overwrote the
+# first instead of following it, and under `-c` and `-t` the option was parsed
+# and then silently discarded -- which meant `tar -cf out.tar -C dir .`, the
+# commonest line anyone writes with this utility, failed with `Cannot stat`,
+# and `tar -tf a.tar -C nosuchdir` listed the archive and exited 0 where GNU
+# refuses. Five `-C` cases already existed and every one of them passed: all
+# five give one `-C`, once, under `-x`, which is the exact shape in which the
+# broken reading and GNU's cannot be told apart.
+create_case 'create from another directory'       -C tree a.txt
+create_case 'create with the -C dot idiom'        -C tree .
+create_case 'two -C, the second inside the first' -C tree -C sub .
+# `-f o.tar` is opened before the chdir and is not moved by it -- otherwise
+# these would write their output inside `tree` and then compare two files that
+# do not exist. (The pre-existing `-xvf ref.tar -C od` case says the same thing
+# for reading: the archive is found where tar started, not under `od`.)
+
+# A `-C` that cannot be entered is fatal, and the message is `Cannot open`,
+# not `Cannot chdir` -- which reads oddly for an option whose long name is
+# `--directory`, but GNU performs the chdir with an open and reports the open.
+# Ours said `Cannot chdir` until the same date.
+plain_case 'a -C that does not exist'          -cf o.tar -C nosuchdir tree/a.txt
+plain_case 'a -C naming a plain file'          -cf o.tar -C tree/a.txt zero.txt
+plain_case 'a -C that does not exist (-t)'     -tf ref.tar -C nosuchdir
+plain_case 'a -C naming a plain file (-t)'     -tf ref.tar -C ref.tar
+
+# A `-C` written *after* the last operand affects nothing, and under `-c` GNU
+# will not let that pass: it writes the archive in full, then prints a block of
+# its own and exits 2. `tar cf out.tar mydir -C /elsewhere` is a line people
+# write meaning the opposite of what it does, so exiting 0 would be the one
+# outcome that helps nobody. The trailing `-C` is nonetheless *executed* first,
+# which is what the `nosuchdir` case below shows -- it dies on the chdir and
+# never reaches the block.
+create_case 'a -C after the last operand'    -C tree a.txt -C sub
+create_case 'two -C after the last operand'  -C tree a.txt -C sub -C .
+# Reported by short name whichever spelling was used: `--directory=sub` comes
+# back as `-C 'sub'`.
+create_case 'a trailing --directory'         -C tree a.txt --directory=sub
+# ...and the value inside the block is quoted the way every other name is: an
+# unprintable byte as `\351`, inside the locale's directional single quotes.
+mkdir -p "cd-$NONUTF8"
+create_case 'a trailing -C that is not UTF-8' tree/a.txt -C "cd-$NONUTF8"
+plain_case 'a trailing -C that does not exist' -cf o.tar -C tree a.txt -C nosuchdir
+
+# ...and this is the one case in the whole harness that can see *when* a record
+# is written, because it is the one that dies with a partly-filled one and never
+# pads it. `a.txt` hands 1024 bytes to a 512-byte record and 512 of them reach
+# the file: a record is spilled when the *next* write needs the room, not when
+# the byte that fills it arrives. Flushing eagerly would leave 1024 here, and
+# writing straight through would leave 1024 at every record size. At the default
+# 10240 nothing is spilled at all and the file is empty, which is the other half
+# of the same statement.
+create_case 'a fatal trailing -C, one-block record'  -b 1 -C tree a.txt -C nosuchdir
+create_case 'a fatal trailing -C, default record'    -C tree a.txt -C nosuchdir
+
+# ...and all of that is create-only. Under `-x` a `-C` that no member operand
+# follows is never reached at all -- not executed, not complained about, exit 0.
+# Extraction treats `-C` as a destination for the members after it, while
+# creation treats it as a step in a sequence and runs every step. With no member
+# operands at all the whole archive is wanted, so the destination is the end of
+# the chain.
+prep_two_dirs() { mkdir -p d1/d2; }
+PREP=prep_two_dirs extract_case 'two -C, both before the member' ref.tar \
+  -C d1 -C d2 tree/a.txt
+PREP=prep_two_dirs extract_case 'two -C and no member operands' ref.tar -C d1 -C d2
+PREP=prep_two_dirs extract_case 'a trailing -C that does not exist' ref.tar \
+  -C d1 tree/a.txt -C nosuchdir
+extract_case 'a -C that does not exist' ref.tar -C nosuchdir
+extract_case 'a -C naming a plain file' ref.tar -C ../ref.tar
+
+# Each member goes where *its own* operand said, which is not the same as
+# folding the chain into one destination: `-C d1 A -C d2 B` leaves `A` in `d1`
+# and `B` in `d1/d2`. Only these two cases tell the two readings apart, and the
+# difference is visible only in where the files land -- so they are
+# `extract_case`, which compares the unpacked tree, not just the output.
+PREP=prep_two_dirs extract_case 'two -C, one before each member' ref.tar \
+  -C d1 tree/a.txt -C d2 tree/zero.txt
+# The archive holds `tree/a.txt` before `tree/zero.txt`, so naming the *later*
+# member first makes the levels come back out of archive order: this one has to
+# come back *up* from `d1/d2` to `d1` partway through, which a single cwd that
+# only ever walks forward cannot do.
+PREP=prep_two_dirs extract_case 'two -C, the deeper one named first' ref.tar \
+  -C d1/d2 tree/zero.txt -C .. tree/a.txt
+# The lazy half of the same rule: a `-C` is entered when a member that belongs
+# to it is met, so the members before it are already extracted when it fails,
+# and the operands after it are never reported missing -- GNU exits on the spot.
+prep_one_dir() { mkdir -p d1; }
+PREP=prep_one_dir extract_case 'a second -C that does not exist' ref.tar \
+  -C d1 tree/a.txt -C nosuchdir tree/zero.txt
+# ...and it is never entered at all when no member matches the operand that
+# follows it, which is why this says only `Not found in archive`.
+PREP=prep_one_dir extract_case 'a second -C whose member is not in the archive' \
+  ref.tar -C d1 tree/a.txt -C nosuchdir tree/nope
+# Listing is lazy in exactly the same way, and the ordering shows it: `tree/a.txt`
+# is printed *before* the directory that could not be entered is reported. (These
+# are `plain_case`, which does not honour `$PREP` -- but a listing writes nothing,
+# so the destination only has to exist.)
+mkdir -p d1
+plain_case 'a second -C that does not exist (-t)' \
+  -tf ref.tar -C d1 tree/a.txt -C nosuchdir tree/zero.txt
+plain_case 'a second -C whose member is not in the archive (-t)' \
+  -tf ref.tar -C d1 tree/a.txt -C nosuchdir tree/nope
+# A directory member and a file member in different destinations: `tree/sub` is
+# stored 0700, and its deferred mode/mtime restore has to happen under the
+# directory member's own root rather than under whichever one the run ended in.
+PREP=prep_two_dirs extract_case 'a directory member and a file member split apart' \
+  ref.tar -C d1 tree/sub -C d2 tree/a.txt
+# A symlink held back to the end of the run, in a destination that is not the
+# last one: `./abs` points at `/etc/passwd`, so it is stood up as a placeholder
+# and only becomes a symlink after the archive is read -- in `d1`, not `d1/d2`.
+PREP=prep_two_dirs extract_case 'a delayed symlink in a non-final destination' \
+  spec.tar -C d1 ./abs -C d2 ./f
+
+# ===========================================================================
+# 9. the known divergences
 # ===========================================================================
 plain_xcase \
   "GNU's -Z is compression, which this tar does not implement; the message is a refusal either way, and the wording of a refusal for an option we do not have is not something to copy" \

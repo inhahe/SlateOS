@@ -422,9 +422,24 @@ impl ResourceType {
     ///    turns the boot red until you do this one — deliberately, because
     ///    step 4 is the one with no compiler behind it at all and this is the
     ///    last place that can make you stop and read it.
-    /// 4. Lane B's mirrored copy in `posix/src/sys_capability.rs`, which no
-    ///    compiler here can see. File a request; do not assume they will
-    ///    notice.
+    /// 4. `posix/src/sys_capability.rs` — **only if** the new type implies a
+    ///    Linux capability. It is *not* a mirror of this enum, despite what
+    ///    this step used to say: it lists the handful of types some rule in
+    ///    its `project()` actually tests — seven of the thirty-one — so a
+    ///    type that no `CAP_*` follows from belongs nowhere in it. Ask lane B
+    ///    whether one does; no compiler here can see either answer. Do not
+    ///    assume they will notice, and do not assume there is a line to add.
+    ///
+    ///    Keep asking every time even so. The two trees cannot check each
+    ///    other, and the failure this step exists to prevent — fifteen types
+    ///    added past a `sys_cap_request` copy that stopped at `Namespace`,
+    ///    `InvalidArgument` for every one of them, no test red — is far
+    ///    costlier than a request answered "no line needed". A *false*
+    ///    projection is costlier still: a `diskimager` holding `BlockDevice`
+    ///    would report `CAP_SYS_RAWIO`, and a ported program reading that bit
+    ///    as "I may call `ioperm`" gets yes from libc and no from this
+    ///    kernel. An absent name is visibly absent; a wrong one is not. See
+    ///    `requests/b-a-there-is-no-mirrored-resourcetype-table-in-posix-and-step-4-should-not-say-there-is.md`.
     /// 5. [`Self::from_raw`], below — the inverse. It is a `match` on a `u16`,
     ///    so the compiler cannot check it; `test_resource_type_from_raw` walks
     ///    `1..=LAST` and turns the boot red instead.
@@ -687,9 +702,14 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // The discriminant is the wire value, and lane B mirrors these numbers by
-    // hand in `posix/src/sys_capability.rs`, where no compiler here can see
-    // them.  Two *different* mistakes have to be caught, and it is worth being
+    // The discriminant is the wire value, and lane B hand-copies *some* of
+    // these numbers into `posix/src/sys_capability.rs`, where no compiler here
+    // can see them.  Some, not all: that file lists only the types one of its
+    // `project()` rules tests — seven of the thirty-one — so an append usually
+    // needs nothing there, while a renumbering silently repoints every one of
+    // the seven.  That asymmetry is why the two pins below are separate.
+    //
+    // Two *different* mistakes have to be caught, and it is worth being
     // precise about which pin catches which — an earlier version of this
     // comment claimed the `ResourceLimit` pin caught an append, which it does
     // not: appending a variant leaves `ResourceLimit` at 29 and this check
@@ -736,8 +756,11 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
         serial_println!(
             "[cap]   FAIL: ResourceType::LAST is {}, pinned at 31 — a new resource type \
              was appended. That is fine, but the wire ABI just grew: bump the pin here, \
-             and file a request so lane B adds it to posix/src/sys_capability.rs. Until \
-             they do, userspace decodes the new type as unknown.",
+             and ask lane B whether the new type implies a Linux capability. If it does, \
+             posix/src/sys_capability.rs needs a rule; if it does not — which is the usual \
+             answer, that file names seven of our thirty-one types — it needs nothing, and \
+             adding it anyway would make capget() report a CAP_* the kernel will refuse. \
+             Ask either way: no compiler here can see that tree.",
             ResourceType::LAST
         );
         return Err(KernelError::InternalError);

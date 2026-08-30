@@ -62680,15 +62680,19 @@ nice nohup patch ps readlink realpath renice rm rmdir sed sh sha256sum sleep
 stat strings tar tee time_cmd touch tty which xargs yes
 ```
 
-**Burn-down progress — 2026-08-30: seven findings left, in six files.** Naming
+**Burn-down progress — 2026-08-30: four findings left, in four files.** Naming
 what is *left* is now shorter than naming what is done, so this paragraph names
 that instead:
 
 ```
-diff  fetch  logger  patch  ps  sh (twice — argv and the environment)
+diff  logger  patch  ps
 ```
 
-`fetch` and `sh` are unblocked and are the next two to do. `diff`, `logger`,
+`fetch` and `sh` were the last two unblocked ones and are now done, which is
+what took the count from seven to four — `sh` carried two findings, argv and
+the environment. **Everything remaining is blocked on B-Q7**, so there is no
+unblocked work left in this entry; a reader looking for the next thing to do
+should look elsewhere until that question is answered. `diff`, `logger`,
 `patch` and `ps` each have a second implementation of the same utility outside
 `userspace/coreutils/` (`userspace/diff/`, `userspace/logger/`,
 `userspace/patch/`, `userspace/ps/`), so converting one of them means first

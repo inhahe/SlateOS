@@ -1675,8 +1675,8 @@ pub fn self_test() {
         // tests the symboliser's *spelling* as much as the frame walk, and
         // mangling is not this test's subject.
         if let Some((name, _)) = crate::ksyms::resolve_static(site as u64) {
-            let expected =
-                crate::ksyms::resolve_static(site_probe_acquire as usize as u64).map(|(n, _)| n);
+            let expected = crate::ksyms::resolve_static(site_probe_acquire as *const () as u64)
+                .map(|(n, _)| n);
             assert!(
                 Some(name) == expected,
                 "recorded site resolved to {name}, not to the function that took the \

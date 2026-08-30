@@ -96851,3 +96851,74 @@ the caller was never granted — which succeeds, returns a valid descriptor, and
 looks exactly like working confinement. That is the identical failure mode lane
 B asked for the ring-3 marshalling test to rule out, arriving through a
 different door. The gate should therefore land before, or with, that syscall.
+
+---
+
+## A-SYS-FS-DUP-NEVER-REGISTERS-ITS-NEW-HANDLE-SO-EVERY-DUP-LEAKS-ONE
+
+**Status:** OPEN · **Lane:** A · **Filed:** 2026-08-30 · **Severity:** medium
+(unbounded resource leak; also blocks the fix for
+`A-FILE-HANDLES-ARE-SEQUENTIAL-AND-UNOWNED-…`)
+
+**In short:** Duplicating an open file — what a program does when it wants a
+second, independent way to refer to the same file — creates a brand-new
+bookkeeping entry in the kernel, but the kernel never writes down which process
+owns it. Cleanup when a program exits works by walking the list of things that
+program was recorded as owning, so a duplicate is never on that list and is
+never cleaned up. Every duplicate a program makes therefore stays behind after
+it exits, for as long as the machine is up.
+
+**The chain, with the specific lines:**
+
+1. `sys_fs_dup` (`kernel/src/syscall/handlers.rs`) calls
+   `crate::fs::handle::dup(handle)` and returns the result. It does **not**
+   call `pcb::register_ipc_handle` — compare `sys_fs_open_mode`, which does.
+2. `fs::handle::dup` (`kernel/src/fs/handle.rs`) is not a refcounting dup: it
+   reads the source entry, drops the lock, and calls `allocate_handle` /
+   `allocate_dir_handle`, both of which take a fresh number from `NEXT_HANDLE`.
+   So the returned value is a genuinely new `OPEN_FILES` entry, not another
+   reference to an existing one.
+3. Exit cleanup (`pcb.rs:6241-6249`) does
+   `core::mem::take(&mut proc.ipc_handles)` and hands *that list* to
+   `ipc::cleanup_handles`. Nothing else closes handles at exit.
+
+An entry that was never added at step 1 is not in the list at step 3. It is
+therefore never closed, and `OPEN_FILES` grows monotonically across the boot.
+
+**Note the contrast that shows this is an oversight rather than a policy:**
+`sys_fs_close` deliberately calls `pcb::deregister_ipc_handle`, with a comment
+explaining it is "so the handle is not double-closed by `cleanup_handles` on
+process exit." The close path is written with full awareness that
+`ipc_handles` drives exit cleanup. The dup path simply never got the matching
+registration.
+
+**A second consequence beyond the leak:** the duplicate also survives its
+creator, so its number stays live and readable by anyone — which makes this
+strictly worse under
+`A-FILE-HANDLES-ARE-SEQUENTIAL-AND-UNOWNED-SO-ANY-PROCESS-CAN-READ-ANY-OPEN-FILE`.
+A leaked handle to a file a now-dead privileged service had open is exactly
+the thing that bug lets an unprivileged process find by counting.
+
+**Proper fix:** in `sys_fs_dup`, register the returned handle to
+`caller_pid()` exactly as `sys_fs_open_mode` does:
+
+```rust
+if let Some(pid) = caller_pid() {
+    pcb::register_ipc_handle(pid, ResourceType::File, new_handle);
+}
+```
+
+Conditional on `caller_pid()` because kernel-context callers have no pid, which
+is the same condition the open path uses.
+
+**Why this must land before the ownership gate**, not after: with the gate in
+and this unfixed, a dup'd handle would be unowned and so the very next
+`SYS_FS_READ` on it would be refused — turning a leak into a visible breakage
+of every program that dups. Fixing the registration first makes the gate a
+no-op for correct programs.
+
+**Also unaudited on the same axis:** `SYS_FS_HANDLE_PATH` consumes a handle
+with no ownership check and returns the file's full VFS path, which discloses
+the path of any open file in the system even to a caller that cannot read it.
+Covered by the gate in the other entry; noted here because it is a disclosure
+in its own right, not merely a missing check.

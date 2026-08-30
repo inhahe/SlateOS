@@ -28,11 +28,6 @@
 #   --blocking-factor=1   GNU pads the archive to a 10 KiB record; ours ends
 #                         after the two zero blocks that ustar requires. The
 #                         padding is a tape-drive artefact, not a format rule.
-#   --numeric-owner       on create this leaves `uname`/`gname` empty, which is
-#                         what ours writes. Filling them needs a passwd lookup
-#                         (see the xfail at the bottom), so normalising it here
-#                         keeps that one known gap from masking every other
-#                         difference in the same 512 bytes.
 #   --sort=name           GNU walks a directory in whatever order `readdir`
 #                         returns; ours sorts, so that archiving the same tree
 #                         twice gives the same bytes. ustar imposes no order at
@@ -41,9 +36,12 @@
 #                         against anything, so the reference is the one that
 #                         gets pinned.
 #
-# Nothing else is normalised. In particular the mode, uid, gid and mtime fields
-# are compared as written, because those are the fields a backup exists to
-# preserve.
+# Nothing else is normalised. In particular the mode, uid, gid, mtime *and*
+# uname/gname fields are compared as written, because those are the fields a
+# backup exists to preserve. `--numeric-owner` used to be in that list, to keep
+# ours leaving uname/gname empty from masking every other difference in the same
+# 512 bytes; it came out when ours started filling them, so the owner names are
+# now compared like everything else.
 #
 # Run `OURS=/usr/bin/tar ./scripts/tar-diff.sh` to confirm the harness still
 # discriminates: it should report every xfail as XPASS and nothing else. (The
@@ -59,7 +57,7 @@ DIFF_NEED='find stat cmp od sha256sum touch ln readlink mkfifo'
 pass=0; fail=0; xfail=0; xpass=0
 
 # GNU's format normalisation. See the header.
-GNUFMT="--format=ustar --blocking-factor=1 --numeric-owner --sort=name"
+GNUFMT="--format=ustar --blocking-factor=1 --sort=name"
 
 work=$DIFF_TMP/work
 mkdir -p "$work"
@@ -1053,17 +1051,10 @@ plain_xcase \
   "both tars print help and exit 0; the texts differ because ours documents the options it has and GNU's documents 172 it has. Copying GNU's list would advertise options that do not work -- see design-decisions.md 703" \
   'a long option' --help
 
-# `uname`/`gname` are left empty by ours, so an archive moved to a machine with
-# different numeric ids restores to the wrong owner. Filling them needs a
-# passwd lookup, which is why this is recorded rather than fixed in passing.
-# `--numeric-owner` is dropped here so the case is exactly that difference.
-rm -f o.tar gn.tar
-diff_run env PATH="$bindir/ours" tar -cf o.tar tree >/dev/null 2>&1
-"$gnu_real" --format=ustar --blocking-factor=1 -cf gn.tar tree >/dev/null 2>&1
-if cmp -s o.tar gn.tar; then AGREED=yes; else AGREED=no; fi
-REPORT="  (uname/gname)"
-xreport 'create: uname/gname are filled in' \
-  'ours leaves uname/gname empty; GNU fills them from the passwd database, so an archive restored on another machine gets the wrong owner name. Needs a passwd lookup in tar. known-issues.md -> B-tar'
+# `uname`/`gname` were an xfail here until ours learned to fill them. They are
+# not a case of their own any more: `--numeric-owner` came out of GNUFMT at the
+# same time, so every `create_case` above compares those two fields along with
+# the rest of the header, and `header_field` names them if they ever differ.
 
 printf '\ntar: %d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

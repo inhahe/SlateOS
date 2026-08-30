@@ -1243,6 +1243,27 @@ impl TarHeader {
         target.len() <= NAME_FIELD
     }
 
+    /// Store an owner *name* in one of the two 32-byte `uname`/`gname` fields.
+    ///
+    /// Unlike `name`, these fields are NUL-terminated even when full, so the
+    /// usable width is 31 and a longer name is cut to fit — silently. That is
+    /// measured, not assumed (`tar-uname2.sh`): GNU stores 31 `u`s and a NUL for
+    /// an owner named with 32, 33 or 40 of them, says nothing about it, and
+    /// exits 0. It follows from tar's `tar_copy_str`, which stops at the first
+    /// NUL *or* at the field width, leaving the array's own zero byte in place.
+    ///
+    /// An empty name is stored as an all-NUL field, which is how ustar spells
+    /// "no name recorded" — the reader then falls back to the numeric id. That
+    /// is the same encoding `--numeric-owner` produces, deliberately: an id with
+    /// no account is indistinguishable from one whose name was suppressed, and
+    /// both mean "you only have the number".
+    fn set_owner_name(field: &mut [u8; 32], name: &[u8]) {
+        let kept = name.len().min(field.len().saturating_sub(1));
+        if let (Some(dst), Some(src)) = (field.get_mut(..kept), name.get(..kept)) {
+            dst.copy_from_slice(src);
+        }
+    }
+
     /// Write `value` as a zero-padded octal string into `field`.  The
     /// field always ends with a trailing null byte, matching ustar.
     fn set_octal(field: &mut [u8], value: u64) {
@@ -1556,6 +1577,70 @@ impl PrefixNotice {
     }
 }
 
+/// The account database, plus the answers already looked up in it.
+///
+/// ustar stores each member's owner *twice*: as a number, and as the name that
+/// number had on the machine the archive was written on. Only the name survives
+/// a move — uid 1000 is a different person on every machine — so an archive
+/// with the field left empty restores to whoever happens to hold the number
+/// there. Ours left it empty for every member of every archive it ever wrote,
+/// which is why this exists.
+///
+/// The cache is the reason it is a struct rather than two calls. Archiving a
+/// home directory means one lookup per member against a database that is a
+/// linear scan, all of them asking about the same one or two accounts; the map
+/// turns that into one scan per distinct id. GNU caches for the same reason,
+/// though it keeps only the most recent answer.
+///
+/// A name is stored only when the database has one. An id it does not know
+/// leaves the field empty, exactly as `--numeric-owner` would — measured
+/// (`tar-uname1.sh`): `tar --owner=4242` writes an empty `uname` and lists the
+/// member as `4242/…`. Leaving it empty is the honest encoding; inventing
+/// `"4242"` as a *name* would make the reader restore ownership to an account
+/// literally called `4242` if one existed.
+#[cfg(unix)]
+struct OwnerNames {
+    db: pwdb::Db,
+    users: BTreeMap<u32, Vec<u8>>,
+    groups: BTreeMap<u32, Vec<u8>>,
+}
+
+#[cfg(unix)]
+impl OwnerNames {
+    /// Read `/etc/passwd` and `/etc/group` once, for the whole run.
+    ///
+    /// Through `pwdb` and not libc's `getpwuid`, which on this system answers
+    /// "root" for uid 0 and nothing for anything else — see that crate's docs.
+    /// A missing or unreadable database yields an empty one rather than an
+    /// error: not knowing who uid 1000 is has an encoding in the format, so it
+    /// is not a failure and must not cost the user their archive.
+    fn load() -> Self {
+        Self {
+            db: pwdb::Db::load(),
+            users: BTreeMap::new(),
+            groups: BTreeMap::new(),
+        }
+    }
+
+    fn user(&mut self, uid: u32) -> &[u8] {
+        let db = &self.db;
+        self.users.entry(uid).or_insert_with(|| {
+            db.user_by_uid(uid)
+                .map(|u| u.name.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    fn group(&mut self, gid: u32) -> &[u8] {
+        let db = &self.db;
+        self.groups.entry(gid).or_insert_with(|| {
+            db.group_by_gid(gid)
+                .map(|g| g.name.clone())
+                .unwrap_or_default()
+        })
+    }
+}
+
 /// The state one `-c` pass carries from member to member.
 ///
 /// This was four free functions threading a `&mut i32`. The hard-link table is
@@ -1576,6 +1661,9 @@ struct Creator<'a> {
     /// unique within one filesystem — a bare `ino` key would link together two
     /// unrelated files that happen to share a number across mount points.
     links: BTreeMap<(u64, u64), Vec<u8>>,
+    /// The passwd/group database and the answers already taken from it, for the
+    /// `uname`/`gname` header fields. See [`OwnerNames`].
+    owners: OwnerNames,
     /// How much has already been stripped from a member name and from a hard
     /// link's target, so that the notice is issued once per *longer* prefix.
     /// This is why `tar -c ..` produces two lines, ``Removing leading `..'``
@@ -1664,6 +1752,10 @@ impl Creator<'_> {
         TarHeader::set_octal(&mut header.mode, u64::from(meta.mode()) & 0o7777);
         TarHeader::set_octal(&mut header.uid, u64::from(meta.uid()));
         TarHeader::set_octal(&mut header.gid, u64::from(meta.gid()));
+        // Beside each number, the name it stands for here. The number alone is
+        // meaningless on any other machine; see [`OwnerNames`].
+        TarHeader::set_owner_name(&mut header.uname, self.owners.user(meta.uid()));
+        TarHeader::set_owner_name(&mut header.gname, self.owners.group(meta.gid()));
         TarHeader::set_octal(&mut header.size, 0);
         TarHeader::set_octal(&mut header.mtime, meta.mtime().unsigned_abs());
         header.magic = *b"ustar\0";
@@ -1971,6 +2063,7 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
         verbose,
         status: 0,
         links: BTreeMap::new(),
+        owners: OwnerNames::load(),
         prefixes: PrefixNotice::new(),
         archive_id,
         writable: true,
@@ -6194,6 +6287,72 @@ mod tests {
         let mut h = TarHeader::new();
         assert!(!h.set_linkname(&[b'y'; 101]));
         assert_eq!(&h.linkname[..], &[b'y'; 100][..]);
+    }
+
+    #[test]
+    fn an_owner_name_is_cut_to_31_bytes_because_the_field_is_terminated() {
+        // Not 32, the field's width -- unlike `name`, which is legally
+        // unterminated when full, `uname` always keeps its NUL. Measured
+        // (`tar-uname2.sh`): GNU stores 31 `u`s and a NUL for an owner named
+        // with 32, 33 or 40 of them, prints no diagnostic, and exits 0.
+        let mut f = [0u8; 32];
+        TarHeader::set_owner_name(&mut f, b"inhahe");
+        assert_eq!(&f[..6], b"inhahe");
+        assert!(f[6..].iter().all(|&b| b == 0));
+
+        let mut f = [0u8; 32];
+        TarHeader::set_owner_name(&mut f, &[b'u'; 31]);
+        assert_eq!(&f[..31], &[b'u'; 31][..]);
+        assert_eq!(f[31], 0);
+
+        // The three GNU renders identically, terminator kept.
+        for len in [32usize, 33, 40] {
+            let mut f = [0u8; 32];
+            TarHeader::set_owner_name(&mut f, &vec![b'u'; len]);
+            assert_eq!(&f[..31], &[b'u'; 31][..], "len {len}");
+            assert_eq!(f[31], 0, "len {len}");
+        }
+    }
+
+    #[test]
+    fn an_id_with_no_account_leaves_the_owner_field_empty() {
+        // The tempting wrong answer is to fall back to the number. It would be
+        // wrong as a *name*: a reader restoring the archive on a machine that
+        // has an account literally called `4242` would hand the file to it.
+        // Empty is the format's own encoding for "you only have the number",
+        // and it is what GNU writes -- measured, `tar --owner=4242` leaves
+        // `uname` all-NUL and lists the member as `4242/...`.
+        let mut f = [0u8; 32];
+        TarHeader::set_owner_name(&mut f, b"");
+        assert!(f.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owner_names_come_from_the_database_and_are_cached() {
+        // The cache is not an optimisation detail worth a test on its own --
+        // it is tested because it is a *map keyed by id*, and the failure mode
+        // of getting that wrong is every member in the archive being stamped
+        // with the first member's owner.
+        let mut o = OwnerNames {
+            db: pwdb::Db::from_bytes(
+                b"alice:x:1000:1000:A:/home/alice:/bin/sh\n\
+                  bob:x:1001:2000:B:/home/bob:/bin/sh\n",
+                b"alice:x:1000:\nstaff:x:2000:alice\n",
+            ),
+            users: BTreeMap::new(),
+            groups: BTreeMap::new(),
+        };
+        assert_eq!(o.user(1000), b"alice");
+        assert_eq!(o.user(1001), b"bob");
+        assert_eq!(o.user(1000), b"alice");
+        assert_eq!(o.group(2000), b"staff");
+        // An id the database does not know: empty, and the emptiness is cached
+        // too, so a tree full of orphaned ids costs one scan and not one per
+        // member.
+        assert_eq!(o.user(4242), b"");
+        assert_eq!(o.group(4242), b"");
+        assert_eq!(o.users.len(), 3);
     }
 
     #[test]

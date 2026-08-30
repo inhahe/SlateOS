@@ -367,8 +367,8 @@ run_pipe '9d\nq\n'                   f.txt
 
 # === substitution =============================================================
 #
-# Only literal patterns. Anything with a metacharacter in it belongs under
-# KBUG below, not here — see `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`.
+# The mechanics of `s`: delimiters, flags, the unterminated form. What the
+# *pattern* means is a separate section further down.
 
 run_pipe '2s/beta/BETA/\n,p\nq\n'    f.txt
 run_pipe ',s/a/A/\n,p\nq\n'          f.txt
@@ -388,6 +388,131 @@ run_pipe ',s/a/A\nq\n'               f.txt
 run_pipe '1s/zz/A\nq\n'              f.txt        # ...unless nothing matched
 run_pipe '1s\nq\n'                   f.txt        # no pattern at all
 run_pipe ',s/\xff/Z/\n,p\nq\n'       bytes.txt    # a byte no String can hold
+
+# === regular expressions ======================================================
+#
+# A pattern is a POSIX *basic* RE through `ere::bre`, or an *extended* one under
+# `-E`. Everything in this section was a KBUG under
+# `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS` until the engine was wired in.
+#
+# Note on writing these: the script goes through `printf %b`, which turns `\1`
+# into byte 0x01. A backslash meant for ed must be doubled.
+
+run_pipe '1s/./X/\n,p\nq\n'          f.txt
+run_pipe ',s/^/> /\n,p\nq\n'         f.txt
+run_pipe ',s/$/./\n,p\nq\n'          f.txt
+run_pipe ',s/a*/X/\n,p\nq\n'         f.txt        # an empty match at the front
+run_pipe ',s/[aeiou]/./g\n,p\nq\n'   f.txt
+run_pipe ',s/[^aeiou]/./g\n,p\nq\n'  f.txt
+run_pipe ',s/[/]/X/\n,p\nq\n'        f.txt        # the delimiter inside a bracket
+run_pipe ',s/m\\{2\\}/X/\n,p\nq\n'     f.txt        # a BRE interval
+run_pipe ',s/\\(a\\)\\(l\\)/\\2\\1/\n,p\nq\n' f.txt  # \1..\9 in the replacement
+run_pipe ',s/a/[&]/\n,p\nq\n'        f.txt        # & is the whole match
+run_pipe ',s/a/[\\&]/\n,p\nq\n'      f.txt        # ...and \& is a literal one
+run_pipe 'a\nbanana\n.\n$s/\\(an\\)\\1/X/\n$p\nq\n' empty.txt   # a backreference
+run_pipe '1s/[/X/\nq\n'              f.txt        # an unbalanced bracket
+run_pipe '1s/\\(/X/\nq\n'            f.txt        # an unbalanced group
+run_pipe '1s/a\\+/X/\n,p\nq\n'       f.txt        # GNU's BRE extension
+run_pipe ',s/a+/X/\n,p\nq\n'         f.txt        # ...and a bare + is literal
+run_pipe ',s/\\./X/\n,p\nq\n'        f.txt        # an escaped metacharacter
+run_pipe ',s/[[:alpha:]]/X/\n,p\nq\n' f.txt       # a character class
+
+# The empty-match rule for `s///g`, which is ed's and not sed's: a match that
+# consumes nothing, on any pass after the first, ends the command with
+# `Infinite substitution loop` rather than skipping a character. The dividing
+# line is whether the *second* search can still match empty where the first one
+# did — which is what `^` cannot do, and `a*` can. Both halves are here because
+# getting one right by breaking the other is the easy mistake.
+run_pipe ',s/a*/X/g\n,p\nq\n'        f.txt        # empty after consuming: refused
+run_pipe ',s/b*/X/g\n,p\nq\n'        f.txt        # empty at 0 twice: refused
+run_pipe ',s/a*b*/X/g\n,p\nq\n'      f.txt        # ditto, two stars
+run_pipe ',s/\\(a\\)*/X/g\n,p\nq\n'    f.txt        # ditto, through a group
+run_pipe ',s/^x*/X/g\n,p\nq\n'       f.txt        # ^ cannot match twice: allowed
+run_pipe ',s/^a*/X/g\n,p\nq\n'       f.txt        # ...even having consumed
+run_pipe ',s/x*$/X/g\n,p\nq\n'       f.txt        # $ likewise
+run_pipe ',s/al*/X/g\n,p\nq\n'       f.txt        # always consumes: allowed
+run_pipe ',s/a*/X/\n,p\nq\n'         f.txt        # no `g`, so one pass, allowed
+run_pipe 'a\n\n.\n$s/x*/X/g\n$p\nq\n' empty.txt   # an empty line substitutes once
+# A line the walk already changed keeps its change when a later line raises the
+# error — which is also why `q` then refuses.
+run_pipe 'a\naaa\nbbb\n.\n,s/a*/X/g\n,p\nq\n' empty.txt
+run_pipe 'a\nbbb\naaa\n.\n,s/a*/X/g\n,p\nq\n' empty.txt
+
+# A search address, forwards and backwards, and the empty pattern that repeats
+# the last one. The search wraps, so three `/a/` on a three-line file come back
+# to where they started.
+run_pipe '/beta/p\nq\n'              f.txt
+run_pipe '/BETA/p\nq\n'              f.txt        # no match
+run_pipe '?beta?p\nq\n'              f.txt
+run_pipe '/a/p\n//p\nq\n'            f.txt
+run_pipe '/a/p\n??p\nq\n'            f.txt
+run_pipe '//p\nq\n'                  f.txt        # nothing searched for yet
+run_pipe 's//X/\nq\n'                f.txt
+run_pipe '/beta/,/gamma/p\nq\n'      f.txt
+run_pipe '/a/\n/a/\n/a/\np\nq\n'     f.txt        # the search wraps
+run_pipe '/gamma/+p\nq\n'            f.txt        # past the end after a search
+run_pipe '/be/d\n,p\nq\n'            f.txt
+run_pipe '/beta\nq\n'                f.txt        # unterminated, still a search
+
+# `-E` selects the extended dialect, where `+`, `?`, `|` and unbackslashed
+# parentheses are the metacharacters instead of their backslashed forms.
+run_pipe ',s/a+/X/\n,p\nq\n' -E      f.txt
+run_pipe ',s/(a)(l)/\\2\\1/\n,p\nq\n' -E f.txt
+run_pipe ',s/a|b/X/g\n,p\nq\n' -E    f.txt
+run_pipe ',s/al?/X/\n,p\nq\n' -E     f.txt
+run_pipe ',s/\\(a\\)/X/\n,p\nq\n' -E   f.txt      # backslashed parens are literal
+run_pipe 'g/a|g/p\nq\n' --extended-regexp f.txt
+run_null -E
+run_null --extended-regexp
+
+# `-G` is GNU's compatibility mode. Of the commands this ed has, the one thing
+# it changes is that `l` ends the line without the `$` marker.
+run_pipe '1l\nq\n' -G                f.txt
+run_pipe ',l\nq\n' -G -s             bytes.txt
+run_pipe ',l\nq\n' --traditional -s  blanks.txt
+run_pipe '1ll\nq\n' -G               f.txt
+run_null -G
+run_null --traditional
+
+# === global commands ==========================================================
+#
+# `g`/`v` run a command list over every (non-)matching line; `G`/`V` ask at the
+# terminal for the list instead, and read the answers from the same stdin the
+# script arrived on.
+
+run_pipe 'g/a/p\nq\n'                f.txt
+run_pipe 'g/a/\nq\n'                 f.txt        # an empty list means p
+run_pipe 'g/a/\\\n\nq\n'             f.txt        # ...twice, for two empty ones
+run_pipe 'v/a/p\nq\n'                f.txt        # nothing lacks an a
+run_pipe 'v/beta/p\nq\n'             f.txt
+run_pipe 'g/a/d\n,p\nq\n'            f.txt
+run_pipe 'v/beta/d\n,p\nq\n'         f.txt
+run_pipe 'g/a/s/a/X/\n,p\nq\n'       f.txt
+run_pipe 'g/a/s/a/X/g\n,p\nq\n'      f.txt
+run_pipe '2,3g/a/p\nq\n'             f.txt
+run_pipe '1,2v/a/p\nq\n'             f.txt
+run_pipe 'g/zzz/p\nq\n'              f.txt        # nothing matches
+run_pipe 'g/a/=\nq\n'                f.txt
+run_pipe 'g/e/n\nq\n'                five.txt
+run_pipe 'g/o/l\nq\n'                five.txt
+run_pipe 'g/a/g/b/p\nq\n'            f.txt        # nesting is refused
+run_pipe 'g\nq\n'                    f.txt        # no delimiter at all
+run_pipe 'g/a p\nq\n'                f.txt        # a space is not a delimiter
+run_pipe 'g,a,p\nq\n'                f.txt        # any other byte is
+run_pipe 'g/a/w other.txt\nq\n'      f.txt        # the list may write
+# The list continues while a line ends in an odd number of backslashes, and the
+# newline the backslash hid separates the two commands.
+run_pipe 'g/beta/s/e/E/\\\ns/t/T/\n,p\nq\n'   f.txt
+# `a` inside a list takes its text from the list and ends when the list does —
+# there is no `.` to close it.
+run_pipe 'g/beta/a\\\ninserted\n,p\nq\n'      f.txt
+run_pipe 'g/a/s/a/X/\\\np\nq\n'               f.txt
+# `G` prints each selected line and takes its list from stdin: a reply is a new
+# list, an empty reply skips the line, and `&` repeats the last list.
+run_pipe 'G/a/\ns/a/X/\n\n&\n,p\nq\n'         f.txt
+run_pipe 'V/beta/\np\n,p\nq\n'                f.txt
+run_pipe 'G/a/\n\n\n\n,p\nq\n'                f.txt
+run_pipe 'G/zzz/\nq\n'                        f.txt
 
 # === file names ===============================================================
 
@@ -463,40 +588,26 @@ xfail_case 'version names SlateOS' -V
 # is what every other utility here prints; matching ed's would mean a second
 # option parser in the tree for the sake of a worse message.
 xfail_case 'getopt lists the ambiguity candidates and ed does not' --s
-# `-E`/`--extended-regexp` and `-G`/`--traditional` both select a regex engine.
-# We have no regex engine wired in at all yet, so accepting either would be a
-# lie: the option would be taken and change nothing. Refusing it says so.
-xfail_case 'the regex options are refused rather than silently ignored' -E
-xfail_case 'the regex options are refused rather than silently ignored' -G
-xfail_case 'the regex options are refused rather than silently ignored' --extended-regexp
-xfail_case 'the regex options are refused rather than silently ignored' --traditional
-# A file name beginning with `!` is a *shell command* to GNU, which runs it and
-# pipes the buffer through it. We have no `!` at all — see the module docs —
-# and refusing the name is the honest answer, since taking it as a literal file
-# name would write to a file the user did not ask for.
+# `!CMD`, and a file name beginning with `!`, hand the line to a shell. That is
+# a deliberate omission rather than a missing feature — see the module docs and
+# `design-decisions.md` §713 — so all three answer `Shell access not implemented
+# by this ed`. Taking `!cmd` as a literal file name would write to a file the
+# user did not ask for, which is why refusing is the honest answer.
 xfail_pipe 'a name starting with ! is a shell command we do not run' 'w !cmd\nq\n' f.txt
 xfail_pipe 'a name starting with ! is a shell command we do not run' 'r !cmd\nq\n' f.txt
+xfail_pipe '! runs a shell command and we do not have a shell' '!echo hi\nq\n' f.txt
 
 # --- known bugs ---------------------------------------------------------------
 #
-# `s` and the `/RE/` addresses take a literal string where GNU takes a basic
-# regular expression, and the `g`/`v`/`G`/`V` commands are missing entirely.
-# The fix is `ere::bre::compile`, which `sed` already uses.
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '1s/./X/\n,p\nq\n'    f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' ',s/^/> /\n,p\nq\n'   f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' ',s/a*/X/\n,p\nq\n'   f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '/beta/p\nq\n'        f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' 'g/a/p\nq\n'          f.txt
 # Commands we have not written. Each is `?` here and does something there.
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '1m$\n,p\nq\n'        f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '1t$\n,p\nq\n'        f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '1,2j\n,p\nq\n'       f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '1ka\n$\np\nq\n'      f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '$r f.txt\n,p\nq\n'   five.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '1d\nu\n,p\nq\n'      f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' 'e five.txt\n,p\nq\n' f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '#comment\n1p\nq\n'   f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '!echo hi\nq\n'       f.txt
+kbug_pipe 'TD-B-ED-IS-MISSING-EIGHT-COMMANDS' '1m$\n,p\nq\n'        f.txt
+kbug_pipe 'TD-B-ED-IS-MISSING-EIGHT-COMMANDS' '1t$\n,p\nq\n'        f.txt
+kbug_pipe 'TD-B-ED-IS-MISSING-EIGHT-COMMANDS' '1,2j\n,p\nq\n'       f.txt
+kbug_pipe 'TD-B-ED-IS-MISSING-EIGHT-COMMANDS' "1ka\n'ap\nq\n"       f.txt
+kbug_pipe 'TD-B-ED-IS-MISSING-EIGHT-COMMANDS' '$r f.txt\n,p\nq\n'   five.txt
+kbug_pipe 'TD-B-ED-IS-MISSING-EIGHT-COMMANDS' '1d\nu\n,p\nq\n'      f.txt
+kbug_pipe 'TD-B-ED-IS-MISSING-EIGHT-COMMANDS' 'e five.txt\n,p\nq\n' f.txt
+kbug_pipe 'TD-B-ED-IS-MISSING-EIGHT-COMMANDS' '#comment\n1p\nq\n'   f.txt
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$kbug" -gt 0 ]; then

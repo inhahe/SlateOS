@@ -52246,24 +52246,31 @@ The 140-case harness is `scripts/ed-diff.sh`; all three decisions below appear
 there as explicitly-marked deliberate differences, so none of them can be
 mistaken later for a bug nobody noticed.
 
-### 1. `-E` and `-G` are recognised and refused, not accepted and ignored
+### 1. ~~`-E` and `-G` are recognised and refused~~ — superseded 2026-08-30
 
-`-E`/`--extended-regexp` and `-G`/`--traditional` both select a regular-
-expression dialect. This `ed`'s `s` matches a *literal string* (see
-`known-issues.md` → `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`), so there is no
-dialect to select and no way to honour either flag.
+This decision said `-E`/`--extended-regexp` and `-G`/`--traditional` were
+refused rather than accepted-and-ignored, because a script that passes `-E` and
+gets literal matching does not fail — it **edits the wrong bytes** and writes
+them. It set its own expiry: *"what changes when regular expressions land: both
+flags become accepted, and this half of the entry is deleted rather than
+revised."*
 
-*The alternative was to accept and ignore them*, which is what a compatibility
-shim usually does and what keeps the most scripts running. It was rejected
-because of what "the most scripts" means here. A script that passes `-E` passes
-it because it contains an extended regular expression; running it with literal
-matching does not fail, it **edits the wrong bytes** — `s/foo.*//` deletes
-nothing where it should have deleted to end of line, `w` writes the result, and
-the file is now wrong with no diagnostic anywhere. Refusing costs that script an
-error message it must be fixed to satisfy. Ignoring costs it the file.
+Regular expressions landed the same day (`known-issues.md` →
+`TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`, closed), so both flags are now accepted
+and both do what they say: `-E` compiles through `ere::Regex::new_flags` instead
+of `ere::bre::compile`, and `-G` drops `l`'s trailing `$`.
 
-*What changes when regular expressions land:* both flags become accepted, and
-this half of the entry is deleted rather than revised.
+The heading is kept, and the section not renumbered, because §713's other three
+decisions are cited by number from `ed.rs` and from the harness — renumbering to
+close a gap would break those citations to save a line.
+
+One correction worth keeping, because it was the premise of the original text
+and it was wrong: **`-G` was never about a regex dialect.** GNU's
+`--traditional` is a compatibility mode over `G`, `V`, `f`, `l`, `m`, `t` and
+`!!`. Measured on GNU ed 1.20.1 across the commands this `ed` has, exactly one
+of them differs — `l` ends the line without `$`, and folds identically
+otherwise. Refusing the flag was still the right call while `l` could not honour
+it, but for a different reason than the one recorded.
 
 ### 2. A file name beginning with `!` is refused
 
@@ -52438,3 +52445,85 @@ seam is worth an extra type (`ResolvePlan`) in code that would otherwise be a
 short `if` chain: the alternative was an untestable `if` chain, which is what
 lane A's request warned would become untested marshalling under every program
 that reaches for a contained open.
+
+---
+
+## 715. `ere` gained a real `REG_NOTBOL` rather than `ed` faking one, and a decode-once searcher rather than a second empty-match policy baked into an iterator
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** `ed`'s search-and-replace command, `s`, can be told to replace
+*every* occurrence on a line (`s/old/new/g`). Some patterns match the empty
+string — `a*` matches "zero or more a's", which is satisfied by nothing at all
+— and a program that replaces "nothing" and then looks again at the same spot
+would run for ever. `sed` and `ed` solve that differently, and ours had `sed`'s
+answer. Fixing it needed a switch in the regular-expression library that we did
+not have: a way to say "`^` (start of line) has already been passed; it must
+not match again". These two decisions are about building that switch properly
+instead of simulating it inside `ed`.
+
+The bug: GNU `ed` answers `,s/a*/X/g` on `alpha` with `?` and *Infinite
+substitution loop*; ours answered `XlXpXhX`. Measured against GNU ed 1.20.1.
+The rule GNU actually follows is: substitute, advance past what was consumed,
+search the rest with `REG_NOTBOL` set — and if *that* search matches empty at
+the very position it started from, give up on the command. See
+`known-issues.md` → `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`, point 4.
+
+### Decision 1 — `ere::StartOfLine::No` is a real engine flag, not an `ed`-side trick
+
+`REG_NOTBOL` is the POSIX flag for "the first character of this subject is not
+the beginning of a line", which is exactly what a resumed `s///g` search needs:
+without it, `s/^x*/X/g` on `alpha` finds a *second* empty match at offset 0 and
+is reported as a loop, where GNU prints `Xalpha`. `ere` had no such flag.
+
+**The alternative considered and rejected** was an `ed`-local emulation:
+search a copy of the line with one sentinel newline byte in front of it and
+shift every span back by one. That is provably equivalent for this engine —
+`$` is unaffected, and a word boundary before the first character is decided the
+same way by "no character" and by "a newline", both being non-word — and it
+needed no library change at all. It was rejected because it is the shape the
+project's rules name outright: a band-aid that copies the line on every
+substitution, encodes a proof about the engine's internals in a caller that
+cannot see them, and would silently rot the day `ere` gained a multi-line mode
+in which a newline *is* a line start. The cost of doing it properly was one
+`Copy` enum threaded through five private functions and one `if` at each of the
+two places `Inst::AssertStart` is decided.
+
+**Why an enum rather than a `bool`:** `capture_spans_from(line, at, false)`
+does not say which way round the flag runs, and this is a flag whose two
+readings differ by a data-corrupting bug rather than by a formatting nicety.
+`StartOfLine::No` reads at the call site.
+
+**Cost accepted:** the flag exists on exactly one public entry point, and every
+other one passes `StartOfLine::Yes`. That is deliberate — `grep`, `sed`, `awk`
+and `expr` have no use for it, and an API where every search takes a flag would
+make four callers pay attention to a distinction only one of them has.
+
+### Decision 2 — `Regex::search` returns a reusable searcher; the walk stays the caller's
+
+`ere` already had two ways to step through a subject, and neither fits:
+`capture_spans_at(text, from)` re-decodes the whole subject on every call, so a
+global substitution on a long line is quadratic in its length; and
+`capture_spans_iter(text)` decodes once but **hard-codes one empty-match
+policy** — advance one character — which is precisely `sed`'s rule and
+precisely what `ed` must not do. Using the iterator is what produced the bug:
+it is not that `ed` used it carelessly, it is that the iterator's contract is
+somebody else's answer to the question `ed` was asking.
+
+So the third option: `Regex::search(text)` hands back a `Search` that owns the
+decoded subject and answers `capture_spans_from(at, bol)` any number of times.
+Decoding happens once; the walk — including what to do about an empty match —
+belongs to the caller, which is the only party that knows.
+
+**The alternative considered and rejected** was a second iterator, e.g.
+`capture_spans_iter_ed`, or an iterator parameterised by an empty-match policy
+enum. Rejected because the policy is not a closed set: `ed` does not merely
+"stop" on an empty match, it stops *only on a pass after the first* and reports
+a specific error, which is not a policy an iterator can express without also
+owning the error type. A policy enum would have grown a variant per caller.
+
+**Cost accepted:** one more public type in `ere`, and `capture_spans_at` is now
+a one-line delegation to it. The alternative reading — that `Search` duplicates
+`CaptureMatches` — is answered by what they do *not* share: `CaptureMatches`
+decides where the next search starts, `Search` is told.

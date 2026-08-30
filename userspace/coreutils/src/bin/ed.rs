@@ -77,18 +77,29 @@
 //! The command language is a subset, and the subset is stated here rather than
 //! left to be discovered:
 //!
-//! - **`s` matches a literal string, not a regular expression**, and there are
-//!   no `/RE/` addresses, no `g`/`v`/`G`/`V`. This is the largest gap and the
-//!   one that most changes what a command means: GNU's `s/./X/` replaces the
-//!   first *character*, this one replaces a literal full stop. It is recorded
-//!   in `known-issues.md` → `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`, and the fix
-//!   is `ere::bre`, which `sed` already uses.
-//! - No `m`, `t`, `j`, `k`, `r`, `e`/`E`, `u`, `x`/`y`, `h`/`H`, `#`, no
-//!   `!command`, no `+line` on the command line, no marks. (Not `z` — GNU ed
-//!   answers `?` to that one too, so it is not a gap.)
-//! - `-E`/`--extended-regexp` and `-G`/`--traditional` are recognised and
-//!   refused rather than ignored, because both are about a regex engine that is
-//!   not here.
+//! - No `m`, `t`, `j`, `k` and `'x`, `r`, `e`/`E`, `u`, `x`/`y`, `h`/`H`, `#`,
+//!   no `+line` on the command line, no marks. See `known-issues.md` →
+//!   `TD-B-ED-IS-MISSING-EIGHT-COMMANDS`. (Not `z` — GNU ed answers `?` to that
+//!   one too, so it is not a gap. Not `!command` either: that one is a refusal
+//!   rather than a gap — see below.)
+//!
+//! # Regular expressions
+//!
+//! `s`, the `/RE/` and `?RE?` addresses, and `g`/`v`/`G`/`V` all run POSIX
+//! **basic** regular expressions through [`ere::bre`], the same engine `sed`
+//! uses, over bytes rather than characters. `\1`…`\9` and `&` work in a
+//! replacement; `//` and `??` repeat the last pattern, and are an error rather
+//! than a match-everything when there is no last pattern.
+//!
+//! Two places where this file has to know about regex syntax itself, rather
+//! than handing the text to the engine:
+//!
+//! - **Finding the closing delimiter is bracket-aware.** `/` inside `[...]` is
+//!   an ordinary character, which is what makes `s/[/]/X/` a two-field command
+//!   that replaces a slash. See [`read_pattern`], and [`EdError::UnbalancedBrackets`]
+//!   for why an unclosed `[` is `ed`'s own diagnostic and not the engine's.
+//! - **A match may be abandoned rather than answered** — the engine bounds
+//!   backreference search. See [`Editor::matches`].
 //!
 //! # Deliberate differences from GNU
 //!
@@ -102,27 +113,30 @@
 //!   only `option '--=x' is ambiguous`. Every other wording — `invalid option
 //!   -- 'Z'`, `unrecognized option '--zz'`, the `Try 'ed --help'` referral —
 //!   matches.
-//! - **A file name beginning with `!` is refused**, where GNU takes it as a
-//!   shell command and runs it. Since there is no `!` here at all, the
-//!   alternative is to treat it as a literal name — which would *write to a
-//!   file the user did not ask for*, and silently. Refusing says so.
+//! - **`!command`, and a file name beginning with `!`, are refused**, where GNU
+//!   hands the text to a shell and runs it. This is a deliberate omission, not
+//!   a gap: see `design-decisions.md` §713. For the *name*, the alternative to
+//!   refusing is to treat it as a literal name — which would *write to a file
+//!   the user did not ask for*, and silently. All three answer
+//!   `Shell access not implemented by this ed`.
 //!
 //! # How this is checked
 //!
-//! `scripts/ed-diff.sh` runs 140 cases against GNU ed 1.20.1 inside WSL and
+//! `scripts/ed-diff.sh` runs 239 cases against GNU ed 1.20.1 inside WSL and
 //! compares four things, not the usual three: stdout, stderr, the exit status
 //! **and the bytes left on disk**. The fourth is not belt-and-braces — the
 //! data-loss bug above agreed with GNU on the first three and disagreed only on
 //! the file. Every case appears in the two stdin kinds where the two kinds
 //! differ. `OURS=/usr/bin/ed scripts/ed-diff.sh` checks the harness can still
-//! tell the two apart: it turns all 11 deliberate differences into `XPASS` and
-//! all 14 known-bug cases into `KFIXED`, and nothing else moves.
+//! tell the two apart: it turns all 8 deliberate differences into `XPASS` and
+//! all 8 known-bug cases into `KFIXED`, and nothing else moves.
 
 use coreutils::errmsg::strerror;
 use coreutils::filekind;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, os_from_bytes};
 use coreutils::stdfd::{self, Stream};
+use ere::{Regex, StartOfLine, bre};
 use std::ffi::OsString;
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
@@ -186,6 +200,15 @@ struct Options {
     strip_cr: bool,
     /// `--unsafe-names`: permit bytes 1–31 in a file name.
     unsafe_names: bool,
+    /// `-E`: patterns are POSIX *extended* regular expressions, so `a+`, `a|b`
+    /// and `\(…\)`-without-backslashes mean what they do in `egrep`.
+    extended: bool,
+    /// `-G`/`--traditional`. GNU's compatibility mode touches `G`, `V`, `f`,
+    /// `l`, `m`, `t` and `!!`; of those this `ed` has `G`, `V`, `f` and `l`, and
+    /// measured against GNU 1.20.1 exactly one of them differs — `l` omits the
+    /// trailing `$`. So that is what this flag does here, and the rest of
+    /// traditional mode is a no-op because it is already the same.
+    traditional: bool,
 }
 
 /// What the command line asked for.
@@ -238,6 +261,8 @@ Edit FILE as a buffer of lines.
 
   -h, --help                 display this help and exit
   -V, --version              output version information and exit
+  -E, --extended-regexp      use extended regular expressions
+  -G, --traditional          run in compatibility mode
   -l, --loose-exit-status    exit with 0 status even if a command fails
   -p, --prompt=STRING        use STRING as an interactive prompt
   -q, --quiet, --silent      suppress diagnostics written to stderr
@@ -251,11 +276,14 @@ Commands:
   (.)p / (.,.)p    print lines            (.)n   print with line numbers
   (.,.)l           print unambiguously    (.)a   append text after the line
   (.)i             insert text before     (.,.)c change lines
-  (.,.)d           delete lines           (.)s/PAT/REPL/ substitute (literal)
+  (.,.)d           delete lines           (.)s/RE/REPL/ substitute
+  (1,$)g/RE/CMDS   run CMDS on matches    (1,$)v/RE/CMDS on non-matches
+  (1,$)G/RE/        as g, one at a time   (1,$)V/RE/      as v, one at a time
   (1,$)w [FILE]    write to FILE          f [FILE]  show or set the file name
   ($)=             print a line number    q / Q  quit, with or without a warning
 
-Addresses may be a number, '.', '$', '+N', '-N', ',' (1,$), ';' (.,$) or '%'.
+Addresses may be a number, '.', '$', '+N', '-N', '/RE/', '?RE?', ',' (1,$),
+';' (.,$) or '%'.
 
 Exit status: 0 for a normal exit, 1 for a command that failed, 2 for a
 problem with the input file.
@@ -287,14 +315,8 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Short(b'v', _) | Opt::Long("verbose", _) => opts.verbose = true,
             Opt::Long("strip-trailing-cr", _) => opts.strip_cr = true,
             Opt::Long("unsafe-names", _) => opts.unsafe_names = true,
-            // Both are about a regular-expression engine this `ed` does not
-            // have, so both are refused rather than accepted and ignored: a
-            // script that asks for `-E` and gets literal matching would corrupt
-            // the file it was editing without saying anything.
-            Opt::Short(flag @ (b'E' | b'G'), _) => return Err(unimplemented_short(flag)),
-            Opt::Long(name @ ("extended-regexp" | "traditional"), _) => {
-                return Err(unimplemented_long(name));
-            }
+            Opt::Short(b'E', _) | Opt::Long("extended-regexp", _) => opts.extended = true,
+            Opt::Short(b'G', _) | Opt::Long("traditional", _) => opts.traditional = true,
             Opt::Short(other, _) => return Err(ED.invalid_option(other)),
             Opt::Long(other, _) => return Err(unimplemented_long(other)),
             // GNU takes the first operand and ignores the rest in silence —
@@ -308,13 +330,6 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     }
 
     Ok(Request::Run(opts, file))
-}
-
-fn unimplemented_short(flag: u8) -> getopt::Error {
-    ED.usage_referring(format!(
-        "option -{} is not implemented by this ed",
-        char::from(flag)
-    ))
 }
 
 fn unimplemented_long(name: &str) -> getopt::Error {
@@ -346,6 +361,34 @@ enum EdError {
     ControlCharsInName,
     DirectoryAccessRestricted,
     ShellAccessUnsupported,
+    /// An empty pattern — `//`, `??`, or `s//repl/` — with nothing remembered
+    /// to repeat.
+    NoPreviousPattern,
+    /// A `[` in a pattern that the delimiter scan never saw closed. This is
+    /// GNU's *own* wording, not the regex library's: `ed` has to know where the
+    /// brackets are before it can find the closing delimiter (a `/` inside
+    /// `[...]` is an ordinary character, which is what makes `s/[/]/X/` a valid
+    /// two-field command), so it detects this before `regcomp` is ever called
+    /// and reports it in its own voice.
+    UnbalancedBrackets,
+    /// The regex engine refused the pattern. The sentence is glibc's, because
+    /// that is what GNU `ed` prints here — it hands `regerror`'s text straight
+    /// through rather than translating it into one of its own.
+    BadPattern(&'static str),
+    /// A match was abandoned rather than answered. Not a GNU sentence: GNU's
+    /// backtracker has no budget and simply runs. See [`Editor::matches`] for
+    /// why "did not match" would have been the dangerous answer.
+    PatternTooCostly,
+    /// `s///g` where the pattern can only match the empty string at the point
+    /// the walk has reached, so no amount of substituting would ever consume a
+    /// byte. GNU's sentence, and GNU's judgement: it refuses the command rather
+    /// than inventing a rule for how far to skip. See [`substitute_line`].
+    InfiniteSubstitutionLoop,
+    /// A `g`, `v`, `G` or `V` inside another one's command list. Refused rather
+    /// than supported, as GNU does: the inner command would clear and refill the
+    /// outer one's marks, so the outer loop would resume against a selection
+    /// that is no longer its own.
+    NestedGlobal,
     /// `q` on a modified buffer. Status 1: the *command* failed.
     BufferModified,
     /// End of input on a modified buffer. Status 2 — measured: this is a
@@ -367,6 +410,12 @@ impl EdError {
             EdError::ControlCharsInName => "Control characters 1-31 not allowed in file names",
             EdError::DirectoryAccessRestricted => "Directory access restricted",
             EdError::ShellAccessUnsupported => "Shell access not implemented by this ed",
+            EdError::NoPreviousPattern => "No previous pattern",
+            EdError::UnbalancedBrackets => "Unbalanced brackets ([])",
+            EdError::BadPattern(text) => text,
+            EdError::PatternTooCostly => "Regular expression match abandoned",
+            EdError::InfiniteSubstitutionLoop => "Infinite substitution loop",
+            EdError::NestedGlobal => "Cannot nest global commands",
             EdError::BufferModified | EdError::BufferModifiedAtEof => "Warning: buffer modified",
         }
     }
@@ -427,6 +476,54 @@ impl PrintStyle {
     }
 }
 
+/// What an address counts *from*, before any `+N`/`-N` is applied.
+///
+/// This exists because of `/RE/`. Every other base — `.`, `$`, a number — can
+/// be turned into a line number by a parser that knows only the current line
+/// and the buffer's length, which is why the parser used to return an `i64`
+/// directly. A search cannot: it has to read the buffer, and it can fail. So
+/// the parser now hands back what was *written* and the editor resolves it.
+///
+/// The split has a second payoff that is not just plumbing. `addr1;addr2` is
+/// specified to move `.` to `addr1` before `addr2` is evaluated, so
+/// `/a/;/b/` finds the first `b` *after* the first `a`. That is impossible to
+/// express when both addresses are resolved by the same pure call; with a
+/// symbolic form the editor resolves them in order and the rule falls out.
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum AddrBase {
+    /// `.`
+    Current,
+    /// `$`
+    Last,
+    /// A literal line number.
+    Line(i64),
+    /// `/RE/` (forward) or `?RE?` (backward). An empty pattern means "the last
+    /// one used", which is why this carries the text rather than a compiled
+    /// regex — the compile has to be deferred to the editor, which is the only
+    /// thing that knows what the last pattern was.
+    Search { pattern: Vec<u8>, forward: bool },
+}
+
+/// One address expression: a base plus the sum of its `+N` / `-N` terms.
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Addr {
+    base: AddrBase,
+    offset: i64,
+}
+
+impl Addr {
+    /// An address that is just a line number, which is what most of the tests
+    /// and all of the non-search paths produce.
+    fn line(n: i64) -> Self {
+        Self {
+            base: AddrBase::Line(n),
+            offset: 0,
+        }
+    }
+}
+
 /// One command line, cut into its parts but not yet validated.
 ///
 /// The two addresses stay `Option` all the way here because the *default* is a
@@ -435,14 +532,31 @@ impl PrintStyle {
 /// would make two of the three wrong.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct Command {
-    first: Option<i64>,
-    second: Option<i64>,
+    first: Option<Addr>,
+    second: Option<Addr>,
+    /// The range was written with `;` rather than `,`, so `.` moves to the
+    /// first address before the second is evaluated.
+    semi: bool,
     /// Whether any address text was present, which is what makes `1q` an
     /// `Unexpected address` while `q` is fine.
     addressed: bool,
     /// The command letter, or `b'\n'` for a line that was only an address.
     cmd: u8,
     /// Everything after the command letter.
+    rest: Vec<u8>,
+}
+
+/// A [`Command`] whose addresses have been turned into line numbers.
+///
+/// Separate from `Command` because resolving is not a pure operation any more:
+/// a `/RE/` address reads the buffer, can fail, and — through `;` — can depend
+/// on the address before it. Keeping the two apart is what lets the parser stay
+/// a pure function with pure tests.
+struct Resolved {
+    first: Option<i64>,
+    second: Option<i64>,
+    addressed: bool,
+    cmd: u8,
     rest: Vec<u8>,
 }
 
@@ -474,36 +588,214 @@ fn read_number(bytes: &[u8], pos: &mut usize) -> Option<Result<i64, EdError>> {
     Some(Ok(value))
 }
 
-/// One address expression: a base (`.`, `$`, a number, or nothing) followed by
-/// any number of `+N` / `-N` terms.
+/// Read a delimited pattern — the `RE` of `/RE/`, `?RE?` or `s/RE/…`.
+///
+/// `pos` is left just past the closing delimiter, or at end of input when the
+/// pattern was not closed (which is legal: `1s/a` and `/a` both work).
+///
+/// Two rules make this more than "scan to the next delimiter", and both are
+/// measured:
+///
+/// * **A `[…]` bracket expression swallows the delimiter.** `s/[/]/X/` turns
+///   `a/b` into `aXb` in GNU: the pattern is `[/]`, not the empty string. So
+///   this tracks bracket state, including the two positions where a `]` is an
+///   ordinary character (`[]…]` and `[^]…]`) and the `[.` / `[=` / `[:`
+///   sub-brackets that have their own terminators.
+/// * **A `[` that is never closed is `ed`'s own error, not the regex
+///   library's.** GNU says `Unbalanced brackets ([])`, which is not one of
+///   glibc's sentences — it cannot be, because `ed` has to resolve the brackets
+///   to find the end of the pattern in the first place, before there is
+///   anything to hand to `regcomp`.
+///
+/// A `\` escapes the next byte. The backslash is kept unless it was hiding the
+/// delimiter, since every other `\x` is the regex engine's to interpret.
+///
+/// The `bool` is whether a closing delimiter was actually found. It is reported
+/// rather than inferred from the last byte because the two are not the same
+/// thing: `s/a\/` ends *on* a `/` that was escaped, so the pattern is `a/` and
+/// the command has no replacement field at all.
+fn read_pattern(bytes: &[u8], pos: &mut usize, delim: u8) -> Result<(Vec<u8>, bool), EdError> {
+    let mut out: Vec<u8> = Vec::new();
+    // Where in a bracket expression the scan is. `Out` is the ordinary case;
+    // `In` counts the members seen so far, because the first one (or the first
+    // after a `^`) is the one position where `]` is a member rather than the
+    // close; `Class` is inside `[.`, `[=` or `[:`, each of which ends only at
+    // its own two-byte terminator.
+    enum Br {
+        Out,
+        In {
+            seen: usize,
+            negated: bool,
+        },
+        Class {
+            term: u8,
+            seen: usize,
+            negated: bool,
+        },
+    }
+    let mut br = Br::Out;
+    while let Some(&b) = bytes.get(*pos) {
+        match br {
+            Br::Class {
+                term,
+                seen,
+                negated,
+            } => {
+                *pos = pos.saturating_add(1);
+                out.push(b);
+                if b == b']' && out.len() >= 2 && out.get(out.len().wrapping_sub(2)) == Some(&term)
+                {
+                    br = Br::In { seen, negated };
+                }
+                continue;
+            }
+            Br::In { seen, negated } => {
+                *pos = pos.saturating_add(1);
+                out.push(b);
+                if b == b'^' && seen == 0 && !negated {
+                    br = Br::In {
+                        seen: 0,
+                        negated: true,
+                    };
+                    continue;
+                }
+                // `[]a]` and `[^]a]`: the leading `]` is a member.
+                if b == b']' && seen > 0 {
+                    br = Br::Out;
+                    continue;
+                }
+                if b == b'['
+                    && matches!(bytes.get(*pos), Some(b'.' | b'=' | b':'))
+                    && let Some(&term) = bytes.get(*pos)
+                {
+                    *pos = pos.saturating_add(1);
+                    out.push(term);
+                    br = Br::Class {
+                        term,
+                        seen: seen.saturating_add(1),
+                        negated,
+                    };
+                    continue;
+                }
+                br = Br::In {
+                    seen: seen.saturating_add(1),
+                    negated,
+                };
+                continue;
+            }
+            Br::Out => {}
+        }
+        if b == b'\\' {
+            *pos = pos.saturating_add(1);
+            let Some(&next) = bytes.get(*pos) else {
+                out.push(b'\\');
+                break;
+            };
+            // The backslash hides the delimiter and nothing else: `s/a\/b/c/`
+            // is a two-field command whose pattern is `a/b`. Every other `\x`
+            // is the regex dialect's, so it is passed through intact.
+            if next != delim {
+                out.push(b'\\');
+            }
+            out.push(next);
+            *pos = pos.saturating_add(1);
+            continue;
+        }
+        if b == delim {
+            *pos = pos.saturating_add(1);
+            return Ok((out, true));
+        }
+        *pos = pos.saturating_add(1);
+        out.push(b);
+        if b == b'[' {
+            br = Br::In {
+                seen: 0,
+                negated: false,
+            };
+        }
+    }
+    if !matches!(br, Br::Out) {
+        return Err(EdError::UnbalancedBrackets);
+    }
+    Ok((out, false))
+}
+
+/// Whether a `g`/`v` command list continues onto the next input line.
+///
+/// It does when the line ends with an *odd* number of backslashes, so that
+/// `s/a/\\/` — a replacement of one literal backslash — is a complete command
+/// and `s/a/b/\` is not. Measured: `g/beta/s/e/E/\` followed by `s/t/T/` runs
+/// both, turning `beta` into `bETa`.
+fn has_trailing_continuation(body: &[u8]) -> bool {
+    let mut run = 0usize;
+    for &b in body.iter().rev() {
+        if b == b'\\' {
+            run = run.saturating_add(1);
+        } else {
+            break;
+        }
+    }
+    run % 2 == 1
+}
+
+/// Split a `g`/`v` command list into the individual commands it runs.
+///
+/// The continuations have already been turned into newlines by the caller, so
+/// this is a split on `\n` — with one exception that is not a formality: an
+/// *empty* command in the list means `p`, and so does an empty list, which is
+/// just the one-element case of the same rule. Measured against GNU 1.20.1:
+/// `g/a/` on a three-line file prints every matching line rather than doing
+/// nothing, and `g/a/\` followed by a blank line — a list of two empty
+/// commands — prints every matching line *twice*.
+///
+/// The empty command therefore cannot be handed to `execute`, which would read
+/// it as the bare-newline command (`.+1p`, a different thing entirely). It is
+/// rewritten to `p` here, at the one place that knows the context.
+fn split_command_list(body: &[u8]) -> Vec<Vec<u8>> {
+    body.split(|&b| b == b'\n')
+        .map(|step| if step.is_empty() { b"p" } else { step }.to_vec())
+        .collect()
+}
+
+/// One address expression: a base (`.`, `$`, a number, `/RE/`, `?RE?`, or
+/// nothing) followed by any number of `+N` / `-N` terms.
 ///
 /// Returns `Ok(None)` when there was no address text at all, which is how the
 /// caller knows to use the command's own default. A bare `+` or `-` counts as
 /// address text and means ±1 — measured, `-p` on a five-line buffer at line 5
 /// prints line 4.
-fn parse_address(
-    bytes: &[u8],
-    pos: &mut usize,
-    current: usize,
-    total: usize,
-) -> Result<Option<i64>, EdError> {
+///
+/// Nothing here reads the buffer: a search is recorded, not performed. See
+/// [`AddrBase`] for why.
+fn parse_address(bytes: &[u8], pos: &mut usize) -> Result<Option<Addr>, EdError> {
     skip_blank(bytes, pos);
 
-    let mut value: Option<i64> = match bytes.get(*pos) {
+    let mut base: Option<AddrBase> = match bytes.get(*pos) {
         Some(b'.') => {
             *pos = pos.saturating_add(1);
-            Some(i64::try_from(current).unwrap_or(i64::MAX))
+            Some(AddrBase::Current)
         }
         Some(b'$') => {
             *pos = pos.saturating_add(1);
-            Some(i64::try_from(total).unwrap_or(i64::MAX))
+            Some(AddrBase::Last)
+        }
+        Some(&d @ (b'/' | b'?')) => {
+            *pos = pos.saturating_add(1);
+            // An address search need not be closed: `/beta` is a whole
+            // command line and finds the next line holding `beta`.
+            let (pattern, _closed) = read_pattern(bytes, pos, d)?;
+            Some(AddrBase::Search {
+                pattern,
+                forward: d == b'/',
+            })
         }
         _ => match read_number(bytes, pos) {
-            Some(n) => Some(n?),
+            Some(n) => Some(AddrBase::Line(n?)),
             None => None,
         },
     };
 
+    let mut offset: i64 = 0;
     loop {
         let mark = *pos;
         skip_blank(bytes, pos);
@@ -522,55 +814,73 @@ fn parse_address(
             Some(n) => n?,
             None => 1,
         };
-        let base = value.unwrap_or(i64::try_from(current).unwrap_or(i64::MAX));
-        let next = if op == b'+' {
-            base.checked_add(step)
+        // `+2` with no base at all counts from `.`, and is address text in its
+        // own right — which is why `base` is filled in here rather than left
+        // `None` for the command's default to claim.
+        base = Some(base.unwrap_or(AddrBase::Current));
+        let signed = if op == b'+' {
+            step
         } else {
-            base.checked_sub(step)
+            step.checked_neg().ok_or(EdError::InvalidAddress)?
         };
-        value = Some(next.ok_or(EdError::InvalidAddress)?);
+        offset = offset.checked_add(signed).ok_or(EdError::InvalidAddress)?;
     }
 
-    Ok(value)
+    Ok(base.map(|base| Addr { base, offset }))
 }
 
 /// The address part of a command line: one address, a range, or nothing.
+///
+/// Returns the two addresses, whether the separator was `;`, and whether any
+/// address text was present at all.
 fn parse_addresses(
     bytes: &[u8],
     pos: &mut usize,
-    current: usize,
-    total: usize,
-) -> Result<(Option<i64>, Option<i64>, bool), EdError> {
+) -> Result<(Option<Addr>, Option<Addr>, bool, bool), EdError> {
     skip_blank(bytes, pos);
     if bytes.get(*pos) == Some(&b'%') {
         *pos = pos.saturating_add(1);
         return Ok((
-            Some(1),
-            Some(i64::try_from(total).unwrap_or(i64::MAX)),
+            Some(Addr::line(1)),
+            Some(Addr {
+                base: AddrBase::Last,
+                offset: 0,
+            }),
+            false,
             true,
         ));
     }
 
-    let first = parse_address(bytes, pos, current, total)?;
+    let first = parse_address(bytes, pos)?;
     skip_blank(bytes, pos);
 
     let Some(&sep @ (b',' | b';')) = bytes.get(*pos) else {
-        return Ok((first, None, first.is_some()));
+        let addressed = first.is_some();
+        return Ok((first, None, false, addressed));
     };
     *pos = pos.saturating_add(1);
+    let semi = sep == b';';
 
     // `,` runs from line 1, `;` runs from the current line. Both run to `$`
     // unless a second address says otherwise.
-    let start_default = if sep == b';' { current } else { 1 };
-    let lo = first.unwrap_or(i64::try_from(start_default).unwrap_or(i64::MAX));
-    let hi = parse_address(bytes, pos, current, total)?
-        .unwrap_or(i64::try_from(total).unwrap_or(i64::MAX));
-    Ok((Some(lo), Some(hi), true))
+    let lo = first.unwrap_or(if semi {
+        Addr {
+            base: AddrBase::Current,
+            offset: 0,
+        }
+    } else {
+        Addr::line(1)
+    });
+    let hi = parse_address(bytes, pos)?.unwrap_or(Addr {
+        base: AddrBase::Last,
+        offset: 0,
+    });
+    Ok((Some(lo), Some(hi), semi, true))
 }
 
-fn parse_command(line: &[u8], current: usize, total: usize) -> Result<Command, EdError> {
+fn parse_command(line: &[u8]) -> Result<Command, EdError> {
     let mut pos = 0usize;
-    let (first, second, addressed) = parse_addresses(line, &mut pos, current, total)?;
+    let (first, second, semi, addressed) = parse_addresses(line, &mut pos)?;
     skip_blank(line, &mut pos);
 
     let cmd = match line.get(pos) {
@@ -585,6 +895,7 @@ fn parse_command(line: &[u8], current: usize, total: usize) -> Result<Command, E
     Ok(Command {
         first,
         second,
+        semi,
         addressed,
         cmd,
         rest,
@@ -621,41 +932,49 @@ fn parse_substitute(arg: &[u8]) -> Result<Substitution, EdError> {
     let Some(&delim) = arg.first() else {
         return Err(EdError::InvalidCommandSuffix);
     };
-    let rest = arg.get(1..).unwrap_or(&[]);
+    let mut pos = 1usize;
+
+    // The pattern is scanned by the *bracket-aware* reader and the replacement
+    // is not, because they are not the same language: `[` is a metacharacter on
+    // the left of an `s` and an ordinary byte on the right. Scanning both the
+    // same way would make `s/x/[/` — replace `x` with an open bracket — read
+    // its closing delimiter as a bracket member and fail.
+    let (pattern, closed) = read_pattern(arg, &mut pos, delim)?;
+    if !closed {
+        return Err(EdError::InvalidCommandSuffix);
+    }
 
     let mut parts: Vec<Vec<u8>> = Vec::new();
     let mut field: Vec<u8> = Vec::new();
-    let mut i = 0usize;
-    while let Some(&b) = rest.get(i) {
+    while let Some(&b) = arg.get(pos) {
         if b == b'\\' {
-            if let Some(&next) = rest.get(i.saturating_add(1)) {
+            if let Some(&next) = arg.get(pos.saturating_add(1)) {
                 // A backslash hides the delimiter and nothing else, which is
-                // what keeps `s/a\/b/c/` a two-field command.
+                // what keeps `s/a/b\/c/` a two-field command.
                 if next != delim {
                     field.push(b'\\');
                 }
                 field.push(next);
-                i = i.saturating_add(2);
+                pos = pos.saturating_add(2);
                 continue;
             }
             field.push(b'\\');
-            i = i.saturating_add(1);
+            pos = pos.saturating_add(1);
         } else if b == delim {
             parts.push(std::mem::take(&mut field));
-            i = i.saturating_add(1);
+            pos = pos.saturating_add(1);
         } else {
             field.push(b);
-            i = i.saturating_add(1);
+            pos = pos.saturating_add(1);
         }
     }
     parts.push(field);
 
-    if parts.len() < 2 {
-        return Err(EdError::InvalidCommandSuffix);
-    }
-    let pattern = parts.first().cloned().unwrap_or_default();
-    let replacement = parts.get(1).cloned().unwrap_or_default();
-    let flags = parts.get(2).cloned().unwrap_or_default();
+    let replacement = parts.first().cloned().unwrap_or_default();
+    let flags = parts.get(1).cloned().unwrap_or_default();
+    // `parts` counts the fields *after* the pattern, so a closed replacement
+    // leaves two of them and an unclosed one leaves a single field.
+    let parts_len = parts.len().saturating_add(1);
 
     let mut global = false;
     // An `s` whose replacement is *not* closed by a delimiter prints the last
@@ -664,7 +983,7 @@ fn parse_substitute(arg: &[u8]) -> Result<Substitution, EdError> {
     // and GNU obeys it: `1s/a/A` prints `Alpha` where `1s/a/A/` prints nothing.
     // It is a real convenience at a terminal and a real difference in a script,
     // so it is not something to leave out.
-    let mut print = if parts.len() < 3 {
+    let mut print = if parts_len < 3 {
         Some(PrintStyle::PLAIN)
     } else {
         None
@@ -728,41 +1047,152 @@ fn byte_count(lines: &[Vec<u8>]) -> usize {
     })
 }
 
-/// Replace `pattern` in `line`, once or everywhere. `None` when it never
-/// matched, which is what makes `No match` an error rather than a no-op.
-fn substitute_line(
+/// Expand one match's worth of an `s` replacement into `out`.
+///
+/// `&` is the whole match and `\1`…`\9` are the parenthesised groups, both of
+/// which are why this needs the spans rather than just the matched text. `\&`
+/// is a literal ampersand and `\\` a literal backslash; every other `\x` is the
+/// byte `x`, which is what makes `\/` inside a `/`-delimited replacement work.
+///
+/// A group that did not participate in the match expands to nothing rather than
+/// failing. That is not leniency — POSIX specifies an unset group as the empty
+/// string, and `s/\(a\)\|b/[\1]/` on a line matching `b` is the ordinary way to
+/// reach it.
+fn expand_replacement(
     line: &[u8],
-    pattern: &[u8],
-    replacement: &[u8],
-    global: bool,
-) -> Option<Vec<u8>> {
-    if pattern.is_empty() {
-        return None;
-    }
-    let mut out: Vec<u8> = Vec::with_capacity(line.len());
-    let mut at = 0usize;
-    let mut hit = false;
-    while at <= line.len().saturating_sub(pattern.len()) {
-        let window = line.get(at..at.saturating_add(pattern.len()));
-        if window == Some(pattern) && (!hit || global) {
-            out.extend_from_slice(replacement);
-            at = at.saturating_add(pattern.len());
-            hit = true;
-        } else {
-            match line.get(at) {
-                Some(&b) => out.push(b),
-                None => break,
+    spans: &[Option<(usize, usize)>],
+    repl: &[u8],
+    out: &mut Vec<u8>,
+) {
+    let group = |n: usize, out: &mut Vec<u8>| {
+        if let Some(&Some((s, e))) = spans.get(n)
+            && let Some(text) = line.get(s..e)
+        {
+            out.extend_from_slice(text);
+        }
+    };
+    let mut i = 0usize;
+    while let Some(&b) = repl.get(i) {
+        match b {
+            b'&' => {
+                group(0, out);
+                i = i.saturating_add(1);
             }
-            at = at.saturating_add(1);
+            b'\\' => match repl.get(i.saturating_add(1)) {
+                Some(&d @ b'1'..=b'9') => {
+                    group(usize::from(d.wrapping_sub(b'0')), out);
+                    i = i.saturating_add(2);
+                }
+                Some(&next) => {
+                    out.push(next);
+                    i = i.saturating_add(2);
+                }
+                // A replacement ending in a lone backslash keeps it. GNU uses a
+                // trailing backslash to continue a `g` command list onto the
+                // next line, so by the time one reaches here it is literal.
+                None => {
+                    out.push(b'\\');
+                    i = i.saturating_add(1);
+                }
+            },
+            _ => {
+                out.push(b);
+                i = i.saturating_add(1);
+            }
         }
     }
-    if !hit {
-        return None;
+}
+
+/// Replace `re` in `line`, once or everywhere. `Ok(None)` when it never
+/// matched, which is what makes `No match` an error rather than a no-op.
+///
+/// ## The empty-match rule, which is not `sed`'s
+///
+/// A pattern that can match nothing — `a*`, `^`, `x\?` — has to be handled
+/// deliberately or `s///g` never terminates. `sed` answers by advancing one
+/// character past an empty match, so `s/x*/-/g` on `abc` yields `-a-b-c-`.
+/// **`ed` does not do that**, and copying `sed`'s rule here — which is what
+/// this function used to do, via [`Regex::capture_spans_iter`], whose whole
+/// contract is that rule — was wrong in a way no test had asked about:
+///
+/// ```text
+/// GNU ed 1.20.1, buffer "alpha":   ,s/a*/X/g   →   ? / Infinite substitution loop
+/// this ed, before this was fixed:  ,s/a*/X/g   →   XlXpXhX
+/// ```
+///
+/// GNU's actual loop, measured rather than inferred: it substitutes, advances
+/// past what the match consumed, and searches the remainder again with
+/// `REG_NOTBOL` set — and if *that* search comes back with an empty match at
+/// offset 0 of the remainder, it gives up on the whole command, because a
+/// substitution that consumed nothing and left the position unmoved would
+/// repeat for ever. The first search is exempt: an empty match at 0 on the
+/// first pass is how `,s/^/> /` and `,s/x*/X/` do their jobs.
+///
+/// `REG_NOTBOL` — [`StartOfLine::No`] here — is the part that cannot be skipped.
+/// Without it, `s/^x*/X/g` on `alpha` would find its second empty match at 0
+/// and report the loop error, where GNU prints `Xalpha`: the point of the flag
+/// is that `^` has already been passed and cannot match again.
+///
+/// Lines the walk already changed keep their change when a later line raises
+/// the error — the caller writes each line back as it goes, which is GNU's
+/// behaviour too (`aaa\nbbb` with `,s/a*/X/g` leaves `X` and `bbb`, and reports
+/// the buffer as modified).
+///
+/// # Errors
+/// [`EdError::InfiniteSubstitutionLoop`] as above;
+/// [`EdError::PatternTooCostly`] if a backreference search ran out of budget.
+fn substitute_line(
+    line: &[u8],
+    re: &Regex,
+    replacement: &[u8],
+    global: bool,
+) -> Result<Option<Vec<u8>>, EdError> {
+    let mut out: Vec<u8> = Vec::with_capacity(line.len());
+    let mut at = 0usize;
+    let mut first = true;
+    // `Regex::search` rather than a `capture_spans_at` loop: the latter
+    // re-decodes the whole line on every call, which turns one substitution
+    // into a quadratic one on exactly the long lines where it would show.
+    let subject = re.search(line);
+    loop {
+        // Byte 0 of the line is a line start only on the first search; after
+        // that the walk has passed it. See the doc comment — this is the whole
+        // difference between `s/^x*/X/g` working and reporting a loop.
+        let bol = if first {
+            StartOfLine::Yes
+        } else {
+            StartOfLine::No
+        };
+        let found = subject
+            .capture_spans_from(at, bol)
+            .map_err(|_| EdError::PatternTooCostly)?;
+        let Some(spans) = found else { break };
+        let Some(&Some((s, e))) = spans.first() else {
+            break;
+        };
+        if !first && s == at && e == at {
+            return Err(EdError::InfiniteSubstitutionLoop);
+        }
+        if let Some(gap) = line.get(at..s) {
+            out.extend_from_slice(gap);
+        }
+        expand_replacement(line, &spans, replacement, &mut out);
+        at = e;
+        first = false;
+        // `at >= line.len()` is GNU's "the remaining text is empty" — the walk
+        // stops there rather than searching an empty remainder, which is why
+        // `s/x*/X/g` on an empty line substitutes once instead of erroring.
+        if !global || at >= line.len() {
+            break;
+        }
+    }
+    if first {
+        return Ok(None);
     }
     if let Some(tail) = line.get(at..) {
         out.extend_from_slice(tail);
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 /// `l`'s rendering: every byte made visible, a `$` marking the end, and a fold
@@ -785,7 +1215,7 @@ fn substitute_line(
 /// `COLUMNS` has no effect on any of it; the 72 is fixed. Measured against GNU
 /// ed 1.20.1 at every length from 68 to 75, and with tabs and `\ooo` escapes to
 /// separate the column rule from the byte rule.
-fn list_line(line: &[u8]) -> Vec<u8> {
+fn list_line(line: &[u8], traditional: bool) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(line.len().saturating_add(2));
     let mut col = 0usize;
     for &b in line {
@@ -809,7 +1239,10 @@ fn list_line(line: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&escape);
         col = col.saturating_add(escape.len());
     }
-    out.extend_from_slice(b"$\n");
+    // The `$` marks the end of the line so a trailing blank is visible. GNU's
+    // `-G` compatibility mode drops it — measured, `ed -sG` on a 100-column line
+    // folds it identically and ends without the `$`.
+    out.extend_from_slice(if traditional { b"\n" } else { b"$\n" });
     out
 }
 
@@ -856,6 +1289,37 @@ struct Editor {
     /// the shape of the `-v` explanation and whether an error is fatal.
     file_driven: bool,
     stdin: std::io::StdinLock<'static>,
+    /// The last pattern compiled, which `//`, `??` and `s//repl/` all reuse.
+    ///
+    /// `Rc` because a caller needs to hold the pattern while it edits the
+    /// buffer, and both live on this struct: `s` matches with the regex and
+    /// writes back through `&mut self.buffer` in the same loop. Taking a cheap
+    /// handle is the alternative to taking the regex out and remembering to put
+    /// it back on every exit path, which is the sort of thing that survives
+    /// review and then loses the pattern on an error return.
+    last_re: Option<std::rc::Rc<Regex>>,
+    /// One flag per buffer line, live only for the duration of a `g`/`v`/`G`/`V`
+    /// command: "this line was selected and has not been visited yet".
+    ///
+    /// It is a parallel array rather than a set of line numbers because the
+    /// command list renumbers the buffer as it runs. `insert` and `delete` shift
+    /// the marks in step with the lines, so a mark keeps pointing at the line it
+    /// was set on however much text is added or removed above it. A set of
+    /// numbers would have to be rewritten by every edit, and the first one
+    /// missed would run the list on the wrong line.
+    marks: Vec<bool>,
+    /// The command list of a running `g`/`v`/`G`/`V`, as lines still to be
+    /// consumed, reversed so the next one is the last element.
+    ///
+    /// `Some` for exactly as long as a global is running, and it is the *whole*
+    /// input source while it is: [`Editor::read_line`] takes from here and
+    /// returns `None` at the end of the list rather than falling through to
+    /// standard input. That is what makes an `a` inside a command list take its
+    /// text from the list and stop when the list does, with no `.` — measured
+    /// against GNU, where `g/beta/a\` + `inserted` appends one line.
+    ///
+    /// It doubles as the nesting guard: a `g` that finds this `Some` refuses.
+    global_input: Option<Vec<Vec<u8>>>,
 }
 
 impl Editor {
@@ -873,7 +1337,117 @@ impl Editor {
             line_no: 0,
             file_driven,
             stdin: std::io::stdin().lock(),
+            last_re: None,
+            marks: Vec::new(),
+            global_input: None,
         }
+    }
+
+    /// The regex a command asked for: the one it spelled out, or — for an
+    /// empty pattern — the last one used.
+    ///
+    /// An empty pattern is `//`, `??` or `s//repl/`, and it is an *error* when
+    /// nothing has been searched for yet rather than a match-everything.
+    /// Measured: GNU says `No previous pattern`.
+    fn pattern(&mut self, text: &[u8]) -> Result<std::rc::Rc<Regex>, EdError> {
+        if text.is_empty() {
+            return self.last_re.clone().ok_or(EdError::NoPreviousPattern);
+        }
+        let re = if self.opts.extended {
+            Regex::new_flags(text, false)
+        } else {
+            bre::compile(text, false)
+        }
+        .map_err(|e| EdError::BadPattern(e.message()))?;
+        let re = std::rc::Rc::new(re);
+        self.last_re = Some(std::rc::Rc::clone(&re));
+        Ok(re)
+    }
+
+    /// Whether `line` matches, with an abandoned search reported rather than
+    /// answered.
+    ///
+    /// The distinction earns its keep in `v/RE/d`, which deletes every line the
+    /// pattern does *not* match. Reporting a search that ran out of budget as
+    /// "did not match" would delete the user's lines on the strength of a
+    /// question this `ed` declined to answer.
+    fn matches(re: &Regex, line: &[u8]) -> Result<bool, EdError> {
+        re.is_match(line).map_err(|_| EdError::PatternTooCostly)
+    }
+
+    /// The next line matching `re`, searching from `.` and wrapping past the
+    /// end of the buffer — which is what GNU does, and is why `/alpha/` finds
+    /// line 1 from line 2 of a four-line file rather than failing.
+    fn search(&self, re: &Regex, forward: bool) -> Result<usize, EdError> {
+        let total = self.total();
+        if total == 0 {
+            return Err(EdError::NoMatch);
+        }
+        let from = self.current.min(total);
+        for step in 1..=total {
+            let raw = if forward {
+                from.saturating_add(step).saturating_sub(1)
+            } else {
+                from.saturating_add(total)
+                    .saturating_sub(step)
+                    .saturating_sub(1)
+            };
+            let n = raw.checked_rem(total).unwrap_or(0).saturating_add(1);
+            let Some(line) = self.buffer.get(n.saturating_sub(1)) else {
+                continue;
+            };
+            if Self::matches(re, line)? {
+                return Ok(n);
+            }
+        }
+        Err(EdError::NoMatch)
+    }
+
+    /// Turn one written address into a line number.
+    fn resolve(&mut self, a: &Addr) -> Result<i64, EdError> {
+        let base = match &a.base {
+            AddrBase::Current => i64::try_from(self.current).unwrap_or(i64::MAX),
+            AddrBase::Last => i64::try_from(self.total()).unwrap_or(i64::MAX),
+            AddrBase::Line(n) => *n,
+            AddrBase::Search { pattern, forward } => {
+                let re = self.pattern(pattern)?;
+                i64::try_from(self.search(&re, *forward)?).unwrap_or(i64::MAX)
+            }
+        };
+        base.checked_add(a.offset).ok_or(EdError::InvalidAddress)
+    }
+
+    /// Resolve both of a command's addresses, in order.
+    ///
+    /// The order is the point. `addr1;addr2` moves `.` to `addr1` before
+    /// `addr2` is evaluated, so `/a/;/b/` is "the first `b` at or after the
+    /// first `a`" rather than two searches from the same place. `.` is put back
+    /// afterwards — including on the error path, because a range whose second
+    /// address does not exist must not leave the editor somewhere new.
+    fn resolve_command(&mut self, c: Command) -> Result<Resolved, EdError> {
+        let first = match &c.first {
+            Some(a) => Some(self.resolve(a)?),
+            None => None,
+        };
+        let saved = self.current;
+        if c.semi
+            && let Some(f) = first
+            && let Ok(n) = usize::try_from(f)
+        {
+            self.current = n.min(self.total());
+        }
+        let second = match &c.second {
+            Some(a) => self.resolve(a).map(Some),
+            None => Ok(None),
+        };
+        self.current = saved;
+        Ok(Resolved {
+            first,
+            second: second?,
+            addressed: c.addressed,
+            cmd: c.cmd,
+            rest: c.rest,
+        })
     }
 
     fn put(&mut self, bytes: &[u8]) {
@@ -988,7 +1562,14 @@ impl Editor {
     }
 
     /// Read one line of input, without its newline. `None` at end of input.
+    ///
+    /// While a global command list is running that list *is* the input — see
+    /// [`Editor::global_input`] — so this returns `None` at the end of the list
+    /// and does not reach standard input.
     fn read_line(&mut self) -> Option<Vec<u8>> {
+        if let Some(pending) = self.global_input.as_mut() {
+            return pending.pop();
+        }
         let mut raw: Vec<u8> = Vec::new();
         match self.stdin.read_until(b'\n', &mut raw) {
             Ok(0) | Err(_) => return None,
@@ -1034,7 +1615,7 @@ impl Editor {
     /// where the command accepts "before the first line".
     fn range(
         &self,
-        c: &Command,
+        c: &Resolved,
         default: (usize, usize),
         allow_zero: bool,
     ) -> Result<(usize, usize), EdError> {
@@ -1067,7 +1648,7 @@ impl Editor {
                 bytes.extend_from_slice(format!("{n}\t").as_bytes());
             }
             if style.listed {
-                bytes.extend_from_slice(&list_line(&line));
+                bytes.extend_from_slice(&list_line(&line, self.opts.traditional));
             } else {
                 bytes.extend_from_slice(&line);
                 bytes.push(b'\n');
@@ -1083,7 +1664,11 @@ impl Editor {
     fn read_text(&mut self) -> Vec<Vec<u8>> {
         let mut lines = Vec::new();
         while let Some(line) = self.read_line() {
-            self.line_no = self.line_no.saturating_add(1);
+            // Lines taken from a global command list are not input lines, so
+            // they do not move the number `-v` reports an error against.
+            if self.global_input.is_none() {
+                self.line_no = self.line_no.saturating_add(1);
+            }
             if line == b"." {
                 break;
             }
@@ -1111,10 +1696,11 @@ impl Editor {
 
     fn execute(&mut self, line: &[u8]) -> Result<Action, EdError> {
         let total = self.total();
-        let c = parse_command(line, self.current, total)?;
-        if c.cmd != b'q' && c.cmd != b'Q' {
+        let parsed = parse_command(line)?;
+        if parsed.cmd != b'q' && parsed.cmd != b'Q' {
             self.warned = false;
         }
+        let c = self.resolve_command(parsed)?;
 
         match c.cmd {
             // A line that was only an address prints that line; an empty line
@@ -1181,19 +1767,29 @@ impl Editor {
 
             b's' => {
                 let sub = parse_substitute(&c.rest)?;
+                let re = self.pattern(&sub.pattern)?;
                 let (lo, hi) = self.range(&c, (self.current, self.current), false)?;
                 let mut hit = None;
                 let mut n = lo;
                 while n <= hi {
                     let idx = n.saturating_sub(1);
-                    let replaced = self.buffer.get(idx).and_then(|l| {
-                        substitute_line(l, &sub.pattern, &sub.replacement, sub.global)
-                    });
+                    let replaced = match self.buffer.get(idx) {
+                        Some(l) => substitute_line(l, &re, &sub.replacement, sub.global)?,
+                        None => None,
+                    };
                     if let Some(new_line) = replaced {
                         if let Some(slot) = self.buffer.get_mut(idx) {
                             *slot = new_line;
                         }
                         hit = Some(n);
+                        // Marked here rather than after the loop because the
+                        // loop can leave through the `?` above: a later line
+                        // that raises `Infinite substitution loop` does not
+                        // un-change the lines already rewritten, and GNU warns
+                        // about the buffer on the way out. Measured: `aaa\nbbb`
+                        // with `,s/a*/X/g` errors on line 2 and still refuses a
+                        // bare `q`.
+                        self.modified = true;
                     }
                     n = n.saturating_add(1);
                 }
@@ -1201,9 +1797,53 @@ impl Editor {
                     return Err(EdError::NoMatch);
                 };
                 self.current = last;
-                self.modified = true;
                 self.finish_suffix(sub.print);
                 Ok(Action::Continue)
+            }
+
+            // `g`/`v` run a command list on every (non-)matching line; `G`/`V`
+            // are the forms that ask at the terminal instead. All four share
+            // one implementation because the only difference is where the
+            // command text comes from and whether the match is inverted.
+            b'g' | b'v' | b'G' | b'V' => {
+                if self.global_input.is_some() {
+                    return Err(EdError::NestedGlobal);
+                }
+                let invert = c.cmd == b'v' || c.cmd == b'V';
+                let interactive = c.cmd == b'G' || c.cmd == b'V';
+                // An unaddressed global covers the whole buffer, which `range`
+                // cannot express on its own: it derives the upper bound from the
+                // *lower* default (`hi = c.second.unwrap_or(lo)`), so passing
+                // `(1, self.total())` still yields `(1, 1)`. `w` below carries
+                // the same shape for the same reason.
+                let (lo, hi) = if c.addressed {
+                    self.range(&c, (1, self.total()), false)?
+                } else {
+                    (1, self.total())
+                };
+                let Some(&delim) = c.rest.first() else {
+                    return Err(EdError::InvalidCommandSuffix);
+                };
+                // A delimiter that could end an address or a line would make the
+                // command unparseable, so GNU refuses these outright.
+                if delim == b'\n' || delim == b' ' {
+                    return Err(EdError::InvalidCommandSuffix);
+                }
+                let mut pos = 1usize;
+                let (pattern, _closed) = read_pattern(&c.rest, &mut pos, delim)?;
+                let re = self.pattern(&pattern)?;
+                let mut body = c.rest.get(pos..).unwrap_or(&[]).to_vec();
+                // The list continues onto the next input line while this one
+                // ends with an unescaped backslash. The backslash goes; the
+                // newline it hid becomes the separator between two commands.
+                while has_trailing_continuation(&body) {
+                    body.pop();
+                    body.push(b'\n');
+                    let Some(next) = self.read_line() else { break };
+                    self.line_no = self.line_no.saturating_add(1);
+                    body.extend_from_slice(&next);
+                }
+                self.global(lo, hi, &re, invert, interactive, &body)
             }
 
             b'w' => {
@@ -1265,6 +1905,14 @@ impl Editor {
                 Ok(Action::Quit)
             }
 
+            // `!CMD` hands the line to a shell. That is a deliberate omission,
+            // not a missing feature — see the module docs and
+            // `design-decisions.md` §713 — so it gets the sentence that says so
+            // rather than falling through to `Unknown command`, which would
+            // suggest the letter was merely unimplemented. `w !CMD` and
+            // `r !CMD` already answer the same way via `resolve_name`.
+            b'!' => Err(EdError::ShellAccessUnsupported),
+
             _ => Err(EdError::UnknownCommand),
         }
     }
@@ -1284,6 +1932,10 @@ impl Editor {
         let mut at = at.min(self.buffer.len());
         for line in text {
             self.buffer.insert(at, line);
+            // A line created during a `g` command list was not one of the lines
+            // the pattern selected, so it is not visited. GNU behaves the same
+            // way, and the alternative is a `g/x/a` that appends for ever.
+            self.marks.insert(at.min(self.marks.len()), false);
             at = at.saturating_add(1);
         }
     }
@@ -1294,7 +1946,118 @@ impl Editor {
         let end = hi.min(self.buffer.len());
         if start < end {
             self.buffer.drain(start..end);
+            if start < self.marks.len() {
+                self.marks.drain(start..end.min(self.marks.len()));
+            }
         }
+    }
+
+    /// The engine behind `g`, `v`, `G` and `V`.
+    ///
+    /// The two-pass shape is the whole point and is not an optimisation. A
+    /// command list can insert and delete lines, so the line numbers move
+    /// underneath it; a one-pass loop that walked `lo..=hi` and tested each
+    /// line as it arrived would visit lines the command list created, skip
+    /// lines it pushed downwards, and run off the end of a buffer it had
+    /// shortened. So every selected line is *marked* first — and the marks are
+    /// carried through [`Editor::insert`] and [`Editor::delete`] so they follow
+    /// their lines rather than their numbers — and only then is the list run,
+    /// taking the first line still marked each time round.
+    ///
+    /// An error inside the list stops the whole `g`, which is GNU's behaviour
+    /// and the safe one: a `g/x/s/a/b/` whose fifth line has no `a` should not
+    /// go on quietly editing the sixth.
+    fn global(
+        &mut self,
+        lo: usize,
+        hi: usize,
+        re: &Regex,
+        invert: bool,
+        interactive: bool,
+        body: &[u8],
+    ) -> Result<Action, EdError> {
+        self.marks.clear();
+        self.marks.resize(self.buffer.len(), false);
+        let mut n = lo;
+        while n <= hi {
+            let idx = n.saturating_sub(1);
+            if let Some(line) = self.buffer.get(idx) {
+                let hit = Self::matches(re, line)?;
+                if hit != invert
+                    && let Some(slot) = self.marks.get_mut(idx)
+                {
+                    *slot = true;
+                }
+            }
+            n = n.saturating_add(1);
+        }
+
+        let list = split_command_list(body);
+        // The list `G`/`V` will repeat for a lone `&`. Starts as the body, so
+        // that `G/RE/p` — a list given on the `G` line itself — is what an `&`
+        // at the first prompt repeats.
+        let mut remembered = list.clone();
+        let mut outcome = Ok(Action::Continue);
+
+        // Driven off the marks rather than off a line range: the command list
+        // can insert and delete, so the *next* marked line has to be looked up
+        // again after every step rather than counted to.
+        while let Some(idx) = self.marks.iter().position(|&m| m) {
+            if let Some(slot) = self.marks.get_mut(idx) {
+                *slot = false;
+            }
+            self.current = idx.saturating_add(1);
+
+            let steps = if interactive {
+                // `G`/`V` print the line and read one command list for it, from
+                // real input. End of input ends the loop, as GNU does.
+                self.print_range(self.current, self.current, PrintStyle::PLAIN);
+                let Some(reply) = self.read_line() else { break };
+                self.line_no = self.line_no.saturating_add(1);
+                if reply.is_empty() {
+                    // An empty line leaves this line alone. It does *not*
+                    // become the remembered list, so a later `&` still repeats
+                    // the last list that did something.
+                    continue;
+                }
+                if reply == b"&" {
+                    remembered.clone()
+                } else {
+                    remembered = split_command_list(&reply);
+                    remembered.clone()
+                }
+            } else {
+                list.clone()
+            };
+
+            // The list is the input source while it runs, so an `a` inside it
+            // takes its text from the list. Reversed because `read_line` pops.
+            let mut queue = steps;
+            queue.reverse();
+            self.global_input = Some(queue);
+            // Popped from `global_input` rather than iterated, because a step
+            // may itself consume the rest of the list — `a` takes its text from
+            // there, which is how GNU makes `g/RE/a\` work without a `.`.
+            while let Some(step) = self.global_input.as_mut().and_then(Vec::pop) {
+                match self.execute(&step) {
+                    Ok(Action::Continue) => {}
+                    Ok(Action::Quit) => {
+                        outcome = Ok(Action::Quit);
+                        break;
+                    }
+                    Err(e) => {
+                        outcome = Err(e);
+                        break;
+                    }
+                }
+            }
+            self.global_input = None;
+            if !matches!(outcome, Ok(Action::Continue)) {
+                break;
+            }
+        }
+        self.marks.clear();
+        outcome
     }
 
     fn write(&mut self, name: &[u8], lo: usize, hi: usize) -> Result<(), EdError> {
@@ -1402,17 +2165,34 @@ mod tests {
     }
 
     #[test]
-    fn a_regex_option_is_refused_rather_than_ignored() {
-        // Accepting `-E` and matching literally would edit the wrong text in
-        // silence, which is worse than refusing a flag we do not have.
-        let e = parse_args(&s(&["-E"])).unwrap_err();
-        assert_eq!(e.sentence, "option -E is not implemented by this ed");
-        assert_eq!(e.status, 1);
-        let e = parse_args(&s(&["--traditional"])).unwrap_err();
-        assert_eq!(
-            e.sentence,
-            "option '--traditional' is not implemented by this ed"
-        );
+    fn the_regex_dialect_options_are_accepted() {
+        // These were refused while this `ed` had no regex engine, on the
+        // grounds that accepting `-E` and matching literally would edit the
+        // wrong text in silence. Both now do what they say.
+        for spell in ["-E", "--extended-regexp"] {
+            let Request::Run(opts, _) = parse_args(&s(&[spell])).unwrap() else {
+                panic!("expected a run")
+            };
+            assert!(opts.extended, "{spell}");
+        }
+        for spell in ["-G", "--traditional"] {
+            let Request::Run(opts, _) = parse_args(&s(&[spell])).unwrap() else {
+                panic!("expected a run")
+            };
+            assert!(opts.traditional, "{spell}");
+        }
+    }
+
+    #[test]
+    fn traditional_mode_drops_the_end_of_line_marker() {
+        // The one difference `-G` makes among the commands this ed has.
+        // Measured: `ed -sG` folds a 100-column line identically and ends it
+        // without the `$`.
+        assert_eq!(list_line(b"ab", false), b"ab$\n".to_vec());
+        assert_eq!(list_line(b"ab", true), b"ab\n".to_vec());
+        let folded = list_line(&[b'a'; 100], true);
+        assert!(folded.windows(2).any(|w| w == b"\\\n"), "still folds");
+        assert!(folded.ends_with(b"a\n") && !folded.ends_with(b"$\n"));
     }
 
     #[test]
@@ -1438,8 +2218,23 @@ mod tests {
 
     // ---------------- addresses ----------------
 
+    /// Parse *and resolve* an address, against a buffer of `total` blank lines
+    /// with `.` at `current`.
+    ///
+    /// Resolution needs a buffer now that `/RE/` is an address, so these tests
+    /// go through an `Editor` rather than calling the parser alone. The lines
+    /// are blank because no test here searches; the ones that do build their own
+    /// buffer with `editor_with`.
+    fn resolve_in(line: &str, current: usize, total: usize) -> Result<Resolved, EdError> {
+        let mut e = Editor::new(Options::default());
+        e.buffer = vec![Vec::new(); total];
+        e.current = current;
+        let parsed = parse_command(line.as_bytes())?;
+        e.resolve_command(parsed)
+    }
+
     fn addr(line: &str, current: usize, total: usize) -> (Option<i64>, Option<i64>, u8) {
-        let c = parse_command(line.as_bytes(), current, total).unwrap();
+        let c = resolve_in(line, current, total).unwrap();
         (c.first, c.second, c.cmd)
     }
 
@@ -1484,7 +2279,7 @@ mod tests {
         // together they are why the address parser puts its trailing blanks
         // back rather than eating them.
         assert_eq!(addr("1 p", 1, 9), (Some(1), None, b'p'));
-        let c = parse_command(b"1p ", 1, 9).unwrap();
+        let c = parse_command(b"1p ").unwrap();
         assert_eq!(print_suffix(&c.rest), Err(EdError::InvalidCommandSuffix));
     }
 
@@ -1492,7 +2287,7 @@ mod tests {
     fn an_address_too_large_to_hold_is_refused_not_wrapped() {
         let huge = "99999999999999999999p";
         assert_eq!(
-            parse_command(huge.as_bytes(), 1, 9).unwrap_err(),
+            parse_command(huge.as_bytes()).unwrap_err(),
             EdError::InvalidAddress
         );
     }
@@ -1575,19 +2370,25 @@ mod tests {
 
     // ---------------- substitution ----------------
 
+    /// `substitute_line` against a freshly compiled pattern.
+    fn sub(line: &[u8], pattern: &[u8], repl: &[u8], global: bool) -> Option<Vec<u8>> {
+        let re = bre::compile(pattern, false).unwrap();
+        substitute_line(line, &re, repl, global).unwrap()
+    }
+
     #[test]
     fn substitute_replaces_the_first_occurrence_only() {
         assert_eq!(
-            substitute_line(b"foo foo foo", b"foo", b"bar", false).unwrap(),
-            b"bar foo foo".to_vec()
+            sub(b"foo foo foo", b"foo", b"bar", false),
+            Some(b"bar foo foo".to_vec())
         );
     }
 
     #[test]
     fn substitute_global_replaces_all_of_them() {
         assert_eq!(
-            substitute_line(b"foo foo foo", b"foo", b"bar", true).unwrap(),
-            b"bar bar bar".to_vec()
+            sub(b"foo foo foo", b"foo", b"bar", true),
+            Some(b"bar bar bar".to_vec())
         );
     }
 
@@ -1596,16 +2397,83 @@ mod tests {
         // The caller turns this into GNU's `No match`, which the old code had
         // no way to produce: it wrote the unchanged line back and marked the
         // buffer modified.
-        assert!(substitute_line(b"hello", b"X", b"Y", true).is_none());
-        assert!(substitute_line(b"hello", b"", b"X", true).is_none());
+        assert_eq!(sub(b"hello", b"X", b"Y", true), None);
     }
 
     #[test]
     fn substitute_works_on_bytes_that_are_not_text() {
+        // The pattern is a byte, not a character: `\x80` is not valid UTF-8 and
+        // has to match anyway, which is why the whole engine is byte-based.
+        assert_eq!(sub(b"a\x80b", b"\x80", b"!", false), Some(b"a!b".to_vec()));
+    }
+
+    #[test]
+    fn substitute_is_a_regular_expression_not_a_literal() {
+        // The defect this closes: `s/./X/` replaced a literal full stop.
+        assert_eq!(sub(b"abc", b".", b"X", false), Some(b"Xbc".to_vec()));
+        assert_eq!(sub(b"abc", b"^a", b"X", false), Some(b"Xbc".to_vec()));
+        assert_eq!(sub(b"aaab", b"a*", b"X", false), Some(b"Xb".to_vec()));
         assert_eq!(
-            substitute_line(b"a\x80b", b"\x80", b"!", false).unwrap(),
-            b"a!b".to_vec()
+            sub(b"ab", b"\\(a\\)b", b"[\\1]", false),
+            Some(b"[a]".to_vec())
         );
+        assert_eq!(sub(b"ab", b"a", b"<&>", false), Some(b"<a>b".to_vec()));
+    }
+
+    /// `substitute_line`'s error, for the cases that are meant to have one.
+    fn sub_err(line: &[u8], pattern: &[u8], repl: &[u8], global: bool) -> EdError {
+        let re = bre::compile(pattern, false).unwrap();
+        substitute_line(line, &re, repl, global).unwrap_err()
+    }
+
+    #[test]
+    fn a_global_substitution_applies_an_empty_match_once_and_then_stops() {
+        // `,s/^/> /` prefixes the line exactly once: the empty match at 0 is
+        // applied, and the second search cannot match `^` again because byte 0
+        // is no longer a line start. Same for `$`, from the other end.
+        assert_eq!(sub(b"ab", b"^", b"> ", true), Some(b"> ab".to_vec()));
+        assert_eq!(sub(b"ab", b"$", b" <", true), Some(b"ab <".to_vec()));
+        assert_eq!(sub(b"alpha", b"^x*", b"X", true), Some(b"Xalpha".to_vec()));
+        // A pattern that consumes something on the first pass and can only
+        // match empty afterwards is fine too, as long as the empty match is
+        // ruled out by `^`.
+        assert_eq!(sub(b"alpha", b"^a*", b"X", true), Some(b"Xlpha".to_vec()));
+        // An empty line: one substitution, and the walk stops because there is
+        // no remaining text to search.
+        assert_eq!(sub(b"", b"x*", b"X", true), Some(b"X".to_vec()));
+        // Consuming the whole line likewise ends the walk rather than searching
+        // an empty remainder.
+        assert_eq!(sub(b"aaa", b"a*", b"X", true), Some(b"X".to_vec()));
+        assert_eq!(sub(b"b", b"b*", b"X", true), Some(b"X".to_vec()));
+    }
+
+    #[test]
+    fn a_global_substitution_that_cannot_advance_is_refused() {
+        // GNU 1.20.1's rule, measured: an empty match at offset 0 of the
+        // *remaining* text, on any pass after the first, ends the command.
+        // Copying `sed`'s rule instead — skip a character and carry on — gave
+        // `,s/a*/X/g` on `alpha` the answer `XlXpXhX`, which GNU never prints.
+        for (line, pat) in [
+            (&b"alpha"[..], &b"a*"[..]),
+            (b"alpha", b"b*"),
+            (b"alpha", b"a*b*"),
+            (b"alpha", b"\\(a\\)*"),
+            (b"alpha", b"a\\{0,\\}"),
+            // Leftmost-empty at 0 even though a longer match exists later, and
+            // consumed-then-empty: both are the same refusal.
+            (b"ab", b"b*"),
+            (b"ba", b"b*"),
+        ] {
+            assert_eq!(
+                sub_err(line, pat, b"X", true),
+                EdError::InfiniteSubstitutionLoop,
+                "{}",
+                String::from_utf8_lossy(pat)
+            );
+        }
+        // Without `g` there is only ever one pass, so none of them can loop.
+        assert_eq!(sub(b"alpha", b"a*", b"X", false), Some(b"Xlpha".to_vec()));
+        assert_eq!(sub(b"alpha", b"b*", b"X", false), Some(b"Xalpha".to_vec()));
     }
 
     #[test]
@@ -1662,7 +2530,7 @@ mod tests {
     fn list_escapes_the_bytes_a_terminal_would_eat() {
         // Measured: `a\tb\\c$d\200e` lists as `a\tb\\c\$d\200e$`.
         assert_eq!(
-            list_line(b"a\tb\\c$d\x80e"),
+            list_line(b"a\tb\\c$d\x80e", false),
             br"a\tb\\c\$d\200e$"
                 .to_vec()
                 .into_iter()
@@ -1675,7 +2543,7 @@ mod tests {
     fn list_folds_at_seventy_two_columns() {
         // Eighteen four-character escapes make exactly 72, and the break comes
         // after the eighteenth.
-        let out = list_line(&[0x80u8; 30]);
+        let out = list_line(&[0x80u8; 30], false);
         let text = String::from_utf8(out).unwrap();
         let first = text.lines().next().unwrap();
         assert_eq!(first.len(), 73, "72 columns then the announcing backslash");
@@ -1689,19 +2557,19 @@ mod tests {
         // is no escape after this one. Measured — GNU prints this on one line.
         let mut line = vec![b'a'; 71];
         line.push(0x80);
-        let out = String::from_utf8(list_line(&line)).unwrap();
+        let out = String::from_utf8(list_line(&line, false)).unwrap();
         assert_eq!(out, format!("{}\\200$\n", "a".repeat(71)));
 
         // One more `a` in front and the fold does happen — after 72 columns,
         // with the escape landing whole on the second line.
         let mut line = vec![b'a'; 72];
         line.push(0x80);
-        let out = String::from_utf8(list_line(&line)).unwrap();
+        let out = String::from_utf8(list_line(&line, false)).unwrap();
         assert_eq!(out, format!("{}\\\n\\200$\n", "a".repeat(72)));
 
         // And the margin is columns, not bytes: 36 tabs are 36 bytes and 72
         // printed columns, so a 37th tab starts a new line.
-        let out = String::from_utf8(list_line(&[b'\t'; 37])).unwrap();
+        let out = String::from_utf8(list_line(&[b'\t'; 37], false)).unwrap();
         assert_eq!(out, format!("{}\\\n\\t$\n", r"\t".repeat(36)));
     }
 
@@ -1709,7 +2577,7 @@ mod tests {
     #[test]
     fn the_fold_margin_is_exactly_seventy_two() {
         for n in [68usize, 69, 70, 71, 72] {
-            let out = String::from_utf8(list_line(&vec![b'a'; n])).unwrap();
+            let out = String::from_utf8(list_line(&vec![b'a'; n], false)).unwrap();
             assert_eq!(
                 out,
                 format!("{}$\n", "a".repeat(n)),
@@ -1717,7 +2585,7 @@ mod tests {
             );
         }
         for n in [73usize, 74, 75] {
-            let out = String::from_utf8(list_line(&vec![b'a'; n])).unwrap();
+            let out = String::from_utf8(list_line(&vec![b'a'; n], false)).unwrap();
             let tail = "a".repeat(n.saturating_sub(72));
             assert_eq!(out, format!("{}\\\n{tail}$\n", "a".repeat(72)), "n={n}");
         }
@@ -1725,7 +2593,7 @@ mod tests {
 
     #[test]
     fn list_marks_the_end_of_every_line() {
-        assert_eq!(list_line(b""), b"$\n".to_vec());
+        assert_eq!(list_line(b"", false), b"$\n".to_vec());
     }
 
     // ---------------- file names ----------------
@@ -1806,6 +2674,19 @@ mod tests {
             EdError::DirectoryAccessRestricted.sentence(),
             "Directory access restricted"
         );
+        assert_eq!(
+            EdError::InfiniteSubstitutionLoop.sentence(),
+            "Infinite substitution loop"
+        );
+        assert_eq!(
+            EdError::NestedGlobal.sentence(),
+            "Cannot nest global commands"
+        );
+        assert_eq!(EdError::NoPreviousPattern.sentence(), "No previous pattern");
+        assert_eq!(
+            EdError::UnbalancedBrackets.sentence(),
+            "Unbalanced brackets ([])"
+        );
     }
 
     // ---------------- buffer edits ----------------
@@ -1837,17 +2718,88 @@ mod tests {
 
     #[test]
     fn a_range_is_checked_against_the_buffer() {
-        let e = editor_with(&["a", "b", "c"]);
-        let ok = parse_command(b"1,2p", 3, 3).unwrap();
+        let mut e = editor_with(&["a", "b", "c"]);
+        let ok = e.resolve_command(parse_command(b"1,2p").unwrap()).unwrap();
         assert_eq!(e.range(&ok, (3, 3), false), Ok((1, 2)));
         // Reversed, past the end, and zero: all three were silent before.
-        let rev = parse_command(b"2,1p", 3, 3).unwrap();
+        let rev = e.resolve_command(parse_command(b"2,1p").unwrap()).unwrap();
         assert_eq!(e.range(&rev, (3, 3), false), Err(EdError::InvalidAddress));
-        let past = parse_command(b"9p", 3, 3).unwrap();
+        let past = e.resolve_command(parse_command(b"9p").unwrap()).unwrap();
         assert_eq!(e.range(&past, (3, 3), false), Err(EdError::InvalidAddress));
-        let zero = parse_command(b"0p", 3, 3).unwrap();
+        let zero = e.resolve_command(parse_command(b"0p").unwrap()).unwrap();
         assert_eq!(e.range(&zero, (3, 3), false), Err(EdError::InvalidAddress));
         // …but zero is where `a` and `i` put text before the first line.
         assert_eq!(e.range(&zero, (3, 3), true), Ok((0, 0)));
+    }
+
+    /// Run one command line against a fresh buffer and hand back what is left.
+    ///
+    /// The editor must not outlive the call: `Editor::new` takes `stdin().lock()`,
+    /// so two live editors in one thread deadlock — and `let e = …` twice in a
+    /// row *is* two live editors, because shadowing does not drop.
+    fn after(lines_in: &[&str], cmd: &[u8]) -> Vec<Vec<u8>> {
+        let mut e = editor_with(lines_in);
+        assert!(e.execute(cmd).is_ok());
+        std::mem::take(&mut e.buffer)
+    }
+
+    #[test]
+    fn an_unaddressed_global_covers_the_whole_buffer() {
+        // The bug this guards against: `range` derives its upper bound from the
+        // *lower* default, so a `g` that handed it `(1, total)` still came back
+        // with `(1, 1)` and only ever visited the first line.
+        let all = ["alpha", "beta", "gamma"];
+        assert!(after(&all, b"g/a/d").is_empty());
+        // `v` is the same loop with the match inverted, so — every line here
+        // containing an `a` — nothing is selected and the buffer survives.
+        assert_eq!(after(&all, b"v/a/d"), lines(&all));
+        // An explicit range still narrows it.
+        assert_eq!(after(&all, b"2,3g/a/d"), lines(&["alpha"]));
+        // And the marks travel with the lines rather than with their numbers:
+        // deleting line 1 must not turn line 2 into an unvisited line 1 again.
+        assert_eq!(
+            after(&all, b"g/a/s/a/X/"),
+            lines(&["Xlpha", "betX", "gXmma"])
+        );
+    }
+
+    #[test]
+    fn a_global_inside_a_global_is_refused() {
+        let mut e = editor_with(&["alpha", "beta"]);
+        assert!(matches!(
+            e.execute(b"g/a/g/b/d"),
+            Err(EdError::NestedGlobal)
+        ));
+    }
+
+    #[test]
+    fn an_empty_global_command_list_prints() {
+        // Measured against GNU: `g/a/` with nothing after the delimiter runs
+        // `p`, and `g/a/\` plus a blank line — two empty commands — runs it
+        // twice. So an empty command is `p`, not the bare-newline command.
+        assert_eq!(split_command_list(b""), vec![b"p".to_vec()]);
+        assert_eq!(
+            split_command_list(b"\n"),
+            vec![b"p".to_vec(), b"p".to_vec()]
+        );
+        assert_eq!(
+            split_command_list(b"s/a/X/\n"),
+            vec![b"s/a/X/".to_vec(), b"p".to_vec()]
+        );
+        assert_eq!(
+            split_command_list(b"s/a/X/\ns/b/Y/"),
+            vec![b"s/a/X/".to_vec(), b"s/b/Y/".to_vec()]
+        );
+    }
+
+    #[test]
+    fn a_command_list_continues_on_an_odd_number_of_backslashes() {
+        // `s/a/b/\` is unfinished; `s/a/\\/` is a complete command whose
+        // replacement happens to be a backslash.
+        assert!(has_trailing_continuation(b"s/a/b/\\"));
+        assert!(!has_trailing_continuation(b"s/a/\\\\/"));
+        assert!(!has_trailing_continuation(b"s/a/b/\\\\"));
+        assert!(!has_trailing_continuation(b"p"));
+        assert!(has_trailing_continuation(b"\\\\\\"));
     }
 }

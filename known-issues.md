@@ -63297,7 +63297,11 @@ worst where the trailing newline is semantic, which for a line editor it is.
 are no `/RE/` addresses, no `g`/`v`/`G`/`V`. That is
 `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`; the fix is `ere::bre`, which `sed` already
 uses, and the 14 cases that will turn `KFIXED` when it lands are already in the
-harness, so the entry cannot be silently outlived. The scope calls — what this
+harness, so the entry cannot be silently outlived.
+*(Superseded 2026-08-30: regular expressions landed, that entry is closed, and
+the harness cases became ordinary `run_pipe` comparisons. What is still missing
+is eight commands — `TD-B-ED-IS-MISSING-EIGHT-COMMANDS`.)*
+The scope calls — what this
 `ed` refuses rather than guesses at, and why it prints file names raw instead of
 quoted — are `design-decisions.md` §713.
 
@@ -97621,7 +97625,51 @@ each length exactly.
 
 ---
 
-## TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS — `ed`'s `s` matches a literal string, and there are no `/RE/` addresses (lane B, 2026-08-30) — **open**
+## TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS — `ed`'s `s` matches a literal string, and there are no `/RE/` addresses (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+**Fixed the same day it was written.** `ed` now compiles every pattern through
+`ere::bre` (or `ere::Regex` under `-E`), has the `/RE/`, `?RE?`, `//` and `??`
+addresses, `&` and `\1`…`\9` in a replacement, and all four of `g`, `v`, `G`,
+`V`. The five `kbug_pipe` cases that named this entry are ordinary `run_pipe`
+comparisons now, and `scripts/ed-diff.sh` grew a `regular expressions` and a
+`global commands` section — about fifty cases — around them. The rest of the
+original text is kept below because the *fix plan* is what was carried out and
+the table is the record of what changed.
+
+Four things were learned in the doing that the plan did not anticipate, and
+they are the reason this paragraph exists rather than a bare "fixed":
+
+1. **A `g` command list is an input *source*, not a list of steps.** GNU feeds
+   it through the ordinary line-reading path, which is what makes `a` inside a
+   list take its text from the list and stop when the list ends — no `.`
+   required. `Editor::global_input` is that source; `read_line` consults it
+   first. The same field is the nesting guard: a `g` that finds it `Some`
+   answers `Cannot nest global commands`.
+2. **An empty command in a list means `p`.** Measured: `g/a/` prints every
+   matching line, and `g/a/\` followed by a blank line — two empty commands —
+   prints each one *twice*. The empty command cannot simply be handed to
+   `execute`, which would read it as the bare-newline command (`.+1p`).
+3. **`-G`/`--traditional` was never about a regex dialect**, which was the
+   premise of `design-decisions.md` §713 decision 1 and was wrong. It is a
+   compatibility mode over `G`, `V`, `f`, `l`, `m`, `t` and `!!`; of the
+   commands this `ed` has, the single thing it changes is that `l` ends a line
+   without the `$` marker. §713 records the correction.
+4. **`ed`'s empty-match rule for `s///g` is not `sed`'s**, and reaching for
+   `ere`'s ready-made iterator — which implements `sed`'s — was wrong. `sed`
+   advances one character past a match that consumed nothing; `ed` **refuses**,
+   with `Infinite substitution loop`. Measured: `,s/a*/X/g` on `alpha` is an
+   error in GNU and was `XlXpXhX` here. Getting it right needs `REG_NOTBOL` —
+   `^` may match on the first search of a line and not on any later one, which
+   is the whole difference between `s/^x*/X/g` printing `Xalpha` and wrongly
+   reporting the loop. `ere` grew a real `StartOfLine::No` for it (and
+   `Regex::search`, so the walk can be the caller's without re-decoding the
+   subject on every step), rather than `ed` faking the flag with a sentinel
+   byte.
+
+What remains missing is eight *commands*, which never had anything to do with
+regular expressions — that is `TD-B-ED-IS-MISSING-EIGHT-COMMANDS`.
+
+---
 
 **In short:** `ed` is the line editor. Its search-and-replace command, `s`,
 is supposed to take a *regular expression* — a small pattern language in which
@@ -97704,6 +97752,85 @@ the entry be closed at the same time.
 | The parser that would grow the `/RE/` forms | same file, `parse_address`, `parse_substitute` |
 | The engine to use | `userspace/ere/src/bre.rs`, `compile` |
 | The precedent | `userspace/coreutils/src/bin/sed.rs`, which compiles the same dialect |
+| The harness cases | `scripts/ed-diff.sh`, the `kbug_pipe` block |
+
+---
+
+## TD-B-ED-IS-MISSING-EIGHT-COMMANDS — `ed` answers `?` to `m`, `t`, `j`, `k`, `r`, `e`, `u` and `#` (lane B, 2026-08-30) — **open**
+
+**In short:** `ed` is the line editor. Eight of its commands are simply not
+written yet, so typing one gets a bare `?` — the same answer as a typo. Nothing
+is *wrong* with what `ed` does; there is less of it than there should be. A
+script written for a real `ed` that moves a line, copies one, joins two, sets a
+mark, reads a second file in, switches files, undoes a change, or carries a
+comment will stop at that line rather than do something wrong. This is the
+successor to `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`, which was about the pattern
+language and is closed; this one is about the command list and never involved
+patterns at all.
+
+### What is missing
+
+| Command | What GNU does | What we do |
+|---|---|---|
+| `(.,.)m(.)` | **move** the addressed lines to after another line | `Unknown command` |
+| `(.,.)t(.)` | **copy** ("transfer") them there instead | `Unknown command` |
+| `(.,.)j` | **join** the addressed lines into one | `Unknown command` |
+| `(.)kx` and the `'x` address | set a **mark** on a line and name it later | `Unknown command` |
+| `(.)r FILE` | **read** a file in after the addressed line | `Unknown command` |
+| `e FILE`, `E FILE` | **edit** another file (`E` without the modified warning) | `Unknown command` |
+| `u` | **undo** the last buffer change | `Unknown command` |
+| `#comment` | ignore the rest of the line | `Unknown command` |
+
+Also absent, and smaller: `x`/`y` (the cut buffer), `h`/`H` (the last error's
+explanation — `-v` covers the same ground for a script but not for a person at
+a terminal), and `+line` on the command line.
+
+**Not on this list, on purpose:** `!command` and a file name beginning with `!`.
+Those hand text to a shell and are a *deliberate* refusal, not a gap — see
+`design-decisions.md` §713 decision 2. They answer `Shell access not implemented
+by this ed` and are `xfail_pipe` cases in the harness, not `kbug_pipe` ones.
+`z` is not on it either: GNU ed answers `?` to `z` as well.
+
+### The fix
+
+All eight are ordinary arms in `Editor::execute`
+(`userspace/coreutils/src/bin/ed.rs`). Three notes that are not obvious from
+the command descriptions:
+
+1. **`m`, `t` and `j` must carry the `g` marks with the lines**, exactly as
+   `insert` and `delete` already do (`Editor::marks`). A global command list
+   may contain any of them, and a mark array that does not follow its lines
+   turns "visit each selected line once" into "visit some twice and some never".
+2. **`u` needs a change record, which does not exist yet.** The cheapest honest
+   shape is a single snapshot of `(buffer, current, modified)` taken before each
+   command that modifies the buffer, since GNU's `u` is one level deep and `u`
+   after `u` redoes. A full undo *stack* is not what GNU has and would be a
+   difference, not an improvement.
+3. **`e` re-enters `Editor::load`**, which today is only called at startup and
+   returns `Some(status)` meaning "the session is over before it started". That
+   return has to become "the load failed, keep the old buffer" for the `e`
+   caller, so `load` needs splitting rather than reusing as-is.
+
+### How to see it
+
+```
+$ printf '1m$\n,p\nq\n' | ed f.txt     # f.txt is alpha/beta/gamma
+17
+?                                      # GNU prints beta/gamma/alpha
+```
+
+`scripts/ed-diff.sh` carries eight `kbug_pipe` cases naming this entry, one per
+command. They are loud on every run and do not fail it; when a command lands its
+case turns `KFIXED`, which *does* fail the run, so the entry cannot be silently
+outlived.
+
+### Where
+
+| | |
+|---|---|
+| The dispatch to extend | `userspace/coreutils/src/bin/ed.rs`, `Editor::execute` |
+| The marks that `m`/`t`/`j` must maintain | same file, `Editor::marks`, `insert`, `delete` |
+| The loader `e` needs to reuse | same file, `Editor::load` |
 | The harness cases | `scripts/ed-diff.sh`, the `kbug_pipe` block |
 
 ## `B-A-HOOK-EDIT-DID-NOTHING-BECAUSE-THE-HOOK-WAS-INSTALLED-AS-A-COPY` (lane B, 2026-08-30) — **FIXED 2026-08-30**

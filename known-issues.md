@@ -95247,6 +95247,99 @@ visit: sudoku's pencil-mark grid, chess's move history, checkers' capture
 panel, and every app that reserves room for a scrollback it never fills in a
 test.
 
+**Addendum (lane C, 2026-08-30, `apps/yahtzee`).** The same shape appears one
+step worse when the losing side is a *magic constant* and a later operation can
+override it. `apps/yahtzee`'s scorecard was
+`(w * 0.44).clamp(170.0, 380.0).min(w / 2.0)` — which reads as three
+constraints and was two. At every window shape the app was tried at, either the
+share or the half-window cap decided the width; the 170 floor never applied
+once, so a mutation deleting it changed nothing anywhere. Two remedies, and
+both are needed: (a) **derive the bound from the thing it exists to protect**
+rather than writing a number — the floor is now the longest category name
+measured at the font this window actually uses, widened back through the row's
+own name/score split; and (b) **add a fixture at the shape where the bound is
+the binding one**, which for yahtzee is 350x1000 and is nowhere near any of the
+five shapes chosen to be "small, large, tall, wide, default". A bound nothing
+binds at is not tested by *any* number of window sizes chosen for variety; it
+is tested by one window size chosen by solving for it.
+
+### Lesson 83: the window's own background makes "something is drawn here" true everywhere (lane C, 2026-08-30)
+
+**In short:** Lesson 81 said a recorded hit box is not evidence anything was
+drawn in it, and prescribed the obvious remedy — look for a paint command that
+covers the box. That remedy is vacuous in every app in this campaign, because
+the first thing every drawing pass does is fill the entire window with the
+background colour. "Some `FillRect` covers this point" is therefore true of
+*every point in the app*, including the middle of a widget that drew nothing at
+all. `apps/yahtzee`'s `something_is_painted_inside_every_die_box` asked exactly
+that question, and a mutation that recorded each die's hit box and then returned
+before painting a single pixel of it walked straight past — past the one test
+whose entire stated purpose was to notice a box with nothing in it.
+
+**The rule.** Containment has to run the other way. Do not ask whether a paint
+command *contains* the widget's centre; ask whether some paint command *fits
+inside* the widget's box (grown by a pixel or two of slack). A full-window
+background can never satisfy that, and a widget that drew itself always does,
+because a widget that draws itself draws inside itself.
+
+```rust
+// vacuous — the background satisfies it for every point in the window
+filled.iter().any(|r| r.contains(cx, cy))
+
+// has teeth — nothing that isn't inside the die can satisfy it
+let grown = Rect::new(die.x - 1.0, die.y - 1.0, die.w + 2.0, die.h + 2.0);
+filled.iter().any(|r| {
+    r.w > 0.0 && r.h > 0.0
+        && r.x >= grown.x && r.y >= grown.y
+        && r.right() <= grown.right() && r.bottom() <= grown.bottom()
+})
+```
+
+**The tell.** Any assertion of the form "a command covers this point", in any
+app whose `draw` opens with a background fill — which is all of them. The same
+trap catches text: "some string was painted inside this rect" is nearly
+vacuous for a rect that spans a column, because the neighbouring row's label
+often has its origin on the boundary.
+
+**Where else to look.** Every app in the campaign that has a
+`something_is_painted_*` or `*_is_actually_drawn` test written after Lesson 81:
+checkers, solitaire, mandelbrot, and the seven `is_some()`-only visibility
+assertions Lesson 81 already lists as suspect. Lesson 81's "where else to look"
+should be read as pointing at this remedy, not the point-containment one.
+
+### Lesson 84: a test that computes its expectation with the function under test agrees with any bug in it (lane C, 2026-08-30)
+
+**In short:** `apps/yahtzee`'s `every_category_box_carries_that_category_s_name`
+checked that row *i* of the scorecard has category *i*'s name painted in it. It
+got the expected name by calling `Category::at(i)` — which is the same function
+the drawing pass calls to decide what to paint. A mutation making `at` return
+the category *after* the one asked for relabelled every row in the game, and the
+test passed, because the test's expectation shifted by one in lockstep with the
+picture. The suite had two copies of the same wrong answer and compared them to
+each other.
+
+**The rule.** The expectation must come from somewhere the code under test
+cannot reach. `Category::ALL[i]` is the data; `Category::at(i)` is the lookup
+being tested. Index the data. More generally: when a `Probe` test needs to know
+what *should* be on screen, spell it out from the rules of the game or from the
+raw table, never from the accessor, formatter or index-mapper the drawing pass
+uses. If spelling it out is inconvenient, that inconvenience is the test doing
+its job.
+
+**The tell.** Any `assert` whose left and right sides both contain a call into
+the production module — especially a helper with "index", "at", "for", "of" or
+"row" in its name, which is what a second description of an order looks like.
+Also any test that reads `l.something` out of a `Layout` and then compares it to
+a rect the same `Layout` produced: that is the same fault wearing geometry.
+
+**Where else to look.** Every app in this campaign routes its tests through
+`Probe`, and the natural way to write "the right thing is here" is to ask
+production what the right thing is. Grep each suite's test module for calls to
+production accessors inside `assert!`/`assert_eq!` arguments. The safe shape is
+the one `clicking_a_category_lands_on_that_category_and_no_other` already
+uses — click box *i*, then assert the set of filled boxes is exactly `{i}`,
+which names no production helper at all.
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print

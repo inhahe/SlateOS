@@ -95133,9 +95133,62 @@ boxes are the only thing that *can* see the clip vanish, and are blind to
 everything else. A wrong comment beside a vacuous assertion is how a tautology
 survives three readings.
 
-Still open: `guitk`'s own tests for `Frame::hit`, and any test asserting a
-widget's rect is inside its parent where the parent rect was used to compute the
-child's.
+**`guitk`'s own tests for `Frame::hit` — checked 2026-08-30, nothing to do.**
+The worry was that the toolkit never pinned down the behaviour the app tests
+were unknowingly leaning on, in which case it could drift and take fifty apps'
+tests with it. It pins it down in five places: `a_target_is_trimmed_to_the_clip_in_force`
+(a straddling box comes back cut, and the cut half is not clickable),
+`a_target_entirely_outside_the_clip_is_dropped`,
+`a_nested_clip_can_only_shrink_the_visible_region`,
+`a_degenerate_clip_clips_everything_away`, and
+`an_over_popped_clip_stops_trimming_the_callers_hits`, which is the same rule
+read from the other side. So the lesson is about where an app puts its
+assertion, not about a gap in the toolkit.
+
+Still open: any test asserting a widget's rect is inside its parent where the
+parent rect was used to compute the child's.
+
+### Lesson 81: a recorded hit box is not evidence that anything was drawn in it (lane C, 2026-08-30)
+
+**In short:** the natural way to check that a panel drew all its rows is to ask
+the frame whether each row's target has a box —
+`probe::rect_of_sized(&app, Target::Captures, size).is_some()`. That checks the
+row was *laid out*. It does not check the row was *painted*. In `apps/checkers`
+the two are separable: `panel_row` computes the row's rectangle, draws the text
+into it, and returns the rectangle, and the caller hands that rectangle to
+`f.hit`. Delete the drawing and keep the return — one line — and every box is
+still recorded, every `is_some()` still answers yes, and the panel is blank.
+A mutation doing exactly that survived the test whose stated job was to catch
+it.
+
+**The rule.** A hit box and a painted pixel are two different outputs of the
+drawing pass, and a test that reads one says nothing about the other. If what
+you mean is "the user can see this", assert against the render commands. If
+what you mean is "the user can click this", assert against the hit map. Say
+which one you meant, and if you meant both, assert both — the box exists *and*
+some `RenderCommand::Text`/`FillRect` origin falls inside it.
+
+**The tell.** A drawing helper that returns the rect it was given rather than
+the rect it drew, with a call site of the shape
+`f.hit(Target::X, helper(f, ..))`. The rect flows to the hit map through a path
+that does not pass through the painting. Also: any test whose only assertion is
+`rect_of(..).is_some()` for a target whose *content* is the point of it. The
+inverse shape — a control painted but never recorded — is caught by clicking
+it, so it is the visible half that goes unguarded.
+
+**How it was found.** A mutation sweep on `apps/checkers` gutting `panel_row`'s
+body to `let _ = (f, s, ink); row`. The row was expected to be caught by
+`the_panel_draws_its_rows_while_they_fit` and was instead caught only by
+`the_captures_line_credits_the_side_that_did_the_taking`, which happens to read
+the text. Fixed by requiring each of the panel's five boxes to contain the
+origin of a line of text.
+
+**Where else to look.** Every app in this campaign has a
+"the panel/toolbar/sidebar drew its rows" test, and the cheap spelling of it is
+`is_some()` over a list of targets. Wherever the drawing helper's return value
+is independent of whether it drew — which is most of them, since returning the
+laid-out rect is what makes `union` and the stacking cursor work — the test is
+measuring the layout and reporting on the paint.
 
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 

@@ -563,6 +563,115 @@ prep_dir_over_file() {
 PREP=prep_dir_over_file extract_case 'a directory member over a plain file' spec.tar
 
 # ---------------------------------------------------------------------------
+# Overwrite control: the five options that change what the cases above just did
+#
+# All of them answer the same question — an entry is already at the member's
+# path, now what — and GNU keeps the answer in *one* variable rather than five
+# flags, so naming two of them is a usage error. Every case here re-uses an
+# obstacle course from above and adds the option, which is the only way to see
+# what the option changed: the diagnostics differ between them, the exit status
+# differs, and in two cases nothing differs in the output at all and the whole
+# of the behaviour is in the manifest.
+#
+# The two silent ones are the reason `manifest` earns its keep here:
+#
+#   * `--overwrite` truncates in place where the default unlinks and recreates.
+#     Both leave identical bytes at the member's own name; the difference shows
+#     only at a *second* name for the same inode, as `%h` and the `=`-grouping
+#     lines (`prep_hardlinked`, below).
+#   * `-k` over an existing *directory* steps over it silently — and, because
+#     the member never counts as created, never records the directory in the
+#     deferred-metadata pass, so the mode and mtime found on disk survive. No
+#     message on either side says so; only the manifest's mode and mtime do.
+# ---------------------------------------------------------------------------
+for ovw in --overwrite -k --skip-old-files -U --keep-newer-files; do
+  PREP=prep_existing extract_case "over existing entries, $ovw" spec.tar "$ovw"
+  # `-v` is not cosmetic for three of these: `--skip-old-files` prints its
+  # notice *only* under it, and `--keep-newer-files` prints one whose position
+  # relative to the name line is itself a thing to get right.
+  PREP=prep_existing extract_case "over existing entries, $ovw -v" spec.tar "$ovw" -v
+done
+
+# The inode-identity case. `--overwrite`'s `O_TRUNC` rewrites the shared inode,
+# so `other` — not in the archive at all — becomes the member's contents and the
+# link survives; the default breaks the link and leaves `other` alone. `-k` and
+# `--skip-old-files` leave both names untouched, and `-U` breaks the link before
+# it ever opens anything.
+for ovw in --overwrite -k --skip-old-files -U --keep-newer-files; do
+  PREP=prep_hardlinked extract_case "over a file with another hard link, $ovw" \
+    spec.tar ./f "$ovw"
+done
+
+# `--overwrite` and a symlink pointing outside the destination. This is the case
+# that forces `O_NOFOLLOW`: an `O_TRUNC` open without it follows the link and
+# writes at the far end, which the `escape/` check further down would catch.
+# GNU replaces the link with a regular file and leaves the target alone.
+PREP=prep_symlink_out extract_case 'over a symlink pointing outside, --overwrite' \
+  spec.tar ./f ./rel --overwrite
+PREP=prep_symlink_out extract_case 'over a symlink pointing outside, -k' \
+  spec.tar ./f ./rel -k
+
+# A directory member over a directory that is already there, wearing a mode and
+# an mtime the member would replace. Under `-k` and `--skip-old-files` both are
+# left as found; under the others the member's are restored. Nothing is printed
+# in any of the five, so the manifest is the entire observation.
+prep_dir_existing() {
+  mkdir -m 700 d; printf 'was here\n' > d/mine
+  touch -d '2001-02-03 04:05:06' d/mine d
+}
+for ovw in '' --overwrite -k --skip-old-files -U --keep-newer-files; do
+  # shellcheck disable=SC2086  # empty means "no option", i.e. the default.
+  PREP=prep_dir_existing extract_case \
+    "a directory member over an existing directory, ${ovw:-default}" spec.tar $ovw
+done
+PREP=prep_dir_over_file extract_case 'a directory member over a plain file, -k' \
+  spec.tar -k
+
+# `--keep-newer-files` compares what is on disk against the member's mtime, and
+# the fixture's members are stamped 2020-01-02. Both sides of the comparison are
+# needed: a newer file is kept and announced, an older one is replaced silently.
+# The obstacle is put at four member types at once — `f` is regular, `rel` a
+# symlink member, `pipe` a fifo, `d` a directory — because the option applies to
+# every one of them, and a directory *on disk* is the one exemption.
+prep_newer_than_member() {
+  printf 'NEWER-ON-DISK\n' > f; printf 'n\n' > rel
+  printf 'n\n' > pipe;          printf 'n\n' > hard
+  touch -d '2021-06-07 08:09:10' f rel pipe hard
+}
+prep_older_than_member() {
+  printf 'OLDER-ON-DISK\n' > f; printf 'o\n' > rel
+  printf 'o\n' > pipe;          printf 'o\n' > hard
+  touch -d '2018-03-04 05:06:07' f rel pipe hard
+}
+PREP=prep_newer_than_member extract_case 'a newer file in the way, --keep-newer-files' \
+  spec.tar --keep-newer-files
+PREP=prep_newer_than_member extract_case 'a newer file in the way, --keep-newer-files -v' \
+  spec.tar --keep-newer-files -v
+PREP=prep_older_than_member extract_case 'an older file in the way, --keep-newer-files' \
+  spec.tar --keep-newer-files
+# A file stamped to the *same* second as the member: the test is `>=`, so it is
+# kept. One second either way is the whole of the boundary, and ustar mtimes
+# carry no fraction, so this is exact rather than approximate.
+prep_same_age_as_member() {
+  printf 'SAME-AGE\n' > f
+  touch -d '2020-01-02 03:04:05' f
+}
+PREP=prep_same_age_as_member extract_case 'a file of the same age, --keep-newer-files' \
+  spec.tar ./f --keep-newer-files
+
+# Naming two members of the family. The archive does not exist on purpose: the
+# refusal happens while the arguments are still being read, so nothing is opened
+# and the case cannot leave anything behind. Naming the *same* one twice is
+# fine — which is the observable consequence of GNU holding one variable rather
+# than five flags — and both spellings of a name have to be refused against each
+# other, since the check is on the value and not on the spelling.
+plain_case 'two of the family'            -xf nosuch.tar -k -U
+plain_case 'two of the family, long'      -xf nosuch.tar --overwrite --skip-old-files
+plain_case 'two of the family, mixed'     -xf nosuch.tar --keep-newer-files -k
+plain_case 'the same one twice'           -xf nosuch.tar -k --keep-old-files
+plain_case 'the same one twice, short'    -xf nosuch.tar -U -U
+
+# ---------------------------------------------------------------------------
 # A symlink that is an *ancestor* of the member, already in the destination.
 #
 # The cases above all put the obstacle at a member's *own* path, where the
@@ -834,7 +943,7 @@ plain_xcase \
   'unknown option' -cZf o.tar tree
 
 plain_xcase \
-  "GNU accepts long options; this tar has none, so --help is an operand to it. Adding them is a separate task -- see the getopt-ambiguity gate, which reports 'tar has no LONG_OPTIONS table'" \
+  "both tars print help and exit 0; the texts differ because ours documents the options it has and GNU's documents 172 it has. Copying GNU's list would advertise options that do not work -- see design-decisions.md 703" \
   'a long option' --help
 
 # `uname`/`gname` are left empty by ours, so an archive moved to a machine with

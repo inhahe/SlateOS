@@ -4026,7 +4026,9 @@ fn update_load_average() {
 /// EWMA absorbs the occasional undercount.
 #[must_use]
 pub fn nr_runnable() -> u64 {
-    let num_cpus = crate::smp::cpu_count().max(1).min(priority_rr::MAX_CPUS);
+    // `clamp` panics when max < min; `MAX_CPUS` is a compile-time constant
+    // greater than 1, so the bounds are ordered by construction.
+    let num_cpus = crate::smp::cpu_count().clamp(1, priority_rr::MAX_CPUS);
     let mut runnable: u64 = 0;
     for cpu_idx in 0..num_cpus {
         runnable = runnable.saturating_add(PER_CPU_SCHED.real_queue_length(cpu_idx) as u64);

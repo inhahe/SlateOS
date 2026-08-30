@@ -43,7 +43,12 @@ const HISTORY_SIZE: usize = 60;
 /// A single system metrics snapshot.
 ///
 /// Kept deliberately small (64 bytes) to fit in a cache line.
-/// All values are absolute (not deltas) — the viewer computes deltas.
+///
+/// Values are absolute (since boot, or as-of-now) and the viewer computes
+/// deltas — **except [`cpu_util`](Self::cpu_util)**, which is already an
+/// interval figure because the absolute form of it is a since-boot average
+/// that cannot move.  That exception is the reason the field carries a
+/// paragraph of its own.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct Sample {
@@ -55,13 +60,37 @@ pub struct Sample {
     pub total_frames: u32,
     /// Heap bytes currently in use.
     pub heap_bytes_in_use: u32,
-    /// Number of runnable tasks (ready + running).
+    /// Number of tasks the scheduler could run at this instant — queued on
+    /// some CPU's run queue, plus the one on each CPU that is not that CPU's
+    /// idle task.  From [`crate::sched::nr_runnable`].
+    ///
+    /// **This field used to hold `live_tasks`' number under this name**, which
+    /// meant a column labelled "runnable" only ever went up.  See that field.
     pub runnable_tasks: u16,
-    /// Number of blocked tasks.
-    pub blocked_tasks: u16,
+    /// Number of tasks that exist: spawned minus exited since boot.
+    ///
+    /// Not a count of *blocked* tasks, which is what this slot used to be
+    /// called while being hardcoded to zero.  Blocked cannot be derived from
+    /// the two by subtraction either, because the per-CPU idle tasks are live
+    /// and never runnable but are registered directly into the scheduler's
+    /// table without passing the spawn counter (`sched::register_ap_idle`), so
+    /// the two populations do not nest.  Counting blocked tasks honestly needs
+    /// a walk of the scheduler's task table, which takes `SCHED` — forbidden
+    /// here; see [`sample`].
+    pub live_tasks: u16,
     /// Memory pressure score (0-100).
     pub pressure_score: u8,
-    /// Per-CPU utilization percentages (up to 4 CPUs, 0-100 each).
+    /// Per-CPU utilization percentage over the interval *since the previous
+    /// sample* (up to 4 CPUs, 0-100 each).
+    ///
+    /// An interval figure, deliberately, even though every other number in
+    /// this struct is absolute: the scheduler publishes `(total, idle)` tick
+    /// counts that are cumulative since boot, and `(total - idle) / total` on
+    /// those is a since-boot *average*.  An average over an ever-longer window
+    /// converges and stops moving — so a graph of it is flat by construction
+    /// and cannot show the busy second this buffer exists to catch, while
+    /// still looking like measured data.  The deltas are taken against
+    /// [`PREV_CPU_TICKS`].
     pub cpu_util: [u8; 4],
     /// Context switches since boot (low 32 bits).
     pub ctx_switches_lo: u32,
@@ -79,7 +108,7 @@ impl Sample {
             total_frames: 0,
             heap_bytes_in_use: 0,
             runnable_tasks: 0,
-            blocked_tasks: 0,
+            live_tasks: 0,
             pressure_score: 0,
             cpu_util: [0; 4],
             ctx_switches_lo: 0,
@@ -104,6 +133,25 @@ static TOTAL_SAMPLES: AtomicU64 = AtomicU64::new(0);
 
 /// Whether sampling is enabled.
 static ENABLED: AtomicU64 = AtomicU64::new(1);
+
+/// The previous sample's cumulative per-CPU `(total_ticks, idle_ticks)`.
+///
+/// Exists so [`Sample::cpu_util`] can be an *interval* utilisation rather than
+/// a since-boot average; see that field for why the difference is the whole
+/// point of this buffer.  Indexed by CPU, four wide to match `cpu_util`.
+///
+/// Written only by the BSP softirq, the same single-writer discipline as
+/// [`HISTORY`], so a plain `swap` per entry is enough — there is no second
+/// writer for the read and the write to race against.  Relaxed ordering is
+/// correct because each slot is read and written by that one thread of
+/// control and nothing else is published through it.
+///
+/// **The first sample after boot diffs against zero**, so its utilisation is
+/// the since-boot average — which is the right answer for it, there being no
+/// earlier sample to measure an interval against.  Every sample after it is a
+/// true interval.
+static PREV_CPU_TICKS: [(AtomicU64, AtomicU64); 4] =
+    [const { (AtomicU64::new(0), AtomicU64::new(0)) }; 4];
 
 /// Samples abandoned because a memory lock was busy at tick time.
 ///
@@ -162,25 +210,43 @@ pub fn sample() {
 
     // --- Scheduler stats ---
     let sched = crate::sched::sched_stats();
-    let runnable = sched
-        .total_tasks_spawned
-        .saturating_sub(sched.total_tasks_exited) as u16;
-    // Rough split: blocked = total - ready - running.
-    // The sched_stats exposes state counts if available.
-    let blocked = 0u16; // Simplified; full version would query per-state counts.
+    // `nr_runnable` documents itself ISR-safe: per-CPU `try_lock` reads and
+    // atomic loads, no allocation, a contended queue contributing 0 rather
+    // than blocking.  That is the only reason this can be asked here at all,
+    // and it is why the answer is taken from there rather than recomputed.
+    let runnable = u16::try_from(crate::sched::nr_runnable()).unwrap_or(u16::MAX);
+    let live = u16::try_from(
+        sched
+            .total_tasks_spawned
+            .saturating_sub(sched.total_tasks_exited),
+    )
+    .unwrap_or(u16::MAX);
 
     // --- Memory pressure --- scored from the snapshot already taken above, so
     // this adds no lock acquisition at all.
     let pressure_score = crate::mm::pressure_from_info(&info).score;
 
-    // --- Per-CPU utilization ---
+    // --- Per-CPU utilization, over the interval since the previous sample ---
+    //
+    // `cpu_ticks` is cumulative since boot, so the ratio has to be taken on
+    // the *deltas*; see `Sample::cpu_util` for why the since-boot ratio this
+    // replaced could not show a busy second.  The swap publishes this
+    // sample's raw counts for the next one to diff against, so a CPU that
+    // stops being sampled (num_cpus shrank) simply stops updating rather than
+    // going stale in a way that inflates a later delta.
     let mut cpu_util = [0u8; 4];
     for i in 0..sched.num_cpus.min(4) {
         let (total, idle) = sched.cpu_ticks.get(i).copied().unwrap_or((0, 0));
-        if total > 0 {
-            #[allow(clippy::cast_possible_truncation)]
-            let util = total.saturating_sub(idle).saturating_mul(100) / total;
-            cpu_util[i] = util.min(100) as u8;
+        let Some(prev) = PREV_CPU_TICKS.get(i) else {
+            continue;
+        };
+        let d_total = total.saturating_sub(prev.0.swap(total, Ordering::Relaxed));
+        let d_idle = idle.saturating_sub(prev.1.swap(idle, Ordering::Relaxed));
+        if d_total > 0 {
+            let util = d_total.saturating_sub(d_idle).saturating_mul(100) / d_total;
+            if let Some(slot) = cpu_util.get_mut(i) {
+                *slot = u8::try_from(util.min(100)).unwrap_or(100);
+            }
         }
     }
 
@@ -204,7 +270,7 @@ pub fn sample() {
         total_frames,
         heap_bytes_in_use: heap_bytes,
         runnable_tasks: runnable,
-        blocked_tasks: blocked,
+        live_tasks: live,
         pressure_score,
         cpu_util,
         ctx_switches_lo,

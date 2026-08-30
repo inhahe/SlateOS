@@ -127771,17 +127771,18 @@ fn cmd_kstat(args: &str) {
     }
     shell_println!("");
     shell_println!(
-        "  {:<6} {:>5} {:>5} {:>7} {:>4} {:>4} {:>7} {:>5}",
+        "  {:<6} {:>5} {:>5} {:>7} {:>4} {:>4} {:>4} {:>7} {:>5}",
         "Age(s)",
         "Free%",
         "Press",
         "Heap KB",
-        "Task",
+        "Run",
+        "Live",
         "CPU0",
         "CtxSw",
         "IRQs"
     );
-    shell_println!("  {}", "-".repeat(55));
+    shell_println!("  {}", "-".repeat(61));
 
     let now_tick = crate::apic::tick_count();
 
@@ -127799,13 +127800,14 @@ fn cmd_kstat(args: &str) {
         let heap_kb = s.heap_bytes_in_use / 1024;
 
         shell_println!(
-            "  {:>5}s {:>4}% {:>5} {:>5}KB {:>4} {:>3}% {:>7} {:>5}",
+            "  {:>5}s {:>4}% {:>5} {:>5}KB {:>4} {:>4} {:>3}% {:>7} {:>5}",
             age_sec,
             free_pct,
             s.pressure_score,
             heap_kb,
             s.runnable_tasks,
-            s.cpu_util[0],
+            s.live_tasks,
+            s.cpu_util.first().copied().unwrap_or(0),
             s.ctx_switches_lo,
             s.interrupts_lo,
         );
@@ -127813,7 +127815,9 @@ fn cmd_kstat(args: &str) {
 
     shell_println!("");
     shell_println!("  Columns: Age=seconds ago, Free%=phys mem free, Press=pressure(0-100),");
-    shell_println!("           Heap=kernel heap, Task=active tasks, CPU0=util%, CtxSw/IRQs=totals");
+    shell_println!("           Heap=kernel heap, Run=runnable now, Live=tasks that exist,");
+    shell_println!("           CPU0=util% over the interval since the row above it,");
+    shell_println!("           CtxSw/IRQs=totals since boot");
 }
 
 /// `idle` — show CPU idle state statistics.

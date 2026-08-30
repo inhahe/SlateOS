@@ -16208,7 +16208,22 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "netsettings dns nosuchif auto",
                 b"Usage:",
             ),
-            ("perfmon dismiss", "perfmon dismiss 999999", b"Usage:"),
+            // The `let ... else` form, where the guard *is* the binding: the
+            // operand is pulled out with `parts.get(1)` and the absent case is
+            // the `else` block. This slot used to hold `perfmon dismiss`, a
+            // second example of the `} else if` form above; it was replaced
+            // rather than deleted when `dismiss` went away with the alert
+            // buffer, because a slot covering a shape nothing else covers is
+            // worth more than a duplicate of one `netsettings dns` already
+            // pins. The control is a *malformed* operand rather than a
+            // nonexistent one -- `perfmon cpu-alert 50` would succeed and
+            // leave the threshold changed for the rest of the boot, which is
+            // not a self-test's business.
+            (
+                "perfmon cpu-alert",
+                "perfmon cpu-alert notanumber",
+                b"Usage:",
+            ),
         ];
         for (bare, control, marker) in arity_cases {
             let out = capture_command(bare);
@@ -53678,35 +53693,81 @@ fn cmd_perfmon(args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
 
+    /// Parse a threshold argument, or print the usage line and fail.
+    ///
+    /// Split from the reporting half rather than taking the setter as a
+    /// callback, so that each arm below calls `perfmon::set_*_alert` *directly*.
+    /// Two readers depend on the call being literal text at the call site:
+    /// anyone grepping for the setter's callers, and
+    /// `scripts/find-unreachable-mutators.py`, which matches on call text and
+    /// counted both setters as callerless while they were reached through a
+    /// function-item parameter — a false positive in the very metric the
+    /// burn-down for `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` is
+    /// measured by.
+    fn parse_threshold(parts: &[&str], name: &str) -> Option<u32> {
+        let Some(raw) = parts.get(1) else {
+            shell_println!("Usage: perfmon {name}-alert <percent>");
+            set_exit(1);
+            return None;
+        };
+        match raw.parse::<u32>() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                shell_println!("Invalid percentage: {raw}");
+                set_exit(1);
+                None
+            }
+        }
+    }
+
+    /// Report what a threshold setter actually stored.
+    ///
+    /// Shared so the two arms cannot drift into describing the same clamp
+    /// differently. Reports the stored value rather than the requested one: the
+    /// setter clamps, and restating its range here would be a second copy of
+    /// that policy, free to disagree with it.
+    fn report_threshold(name: &str, requested: u32, effective: u32) {
+        if effective == requested {
+            shell_println!("{name} alert threshold set to {effective}%");
+        } else {
+            shell_println!("{name} alert threshold set to {effective}% (clamped from {requested})");
+        }
+    }
+
     match sub {
         "" | "show" | "latest" => {
             if let Some(cpu) = perfmon::cpu_latest() {
-                shell_println!(
-                    "CPU:  {}% (sys {}% user {}%) @ {} MHz",
-                    cpu.usage_pct,
-                    cpu.system_pct,
-                    cpu.user_pct,
-                    cpu.freq_mhz
-                );
-                if cpu.temp_mc > 0 {
-                    shell_println!(
-                        "Temp: {}.{} °C",
-                        cpu.temp_mc / 1000,
-                        (cpu.temp_mc % 1000) / 100
-                    );
+                shell_println!("CPU:  {}% over the last sample interval", cpu.usage_pct);
+                if !cpu.per_core.is_empty() {
+                    let mut line = String::from("Cores:");
+                    for (i, pct) in cpu.per_core.iter().enumerate() {
+                        line.push_str(&alloc::format!(" cpu{i}={pct}%"));
+                    }
+                    shell_println!("{}", line);
                 }
-                shell_println!("Procs: {} Threads: {}", cpu.process_count, cpu.thread_count);
+                shell_println!(
+                    "Tasks: {} runnable, {} live",
+                    cpu.runnable_tasks,
+                    cpu.live_tasks
+                );
             } else {
-                shell_println!("No CPU samples yet");
+                shell_println!("No samples yet (kstat has not run)");
             }
             if let Some(mem) = perfmon::mem_latest() {
-                let used_mb = mem.used_bytes / (1024 * 1024);
-                let avail_mb = mem.available_bytes / (1024 * 1024);
-                shell_println!("RAM:  {} MiB used, {} MiB available", used_mb, avail_mb);
+                shell_println!(
+                    "RAM:  {} MiB used of {} MiB ({}%), heap {} KiB, pressure {}",
+                    mem.used_bytes / (1024 * 1024),
+                    mem.total_bytes / (1024 * 1024),
+                    mem.used_pct(),
+                    mem.heap_bytes / 1024,
+                    mem.pressure_score
+                );
             }
             let alerts = perfmon::active_alerts();
-            if !alerts.is_empty() {
-                shell_println!("\n{} active alert(s):", alerts.len());
+            if alerts.is_empty() {
+                shell_println!("No thresholds exceeded");
+            } else {
+                shell_println!("\n{} threshold(s) exceeded:", alerts.len());
                 for a in &alerts {
                     shell_println!("  [{}] {}", a.resource, a.message);
                 }
@@ -53715,18 +53776,17 @@ fn cmd_perfmon(args: &str) {
         "cpu" => {
             let hist = perfmon::cpu_history();
             if hist.is_empty() {
-                shell_println!("No CPU samples");
+                shell_println!("No samples yet (kstat has not run)");
             } else {
                 let n = hist.len().min(10);
-                shell_println!("Last {} CPU samples:", n);
+                shell_println!("Last {n} of {} CPU samples (newest first):", hist.len());
                 for s in hist.iter().rev().take(n) {
                     shell_println!(
-                        "  {}% (sys {}%, user {}%) @ {} MHz, {} procs",
+                        "  t={}s {:>3}%  {} runnable, {} live",
+                        s.timestamp_ns / 1_000_000_000,
                         s.usage_pct,
-                        s.system_pct,
-                        s.user_pct,
-                        s.freq_mhz,
-                        s.process_count
+                        s.runnable_tasks,
+                        s.live_tasks
                     );
                 }
             }
@@ -53734,166 +53794,70 @@ fn cmd_perfmon(args: &str) {
         "mem" | "memory" => {
             let hist = perfmon::mem_history();
             if hist.is_empty() {
-                shell_println!("No memory samples");
+                shell_println!("No samples yet (kstat has not run)");
             } else {
                 let n = hist.len().min(10);
-                shell_println!("Last {} memory samples:", n);
-                for s in hist.iter().rev().take(n) {
-                    let used_mb = s.used_bytes / (1024 * 1024);
-                    let avail_mb = s.available_bytes / (1024 * 1024);
-                    shell_println!(
-                        "  {} MiB used, {} MiB avail, swap {} MiB, {} faults",
-                        used_mb,
-                        avail_mb,
-                        s.swap_used_bytes / (1024 * 1024),
-                        s.page_faults
-                    );
-                }
-            }
-        }
-        "disk" => {
-            let hist = perfmon::disk_history();
-            if hist.is_empty() {
-                shell_println!("No disk samples");
-            } else {
-                let n = hist.len().min(10);
-                shell_println!("Last {} disk samples:", n);
+                shell_println!("Last {n} of {} memory samples (newest first):", hist.len());
                 for s in hist.iter().rev().take(n) {
                     shell_println!(
-                        "  {} R:{} W:{} IOPS r:{} w:{} busy:{}% q:{}",
-                        s.device,
-                        s.read_bytes,
-                        s.write_bytes,
-                        s.read_iops,
-                        s.write_iops,
-                        s.busy_pct,
-                        s.queue_depth
-                    );
-                }
-            }
-        }
-        "net" | "network" => {
-            let hist = perfmon::net_history();
-            if hist.is_empty() {
-                shell_println!("No network samples");
-            } else {
-                let n = hist.len().min(10);
-                shell_println!("Last {} network samples:", n);
-                for s in hist.iter().rev().take(n) {
-                    shell_println!(
-                        "  {} rx:{} tx:{} pkts r:{} t:{} err:{}",
-                        s.interface,
-                        s.rx_bytes,
-                        s.tx_bytes,
-                        s.rx_packets,
-                        s.tx_packets,
-                        s.errors
+                        "  t={}s {} MiB used of {} ({}%), heap {} KiB, pressure {}",
+                        s.timestamp_ns / 1_000_000_000,
+                        s.used_bytes / (1024 * 1024),
+                        s.total_bytes / (1024 * 1024),
+                        s.used_pct(),
+                        s.heap_bytes / 1024,
+                        s.pressure_score
                     );
                 }
             }
         }
         "alerts" => {
-            let alerts = perfmon::all_alerts();
+            let alerts = perfmon::active_alerts();
             if alerts.is_empty() {
-                shell_println!("No alerts");
+                shell_println!("No thresholds exceeded");
             } else {
                 for a in &alerts {
-                    let status = if a.dismissed { "dismissed" } else { "active" };
                     shell_println!(
-                        "[{}] {} {} ({}% >= {}%) [{}]",
-                        a.id,
+                        "{} {} ({}% >= {}%) at t={}s",
                         a.resource,
                         a.message,
                         a.value,
                         a.threshold,
-                        status
+                        a.timestamp_ns / 1_000_000_000
                     );
-                }
-            }
-        }
-        "dismiss" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: perfmon dismiss <id|all>");
-                set_exit(1);
-            } else if parts[1] == "all" {
-                perfmon::dismiss_all_alerts();
-                shell_println!("All alerts dismissed");
-            } else {
-                match parts[1].parse::<u64>() {
-                    Ok(id) => match perfmon::dismiss_alert(id) {
-                        Ok(()) => shell_println!("Alert {} dismissed", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    },
-                    Err(_) => {
-                        shell_println!("Invalid ID");
-                        set_exit(1);
-                    }
                 }
             }
         }
         "config" => {
             let cfg = perfmon::get_config();
-            shell_println!("Interval:    {} ms", cfg.sample_interval_ms);
-            shell_println!("Max samples: {}", cfg.max_samples);
             shell_println!(
-                "CPU:         {} (alert > {}%)",
-                if cfg.cpu_enabled { "on" } else { "off" },
-                cfg.cpu_alert_pct
+                "Interval:    {} ms (kstat's; not settable here)",
+                cfg.sample_interval_ms
             );
-            shell_println!(
-                "Memory:      {} (alert > {}%)",
-                if cfg.mem_enabled { "on" } else { "off" },
-                cfg.mem_alert_pct
-            );
-            shell_println!(
-                "Disk:        {} (alert > {}%)",
-                if cfg.disk_enabled { "on" } else { "off" },
-                cfg.disk_alert_pct
-            );
-            shell_println!(
-                "Network:     {}",
-                if cfg.net_enabled { "on" } else { "off" }
-            );
+            shell_println!("Max samples: {} (kstat's ring size)", cfg.max_samples);
+            shell_println!("CPU alert:   > {}%", cfg.cpu_alert_pct);
+            shell_println!("Mem alert:   > {}%", cfg.mem_alert_pct);
         }
-        "interval" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: perfmon interval <ms>");
-                set_exit(1);
-            } else {
-                match parts[1].parse::<u32>() {
-                    Ok(v) => {
-                        // Report what was stored, not what was asked for: the
-                        // setter clamps, and restating its range here was a
-                        // second copy of that policy free to drift from it.
-                        let effective = perfmon::set_interval(v);
-                        if effective == v {
-                            shell_println!("Interval set to {} ms", effective);
-                        } else {
-                            shell_println!("Interval set to {} ms (clamped from {})", effective, v);
-                        }
-                    }
-                    Err(_) => {
-                        shell_println!("Invalid value");
-                        set_exit(1);
-                    }
-                }
+        "cpu-alert" => {
+            if let Some(v) = parse_threshold(&parts, "cpu") {
+                report_threshold("cpu", v, perfmon::set_cpu_alert(v));
+            }
+        }
+        "mem-alert" => {
+            if let Some(v) = parse_threshold(&parts, "mem") {
+                report_threshold("mem", v, perfmon::set_mem_alert(v));
             }
         }
         "init" => {
             perfmon::init_defaults();
-            shell_println!("Initialised performance monitor defaults");
+            shell_println!("Alert thresholds restored to defaults");
         }
         "stats" => {
-            let (cpus, mems, disks, nets, alerts, ops) = perfmon::stats();
-            shell_println!("CPU samples:  {}", cpus);
-            shell_println!("Mem samples:  {}", mems);
-            shell_println!("Disk samples: {}", disks);
-            shell_println!("Net samples:  {}", nets);
-            shell_println!("Alerts:       {}", alerts);
-            shell_println!("Operations:   {}", ops);
+            let (in_window, since_boot, alerts, changes) = perfmon::stats();
+            shell_println!("Samples in window: {}", in_window);
+            shell_println!("Samples since boot:{}", since_boot);
+            shell_println!("Thresholds exceeded: {}", alerts);
+            shell_println!("Threshold changes: {}", changes);
         }
         "test" => match perfmon::self_test() {
             Ok(()) => shell_println!("perfmon: all tests passed"),
@@ -53903,20 +53867,19 @@ fn cmd_perfmon(args: &str) {
             }
         },
         other => {
-            shell_println!("perfmon — performance monitor / resource tracker");
+            shell_println!("perfmon — performance monitor over kstat's sample history");
             shell_println!("Usage: perfmon <subcommand>");
-            shell_println!("  (no args)         Show latest readings");
-            shell_println!("  cpu               CPU history");
-            shell_println!("  mem               Memory history");
-            shell_println!("  disk              Disk I/O history");
-            shell_println!("  net               Network history");
-            shell_println!("  alerts            Show all alerts");
-            shell_println!("  dismiss <id|all>  Dismiss alert(s)");
-            shell_println!("  config            Show configuration");
-            shell_println!("  interval <ms>     Set sample interval");
-            shell_println!("  init              Load defaults");
-            shell_println!("  stats             Show statistics");
-            shell_println!("  test              Run self-tests");
+            shell_println!("  (no args)          Show latest readings");
+            shell_println!("  cpu                CPU history");
+            shell_println!("  mem                Memory history");
+            shell_println!("  alerts             Thresholds currently exceeded");
+            shell_println!("  config             Show configuration");
+            shell_println!("  cpu-alert <pct>    Set CPU alert threshold");
+            shell_println!("  mem-alert <pct>    Set memory alert threshold");
+            shell_println!("  init               Restore default thresholds");
+            shell_println!("  stats              Show statistics");
+            shell_println!("  test               Run self-tests");
+            shell_println!("Disk and network are not sampled; see diskstat and netdev.");
             end_help_arm("perfmon", other);
         }
     }
@@ -127771,17 +127734,18 @@ fn cmd_kstat(args: &str) {
     }
     shell_println!("");
     shell_println!(
-        "  {:<6} {:>5} {:>5} {:>7} {:>4} {:>4} {:>7} {:>5}",
+        "  {:<6} {:>5} {:>5} {:>7} {:>4} {:>4} {:>4} {:>7} {:>5}",
         "Age(s)",
         "Free%",
         "Press",
         "Heap KB",
-        "Task",
+        "Run",
+        "Live",
         "CPU0",
         "CtxSw",
         "IRQs"
     );
-    shell_println!("  {}", "-".repeat(55));
+    shell_println!("  {}", "-".repeat(61));
 
     let now_tick = crate::apic::tick_count();
 
@@ -127799,13 +127763,14 @@ fn cmd_kstat(args: &str) {
         let heap_kb = s.heap_bytes_in_use / 1024;
 
         shell_println!(
-            "  {:>5}s {:>4}% {:>5} {:>5}KB {:>4} {:>3}% {:>7} {:>5}",
+            "  {:>5}s {:>4}% {:>5} {:>5}KB {:>4} {:>4} {:>3}% {:>7} {:>5}",
             age_sec,
             free_pct,
             s.pressure_score,
             heap_kb,
             s.runnable_tasks,
-            s.cpu_util[0],
+            s.live_tasks,
+            s.cpu_util.first().copied().unwrap_or(0),
             s.ctx_switches_lo,
             s.interrupts_lo,
         );
@@ -127813,7 +127778,9 @@ fn cmd_kstat(args: &str) {
 
     shell_println!("");
     shell_println!("  Columns: Age=seconds ago, Free%=phys mem free, Press=pressure(0-100),");
-    shell_println!("           Heap=kernel heap, Task=active tasks, CPU0=util%, CtxSw/IRQs=totals");
+    shell_println!("           Heap=kernel heap, Run=runnable now, Live=tasks that exist,");
+    shell_println!("           CPU0=util% over the interval since the row above it,");
+    shell_println!("           CtxSw/IRQs=totals since boot");
 }
 
 /// `idle` — show CPU idle state statistics.

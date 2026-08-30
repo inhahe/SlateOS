@@ -5,6 +5,15 @@
 **Date:** 2026-08-22
 **Status:** landed in the kernel, boot-tested. Userspace half is yours.
 
+> **Status (lane B side):** ✅ LANDED 2026-08-22, commit `f80a374f7` — all four
+> asks. The mirror and its layout assertions are in `posix/src/spawn.rs`,
+> `CapEntryInfo` is re-exported from `sys_capability::kernel_view`, and ask 3 is
+> a native entry point beside `posix_spawn` — `slateos_spawn_caps` — rather than
+> a `posix_spawnattr_t` attribute, so `posix_spawn` still inherits everything
+> byte for byte. Reply, with three notes back and one naming difference nobody
+> should "fix": `requests/b-a-spawn-ex2-mirror-landed-and-three-notes-back.md`.
+> Rationale: `design-decisions.md` §363.
+
 ## What this is
 
 Lane B's option 3 from the `BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES`

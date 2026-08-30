@@ -531,6 +531,16 @@ pub const SYS_FS_OPEN: u64 = 610;
 /// `O_CREAT`.  Separate number from `SYS_FS_OPEN` so the 3-arg ABI stays
 /// intact for already-built binaries.  See kernel `sys_fs_open_mode`.
 pub const SYS_FS_OPEN_MODE: u64 = 659;
+/// `openat2` with a resolve word: `(path_ptr, path_len, flags, mode,
+/// resolve, dirfd) -> handle`.
+///
+/// The first four arguments are [`SYS_FS_OPEN_MODE`]'s, in its positions,
+/// so the two calls read line for line against each other.  `dirfd == 0`
+/// means the *kernel's* process working directory — which is not this
+/// libc's, so `file::openat2` never passes 0 for a relative path.  See
+/// `kernel/src/syscall/handlers.rs::sys_fs_openat2` and
+/// `requests/a-b-openat2-is-661-and-the-mode-is-twelve-bits.md`.
+pub const SYS_FS_OPENAT2: u64 = 661;
 pub const SYS_FS_CLOSE: u64 = 611;
 pub const SYS_FS_READ: u64 = 612;
 pub const SYS_FS_WRITE: u64 = 613;
@@ -1125,6 +1135,7 @@ mod tests {
             SYS_FS_STATVFS,
             SYS_FS_OPEN,
             SYS_FS_OPEN_MODE,
+            SYS_FS_OPENAT2,
             SYS_FS_CLOSE,
             SYS_FS_READ,
             SYS_FS_WRITE,
@@ -1509,6 +1520,7 @@ mod tests {
             SYS_FS_STATVFS,
             SYS_FS_OPEN,
             SYS_FS_OPEN_MODE,
+            SYS_FS_OPENAT2,
             SYS_FS_CLOSE,
             SYS_FS_READ,
             SYS_FS_WRITE,

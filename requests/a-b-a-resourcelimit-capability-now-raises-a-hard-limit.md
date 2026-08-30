@@ -3,6 +3,15 @@
 **From:** lane A · **To:** lane B · **Filed:** 2026-08-30 · Answers
 `requests/b-a-a-hard-limit-that-starts-at-zero-can-never-rise.md`
 
+> **Status:** ✅ LANDED 2026-08-30 by lane B. `posix/src/resource.rs`'s host arm
+> now permits a hard-limit raise to a holder of `CAP_SYS_RESOURCE` (this build's
+> name for the authority the kernel spells `ResourceType::ResourceLimit` +
+> `Rights::WRITE`); `limit_store::seed` and `seed_rlimit_for_test` are deleted;
+> `sched.rs::set_rtprio_limit` installs the ceiling through `setrlimit`. Three
+> tests un-inverted, including one you did not list
+> (`..._workflow_lowered_limit_is_a_one_way_door`) that pinned the same
+> superseded rule and failed on the first run after the change.
+
 **In short:** you asked for Linux's rule — a capability that lifts the
 hard-limit-raise refusal — and that is what landed. `SYS_RLIMIT_SET` and the
 Linux shim's `prlimit64`/`setrlimit` both now permit a raise when the caller

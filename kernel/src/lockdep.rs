@@ -32,7 +32,8 @@
 
 use crate::serial_println;
 use crate::smp;
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::panic::Location;
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -124,7 +125,7 @@ static CLASS_COUNT: AtomicU32 = AtomicU32::new(0);
 /// byte per class and leaves the hot read shape untouched.
 static CLASS_READY: [AtomicBool; MAX_CLASSES] = [const { AtomicBool::new(false) }; MAX_CLASSES];
 
-/// Instruction pointer of the most recent acquisition of each class, or `0`.
+/// Source location of the most recent acquisition of each class, or null.
 ///
 /// A lock class is keyed by the lock's *address*, which `ksyms` can turn back
 /// into a name only when the lock lives in a `static`. A heap-allocated lock —
@@ -149,108 +150,50 @@ static CLASS_READY: [AtomicBool; MAX_CLASSES] = [const { AtomicBool::new(false) 
 /// single indexing operation, and an atomic field would take that away.
 /// `Relaxed` throughout — this is a diagnostic hint, not a synchronisation
 /// point, and no other state is published through it.
-static CLASS_SITE: [AtomicUsize; MAX_CLASSES] = [const { AtomicUsize::new(0) }; MAX_CLASSES];
-
-/// The caller's caller — one frame beyond [`CLASS_SITE`].
 ///
-/// Needed because the immediate caller of `lock_acquire` is almost always
-/// `Mutex::<T>::lock`, which names the *guard type* but not the lock. Boot
-/// batch 31 showed exactly that: a real AB/BA inversion reported both sides as
+/// # Why a source location and not a return address
+///
+/// This was a `usize` instruction pointer recovered by walking the RBP chain,
+/// and a second array beside it held the caller's caller — because the
+/// immediate caller of `lock_acquire` is nearly always `Mutex::<T>::lock`,
+/// which names the guarded *type* and not the code that took the lock. A real
+/// AB/BA inversion in boot batch 31 reported both sides as
 /// `kernel::sync::Mutex<T>::lock+0x6f`, differing only in the monomorphisation
-/// hash. That is one frame short of the answer — it says two different types
-/// were locked, and refuses to say by whom.
+/// hash: it said two different types were locked and refused to say by whom.
+/// The second array was the workaround for that.
 ///
-/// Stored separately rather than replacing [`CLASS_SITE`]: when `Mutex::lock`
-/// *is* inlined the immediate frame is already the interesting one, and which
-/// case applies is not knowable without symbolising, which this path may not
-/// do. Printing both costs a line and is never wrong.
-static CLASS_SITE_UP: [AtomicUsize; MAX_CLASSES] = [const { AtomicUsize::new(0) }; MAX_CLASSES];
-
-/// The return addresses of [`lock_acquire`]'s caller and its caller in turn.
+/// The walk was wrong in optimised builds, and wrong in three independent ways
+/// — the callee could be inlined, the caller's frame could be erased by a
+/// sibling call, and the walker's own prologue could be sunk below the
+/// instruction that read RBP by shrink-wrapping. Each is a separate optimiser
+/// liberty, each silently shifts the answer by exactly one frame, and no
+/// arrangement of `#[inline(never)]` closes all three, because a function
+/// cannot assume its own prologue has run.
 ///
-/// Walks the RBP chain from this helper's own frame: frame 0 is ours, frame 1
-/// is `lock_acquire`'s, frame 2 belongs to whoever called it. The first two are
-/// guaranteed to exist — we are executing inside them — and the kernel is built
-/// with `-C force-frame-pointers=yes` (`.cargo/config.toml`), so neither can
-/// have been omitted. That is why this does no range validation the way
-/// [`crate::backtrace::walk_from`] must: that walker follows a chain of
-/// *arbitrary* length into frames that may be corrupt, whereas these are ours.
-///
-/// The third frame is **not** ours, so it gets the one check that costs
-/// nothing and needs no other subsystem: the stack grows downward, so an outer
-/// frame must sit at a strictly higher address than an inner one. A chain that
-/// fails that is not a stack, and the second address is dropped. Deliberately
-/// no `hhdm()`/`is_kstack_region()` validation — this runs inside
-/// `lock_acquire`, and a reporter that takes a lock to describe a locking bug
-/// is a deadlock in a diagnostic.
-///
-/// `#[inline(never)]` is load-bearing: an inlined body would have no frame of
-/// its own and the walk would start one level too high.
-///
-/// Returns `(0, 0)` when the chain cannot be trusted, which degrades the
-/// report to what it printed before these arrays existed — the right failure.
-#[inline(never)]
-fn caller_ips() -> (usize, usize) {
-    let rbp: u64;
-    // SAFETY: Reading RBP is always safe in ring 0.
-    unsafe {
-        core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack));
-    }
-    // Defensive despite the argument above: a zero or misaligned RBP would mean
-    // the frame-pointer guarantee has been broken, and reading through it would
-    // fault inside a diagnostic path.
-    if rbp == 0 || !rbp.is_multiple_of(8) {
-        return (0, 0);
-    }
-    // SAFETY: `rbp` is this function's own frame pointer, established by its
-    // prologue, so `[rbp]` — the saved caller RBP — is in-bounds and
-    // initialised.
-    let parent_rbp: u64 = unsafe { core::ptr::read_volatile(rbp as *const u64) };
-    if parent_rbp == 0 || !parent_rbp.is_multiple_of(8) {
-        return (0, 0);
-    }
-    // SAFETY: `parent_rbp` is `lock_acquire`'s frame pointer, likewise
-    // established by its prologue, so `[parent_rbp + 8]` is its return-address
-    // slot — in-bounds and initialised by the `call` that reached it.
-    #[allow(clippy::arithmetic_side_effects)]
-    let ret: u64 = unsafe { core::ptr::read_volatile((parent_rbp + 8) as *const u64) };
-
-    // SAFETY: `[parent_rbp]` is the RBP `lock_acquire`'s prologue saved, i.e.
-    // its caller's frame pointer. In-bounds and initialised for the same reason
-    // as the read above.
-    let grand_rbp: u64 = unsafe { core::ptr::read_volatile(parent_rbp as *const u64) };
-    // Outer frames live at higher addresses; anything else is not a frame
-    // chain. This is the only guard the third frame gets, and the only one it
-    // can afford.
-    if grand_rbp == 0 || !grand_rbp.is_multiple_of(8) || grand_rbp <= parent_rbp {
-        #[allow(clippy::cast_possible_truncation)]
-        return (ret as usize, 0);
-    }
-    // SAFETY: `grand_rbp` passed the ordering and alignment checks above and is
-    // the frame pointer of `lock_acquire`'s caller, so `[grand_rbp + 8]` is
-    // that frame's return-address slot.
-    #[allow(clippy::arithmetic_side_effects)]
-    let up: u64 = unsafe { core::ptr::read_volatile((grand_rbp + 8) as *const u64) };
-    #[allow(clippy::cast_possible_truncation)]
-    {
-        (ret as usize, up as usize)
-    }
-}
+/// `#[track_caller]` is the language's own answer to "attribute this to my
+/// caller", decided at compile time, and no optimisation can move it. Putting
+/// it on `Mutex::lock` as well as on `lock_acquire` means the location stored
+/// here is the *user's* source line — the answer the second array was
+/// approximating — so that array is gone and the `via:` line with it. See
+/// design-decisions.md §642 and
+/// `A-LOCKDEP-SELF-TEST-PANICS-ON-EVERY-RELEASE-BUILD` in known-issues.md.
+static CLASS_SITE: [AtomicPtr<Location<'static>>; MAX_CLASSES] =
+    [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_CLASSES];
 
 /// The recorded acquisition site for class `idx`, if one has been captured.
-fn class_site(idx: u16) -> Option<usize> {
-    match CLASS_SITE.get(idx as usize)?.load(Ordering::Relaxed) {
-        0 => None,
-        ip => Some(ip),
+///
+/// Safe to dereference: the only value ever stored is one obtained from
+/// [`Location::caller`], which is a `&'static` reference into read-only data.
+fn class_site(idx: u16) -> Option<&'static Location<'static>> {
+    let p = CLASS_SITE.get(idx as usize)?.load(Ordering::Relaxed);
+    if p.is_null() {
+        return None;
     }
-}
-
-/// The recorded caller-of-the-caller for class `idx`, if one was captured.
-fn class_site_up(idx: u16) -> Option<usize> {
-    match CLASS_SITE_UP.get(idx as usize)?.load(Ordering::Relaxed) {
-        0 => None,
-        ip => Some(ip),
-    }
+    // SAFETY: `p` is non-null and was stored by `lock_acquire` from a
+    // `&'static Location<'static>` returned by `Location::caller()`. Those
+    // point at statics in `.rodata` and live for the whole program, so the
+    // reference is valid for `'static` and the data is never mutated.
+    Some(unsafe { &*p })
 }
 
 /// Whether class slot `idx` is fully written and safe to read.
@@ -594,7 +537,21 @@ pub enum Acquire {
 /// `lock_addr`: address of the lock (e.g., `&spinlock as *const _ as usize`).
 /// `name`: short human-readable name for diagnostics.
 /// `how`: see [`Acquire`] — a `Try` records no *incoming* dependency edges.
-#[inline]
+///
+/// # `#[track_caller]`
+///
+/// The acquisition site recorded in [`CLASS_SITE`] is `Location::caller()`, so
+/// it is whatever source line called this — and because `Mutex::lock` and
+/// `Mutex::try_lock` carry the attribute too, that is transitively the line of
+/// code that took the lock, rather than a line inside `sync.rs`.
+///
+/// This replaced an RBP-chain walk that was wrong in every optimised build; see
+/// [`CLASS_SITE`] for why no arrangement of inlining attributes could have
+/// rescued it. The attribute is load-bearing, and quietly so: removing it from
+/// here or from `Mutex::lock` re-points every recorded site at `sync.rs`, which
+/// still *looks* like a plausible answer. That is why test 9b asserts the
+/// recorded file and line rather than merely that something was recorded.
+#[track_caller]
 pub fn lock_acquire(lock_addr: usize, name: &[u8], how: Acquire) {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
@@ -632,12 +589,17 @@ pub fn lock_acquire(lock_addr: usize, name: &[u8], how: Acquire) {
     // Record where this acquisition came from, before any report can be
     // emitted below — a violation involving this class should describe the
     // acquisition that provoked it, not the one before.
-    let (site, site_up) = caller_ips();
+    let site: &'static Location<'static> = Location::caller();
     if let Some(slot) = CLASS_SITE.get(class_idx as usize) {
-        slot.store(site, Ordering::Relaxed);
-    }
-    if let Some(slot) = CLASS_SITE_UP.get(class_idx as usize) {
-        slot.store(site_up, Ordering::Relaxed);
+        // `Location::caller()` hands back a `&'static` into read-only data, so
+        // the pointer stays valid for the life of the kernel. The cast to
+        // `*mut` is `AtomicPtr`'s signature, not a claim of mutability: nothing
+        // ever writes through it, and `class_site` only ever re-borrows it
+        // shared.
+        slot.store(
+            core::ptr::from_ref::<Location<'static>>(site).cast_mut(),
+            Ordering::Relaxed,
+        );
     }
 
     // SAFETY: Only this CPU accesses its held stack (called with lock
@@ -996,12 +958,12 @@ pub fn dump_held_locks(cpu: usize) {
         // appended so a heap lock — which resolves to nothing — is still
         // identified, by the code that took it.
         match class_site(stack[i]) {
-            Some(ip) => serial_println!(
+            Some(loc) => serial_println!(
                 "[lockdep]     [{}] {} @ {}, taken at {}",
                 i,
                 core::str::from_utf8(n).unwrap_or("<non-utf8>"),
                 AddrDesc(id),
-                AddrDesc(ip)
+                loc
             ),
             None => serial_println!(
                 "[lockdep]     [{}] {} @ {}",
@@ -1240,20 +1202,17 @@ fn report_violation(held_class: u16, acquired_class: u16, cpu: usize) {
     // identifying information there is — its address resolves to no symbol —
     // and it is what a reader needs even when the address does resolve, since
     // the fix is always a change to one of these two call paths.
-    // The `via` line is the one that usually answers the question: the direct
-    // caller is nearly always `Mutex::<T>::lock`, which names the guarded type
-    // and nothing else, so the frame above it is where the fix goes.
+    // Each is a `file:line:col` of the code that took the lock, because
+    // `lock_acquire` and `Mutex::lock` are both `#[track_caller]`. This used to
+    // be a symbolised return address plus a second `via:` line one frame up,
+    // needed because the direct caller was always `Mutex::<T>::lock` — which
+    // names the guarded type and nothing else. `#[track_caller]` sees through
+    // that in one step, so the second line has no remaining job.
     if let Some(h) = class_site(held_class) {
-        serial_println!("[lockdep]     held taken at:  {}", AddrDesc(h));
-        if let Some(hu) = class_site_up(held_class) {
-            serial_println!("[lockdep]                via: {}", AddrDesc(hu));
-        }
+        serial_println!("[lockdep]     held taken at:  {}", h);
     }
     if let Some(a) = class_site(acquired_class) {
-        serial_println!("[lockdep]     acquiring at:   {}", AddrDesc(a));
-        if let Some(au) = class_site_up(acquired_class) {
-            serial_println!("[lockdep]                via: {}", AddrDesc(au));
-        }
+        serial_println!("[lockdep]     acquiring at:   {}", a);
     }
     serial_println!("[lockdep]   But the reverse order was observed previously.");
     serial_println!("[lockdep]   This means a deadlock is possible under different scheduling.");
@@ -1378,6 +1337,14 @@ impl core::fmt::Display for AddrDesc {
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
+
+// Test 9b used to call the site-capture probe lock through an `#[inline(never)]`
+// helper carrying a three-paragraph explanation of why it could not be inlined:
+// the site was a return address recovered by walking the frame chain, so the
+// test's own frame had to be made to exist before the walk could find it. Both
+// the helper and the walk are gone. `Location::caller()` is resolved at compile
+// time and needs no frame at all, so the probe is now a plain call in the test
+// body. See [`CLASS_SITE`].
 
 /// Boot-time self-test of the lock order validator.
 ///
@@ -1624,59 +1591,76 @@ pub fn self_test() {
 
     // Test 9b: acquisition-site capture. A heap-allocated lock's address
     // resolves to no symbol, so for those the recorded site is the *only*
-    // identifying information a violation report can offer. Verify it is
-    // actually captured, and that it points into kernel text rather than at
-    // whatever an off-by-one frame walk would produce.
+    // identifying information a violation report can offer.
+    //
+    // The site is `Location::caller()`, so the whole mechanism rests on two
+    // `#[track_caller]` attributes: one on `lock_acquire`, one on
+    // `Mutex::lock`. Losing either leaves a *plausible* wrong answer rather
+    // than a visibly broken one — without the first, every site becomes the
+    // `Location::caller()` line in this file; without the second, every site
+    // becomes the `lock_acquire` call inside `sync.rs`. Both read as real code
+    // locations in a report, and the second is exactly the failure the site
+    // recording exists to avoid. So each attribute gets its own case, and each
+    // asserts the exact line: an exact line is the only assertion that both
+    // wrong answers fail.
     {
+        // Case 1: `lock_acquire` called directly, pinning its own attribute.
         const SITE_PROBE: usize = 0xdead_5117;
+        let expected_line = line!() + 1;
         lock_acquire(SITE_PROBE, b"site-probe", Acquire::Blocking);
         let idx = find_or_register_class(SITE_PROBE, b"site-probe")
             .expect("site probe class must be registered");
         let site = class_site(idx).expect("acquiring a lock must record where from");
-        assert!(
-            site >= 0xFFFF_FFFF_8000_0000,
-            "recorded site {site:#x} is not a kernel text address — the frame walk in \
-             caller_ips() is off by a frame, or a frame pointer was omitted"
-        );
-        // The site must resolve to *this* function: `caller_ips` walks to
-        // `lock_acquire`'s caller, and that caller is the self-test. A name
-        // from anywhere else means the walk depth is wrong. `resolve_static`
-        // yields nothing before ksyms has loaded, which is not a failure —
-        // the address check above still holds.
-        if let Some((name, _)) = crate::ksyms::resolve_static(site as u64) {
-            assert!(
-                name.contains("lockdep"),
-                "recorded site resolved to {name}, which is not the calling self-test"
-            );
-        }
-        // The second frame is what makes a real report readable: the immediate
-        // caller of `lock_acquire` is nearly always `Mutex::<T>::lock`, which
-        // names the guard *type* and not the lock. Here the probe calls
-        // `lock_acquire` directly, so frame 1 is this self-test and frame 2 is
-        // whoever called it — still kernel text either way. A zero is tolerated
-        // (the walk bails out rather than guess when the chain looks wrong), but
-        // a non-zero value that is not kernel text means the extra hop read
-        // something that was never a frame pointer.
-        let site_up = class_site_up(idx);
-        if let Some(up) = site_up {
-            assert!(
-                up >= 0xFFFF_FFFF_8000_0000,
-                "recorded via-site {up:#x} is not a kernel text address — the second \
-                 frame of caller_ips() walked off the frame chain"
-            );
-        }
         lock_release(SITE_PROBE);
-        match site_up {
-            Some(up) => serial_println!(
-                "[lockdep]   Acquisition-site capture: OK ({}, via {})",
-                AddrDesc(site),
-                AddrDesc(up)
-            ),
-            None => serial_println!(
-                "[lockdep]   Acquisition-site capture: OK ({}, no second frame)",
-                AddrDesc(site)
-            ),
-        }
+        assert!(
+            site.file().ends_with("lockdep.rs"),
+            "direct lock_acquire recorded a site in {}, not in this file — \
+             lock_acquire lost its #[track_caller]",
+            site.file()
+        );
+        assert!(
+            site.line() == expected_line,
+            "direct lock_acquire recorded line {}, expected {expected_line} — \
+             lock_acquire lost its #[track_caller] and is naming its own body",
+            site.line()
+        );
+
+        // Case 2: the same lock, taken the way every real lock in the kernel is
+        // taken — through `Mutex::lock`. A `static` and not a local: the class
+        // ID is the lock's address, and a stack address would later be reused
+        // by an unrelated lock that would then inherit this class.
+        static SITE_MUTEX: crate::sync::Mutex<u32> = crate::sync::Mutex::named(0, b"site-mtx");
+        let expected_line = line!() + 1;
+        let guard = SITE_MUTEX.lock();
+        // Found by name rather than by address: the class ID is the address of
+        // the `Mutex`'s inner `spin::Mutex`, which is a private field, and
+        // assuming it coincides with the address of the `Mutex` would be
+        // assuming a field offset that `repr(Rust)` does not promise.
+        let count = CLASS_COUNT.load(Ordering::Relaxed);
+        #[allow(clippy::cast_possible_truncation)] // count <= MAX_CLASSES, which fits u16
+        let midx = (0..count as u16)
+            .find(|&i| class_name(i) == "site-mtx")
+            .expect("locking the probe mutex must register its class");
+        let msite = class_site(midx).expect("Mutex::lock must record where from");
+        drop(guard);
+        assert!(
+            msite.file().ends_with("lockdep.rs"),
+            "Mutex::lock recorded a site in {}, not in the caller's file — \
+             Mutex::lock lost its #[track_caller] and is attributing every lock \
+             in the kernel to one line of sync.rs",
+            msite.file()
+        );
+        assert!(
+            msite.line() == expected_line,
+            "Mutex::lock recorded line {}, expected {expected_line}",
+            msite.line()
+        );
+
+        serial_println!(
+            "[lockdep]   Acquisition-site capture: OK (direct {}, via Mutex::lock {})",
+            site,
+            msite
+        );
     }
 
     // Test 10: the edge bitmap. `record_edge` answers "is this edge new?" on

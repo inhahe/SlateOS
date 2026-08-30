@@ -52099,6 +52099,251 @@ stops working, because the refusal is only ever *lifted*, never tightened.
 
 ---
 
+## 641. `fs::perfmon` projects `kstat`'s history instead of keeping its own, and the fields no source can fill are deleted rather than zeroed
+
+**Date:** 2026-08-30
+**Decided by:** Claude (autonomous), lane A
+**Lane:** A
+
+**In short:** the kernel has a "performance monitor" — the thing that would draw
+the CPU and memory graphs in a Task Manager. It reported **zero samples, on
+every boot, forever**, because the four functions that were supposed to feed it
+were never called by anything. Meanwhile a *different* part of the kernel
+(`kstat`) had been recording CPU and memory once a second since boot, into a
+buffer nobody was showing. The fix is to delete the empty store and have the
+monitor read the buffer that was already full. The judgment call worth recording
+is the second half: several of the monitor's fields — CPU temperature, core
+frequency, a user-vs-system time split, disk and network history — had **no
+source anywhere in the kernel**, so they are removed outright rather than kept
+and filled with zeros.
+
+### The situation
+
+`kernel/src/fs/perfmon.rs` owned four `Vec` histories and four recorders,
+`record_cpu` / `record_mem` / `record_disk` / `record_net`. Nothing outside the
+module called any of them; the only caller was the module's own self-test, which
+passed fixture values and asserted them back. So `/proc/perfmon` printed
+
+```
+CPU samples: 0
+Mem samples: 0
+Disk samples:0
+Net samples: 0
+```
+
+on a machine that had been up for an hour, and the `perfmon cpu` shell arm
+answered "No CPU samples". This is category 3 of
+`known-issues.md` → `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH`: not a
+missing feature but an **unfed table**, which is worse, because a zero that
+nothing can raise is indistinguishable from a measured zero.
+
+`kernel/src/kstat.rs` had, the whole time, been sampling free frames, total
+frames, heap bytes, pressure score, runnable and live task counts, per-CPU
+utilisation, context switches and interrupts into a 60-entry ring, once a
+second, from the timer softirq.
+
+### The decision
+
+**Project at read time; store only policy.** `cpu_history()`, `mem_history()`,
+`cpu_latest()`, `mem_latest()` and `active_alerts()` all compute from
+`kstat::recent()` when called. The module's `STATE` now holds two numbers — the
+CPU and memory alert thresholds — because a threshold is a *user's choice* and
+not a measurement, and choices are the only thing this module has any business
+owning.
+
+This is the same shape as §-less precedents `fs::pagecache` and `fs::netdev`
+(both logged in that `known-issues.md` entry's burn-down): where a subsystem
+already keeps the numbers, join the two halves at read time rather than by
+calling an accounting function on the producer's hot path.
+
+**Alternatives rejected:**
+
+| Option | Why not |
+|---|---|
+| Wire `record_*` into a second sampler | The constraint that shapes the real sampler — softirq context, so no allocation and no blocking lock — makes a second one strictly worse than one. Two samplers of the same event are two numbers that can disagree, with nothing to say which is right. |
+| Call `record_cpu` from `kstat::sample()` | Puts this module's `PreemptSpinMutex` and a `Vec` push inside the timer softirq. Both are forbidden there for the reason `kstat` documents at length: a blocking acquire of a lock the interrupted code holds can never succeed. |
+| Keep the histories, feed them from a kernel thread | A third copy of a ring that already exists, sampled at a third instant, so `kstat` and `perfmon` would disagree about the same second. |
+| Leave it and file it | It has been filed since 2026-08-26. The cost of leaving it is that `/proc/perfmon` keeps publishing zeros that read as measurements. |
+
+### The part that is a genuine trade: deleting fields
+
+`CpuSample` lost `system_pct`, `user_pct`, `freq_mhz`, `temp_mc`,
+`process_count` and `thread_count`. `MemSample` lost `cached_bytes`,
+`swap_used_bytes` and `page_faults`. `DiskSample` and `NetSample` are gone
+entirely, with `disk_history()` and `net_history()`.
+
+**For deleting:** every one of these had no source. The scheduler publishes
+`(total_ticks, idle_ticks)` per CPU and nothing finer, so a user/system split
+cannot be computed. There is no frequency driver and no thermal driver. Disk and
+network counters live behind spin locks the softirq cannot take. A field that
+can only ever be zero is not an incomplete feature; it is a **fabrication
+surface** — the next person to touch it fills it with something plausible, and
+now the graph has a line on it that is not measurement. This is exactly the
+`irqstat` argument recorded in that same burn-down, where deleting the mutators
+was right *because they were the wrong shape*, not merely uncalled.
+
+**Against deleting:** the field names were a record of an intent — someone meant
+this monitor to show temperature one day — and deleting them loses that. A
+future thermal driver now has to re-add `temp_mc` rather than find it waiting.
+
+**Why deleting won:** the intent is preserved better in prose than in a struct
+field, so the module doc now says explicitly what is absent and *why it cannot
+be filled from here*, which is more than the field ever said. And the asymmetry
+of harm is decisive: an absent field costs one small edit when a source appears;
+a permanently-zero field costs a wrong number on a screen for as long as nobody
+notices, which is how long it had already been.
+
+Disk and network get a pointer rather than silence: `/proc/perfmon` now ends
+with a line saying to read `/proc/diskstat` and `/proc/netdev`, which carry the
+real cumulative counters. What does not exist is a *time series* of them.
+
+### Two settings became read-only, which is a user-visible change
+
+`perfmon interval <ms>` and `set_max_samples` are gone. They stored a value,
+`get_config()` read it back, and nothing sampled any faster — because this
+module had no sampler. **A knob that moves and changes nothing is worse than a
+fixed value**, because it answers "did that work?" with yes. The interval and
+depth are now reported from `kstat::sample_interval_ms()` and
+`kstat::history_depth()`, labelled in `perfmon config` as not settable here.
+
+Replacing them, `perfmon cpu-alert <pct>` and `perfmon mem-alert <pct>` are new,
+which makes the two threshold setters reachable — they were among the twelve
+unreachable mutators this module contributed.
+
+### Alerts lost their identity and their dismiss verb
+
+The old design appended an `Alert` row per over-threshold sample, each with an
+`id` and a `dismissed` flag, and offered `perfmon dismiss <id|all>`. A CPU
+pinned at 100% therefore produced a growing list of identical rows, and
+dismissing them all made a still-overloaded machine report itself healthy.
+
+Alerts are now derived from the newest sample each time they are asked for, so
+they have no identity and cannot be dismissed: **a condition that is still true
+cannot be dismissed, and one that has passed disappears without being told to.**
+The cost is that a spike which has already ended leaves no trace — the old
+design could in principle have shown you a burst from a minute ago. It never
+did, because nothing recorded one; and the honest place for that feature is a
+scan of the projected history, which is now possible and was not before.
+
+### Effect on the burn-down metric
+
+`scripts/find-unreachable-mutators.py`: **515 → 503** unreachable mutators, 220
+→ 219 modules, 1941 → 1928 mutators. Read that with the same care the
+`irqstat` row asks for — most of the drop is deletion of functions that should
+not exist, not callers being wired up. Two of the twelve (`set_cpu_alert`,
+`set_mem_alert`) are genuine wirings.
+
+One incidental finding, recorded because it will recur: the scanner matches on
+**call text**, so passing `perfmon::set_cpu_alert` as a function item to a
+shared helper left both setters counted as callerless. Wrapping in a closure
+fixes the metric but trips `clippy::redundant_closure`; the resolution was to
+split the helper into a parse half and a report half so each shell arm calls its
+setter directly. That is better code anyway, but the reason it was written that
+way is the scanner, and a later reader tidying it back into a callback would
+silently re-break the measurement.
+
+### How to reverse
+
+The projection is four short functions (`project_cpu`, `project_mem`, `window`,
+`tick_to_ns`) in `kernel/src/fs/perfmon.rs`. Restoring stored histories means
+re-adding the `Vec`s and finding a caller for the recorders — which is the thing
+that was never done in the first place, and the reason to check before trying is
+that the softirq cannot be that caller.
+
+---
+
+## 642. lockdep records *where a lock was taken* as a compile-time source location, not as a return address recovered from the stack
+
+**Date:** 2026-08-30
+**Decided by:** Claude (autonomous), lane A
+**Lane:** A
+
+**In short:** when the kernel detects that two locks are being taken in
+opposite orders — the classic way to deadlock — it prints a report, and the
+most useful line in that report is *which piece of code took each lock*. We
+used to work that out by reading the CPU's stack at run time: walk back one
+call frame, take the address stored there, look it up in the symbol table.
+That was wrong in every optimised build, in three separate ways, and each way
+shifted the answer by exactly one call — so the report confidently named a
+function that had never touched the lock. It is now a `file:line:column`
+supplied by the compiler, which knows the answer for certain and cannot be
+optimised into a different one.
+
+**Decision.** `lockdep::lock_acquire` is `#[track_caller]` and stores
+`Location::caller()`. `sync::Mutex::lock` and `sync::Mutex::try_lock` carry the
+attribute too, so the location propagates through them to the code that actually
+took the lock. `CLASS_SITE` holds `AtomicPtr<Location<'static>>` instead of a
+`usize` instruction pointer. The frame walk (`caller_ips`), its companion array
+`CLASS_SITE_UP`, the `via:` line in violation reports, and the `#[inline(never)]`
+test probe that existed to give the walk a frame to find are all deleted.
+
+### Why the stack walk could not be repaired
+
+Three independent optimiser liberties each erase exactly one frame: the callee
+may be **inlined** into its caller; a one-call body may be emitted as `jmp`
+rather than `call` (**sibling call**), reusing the frame instead of pushing one;
+and the walker's own `push rbp; mov rsp,rbp` prologue may be **shrink-wrapped**
+below the instruction that reads `rbp`, so it reads its caller's frame pointer.
+The first two were closed with attributes, one per round of diagnosis. The third
+cannot be: it is not about who is inlined into whom, and
+`-C force-frame-pointers=yes` does not help, because it guarantees the frame
+pointer is *maintained*, not that it is established before the first instruction
+that reads it. **A function cannot assume its own prologue has run.** The full
+history, including the disassembly that settled it, is
+`A-LOCKDEP-SELF-TEST-PANICS-ON-EVERY-RELEASE-BUILD` in `known-issues.md`.
+
+### The alternatives, and why not
+
+| Option | Why not |
+|---|---|
+| More `#[inline(never)]` / `#[no_sanitize]`-style attributes on the walker | Closes hazards 1 and 2, which is what rounds 1 and 2 did. Nothing source-level closes hazard 3. |
+| Read the return address from `[rsp]` on entry via a naked shim | Correct in principle, and it is a naked-function ABI dance in `asm!` per call site, for an answer worse than the one the compiler will hand over for free. |
+| Keep the walk, add a compiler barrier before the `rbp` read | A barrier orders memory, not the prologue. There is no source-level construct that forces a prologue to precede an `asm!` block. |
+| A frame-pointer-free unwinder (`.eh_frame`/`.pdata`) | Genuinely correct, and vastly more machinery than the problem needs: a table parser and its own correctness story, in the kernel, to answer a question the front end already knows. Worth it for *panic* backtraces, where the frames are not the caller's own; not worth it for "who called me". |
+| Pass the site explicitly as a `&'static Location` parameter | This is `#[track_caller]`, spelled by hand at every call site. |
+
+### The costs, stated plainly
+
+- **`#[track_caller]` is contagious.** It has to be on every function between the
+  user's code and `lock_acquire`, or the chain stops and the location becomes
+  that function's own line. Today that is `Mutex::lock` and `Mutex::try_lock`;
+  any future wrapper that takes a lock on someone's behalf must carry it too.
+- **It costs an implicit argument.** A `#[track_caller]` function receives a
+  hidden `&Location` pointer, and calls to it are marginally larger. On
+  `Mutex::lock` this is a pointer to a static passed in a register on a path that
+  already does `preempt_disable` + `ensure_registered` + an atomic — not
+  measurable against that.
+- **It degrades silently, which is the real risk.** Drop the attribute and every
+  lock in the kernel is reported as taken at one line of `sync.rs` — a real
+  location, plausible in a report, and wrong for every lock. That is precisely
+  the failure the site recording exists to prevent, so it is gated rather than
+  merely commented: `lockdep`'s test 9b has one case per attribute and each
+  asserts the **exact** expected line (captured with `line!() + 1` immediately
+  above the acquire). An exact line is the only assertion that both silent
+  degradations fail.
+
+### What got better besides correctness
+
+Reports now read `kernel/src/fs/vfs.rs:812:19` instead of
+`kernel::sync::Mutex<T>::lock+0x6f`. That is not cosmetic: the old form was the
+reason `CLASS_SITE_UP` existed at all. A real AB/BA inversion in boot batch 31
+reported *both* sides as `kernel::sync::Mutex<T>::lock+0x6f`, differing only in
+the monomorphisation hash — it said two different types were locked and refused
+to say by whom, so a second array recorded the caller's caller as a workaround.
+`#[track_caller]` reaches the same answer in one step, and reaches it correctly,
+so the workaround and its extra report line are gone.
+
+### If this turns out wrong
+
+`CLASS_SITE`'s type and three attributes. The information stored is strictly
+richer than a return address (a `Location` names file, line *and* column, where a
+symbol+offset names neither line nor column), so nothing that consumed the old
+form has lost anything. Reverting would mean reintroducing `caller_ips` from
+git history — and it would reintroduce the bug, since none of the three hazards
+has gone away.
+
+---
+
 ## 712. `tar`'s record size is one setting with two spellings, and a record reaches the stream only when the *next* write needs the room
 
 **Date:** 2026-08-30
@@ -52246,24 +52491,31 @@ The 140-case harness is `scripts/ed-diff.sh`; all three decisions below appear
 there as explicitly-marked deliberate differences, so none of them can be
 mistaken later for a bug nobody noticed.
 
-### 1. `-E` and `-G` are recognised and refused, not accepted and ignored
+### 1. ~~`-E` and `-G` are recognised and refused~~ — superseded 2026-08-30
 
-`-E`/`--extended-regexp` and `-G`/`--traditional` both select a regular-
-expression dialect. This `ed`'s `s` matches a *literal string* (see
-`known-issues.md` → `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`), so there is no
-dialect to select and no way to honour either flag.
+This decision said `-E`/`--extended-regexp` and `-G`/`--traditional` were
+refused rather than accepted-and-ignored, because a script that passes `-E` and
+gets literal matching does not fail — it **edits the wrong bytes** and writes
+them. It set its own expiry: *"what changes when regular expressions land: both
+flags become accepted, and this half of the entry is deleted rather than
+revised."*
 
-*The alternative was to accept and ignore them*, which is what a compatibility
-shim usually does and what keeps the most scripts running. It was rejected
-because of what "the most scripts" means here. A script that passes `-E` passes
-it because it contains an extended regular expression; running it with literal
-matching does not fail, it **edits the wrong bytes** — `s/foo.*//` deletes
-nothing where it should have deleted to end of line, `w` writes the result, and
-the file is now wrong with no diagnostic anywhere. Refusing costs that script an
-error message it must be fixed to satisfy. Ignoring costs it the file.
+Regular expressions landed the same day (`known-issues.md` →
+`TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`, closed), so both flags are now accepted
+and both do what they say: `-E` compiles through `ere::Regex::new_flags` instead
+of `ere::bre::compile`, and `-G` drops `l`'s trailing `$`.
 
-*What changes when regular expressions land:* both flags become accepted, and
-this half of the entry is deleted rather than revised.
+The heading is kept, and the section not renumbered, because §713's other three
+decisions are cited by number from `ed.rs` and from the harness — renumbering to
+close a gap would break those citations to save a line.
+
+One correction worth keeping, because it was the premise of the original text
+and it was wrong: **`-G` was never about a regex dialect.** GNU's
+`--traditional` is a compatibility mode over `G`, `V`, `f`, `l`, `m`, `t` and
+`!!`. Measured on GNU ed 1.20.1 across the commands this `ed` has, exactly one
+of them differs — `l` ends the line without `$`, and folds identically
+otherwise. Refusing the flag was still the right call while `l` could not honour
+it, but for a different reason than the one recorded.
 
 ### 2. A file name beginning with `!` is refused
 
@@ -52347,3 +52599,260 @@ clause covers both. Each has a named case in `scripts/ed-diff.sh`
 (`xfail_pipe`/`xfail_case`) that must
 move to a plain case in the same change — the harness's `OURS=/usr/bin/ed`
 self-check will report the stale expectation as `XPASS` if it is not.
+
+## 714. libc's `openat2` forwards only when it has a restriction to carry, and gives the kernel a handle on *its own* working directory rather than the number that means the kernel's
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** SlateOS's C library has a call, `openat2`, that opens a file and
+can be asked to keep the search confined to one directory (so a path full of
+`..` cannot climb out of it). Until today the library had no way to ask the
+kernel for that, so it refused the request outright. The kernel now has the
+call, so the library forwards. Two choices inside that forwarding are not
+obvious, and both are about *not* taking the shorter route: the library still
+uses the old ordinary path when no confinement was asked for, and it never uses
+the kernel's shorthand for "my current directory", because the kernel's idea of
+the current directory and the library's are two different directories.
+
+Answers `requests/a-b-openat2-is-661-and-the-mode-is-twelve-bits.md`. The
+counterpart on lane A's side is §639.
+
+### Decision 1 — forward only a non-empty `resolve` word; delegate the rest to `openat`
+
+`plan_resolve` returns one of three things, and `Delegate` is the common case:
+a `resolve` word of 0, or one containing only `RESOLVE_NO_XDEV` /
+`RESOLVE_NO_MAGICLINKS`, still goes to plain `openat`.
+
+*The alternative*: forward everything, so `openat2` has exactly one path to the
+filesystem.
+
+That is the tidier shape and it was rejected, because `openat` is not a thin
+wrapper — it is where `/dev/ptmx` and `/dev/pts/<n>` are answered inside libc,
+where `O_TMPFILE` is refused, where the umask is applied, and where the fd is
+registered with its stored path. Routing every `openat2` through the native
+call would have silently removed pty support from `openat2`, which nothing
+asked for and no test would have caught. The cost of the choice is real and
+should be stated plainly: there are now two paths from `openat2` to the
+filesystem, and they can drift. What holds them together is that the forwarding
+path re-runs `openat`'s gates in `openat`'s order (`validate_open_flags`, then
+the NULL check, then the `O_TMPFILE` refusal) and ends with a copy of `open`'s
+fd registration. A third path would not be acceptable; a second is, because the
+second exists to carry something the first structurally cannot.
+
+### Decision 2 — `AT_FDCWD` opens a scratch handle on libc's cwd; it does not pass `dirfd == 0`
+
+The native ABI reads handle 0 as "the process working directory". Using it for
+`AT_FDCWD` is one line and looks exactly right.
+
+It is wrong here, and the reason is a divergence that is not written down
+anywhere else: `unistd::chdir` keeps this libc's working directory in a
+libc-side buffer and **never tells the kernel**. The kernel's cwd for the
+process is therefore whatever it was at spawn, and after any `chdir` the two
+disagree. Confining a walk beneath the kernel's cwd when the caller meant
+libc's is a containment check against the wrong base — and it fails *open*: a
+wrong base still returns a valid descriptor and still looks like working
+containment. That is the exact failure mode `TD-OPENAT2-BENEATH-INROOT` was
+opened for, so reintroducing it in the fix for it was not acceptable.
+
+So for a relative path with `AT_FDCWD`, libc opens its own cwd with
+`O_DIRECTORY`, uses that handle as the base, and closes it on every exit path.
+The cost is one extra open and close per confined `AT_FDCWD` call.
+
+*The alternative considered and rejected*: make `chdir` tell the kernel, so the
+two cwds agree and 0 becomes usable. That is the better long-term answer and it
+is a bigger change than this one — it makes every `chdir` a syscall, and it has
+to decide what happens when the kernel refuses a directory libc accepted. It
+should be done, but not inside a change whose job is to stop refusing
+`RESOLVE_BENEATH`; doing it here would have meant shipping a cwd-semantics
+change hidden inside an `openat2` change. Logged as the remaining half.
+
+`dirfd == 0` *is* passed for an absolute path, and the justification is not
+"the kernel ignores it" but something provable: without `BENEATH` the handler
+takes the absolute fragment as the whole answer, and with `BENEATH` it refuses
+an absolute fragment *before* the handle lookup. The base is unread on both
+branches, so there is no value that could be wrong.
+
+### Decision 3 — the bit translation is tested as a pure function, not end to end
+
+Every native syscall is stubbed off-target, so a host test cannot open
+anything. An end-to-end assertion about `RESOLVE_BENEATH` therefore reduces to
+"the stub returned `ENOSYS`" — which is also what a *deleted* translation would
+produce. The five tests that pinned the old refusals could not be inverted into
+"must succeed" for the same reason.
+
+`plan_resolve` is consequently a pure function over the `resolve` word, and the
+tests assert its output directly, including that every Linux resolve value is
+`< 0x40` while both kernel values are `>= 0x40` — the divergence lane A made
+deliberate, now pinned from both sides rather than only in
+`test_dispatch_openat2_native`. The judgement being recorded is that a testable
+seam is worth an extra type (`ResolvePlan`) in code that would otherwise be a
+short `if` chain: the alternative was an untestable `if` chain, which is what
+lane A's request warned would become untested marshalling under every program
+that reaches for a contained open.
+
+---
+
+## 715. `ere` gained a real `REG_NOTBOL` rather than `ed` faking one, and a decode-once searcher rather than a second empty-match policy baked into an iterator
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** `ed`'s search-and-replace command, `s`, can be told to replace
+*every* occurrence on a line (`s/old/new/g`). Some patterns match the empty
+string — `a*` matches "zero or more a's", which is satisfied by nothing at all
+— and a program that replaces "nothing" and then looks again at the same spot
+would run for ever. `sed` and `ed` solve that differently, and ours had `sed`'s
+answer. Fixing it needed a switch in the regular-expression library that we did
+not have: a way to say "`^` (start of line) has already been passed; it must
+not match again". These two decisions are about building that switch properly
+instead of simulating it inside `ed`.
+
+The bug: GNU `ed` answers `,s/a*/X/g` on `alpha` with `?` and *Infinite
+substitution loop*; ours answered `XlXpXhX`. Measured against GNU ed 1.20.1.
+The rule GNU actually follows is: substitute, advance past what was consumed,
+search the rest with `REG_NOTBOL` set — and if *that* search matches empty at
+the very position it started from, give up on the command. See
+`known-issues.md` → `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`, point 4.
+
+### Decision 1 — `ere::StartOfLine::No` is a real engine flag, not an `ed`-side trick
+
+`REG_NOTBOL` is the POSIX flag for "the first character of this subject is not
+the beginning of a line", which is exactly what a resumed `s///g` search needs:
+without it, `s/^x*/X/g` on `alpha` finds a *second* empty match at offset 0 and
+is reported as a loop, where GNU prints `Xalpha`. `ere` had no such flag.
+
+**The alternative considered and rejected** was an `ed`-local emulation:
+search a copy of the line with one sentinel newline byte in front of it and
+shift every span back by one. That is provably equivalent for this engine —
+`$` is unaffected, and a word boundary before the first character is decided the
+same way by "no character" and by "a newline", both being non-word — and it
+needed no library change at all. It was rejected because it is the shape the
+project's rules name outright: a band-aid that copies the line on every
+substitution, encodes a proof about the engine's internals in a caller that
+cannot see them, and would silently rot the day `ere` gained a multi-line mode
+in which a newline *is* a line start. The cost of doing it properly was one
+`Copy` enum threaded through five private functions and one `if` at each of the
+two places `Inst::AssertStart` is decided.
+
+**Why an enum rather than a `bool`:** `capture_spans_from(line, at, false)`
+does not say which way round the flag runs, and this is a flag whose two
+readings differ by a data-corrupting bug rather than by a formatting nicety.
+`StartOfLine::No` reads at the call site.
+
+**Cost accepted:** the flag exists on exactly one public entry point, and every
+other one passes `StartOfLine::Yes`. That is deliberate — `grep`, `sed`, `awk`
+and `expr` have no use for it, and an API where every search takes a flag would
+make four callers pay attention to a distinction only one of them has.
+
+### Decision 2 — `Regex::search` returns a reusable searcher; the walk stays the caller's
+
+`ere` already had two ways to step through a subject, and neither fits:
+`capture_spans_at(text, from)` re-decodes the whole subject on every call, so a
+global substitution on a long line is quadratic in its length; and
+`capture_spans_iter(text)` decodes once but **hard-codes one empty-match
+policy** — advance one character — which is precisely `sed`'s rule and
+precisely what `ed` must not do. Using the iterator is what produced the bug:
+it is not that `ed` used it carelessly, it is that the iterator's contract is
+somebody else's answer to the question `ed` was asking.
+
+So the third option: `Regex::search(text)` hands back a `Search` that owns the
+decoded subject and answers `capture_spans_from(at, bol)` any number of times.
+Decoding happens once; the walk — including what to do about an empty match —
+belongs to the caller, which is the only party that knows.
+
+**The alternative considered and rejected** was a second iterator, e.g.
+`capture_spans_iter_ed`, or an iterator parameterised by an empty-match policy
+enum. Rejected because the policy is not a closed set: `ed` does not merely
+"stop" on an empty match, it stops *only on a pass after the first* and reports
+a specific error, which is not a policy an iterator can express without also
+owning the error type. A policy enum would have grown a variant per caller.
+
+**Cost accepted:** one more public type in `ere`, and `capture_spans_at` is now
+a one-line delegation to it. The alternative reading — that `Search` duplicates
+`CaptureMatches` — is answered by what they do *not* share: `CaptureMatches`
+decides where the next search starts, `Search` is told.
+
+---
+
+## 716. `ed`'s undo is one swap of the whole editor, and the two kinds of mark are stored the same way but travel differently
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** `ed` gained `u` (undo) along with `m` (move), `t` (copy) and `k`
+(set a mark on a line so you can name it later as `'x`). Two shapes had to be
+chosen. First, what `u` remembers: a *stack* of past states, as most editors
+keep, or a single one that is swapped in and out. Second, `ed` has two entirely
+different things both called "marks" — the `k` marks a user sets by hand, and
+the internal flags a global command (`g/pattern/command`) uses to remember
+which lines it still has to visit — and when a command moves a line, each has
+to decide whether to move with it. Getting either wrong is invisible in normal
+use and produces a wrong answer in exactly the case people write `g` for.
+
+### Decision 1: one snapshot, swapped, not a stack
+
+`Editor::undo` is a single `Option<Snapshot>` holding the whole editor state —
+buffer, both mark arrays, the current line, and the modified flag. `u` swaps it
+with the live state rather than popping it.
+
+*What changes:* `u` after `u` **redoes** rather than undoing a second change.
+
+- **For:** it is what GNU ed does, exactly. `ed` is a program whose entire value
+  is being the `ed` that scripts and fingers already know; a deeper undo would
+  be a different editor, and one whose difference shows up only after someone
+  has relied on the redo.
+- **Against:** a one-deep undo is genuinely less useful, and a stack is barely
+  more code — `Vec<Snapshot>` and a `pop`.
+- **Why the "for" wins:** the "against" is an argument for a *better editor*,
+  and this is not the place to have it. Every other GNU-compatibility decision
+  in this file (§713 especially) resolves the same way: where we differ from
+  GNU we refuse, we do not improve. Someone who wants a stack can have one the
+  day `design.txt` asks for a non-GNU `ed`.
+
+The snapshot is whole-editor rather than a delta because the commands that
+modify are heterogeneous — `m` relinks, `j` replaces a range with one line, `e`
+throws everything away — and a per-command delta would be seven kinds of
+bookkeeping to save copying a buffer that a line editor keeps in memory anyway.
+The cost is one `Vec<Vec<u8>>` clone per modifying command; inside a global it
+is one clone per *global*, not per selected line, which is what makes
+`g/x/s/a/b/` over a large file linear rather than quadratic.
+
+### Decision 2: `k` marks travel with a moved line, `g` selections do not
+
+Both are parallel arrays indexed by buffer position — `kmarks: Vec<u32>`, 26
+bits per line, and `marks: Vec<bool>`. When `m` lifts a range out and puts it
+back elsewhere, `Editor::cut` carries the `k` marks along inside a `Taken` and
+`Editor::paste` restores them, while the `g` selection is dropped on the way out
+and a clear one inserted on the way in.
+
+*What changes:* after `1ka`, `1m$`, the address `'a` finds the line at the
+*end* of the buffer. But `g/^\(one\|four\)$/4m0p` runs its command list once,
+not twice — moving `four` deselects it.
+
+- **For the asymmetry:** it is GNU's behaviour, measured both ways, and GNU gets
+  it for structural reasons we do not share. GNU's buffer is a linked list and
+  its `k` marks are pointers into it, so relinking a node carries its mark for
+  free; its `g` selections live in a separate array of node pointers that
+  `move_lines` explicitly calls `unset_active_nodes` to prune. Two mechanisms,
+  two answers.
+- **Against:** stated as a rule it sounds arbitrary — "these marks follow the
+  line, those follow the position" is the kind of sentence that invites someone
+  to "fix" it. And it is not what the fix plan in
+  `TD-B-ED-IS-MISSING-EIGHT-COMMANDS` predicted; that plan reasoned from our
+  own array representation and said both should travel.
+- **Why the "for" wins:** the asymmetry is not arbitrary once you ask what each
+  mark *means*. A `k` mark is a name the user gave to a **line**, so it belongs
+  to the line and goes where the line goes. A `g` selection is a note the
+  editor made about **work left to do at a position**, and a command list that
+  moves a line has, by moving it, dealt with it. The alternative — carrying the
+  selection — makes `g` visit lines the list has already handled, which is a
+  worse failure than the surprise: it is a loop whose trip count depends on
+  what its own body does.
+
+**What this cost, and the lesson:** the plan's prediction was written from the
+code and was wrong; the harness (`scripts/ed-diff.sh`, ~400 cases against GNU
+ed 1.20.1) caught it in one run. Three other rules in the same batch were wrong
+the same way — see the `FIXED` note on that `known-issues.md` entry. Reading a
+reference implementation tells you what it does in the case you thought to look
+at; running it tells you what it does.

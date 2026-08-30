@@ -188,6 +188,43 @@ pub struct MatchLimit;
 /// them; spelled out, the type is long enough that the reader stops reading it.
 pub type GroupSpans = Vec<Option<(usize, usize)>>;
 
+/// Whether byte 0 of the subject counts as the beginning of a line — that is,
+/// whether `^` is allowed to match there at all.
+///
+/// Almost every search wants [`StartOfLine::Yes`], and every entry point that
+/// does not take this explicitly passes it. The exception is a caller stepping
+/// through one subject that has *already* consumed some of it and is asking
+/// what the rest looks like **as if it were a fresh subject that is not a line
+/// start**. POSIX spells that `REG_NOTBOL`, and `ed`'s `s///g` is the reason
+/// this crate has it:
+///
+/// ```text
+/// s/^x*/X/g   on "alpha"   →  "Xalpha"   (one empty match, then nothing)
+/// ```
+///
+/// The first search matches `^x*` as the empty string at 0. The second search
+/// resumes at 0 as well, having consumed nothing — and if `^` could match again
+/// there, the command would either loop for ever or, worse, quietly report the
+/// infinite-loop error that GNU `ed` raises only for patterns that genuinely
+/// cannot make progress. `REG_NOTBOL` is what separates the two: with it, the
+/// second search finds nothing and the command finishes.
+///
+/// Note that this is not the same as [`Regex::find_at`]'s `from`. `from` says
+/// where to *look*; this says what the subject's first byte *is*. A search
+/// resumed at byte 7 still has a byte 0, and `^` still means that byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartOfLine {
+    /// Byte 0 is a line start: `^` matches there. The ordinary case.
+    Yes,
+    /// Byte 0 is not a line start: `^` matches nowhere in this subject.
+    ///
+    /// Only `^` is affected. `$` still matches at the end, and a word boundary
+    /// at byte 0 is still decided from the character after it — glibc draws the
+    /// line in the same place (`REG_NOTEOL` is the separate flag for the other
+    /// end, which nothing here needs yet).
+    No,
+}
+
 impl core::fmt::Display for MatchLimit {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("backreference matching exceeded its step limit")
@@ -1739,7 +1776,7 @@ impl Regex {
     /// [`MatchLimit`] if a backreference search exceeded its budget.
     pub fn captures(&self, text: BStr<'_>) -> Result<Option<Vec<Option<Str>>>, MatchLimit> {
         let chars: Vec<Ch> = bytes::chars(text).collect();
-        let Some(slots) = self.run(&chars, 0)? else {
+        let Some(slots) = self.run(&chars, 0, StartOfLine::Yes)? else {
             return Ok(None);
         };
         let mut out = Vec::with_capacity(self.ngroups.saturating_add(1));
@@ -1781,9 +1818,14 @@ impl Regex {
     ///
     /// `^` still means the start of `text`, not the start of the search — a
     /// continued search is looking for the *next* match in one subject, not
-    /// matching a new subject that happens to begin at `from`. (POSIX spells
-    /// this `REG_NOTBOL`.) So `sed 's/^a//g'` removes one leading `a` and not
-    /// one per position, which is what every other implementation does.
+    /// matching a new subject that happens to begin at `from`. So `sed
+    /// 's/^a//g'` removes one leading `a` and not one per position, which is
+    /// what every other implementation does. (POSIX reaches the same place from
+    /// the other side: it slices the subject at `from` and sets `REG_NOTBOL` so
+    /// that the new first byte does not become a line start. Since the subject
+    /// here is never sliced, there is nothing to suppress. A caller that really
+    /// does want `^` switched off wants [`StartOfLine::No`] on
+    /// [`Regex::capture_spans_from`].)
     ///
     /// `from` is rounded forward to a character boundary, so a caller that
     /// resumes from an arbitrary byte cannot start a match inside a character.
@@ -1799,7 +1841,7 @@ impl Regex {
         from: usize,
     ) -> Result<Option<(usize, usize)>, MatchLimit> {
         let scan = Scan::new(text);
-        let Some(slots) = self.run(&scan.chars, scan.char_index(from))? else {
+        let Some(slots) = self.run(&scan.chars, scan.char_index(from), StartOfLine::Yes)? else {
             return Ok(None);
         };
         let (Some(s), Some(e)) = (
@@ -1864,11 +1906,26 @@ impl Regex {
         text: BStr<'_>,
         from: usize,
     ) -> Result<Option<GroupSpans>, MatchLimit> {
-        let scan = Scan::new(text);
-        let Some(slots) = self.run(&scan.chars, scan.char_index(from))? else {
-            return Ok(None);
-        };
-        Ok(Some(self.spans_from_slots(&scan, &slots)))
+        self.search(text).capture_spans_from(from, StartOfLine::Yes)
+    }
+
+    /// Decode `text` once and hand back something that can be searched from any
+    /// offset, any number of times.
+    ///
+    /// [`Regex::capture_spans_at`] decodes the subject on every call, so
+    /// stepping through a line with it is quadratic in the line's length — the
+    /// reason [`Regex::capture_spans_iter`] exists. But that iterator hard-codes
+    /// one empty-match policy (advance one character, which is `sed`'s rule),
+    /// and a caller that needs a *different* one — `ed`'s `s///g` refuses to
+    /// advance at all; see [`StartOfLine`] — otherwise has to choose between the
+    /// right answer and a linear one. This is both: the walk is the caller's,
+    /// the decoding is done once.
+    #[must_use]
+    pub fn search(&self, text: BStr<'_>) -> Search<'_> {
+        Search {
+            re: self,
+            scan: Scan::new(text),
+        }
     }
 
     /// Turn a winning thread's character slots into byte spans, one per group.
@@ -1921,11 +1978,16 @@ impl Regex {
     /// # Errors
     /// [`MatchLimit`] if a backreference search ran out of budget. A pattern
     /// without a backreference never returns one.
-    fn run(&self, input: &[Ch], start: usize) -> Result<Option<Vec<Option<usize>>>, MatchLimit> {
+    fn run(
+        &self,
+        input: &[Ch],
+        start: usize,
+        bol: StartOfLine,
+    ) -> Result<Option<Vec<Option<usize>>>, MatchLimit> {
         if self.has_backref {
-            return self.run_backtrack(input, start);
+            return self.run_backtrack(input, start, bol);
         }
-        let Some(first) = self.scan(input, start, 0, false) else {
+        let Some(first) = self.scan(input, start, 0, false, bol) else {
             return Ok(None);
         };
         let Some(at) = first.first().copied().flatten() else {
@@ -1935,7 +1997,7 @@ impl Regex {
         // was just found at exactly that position — and is written out rather
         // than unwrapped so a future change to the prefix cannot turn a shorter
         // answer into no answer at all.
-        Ok(self.scan(input, at, self.entry, true).or(Some(first)))
+        Ok(self.scan(input, at, self.entry, true, bol).or(Some(first)))
     }
 
     /// How many steps one search of `input` may take before it is abandoned.
@@ -1970,11 +2032,12 @@ impl Regex {
         &self,
         input: &[Ch],
         start: usize,
+        bol: StartOfLine,
     ) -> Result<Option<Vec<Option<usize>>>, MatchLimit> {
         let mut budget = Self::backtrack_budget(input.len());
         let start = start.min(input.len());
         for at in start..=input.len() {
-            if let Some(caps) = self.backtrack_at(input, at, &mut budget)? {
+            if let Some(caps) = self.backtrack_at(input, at, &mut budget, bol)? {
                 return Ok(Some(caps));
             }
         }
@@ -2031,6 +2094,7 @@ impl Regex {
         input: &[Ch],
         start: usize,
         budget: &mut u64,
+        bol: StartOfLine,
     ) -> Result<Option<Vec<Option<usize>>>, MatchLimit> {
         let nslots = self.ngroups.saturating_add(1).saturating_mul(2);
         let mut best: Option<Vec<Option<usize>>> = None;
@@ -2114,7 +2178,7 @@ impl Regex {
                         });
                         f.pc = *x;
                     }
-                    Inst::AssertStart if f.sp == 0 => f.pc = next_pc,
+                    Inst::AssertStart if f.sp == 0 && bol == StartOfLine::Yes => f.pc = next_pc,
                     Inst::AssertEnd if f.sp == input.len() => f.pc = next_pc,
                     Inst::AssertWord(w) if w.holds_at(input, f.sp) => f.pc = next_pc,
                     Inst::Match => {
@@ -2200,6 +2264,7 @@ impl Regex {
         start: usize,
         seed_pc: usize,
         longest: bool,
+        bol: StartOfLine,
     ) -> Option<Vec<Option<usize>>> {
         // Two slots — open and close — for every group plus the whole match.
         let nslots = self.ngroups.saturating_add(1).saturating_mul(2);
@@ -2215,7 +2280,7 @@ impl Regex {
         // `start` past the end is not an error — it is a scan that has run off
         // the subject, which `find_iter` does on its last step.
         let start = start.min(input.len());
-        self.add_thread(&mut clist, seed_pc, start, &mut caps, input);
+        self.add_thread(&mut clist, seed_pc, start, &mut caps, input, bol);
 
         for sp in start..=input.len() {
             if clist.threads.is_empty() {
@@ -2245,15 +2310,15 @@ impl Regex {
                 match inst {
                     Inst::Char(ch) if char_eq(c, *ch, self.ci) => {
                         let mut caps = th.caps.clone();
-                        self.add_thread(&mut nlist, next.0, next.1, &mut caps, input);
+                        self.add_thread(&mut nlist, next.0, next.1, &mut caps, input, bol);
                     }
                     Inst::Any if c.is_some() => {
                         let mut caps = th.caps.clone();
-                        self.add_thread(&mut nlist, next.0, next.1, &mut caps, input);
+                        self.add_thread(&mut nlist, next.0, next.1, &mut caps, input, bol);
                     }
                     Inst::Class(d) if c.is_some_and(|ch| d.matches_ci(ch, self.ci)) => {
                         let mut caps = th.caps.clone();
-                        self.add_thread(&mut nlist, next.0, next.1, &mut caps, input);
+                        self.add_thread(&mut nlist, next.0, next.1, &mut caps, input, bol);
                     }
                     Inst::Match => {
                         if matched_at.is_none_or(|at| sp > at) {
@@ -2298,6 +2363,7 @@ impl Regex {
         sp: usize,
         caps: &mut Vec<Option<usize>>,
         input: &[Ch],
+        bol: StartOfLine,
     ) {
         // `seen` is sized to the program, so a `pc` it cannot index is one no
         // instruction names — a compiler bug rather than an input. Declining to
@@ -2319,10 +2385,10 @@ impl Regex {
         // recursive call rather than indexing out of range.
         let next = pc.saturating_add(1);
         match inst {
-            Inst::Jmp(x) => self.add_thread(list, *x, sp, caps, input),
+            Inst::Jmp(x) => self.add_thread(list, *x, sp, caps, input, bol),
             Inst::Split(x, y) => {
-                self.add_thread(list, *x, sp, caps, input);
-                self.add_thread(list, *y, sp, caps, input);
+                self.add_thread(list, *x, sp, caps, input, bol);
+                self.add_thread(list, *y, sp, caps, input, bol);
             }
             Inst::Save(n) => {
                 let n = *n;
@@ -2330,24 +2396,24 @@ impl Regex {
                 if let Some(slot) = caps.get_mut(n) {
                     *slot = Some(sp);
                 }
-                self.add_thread(list, next, sp, caps, input);
+                self.add_thread(list, next, sp, caps, input, bol);
                 if let Some(slot) = caps.get_mut(n) {
                     *slot = old;
                 }
             }
             Inst::AssertStart => {
-                if sp == 0 {
-                    self.add_thread(list, next, sp, caps, input);
+                if sp == 0 && bol == StartOfLine::Yes {
+                    self.add_thread(list, next, sp, caps, input, bol);
                 }
             }
             Inst::AssertEnd => {
                 if sp == input.len() {
-                    self.add_thread(list, next, sp, caps, input);
+                    self.add_thread(list, next, sp, caps, input, bol);
                 }
             }
             Inst::AssertWord(w) => {
                 if w.holds_at(input, sp) {
-                    self.add_thread(list, next, sp, caps, input);
+                    self.add_thread(list, next, sp, caps, input, bol);
                 }
             }
             // Consuming/terminal instruction — becomes a live thread.
@@ -2356,6 +2422,45 @@ impl Regex {
                 caps: caps.clone(),
             }),
         }
+    }
+}
+
+/// One subject, decoded once, searchable from any offset. Built by
+/// [`Regex::search`].
+///
+/// Holds its own copy of the decoded subject, so it does not borrow the bytes
+/// it was built from — a caller can rebuild the subject while this is alive,
+/// and the offsets it returns still describe the bytes it was given.
+pub struct Search<'r> {
+    re: &'r Regex,
+    scan: Scan,
+}
+
+impl Search<'_> {
+    /// The leftmost match at or after byte offset `from`, with its capture
+    /// groups, as **byte** spans into the subject.
+    ///
+    /// `from` is rounded forward to a character boundary, so a caller resuming
+    /// from an arbitrary byte cannot start a match inside a character.
+    ///
+    /// `bol` says whether byte 0 of the subject counts as a line start; it is
+    /// about byte 0 and not about `from`, which is a distinction worth reading
+    /// [`StartOfLine`] for.
+    ///
+    /// # Errors
+    /// [`MatchLimit`] if a backreference search exceeded its budget.
+    pub fn capture_spans_from(
+        &self,
+        from: usize,
+        bol: StartOfLine,
+    ) -> Result<Option<GroupSpans>, MatchLimit> {
+        let Some(slots) = self
+            .re
+            .run(&self.scan.chars, self.scan.char_index(from), bol)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.re.spans_from_slots(&self.scan, &slots)))
     }
 }
 
@@ -2436,7 +2541,7 @@ impl Cursor {
             if self.done {
                 return None;
             }
-            let slots = match re.run(&self.scan.chars, self.next) {
+            let slots = match re.run(&self.scan.chars, self.next, StartOfLine::Yes) {
                 Ok(Some(slots)) => slots,
                 Ok(None) => {
                     self.done = true;
@@ -3673,5 +3778,35 @@ mod tests {
         let hay = vec![b'a'; 20_000];
         let re = Regex::new(b"^(a)\\1*$").unwrap();
         assert_eq!(re.is_match(&hay), Ok(true));
+    }
+
+    #[test]
+    fn not_a_line_start_switches_off_the_caret_and_nothing_else() {
+        let whole = |p: &str, hay: &str, from, bol| {
+            let re = Regex::new(p.as_bytes()).unwrap();
+            re.search(hay.as_bytes())
+                .capture_spans_from(from, bol)
+                .unwrap()
+                .and_then(|s| s.first().copied().flatten())
+        };
+        // `^` matches at 0 with `Yes` and nowhere at all with `No` — including
+        // at 0, which is the whole point: the caller has already consumed the
+        // empty match there and is asking what is left.
+        assert_eq!(whole("^", "alpha", 0, StartOfLine::Yes), Some((0, 0)));
+        assert_eq!(whole("^", "alpha", 0, StartOfLine::No), None);
+        assert_eq!(whole("^a*", "alpha", 0, StartOfLine::No), None);
+        // `$` is the other end and is not this flag's business.
+        assert_eq!(whole("$", "alpha", 0, StartOfLine::No), Some((5, 5)));
+        assert_eq!(whole("a*$", "alpha", 0, StartOfLine::No), Some((4, 5)));
+        // Nor is a word boundary at byte 0: it is decided from the characters
+        // either side, and `No` does not invent a character before the first.
+        assert_eq!(whole("\\balpha", "alpha", 0, StartOfLine::No), Some((0, 5)));
+        // An ordinary pattern is untouched, at 0 and resumed.
+        assert_eq!(whole("a", "alpha", 0, StartOfLine::No), Some((0, 1)));
+        assert_eq!(whole("a", "alpha", 1, StartOfLine::No), Some((4, 5)));
+        // And the backtracking matcher — a different code path — agrees.
+        assert_eq!(whole("^(a)\\1*", "aaa", 0, StartOfLine::Yes), Some((0, 3)));
+        assert_eq!(whole("^(a)\\1*", "aaa", 0, StartOfLine::No), None);
+        assert_eq!(whole("(a)\\1*", "aaa", 0, StartOfLine::No), Some((0, 3)));
     }
 }

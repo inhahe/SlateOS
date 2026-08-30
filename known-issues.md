@@ -16078,6 +16078,51 @@ Two things about it are worth reading before touching it:
 `RESOLVE_IN_ROOT` remains the sole open item on this entry, unchanged and still
 without a consumer.
 
+**The libc half landed 2026-08-30 (lane B) — `openat2` forwards, and both
+refusals are gone.** `posix/src/file.rs::openat2` step 7 is now a three-way
+decision rather than a list of refusals: `plan_resolve` returns `Delegate`
+(nothing to carry — plain `openat`), `Forward(k_resolve)` (`BENEATH` and/or
+`NO_SYMLINKS`, translated to the kernel's bit values and sent to
+`SYS_FS_OPENAT2`), or `Refuse(errno)` (`IN_ROOT` → `EOPNOTSUPP`, `CACHED` →
+`EAGAIN`). A native binary can now reach containment; before today it could
+only be told no.
+
+Three things on the libc side that are not obvious from the kernel side:
+
+- **`dirfd == 0` is not usable for a relative path, and the reason is a
+  divergence nobody had written down.** The native ABI reads handle 0 as "the
+  process working directory", meaning the one `pcb::get_cwd` returns — but this
+  libc's `chdir` (`posix/src/unistd.rs`) keeps its answer in a libc-side buffer
+  and *never tells the kernel*. Passing 0 would confine the walk beneath
+  whichever directory the kernel last recorded, which is a containment check
+  against the wrong base, and it fails **open**: a wrong base still returns a
+  valid descriptor, which is this entry's original failure mode again. So
+  `openat2_forward` opens libc's own cwd as a scratch directory handle for
+  `AT_FDCWD` and closes it on every exit path. 0 is passed only for an absolute
+  path, where the base is provably never read — without `BENEATH` the handler
+  takes the fragment as the whole answer, and with `BENEATH` it refuses an
+  absolute fragment before the handle lookup (the ordering pinned by case (b)
+  above).
+- **`/dev/ptmx` and `/dev/pts/<n>` are refused with `EOPNOTSUPP` when a
+  restriction is in play**, because they are answered inside libc and do not
+  exist in the kernel's namespace. Forwarding one would come back `ENOENT` — a
+  lie, since the file exists to that caller. The predicate is factored out as
+  `file::is_pty_device_path` and `open_pty_device` gates on it too, so the
+  refusal cannot name a different set than the claim.
+- **The bit translation is tested directly, not end to end.** A host test cannot
+  open anything (every native syscall is stubbed off-target), so an end-to-end
+  assertion about `RESOLVE_BENEATH` degenerates into "the stub said `ENOSYS`"
+  and would stay green with the translation deleted — exactly the untested
+  marshalling lane A warned about. `plan_resolve` is therefore a pure function
+  with its own tests, including one that asserts every Linux resolve value is
+  `< 0x40` and both kernel values are `>= 0x40`, so a "harmonisation" of the
+  constants fails on this side too and not only in `test_dispatch_openat2_native`.
+
+The five tests that pinned the old refusals for `BENEATH`/`NO_SYMLINKS` are
+gone, replaced rather than inverted: they cannot become "must succeed" on a
+host that cannot open. `IN_ROOT` and `CACHED` keep their end-to-end differential
+tests unchanged.
+
 ### D-NETSTACK-TCP-MINIMAL. Userspace `netstack` TCP client is minimal (slirp-only correctness) — DEBT 2026-07-14
 
 **Where:** `services/netstack/src/main.rs` — `tcp_fetch` / `send_tcp` /
@@ -63252,7 +63297,11 @@ worst where the trailing newline is semantic, which for a line editor it is.
 are no `/RE/` addresses, no `g`/`v`/`G`/`V`. That is
 `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`; the fix is `ere::bre`, which `sed` already
 uses, and the 14 cases that will turn `KFIXED` when it lands are already in the
-harness, so the entry cannot be silently outlived. The scope calls — what this
+harness, so the entry cannot be silently outlived.
+*(Superseded 2026-08-30: regular expressions landed, that entry is closed, and
+the harness cases became ordinary `run_pipe` comparisons. What is still missing
+is eight commands — `TD-B-ED-IS-MISSING-EIGHT-COMMANDS`.)*
+The scope calls — what this
 `ed` refuses rather than guesses at, and why it prints file names raw instead of
 quoted — are `design-decisions.md` §713.
 
@@ -81897,7 +81946,7 @@ one too many.
 
 ---
 
-## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 515 of 1937
+## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 503 of 1928
 
 **In short:** the kernel has ~430 small modules that each keep a table of numbers
 and print it — how much swap is compressed, which signals a process has blocked,
@@ -82003,6 +82052,22 @@ naive way.
 | 2026-08-26 | `futexstat` | 516 | category 3, the sharpest instance found so far. `procfs.rs` publishes `futexstat::stats()` and `hotspots(10)` under `/proc`, and the `futexstat` shell command prints the same table — while all four of `record_wait` / `record_wake` / `record_timeout` / `record_contention` were unreachable. So `/proc`'s futex hotspot list was permanently empty and its wait/wake/timeout totals permanently zero, on a kernel whose futex implementation works. A reader takes that as *measured* zero contention. Fixed by wiring the four recorders into `kernel/src/ipc/futex.rs` at the real blocking and waking points. |
 | 2026-08-26 | `irqstat` | 515 (and 222 → 220 modules, 1940 → 1937 mutators) | category 3, the third projection — and **the first one where deleting the mutators was right**, against this entry's own standing advice. `/proc/irqstat` and the `irqstat` command served per-IRQ-line counts, per-CPU interrupt totals and ISR latency while all six of `record`/`record_latency`/`mark_spurious`/`register_irq`/`register_cpu`/`init_defaults` were unreachable; before that the table was seeded with five fictional IRQ lines and four fictional per-CPU rows. Rewritten as a stateless projection of `idt::vector_counts()` — no `STATE`, no lock, nothing to seed or reset — which also makes `A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT` inapplicable to this module by construction rather than by care. **Why deletion, when the rule above says the function is usually right and the caller is what is missing:** here the functions were the wrong *shape*, not merely uncalled. `record(cpu, irq)` presumes a per-CPU per-line table the kernel's counter architecture cannot feed (`VECTOR_COUNTS` is one flat global array), and `IrqLine::spurious`/`affinity_mask` and the whole `CpuIrqState` latency pair had no source at all — they *were* the fabrication surface. Keeping them would not have preserved evidence of an unfed number; it would have preserved an invitation to the wrong fix, namely a second counter of the same event on the ISR path, which is two numbers that can disagree with nothing to say which is right. The `IrqType` enum went the same way: `Timer`/`Keyboard`/`Disk`/`Network`/`Usb`/`Gpu` is a guess about which device sits behind a line, and the kernel does not know that, so it is now `Timer`/`Device`/`Ipi`/`Spurious`/`Unassigned` — derived from the vector number, which the kernel *does* know. **Read the count change with care:** unlike the two rows below, this one moves the metric by removing functions rather than by wiring callers, so the drop is not five modules' worth of progress. That is the mirror of the `pagecache` lesson — the metric counts functions, and the defect is an unfed table. |
 | 2026-08-26 | `netdev` | 516 (unchanged, and that is the point) | category 3, the second projection. `/proc/netdev` listed no interfaces and reported `total_rx_bytes: 0` on a kernel that had just completed a DHCP exchange, because all six of `record_rx`/`record_tx`/`record_error`/`record_drop`/`register_iface`/`set_link_state` were unreachable -- while `net::interface` counted every frame in six relaxed atomics that `netstat -i` was already printing. The two halves of one intent, never joined, exactly as with `pagecache`. Joined at *read* time (a projected `kernel` row) rather than by calling `record_rx` per frame, which would put this module's spin lock and a string compare per interface on the path of every packet. The six `record_*`/`register_*` stay unreachable and now legitimately so, reserved for a per-NIC source that does not exist. **New finding while naming the row:** `net::interface`'s counters are not one NIC's -- `net::veth::poll` records into the same atomics, so the total includes frames that never reached the wire. The projected row is therefore named `kernel` and not `eth0`, and the conflation is logged separately as `A-NET-INTERFACE-COUNTERS-CONFLATE-THE-NIC-WITH-EVERY-VETH-PAIR`. |
+| 2026-08-30 | `perfmon` | 503 (and 220 → 219 modules, 1941 → 1928 mutators) | category 3, the fourth projection, and the largest single module cleared: **twelve** unreachable mutators, all of them. `/proc/perfmon` printed `CPU samples: 0 / Mem samples: 0 / Disk samples: 0 / Net samples: 0` on every boot for the life of the kernel, and `perfmon cpu` answered "No CPU samples" — while `kstat` had been sampling free frames, heap bytes, pressure, runnable/live task counts and per-CPU utilisation into a 60-entry ring *once a second since boot*. The `pagecache`/`netdev` shape exactly: two halves of one intent, never joined. Rewritten so every history is projected from `kstat::recent()` at read time and the module stores only the two alert thresholds, which are policy rather than measurement. **Both deletion rules from the `irqstat` row applied again, and more widely.** `CpuSample`'s `system_pct`/`user_pct` (the scheduler publishes only `(total, idle)` per CPU), `freq_mhz` and `temp_mc` (no frequency or thermal driver exists), and `process_count`/`thread_count` (no *historical* source) were deleted, as were `MemSample`'s `cached_bytes`/`swap_used_bytes`/`page_faults` and the whole of `DiskSample`/`NetSample` — the latter two because their counters live behind spin locks the timer softirq cannot take, so no sampler can ever fill them. `/proc/perfmon` now ends with a line pointing at `/proc/diskstat` and `/proc/netdev` for the cumulative figures, so the absence is stated rather than silent. **Also removed: two knobs that moved and changed nothing** — `perfmon interval <ms>` and `set_max_samples` stored a value that `get_config()` read back while nothing sampled any faster, because this module had no sampler; a knob that answers "did that work?" with a false yes is worse than a fixed value. Interval and depth are now reported from `kstat::sample_interval_ms()`/`history_depth()` and labelled not-settable. **And the alert model changed shape:** alerts are derived from the newest sample rather than appended per over-threshold sample, so `id`/`dismissed` and `perfmon dismiss` are gone — a CPU pinned at 100% used to accumulate identical rows, and dismissing them made a still-overloaded machine report itself healthy. Two new shell arms, `perfmon cpu-alert <pct>` and `perfmon mem-alert <pct>`, make the surviving setters reachable. Full rationale, including what was argued *against* deleting the fields: `design-decisions.md` §641. |
+
+**A blind spot in the metric, found while writing that row and worth knowing
+before the next module.** `scripts/find-unreachable-mutators.py` decides
+reachability by searching other files for the literal text `module::name(` — a
+*call*. Passing a mutator as a **function item** to a shared helper
+(`set_threshold(&parts, "cpu", perfmon::set_cpu_alert)`) is a real caller that
+the scanner cannot see, and it reported both `perfmon` setters as callerless
+after they had been wired up. Wrapping in a closure makes the text match but
+trips `clippy::redundant_closure`, so the resolution was to split the helper
+into a parse half and a report half, leaving each shell arm to call its setter
+directly. Two consequences: a future refactor that tidies those two arms back
+into one callback will silently re-break the measurement without changing any
+behaviour, and — more importantly — **the 503 figure may undercount reachability
+elsewhere for the same reason**, so treat it as an upper bound on the problem
+rather than an exact census.
 
 The futexstat fix is worth reading before doing the next category-3 module,
 because it ran into the constraint that shapes all of them: **you usually cannot
@@ -97719,7 +97784,315 @@ each length exactly.
 
 ---
 
-## TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS — `ed`'s `s` matches a literal string, and there are no `/RE/` addresses (lane B, 2026-08-30) — **open**
+## `A-LOCKDEP-SELF-TEST-PANICS-ON-EVERY-RELEASE-BUILD` (lane A, 2026-08-30) — **fixed 2026-08-30 (took three attempts; the first two were incomplete)**
+
+**Status:** FIXED 2026-08-30, on the third attempt, by deleting the mechanism
+rather than repairing it. Rounds 1 and 2 are recorded below as written at the
+time. Round 1 concluded the *test* was wrong and the code was right — it was the
+other way round. Round 2 found a real cause but treated it as *the* cause; it
+turned out to be one of three independent optimiser liberties that each erase
+exactly one stack frame. Round 3 is the fix that shipped. The earlier rounds are
+kept because the reasoning errors are the useful part: each one ended in a
+plausible mechanism that fully explained the symptom and was not the whole
+story.
+
+**In short:** the kernel would not finish booting when built with optimisations
+on. It panicked partway through startup, inside a self-test belonging to the
+lock-order checker. The test was checking that the checker correctly records
+*which piece of code took a lock* — information that appears in every deadlock
+report it prints. In an optimised build it was recording the wrong function: not
+the one that took the lock, but the one that called it. So every "taken at" line
+in every release-build lock report pointed at innocent code. The self-test was
+right to panic; three rounds were needed to fix it, and the fix in the end was
+to stop asking the machine where the caller was and ask the *compiler* instead
+— it knows, and it cannot be optimised into a different answer.
+
+---
+
+### Round 1 (wrong): "the test is asserting a property of the build"
+
+**What happened.** `lockdep`'s test 9b checks that `caller_ips()` walks exactly
+one frame up from `lock_acquire`, landing on the caller. It identified that
+caller by symbolising the recorded return address and asserting the name
+`contains("lockdep")`:
+
+```rust
+lock_acquire(SITE_PROBE, b"site-probe", Acquire::Blocking);
+…
+if let Some((name, _)) = crate::ksyms::resolve_static(site as u64) {
+    assert!(name.contains("lockdep"), "recorded site resolved to {name} …");
+}
+```
+
+In a debug build the caller is `lockdep::self_test` and the substring matches.
+In release, LLVM inlined `self_test` into `kernel_main`, so the recorded address
+genuinely *is* inside `kernel_main` — the frame walk was correct and the
+assertion fired anyway:
+
+```
+!!! KERNEL PANIC !!!
+panicked at kernel\src\lockdep.rs:1647:13:
+recorded site resolved to kernel_main, which is not the calling self-test
+```
+
+**The test was asserting a property of the build, not of the code under test.**
+After inlining there is no `self_test` frame to walk to, because there is no
+`self_test`. A test whose premise the optimiser is free to delete is a test that
+only runs at `-O0`.
+
+**How it stayed hidden — and this is the transferable part.** `scripts/boot-test.sh`
+builds debug. `--bench` builds release, and `--bench` had not been run since
+before this test was written. So the failing configuration was one flag away and
+nothing in between exercised it. **A self-test that reasons about symbol names,
+frame layout, or inlining is release-sensitive by construction, and the routine
+gate does not cover it.** The other place this class lives is `caller_ips()`
+itself, whose own `#[inline(never)]` doc comment says the attribute is
+load-bearing — the same hazard, correctly handled one function away.
+
+**The fix.** Move the probe's acquire into a dedicated `#[inline(never)] fn
+site_probe_acquire(probe: usize)`, so a frame with a stable symbol exists in
+every build, and compare against the name `resolve_static` gives for that
+function's *own address* rather than a hardcoded substring:
+
+```rust
+let expected = crate::ksyms::resolve_static(site_probe_acquire as usize as u64).map(|(n, _)| n);
+assert!(Some(name) == expected, …);
+```
+
+Asking the same table for both sides is deliberate: a literal would test the
+symboliser's spelling and mangling as much as the frame walk, and neither is
+this test's subject. The assertion is now stronger than the substring it
+replaced — `contains("lockdep")` would also have accepted a walk that landed on
+any other function in this file.
+
+**Not a regression in lockdep.** `caller_ips` was right in both builds
+throughout; only the test's way of naming its own caller was wrong.
+
+*(That last paragraph is the error. It was written without re-running `--bench`,
+because the change was "obviously" sufficient. It was not.)*
+
+---
+
+### Round 2 (correct): `lock_acquire` was `#[inline]`, so the walk lost a frame
+
+Running `--bench` after round 1 panicked again, and the stronger assertion round
+1 had installed is what made the second panic legible:
+
+```
+panicked at kernel\src\lockdep.rs:1680:13:
+recorded site resolved to kernel_main, not to the function that took the lock
+(Some("_ZN6kernel7lockdep18site_probe_acquire…")) — caller_ips() walked to the wrong frame
+```
+
+Both sides of that comparison now come from the symbol table, so this is not a
+naming quibble: the walk genuinely landed on `kernel_main` when the function
+that took the lock was `site_probe_acquire`, which still exists as a real
+`#[inline(never)]` frame. Round 1's premise — "there is no `self_test` frame to
+walk to, because there is no `self_test`" — had been repaired, and the walk was
+*still* one frame high. That is the tell that the walker, not the target, was
+wrong.
+
+**The actual cause.** `caller_ips()` is `#[inline(never)]` and reads two frames:
+its own, then its parent's — the parent being `lock_acquire`, whose return
+address is the acquisition site. That is correct only while `lock_acquire` *has*
+a frame. It was declared `#[inline]`. In a release build LLVM took the hint, so
+the "parent frame" the walk found was not `lock_acquire`'s but its caller's, and
+the return address in it belonged to the caller's **caller**. Every recorded
+site was off by exactly one level of call.
+
+`#[inline]` is a hint and `#[inline(never)]` is a guarantee, and the frame walk
+was resting the whole of its correctness on the hint.
+
+**This was never confined to the test.** The same run prints the held-lock dump
+a few lines above the panic, and it shows the defect directly:
+
+```
+[lockdep]   cpu 0 holds 2 lock(s):
+[lockdep]     [0] test-A @ 0xdead0001, taken at 0xffffffff812eec9b (kernel_main+0x16b)
+[lockdep]     [1] test-B @ 0xdead0002, taken at 0xffffffff812eec9b (kernel_main+0x16b)
+```
+
+Two different locks, taken at two different places, reported at one identical
+address — the call to `self_test` in `kernel_main`. In a release build every
+lockdep report attributed every acquisition to whoever called the function that
+took the lock. That is worse than printing nothing: a bare address carries an
+implicit claim to be worth reading, and this one sends you to code that never
+touched the lock.
+
+**The fix, in two parts, because a frame can be lost two ways.**
+
+1. `lock_acquire` is now `#[inline(never)]`. The invariant the walk depends on
+   becomes a guarantee instead of a hope. It costs nothing measurable: there are
+   two call sites, both already doing `preempt_disable` + `ensure_registered` +
+   `tracking_enabled` on the same path, and `ENABLED` is true from boot onward,
+   so the early-out that the inline hint existed to fold away is the branch not
+   taken in production.
+2. `site_probe_acquire` gained a `core::hint::black_box(probe)` after the
+   acquire. `#[inline(never)]` on the *callee* does not stop the *caller's* own
+   frame vanishing: a body consisting of one call in tail position can be
+   emitted as `jmp` instead of `call`, reusing the frame rather than pushing
+   one, which produces the identical off-by-one from the opposite direction.
+   The barrier takes the call out of tail position, which is what makes the
+   frame mandatory.
+
+*(Round 2 is correct as far as it goes, and both of its fixes were verified by
+disassembly to have worked. It is incomplete: it treats "a frame can be lost two
+ways" as an enumeration, and there was a third way, in the walker itself.)*
+
+---
+
+### Round 3 (the fix): a function cannot assume its own prologue has run
+
+Round 2's `--bench` run panicked again, one frame closer than before —
+`kernel_main::case` instead of `kernel_main`. At that point the honest move was
+to stop proposing mechanisms and read the machine code, which is what found the
+third hazard immediately:
+
+```
+$ llvm-objdump -d --disassemble-symbols='…caller_ips…' target/x86_64-unknown-none/release/kernel
+ffffffff81150310: movq %rbp, %rax      <-- the asm! that reads the frame pointer
+ffffffff81150313: testq %rax, %rax     <-- null / alignment sanity checks
+…
+ffffffff81150322: pushq %rbp           <-- the prologue, AFTER the read
+ffffffff81150323: movq %rsp, %rbp
+```
+
+LLVM had **shrink-wrapped** `caller_ips`: it sank the `push rbp; mov rsp,rbp`
+prologue below the early-exit checks, because on the bail-out paths no frame is
+needed. Perfectly legal, and invisible from the source. The `asm!("mov {}, rbp")`
+at the top of the function therefore read the *caller's* `rbp`, so "my frame"
+was really "my caller's frame" and the whole walk was shifted by one — again.
+
+`-C force-frame-pointers=yes` does not prevent this. It guarantees the frame
+pointer is *maintained*, not that it is established before the first instruction
+that reads it.
+
+**So there are three separate ways to lose exactly one frame**, and they are not
+a list that can be closed:
+
+| # | Liberty | What the walk sees |
+|---|---|---|
+| 1 | the callee is inlined into its caller | the "parent frame" belongs to the caller |
+| 2 | a one-call body is emitted as `jmp` (sibling/tail call) | the frame is reused, not pushed |
+| 3 | the prologue is sunk below the read (shrink wrapping) | `rbp` is still the caller's |
+
+Rounds 1 and 2 each closed one of these with an attribute. No arrangement of
+attributes closes the third, because it is not about who gets inlined into whom:
+**a function cannot assume its own prologue has run.**
+
+**The fix: `#[track_caller]`.** The question the walk was trying to answer —
+"which line of code called me?" — is one the compiler already knows and answers
+exactly, at compile time, via `Location::caller()`. No optimisation can move it.
+`lock_acquire` and `sync::Mutex::{lock, try_lock}` all carry the attribute, so
+the location `lockdep` records is transitively the *user's* source line rather
+than a line inside `sync.rs`.
+
+What this deleted, and why the deletions are the point:
+
+- `caller_ips()` — ~65 lines of RBP-chain walking, `asm!`, canonical-address and
+  alignment checks, and three paragraphs of doc comment justifying attributes on
+  neighbouring functions. Gone.
+- `CLASS_SITE_UP` and the `via:` line in violation reports. That second array
+  existed only because the immediate caller of `lock_acquire` is nearly always
+  `Mutex::<T>::lock`, which names the guarded *type* and not the code that took
+  the lock; a real inversion in boot batch 31 reported both sides as
+  `kernel::sync::Mutex<T>::lock+0x6f`, differing only in the monomorphisation
+  hash. `#[track_caller]` sees through that in one step, so the workaround has
+  no remaining job.
+- `site_probe_acquire`, the `#[inline(never)]` probe helper round 1 added, and
+  its `black_box`. With no frame to find, no frame need be forced to exist.
+
+Reports improved in the process: `file:line:col` instead of `symbol+0xoffset`,
+and correct at every optimisation level rather than at `-O0` only.
+
+**The one hazard that remains, and how it is gated.** `#[track_caller]` degrades
+*silently*. Remove it from `lock_acquire` and every site becomes the
+`Location::caller()` line inside `lockdep.rs`; remove it from `Mutex::lock` and
+every site becomes the `lock_acquire` call inside `sync.rs`. Both are real code
+locations and both look like plausible answers in a report — the second is
+precisely the failure this whole mechanism exists to prevent. So test 9b now has
+two cases, one per attribute, and each asserts the **exact line** it expects
+(captured with `line!() + 1` immediately above the acquire) rather than merely
+that something was recorded. An exact line is the only assertion both wrong
+answers fail.
+
+**The transferable lesson.** Round 1 explained the failure convincingly and
+fixed a real weakness (the substring assertion *was* build-dependent), then drew
+the wrong conclusion from it and did not re-run the one command that would have
+said so. Round 2 found a genuine cause, fixed it correctly, and assumed it was
+the only one. Both were plausible mechanisms that fully accounted for the
+symptom — and a plausible mechanism that accounts for the symptom is not the
+same as the cause. The thing that ended it was not a better hypothesis but
+`llvm-objdump`: **after the second wrong guess, stop reasoning about the
+compiler and read what it emitted.** And the real fix was not a third patch to
+the walk but the recognition that the walk was answering a question the language
+answers exactly — three rounds of increasingly careful frame arithmetic were
+three rounds spent reimplementing `#[track_caller]` badly.
+
+The saving grace throughout was that each round made the assertion *stronger*
+rather than weaker. A fix that had loosened the test to make the panic go away
+would have shipped the wrong attribution silently and permanently.
+
+| | |
+|---|---|
+| The panic | `kernel/src/lockdep.rs`, test 9b in `self_test` |
+| The real defect | `kernel/src/lockdep.rs::caller_ips` — recovering the caller by walking the frame chain at all |
+| Round-1 fix (real weakness, wrong conclusion) | `site_probe_acquire` + symbol-table-vs-symbol-table assertion |
+| Round-2 fix (necessary, insufficient) | `#[inline(never)]` on `lock_acquire`; `black_box` to defeat the sibling call |
+| Round-3 fix (shipped) | `#[track_caller]` on `lock_acquire` and `sync::Mutex::{lock, try_lock}`; `CLASS_SITE` holds a `&'static Location`; `caller_ips`, `CLASS_SITE_UP` and `site_probe_acquire` deleted |
+| Blast radius before the fix | every `taken at` address in every release-build lockdep report, not just the self-test |
+| How to reproduce (before the fix) | `./scripts/boot-test.sh --bench` — release build, panics ~20s into the boot |
+| The gate that missed it | `scripts/boot-test.sh` without `--bench` builds debug |
+| The gate now | test 9b asserts the exact recorded `file:line` for both attributes, and is correct in debug and release alike |
+| Design record | `design-decisions.md` §642 |
+
+---
+
+## TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS — `ed`'s `s` matches a literal string, and there are no `/RE/` addresses (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+**Fixed the same day it was written.** `ed` now compiles every pattern through
+`ere::bre` (or `ere::Regex` under `-E`), has the `/RE/`, `?RE?`, `//` and `??`
+addresses, `&` and `\1`…`\9` in a replacement, and all four of `g`, `v`, `G`,
+`V`. The five `kbug_pipe` cases that named this entry are ordinary `run_pipe`
+comparisons now, and `scripts/ed-diff.sh` grew a `regular expressions` and a
+`global commands` section — about fifty cases — around them. The rest of the
+original text is kept below because the *fix plan* is what was carried out and
+the table is the record of what changed.
+
+Four things were learned in the doing that the plan did not anticipate, and
+they are the reason this paragraph exists rather than a bare "fixed":
+
+1. **A `g` command list is an input *source*, not a list of steps.** GNU feeds
+   it through the ordinary line-reading path, which is what makes `a` inside a
+   list take its text from the list and stop when the list ends — no `.`
+   required. `Editor::global_input` is that source; `read_line` consults it
+   first. The same field is the nesting guard: a `g` that finds it `Some`
+   answers `Cannot nest global commands`.
+2. **An empty command in a list means `p`.** Measured: `g/a/` prints every
+   matching line, and `g/a/\` followed by a blank line — two empty commands —
+   prints each one *twice*. The empty command cannot simply be handed to
+   `execute`, which would read it as the bare-newline command (`.+1p`).
+3. **`-G`/`--traditional` was never about a regex dialect**, which was the
+   premise of `design-decisions.md` §713 decision 1 and was wrong. It is a
+   compatibility mode over `G`, `V`, `f`, `l`, `m`, `t` and `!!`; of the
+   commands this `ed` has, the single thing it changes is that `l` ends a line
+   without the `$` marker. §713 records the correction.
+4. **`ed`'s empty-match rule for `s///g` is not `sed`'s**, and reaching for
+   `ere`'s ready-made iterator — which implements `sed`'s — was wrong. `sed`
+   advances one character past a match that consumed nothing; `ed` **refuses**,
+   with `Infinite substitution loop`. Measured: `,s/a*/X/g` on `alpha` is an
+   error in GNU and was `XlXpXhX` here. Getting it right needs `REG_NOTBOL` —
+   `^` may match on the first search of a line and not on any later one, which
+   is the whole difference between `s/^x*/X/g` printing `Xalpha` and wrongly
+   reporting the loop. `ere` grew a real `StartOfLine::No` for it (and
+   `Regex::search`, so the walk can be the caller's without re-decoding the
+   subject on every step), rather than `ed` faking the flag with a sentinel
+   byte.
+
+What remains missing is eight *commands*, which never had anything to do with
+regular expressions — that is `TD-B-ED-IS-MISSING-EIGHT-COMMANDS`.
+
+---
 
 **In short:** `ed` is the line editor. Its search-and-replace command, `s`,
 is supposed to take a *regular expression* — a small pattern language in which
@@ -97802,6 +98175,120 @@ the entry be closed at the same time.
 | The parser that would grow the `/RE/` forms | same file, `parse_address`, `parse_substitute` |
 | The engine to use | `userspace/ere/src/bre.rs`, `compile` |
 | The precedent | `userspace/coreutils/src/bin/sed.rs`, which compiles the same dialect |
+| The harness cases | `scripts/ed-diff.sh`, the `kbug_pipe` block |
+
+---
+
+## TD-B-ED-IS-MISSING-EIGHT-COMMANDS — `ed` answers `?` to `m`, `t`, `j`, `k`, `r`, `e`, `u` and `#` (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+> **FIXED 2026-08-30 (lane B).** All eight implemented and measured against GNU
+> ed 1.20.1; the eight `kbug_pipe` cases below are now ordinary `run_pipe`s and
+> `scripts/ed-diff.sh` grew ~150 more. Four things the fix plan below got wrong
+> or did not know, every one of them found by measuring rather than by reading:
+>
+> 1. **Note 1 is backwards.** A line that `m` moves *loses* its `g`/`v`
+>    selection — GNU's `move_lines` calls `unset_active_nodes` over the moved
+>    range. Visible: `g/^\(one\|four\)$/4m0p` over `one two three four five`
+>    runs its list **once**, because moving `four` deselects it. Carrying the
+>    mark, as the note said to, would run it twice. `t` keeps the source's mark
+>    and never selects the copy; `j`'s joined line is a new, unselected line.
+>    The `k` marks *do* travel with `m` — those are GNU node pointers — which is
+>    what `Taken` in `ed.rs` exists to carry.
+> 2. **A global clears the undo record the moment it starts**, whether or not it
+>    changes anything: `1d`, `g/beta/p`, `u` answers `Nothing to undo` rather
+>    than bringing the line back (GNU's `exec_global` calls `clear_undo_stack`
+>    unconditionally). So the whole-global snapshot is *set aside* and installed
+>    only by the first modifying command inside — `Editor::global_before`.
+> 3. **`u` restores the current line as well as the buffer**, and restores it to
+>    where `.` was before the change — including before the whole `g`, not
+>    before the first line the `g` selected. That is why the snapshot is taken
+>    at the top of `global` rather than by an inner command's `begin_change`.
+> 4. **The `Warning: buffer modified` rule is two rules, not one**, and neither
+>    is "sticky until the next command". A change *or* an error retracts the
+>    warning (`1d q 1d q` and `1d q zzz q` both warn twice) while a mere look
+>    does not (`1d q 1p q` quits); and the *end-of-input* warning asks a
+>    different question again — was the command just before EOF the refusal — so
+>    `1d q` exits 1 with one warning and `1d q 1p` exits 2 with two. Two flags:
+>    `Editor::warned` and `Editor::warned_last`.
+>
+> Note 3 of the plan was right as written: `Editor::load` was split so `e` can
+> fail without ending the session. Two further gaps found on the way are logged
+> separately as `TD-B-ED-IS-MISSING-SEVEN-MORE-COMMANDS`, and the claim below
+> that GNU ed has no `z` is **false** — see that entry.
+
+**In short:** `ed` is the line editor. Eight of its commands are simply not
+written yet, so typing one gets a bare `?` — the same answer as a typo. Nothing
+is *wrong* with what `ed` does; there is less of it than there should be. A
+script written for a real `ed` that moves a line, copies one, joins two, sets a
+mark, reads a second file in, switches files, undoes a change, or carries a
+comment will stop at that line rather than do something wrong. This is the
+successor to `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`, which was about the pattern
+language and is closed; this one is about the command list and never involved
+patterns at all.
+
+### What is missing
+
+| Command | What GNU does | What we do |
+|---|---|---|
+| `(.,.)m(.)` | **move** the addressed lines to after another line | `Unknown command` |
+| `(.,.)t(.)` | **copy** ("transfer") them there instead | `Unknown command` |
+| `(.,.)j` | **join** the addressed lines into one | `Unknown command` |
+| `(.)kx` and the `'x` address | set a **mark** on a line and name it later | `Unknown command` |
+| `(.)r FILE` | **read** a file in after the addressed line | `Unknown command` |
+| `e FILE`, `E FILE` | **edit** another file (`E` without the modified warning) | `Unknown command` |
+| `u` | **undo** the last buffer change | `Unknown command` |
+| `#comment` | ignore the rest of the line | `Unknown command` |
+
+Also absent, and smaller: `x`/`y` (the cut buffer), `h`/`H` (the last error's
+explanation — `-v` covers the same ground for a script but not for a person at
+a terminal), and `+line` on the command line.
+
+**Not on this list, on purpose:** `!command` and a file name beginning with `!`.
+Those hand text to a shell and are a *deliberate* refusal, not a gap — see
+`design-decisions.md` §713 decision 2. They answer `Shell access not implemented
+by this ed` and are `xfail_pipe` cases in the harness, not `kbug_pipe` ones.
+`z` is not on it either: GNU ed answers `?` to `z` as well.
+
+### The fix
+
+All eight are ordinary arms in `Editor::execute`
+(`userspace/coreutils/src/bin/ed.rs`). Three notes that are not obvious from
+the command descriptions:
+
+1. **`m`, `t` and `j` must carry the `g` marks with the lines**, exactly as
+   `insert` and `delete` already do (`Editor::marks`). A global command list
+   may contain any of them, and a mark array that does not follow its lines
+   turns "visit each selected line once" into "visit some twice and some never".
+2. **`u` needs a change record, which does not exist yet.** The cheapest honest
+   shape is a single snapshot of `(buffer, current, modified)` taken before each
+   command that modifies the buffer, since GNU's `u` is one level deep and `u`
+   after `u` redoes. A full undo *stack* is not what GNU has and would be a
+   difference, not an improvement.
+3. **`e` re-enters `Editor::load`**, which today is only called at startup and
+   returns `Some(status)` meaning "the session is over before it started". That
+   return has to become "the load failed, keep the old buffer" for the `e`
+   caller, so `load` needs splitting rather than reusing as-is.
+
+### How to see it
+
+```
+$ printf '1m$\n,p\nq\n' | ed f.txt     # f.txt is alpha/beta/gamma
+17
+?                                      # GNU prints beta/gamma/alpha
+```
+
+`scripts/ed-diff.sh` carries eight `kbug_pipe` cases naming this entry, one per
+command. They are loud on every run and do not fail it; when a command lands its
+case turns `KFIXED`, which *does* fail the run, so the entry cannot be silently
+outlived.
+
+### Where
+
+| | |
+|---|---|
+| The dispatch to extend | `userspace/coreutils/src/bin/ed.rs`, `Editor::execute` |
+| The marks that `m`/`t`/`j` must maintain | same file, `Editor::marks`, `insert`, `delete` |
+| The loader `e` needs to reuse | same file, `Editor::load` |
 | The harness cases | `scripts/ed-diff.sh`, the `kbug_pipe` block |
 
 ## `B-A-HOOK-EDIT-DID-NOTHING-BECAUSE-THE-HOOK-WAS-INSTALLED-AS-A-COPY` (lane B, 2026-08-30) — **FIXED 2026-08-30**
@@ -97925,7 +98412,76 @@ of making a thing account for what it did.
   nothing compares them". `git config --get core.hooksPath` should stay unset;
   if a future change sets it, the trampoline is bypassed and this returns.
 
-### C-COREUTILS-STDFD-FLUSH-ORDER-TESTS-RACE — 2026-08-30 — LANE C reporting, lane B's tree, OPEN
+## `TD-B-THE-KERNEL-HAS-A-WORKING-DIRECTORY-AND-LIBC-NEVER-TELLS-IT-ANYTHING` (lane B, 2026-08-30) — DEBT
+
+**In short:** two different parts of the system each believe they know what
+directory this process is "in", and they do not agree. The C library keeps its
+answer in its own memory and never mentions it to the kernel; the kernel keeps
+its own answer, which changes only through the Linux-compatibility calls that
+SlateOS-native programs do not use. Nothing is broken today, because every path
+the library hands the kernel is spelled out in full from the root. It becomes a
+bug the moment any native call resolves a *relative* path — and it would become
+one quietly, since a path resolved against the wrong directory usually still
+finds a file.
+
+**Where:**
+- `posix/src/unistd.rs::chdir` — validates the target with `SYS_FS_STAT`, then
+  stores the normalized absolute path in a libc-side buffer. No syscall tells
+  the kernel.
+- `kernel/src/proc/pcb.rs::{get_cwd, set_cwd}` — the kernel's copy.
+- `kernel/src/syscall/linux.rs` (~42750, ~42821) — the *only* two callers of
+  `set_cwd`, both in the Linux ABI (`chdir`/`fchdir`). There is no native
+  syscall number that sets it.
+
+**How it bites.** A native program that calls `chdir("/a/b")` and then makes any
+syscall whose path is resolved kernel-side against `pcb::get_cwd` gets `/a/b`
+from libc's point of view and the spawn-time directory from the kernel's. Today
+exactly one native call reads that cwd — `SYS_FS_OPENAT2` with `dirfd == 0` —
+and `posix/src/file.rs::openat2_forward` deliberately never passes 0 for a
+relative path for this reason (it opens a scratch handle on libc's own cwd
+instead; `design-decisions.md` §714, decision 2). Every other native fs call
+receives an absolute path from `resolve_or_err`, so the kernel's cwd is never
+consulted.
+
+That makes this latent rather than live, and it is worth being precise about
+why the latent version is still worth an entry: the failure it produces is a
+*wrong answer*, not an error. A relative open resolved against the wrong base
+usually succeeds — on the wrong file. And in the one place it interacts with
+containment, it fails open: `RESOLVE_BENEATH` against the wrong base still
+returns a valid descriptor and still looks like working confinement.
+
+**The rule that holds while this is unfixed:** libc never relies on the
+kernel's process working directory. Any use of `dirfd == 0` (or a future
+equivalent) must be justified by the base being provably unread, as
+`openat2_forward`'s absolute-path case is.
+
+**Trigger to fix:** the first native syscall that resolves a relative path
+against the kernel's cwd, or the first native caller that wants `dirfd == 0`
+for a relative fragment.
+
+**The proper fix, and why it was not done here.** Either (a) a native
+`SYS_FS_SET_CWD` that `chdir`/`fchdir` call, so the two copies stay in step, or
+(b) an explicit statement in the native ABI that the kernel's cwd is not part of
+it, and the removal of `dirfd == 0`'s cwd meaning in favour of an
+`AT_FDCWD`-style sentinel that libc supplies a real handle for. (a) is the
+smaller change and creates a second source of truth that must be kept in sync —
+including across `fork`, `exec` and `spawn`, which is where it would go wrong.
+(b) is the cleaner one and is a request to lane A, not a lane-B change. Neither
+belongs inside a change whose job was to stop refusing `RESOLVE_BENEATH`;
+shipping a cwd-semantics change hidden inside an `openat2` change is how the
+next entry above this one gets written. Filed as
+`requests/b-a-the-kernels-cwd-and-libcs-cwd-are-two-different-directories.md`.
+
+### C-COREUTILS-STDFD-FLUSH-ORDER-TESTS-RACE — 2026-08-30 — LANE C reporting, lane B's tree — **FIXED 2026-08-30 (lane B)**
+
+**Fixed as filed, and the diagnosis was right in every particular.**
+`a_lost_diagnostic_is_remembered_and_a_delivered_one_is_not` now takes
+`shared()` like the other five. The `shared()` doc comment carries the widened
+rule — *hold this if you touch descriptor 1 **or** descriptor 2*, because a
+write to 2 reaches 1 through `before_diagnostic` — and the test's own comment
+records why serialising it costs nothing. `stderr_is_unbuffered` is left
+unguarded, also as filed: `Stream::new` does not write, so it cannot flush.
+The original report follows.
 
 `cargo test --workspace` came back red on an otherwise-green tree with one
 failure in a crate `lane-c` has never touched:
@@ -97968,3 +98524,142 @@ of the state a test *reads*. A side effect on a second global — here, "writing
 diagnostic flushes the output it comes after", which is the feature under test —
 puts a test inside the guard's scope without it ever mentioning the guarded
 state.
+
+---
+
+## TD-B-ED-IS-MISSING-SEVEN-MORE-COMMANDS — `ed` answers `?` to `h`, `H`, `P`, `W`, `x`, `y` and `z` (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+> **FIXED 2026-08-30 (lane B).** All seven landed together with the cut-buffer
+> fills in `d`, `c`, `j` and `s`. `scripts/ed-diff.sh` is 507 cases, 0 differed,
+> 8 differ on purpose, **0 known bugs** — the `kbug_pipe` case is now an
+> ordinary `run_pipe` — and the file's command language is complete but for a
+> `+line` operand on the command line.
+>
+> **One thing the measurements above missed, which only the harness found.**
+> `z`'s default address is `.+1` *outside* a global and `.` *inside* one: GNU's
+> `check_second_addr( current_addr + !isglobal, … )`. It is the only default
+> address in ed that depends on where the command came from, and it is the
+> right quirk — the global has just put `.` on the selected line, so a
+> `g/RE/z` that started at `.+1` would page from the line after every match.
+> The case that caught it is `g/line0/z2` on thirty numbered lines; every
+> single-command probe agreed.
+>
+> **Two smaller corrections while in there.** `q`, `Q` and `u` were checking
+> their print suffix *before* refusing an address, so `1q9` said `Invalid
+> command suffix` where GNU says `Unexpected address`. That was invisible
+> before — both answers are a bare `?` — and `h` is exactly what makes it
+> visible, so the command that reports errors is also the command that found
+> two. And `W` shares the `w` arm rather than duplicating it, with `write`
+> taking an `append` flag; the byte count it prints is what *that* call wrote,
+> which for an append is not the file's new size.
+
+**In short:** `ed` is the line editor. Having just filled in the eight commands
+`TD-B-ED-IS-MISSING-EIGHT-COMMANDS` was about, a sweep of *every* letter GNU ed
+accepts turned up seven more that we still answer `?` to — the same answer as a
+typo. Two of them (`h`, `H`) are how a person sitting at `ed` finds out *why*
+something was refused; without them the only way to see a reason is to have
+started `ed -v`, which you cannot do retroactively. The rest are the scrolling
+command, the cut/paste pair, the prompt toggle, and append-to-a-file.
+
+### What is missing
+
+GNU ed 1.20.1's full command set, measured a letter at a time, is:
+
+```
+a c d e E f g G h H i j k l m n p P q Q r s t u v V w W x y z = # !
+```
+
+Ours has all of those except these seven:
+
+| Command | What GNU does | What we do |
+|---|---|---|
+| `h` | print the **last error's** sentence; print nothing if there has been none | `Unknown command` |
+| `H` | **toggle** printing that sentence after every `?`; printing the pending one if it turns them on | `Unknown command` |
+| `P` | **toggle** the command prompt on and off | `Unknown command` |
+| `(1,$)W FILE` | **append** the addressed lines to a file, rather than truncating it as `w` does | `Unknown command` |
+| `(.)x` | **put** the cut buffer after the addressed line | `Unknown command` |
+| `(.,.)y` | **yank** the addressed lines into the cut buffer | `Unknown command` |
+| `(.+1)z(N)` | print a **window** of N lines and remember N as the new window size | `Unknown command` |
+
+**Not on this list, on purpose:** `!command` and a file name beginning with `!`
+are a *deliberate* refusal — see `design-decisions.md` §713 decision 2.
+
+### What was measured
+
+All of it against GNU ed 1.20.1 under WSL, since that is the only copy on this
+machine. Recorded here because the measuring is most of the work:
+
+- **`h`** prints the last error's sentence and nothing at all when there has
+  been no error. `1h` is `Unexpected address`. `hp` takes an ordinary print
+  suffix, as do `Hp` and `Pp`.
+- **`H`** toggles. When the toggle turns *on* it also prints the pending
+  sentence, so `1d`, `q`, `H` prints `Warning: buffer modified` twice: once as
+  the `H` reports the `q`'s refusal and once for the `H`'s own. `-v` is exactly
+  "`H` already on".
+- **`P`** toggles the prompt; the default prompt string is `*`, and `-p*`
+  starts it on.
+- **`z`** is `(.+1)z(N)(style)`. The default window is **22**, a count
+  *persists* as the new window (so `1z3` then `z` prints lines 4–6), the window
+  clamps at `$`, `.` becomes the last line printed, and a trailing `p`/`n`/`l`
+  styles the whole window. `1z0`, `1z-1` and `1zx` are all `Invalid command
+  suffix`; `41z` on a 5-line buffer is `Invalid address`.
+- **`y`** copies `(.,.)` into the cut buffer. It does *not* move `.` and does
+  *not* mark the buffer modified.
+- **`x`** puts the cut buffer after `(.)`; `.` becomes the last line put; it
+  marks the buffer modified. With an empty cut buffer it is `Nothing to put`
+  (a sentence we do not have yet). `9x` on a 5-line buffer is `Invalid
+  address`.
+- **The cut buffer is filled by `d`, `c`, `j`, `s` and `y`** — and *not* by
+  `m`, `t`, `r`, `a`, `i` or `u`. It survives a `u`, and it carries no marks.
+- **`W`** appends `(1,$)` to a file and prints the byte count. It clears
+  `modified` even when the name is not the default one. `-s` drops the count;
+  `-r` refuses a name with a separator; `1Wp` is `Unexpected command suffix`.
+
+### The `z` correction
+
+`TD-B-ED-IS-MISSING-EIGHT-COMMANDS` says, in its "not on this list" paragraph,
+that "`z` is not on it either: GNU ed answers `?` to `z` as well". **That is
+false.** GNU ed has `z` and it is the paging command described above. The claim
+came from testing `z` on a buffer whose current line was already `$`, where
+`(.+1)` is out of range and the answer is a perfectly ordinary `Invalid
+address`. A `?` from a command that *exists* and a `?` from one that does not
+are the same `?` — which is the whole reason `h` and `H` are worth having, and
+is a neat argument for measuring a command at more than one starting state.
+
+### The fix
+
+Seven more arms in `Editor::execute` (`userspace/coreutils/src/bin/ed.rs`), plus
+state they need that does not exist yet:
+
+| New state | For |
+|---|---|
+| `cut_buffer: Vec<Vec<u8>>` | `x`, `y`, and fills in the `d`/`c`/`j`/`s` arms |
+| `last_error: Option<EdError>` | `h`, `H` |
+| `verbose: bool` as an `Editor` field rather than an `Options` one | `H` toggles it, so it cannot stay immutable on `opts` |
+| `prompt_on: bool` | `P` |
+| `window: usize`, defaulting to 22 | `z` |
+| an `EdError::NothingToPut` variant | `x` on an empty cut buffer |
+
+### How to see it
+
+```
+$ printf '1d\nq\nH\n' | ed f.txt
+17
+?
+?                                # GNU prints `Warning: buffer modified` twice
+```
+
+`scripts/ed-diff.sh` carries a `kbug_pipe` case naming this entry. It is loud on
+every run and does not fail it; when `H` lands the case turns `KFIXED`, which
+*does* fail the run, so the entry cannot be silently outlived. (It did, and it
+is now `run_pipe '1d\nq\nH\n' f.txt` in the `=== explaining the last error ===`
+section, alongside 26 other `h`/`H` cases.)
+
+### Where
+
+| | |
+|---|---|
+| The dispatch to extend | `userspace/coreutils/src/bin/ed.rs`, `Editor::execute` |
+| The error sentences | same file, `EdError`, `EdError::sentence` |
+| Where `-v` is read today | same file, `Options::verbose`, `Editor::fail` |
+| The harness case | `scripts/ed-diff.sh`, the `kbug_pipe` block |

@@ -3,7 +3,28 @@
 **From:** lane A (kernel & core)
 **To:** lane B (POSIX & userland)
 **Date:** 2026-08-26
-**Status:** open — one entry to add to `posix/src/sys_capability.rs`.
+**Status:** ✅ ANSWERED 2026-08-30 by lane B — no line to add, and the reason
+is a mistake in the checklist rather than in this request. Reply:
+`requests/b-a-there-is-no-mirrored-resourcetype-table-in-posix-and-step-4-should-not-say-there-is.md`.
+
+The table this asks me to extend does not exist. `posix/src/sys_capability.rs`
+has no enumeration of `ResourceType` and no name for any of them; what it has
+is `kernel_view::res`, seven constants that exist **only** because some
+predicate in `project()` tests them, documented as such since `8ceec091c`
+(2026-08-16, ten days before this was filed): *"Only the variants this module
+projects are listed."* It stops at 24 (`NetRaw`), not at 30 — nothing between
+25 and 30 is there either, and that is correct rather than a backlog.
+
+So `BlockDevice` gets no constant, because a constant here is a claim that
+some Linux capability follows from holding the type, and none does. The
+tempting one is `CAP_SYS_RAWIO`, and it would be a false positive in the exact
+direction §312 forbids: on Linux `CAP_SYS_RAWIO` gates `ioperm`/`iopl`,
+`/proc/kcore`, `FIBMAP` and `SG_IO`, while plain `read`/`write` of `/dev/sda`
+is gated by the device node's ownership and mode. `BlockDevice` **is** our
+version of that ownership, not of the capability — so a holder projecting
+`CAP_SYS_RAWIO` would report port-I/O authority the kernel would refuse it.
+Nothing in `posix/`, `userspace/`, `services/` or `init/` displays a
+`ResourceType` name, so there is no "unknown number" to see either.
 
 ## In short
 

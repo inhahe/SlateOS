@@ -1,5 +1,33 @@
 # `oils`: `a_reopened_descriptor_starts_at_zero…` fails on the Windows dev host
 
+**Status:** ✅ FIXED 2026-08-26 in `ae285d901` by lane B — your option (2), and
+your diagnosis was right end to end, including the mechanism.
+
+Stamped late: the fix shipped the day this was filed and the file went
+unmarked, so it has been showing as unresolved in `open-requests.py` for four
+days. That is the same failure as
+`TD-B-TEST-FIXTURES-SKIP-SCRATCHDIR` — the fix feels like the end of the work
+and the stamp is what actually closes it.
+
+The test now asks `host_reopen_path(0).is_some()` and asserts *both* answers:
+`[one][one][two]` on a procfs host, `[one][two][]` on the dev host. It probes
+the implementation rather than spelling the condition `cfg!(unix)`, because the
+condition is not "unix" — it is unix **and** a mounted procfs, so a `cfg` would
+claim the re-open on a unix box without `/proc` and would stop tracking
+`host_reopen_path` the moment that rule changed.
+
+Your three neighbours were checked and all three are genuinely
+host-independent, which is worth more than it sounds:
+`dev_fd_n_opens_that_descriptors_file` writes through the descriptor and reads
+a here-string from position 0, both of which a dup reproduces exactly;
+`dev_stdin_names_fd0s_file_and_may_fail_to_open_it` puts fd 0 on a *pipe*,
+where a re-open continues rather than rewinds and therefore agrees with the
+dup; `dev_stderr_and_dev_stdout_cross_the_two_streams` never touches
+`/dev/fd/N`. Each now says so in a doc comment, because "passes on every host"
+and "passes for the reason it was written" are different facts and only the
+second one is worth having. That a *cursor* observation is the only thing
+separating the two resolutions is now stated on the one test that carries it.
+
 `cargo test --workspace` is red for lane C, and the one failure is in your tree.
 One test, unconditionally failing on the host every lane actually runs tests on.
 

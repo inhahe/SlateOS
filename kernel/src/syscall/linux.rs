@@ -85183,6 +85183,45 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
+            // openat2 with RESOLVE_IN_ROOT (bit 4) -> -EOPNOTSUPP.  This is
+            // the one resolve flag we deliberately do NOT implement, and it
+            // is asserted precisely because of that: BENEATH is the same
+            // machinery with `..` erroring at the base instead of clamping
+            // and absolute targets refused instead of re-rooted, so whoever
+            // next touches `beneath_step` is one plausible edit away from
+            // half-implementing IN_ROOT.  A half-implemented containment
+            // flag that returns success is a sandbox escape; this line is
+            // what makes that edit fail loudly rather than ship.
+            let mut how_in_root = [0u8; 24];
+            how_in_root[16] = 0x10; // resolve = RESOLVE_IN_ROOT
+            let how_in_root_ptr = how_in_root.as_ptr() as u64;
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: path_ptr,
+                arg2: how_in_root_ptr,
+                arg3: 24,
+                arg4: 0,
+                arg5: 0,
+            };
+            if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: openat2 RESOLVE_IN_ROOT not EOPNOTSUPP -- if this \
+                     now succeeds, check it is fully implemented and not merely reaching \
+                     BENEATH's code path"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Say so in the log.  Everything above this line is asserted and
+            // then summarised only by the gate-order message far below, which
+            // names none of it -- so a reader of the serial log could not tell
+            // whether the resolve-flag behaviour was checked or merely
+            // compiled.  A green line that does not name what it checked is
+            // the failure mode this project keeps rediscovering.
+            serial_println!(
+                "[syscall/linux]   openat2 resolve flags: OK (CACHED->EAGAIN, IN_ROOT->EOPNOTSUPP \
+                 as an unimplemented flag, BENEATH enforced: absolute and `..`-escaping paths both \
+                 ->EXDEV, and refused before the dirfd lookup so the errno is not an fd oracle)"
+            );
             // openat2 with unknown resolve bit (bit 6) -> -EINVAL.
             let mut how_bad = [0u8; 24];
             how_bad[16] = 0x40; // resolve = unknown bit

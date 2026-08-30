@@ -96453,3 +96453,70 @@ denominator — a line shaped like Linux's that could not be read like it.
 **Not `crate::fs::loadavg`.** That is a third, unrelated module — the
 `/proc/fs_loadavg` accounting table, reached by the `lavg` command — and is
 untouched. The name collision is itself part of why this was easy to miss.
+
+
+---
+
+## A-CREATE-MODE-SYSCALLS-SILENTLY-DROP-SETUID-SETGID-STICKY
+
+**Status: OPEN** (found 2026-08-30, lane A)
+
+**In short:** Two syscalls let a program create a file or directory and say
+what permissions it should have. If the program asks for one of the three
+special permission bits — setuid, setgid, or sticky (bits that make a program
+run as its owner, or stop users deleting each other's files in a shared
+directory) — the kernel throws that part of the request away and creates the
+file anyway, reporting success. The program is told it got what it asked for.
+It did not.
+
+**Where:** `kernel/src/syscall/handlers.rs:9061` (`sys_fs_open_mode`, for
+`SYS_FS_OPEN_MODE`) and `:8785` (`sys_fs_mkdir_mode`, for
+`SYS_FS_MKDIR_MODE`). Both reduce the caller's mode with a bare
+
+```rust
+mode_raw & 0o777
+```
+
+and neither reports that anything was discarded. `0o4755` becomes `0o755`;
+the return value is a valid handle either way.
+
+**Why it is masked at all is legitimate; the silence is not.** The filesystem
+genuinely cannot represent these bits on a newly-created object yet —
+`kernel/src/fs/handle.rs:537` masks again on the way to `set_permissions` and
+says so plainly: *"Only the low 9 bits are meaningful today (setuid/setgid/
+sticky on a brand-new file are not yet plumbed through the create path)."*
+So the mask is not the bug. The bug is that a caller asking for something the
+kernel cannot do is told it succeeded. An unsupported request should be
+refused, not quietly rounded down to a supported one — the caller who wanted
+a setgid shared directory gets an ordinary one and no way to find out.
+
+**Not the same as the umask reduction.** The doc comments on both handlers
+note the mode arrives "already umask-masked by userspace." That reduction is
+correct and expected: the caller asked for a *maximum*, and umask lowering it
+is the contract. `& 0o777` is a different thing — it drops bits the caller
+asked for that umask never touched.
+
+**Why it surfaced now:** lane B's `requests/b-a-yes-forward-openat2-and-here-
+is-the-shape-we-want.md` asks lane A to choose the mode width for a new
+`SYS_FS_OPENAT2`, offering "take `0o7777` and apply-or-refuse the special
+bits" against "take `0o777` like `SYS_FS_OPEN_MODE`, and let libc refuse
+`mode & 0o7000`" — and rules out a third option, masking silently, by name.
+The finding is that `SYS_FS_OPEN_MODE` *is* the ruled-out option. So the
+second choice does not mean "inherit an established convention"; it means
+"keep doing the thing we agreed not to do, and add a check in libc." A
+libc-side refusal covers libc callers only, and a native syscall number
+exists precisely so callers can bypass libc.
+
+**Proper fix:** refuse `mode & 0o7000 != 0` in the kernel with an explicit
+error, at the syscall boundary where it cannot be bypassed, and relax the
+refusal into acceptance if and when the create path learns the bits — no ABI
+change needed in that direction. Refusing is forward-compatible; a 9-bit-wide
+argument is not, and widening one later needs a whole new syscall number,
+which is exactly why `SYS_FS_OPEN_MODE` already exists separately from
+`SYS_FS_OPEN`.
+
+**Why it is not simply fixed in place:** turning silent acceptance into a
+hard error is a user-visible ABI change for callers outside lane A. Any
+existing userspace passing a special bit succeeds today and would begin
+failing. That makes it lane B and lane C's business too, so it goes to them
+with the `SYS_FS_OPENAT2` reply rather than being changed unilaterally.

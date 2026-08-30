@@ -158,18 +158,160 @@ def load_allowlist() -> dict[str, str]:
     return allowed
 
 
-def deleted_since(base: str) -> list[str]:
-    """Paths under `requests/` present at `base` and absent from the worktree.
+def deleted_since(base: str, head: str | None = None) -> list[str]:
+    """Paths under `requests/` present at `base` and absent from `head`.
 
-    `-M` turns a move into an R and keeps it out of this list; `--diff-filter=D`
-    then leaves only real disappearances.
+    `head=None` means the working tree, which is what the build gates want: they
+    ask "is a request missing right now", and they want the answer before the
+    deletion is even committed.
+
+    A push gate must ask a different question, and passing `head` is how. It
+    judges *the commit being published*, not the worktree, and the difference
+    matters in both directions:
+
+    * **False negative.** Commit X deletes `requests/foo.md` and is about to be
+      pushed; the file has since been restored and *staged*. Diffed against the
+      worktree there is no deletion, so the gate passes and X enters shared
+      history -- the exact event the gate exists to prevent, missed because of a
+      change that is not being pushed. (Staged, not merely present: `git diff
+      <base>` cannot see an untracked file, so an unstaged restore hides
+      nothing. `git add` is the ordinary way to put a file back, and a merge
+      that reintroduces one stages it for you.)
+    * **False positive.** The mirror image: an uncommitted deletion blocks a
+      push of unrelated clean commits.
+
+    `-M` turns a move into an R and keeps it out of this list, so renaming a
+    slug or sweeping into an archive directory passes; `--diff-filter=D` then
+    leaves only real disappearances.
     """
-    rc, out = _git(
-        "diff", "-M", "--diff-filter=D", "--name-only", base, "--", REQUESTS
-    )
+    args = ["diff", "-M", "--diff-filter=D", "--name-only", base]
+    if head is not None:
+        args.append(head)
+    rc, out = _git(*args, "--", REQUESTS)
     if rc != 0:
         raise RuntimeError(out.strip())
     return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+
+def selftest() -> int:
+    """Verify the detector against a throwaway repository with known history.
+
+    Why a gate needs one: every failure mode of this script is silent and reads
+    as good news. If `deleted_since` ever returns nothing -- a git option that
+    changes meaning, a `-M` that starts matching too eagerly, a path filter that
+    stops matching `requests/` -- the output is "clean", which is exactly what a
+    healthy repository prints. Nothing distinguishes "no deletions" from "cannot
+    see deletions", so the gate has to be asked a question it should fail.
+
+    Several cases here are ways a *correct-looking* answer is wrong: a rename
+    must not count (slug fixes and archive sweeps are routine, and a gate that
+    blocked them would be bypassed within a week), the allowlist must still
+    waive, and machinery must stay exempt.
+    """
+    import os
+    import tempfile
+
+    failures: list[str] = []
+
+    def run(cwd: str, *args: str) -> str:
+        proc = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+        )
+        return proc.stdout
+
+    def expect(label: str, got: object, want: object) -> None:
+        if got == want:
+            print(f"  ok    {label}")
+        else:
+            print(f"  FAIL  {label}: got {got!r}, want {want!r}", file=sys.stderr)
+            failures.append(label)
+
+    global ROOT, ALLOWLIST                       # noqa: PLW0603 - see below
+    saved_root, saved_allowlist = ROOT, ALLOWLIST
+    with tempfile.TemporaryDirectory(prefix="reqgate-") as tmp:
+        run(tmp, "init", "--quiet", "-b", "main")
+        run(tmp, "config", "user.email", "selftest@example.invalid")
+        run(tmp, "config", "user.name", "selftest")
+        # Rename detection is on by default in modern git, which means the
+        # rename case below passes whether or not `deleted_since` still passes
+        # `-M` -- the assertion would look load-bearing and not be. Turning it
+        # off here makes the explicit `-M` the only thing that can save an
+        # archive sweep, which is both what the test should prove and the
+        # configuration this gate has to survive: `diff.renames=false` in a
+        # lane's global config would otherwise turn every sweep into a refused
+        # push.
+        run(tmp, "config", "diff.renames", "false")
+        reqs = os.path.join(tmp, "requests")
+        os.makedirs(reqs)
+        for name in ("a-b-one.md", "a-b-two.md", "a-b-swept.md", ".gitkeep"):
+            with open(os.path.join(reqs, name), "w", encoding="utf-8") as fh:
+                fh.write("# fixture\n")
+        run(tmp, "add", "-A")
+        run(tmp, "commit", "--quiet", "-m", "base")
+        base = run(tmp, "rev-parse", "HEAD").strip()
+
+        # `_git`, `deleted_since` and `load_allowlist` all read module globals.
+        # Repointing them is what lets the real code paths be exercised rather
+        # than a reimplementation of them -- a self-test that tested a copy of
+        # the logic would pass while the logic in use was broken.
+        ROOT = Path(tmp)
+
+        os.remove(os.path.join(reqs, "a-b-one.md"))
+        os.remove(os.path.join(reqs, ".gitkeep"))
+        os.makedirs(os.path.join(reqs, "archive"))
+        os.rename(os.path.join(reqs, "a-b-swept.md"),
+                  os.path.join(reqs, "archive", "a-b-swept.md"))
+        run(tmp, "add", "-A")
+        run(tmp, "commit", "--quiet", "-m", "delete one, sweep another")
+        head = run(tmp, "rev-parse", "HEAD").strip()
+
+        gone = deleted_since(base, head)
+        expect("a deleted request is detected", "requests/a-b-one.md" in gone, True)
+        expect("a swept (renamed) request is not a deletion",
+               any("swept" in p for p in gone), False)
+        expect("an untouched request is not reported",
+               any("a-b-two" in p for p in gone), False)
+        expect("machinery is seen by the diff (main() is what exempts it)",
+               "requests/.gitkeep" in gone, True)
+        expect("machinery is classified as exempt",
+               [p for p in gone if Path(p).name in MACHINERY],
+               ["requests/.gitkeep"])
+
+        # The restore-in-worktree case: the reason --head exists at all.
+        #
+        # It must be *staged* to hide anything. `git diff <base>` compares
+        # against the index-plus-worktree view, in which a path absent from the
+        # index is simply absent -- so an untracked restore leaves the deletion
+        # visible. That narrows the false negative but does not remove it.
+        one = os.path.join(reqs, "a-b-one.md")
+        with open(one, "w", encoding="utf-8") as fh:
+            fh.write("# restored, uncommitted\n")
+        expect("an untracked restore does not hide the deletion",
+               "requests/a-b-one.md" in deleted_since(base), True)
+        run(tmp, "add", "requests/a-b-one.md")
+        expect("a STAGED restore hides the deletion from a worktree diff",
+               "requests/a-b-one.md" in deleted_since(base), False)
+        expect("...but not from --head, which judges the commit being pushed",
+               "requests/a-b-one.md" in deleted_since(base, head), True)
+
+        ALLOWLIST = Path(tmp) / "requests" / ".deletions-allowed"
+        with open(ALLOWLIST, "w", encoding="utf-8") as fh:
+            fh.write("# a comment\na-b-one.md  # folded into a-b-two.md\n")
+        allowed = load_allowlist()
+        expect("the allowlist waives by basename", "a-b-one.md" in allowed, True)
+        expect("the allowlist keeps the stated reason",
+               allowed.get("a-b-one.md"), "folded into a-b-two.md")
+        expect("a comment line is not a waiver",
+               any(k.startswith("#") for k in allowed), False)
+
+    ROOT, ALLOWLIST = saved_root, saved_allowlist
+
+    if failures:
+        print(f"\ncheck-requests-not-deleted: SELF-TEST FAILED "
+              f"({len(failures)}): {', '.join(failures)}", file=sys.stderr)
+        return 1
+    print("check-requests-not-deleted: self-test passed")
+    return 0
 
 
 def main() -> int:
@@ -179,7 +321,23 @@ def main() -> int:
         default=None,
         help="commit to compare against (default: merge-base with origin/main)",
     )
+    ap.add_argument(
+        "--head",
+        default=None,
+        help="commit to judge (default: the working tree). The push hook passes "
+             "the commit being published, so a staged restore cannot hide a "
+             "deletion that is about to become shared history.",
+    )
+    ap.add_argument(
+        "--selftest",
+        action="store_true",
+        help="build a throwaway repository and verify this gate still detects a "
+             "deletion, ignores a rename, and honours the allowlist",
+    )
     args = ap.parse_args()
+
+    if args.selftest:
+        return selftest()
 
     rc, _ = _git("rev-parse", "--git-dir")
     if rc != 0:
@@ -188,6 +346,17 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+
+    if args.head is not None and not _rev_exists(args.head):
+        print(
+            f"check-requests-not-deleted: --head {args.head!r} is not a commit",
+            file=sys.stderr,
+        )
+        return 2
+    # The merge base is taken against whatever is being judged. Using HEAD's
+    # merge base while diffing some other commit would compare two unrelated
+    # points and report every request that differs between them.
+    tip = args.head or "HEAD"
 
     if args.base:
         base = args.base
@@ -206,19 +375,19 @@ def main() -> int:
                 + " in this worktree, so there is no trunk to compare against."
             )
             return 0
-        rc, out = _git("merge-base", "HEAD", trunk)
+        rc, out = _git("merge-base", tip, trunk)
         if rc != 0:
             # Unrelated histories, or a HEAD with no commits. Either way there
             # is nothing to diff, and that is not a violation.
             print(
                 f"check-requests-not-deleted: SKIP -- no merge base between "
-                f"HEAD and {trunk}."
+                f"{tip} and {trunk}."
             )
             return 0
         base = out.strip().splitlines()[0]
 
     try:
-        gone = deleted_since(base)
+        gone = deleted_since(base, args.head)
     except RuntimeError as exc:
         print(f"check-requests-not-deleted: git diff failed: {exc}", file=sys.stderr)
         return 2

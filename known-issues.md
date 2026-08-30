@@ -94517,6 +94517,49 @@ assertion has slack) but not the same fault — there the tolerance is written
 into the assertion, here it is the size of the control being clicked, which
 nobody wrote down at all.
 
+### Lesson 76: a hit box for the whole sheet is not "anywhere on the sheet" — its own contents beat it (lane C, 2026-08-30)
+
+**In short:** asteroids' game-over sheet dims the whole playfield and records
+`Target::Overlay` over it, then draws a box in the middle holding the title, the
+final score, the high score, the wave reached, and the "Press N" line — each
+with a hit box of its own. `handle_mouse` had an arm for `Target::Overlay` and
+an arm for `Target::NewGame`, which *reads* as "a click anywhere on the sheet
+starts a new game". It was not. `Frame::hit_test` searches the recorded hits
+**backwards** — last one wins, which is what makes a thing drawn on top
+clickable — so the box's own lines, recorded after the overlay's, took every
+click aimed at the middle. A click on "GAME OVER", or on the score the player
+had just earned, did nothing; a click on the dim margin *around* the box started
+a new game. The dead zone was precisely the part of the sheet a person looks at,
+and the only part that worked was the part nobody aims for.
+
+**The rule.** An arm that names a container's target has covered the container's
+*margin*, not the container. Either name every child target in the same arm, or
+record no child hit boxes at all. Whichever you pick, say which in a comment —
+the two-arm version is the one that looks right, so the next reader will
+otherwise simplify it back.
+
+**How it was nearly missed.** The pause sheet has the same structure and did
+*not* have the bug — because its middle line happens to be `Resume`, which had
+an arm of its own doing the same thing. One sheet was correct by accident and
+the other was wrong, from identical code. A suite that exercised only the pause
+sheet would have concluded the pattern was sound.
+
+**How it was found.** By a test that clicked `Target::Overlay` through the
+probe. `probe::click` aims at the *centre* of the named rect, which for a
+full-field overlay is exactly where the box is — so the click never reached the
+target it asked for. That is lesson 74's family (the event is delivered past the
+code that picks the target) turned inside out: there the test supplied the
+answer and hid a routing bug, here the test aimed honestly and the *program*
+routed it elsewhere, which is the failure the test existed to find. But note it
+was findable only by luck of geometry — the box happens to sit at the centre.
+The follow-up test names `OverlayTitle` and each `FinalStat` directly, so a
+sheet whose box is off-centre is still asked the question.
+
+**Where else to look.** Every overlay, dialog, sheet, tooltip, popup and context
+menu in `apps/**` and `gui/**` that records a hit box for its backdrop *and* for
+its contents. The tell is a match arm naming a backdrop target with no sibling
+arm naming what is drawn on it.
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print

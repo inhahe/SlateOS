@@ -183,6 +183,11 @@ def corpus() -> list[bytes]:
         b"", b"a", b"ab", b"-", b"--", b"-a", b".", b"..",
         b"'", b"''", b"'a", b"a'", b"a'z", b"a'z'", b"'a'",
         b'"', b'a"z', b"a'z\"", b'a"z\'',
+        # A separator beside a single quote. `rm -rv` on a tree holding
+        # `it's` renders exactly this, and it is the shape that showed `/`
+        # missing from the double-quote-safe set.
+        b"/", b"//", b"a/z", b"tree/it's", b"a'b/c'd", b"/it's", b"it's/",
+        b'a/z"', b"a/z'", b"/'", b"'/",
         b" ", b"a z", b" a", b"a ",
         b"#", b"a#z", b"#a", b"~", b"a~z", b"~a",
         b"%", b"+", b",", b".", b"@", b"]", b"_", b"{", b"}",
@@ -253,12 +258,21 @@ def main() -> int:
     # quote -- because which outer quote gets chosen depends on both.
     shapes = (b"%c", b"a%cz", b"%cz", b"a%c",
               b"a'z%c", b"%ca'z", b"a%c'z", b"'%c", b"%c'")
+    # `/` is swept like every other byte, including through the file-name
+    # instruments. It used to be skipped for those two -- presumably out of a
+    # worry that a name holding a separator would reach something real -- and
+    # the omission cost us a live bug: with no measured row for a name holding
+    # both `/` and `'`, our table left `/` out of the double-quote-safe set, so
+    # `rm -v` reported `removed 'tree/it'\''s'` where GNU says
+    # `removed "tree/it's"`. Nothing is reached: the probe runs in a fresh
+    # empty directory, so of the nine shapes only `/` itself exists, and both
+    # instruments merely fail to read it (`Is a directory`), which is a
+    # measurement like any other.
     for b in range(1, 256):
         for shape in shapes:
             name = shape.replace(b"%c", bytes([b]))
-            if b != 0x2F:
-                row("quotef", quotef, name)
-                row("quoteaf", quoteaf, name)
+            row("quotef", quotef, name)
+            row("quoteaf", quoteaf, name)
             row("quote", quote, name)
     # The same sweep for whole *characters* and for whole undecodable
     # sequences, because position decides the outer quote here too -- and

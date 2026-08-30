@@ -108,7 +108,13 @@ def load_corpus() -> list[bytes]:
     shapes = (b"%c", b"a%cz", b"%cz", b"a%c",
               b"a'z%c", b"%ca'z", b"a%c'z", b"'%c", b"%c'")
     for b in range(1, 256):
-        if b == 0x2F:  # `/` is a separator, not a name byte
+        # `/` is skipped here and, since 2026-08-30, *not* skipped in
+        # `quote-probe.py`. The asymmetry is real and must stay: this probe
+        # measures `ls` by creating a file per name, and no file name may
+        # contain a separator, whereas `quote-probe.py` measures a diagnostic
+        # about a name that need not exist. Line 121 below drops any corpus
+        # entry holding one for the same reason.
+        if b == 0x2F:
             continue
         for shape in shapes:
             names.append(shape.replace(b"%c", bytes([b])))

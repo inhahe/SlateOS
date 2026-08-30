@@ -95740,7 +95740,9 @@ the invariant is pinned both statically and at runtime.
 ## `A-A-PUSH-GATE-DELETED-THE-REPOSITORY-IT-WAS-GATING` (lane A, 2026-08-29) — **FIXED 2026-08-29**, published damage
 
 **Status:** FIXED 2026-08-29 (`f0534726e` repair, `31eb8c6bd` root cause,
-`93fb3227b` the same latent bug in two more suites)
+`93fb3227b` the same latent bug in two more suites, and a later config repair
+-- see "The residue" below, which is the part that was still broken after this
+entry first said FIXED)
 
 **In short:** a safety check that runs just before `git push` built itself a
 scratch repository to test itself against. It did not get a scratch
@@ -95853,6 +95855,62 @@ module rather than three copies of a twenty-name denylist.
 lane-a` immediately after a push, compared against what was pushed. A push
 gate is the one program guaranteed to run with a repository named in its
 environment, and it is also the one nobody watches.
+
+### The residue: closing the leak did not undo what it had already written
+
+Found later the same day, by running exactly the post-push check recommended
+just above. It printed `core.bare: true` for a repository that is not bare.
+
+The fixture does three things before it commits anything, and through the
+leaked `GIT_DIR` all three landed in the *real* shared config at
+`os/.git/config` rather than in its temporary directory:
+
+| Fixture line | What it wrote into the real config | Effect |
+|---|---|---|
+| `run(tmp, "init", ...)` | `core.bare = true` | the `os` integration worktree stopped being a worktree |
+| `run(tmp, "config", "user.email"/"user.name", ...)` | `[user] selftest <selftest@example.invalid>` | the commit identity of **all three lanes** |
+| `run(tmp, "config", "diff.renames", "false")` | `[diff] renames = false` | rename detection off in every diff and log, everywhere |
+
+Worktrees share one config, so none of this was confined to lane A.
+
+`core.bare` was the loud one: `git status` in `os` answered `fatal: this
+operation must be run in a work tree` and `git worktree list` reported the
+tree as `(bare)`. Nothing was lost -- all 107 top-level entries were present
+and `HEAD` still named `refs/heads/main` -- but `os` is the tree the
+"merge your lane up to `main`" step is performed in, so that step had been
+quietly impossible since the incident.
+
+`user.email` was the quiet one, and therefore the expensive one. **33 commits
+are permanently authored `selftest <selftest@example.invalid>`** -- 16
+reachable from `lane-a`, 9 from `lane-b`, 3 from `lane-c`, 5 from `main`, all
+pushed. The oldest is the fixture's own `base` commit at 22:43:17; every
+commit any lane made afterwards inherited it, including the commits that
+fixed the incident. They cannot be repaired: changing an author rewrites the
+commit, which requires a force-push to published branches. That is the same
+decision already queued for the operator over the two junk commits, and it is
+recorded there rather than duplicated here.
+
+`diff.renames = false` deserves its own note, because the gate's own source
+comment names it as the configuration that "would otherwise turn every sweep
+into a refused push" -- the fixture set the hostile condition it was written
+to simulate, on the real repository, and then the gate went on passing.
+
+Repaired by unsetting the three; the operator's identity resolves again in all
+four worktrees and `os` is a checkout of `main` once more. **The leak itself
+was verified closed rather than assumed:** the self-test was re-run with
+`GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` all pointed at the real
+repository -- the precise conditions of the incident -- and the config hash,
+the ref hashes and `HEAD` were byte-identical afterwards.
+
+**The lesson, which is not the same as the one above.** That one was about a
+check that could not observe its own damage. This one is about what happens
+*after* a fix: closing a leak does not undo what leaked through it. The
+commits were found immediately because a tree with the whole OS missing is
+impossible to miss; the config was not found for another hour because a
+config setting makes no noise at all. So when a bug is found to have written
+to shared persistent state, the fix is only half the work -- the other half is
+diffing that state against what it should be, and *the quiet damage is the
+part that is still there*.
 
 ---
 

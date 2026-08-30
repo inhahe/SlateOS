@@ -2233,7 +2233,7 @@ work; I am carrying on down the roadmap.
 
 ---
 
-## Two commits that appear to delete the whole OS are permanently in `main`'s history. Leave them, or rewrite? (lane A, 2026-08-29)
+## Two commits that appear to delete the whole OS, and 33 commits signed by a fake name, are permanently in the published history. Leave them, or rewrite? (lane A, 2026-08-29)
 
 **In short:** on 2026-08-29 a safety check that runs just before uploading code
 accidentally committed to the real project instead of to the scratch copy it
@@ -2246,8 +2246,18 @@ history will see two commits that look like a catastrophe. Removing them from
 the record is possible but requires an operation I am forbidden to perform
 without you saying so, because it can destroy other people's work.
 
-**Question.** Should the two commits (`7f6a6b446` "base" and `71f164f7e`
-"delete one, sweep another") be removed from the published history?
+**Updated later the same day — the record is wrong in a second way.** The same
+accident also wrote a fake author name into the project's shared settings, so
+**33 commits are signed `selftest <selftest@example.invalid>` instead of your
+name**. That covers every commit all three sessions made over about an hour,
+including the ones that fixed the accident. The settings are repaired, so no
+*new* commit is affected; the 33 already made cannot be corrected except by the
+same forbidden operation. This does not change the question, but it does change
+what is at stake in it, so both are decided together.
+
+**Question.** Should the published history be rewritten — to remove the two
+commits (`7f6a6b446` "base" and `71f164f7e` "delete one, sweep another"), to
+re-sign the 33 misattributed ones, or neither?
 
 Two terms, glossed:
 
@@ -2266,23 +2276,56 @@ normally — no rewriting was needed. The two bad commits survive as *ancestry*
 (steps in the chain) but not as *content* (no file reflects them). `git log`
 shows them; `git status` and every checkout are clean.
 
+**The misattributed commits, by branch.** All are pushed:
+
+| Branch | Commits signed `selftest` |
+|---|---|
+| `lane-a` | 16 |
+| `lane-b` | 9 |
+| `lane-c` | 3 |
+| `main` | 5 |
+
+Two facts that make this less bad than it sounds, and are the reason it is
+folded into an existing question rather than raised as an urgent one. First,
+**there is no attribution dispute to get wrong**: you are the sole author of
+record for this entire project, so a wrong name credits nobody else and steals
+credit from nobody. Second, **the commit messages are intact** — the *content*
+of the record is right, and only the signature is wrong. What it actually costs
+is that `git log --author` and any per-author statistic silently omit an hour
+of work, and anyone reading the log cold sees a contributor who does not exist.
+
 ### Options
 
-**A. Leave them, documented.** *What changes:* nothing observable; `git log`
-keeps showing two alarming-looking commits, and `known-issues.md` explains why.
-*Pros:* zero risk; no force-push; the incident stays legible, which has value —
-the commits are the evidence for the post-mortem that produced the fix.
-*Cons:* anyone reading history cold gets a scare and has to go find the
-explanation; a future automated tool that audits history for mass deletions
-will flag them forever.
+**A. Leave both, documented.** *What changes:* nothing observable; `git log`
+keeps showing two alarming-looking commits and an hour of work signed by a
+name that is not yours, and `known-issues.md` explains why. *Pros:* zero risk;
+no force-push; the incident stays legible, which has value — the commits are
+the evidence for the post-mortem that produced the fix. *Cons:* anyone reading
+history cold gets a scare and has to go find the explanation; a future
+automated tool that audits history for mass deletions will flag them forever;
+per-author statistics stay wrong for those 33 commits.
 
-**B. Rewrite history to remove them.** *What changes:* `git log` no longer
-shows the two commits at all. *Pros:* a clean record. *Cons:* requires a
-force-push to `main` and `lane-a`; the other two lanes must re-sync, and any
-uncommitted or unpushed work of theirs is at risk; ~40 commits now sit on top
-of the bad ones, all of which get new identities, invalidating every commit
-hash cited in `known-issues.md`, `design-decisions.md` and the request files —
-including the citations *in the entry that explains this incident*.
+**B. Rewrite history to remove and re-sign them.** *What changes:* `git log`
+no longer shows the two commits, and the 33 carry your name. *Pros:* a clean
+and correctly-signed record. *Cons:* requires a force-push to `main` and all
+three lane branches — note that the authorship half touches **all four**,
+where removing the two commits alone would have touched two, so the blast
+radius is larger than it was when this question was first written. The other
+two lanes must re-sync, and any uncommitted or unpushed work of theirs is at
+risk; ~40 commits now sit on top of the bad ones, all of which get new
+identities, invalidating every commit hash cited in `known-issues.md`,
+`design-decisions.md` and the request files — including the citations *in the
+entry that explains this incident*.
+
+**C. Re-sign the 33, but leave the two commits.** *What changes:* the log
+still shows the two commits, but every commit carries your name.
+*Pros:* fixes the half that is factually wrong (a signature naming someone who
+does not exist) while leaving the half that is merely ugly-but-true (the
+commits really did happen). *Cons:* this is not actually cheaper than B —
+re-signing rewrites the same commits a removal would, needs the same
+force-push to the same four branches, and invalidates the same hashes. It buys
+less for the same risk, which is why I list it only to note that it is not the
+compromise it looks like.
 
 ### If never answered
 
@@ -2293,16 +2336,27 @@ rewrite. If you are ever going to pick B, sooner costs less.
 
 ### Claude's recommendation
 
-**A, clearly.** The content is correct, the incident is documented at length in
-`known-issues.md`
+**A, still, and the new evidence does not move me.** The content is correct,
+the incident is documented at length in `known-issues.md`
 (`A-A-PUSH-GATE-DELETED-THE-REPOSITORY-IT-WAS-GATING`), and trading a cosmetic
 blemish in the log for a force-push across three active lanes is a bad
 exchange — the cure has a real chance of destroying work, which is precisely
-the failure the original bug caused. I raise it only because it is your
-history, force-push authority is yours alone, and the cost of choosing B rises
-with every commit.
+the failure the original bug caused.
 
-**Where it bites.** Git history only: `7f6a6b446`, `71f164f7e`, repaired by
-`f0534726e`. No file in the tree is affected.
+The authorship damage is the kind of finding that *feels* like it should tip
+the balance, and I do not think it does: it makes the record uglier without
+making it wrong in any way that costs anyone anything, since you are the only
+author this project has. Meanwhile it makes option B strictly more dangerous
+than it was, because it drags the third lane's branch into a rewrite that
+previously did not need to touch it. The case for A got stronger, not weaker.
+
+I raise it only because it is your history, force-push authority is yours
+alone, and the cost of choosing B rises with every commit.
+
+**Where it bites.** Git history only: `7f6a6b446` and `71f164f7e`, repaired by
+`f0534726e`; plus 33 commits between 22:43 and 23:54 on 2026-08-29 whose author
+field reads `selftest <selftest@example.invalid>`. No file in the tree is
+affected, and the shared config that caused the misattribution is repaired, so
+the count cannot grow.
 
 **Status:** OPEN

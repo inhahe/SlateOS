@@ -614,8 +614,16 @@ fn minimax(
 
     let moves = board.legal_moves(current_color);
     if moves.is_empty() {
-        // A player with no move passes; the ply is still spent, which is what
-        // stops a board where both sides can pass from recursing forever.
+        // A player with no move passes, and the pass costs a ply exactly as a
+        // move would -- so a search told to look four deep looks four deep
+        // whether those four are moves or passes.
+        //
+        // It is *not* what stops the recursion: a board where both sides can
+        // pass is a board where neither can move, which `is_game_over` above
+        // has already returned on. The comment here used to claim otherwise,
+        // and the mutation sweep found the claim out -- leaving the ply
+        // un-spent changes the value the search returns but cannot make it
+        // run forever.
         return minimax(
             board,
             depth.saturating_sub(1),
@@ -1066,11 +1074,11 @@ impl ReversiApp {
         // was recorded last -- reaches the board rather than the window.
         f.hit(Target::Board, board);
 
-        let legal = if self.phase == Phase::Playing {
-            self.board.legal_moves(self.current_turn)
-        } else {
-            Vec::new()
-        };
+        // Not gated on the phase: the dot is only drawn where the phase is
+        // checked anyway, a few lines down, and a second copy of that check
+        // here was a guard the mutation sweep could break without any test
+        // noticing -- because breaking it changed nothing.
+        let legal = self.board.legal_moves(self.current_turn);
 
         for pos in all_positions() {
             let square = g.square(pos.row, pos.col);
@@ -1231,9 +1239,13 @@ impl ReversiApp {
             color: SURFACE1,
             corner_radii: CornerRadii::all(bar_h / 4.0),
         });
-        let total = f32_from_i32(black.saturating_add(white)).max(1.0);
-        let black_w = f32_from_i32(black) / total * bar.w;
         if black > 0 {
+            // The division is inside the guard, not defended by a `.max(1.0)`
+            // outside it: `black > 0` already means the total is at least one,
+            // so the floor could never fire, and a defence that cannot fire is
+            // a defence nothing can prove is there.
+            let total = f32_from_i32(black.saturating_add(white));
+            let black_w = f32_from_i32(black) / total * bar.w;
             f.push(RenderCommand::FillRect {
                 x: bar.x,
                 y: bar.y,
@@ -1806,6 +1818,23 @@ mod tests {
     }
 
     #[test]
+    fn the_status_bar_takes_its_share_of_what_the_header_left() {
+        // Not of the whole window. Both spellings still sum to the height --
+        // the body absorbs the difference -- so the bands stay in order and
+        // nothing overruns either way, which is why the ordering test cannot
+        // see the difference and this one has to.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            assert!(
+                (l.status.h - (h - l.header.h) * 0.08).abs() < 0.01,
+                "the status bar is {} of a {w}x{h} window, not 8% of the {} the header left",
+                l.status.h,
+                h - l.header.h
+            );
+        }
+    }
+
+    #[test]
     fn the_padding_never_vanishes_never_runs_away_and_never_outgrows_the_window() {
         assert_eq!(
             Layout::solve(60.0, 60.0).pad,
@@ -2075,6 +2104,25 @@ mod tests {
             !board.is_legal_move(Pos::new(3, 3), Cell::Black),
             "a square already holding a piece is not playable"
         );
+        // (3, 3) alone cannot show the occupancy check is there: it flanks
+        // nothing on the opening board, so it is refused twice over and
+        // deleting one refusal changes no answer. This board is the case that
+        // needs the check -- a1 is Black's, b1 and c1 are White's, and d1 is
+        // White's too, so d1 *would* flank the pair if only it were empty.
+        let flanking = board_with(&[
+            (0, 0, Cell::Black),
+            (0, 1, Cell::White),
+            (0, 2, Cell::White),
+            (0, 3, Cell::White),
+        ]);
+        assert!(
+            !flanking.is_legal_move(Pos::new(0, 3), Cell::Black),
+            "a square that would flank if it were empty is still occupied"
+        );
+        assert!(
+            flanking.get_flips(Pos::new(0, 3), Cell::Black).is_empty(),
+            "an occupied square flipped what it would have flipped when empty"
+        );
         for pos in [
             Pos::new(-1, 0),
             Pos::new(0, -1),
@@ -2209,6 +2257,19 @@ mod tests {
             weight_at(Pos::new(1, 1)).unwrap() < 0,
             "the square diagonally inside a corner hands it over"
         );
+        // The corner comparison above is satisfied by the separate corner
+        // bonus, so it cannot tell whether the weight table is consulted at
+        // all. Two squares that are neither corners nor adjacent to one can:
+        // c1 is worth having and b2 is worth avoiding, and nothing but the
+        // table says so.
+        let edge = board_with(&[(0, 2, Cell::Black)]);
+        let trap = board_with(&[(1, 1, Cell::Black)]);
+        assert!(
+            evaluate(&edge, Cell::Black) > evaluate(&trap, Cell::Black),
+            "the position table is not being read: {} is no better than {}",
+            evaluate(&edge, Cell::Black),
+            evaluate(&trap, Cell::Black)
+        );
         assert_eq!(
             weight_at(Pos::new(-1, 0)),
             None,
@@ -2252,6 +2313,54 @@ mod tests {
             ai_best_move(&board, Cell::White),
             Some(Pos::new(0, 0)),
             "the search passed up a free corner"
+        );
+    }
+
+    #[test]
+    fn the_search_reads_its_reply_as_the_opponents_and_not_as_its_own() {
+        // One ply into a real game: Black has played c4, flipping d4. Which
+        // square White likes best depends on who the search thinks moves
+        // after it -- reading the reply as White's own turn picks c5 here
+        // instead of e3, because a side that gets to move twice likes the
+        // squares that only pay off on the second move.
+        //
+        // The position was found by playing games out and comparing the two
+        // spellings; it is the earliest board on which they disagree, which
+        // is as close to the opening as this can be pinned.
+        let board = board_with(&[
+            (3, 2, Cell::Black),
+            (3, 3, Cell::Black),
+            (3, 4, Cell::Black),
+            (4, 3, Cell::Black),
+            (4, 4, Cell::White),
+        ]);
+        assert_eq!(
+            ai_best_move(&board, Cell::White),
+            Some(Pos::new(2, 4)),
+            "the search answered as though the reply were a second move of its own"
+        );
+    }
+
+    #[test]
+    fn a_pass_costs_the_search_a_ply_exactly_as_a_move_does() {
+        // Black at a1, White at b1: White has nothing to play, Black has c1.
+        // Told to look one ply, the search spends that ply on White's pass
+        // and scores the board as it stands. A pass that cost nothing would
+        // let Black play inside the one ply the search was given, and return
+        // the value of a board that is one move further on.
+        let board = board_with(&[(0, 0, Cell::Black), (0, 1, Cell::White)]);
+        assert!(
+            !board.has_legal_move(Cell::White),
+            "the fixture must leave white with nothing to play"
+        );
+        assert!(
+            board.has_legal_move(Cell::Black),
+            "the fixture must leave black something to play"
+        );
+        assert_eq!(
+            minimax(&board, 1, i32::MIN, i32::MAX, true, Cell::White),
+            evaluate(&board, Cell::White),
+            "the pass did not cost the ply it was given"
         );
     }
 
@@ -2340,6 +2449,30 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_does_not_outlive_the_move_that_answers_it() {
+        // Every move clears the notice before deciding anything, so a refusal
+        // is a refusal of the move being made and not of the one before it.
+        let mut app = ReversiApp::new();
+        app.cursor = Pos::new(0, 0);
+        app.handle_key(Key::Enter);
+        assert!(
+            app.status().contains("Illegal move"),
+            "the fixture did not produce a refusal to leave standing"
+        );
+        app.cursor = Pos::new(2, 3);
+        app.handle_key(Key::Enter);
+        assert_eq!(
+            app.notice, None,
+            "the refusal was left standing over the move that answered it"
+        );
+        assert!(
+            app.status().starts_with("Your turn (Black)."),
+            "the status line still carries the old notice: {:?}",
+            app.status()
+        );
+    }
+
+    #[test]
     fn a_legal_square_is_played_and_the_ai_answers_in_the_same_event() {
         let mut app = ReversiApp::new();
         app.cursor = Pos::new(2, 3);
@@ -2408,6 +2541,57 @@ mod tests {
             "the result was not announced: {:?}",
             app.status()
         );
+    }
+
+    #[test]
+    fn the_result_line_names_whoever_actually_won() {
+        // The only finished game the other tests reach is one Black wins, so
+        // the white and tie arms of the message were read by nothing. Three
+        // crafted boards run all three.
+        let mut app = ReversiApp::new();
+        app.phase = Phase::GameOver;
+        for (pieces, expected) in [
+            (
+                vec![
+                    (0, 0, Cell::Black),
+                    (0, 1, Cell::Black),
+                    (0, 2, Cell::White),
+                ],
+                "Black wins!",
+            ),
+            (
+                vec![
+                    (0, 0, Cell::White),
+                    (0, 1, Cell::White),
+                    (0, 2, Cell::Black),
+                ],
+                "White wins!",
+            ),
+            (
+                vec![(0, 0, Cell::Black), (0, 1, Cell::White)],
+                "It's a tie!",
+            ),
+        ] {
+            app.board = board_with(&pieces);
+            let line = app.game_over_message();
+            assert!(
+                line.contains(expected),
+                "a game with {pieces:?} on the board was announced as {line:?}"
+            );
+            assert!(
+                line.contains(&format!(
+                    "(B:{} W:{})",
+                    app.board.count(Cell::Black),
+                    app.board.count(Cell::White)
+                )),
+                "the result does not carry the score it was decided by: {line:?}"
+            );
+            assert_eq!(
+                app.status(),
+                line,
+                "a finished game says something other than its result"
+            );
+        }
     }
 
     #[test]
@@ -2581,29 +2765,37 @@ mod tests {
         let eight = box_of(&app, Target::RowLabel(byte(LAST)));
         assert!(one.y < eight.y, "rank 1 is not above rank 8");
 
-        let first = box_of(&app, Target::Square(0, 0));
-        assert!(
-            a.x >= first.x - 0.01 && a.x < first.right(),
-            "the a label does not sit over the a file"
-        );
-        assert!(
-            one.y >= first.y - 0.01 && one.y < first.bottom(),
-            "the 1 label does not sit beside rank 1"
-        );
-
+        // Each label is checked against a square *off* the diagonal -- the c
+        // file against c1, rank 3 against a3 -- because the diagonal is the
+        // one place a board whose rows and columns have been swapped still
+        // looks right. The labels themselves are placed from `square(i, i)`,
+        // so pinning them to a1 pinned them to the one square that cannot
+        // tell the difference.
         let f = app.draw(NATURAL);
         for i in 0..SIDE {
             let letter = column_letter(i).to_string();
+            let col = box_of(&app, Target::ColLabel(byte(i)));
+            let top = box_of(&app, Target::Square(0, byte(i)));
             assert_eq!(
-                text_in(&f, box_of(&app, Target::ColLabel(byte(i)))),
+                text_in(&f, col),
                 letter,
                 "column {i} is not lettered {letter}"
             );
-            assert_eq!(
-                text_in(&f, box_of(&app, Target::RowLabel(byte(i)))),
-                format!("{}", i + 1),
-                "row {i} is not numbered {}",
-                i + 1
+            assert!(
+                col.x >= top.x - 0.01 && col.x < top.right(),
+                "the {letter} label does not sit over the {letter} file: {col:?} against {top:?}"
+            );
+
+            // `i + 1`, not `i.saturating_add(1)`: the production line the
+            // sweep anchors on is spelled the second way, and an anchor that
+            // matches twice is one the sweep refuses to apply.
+            let number = format!("{}", i + 1);
+            let row = box_of(&app, Target::RowLabel(byte(i)));
+            let left = box_of(&app, Target::Square(byte(i), 0));
+            assert_eq!(text_in(&f, row), number, "row {i} is not numbered {number}");
+            assert!(
+                row.y >= left.y - 0.01 && row.y < left.bottom(),
+                "the {number} label does not sit beside rank {number}: {row:?} against {left:?}"
             );
         }
     }
@@ -2768,6 +2960,31 @@ mod tests {
     }
 
     #[test]
+    fn the_panel_names_whose_turn_it_is_and_only_says_so_while_there_is_one() {
+        let mut app = ReversiApp::new();
+        let f = app.draw(NATURAL);
+        assert_eq!(
+            text_in(&f, box_of(&app, Target::Turn)),
+            "Your turn (Black)",
+            "the panel does not say it is the human's move"
+        );
+        app.current_turn = Cell::White;
+        let f = app.draw(NATURAL);
+        assert_eq!(
+            text_in(&f, box_of(&app, Target::Turn)),
+            "White to move",
+            "the panel does not say the search has the move"
+        );
+        app.phase = Phase::GameOver;
+        let f = app.draw(NATURAL);
+        assert_eq!(
+            text_in(&f, box_of(&app, Target::Turn)),
+            "Game Over",
+            "a finished game is still being offered a move"
+        );
+    }
+
+    #[test]
     fn the_panel_says_the_score_the_board_holds() {
         let mut app = ReversiApp::new();
         app.cursor = Pos::new(2, 3);
@@ -2917,17 +3134,58 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_drawn_outside_the_window() {
+    fn the_panel_is_painted_in_the_room_the_layout_gave_it() {
+        // Against the layout's own panel, not against the window. The frame
+        // clips everything to the window, so a band shifted off the panel is
+        // still painted somewhere the window allows -- and `Frame::hit`
+        // intersects with that clip too, which is why the version of this test
+        // that walked `hits()` and checked they were inside the window could
+        // not fail however far the band was moved.
         for (w, h) in SIZES {
             let app = ReversiApp::new();
             let f = app.draw((w, h));
-            for (target, rect) in f.hits() {
+            let l = Layout::solve(w, h);
+            let want = inset(l.panel, l.pad);
+            let got = f
+                .commands()
+                .iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if *color == SURFACE0 => Some(Rect::new(*x, *y, *width, *height)),
+                    _ => None,
+                })
+                .expect("the panel's own band was never painted");
+            assert!(
+                (got.x - want.x).abs() < 0.01
+                    && (got.y - want.y).abs() < 0.01
+                    && (got.w - want.w).abs() < 0.01
+                    && (got.h - want.h).abs() < 0.01,
+                "the panel band is painted at {got:?} and the layout put the panel at {want:?} at {w}x{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inset_never_turns_a_box_inside_out() {
+        // A band can be thinner than the padding it is inset by: a 60x40
+        // window gives a header 3.6 tall and a padding of 2 a side. Without
+        // the floor that box comes back 0.4 wide the wrong way, and a box
+        // whose right edge is left of its left edge answers every containment
+        // question backwards for the rest of the frame.
+        for (w, h) in [(100.0, 100.0), (4.0, 4.0), (3.6, 3.6), (0.0, 0.0)] {
+            for pad in [0.0, 1.0, 2.0, 50.0] {
+                let band = inset(Rect::new(10.0, 10.0, w, h), pad);
                 assert!(
-                    rect.x >= -0.01
-                        && rect.y >= -0.01
-                        && rect.right() <= w + 0.01
-                        && rect.bottom() <= h + 0.01,
-                    "{target:?} is clickable at {rect:?}, outside a {w}x{h} window"
+                    band.w >= 0.0 && band.h >= 0.0,
+                    "a {w}x{h} box inset by {pad} came back {}x{}",
+                    band.w,
+                    band.h
                 );
             }
         }

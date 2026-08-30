@@ -94982,6 +94982,82 @@ generalisation: an invariant asserted as a *final* value rather than as a
 property of the whole sequence is blind to any pair of errors that cancel —
 which for a stack is the commonest pair there is.
 
+### Lesson 80: a box the frame has already trimmed cannot be found outside the frame (lane C, 2026-08-30)
+
+**In short:** nearly every app in this campaign carries a test spelled
+`nothing_is_drawn_outside_the_window`, and nearly every one of them walks
+`Frame::hits()` and asserts each recorded box lies inside the window. That
+assertion cannot fail. `Frame::hit` intersects the box it is given with the
+active clip before recording it, and the apps clip to the window for the whole
+frame — so a hit box outside the window is not something the frame declines to
+produce, it is something the frame is *incapable* of producing. The test passed
+on `apps/reversi` with the panel's whole band deliberately shifted twenty
+pixels down and off the bottom of a 60x60 window.
+
+**The rule.** A containment test is only a test if the thing it measures is
+free to leave. When the type under test enforces the containment on the way in,
+measure something the type does not touch — for a `Frame`, the *commands*,
+which are recorded verbatim — or measure against a boundary the type does not
+enforce. Reversi's replacement does the second: it asserts the panel's own
+background band is painted exactly where the layout put the panel, which the
+clip has no opinion about.
+
+**The tell.** A test whose subject is "X is inside Y" where Y is also the
+argument to a constructor, a clip, a `min`/`clamp`, or an `intersect` on the
+path X takes to get recorded. Two questions settle it: *what code would have to
+be wrong for this to fail*, and *is that code between the fault and the
+assertion, or before it?* If the clamp sits between them, the assertion is
+downstream of its own subject.
+
+**The second half of the same finding.** Once the assertion is real, the
+obvious rewrite — check every painted `FillRect`/`StrokeRect` against the
+window — is *too* strong rather than too weak, and it failed immediately on
+reversi at 60x40. The panel's rows are placed by a cursor walking down the
+panel, and a panel too short for its rows runs the score bar off the bottom;
+the app draws it anyway and the whole-window clip crops it, which is the
+design. So the window is the wrong boundary in both directions: too generous to
+catch a band in the wrong place, too strict to allow deliberate cropping. The
+boundary that works is the layout's own band.
+
+**Where else to look — surveyed and settled, 2026-08-30.** Twenty-one apps
+carry an `outside_the_window`-shaped test, but only three of them assert on
+`Frame::hits()`, and only those three could carry the tautology:
+
+| App | Whole-frame clip? | Verdict |
+|---|---|---|
+| `apps/battleship` | yes, `f.clip(l.window)` | tautology — rewritten |
+| `apps/freecell` | yes, `f.clip(l.window)` | tautology — rewritten |
+| `apps/pdfviewer` | no — clips only individual bands | genuine; left alone |
+
+The other eighteen assert on commands or on the layout and were never affected.
+`apps/pdfviewer` never pushes a window-sized clip — `frame.clip` is called only
+on `bar`, `strip`, `band`, the sidebar rect and `layout.content` — so a control
+placed outside every band really is recorded outside the window and really does
+fail the assertion.
+
+Both rewrites split the old test in two: `the_whole_frame_is_clipped_to_the_window`
+keeps only the parts that can fail (the outermost `PushClip` is the window, and
+the clip stack balances), and a new `at_a_size_that_fits_the_clip_crops_nothing`
+compares each recorded box against the rect the *layout* put it at — battleship
+against `Grids::cell_rect` for all two hundred cells, freecell against
+`Table::top_slot`/`Table::card_at`. That is the boundary the clip does not
+enforce, so a band that drifts off the edge now comes back smaller than the
+layout said and loses the comparison.
+
+Worth noting what made the old test not merely useless but *misleading*: both
+apps carried the comment *"a hit box is recorded whether or not it would survive
+the clip, so the boxes above cannot see a missing clip at all — only the
+commands can."* Every clause of that is the reverse of the truth. `Frame::hit`'s
+own doc says the rect "is moved by the translation in force and trimmed to the
+clip in force, and is **dropped entirely** if nothing of it is visible." So the
+boxes are the only thing that *can* see the clip vanish, and are blind to
+everything else. A wrong comment beside a vacuous assertion is how a tautology
+survives three readings.
+
+Still open: `guitk`'s own tests for `Frame::hit`, and any test asserting a
+widget's rect is inside its parent where the parent rect was used to compute the
+child's.
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print

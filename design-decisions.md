@@ -52005,8 +52005,22 @@ going looking for one.
 which authority it is using. That is tedious, and it is also the entire
 benefit — a call site that raises a hard limit unprivileged becomes visible as
 such in the diff, instead of being one that happened not to trip a check buried
-three layers down. Kernel-internal seeding (process creation installing the
-defaults) says so explicitly rather than inheriting a bypass.
+three layers down.
+
+*Measured before committing to it, because the estimate mattered:* there are
+exactly **two** production call sites — `handlers.rs`'s native `SYS_RLIMIT_SET`
+and `linux.rs`'s `prlimit64`/`setrlimit` shim — plus around twenty in self-tests.
+The initial guess was "a couple of dozen call sites", which would have made this
+a real cost to weigh against the layering argument. It is not; the churn is
+almost entirely in tests, and those tests *want* the explicit spelling, because
+several of them exist specifically to assert that an unprivileged raise is
+refused. Passing `Unprivileged` is what keeps them testing that.
+
+*The parameter is an enum, not a `bool`.* `set_rlimit(pid, r, cur, max, false)`
+at a call site says nothing about what `false` means, and the two readings —
+"not privileged" and "don't check" — are opposites. `LimitAuthority::Unprivileged`
+/ `LimitAuthority::MayRaiseHardLimit` cannot be misread, and a new variant later
+(a resource-specific authority, say) is additive rather than a second `bool`.
 
 ### Decision 3 — the `RLIMIT_NOFILE` ceiling stays absolute, and the capability does not lift it
 

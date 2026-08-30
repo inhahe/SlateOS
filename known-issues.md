@@ -94403,6 +94403,159 @@ bigger than its ink: the padded switches in these apps' footers, list rows grown
 to the row pitch, and any slider whose thumb carries a grab margin. The tell is
 an assertion whose right-hand side is a set rather than a value.
 
+### Lesson 72: "did everything I named fail?" is satisfied by naming nothing (lane C, 2026-08-29)
+
+**In short:** the mutation harness decides a mutation was caught by asking
+whether the tests the table named for it are among the tests that failed —
+`set(expect) <= failed`. Subset is the right relation for the question, and it
+has one answer nobody wanted: the empty set is a subset of everything. A row
+whose `expect` is `[]` is therefore scored **caught** no matter what happened —
+including when not one test failed. It is a mutation that cannot fail, sitting
+in a table whose entire purpose is to fail.
+
+`apps/maze/mutate.py` has carried such a row since it was written. It is there
+for an honest reason, and the comment above it says so: deleting the "have I
+already numbered this cell?" guard makes the breadth-first search re-queue cells
+forever until the binary is killed on a two-gigabyte allocation, so *no named
+test can report it* — the process dies before any test prints a verdict. There
+is no name to put in the list, so the list was left empty.
+
+That works only by accident of arm order. `sweep` tests `crashed` before it
+tests the expectation, so the row has always been scored by the crash arm and
+the empty list never consulted. Change the maze small enough that the runaway
+allocation completes, or give the process more memory, and the row silently
+stops being an assertion: it slides one arm down, `set() <= failed` accepts the
+empty failure set, and the sweep prints `[ok]` for a mutation the suite did not
+notice. Nothing in the output distinguishes that from a real catch.
+
+**The rule.** A subset check needs a non-empty left side, or an explicit arm for
+the empty one. Where "no named test can see this" is a legitimate thing for a
+table to say, make the harness *require* what it means instead of letting it
+fall through the general case: an empty `expect` now asserts the program died,
+and a row that stops dying is reported `[BAD] expected the program to die; it
+survived`. The spelling that was the most dangerous row a table could hold is
+now the one that checks the hardest thing.
+
+**How it was found.** Not by reading, but by running the new up-front table
+check (`check_the_table`) over all thirteen `apps/*/mutate.py` at once. It had
+been written to catch mis-indented anchors — snippets' first sweep spent 296
+seconds to report that 3 of 19 anchors did not match — and the empty expectation
+came out of the same pass for free. That is the argument for checking a table as
+a table: the classes you did not think to look for are found by the pass you ran
+for the class you did.
+
+**Where else to look.** Any predicate of the shape "all of X are in Y" where X
+is supplied by data rather than by code: `set(required) <= set(present)`,
+`all(f(x) for x in xs)`, `xs.iter().all(...)`, and every "assert these all
+appear" helper in the app test suites. Each is vacuously true on empty input,
+and each is fed from a table someone can leave blank.
+
+### Lesson 73: a guard against a shape the data cannot take is not a guard, it is a truncation (lane C, 2026-08-29)
+
+**In short:** snippets' folder tree was walked with a `depth >= MAX_FOLDER_DEPTH
+{ return; }` at the top of the recursion, and a comment saying why: two folders
+could name each other as parent and the walk would never end. The comment
+described a real shape. It did not describe a *reachable* one — and while the
+guard was protecting against something that cannot happen, it was quietly
+deleting something that can.
+
+A folder has one parent, and the walk enters the tree from `None`. So a folder
+is reached only if its parent chain ends at `None`, and every folder in a cycle
+has a chain that never does: the cycle is a separate component the walk never
+enters. The same argument bounds the recursion without any counter — a reached
+folder's chain is finite and cannot repeat a folder, because a repeat *is* a
+cycle and would not have been reached, so depth is at most `folders.len()`.
+
+What the cap actually did was cut the tree off at eight. The New Folder button
+files a new folder under whichever one is picked, so a user can build a ninth
+level by clicking; at that depth the folder disappeared from the sidebar, with
+the snippets filed in it, and nothing was said.
+
+**The rule.** Before writing a guard against malformed data, work out whether
+the code can *reach* the malformed shape. If it cannot, the guard has no
+upside — and it always has a downside, because a limit that fires on nothing
+bad still fires on something good. Write the reachability argument down in
+place of the guard: it is the thing a future reader will otherwise re-derive
+wrongly and re-add the cap.
+
+**How it was found.** By mutation. Raising the cap to `usize::MAX` — "walk the
+cycle for ever" — changed no test result, because the test named for it built a
+two-folder cycle that the walk was never going to enter. Diagnosing why that
+mutant survived is what surfaced both halves: the guard could not fire on a
+cycle, and it could fire on real nesting. The replacement test nests twenty
+deep through the program's own New Folder path and fails against the old code.
+
+**Where else to look.** Every recursion over a parent-pointer structure with a
+depth counter bolted on (`walk_folders` here; `delete_folder` beside it has the
+same shape and correctly has no counter). More generally: any `MAX_*` constant
+whose comment justifies it with data the program cannot construct. `grep` for
+`MAX_` and read the comment — if it says "nothing here builds one today", that
+is the tell.
+
+### Lesson 74: a test that names the target delivers the event past the code that decides the target (lane C, 2026-08-29)
+
+**In short:** snippets has four wheel tests, and the list's hit box could be
+deleted outright with all four still passing. They called `a.scroll(Target::List,
+dy)` — the app's *handler*, given the target directly. The step they were meant
+to cover is the one in between: a wheel arrives at a point, `hit_test` decides
+which panel that point is in, and only then is the handler called. A test that
+supplies the target has already answered the question and is left checking that
+the handler it called did what it does.
+
+`Probe` was the reason: it had `click_at` and `key_at` but nothing for the
+wheel, so there was no way to deliver a scroll at a coordinate and the tests
+reached past it. That is a toolkit gap being paid for once per app — about forty
+of the remaining programs have a wheel.
+
+**The rule.** Deliver every event the way the window system delivers it: as a
+position and a payload, never as a target. If the harness cannot express that,
+fix the harness rather than the test — a per-app workaround is the same fault
+forty more times.
+
+**How it was found.** By mutating away `f.hit(Target::List, body)` and watching
+nothing fail. Adding `Probe::scroll_at` (defaulting to `None`, so the programs
+with no wheel need no impl) and `probe::scroll_at_point` fixed it, and forced a
+second finding: the list's own box is drawn *before* its rows, and `hit_test`
+takes the last hit recorded, so the box is only reachable in the strip below the
+last row that `scroll_window::capacity`'s floor leaves over. A test that scrolls
+at a row's centre exercises the row's route, not the panel's.
+
+**Where else to look.** `probe::press` had the same shape of gap and now has
+`probe::release` beside it: a suite built only from presses cannot tell a
+program that ignores the key coming back up from one that runs every shortcut
+twice per keystroke. Generally, look for a test calling a method the event loop
+calls, rather than the entry point the event loop is given — `handle_key`
+instead of `handle_event`, `press(target)` instead of a click at a point.
+
+### Lesson 75: a witness that moves less than the tolerance has not moved (lane C, 2026-08-29)
+
+**In short:** the test that a resize is remembered clicked the Stats button:
+resize to 1600x900, find where Stats is in a 1600-wide frame, click its centre,
+assert it opened. Throwing the resize away entirely did not fail it. The
+toolbar's buttons are laid out from the *left* edge, so between a 1100-wide
+window and a 1600-wide one Stats moves by a few pixels of padding — less than
+its own width. The click at the wide position still landed inside the narrow
+box, so both frames answered the same, and the test could not tell a program
+that resized from one that ignored the event.
+
+**The rule.** When a test proves something moved by clicking where it moved to,
+the movement has to exceed the size of the thing that moves. Assert that
+separately and up front — `wide.x >= narrow.right()` — rather than trusting the
+click to notice. A witness whose displacement is inside its own tolerance is not
+a witness; it is a coincidence that happens to be green.
+
+**How it was found.** By mutation: the row that discards the resize was expected
+to fail two tests and failed only one. The fix was to pick a control that
+travels — the search box is measured from the right edge and moves by nearly the
+whole difference — and to assert the two rectangles are disjoint before the
+click is asked anything.
+
+**Where else to look.** Any test whose subject is a *change in position*:
+scrolling, resizing, reflow, drag. Related to lesson 68 (a containment
+assertion has slack) but not the same fault — there the tolerance is written
+into the assertion, here it is the size of the control being clicked, which
+nobody wrote down at all.
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print

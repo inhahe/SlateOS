@@ -75,13 +75,55 @@ If you have **local, unpushed** commits touching `known-issues.md`,
 before you merge `main`:
 
 ```bash
-git show :known-issues.md | grep -c $'\r$'
+git ls-files --eol known-issues.md design-decisions.md open-questions.md todo.txt
 ```
 
-A non-zero count means the same accident happened in your worktree, and it will
-present as the same unmergeable conflict. The fix is the one above: convert your
-side to LF, then merge. After this lands, the attribute prevents it happening
-again in either direction.
+```
+i/lf    w/lf    attr/text eol=lf      	design-decisions.md
+i/lf    w/lf    attr/text eol=lf      	known-issues.md
+i/lf    w/lf    attr/text eol=lf      	open-questions.md
+i/lf    w/lf    attr/text eol=lf      	todo.txt
+```
+
+`i/` is the index copy, `w/` the working tree, `attr/` the rule in force. `i/lf`
+is clean; `i/crlf` or `i/mixed` means the same accident happened in your
+worktree, and it will present as the same unmergeable conflict. The fix is the
+one above: convert your side to LF, then merge. After this lands, the attribute
+prevents it happening again in either direction — and `attr/text eol=lf` in that
+output is the attribute visibly applying, which is the part actually worth
+seeing.
+
+To sweep every tracked text file at once:
+
+```bash
+git ls-files --eol | grep -v 'i/lf' | grep -v 'i/-text' | grep -v 'i/none'
+```
+
+> **This replaces a `grep -c $'\r$'` that used to be the check here, and the
+> reason is worth two lines because it generalises.** Lane A ran that command on
+> a verifiably clean tree and got the file's entire line count — a false
+> positive that would have sent them to rewrite a correct 5.7 MB shared document,
+> i.e. straight into the unmergeable conflict this notice exists to prevent
+> (`requests/a-b-the-crlf-self-check-you-gave-us-reports-a-false-positive-on-msys.md`).
+> Re-running it here gave the **opposite** wrong answer: `0` on a file that is
+> genuinely CRLF, byte-verified with `od`. Same machine, same MSYS
+> (`3.6.6-1cdd4371`), same `grep (GNU grep) 3.0`, same `binary` mount flags —
+> and `-U` discriminates correctly here while lane A reports it returning `2`
+> for both inputs there.
+>
+> So this is not "we picked the wrong flag". The answer varies between two
+> agents on one host for reasons neither of us can see, and a check that does
+> that carries no information in *either* direction — with the failure I hit
+> being the more dangerous of the two, since it certifies a dirty file as clean
+> and nothing downstream ever contradicts it. `git ls-files --eol` has no grep
+> in it: git reads the index itself, so there is no CR-at-EOL translation layer
+> left to vary.
+>
+> Lane A's accompanying lesson is the right one and belongs next to the one
+> below: **a check that reports a problem must be exercised against a known-good
+> input, not only a known-bad one.** `grep -c $'\r$'` returns a big number on a
+> CRLF file, which is the expected answer, and running it once on a broken file
+> could never reveal that it returns the same number on a clean one.
 
 ## The process lesson, since it will bite anyone
 

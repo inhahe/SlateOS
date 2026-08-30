@@ -174,7 +174,10 @@ implements it or answers in the same file.
 
 **When it lands, mark it — do not delete it.** Put a `**Status:**` line
 directly under the title saying `✅ LANDED <date> by lane <x>`, plus one
-sentence on what actually shipped. The queue property comes from that line,
+sentence on what actually shipped. (`**Status**:` — colon outside the stars —
+is read the same way. Markdown renders the two identically, so the difference
+is invisible in the file you are writing, and four dropbox files had already
+drifted onto the second spelling.) The queue property comes from that line,
 not from the file's absence:
 
 ```bash
@@ -205,7 +208,10 @@ characters after `**Status:**` and looks for one of these:
 | finished | `done` `landed` `fixed` `implemented` `delivered` `resolved` `answered` `folded in` `closed` `declined` `withdrawn` `obsolete` `superseded` `fulfilled` `consumed` `wontfix` |
 
 Anything else — `**Status:** needs a decision from you first` was a real one —
-reads as *unrecognised*, which counts as open but tells the reader nothing.
+reads as *unrecognised*, which counts as open. The report says so in those
+words and then prints this vocabulary once at the bottom, so you can fix it
+without coming back here; the list it prints is generated from the matcher, not
+copied from this table, so the two cannot say different things.
 A negated done word (`not fixed`, `never landed`) counts as open; a heading like
 `## Resolved` works as a marker on its own. Prefer a word from the table over
 inventing one: the table is what the report can act on, and a status it cannot

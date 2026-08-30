@@ -356,6 +356,33 @@ def test_unrecognised_wording_is_open_and_says_so(mod):
           got[1].startswith("unrecognised status:"), True)
 
 
+def test_both_bold_status_spellings_are_markers(mod):
+    """`**Status**:` reads the same as `**Status:**`, and reads *as a marker*.
+
+    Markdown renders the two identically -- bold "Status", then a colon -- so
+    the difference cannot be seen in the file the writer is looking at. Four
+    dropbox files used the second spelling, two of them filed by lane B, and
+    every one was reported "no status marker" while carrying a clear stamp:
+    the reader is sent to stamp a request that already was.
+
+    The three checks below are the whole point of allowing it. The spelling
+    decides only *where* the classifier looks -- ranking, negation and the
+    window then run over the same text -- so a done stamp stays done, an open
+    stamp stays open, and a negated done stamp stays open, exactly as in the
+    canonical spelling. If any of those diverged, this would be a vocabulary
+    change wearing a syntax change's clothes.
+    """
+    for spelling in ("**Status:**", "**Status**:"):
+        check(f"{spelling} landed is done",
+              verdict(mod, f"{spelling} landed in abc123"), "done")
+        check(f"{spelling} blocked is open",
+              verdict(mod, f"{spelling} blocked on lane A"), "open")
+        check(f"{spelling} 'not yet landed' is still open",
+              verdict(mod, f"{spelling} not yet landed"), "open")
+    check("a bare 'Status:' with no bold is not a marker",
+          verdict(mod, "Status: landed in abc123"), "none")
+
+
 def test_the_unrecognised_hint_names_the_coded_vocabulary(mod):
     """The hint must list the words the matcher honours, and only those.
 

@@ -121,8 +121,23 @@ REPLY_SECTION_RE = re.compile(
 # and it is produced by a line break. The two vocabularies below can only rank
 # against each other when both are searched over the same text, so the block is
 # extracted once and both look at it.
+# Both `**Status:**` and `**Status**:` are accepted, because Markdown renders
+# them identically -- bold "Status", then a colon -- so the difference is
+# invisible in the artifact the writer is looking at while they write it. Four
+# files in the dropbox use the second spelling, two of them filed by lane B,
+# and every one of them was reported "no status marker" while carrying a
+# perfectly clear stamp. That is the conflation the `unrecognised status`
+# branch exists to avoid, arriving one step earlier: a reader is told the file
+# was never stamped, so they go to stamp it, and find it already was.
+#
+# Safe in a way that widening DONE_WORDS is not, and the distinction is the
+# reason this change is made and that one is refused. This decides only *where*
+# the classifier looks; the ranking, the negator guard and STATUS_WINDOW all
+# then run over the same text and mean the same things. No word changes sense,
+# so no open request can become done by it.
 STATUS_BLOCK_RE = re.compile(
-    r"\*\*status:\*\*(.*?)(?:\n[ \t]*\n|\Z)", re.IGNORECASE | re.DOTALL
+    r"\*\*status(?::\*\*|\*\*[ \t]*:)(.*?)(?:\n[ \t]*\n|\Z)",
+    re.IGNORECASE | re.DOTALL,
 )
 
 # How far into a status block the deciding word may sit, in CHARACTERS.

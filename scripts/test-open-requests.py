@@ -50,11 +50,11 @@ way this kind of tool goes quietly wrong.
 
 from __future__ import annotations
 
-import importlib.util
 import inspect
 import os
 import re
 import sys
+import types
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "open-requests.py")
@@ -85,14 +85,33 @@ for _stream in (sys.stdout, sys.stderr):
 _FAILURES: list[str] = []
 
 
-def load_module():
-    """Import open-requests.py by path (the name is not an identifier)."""
-    spec = importlib.util.spec_from_file_location("openrequests", SCRIPT)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {SCRIPT}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["openrequests"] = module
-    spec.loader.exec_module(module)
+def load_module(path=SCRIPT, name="openrequests"):
+    """Import open-requests.py by path (the name is not an identifier).
+
+    Compiled from the source *text* rather than loaded through
+    `spec.loader.exec_module`, and the difference is not stylistic.
+
+    A `SourceFileLoader` consults `__pycache__`, and decides the cache is
+    current by comparing the source's `(mtime, size)` against the pair recorded
+    in the `.pyc` header. The recorded mtime has **one-second** resolution. So
+    two writes to the script inside the same second, producing the same size,
+    leave the second one invisible: the loader finds a `.pyc` whose stamp still
+    matches and runs the *previous* version.
+
+    That is not theoretical. It was found by mutation-testing this very suite:
+    two mutants of `open-requests.py` were reported as surviving -- the suite
+    printed all-pass against code that was not on disk -- and both were caught
+    the moment they were run one at a time, slowly. The staleness window is
+    small, but a suite that can silently validate the wrong bytes is exactly the
+    failure this file's docstring is about, only pointed at itself. `compile()`
+    on freshly-read text has no cache to be stale.
+    """
+    with open(path, encoding="utf-8") as fh:
+        source = fh.read()
+    module = types.ModuleType(name)
+    module.__file__ = path
+    sys.modules[name] = module
+    exec(compile(source, path, "exec"), module.__dict__)  # noqa: S102
     return module
 
 
@@ -334,6 +353,58 @@ def test_the_roadmap_vocabulary_table_matches_the_code(mod):
     if check("the table states a window size", stated is not None, True):
         check("the stated window is the coded one",
               int(stated.group(1)), mod.STATUS_WINDOW)
+
+
+def test_the_loader_sees_an_edit_made_in_the_same_second(mod):  # noqa: ARG001
+    """The suite must test the bytes on disk, not a cached compile of them.
+
+    Reproduces the staleness window described on `load_module`: write a module,
+    import it so a `.pyc` gets written, then rewrite it *in the same second and
+    at the same size*. A `SourceFileLoader` reuses the cache and returns the old
+    value; `load_module` re-reads and returns the new one.
+
+    The same-size requirement is why the two bodies differ only in a digit. If
+    this test ever starts passing for the wrong reason, it will be because the
+    sizes drifted apart -- so the sizes are asserted equal, and the elapsed time
+    is asserted to be under a second, rather than trusted.
+    """
+    import importlib.util
+    import pathlib
+    import tempfile
+    import time
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "stalecheck.py")
+        before, after = "VALUE = 111\n", "VALUE = 222\n"
+        check("the two bodies are the same size",
+              len(before), len(after))
+
+        pathlib.Path(path).write_text(before, encoding="utf-8")
+        start = time.time()
+
+        # Prime the cache the way the old loader did, which also writes the
+        # .pyc that the second load would go on to reuse.
+        spec = importlib.util.spec_from_file_location("stalecheck", path)
+        primed = importlib.util.module_from_spec(spec)
+        sys.modules["stalecheck"] = primed
+        spec.loader.exec_module(primed)
+        check("the primed load sees the first version", primed.VALUE, 111)
+
+        pathlib.Path(path).write_text(after, encoding="utf-8")
+        elapsed = time.time() - start
+
+        got = load_module(path, name="stalecheck_reloaded").VALUE
+        check("load_module sees the rewrite", got, 222)
+
+        # If the rewrite landed in a later second the cache would have been
+        # invalidated honestly and this test proved nothing. Say so rather than
+        # passing quietly -- a test that only sometimes tests its subject is
+        # worse than one that does not exist, because it is believed.
+        if elapsed >= 1.0:
+            print(f"NOTE  same-second window missed ({elapsed:.2f}s); the stale"
+                  " path was not exercised this run")
+        sys.modules.pop("stalecheck", None)
+        sys.modules.pop("stalecheck_reloaded", None)
 
 
 def test_the_status_glyphs_are_documented_and_classify(mod):

@@ -59,6 +59,28 @@
 //!    outcome returned — which is what `cp` is specified to do and what makes the
 //!    diagnostics worth reading.
 //!
+//! # A seventh, found later, by measurement rather than by reading
+//!
+//! 7. **`cp a a` emptied `a`, silently, and exited 0.** The destination is
+//!    opened with `O_TRUNC` before the source is read, so naming one file
+//!    twice truncated it to nothing and then copied the nothing back over
+//!    itself. It said nothing and reported success, so a shell loop that did
+//!    it could destroy a directory's worth of files without a single
+//!    diagnostic. Every one of these reached it — `cp a a`, `cp a ./a`,
+//!    `cp a dir/../a`, `cp a hard-link-to-a`, `cp a symlink-to-a`, and
+//!    `cp -r a .` — because there is no string comparison that catches the
+//!    last four, and GNU does not attempt one: it compares the two `stat`
+//!    results, device and inode, and so does [`is_same_file`] now.
+//!
+//!    This one is worth separating from bugs 1–6 for a reason that has nothing
+//!    to do with `cp`. Those six were found by *reading* the code it replaced.
+//!    This was found by `scripts/cp-diff.sh` on its first run, against a file
+//!    that had already been rewritten once with the defect in it — the rewrite
+//!    swapped a hand-rolled walk for `fs::copy` and never asked what `fs::copy`
+//!    does when handed one file twice. Reading finds the bugs you thought to
+//!    look for. See `known-issues.md` ->
+//!    `B-CP-COPYING-A-FILE-ONTO-ITSELF-EMPTIED-IT`.
+//!
 //! # Options this implementation does not have
 //!
 //! Everything except `-r`/`-R`/`--recursive`. They are recognised and rejected
@@ -442,6 +464,18 @@ fn copy_one<W: Write>(
         }
     };
 
+    // Before anything is worked out about the destination, as in GNU: the
+    // refusal is a fact about the source alone, and asking it here is what
+    // makes `cp tree/.. dst` say which of its two problems came first.
+    if metadata.is_dir() && !flags.recursive {
+        let _ = writeln!(
+            err,
+            "cp: -r not specified; omitting directory {}",
+            quoteaf_os(src)
+        );
+        return false;
+    }
+
     let target = match compute_target(src_path, dest, dest_is_dir) {
         Ok(t) => t,
         Err(reason) => {
@@ -454,6 +488,19 @@ fn copy_one<W: Write>(
             return false;
         }
     };
+
+    // Module docs, bug 7. Two `stat` results rather than two strings, which is
+    // the only comparison that catches every spelling; GNU's `same_file_ok`
+    // makes the same one, at the same point in the same order.
+    if is_same_file(src_path, &metadata, &target) {
+        let _ = writeln!(
+            err,
+            "cp: {} and {} are the same file",
+            quoteaf_os(src),
+            quoteaf_os(&target)
+        );
+        return false;
+    }
 
     if metadata.file_type().is_symlink() {
         // Only reachable under `-r`; see the stat above.
@@ -487,15 +534,6 @@ fn copy_one<W: Write>(
         };
     }
 
-    if !flags.recursive {
-        let _ = writeln!(
-            err,
-            "cp: -r not specified; omitting directory {}",
-            quoteaf_os(src)
-        );
-        return false;
-    }
-
     // Module docs, bug 2: without this, `cp -r a a` and `cp -r a .` copy what
     // they have just written, for ever.
     if is_inside(&target, src_path) {
@@ -509,6 +547,41 @@ fn copy_one<W: Write>(
     }
 
     copy_tree(src_path, &target, err)
+}
+
+/// Does `dst` already name the very file `src_meta` describes?
+///
+/// `false` when `dst` does not exist, which is the ordinary case and not an
+/// error worth distinguishing here: a destination that cannot be stat'd is one
+/// the copy will fail on anyway, with its own diagnostic.
+///
+/// `metadata` and not `symlink_metadata` for the destination, deliberately. A
+/// destination that is a *symlink to the source* is the same file for this
+/// purpose — writing "through" it truncates the source exactly as surely as
+/// naming the source directly — and GNU stats it the same way for the same
+/// reason. The source's own stat is whatever the caller took: followed without
+/// `-r`, unfollowed with it, which is the distinction `-r` is for.
+#[cfg(unix)]
+fn is_same_file(_src: &Path, src_meta: &fs::Metadata, dst: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match fs::metadata(dst) {
+        Ok(d) => d.dev() == src_meta.dev() && d.ino() == src_meta.ino(),
+        Err(_) => false,
+    }
+}
+
+/// Windows exposes a file's identity only through `windows_by_handle`, which is
+/// unstable, so the development host compares resolved paths instead. That
+/// still catches a repeated operand and a `.` or `..` in the middle of one; it
+/// misses a hard link and a symlink, which is why the guarantee is stated on
+/// the `#[cfg(unix)]` arm above — the arm the target OS and the certification
+/// harness both use. The unit tests that pin the refusal run on both.
+#[cfg(not(unix))]
+fn is_same_file(src: &Path, _src_meta: &fs::Metadata, dst: &Path) -> bool {
+    match (fs::canonicalize(src), fs::canonicalize(dst)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// Where one source lands.
@@ -1134,6 +1207,55 @@ mod tests {
         let (ok, err) = cp(&PLAIN, &[&a, &sub]);
         assert!(ok, "{err}");
         assert!(sub.join("a").is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Module docs, bug 7. The assertion that matters is not the message but
+    /// `fs::read`: the defect this pins reported success and said nothing, so a
+    /// test that only checked the diagnostic would have passed against it.
+    #[test]
+    fn copying_a_file_onto_itself_is_refused_and_leaves_it_whole() {
+        let dir = scratch("same_file");
+        let a = dir.join("a");
+        fs::write(&a, b"contents").unwrap();
+        let (ok, err) = cp(&PLAIN, &[&a, &a]);
+        assert!(!ok, "should have been refused");
+        assert!(err.contains("are the same file"), "{err}");
+        assert_eq!(fs::read(&a).unwrap(), b"contents", "the file must survive");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The same file reached by a second spelling. A string comparison of the
+    /// two operands would let this one through, which is why there is not one.
+    #[test]
+    fn a_file_onto_itself_by_another_path_is_refused() {
+        let dir = scratch("same_file_dotted");
+        let a = dir.join("a");
+        let sub = dir.join("sub");
+        fs::write(&a, b"contents").unwrap();
+        fs::create_dir(&sub).unwrap();
+        let dotted = sub.join("..").join("a");
+        let (ok, err) = cp(&PLAIN, &[&a, &dotted]);
+        assert!(!ok, "should have been refused: {err}");
+        assert!(err.contains("are the same file"), "{err}");
+        assert_eq!(fs::read(&a).unwrap(), b"contents", "the file must survive");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A destination that merely *exists* is not the same file, and must still
+    /// be overwritten. Without this the refusal above would be a way of
+    /// breaking `cp` for every ordinary overwrite.
+    #[test]
+    fn an_existing_different_destination_is_still_overwritten() {
+        let dir = scratch("same_file_neg");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::write(&a, b"new").unwrap();
+        fs::write(&b, b"old").unwrap();
+        let (ok, err) = cp(&PLAIN, &[&a, &b]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert_eq!(fs::read(&b).unwrap(), b"new");
         let _ = fs::remove_dir_all(&dir);
     }
 

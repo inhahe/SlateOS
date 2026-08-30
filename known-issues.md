@@ -94227,6 +94227,40 @@ entered) arriving through arithmetic rather than control flow.
 centring assertion in a layout suite. The tell is a test whose fixture puts the
 thing under test at rest.
 
+### Lesson 71: asking *whether* a click landed cannot tell a hit box in the right place from one a whole gap away (lane C, 2026-08-29)
+
+**In short:** snake's board grows each square's click box by half the gap on
+every side, so the gap between two squares is split down the middle and a click
+in it goes to the square it is nearer. The test for that clicked the *middle* of
+a gap and asserted the result was one of the two squares either side. Mutate the
+growth so it happens on one side only — `let half = 0.0;`, leaving the
+`r.w + self.gap` that widens it — and the box is still exactly the right size,
+still leaves no gap belonging to nobody, and the test still passes. What has
+changed is that every click box has slid a whole gap off its own ink: clicking
+the left edge of a square now hits its left-hand neighbour, and the last column
+of the board has a strip of dead ink past which the clicks fall off the board
+entirely. Nothing in the suite noticed.
+
+**The rule.** A hit-box assertion must name the target, not merely require one.
+"Landed on something" is satisfied by a box of the right size in the wrong
+place; "landed on *this* square" is not. Where a box is derived from ink by
+growing it, click a point on **each** side of the ink and say which square owns
+it — a box that has slid shows up on one side as the wrong neighbour and on the
+other as nothing at all. Pick the point a quarter of the way into the gap rather
+than half, so it is unambiguously in one square's half of it and the assertion
+is an equality rather than a disjunction.
+
+This is lesson 68 (a containment assertion has slack, and any fault that fits
+inside the slack is invisible) arriving through the hit map instead of through
+geometry: the `a || b` **is** the slack, and a box displaced by exactly one gap
+is the fault that fits inside it.
+
+**Where else to look.** Every `hit_test` assertion written as
+`landed == Some(a) || landed == Some(b)`, and every control whose click box is
+bigger than its ink: the padded switches in these apps' footers, list rows grown
+to the row pitch, and any slider whose thumb carries a grab margin. The tell is
+an assertion whose right-hand side is a set rather than a value.
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print

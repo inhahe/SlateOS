@@ -2053,31 +2053,65 @@ mod tests {
     }
 
     #[test]
-    fn every_pile_is_drawn_inside_the_window() {
+    fn no_pile_is_cut_off_by_the_edge_of_the_window() {
         for size in SIZES {
-            let app = app();
+            let mut app = app();
+            // Turn some cards over so the waste and a foundation are really
+            // drawn, rather than only their empty slots.
+            for _ in 0..30 {
+                let _ = app.state.handle_key(Key::Enter, Modifiers::default());
+            }
             let f = app.draw(size);
-            let window = Rect::new(0.0, 0.0, size.0, size.1);
-            // `Frame::hit` trims a box to the clip in force, so a box that ran
-            // off the window would arrive here already trimmed and this would
-            // be a tautology. The clip is the window, so what this catches is
-            // a box trimmed to nothing -- a pile drawn entirely off-screen --
-            // which `rect_of_sized` reports as absent.
-            for (target, rect) in f.hits() {
+
+            // Every card in the game is one size, so a card that is a
+            // different size from its neighbours is a card the window cut.
+            // That, and not "the box is inside the window", is the claim with
+            // teeth here: `Frame::hit` trims a box to the clip in force and
+            // the clip *is* the window, so "inside the window" is true of any
+            // layout at all -- including one that fits the card to the tableau
+            // alone and runs the whole deal off the side of a narrow one.
+            // That mutation passed the earlier form of this test.
+            let mut piles: Vec<(&Target, &Rect)> = f
+                .hits()
+                .iter()
+                .filter(|(t, _)| {
+                    matches!(
+                        t,
+                        Target::Stock
+                            | Target::Waste
+                            | Target::Foundation(_)
+                            | Target::TableauCard(_, _)
+                            | Target::TableauBack(_, _)
+                            | Target::TableauEmpty(_)
+                    )
+                })
+                .map(|(t, r)| (t, r))
+                .collect();
+            piles.sort_by(|a, b| a.1.w.total_cmp(&b.1.w));
+
+            let Some((widest, whole)) = piles.last().copied() else {
+                panic!("nothing at all was drawn at {size:?}");
+            };
+            for (target, rect) in &piles {
                 assert!(
                     rect.w > 0.0 && rect.h > 0.0,
                     "{target:?} recorded an empty box {rect:?} at {size:?}"
                 );
                 assert!(
-                    rect.x >= window.x - 0.01 && rect.right() <= window.right() + 0.01,
-                    "{target:?} at {size:?} was drawn at {rect:?}, outside {window:?}"
+                    (rect.w - whole.w).abs() < 0.01 && (rect.h - whole.h).abs() < 0.01,
+                    "at {size:?} {target:?} is {}x{} where {widest:?} is {}x{}; \
+                     every card is one size, so the smaller one is a card the window cut off",
+                    rect.w,
+                    rect.h,
+                    whole.w,
+                    whole.h
                 );
             }
         }
     }
 
     #[test]
-    fn the_seven_columns_are_evenly_spaced_and_the_same_width() {
+    fn the_seven_columns_are_evenly_spaced_the_same_width_and_never_overlap() {
         for size in SIZES {
             let app = app();
             let mut lefts = Vec::new();
@@ -2092,6 +2126,17 @@ mod tests {
             }
             let (_, first) = lefts[0];
             let step = lefts[1].1.x - first.x;
+            // Even spacing on its own says nothing about whether the columns
+            // sit on each other: seven columns spaced a card width apart are
+            // perfectly even and each hides half of the one beside it. The
+            // spacing has to exceed the width for there to be a table between
+            // them at all.
+            assert!(
+                step > first.w + 0.01,
+                "the columns at {size:?} are {} apart and {} wide, so each overlaps the next",
+                step,
+                first.w
+            );
             for &(col, r) in &lefts {
                 assert!(
                     (r.w - first.w).abs() < 0.01,
@@ -2195,28 +2240,44 @@ mod tests {
     }
 
     #[test]
-    fn the_deepest_column_still_fits_the_window() {
-        // The opening deal fans column 6 the deepest. A card size taken from
-        // the width alone -- which is what the fixed layout did -- runs this
-        // off the bottom of any window that is not tall enough for it.
+    fn the_deepest_fan_a_deal_can_reach_still_fits_the_window() {
+        // `Table::fit` reserves room for six face-down cards under twelve
+        // face-up ones, and until this test built one, nothing exercised that
+        // reserve: an opening deal fans column 6 seven cards deep, less than
+        // half the worst case, so a card size taken from the width alone --
+        // which is what the fifteen fixed constants amounted to -- fitted
+        // comfortably and ran a real fan off the bottom. The earlier form of
+        // this test read the opening deal and passed against exactly that.
+        //
+        // Nor can the claim be "the box stops before the bottom edge":
+        // `Frame::hit` trims a box to the clip and the clip is the window, so
+        // a card drawn off the bottom arrives here already trimmed. What the
+        // trimming cannot hide is that the card came back shorter than the
+        // one above it.
         for size in SIZES {
             let mut app = app();
-            // Deal every stock card onto the waste and back, then send what
-            // can go to the foundations, to shake the columns about a bit.
-            for _ in 0..30 {
-                let _ = app.state.handle_key(Key::Enter, Modifiers::default());
+            let deep = &mut app.state.tableau[0];
+            deep.clear();
+            for i in 0..6 {
+                deep.push(PileCard::new(Card::new(Suit::Spades, Rank::ALL[i]), false));
             }
-            let f = app.draw(size);
-            for (target, rect) in f.hits() {
-                if let Target::TableauCard(col, nth) = target {
-                    assert!(
-                        rect.bottom() <= size.1 + 0.01,
-                        "card {nth} of column {col} at {size:?} reaches y={}, \
-                         past the bottom of the window",
-                        rect.bottom()
-                    );
-                }
+            for i in 0..12 {
+                deep.push(PileCard::new(Card::new(Suit::Hearts, Rank::ALL[i]), true));
             }
+
+            let first = box_at(&app, Target::TableauCard(0, 0), size);
+            let last = box_at(&app, Target::TableauCard(0, 11), size);
+            assert!(
+                last.y > first.y,
+                "the premise is wrong: the fan at {size:?} stacks its cards on each other"
+            );
+            assert!(
+                (last.h - first.h).abs() < 0.01,
+                "the twelfth face-up card of a column at {size:?} is {} tall against the first's \
+                 {}; the window cut the bottom of the fan off",
+                last.h,
+                first.h
+            );
         }
     }
 
@@ -2269,6 +2330,58 @@ mod tests {
         }
     }
 
+    /// The suite and the window must be looking at the same picture.
+    ///
+    /// Every geometry test above draws at `SolitaireApp::SIZE`. If the window
+    /// opens at some other size, all of them are proofs about a picture
+    /// nobody ever sees, and the one that is on the screen is untested.
+    #[test]
+    fn the_window_opens_at_the_size_the_tests_draw_at() {
+        let (w, h) = SolitaireApp::SIZE;
+        let opens_at = app().initial_size();
+        assert_eq!(
+            opens_at,
+            (w as u32, h as u32),
+            "the suite proves its geometry at {:?} but the window opens at {opens_at:?}",
+            SolitaireApp::SIZE
+        );
+    }
+
+    /// A covered face-up card must show more of itself than a covered
+    /// face-down one does.
+    ///
+    /// Both fans are a fraction of the card height, and nothing in the code
+    /// stops them being the same fraction. But a face-down card only has to
+    /// prove it is there, whereas a face-up one has to show the rank and the
+    /// suit in its corner -- a column fanned as tightly as its backs are is a
+    /// column that cannot be read.
+    #[test]
+    fn a_covered_face_up_card_shows_more_of_itself_than_a_covered_face_down_one() {
+        let mut app = app();
+        // The opening deal turns exactly one card up per column, so a second
+        // face-up card is what it takes to have a face fan at all.
+        app.state.tableau[0].push(PileCard::new(Card::new(Suit::Spades, Rank::Two), true));
+
+        let first = box_of(&app, Target::TableauCard(0, 0));
+        let second = box_of(&app, Target::TableauCard(0, 1));
+        let face_sliver = second.y - first.y;
+
+        // Column 6 is dealt six face-down cards under its face-up one.
+        let back_a = box_of(&app, Target::TableauBack(6, 0));
+        let back_b = box_of(&app, Target::TableauBack(6, 1));
+        let back_sliver = back_b.y - back_a.y;
+
+        assert!(
+            back_sliver > 0.0,
+            "the premise is wrong: the face-down cards are stacked exactly on each other"
+        );
+        assert!(
+            face_sliver > back_sliver * 2.0,
+            "a covered face-up card shows {face_sliver} of itself and a covered face-down one \
+             {back_sliver}; the rank in the corner needs much the larger share"
+        );
+    }
+
     // ── The mouse ───────────────────────────────────────────────────
     //
     // The program had none: `handle_event` matched `Event::Key` and nothing
@@ -2290,17 +2403,50 @@ mod tests {
 
     #[test]
     fn clicking_a_face_up_card_picks_up_from_that_card() {
-        let mut app = app();
+        let mut opening = app();
         // Column 6 has six face-down cards under one face-up one.
         assert_eq!(
-            tap_on(&mut app, Target::TableauCard(6, 0)),
+            tap_on(&mut opening, Target::TableauCard(6, 0)),
             EventResult::Consumed
         );
         assert_eq!(
-            app.state.selection,
+            opening.state.selection,
             Some(Selection::Tableau(6, 0)),
             "clicking the face-up card of column 6 selected {:?}",
-            app.state.selection
+            opening.state.selection
+        );
+
+        // And from the middle of a run. The opening deal turns exactly one
+        // card up per column, so every `nth` in it is 0 and a click routed to
+        // "the deepest face-up card of the column" is indistinguishable from
+        // one routed to the card actually under the pointer. The whole point
+        // of picking up a run from a chosen card needs a run to pick from.
+        let mut fanned = app();
+        let run = &mut fanned.state.tableau[0];
+        run.clear();
+        for rank in [Rank::Five, Rank::Four, Rank::Three] {
+            run.push(PileCard::new(Card::new(Suit::Spades, rank), true));
+        }
+        // Aimed at the sliver of the middle card, not the middle of its box:
+        // the box is a whole card tall and the card above covers most of it,
+        // which is what `a_covered_card_is_clickable_only_where_it_can_be_seen`
+        // is about.
+        let middle = box_of(&fanned, Target::TableauCard(0, 1));
+        let cover = box_of(&fanned, Target::TableauCard(0, 2));
+        let y = f32::midpoint(middle.y, cover.y);
+        assert!(
+            y < cover.y,
+            "the premise is wrong: the run's cards are stacked on each other"
+        );
+        assert_eq!(
+            tap(&mut fanned, middle.centre().0, y, SolitaireApp::SIZE),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            fanned.state.selection,
+            Some(Selection::Tableau(0, 1)),
+            "clicking the middle card of a three-card run selected {:?}",
+            fanned.state.selection
         );
     }
 
@@ -2399,6 +2545,58 @@ mod tests {
             );
             assert_eq!(app.state.focus, before, "the cursor moved on a dead click");
             assert!(app.state.selection.is_none());
+        }
+    }
+
+    /// The header is a label, not a control.
+    ///
+    /// The title, the move counter and the help line all record hit boxes --
+    /// they have to, or a click on them would fall through to whatever the
+    /// frame recorded underneath. Recording a box is not the same as acting
+    /// on it, and the difference is invisible in a won game, where the click
+    /// path returns before it ever reaches the header's arm.
+    #[test]
+    fn a_click_on_the_header_is_not_a_move() {
+        for target in [Target::Title, Target::Moves, Target::Help] {
+            let mut app = app();
+            let before = (app.state.focus, app.state.move_count, app.state.stock.len());
+            let (x, y) = box_of(&app, target).centre();
+            assert_eq!(
+                tap(&mut app, x, y, SolitaireApp::SIZE),
+                EventResult::Ignored,
+                "a click on {target:?} was taken for a move"
+            );
+            assert_eq!(
+                (app.state.focus, app.state.move_count, app.state.stock.len()),
+                before,
+                "a click on {target:?} changed the game"
+            );
+            assert!(app.state.selection.is_none());
+        }
+    }
+
+    /// Only the left button plays the game.
+    ///
+    /// The other buttons are unclaimed, and an app that treats every button
+    /// the same is an app where a right-click meant for a context menu deals
+    /// a card instead.
+    #[test]
+    fn only_the_left_button_plays_a_card() {
+        let stock = box_of(&app(), Target::Stock);
+        let (x, y) = stock.centre();
+        for button in [MouseButton::Right, MouseButton::Middle] {
+            let mut app = app();
+            let before = app.state.stock.len();
+            assert_eq!(
+                app.click_at(x, y, button, SolitaireApp::SIZE),
+                EventResult::Ignored,
+                "the {button:?} button was taken for a move"
+            );
+            assert_eq!(
+                app.state.stock.len(),
+                before,
+                "the {button:?} button dealt a card off the stock"
+            );
         }
     }
 
@@ -3250,6 +3448,14 @@ mod tests {
         gs.focus = FocusArea::Tableau(6, 0);
         gs.move_horizontal(1);
         assert_eq!(gs.focus, FocusArea::Tableau(6, 0));
+
+        // And off the last foundation. The two edges are separate arms of the
+        // same match, so the tableau's holding says nothing about the top
+        // row's -- which is how a foundation cursor that walked off the end of
+        // the row survived a mutation sweep.
+        gs.focus = FocusArea::Foundation(FOUNDATION_COUNT - 1);
+        gs.move_horizontal(1);
+        assert_eq!(gs.focus, FocusArea::Foundation(FOUNDATION_COUNT - 1));
     }
 
     #[test]

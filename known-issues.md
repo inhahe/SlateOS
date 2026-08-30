@@ -95148,6 +95148,21 @@ assertion, not about a gap in the toolkit.
 Still open: any test asserting a widget's rect is inside its parent where the
 parent rect was used to compute the child's.
 
+**It happened again in `apps/solitaire`, 2026-08-30 — the shape is more common
+than the two apps above suggested.** `every_pile_is_drawn_inside_the_window`
+walked every recorded box and asserted it lay within `0..w, 0..h`. The app
+clips to the window, so that is exactly the tautology described above, written
+independently by a different pass over a different app. A mutation fitting the
+card size to the tableau alone — which runs the top row clean off the side of a
+narrow window — passed it. What replaced it is a second usable spelling worth
+remembering alongside "compare against the layout's own rect": **compare the
+boxes against each other.** Every card in a card game is one size, so a card
+that comes back narrower than its neighbours is a card the clip cut, and the
+assertion is `w == max(w)` over the card targets rather than `x >= 0`. Any app
+that draws a grid of identically-sized things — a board, a keypad, a palette,
+a tile map — can use it, and unlike the "inside the window" form it cannot be
+satisfied by the trimming itself.
+
 ### Lesson 81: a recorded hit box is not evidence that anything was drawn in it (lane C, 2026-08-30)
 
 **In short:** the natural way to check that a panel drew all its rows is to ask
@@ -95189,6 +95204,48 @@ origin of a line of text.
 is independent of whether it drew — which is most of them, since returning the
 laid-out rect is what makes `union` and the stacking cursor work — the test is
 measuring the layout and reporting on the paint.
+
+### Lesson 82: a `min` whose losing side never loses is an untested half of the code (lane C, 2026-08-30)
+
+**In short:** layout code is full of "fit it to A, fit it to B, take the
+smaller" — `size = by_width.min(by_height)`. Only one of the two ever *wins* in
+any given state, and the tests are written against the states the app is
+normally in, so the other side of the `min` can be deleted outright without a
+single test noticing. In `apps/solitaire`, `Table::fit` sizes a card to the top
+row and to the deepest fan a column can reach, and takes the smaller. The
+deepest fan it reserves for is six face-down cards under twelve face-up. The
+*opening deal* fans column 6 seven cards deep. Every geometry test in the suite
+read an opening deal, so the fan half of the fit was slack in all of them, and
+two mutations that removed it survived or were caught only by tests that had no
+business firing.
+
+**The rule.** A `min`/`max`/`clamp` in layout code is a branch, and a branch has
+two sides. If the app's ordinary state always takes the same side, the other
+side is unexecuted code wearing the same coverage number as the line it shares.
+Write a test that *forces* the losing side — construct the worst case directly
+rather than hoping the natural one contains it. In solitaire that meant
+clearing a column and pushing eighteen cards into it by hand, which is a state
+the game can reach and the opening deal never is.
+
+**The tell.** Any `fit`/`solve` function that reserves room for a maximum
+(`MAX_DEPTH`, `worst_case_rows`, "enough for the longest label") when the
+fixtures are all typical. Also: a suite whose every drawing test starts from the
+same `App::new()`, which for a game means the opening position — the position
+most carefully chosen to be unremarkable.
+
+**How it was found.** A mutation sweep on `apps/solitaire` replacing
+`by_top.min(by_tableau)` with each half alone. `the card is fitted across
+alone` and `the card is fitted to the top row alone` were expected to be caught
+by the deep-column test and were not, because that test read the opening deal.
+Fixed by `the_deepest_fan_a_deal_can_reach_still_fits_the_window`, which builds
+the eighteen-card column and asserts the first and last card are the same size.
+
+**Where else to look.** Every app in this campaign has a `Layout::solve` with at
+least one `min` of two candidate sizes, and the reserve-for-the-worst-case side
+is the one that only bites at a window size or a game state the fixtures do not
+visit: sudoku's pencil-mark grid, chess's move history, checkers' capture
+panel, and every app that reserves room for a scrollback it never fills in a
+test.
 
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 

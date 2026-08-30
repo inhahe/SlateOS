@@ -1617,8 +1617,31 @@ fn spawn_process_inner(
         for &(fd_num, handle_type, parent_handle) in options.fd_map {
             let dup_result = match handle_type {
                 fd_handle_type::FILE => {
-                    // Duplicate the file handle — child gets an independent copy.
-                    crate::fs::handle::dup(parent_handle)
+                    // A file handle is `NEXT_HANDLE.fetch_add(1)` from 1, so
+                    // its raw value is a machine-wide counting sequence -- as
+                    // guessable as the pty end below, and arguably more so.
+                    // Without this check `fd_map = [(0, FILE, 3)]` would hand
+                    // the child a duplicate of whatever open file handle 3
+                    // happens to be, whoever owns it, reachable by a caller
+                    // that never issues a single `SYS_FS_*` call.  The `!= 0`
+                    // condition is the pty arm's, for the same reason: a
+                    // kernel spawn has no process claiming authority.
+                    if options.parent != 0
+                        && !pcb::owns_ipc_handle(
+                            options.parent,
+                            crate::cap::ResourceType::File,
+                            parent_handle,
+                        )
+                    {
+                        Err(KernelError::InvalidHandle)
+                    } else {
+                        // Duplicate the file handle — child gets an
+                        // independent copy (a fresh cursor, per
+                        // `fs::handle::dup`), which is the intended meaning
+                        // here: the child's fd is not sharing the parent's
+                        // offset.
+                        crate::fs::handle::dup(parent_handle)
+                    }
                 }
                 fd_handle_type::PIPE => {
                     // Pipes have per-end refcounting: `dup()` increments
@@ -1657,9 +1680,9 @@ fn spawn_process_inner(
                     .map(|h| h.raw())
                 }
                 fd_handle_type::PTY => {
-                    // A pty end is the one handle family in this loop whose raw
-                    // value is *guessable*: it is `(tty_id << 1) | end`, so
-                    // without an ownership check any process could name `2` and
+                    // A pty end's raw value is *guessable*: it is
+                    // `(tty_id << 1) | end`, so without an ownership check any
+                    // process could name `2` and
                     // have the kernel hand its child a live master — which is
                     // the authority to type arbitrary bytes into a stranger's
                     // shell.  Every `SYS_PTY_*` handler gates on
@@ -3375,6 +3398,205 @@ pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux dynamic-interpreter launch (entered ld.so → exit({})): OK",
         INTERP_EXIT
+    );
+    Ok(())
+}
+
+/// Ring-3 end-to-end test that a process cannot use a file handle it does not
+/// own — the `require_file_handle_owner` gate in `syscall::handlers`.
+///
+/// # The attack this reproduces
+///
+/// Native file handles come from `NEXT_HANDLE.fetch_add(1)` starting at 1, so
+/// their values are a machine-wide counting sequence, and `OPEN_FILES` is a
+/// single global table keyed by that number. Before the gate, a process could
+/// walk 1, 2, 3… and read, write or truncate whatever files *other* processes
+/// had open — without holding a `File` capability at all, since the
+/// `require_cap_type` check sits on `open` and this attack never opens
+/// anything.
+///
+/// # Why it must be ring 3, and native ABI
+///
+/// The gate is deliberately a no-op when `caller_pid()` is `None`, because a
+/// bare kernel task legitimately holds handles registered to no process. So
+/// kernel context can only ever observe the bypass. It must also be *native*
+/// ABI: Linux `read(2)` goes through its own fd table rather than
+/// `sys_fs_read`, so a Linux-ABI probe never reaches the gate at all.
+///
+/// # The two probes
+///
+/// 1. **The syscall gate.** The kernel opens a "victim" file itself — which
+///    registers the handle to no process — and passes that raw number to a
+///    ring-3 program. The program first opens and reads a file of its *own*
+///    (the control, without which "refused" would also pass against a kernel
+///    that refuses everything), then reads through the victim handle and
+///    reports whether it was allowed. See
+///    [`elf::build_native_handle_ownership_test_elf`] for the exit codes.
+/// 2. **The `fd_map` arm.** `spawn` is a second way to obtain a handle: an
+///    `fd_map` entry names a parent handle to duplicate into the child. That
+///    arm had no ownership check even though the `PTY` arm beside it did, so
+///    this asserts a spawn naming a handle its claimed parent does not own is
+///    refused. A non-existent parent pid is used deliberately —
+///    `owns_ipc_handle` documents `false` as the answer for a caller not in
+///    the process table, so this exercises the new branch deterministically
+///    without needing a live second process.
+///
+/// Skips only when the environment cannot host the fixture, via
+/// `selftest_setup!`; a staging error of any other kind fails the test.
+#[allow(clippy::cast_possible_truncation)]
+pub fn self_test_file_handle_ownership() -> KernelResult<()> {
+    const OWN: &str = "/slateos-hown-own.txt";
+    const OWN_NUL: &[u8] = b"/slateos-hown-own.txt\0";
+    const VICTIM: &str = "/slateos-hown-victim.txt";
+
+    /// The byte in the probe's own file — proves the control read really read
+    /// *that* file and not something else.
+    const OWN_BYTE: u8 = 0xB1;
+    /// The byte in the victim file. Never legitimately observable by the
+    /// probe; it exists so a successful attack would be reading real content
+    /// rather than an empty file that might fail for an unrelated reason.
+    const VICTIM_BYTE: u8 = 0xB2;
+
+    serial_println!("[spawn] Running file-handle ownership (ring 3) integration test...");
+
+    let mut skips = crate::fs::selftest::Skips::new();
+    let ready = crate::selftest_setup!(
+        skips,
+        "[spawn]",
+        "file handle ownership",
+        "no writable filesystem to stage the fixture in",
+        crate::fs::Vfs::write_file(OWN, &[OWN_BYTE]),
+        crate::fs::Vfs::write_file(VICTIM, &[VICTIM_BYTE]),
+    );
+    if !ready {
+        skips.report("[spawn]");
+        return Ok(());
+    }
+
+    // Open the victim from kernel context.  `caller_pid()` is `None` here, so
+    // `sys_fs_open` registers the handle to no process -- which is exactly the
+    // situation the gate must catch: a live, readable handle in the global
+    // table that the probe has no claim to.
+    let victim_handle = match crate::fs::handle::open(VICTIM, crate::fs::handle::OpenFlags::READ) {
+        Ok(h) => h,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: file handle ownership — could not open victim: {e:?}");
+            let _ = crate::fs::Vfs::remove(OWN);
+            let _ = crate::fs::Vfs::remove(VICTIM);
+            return Err(KernelError::InternalError);
+        }
+    };
+
+    let mut failed = 0u32;
+
+    // --- probe 1: the syscall gate -------------------------------------
+    let elf = elf::build_native_handle_ownership_test_elf(
+        OWN_NUL,
+        (OWN_NUL.len() - 1) as u32,
+        victim_handle,
+        OWN_BYTE,
+    );
+    let argv: &[&[u8]] = &[b"hownprog"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-hown",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    match spawn_process(&elf, &options) {
+        Ok(result) => {
+            crate::sched::yield_now();
+            crate::sched::yield_now();
+            let code = pcb::exit_code(result.pid);
+            thread::on_thread_exit(result.task_id);
+            pcb::destroy(result.pid);
+            match code {
+                Some(0) => {}
+                Some(1) => {
+                    failed += 1;
+                    serial_println!(
+                        "[spawn]   FAIL: file handle ownership — a process READ a file through a \
+                         handle it does not own (handle {victim_handle}). This is the \
+                         enumeration attack, not a test-harness problem."
+                    );
+                }
+                other => {
+                    failed += 1;
+                    serial_println!(
+                        "[spawn]   FAIL: file handle ownership — probe exited {other:?}; \
+                         expected 0. 2 = refused with the wrong errno (must be InvalidHandle, \
+                         so the reply is not an oracle for other processes' handles), \
+                         0xFC/0xFD/0xFE = the probe's *own* open/read failed, which means the \
+                         control never ran and a refusal would prove nothing."
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            failed += 1;
+            serial_println!("[spawn]   FAIL: file handle ownership — probe spawn failed: {e:?}");
+        }
+    }
+
+    // --- probe 2: the fd_map arm ---------------------------------------
+    // A parent pid that is not in the process table cannot own anything, so
+    // this must be refused.  If it is *accepted*, the arm is not checking.
+    let hello = elf::build_hello_elf();
+    let fd_map = [(0i32, fd_handle_type::FILE, victim_handle)];
+    let fdm_options = SpawnOptions {
+        name: "spawn-test-hown-fdmap",
+        parent: u64::MAX,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &fd_map,
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    match spawn_process(&hello, &fdm_options) {
+        Err(KernelError::InvalidHandle) => {}
+        Ok(result) => {
+            failed += 1;
+            serial_println!(
+                "[spawn]   FAIL: file handle ownership — spawn accepted an fd_map naming \
+                 handle {victim_handle}, which its claimed parent does not own; the child \
+                 was handed a duplicate of another process's open file."
+            );
+            thread::on_thread_exit(result.task_id);
+            pcb::destroy(result.pid);
+        }
+        Err(e) => {
+            failed += 1;
+            serial_println!(
+                "[spawn]   FAIL: file handle ownership — fd_map spawn refused with {e:?}, \
+                 expected InvalidHandle; a different error may mean it was rejected for an \
+                 unrelated reason and the ownership branch never ran."
+            );
+        }
+    }
+
+    // Best-effort teardown: a leftover fixture would only affect a later run
+    // of this same test, which restages unconditionally.
+    let _ = crate::fs::handle::close(victim_handle);
+    let _ = crate::fs::Vfs::remove(OWN);
+    let _ = crate::fs::Vfs::remove(VICTIM);
+
+    if failed != 0 {
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   file handle ownership (ring 3: foreign handle refused InvalidHandle, own \
+         handle still works, fd_map arm gated): OK"
     );
     Ok(())
 }

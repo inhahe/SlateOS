@@ -4507,6 +4507,201 @@ pub fn build_linux_execveat_test_elf(
     buf
 }
 
+/// Build a **native-ABI** ring-3 program that performs the file-handle
+/// enumeration attack and reports whether the kernel refused it.
+///
+/// # What this is testing
+///
+/// A native file handle is `NEXT_HANDLE.fetch_add(1)` from 1, so handle values
+/// are a machine-wide counting sequence, and `OPEN_FILES` is one global table
+/// keyed by that number. If the handle is treated as self-authorising, any
+/// process can walk 1, 2, 3… and read files it was never granted. The gate
+/// under test is `require_file_handle_owner` in `syscall::handlers`.
+///
+/// # Why ring 3, and why native rather than Linux ABI
+///
+/// The gate is a no-op in kernel context by design — `caller_pid()` is `None`
+/// for a bare kernel task, which legitimately holds unregistered handles — so
+/// a kernel-context test can only ever observe the bypass. It must also be
+/// *native* ABI: the Linux `read(2)` path goes through its own fd table, not
+/// through `sys_fs_read`, so a Linux-ABI probe never reaches the gate.
+///
+/// # Why a control probe is not optional here
+///
+/// A test that only asserts "the foreign handle was refused" passes just as
+/// happily against a kernel that refuses *everything* — including a
+/// regression that broke `SYS_FS_READ` outright, or a spawn that granted no
+/// `File` capability. So the program first opens a file of its own and reads
+/// a known byte from it. Only once that has succeeded is the refusal of the
+/// foreign handle attributable to ownership.
+///
+/// # Exit codes
+///
+/// | Exit | Meaning |
+/// |---|---|
+/// | `0` | pass — own read worked, foreign read refused with `InvalidHandle` |
+/// | `1` | **the vulnerability** — the foreign read *succeeded* |
+/// | `2` | foreign read failed, but with some error other than `InvalidHandle` |
+/// | `0xFC` | own read returned the wrong byte (fixture is not what we think) |
+/// | `0xFD` | own read did not return exactly 1 byte |
+/// | `0xFE` | own open failed — no `File` capability, or a missing fixture |
+///
+/// `1` and `2` are kept apart on purpose: `1` is a security failure, while
+/// `2` is most likely the gate returning the wrong errno, which is a
+/// correctness bug of a different kind (and an information leak — see
+/// `require_file_handle_owner` on why the answer must be `InvalidHandle`).
+///
+/// `path_nul` must be NUL-terminated. `foreign_handle` is a handle the
+/// spawning kernel context opened and did **not** register to this process.
+#[must_use]
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+pub fn build_native_handle_ownership_test_elf(
+    path_nul: &[u8],
+    path_len: u32,
+    foreign_handle: u64,
+    expect_byte: u8,
+) -> alloc::vec::Vec<u8> {
+    const SYS_EXIT: u32 = 1;
+    const SYS_FS_OPEN: u32 = 610;
+    const SYS_FS_READ: u32 = 612;
+    const OPEN_READ: u32 = 1 << 0;
+    /// `KernelError::InvalidHandle` as it arrives in `rax`.
+    const INVALID_HANDLE: i32 = -505;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 (ehdr) + 56 (one phdr)
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    /// `mov edi, imm32; mov eax, SYS_EXIT; syscall` — 12 bytes, fixed width,
+    /// which is what lets the `jns`/`je` above each one use a known rel8.
+    fn exit_with(code: &mut alloc::vec::Vec<u8>, v: u32) {
+        code.push(0xBF);
+        code.extend_from_slice(&v.to_le_bytes());
+        code.extend_from_slice(&[0xB8]);
+        code.extend_from_slice(&SYS_EXIT.to_le_bytes());
+        code.extend_from_slice(&[0x0F, 0x05]);
+    }
+
+    // --- 1. open our own file ------------------------------------------
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
+    let path_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.push(0xBE); // mov esi, path_len
+    code.extend_from_slice(&path_len.to_le_bytes());
+    code.push(0xBA); // mov edx, OpenFlags::READ
+    code.extend_from_slice(&OPEN_READ.to_le_bytes());
+    code.push(0xB8); // mov eax, SYS_FS_OPEN
+    code.extend_from_slice(&SYS_FS_OPEN.to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x79, 0x00]); // jns .have_own
+    let jns_open = code.len() - 1;
+    exit_with(&mut code, 0xFE);
+    let have_own = code.len();
+    code[jns_open] = ((have_own as isize) - (jns_open as isize + 1)) as u8;
+
+    // --- 2. read one byte through it (the control) ---------------------
+    code.extend_from_slice(&[0x48, 0x89, 0xC7]); // mov rdi, rax  (own handle)
+    code.extend_from_slice(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
+    code.push(0xBA); // mov edx, 1
+    code.extend_from_slice(&1u32.to_le_bytes());
+    code.push(0xB8); // mov eax, SYS_FS_READ
+    code.extend_from_slice(&SYS_FS_READ.to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x01]); // cmp rax, 1
+    code.extend_from_slice(&[0x74, 0x00]); // je .read_ok
+    let je_read = code.len() - 1;
+    exit_with(&mut code, 0xFD);
+    let read_ok = code.len();
+    code[je_read] = ((read_ok as isize) - (je_read as isize + 1)) as u8;
+
+    // The byte must be the one staged, or the "control succeeded" claim is
+    // about some other file and proves nothing about this one.
+    code.extend_from_slice(&[0x80, 0x3C, 0x24]); // cmp byte [rsp], imm8
+    code.push(expect_byte);
+    code.extend_from_slice(&[0x74, 0x00]); // je .byte_ok
+    let je_byte = code.len() - 1;
+    exit_with(&mut code, 0xFC);
+    let byte_ok = code.len();
+    code[je_byte] = ((byte_ok as isize) - (je_byte as isize + 1)) as u8;
+
+    // --- 3. the attack: read through a handle we do not own ------------
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, foreign_handle
+    code.extend_from_slice(&foreign_handle.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
+    code.push(0xBA); // mov edx, 1
+    code.extend_from_slice(&1u32.to_le_bytes());
+    code.push(0xB8); // mov eax, SYS_FS_READ
+    code.extend_from_slice(&SYS_FS_READ.to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // rax >= 0 means the read was allowed -- the vulnerability.
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x78, 0x00]); // js .refused
+    let js_attack = code.len() - 1;
+    exit_with(&mut code, 1);
+    let refused = code.len();
+    code[js_attack] = ((refused as isize) - (js_attack as isize + 1)) as u8;
+
+    // Refused -- but with the right errno?
+    code.extend_from_slice(&[0x48, 0x3D]); // cmp rax, imm32 (sign-extended)
+    code.extend_from_slice(&INVALID_HANDLE.to_le_bytes());
+    code.extend_from_slice(&[0x74, 0x00]); // je .pass
+    let je_errno = code.len() - 1;
+    exit_with(&mut code, 2);
+    let pass = code.len();
+    code[je_errno] = ((pass as isize) - (je_errno as isize + 1)) as u8;
+
+    exit_with(&mut code, 0);
+    code.push(0xCC); // int3 — unreachable
+
+    // --- data ----------------------------------------------------------
+    let code_len = code.len();
+    let path_off = code_offset as usize + code_len;
+    let file_size = path_off + path_nul.len();
+
+    let vaddr_of = |fo: usize| load_vaddr + (fo as u64 - code_offset);
+    let pv = vaddr_of(path_off).to_le_bytes();
+    code[path_imm..path_imm + 8].copy_from_slice(&pv);
+
+    let mut buf = alloc::vec![0u8; file_size];
+    buf[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+    buf[4] = 2; // ELFCLASS64
+    buf[5] = 1; // ELFDATA2LSB
+    buf[6] = EV_CURRENT;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr);
+    write_u64(&mut buf, 32, phdr_offset);
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    let seg_len = (file_size - code_offset as usize) as u64;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_W | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_len);
+    write_u64(&mut buf, ph + 40, seg_len);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
+    buf[path_off..path_off + path_nul.len()].copy_from_slice(path_nul);
+
+    buf
+}
+
 /// Build a **Linux-ABI** test ELF that exercises `openat2(2)` — in particular
 /// the `RESOLVE_BENEATH` containment path — end-to-end from ring 3.
 ///

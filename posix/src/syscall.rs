@@ -334,6 +334,71 @@ pub const SYS_PTY_GET_TERMIOS: u64 = 555;
 /// [`SYS_PTY_GET_TERMIOS`].
 pub const SYS_PTY_SET_TERMIOS: u64 = 556;
 
+// ---------------------------------------------------------------------------
+// Resource limits (557-558) — the kernel's per-process `Process::rlimits`
+// ---------------------------------------------------------------------------
+//
+// **557/558, not 544/545.**  `requests/b-a-native-rlimit-syscalls.md` proposed
+// the pair at 544/545 on the strength of "544-599 is entirely free"; that was
+// true when it was written and the pty block above landed in between.  Writing
+// `SYS_RLIMIT_GET = 544` here would not fail to build and would not fail at
+// run time either — it would create a pty and hand back a handle where an
+// rlimit was expected, which is the failure shape a wrong syscall number
+// always has.  The numbers came back from lane A in
+// `requests/a-b-native-rlimit-syscalls-landed.md`.
+//
+// The buffer both calls use is byte-identical to Linux's `struct rlimit64`, so
+// `crate::resource::Rlimit` (`#[repr(C)]`, two `u64`s) can be handed over as
+// itself rather than marshalled.
+
+/// Read one resource limit.  `arg0` = target pid (**`0` means the caller**),
+/// `arg1` = resource number in `0..=15` (the Linux `RLIMIT_*` numbering),
+/// `arg2` = pointer to a 16-byte `[rlim_cur: u64, rlim_max: u64]` buffer to
+/// fill.  Returns 0 or a negative `KernelError`.
+///
+/// `arg1` is **narrowed** to `u32` by the kernel rather than rejected, matching
+/// how the x86-64 ABI truncates an `unsigned int` argument: `1 << 32` names
+/// resource 0.  A probe that expects `InvalidArgument` from a huge ordinal will
+/// not get one.
+///
+/// Errors: `InvalidArgument` (null buffer, `resource >= 16`),
+/// `PermissionDenied` (any pid that is neither `0` nor the caller's own),
+/// `NoSuchProcess` (the caller named *itself* and its own PCB is gone), or a
+/// fault error if the buffer is not writable.
+///
+/// **A foreign pid is `PermissionDenied` even when no such process exists**,
+/// deliberately: answering `NoSuchProcess` for a dead pid and
+/// `PermissionDenied` for a live one would make this call a process-existence
+/// oracle for any process on the system.  Linux's `prlimit64` does distinguish
+/// them and [`crate::linux_rlimit`] keeps doing so, because reproducing Linux's
+/// observable behaviour is that layer's whole job; the native ABI is not
+/// obliged to inherit the leak.  See §723.
+pub const SYS_RLIMIT_GET: u64 = 557;
+
+/// Write one resource limit.  Arguments as for [`SYS_RLIMIT_GET`], with `arg2`
+/// pointing at the 16-byte pair to install.
+///
+/// Additional errors over the read: `InvalidArgument` if `rlim_cur >
+/// rlim_max`; `PermissionDenied` if `rlim_max` is above the existing hard
+/// limit (**every** raise is refused today, for every resource — nothing yet
+/// projects `ResourceType::ResourceLimit` into a raise permission), or if
+/// `RLIMIT_NOFILE`'s `rlim_max` is above the kernel's `MAX_FDS`.
+///
+/// The `RLIMIT_NOFILE` ceiling is absolute and is checked separately from the
+/// blanket no-raise rule, so it survives the day the blanket rule is relaxed.
+/// In particular `setrlimit(RLIMIT_NOFILE, {RLIM_INFINITY, RLIM_INFINITY})` is
+/// refused, not accepted: the kernel reads `RLIM_INFINITY` as "skip the fd
+/// check", so accepting it would switch off the only thing standing between a
+/// program and an `EMFILE` it had been told could not happen.  Daemons that
+/// lift their own NOFILE to infinity at startup must handle the refusal.
+///
+/// Gate order is **resource before pid** on both calls, so that a caller
+/// probing whether a resource number is understood gets the same answer
+/// whoever they are.  [`crate::linux_rlimit`]'s `prlimit64` keeps Linux's own
+/// order (copy-in, pid, permission, resource); the two ABIs agree on outcomes,
+/// not on which of two simultaneous errors wins.
+pub const SYS_RLIMIT_SET: u64 = 558;
+
 // The three later additions (869–871) are numbered apart from the 544–556 block
 // because they were added after it closed, not because they differ in kind.
 
@@ -1172,142 +1237,91 @@ mod tests {
 
     // -- All syscall numbers are unique --
 
+    /// Every `pub const SYS_*: u64 = <number>;` in this file, parsed out of the
+    /// file itself.
+    ///
+    /// **Derived, not listed.**  This test used to compare a hand-written array
+    /// of 123 names, while the file declared 193 constants — so 70 of them,
+    /// including the whole 544-556 pty block, were never checked against
+    /// anything.  That is the gap that made the rlimit pair's original proposed
+    /// numbers (544/545) dangerous: they collided with `SYS_PTY_CREATE` and
+    /// `SYS_PTY_WRITE_INPUT`, and nothing here would have said so.  A list of
+    /// names is exactly the artefact that stops being complete the moment
+    /// someone adds a constant without remembering it exists — which is the
+    /// same failure `scripts/check-variant-lists.py` gates elsewhere in the
+    /// tree, and it cannot gate this one because the array is not named `ALL`
+    /// and holds `u64`s rather than enum variants.
+    ///
+    /// Reading the source is not elegant, but it is the only form that cannot
+    /// drift: a constant that exists is checked because it exists.
+    fn declared_syscall_numbers() -> Vec<(String, u64)> {
+        let src = include_str!("syscall.rs");
+        let mut out = Vec::new();
+        for line in src.lines() {
+            let Some(rest) = line.strip_prefix("pub const SYS_") else {
+                continue;
+            };
+            let Some((name, value)) = rest.split_once(": u64 = ") else {
+                continue;
+            };
+            let Some(value) = value.strip_suffix(';') else {
+                continue;
+            };
+            // Only literal numbers.  A constant defined in terms of another
+            // (`SYS_A: u64 = SYS_B;`) would be a deliberate alias and must not
+            // be reported as a collision; none exist today, and if one is added
+            // the count assertion below is what will bring it to attention.
+            if let Ok(value) = value.trim().parse::<u64>() {
+                out.push((format!("SYS_{name}"), value));
+            }
+        }
+        out
+    }
+
     #[test]
     fn syscall_numbers_unique() {
-        let all_numbers: &[u64] = &[
-            SYS_EXIT,
-            SYS_TASK_ID,
-            SYS_PROCESS_ID,
-            SYS_CLOCK_MONOTONIC,
-            SYS_SLEEP,
-            SYS_CONSOLE_WRITE,
-            SYS_CONSOLE_READ_CHAR,
-            SYS_LOG_READ,
-            SYS_MMAP,
-            SYS_MUNMAP,
-            SYS_MPROTECT,
-            SYS_SCHED_SET_PROFILE,
-            SYS_PROCESS_SPAWN,
-            SYS_PROCESS_WAIT,
-            SYS_PROCESS_EXEC,
-            SYS_PROCESS_TRY_WAIT,
-            SYS_PROCESS_FORK,
-            SYS_THREAD_CREATE,
-            SYS_THREAD_EXIT,
-            SYS_THREAD_JOIN,
-            SYS_PROCESS_SPAWN_EX,
-            SYS_PROCESS_GET_INITIAL_FDS,
-            SYS_PROCESS_GET_ARGS,
-            SYS_FS_READ_FILE,
-            SYS_FS_WRITE_FILE,
-            SYS_FS_DELETE,
-            SYS_FS_LIST_DIR,
-            SYS_FS_MKDIR,
-            SYS_FS_MKDIR_MODE,
-            SYS_FS_RMDIR,
-            SYS_FS_STAT,
-            SYS_FS_LINK,
-            SYS_FS_STATVFS,
-            SYS_FS_OPEN,
-            SYS_FS_OPEN_MODE,
-            SYS_FS_CLOSE,
-            SYS_FS_READ,
-            SYS_FS_WRITE,
-            SYS_FS_SEEK,
-            SYS_FS_TRUNCATE,
-            SYS_FS_RENAME,
-            SYS_FS_FSTAT,
-            SYS_FS_DUP,
-            SYS_FS_COPY,
-            SYS_FS_APPEND,
-            SYS_FS_FTRUNCATE,
-            SYS_FS_SYMLINK,
-            SYS_FS_READLINK,
-            SYS_FS_LSTAT,
-            SYS_FS_SYNC,
-            SYS_FS_FLOCK,
-            SYS_FS_FUNLOCK,
-            SYS_FS_SEEK_DATA,
-            SYS_FS_SEEK_HOLE,
-            SYS_FS_WATCH_CREATE,
-            SYS_FS_WATCH_READ,
-            SYS_FS_WATCH_CLOSE,
-            SYS_FS_SET_TIMES,
-            SYS_FS_SET_OWNER,
-            SYS_FS_SET_PERMS,
-            SYS_FS_GET_XATTR,
-            SYS_FS_SET_XATTR,
-            SYS_FS_REMOVE_XATTR,
-            SYS_FS_LIST_XATTRS,
-            SYS_PIPE_CREATE,
-            SYS_PIPE_WRITE,
-            SYS_PIPE_READ,
-            SYS_PIPE_TRY_WRITE,
-            SYS_PIPE_TRY_READ,
-            SYS_PIPE_CLOSE,
-            SYS_PIPE_POLL,
-            SYS_PIPE_READABLE_BYTES,
-            SYS_FUTEX_WAIT,
-            SYS_FUTEX_WAKE,
-            SYS_FUTEX_LOCK_PI,
-            SYS_FUTEX_UNLOCK_PI,
-            SYS_FUTEX_WAIT_TIMEOUT,
-            SYS_EVENTFD_CREATE,
-            SYS_EVENTFD_WRITE,
-            SYS_EVENTFD_READ,
-            SYS_EVENTFD_TRY_READ,
-            SYS_EVENTFD_CLOSE,
-            SYS_EVENTFD_READ_TIMEOUT,
-            SYS_EVENTFD_WRITE_TIMEOUT,
-            SYS_EVENTFD_HAS_VALUE,
-            SYS_TCP_CONNECT,
-            SYS_TCP_SEND,
-            SYS_TCP_RECV,
-            SYS_TCP_CLOSE,
-            SYS_TCP_BIND,
-            SYS_TCP_ACCEPT,
-            SYS_TCP_CLOSE_LISTENER,
-            SYS_TCP_ABORT,
-            SYS_TCP_PEER_ADDR,
-            SYS_UDP_BIND,
-            SYS_UDP_SEND,
-            SYS_UDP_RECV,
-            SYS_UDP_CLOSE,
-            SYS_UDP_MCAST_JOIN,
-            SYS_UDP_MCAST_LEAVE,
-            SYS_UDP_CONNECT,
-            SYS_UDP_LOCAL_PORT,
-            SYS_DNS_RESOLVE,
-            SYS_DNS_REVERSE_RESOLVE,
-            SYS_NET_STAT,
-            SYS_ICMP_PING,
-            SYS_ICMP_PING_WAIT,
-            SYS_TCP_LIST,
-            SYS_TCP_LISTENER_LIST,
-            SYS_NET_IF_INFO,
-            SYS_ARP_TABLE,
-            SYS_DNS_CACHE_STATS,
-            SYS_TCP_POLL_STATUS,
-            SYS_TCP_LISTENER_READY,
-            SYS_UDP_RX_READY,
-            SYS_UDP_RX_FRONT_BYTES,
-            SYS_TCP_SHUTDOWN,
-            SYS_TCP_INFO,
-            SYS_TCP_SET_NODELAY,
-            SYS_TCP_SET_KEEPALIVE,
-            SYS_TCP_SET_KEEPALIVE_PARAMS,
-            SYS_TCP_LAST_ERROR,
-            SYS_TCP_LOCAL_PORT,
-        ];
-        for i in 0..all_numbers.len() {
-            for j in (i + 1)..all_numbers.len() {
+        let declared = declared_syscall_numbers();
+
+        // A parser that silently matched nothing would make this test vacuous
+        // and green forever.  The bound is deliberately loose — it is a
+        // liveness check on the parse, not a count of the ABI.
+        assert!(
+            declared.len() > 150,
+            "parsed only {} syscall constants out of this file; the \
+             `pub const SYS_...: u64 = <n>;` shape this test reads has changed",
+            declared.len()
+        );
+
+        for i in 0..declared.len() {
+            for j in (i + 1)..declared.len() {
+                let (ref a_name, a) = declared[i];
+                let (ref b_name, b) = declared[j];
                 assert_ne!(
-                    all_numbers[i], all_numbers[j],
-                    "syscall numbers at indices {i} and {j} must be distinct (both = {})",
-                    all_numbers[i]
+                    a, b,
+                    "{a_name} and {b_name} are both {a}; a syscall number names \
+                     one call, so the second name silently gets the first's \
+                     behaviour rather than failing to build"
                 );
             }
         }
+    }
+
+    /// The numbers lane A allocated for the rlimit pair, pinned against the
+    /// block they sit beside.
+    ///
+    /// Separate from the uniqueness sweep because uniqueness is not the
+    /// property that was nearly lost: 544/545 would have been unique *within
+    /// this file* if the pty block had not been written down here, and would
+    /// still have named the wrong kernel calls.  These assert the values
+    /// themselves, against `requests/a-b-native-rlimit-syscalls-landed.md`.
+    #[test]
+    fn rlimit_syscalls_sit_after_the_pty_block_not_on_top_of_it() {
+        assert_eq!(SYS_RLIMIT_GET, 557);
+        assert_eq!(SYS_RLIMIT_SET, 558);
+        assert_eq!(SYS_PTY_CREATE, 544);
+        assert_eq!(SYS_PTY_SET_TERMIOS, 556);
+        assert!(SYS_RLIMIT_GET > SYS_PTY_SET_TERMIOS);
+        assert!(SYS_RLIMIT_SET < SYS_PROCESS_SPAWN_EX2);
     }
 
     // -- Syscall number ranges match zone allocation --

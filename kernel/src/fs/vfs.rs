@@ -1841,7 +1841,7 @@ impl Vfs {
         // normalizes it.  This is the only place `rel`'s own `..` are
         // visible -- `normalize_path` below collapses them, and after that
         // `../base/sub` is indistinguishable from `sub`.
-        Self::beneath_step(0, rel)?;
+        Self::beneath_fragment_ok(rel)?;
 
         // Step 2: canonicalise the base.  Symlinks *in the base* are
         // followed normally (the caller reached it before asking for
@@ -1866,6 +1866,25 @@ impl Vfs {
         }
 
         Self::resolve_inner(&norm, follow_last, 0, no_symlinks, Some(&base))
+    }
+
+    /// The half of `RESOLVE_BENEATH` that is decidable without a base.
+    ///
+    /// A fragment that is absolute, or that begins by stepping above wherever
+    /// it starts, is an escape whatever directory it is measured against —
+    /// the rule is syntactic, so no base is needed to say no. This is exposed
+    /// separately so callers that hold a *descriptor* for the base can refuse
+    /// such a request **before** they translate it: the answer is already
+    /// determined, and answering it first means the reply cannot be used to
+    /// probe whether the descriptor was valid. `sys_openat_beneath` relies on
+    /// exactly that, and [`Self::resolve_beneath`] performs the same check as
+    /// its own first step, so the two cannot drift.
+    ///
+    /// Passing a fragment this accepts does not mean the walk will succeed —
+    /// a symlink met along the way may still escape, and only the full walk
+    /// can see that.
+    pub fn beneath_fragment_ok(rel: &Path) -> KernelResult<()> {
+        Self::beneath_step(0, rel).map(|_| ())
     }
 
     /// One step of the `RESOLVE_BENEATH` containment rule.

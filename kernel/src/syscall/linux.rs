@@ -31925,6 +31925,41 @@ fn sys_openat_beneath(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
     let path_ptr = args.arg1;
     let flags = args.arg2 as u32;
 
+    const MAX_REL: usize = 4096;
+    let rel_bytes = match read_user_cstr(path_ptr, MAX_REL) {
+        Ok(b) => b,
+        Err(e) => return linux_err(e),
+    };
+    if rel_bytes.is_empty() {
+        return linux_err(errno::ENOENT);
+    }
+    if rel_bytes.contains(&0) {
+        return linux_err(errno::EINVAL);
+    }
+    let rel = crate::fs::path::Path::new(&rel_bytes);
+
+    // The part of the containment rule that needs no base: an absolute
+    // fragment, or one that opens by stepping above wherever it starts.
+    // Note in particular that an absolute path is NOT quietly reinterpreted
+    // against the base, and dirfd is NOT ignored the way POSIX has `openat`
+    // ignore it -- under RESOLVE_BENEATH an absolute path is an escape by
+    // construction, and Linux returns EXDEV.
+    //
+    // This is deliberately answered BEFORE `dirfd` is looked up.  Such a
+    // request is self-contradictory on its face -- "contain me, and also
+    // here is a path that leaves" -- so no base is needed to refuse it, and
+    // refusing first means the reply cannot be used to distinguish a valid
+    // dirfd from an invalid one.  A caller told EXDEV learns nothing about
+    // the fd table.  `resolve_beneath` applies the identical check as its
+    // own first step, so this early exit cannot disagree with it; the only
+    // difference is that this one happens sooner.
+    //
+    // CrossDevice is the sole error the check can produce, so the mapping
+    // is exact rather than a lossy catch-all.
+    if crate::fs::Vfs::beneath_fragment_ok(rel).is_err() {
+        return linux_err(errno::EXDEV);
+    }
+
     // The base.  `AT_FDCWD` means the process working directory, as it does
     // for every other `*at` call.
     let base = if dirfd == AT_FDCWD {
@@ -31942,34 +31977,20 @@ fn sys_openat_beneath(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
         }
     };
 
-    const MAX_REL: usize = 4096;
-    let rel_bytes = match read_user_cstr(path_ptr, MAX_REL) {
-        Ok(b) => b,
-        Err(e) => return linux_err(e),
-    };
-    if rel_bytes.is_empty() {
-        return linux_err(errno::ENOENT);
-    }
-    if rel_bytes.contains(&0) {
-        return linux_err(errno::EINVAL);
-    }
-    let rel = crate::fs::path::Path::new(&rel_bytes);
-
-    // An absolute path is NOT quietly reinterpreted against the base, and
-    // dirfd is NOT ignored the way POSIX has `openat` ignore it: under
-    // RESOLVE_BENEATH an absolute path is an escape by construction, and
-    // Linux returns EXDEV.  `resolve_beneath` refuses it for us, but doing
-    // it here keeps the reason next to the POSIX rule it departs from.
-    if rel.is_absolute() {
-        return linux_err(errno::EXDEV);
-    }
-
     // The joined path is needed only so the synthetic-device interceptors
     // in the installer see the same string they would for a plain openat;
     // the actual resolution uses `base` and `rel` separately.
     let base_bytes = base.as_bytes();
-    let mut combined: alloc::vec::Vec<u8> =
-        alloc::vec::Vec::with_capacity(base_bytes.len() + 1 + rel_bytes.len());
+    // Saturating because this is a capacity *hint*: both operands are bounded
+    // (base by PATH_MAX, rel by MAX_REL), so it cannot really overflow, and if
+    // it ever could the right answer is a short allocation that grows, not a
+    // panic on a path an unprivileged caller controls.
+    let mut combined: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(
+        base_bytes
+            .len()
+            .saturating_add(1)
+            .saturating_add(rel_bytes.len()),
+    );
     combined.extend_from_slice(base_bytes);
     if base_bytes.last().copied() != Some(b'/') {
         combined.push(b'/');
@@ -85107,9 +85128,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: openat2 RESOLVE_CACHED not EAGAIN");
                 return Err(KernelError::InternalError);
             }
-            // openat2 with RESOLVE_BENEATH (bit 3) -> -EXDEV.  Without
-            // chroot-style tracking we can't enforce path-escape
-            // prevention safely; refuse rather than silently allow.
+            // openat2 with RESOLVE_BENEATH (bit 3) and an ABSOLUTE path ->
+            // -EXDEV.  This assertion predates the feature and still holds,
+            // but for a different reason than it used to: it was "we cannot
+            // enforce containment, so refuse everything", and it is now
+            // "containment is enforced, and an absolute path is an escape by
+            // construction."  Worth restating rather than leaving, because
+            // an unchanged assertion with a stale reason is how a test comes
+            // to describe a kernel that no longer exists.
+            //
+            // Note `arg0: 0` -- an arbitrary, here-invalid dirfd.  The reply
+            // is EXDEV and not EBADF because the absolute path is refused
+            // before dirfd is consulted, which is what stops the answer
+            // being an oracle for the caller's fd table.
             let mut how_beneath = [0u8; 24];
             how_beneath[16] = 0x08; // resolve = RESOLVE_BENEATH
             let how_beneath_ptr = how_beneath.as_ptr() as u64;
@@ -85122,7 +85153,34 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg5: 0,
             };
             if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::EXDEV) {
-                serial_println!("[syscall/linux]   FAIL: openat2 RESOLVE_BENEATH not EXDEV");
+                serial_println!(
+                    "[syscall/linux]   FAIL: openat2 RESOLVE_BENEATH absolute path not EXDEV"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // A RELATIVE path that escapes is refused too -- the case the
+            // old blanket refusal could not distinguish from the one above,
+            // and the one the feature actually exists to catch.
+            let esc: &[u8] = b"../escape\0";
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: esc.as_ptr() as u64,
+                arg2: how_beneath_ptr,
+                arg3: 24,
+                arg4: 0,
+                arg5: 0,
+            };
+            // `arg0: 0` is not a directory in kernel context, so a
+            // *contained* relative path cannot be exercised from here -- it
+            // would fail the dirfd lookup and prove nothing.  That is why
+            // this test asserts only the two refusals, and the allow rows
+            // (including the counter-intuitive ones: `deep/../sub` allowed,
+            // `$PWD/sub` refused) live in `fs::vfs`'s own self-test against
+            // real files.  Between them the rule is covered end to end.
+            if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::EXDEV) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: openat2 RESOLVE_BENEATH relative escape not EXDEV"
+                );
                 return Err(KernelError::InternalError);
             }
             // openat2 with unknown resolve bit (bit 6) -> -EINVAL.

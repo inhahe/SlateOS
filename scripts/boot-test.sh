@@ -3617,10 +3617,13 @@ check_shellcheck
 
 # Run the tooling's own test suites.
 #
-# WHY THIS GATE EXISTS.  `scripts/` holds fourteen `test-*.py` suites -- around
-# 400 assertions covering the boot harness itself, the two history loaders, the
-# canary loader, the sysroot fixtures, the space reclaimer, the source digest --
-# and until 2026-08-29 **nothing ran any of them**.  They ran when an agent
+# WHY THIS GATE EXISTS.  `scripts/` holds a `test-*.py` suite for most of the
+# tooling -- the boot harness itself, the two history loaders, the canary
+# loader, the sysroot fixtures, the space reclaimer, the source digest, the
+# open-request report -- and until 2026-08-29 **nothing ran any of them**.  (No
+# count here on purpose: the glob below is the list, and a number in a comment
+# is a second list that goes stale in silence.  This one had, reading
+# "fourteen" while sixteen sat on disk.)  They ran when an agent
 # happened to remember, which for most of them was the day they were written.
 # That is the same failure this file's other gates exist to prevent, one level
 # up: a suite that is not run is not a test, it is a comment that takes an hour
@@ -3628,9 +3631,11 @@ check_shellcheck
 # these scripts *are* the harness -- a regression in `boot-history.py` corrupts
 # the record of every boot, including the ones that would have shown it.
 #
-# WHY IT IS AFFORDABLE.  Measured, not assumed: all fourteen together take ~95 s
-# (the slowest, `test-canary-load.py`, is 31 s), against a boot test that runs
-# 900-1200 s.  It is also the cheapest possible place to spend it -- these fail
+# WHY IT IS AFFORDABLE.  Measured, not assumed: on 2026-08-29 the fourteen
+# suites that existed then took ~95 s together (the slowest,
+# `test-canary-load.py`, is 31 s), against a boot test that runs 900-1200 s.
+# The figure is dated because it is a measurement; it is the ratio that is the
+# argument, and a suite would have to be minutes long to change it.  It is also the cheapest possible place to spend it -- these fail
 # in seconds and before the build, so a broken harness stops the run instead of
 # corrupting its output an hour later.
 #

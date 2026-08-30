@@ -487,8 +487,18 @@ def run(args):
     print(f"=== load controller ready: {args.spinners} spinner(s), "
           f"pids {' '.join(str(w.pid) for w in workers)} ===", flush=True)
     if args.ready_file:
-        with open(args.ready_file, "w", encoding="utf-8") as handle:
+        # Write-then-rename, because the reader waits on this path *existing*.
+        # `open(path, "w")` publishes the name before the content, so a reader
+        # polling for the file can open it in the gap and read nothing --
+        # which is not a hang or a crash but an empty pid list, i.e. a
+        # successful-looking answer that is wrong.  `os.replace` is atomic on
+        # both POSIX and Windows, so the path is either absent or complete.
+        # Seen as a ~1-in-20 flake in `scripts/test-canary-load.py`
+        # ("spinner pids were published: got 0, want 2").
+        tmp = f"{args.ready_file}.tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
             handle.write(" ".join(str(worker.pid) for worker in workers))
+        os.replace(tmp, args.ready_file)
 
     tail = SerialTail(args.serial)
     watcher = Watcher()

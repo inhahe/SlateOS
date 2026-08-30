@@ -54,7 +54,9 @@ import inspect
 import os
 import re
 import sys
-import types
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import srcload  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "open-requests.py")
@@ -105,14 +107,13 @@ def load_module(path=SCRIPT, name="openrequests"):
     small, but a suite that can silently validate the wrong bytes is exactly the
     failure this file's docstring is about, only pointed at itself. `compile()`
     on freshly-read text has no cache to be stale.
+
+    The fix was written here first, then moved to `scripts/srcload.py` when it
+    turned out all fourteen suites in this directory had the same defect. This
+    wrapper stays because the suite loads a second module in one of its tests
+    and reads better naming what it does.
     """
-    with open(path, encoding="utf-8") as fh:
-        source = fh.read()
-    module = types.ModuleType(name)
-    module.__file__ = path
-    sys.modules[name] = module
-    exec(compile(source, path, "exec"), module.__dict__)  # noqa: S102
-    return module
+    return srcload.load(path, name)
 
 
 def check(label, got, want):

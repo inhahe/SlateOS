@@ -29,13 +29,15 @@ reader nothing about which one they hit.
 
 from __future__ import annotations
 
-import importlib.util
 import inspect
 import json
 import os
 import random
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import srcload  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "boot-history.py")
@@ -46,17 +48,18 @@ _FAILURES: list[str] = []
 def load_module():
     """Import boot-history.py by path (its name is not a valid identifier).
 
-    Registered in `sys.modules` before execution: `@dataclass` resolves the
-    defining module by name while the class body runs, and an unregistered
-    module makes that lookup return None.
+    Loaded through `srcload` rather than `importlib`: a `SourceFileLoader`
+    consults `__pycache__`, whose staleness check is `(mtime, size)` at
+    one-second resolution, so two same-size writes inside one second leave the
+    second one invisible and the suite validates bytecode that is not on disk.
+    That has actually happened here. See `scripts/srcload.py`.
+
+    `srcload` also registers the module before running its body, which this
+    file needs: `@dataclass` resolves the defining module by name while the
+    class body runs, and an unregistered module makes that lookup return
+    None.
     """
-    spec = importlib.util.spec_from_file_location("boot_history", SCRIPT)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {SCRIPT}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["boot_history"] = module
-    spec.loader.exec_module(module)
-    return module
+    return srcload.load(SCRIPT, "boot_history")
 
 
 def check(label, got, want):

@@ -29,7 +29,6 @@ from the source, not copied here -- against a scratch git repository.
 
 from __future__ import annotations
 
-import importlib.util
 import inspect
 import os
 import shutil
@@ -42,6 +41,7 @@ BOOT_TEST = os.path.join(REPO_ROOT, "scripts", "boot-test.sh")
 
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 import gitenv  # noqa: E402
+import srcload  # noqa: E402
 
 # The fixtures below are throwaway repositories picked with `-C` and `cwd=`.
 # Neither beats an inherited `GIT_DIR`, which git exports into hooks,
@@ -72,20 +72,20 @@ def check(label, got, want):
 
 
 def load_script(path):
-    """Import a `scripts/*.py` by path (their names are not identifiers)."""
-    name = os.path.basename(path).replace("-", "_").removesuffix(".py")
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    # Registered before execution because a module defining `@dataclass` types
-    # is looked up by name in `sys.modules` while its own body is still running
-    # (dataclasses resolves annotations against the defining module). Skipping
-    # this raises an opaque `'NoneType' object has no attribute '__dict__'`
-    # from inside dataclasses.py, which says nothing about the real cause.
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    """Import a `scripts/*.py` by path (their names are not identifiers).
+
+    Loaded through `srcload` rather than `importlib`: a `SourceFileLoader`
+    consults `__pycache__`, whose staleness check is `(mtime, size)` at
+    one-second resolution, so two same-size writes inside one second leave the
+    second one invisible and the suite validates bytecode that is not on disk.
+    That has actually happened here. See `scripts/srcload.py`.
+
+    `srcload` derives the same name this used to derive, and registers the
+    module before running its body -- which both of this function's callers
+    need, because they define `@dataclass` types and dataclasses looks the
+    defining module up by name while the class body is still executing.
+    """
+    return srcload.load(path)
 
 
 def extract_dirty_check(source=None):

@@ -182,7 +182,15 @@ const SAFE_NOT_FIRST: &[u8] = b"#~";
 const SAFE_UNLESS_ALONE: &[u8] = b"{}";
 
 /// Bytes that may sit inside the `"..."` form.
-const DQ_SAFE: &[u8] = b" %'+,-.0123456789:@ABCDEFGHIJKLMNOPQRSTUVWXYZ]_\
+///
+/// `/` belongs here, and its absence was a live bug: `rm -rv` on a tree
+/// holding `it's` printed `removed 'tree/it'\''s'` where GNU prints
+/// `removed "tree/it's"`. It went unnoticed because `scripts/quote-probe.py`
+/// skipped `/` when sweeping the file-name styles, so no measured row ever
+/// held both a separator and a single quote — the one shape that can tell the
+/// two renderings apart. The skip is gone and the fixture now pins
+/// `"tree/it's"`.
+const DQ_SAFE: &[u8] = b" %'+,-./0123456789:@ABCDEFGHIJKLMNOPQRSTUVWXYZ]_\
                          abcdefghijklmnopqrstuvwxyz";
 
 /// Allowed inside `"..."` too — but only as the *first* byte, which is the
@@ -1529,6 +1537,13 @@ mod tests {
         assert_eq!(quotef(b"it's"), "\"it's\"");
         assert_eq!(quotef(b"'"), "\"'\"");
         assert_eq!(quotef(b"~a'z"), "\"~a'z\"");
+        // A path separator does not spoil the double-quoted form. This is the
+        // shape `rm -rv` produces on a tree holding `it's`, and the one the
+        // probe used to skip; see [`DQ_SAFE`].
+        assert_eq!(quotef(b"tree/it's"), "\"tree/it's\"");
+        assert_eq!(quoteaf(b"tree/it's"), "\"tree/it's\"");
+        assert_eq!(quotef(b"/it's"), "\"/it's\"");
+        assert_eq!(quotef(b"it's/"), "\"it's/\"");
         // ...but not once something appears that a double quote would not
         // protect.
         assert_eq!(quotef(b"a'z$"), r"'a'\''z$'");

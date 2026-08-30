@@ -19,7 +19,7 @@
 //!
 //! | What it did | What GNU does |
 //! |---|---|
-//! | discarded the adjustment | `nice(adjustment)` |
+//! | discarded the adjustment | `setpriority(PRIO_PROCESS, 0, current + adjustment)` |
 //! | `Command::status()` — spawn and wait | `execvp` — *become* the command |
 //! | `-n abc` silently meant `-n 10` | `nice: invalid adjustment ‘abc’`, 125 |
 //! | no `--help`/`--version` | both, and they win over a bad adjustment |
@@ -55,6 +55,48 @@
 //! because the adjustment string is everything after the *first* dash. `--` is
 //! not caught by it, since the character after the second dash is the
 //! terminator rather than a digit.
+//!
+//! # `nice.c` calls `setpriority`, not `nice` — and which one it is, is visible
+//!
+//! `nice.c` looks like it calls `nice(2)`: it opens with
+//!
+//! ```text
+//! #if HAVE_NICE
+//! # define GET_NICENESS() nice (0)
+//! #else
+//! # define GET_NICENESS() getpriority (PRIO_PROCESS, 0)
+//! #endif
+//! ```
+//!
+//! and sets the niceness with `nice (adjustment)` under the same `#if`. That
+//! arm is **dead on every glibc system**, because `configure.ac` only asks
+//! whether `nice` exists when three-argument `setpriority` does *not*:
+//!
+//! ```text
+//! if test $utils_cv_func_setpriority = no; then
+//!   AC_CHECK_FUNCS([nice])
+//! fi
+//! ```
+//!
+//! `setpriority` exists on glibc, so `AC_CHECK_FUNCS([nice])` never runs,
+//! `HAVE_NICE` is never defined, and the `#else` — `getpriority` then
+//! `setpriority` — is what ships. This is not a distinction without a
+//! difference: glibc's `nice()` is itself `getpriority` + `setpriority` with
+//! **`EACCES` rewritten to `EPERM`** on the way out, so the two spellings
+//! disagree in the one place a user sees:
+//!
+//! ```text
+//! nice(-5)                      -> -1, errno 1  Operation not permitted
+//! setpriority(PRIO_PROCESS,0,n) -> -1, errno 13 Permission denied
+//! ```
+//!
+//! We called `nice()` and so printed `cannot set niceness: Operation not
+//! permitted` where GNU prints `Permission denied` — nine differences in
+//! `scripts/nice-diff.sh`, on every case that lowers the niceness without the
+//! privilege to do so. Hence [`imp::set_niceness`] takes an absolute niceness
+//! and the caller reads the current one first, exactly as the surviving arm
+//! does. Both errnos are `PermissionDenied` to Rust, so only the rendered
+//! string moved; the warning-versus-fatal split below is unaffected.
 //!
 //! # A refused niceness is a warning; an undeliverable warning is fatal
 //!
@@ -245,7 +287,27 @@ fn run(args: &[OsString], out: &mut Stream, err: &mut Stream) -> u8 {
         };
     }
 
-    match imp::set_niceness(adjustment.unwrap_or(DEFAULT_ADJUSTMENT)) {
+    // Upstream reads the niceness back before setting it, because the call it
+    // sets with takes an absolute value rather than an adjustment. A failure
+    // here is fatal and carries its own message — unlike the refusal below,
+    // which is only a warning.
+    let current = match imp::get_niceness() {
+        Ok(niceness) => niceness,
+        Err(e) => {
+            return report(
+                err,
+                &format!("cannot get niceness: {}", strerror(&e)),
+                NICE_FAILURE,
+            );
+        }
+    };
+    // `saturating_add` cannot bite: the adjustment is clamped to ±39 and the
+    // niceness to −20..=19, so the sum is nowhere near the edge of an `i32`.
+    // It is here because the alternative is an overflow panic in a binary that
+    // must never panic on OS-supplied data.
+    let target = current.saturating_add(adjustment.unwrap_or(DEFAULT_ADJUSTMENT));
+
+    match imp::set_niceness(target) {
         Ok(()) => {}
         // Refusal is a warning and the command still runs; anything else is
         // fatal. See the module docs.
@@ -473,8 +535,8 @@ mod imp {
     use std::process::Command;
 
     unsafe extern "C" {
-        fn nice(inc: i32) -> i32;
         fn getpriority(which: i32, who: u32) -> i32;
+        fn setpriority(which: i32, who: u32, prio: i32) -> i32;
         fn __errno_location() -> *mut i32;
     }
 
@@ -520,21 +582,25 @@ mod imp {
         Ok(value)
     }
 
-    /// Add `adjustment` to the current niceness.
+    /// Set the niceness to `niceness` outright — upstream's
+    /// `setpriority (PRIO_PROCESS, 0, ...)`.
+    ///
+    /// An *absolute* value rather than an adjustment, because that is the call
+    /// upstream actually makes; see the module docs on why the `nice(2)` arm of
+    /// `nice.c` is dead code on glibc, and what the difference is worth.
     ///
     /// # Errors
     ///
-    /// `EACCES`/`EPERM` when the caller may not raise its own priority — which
-    /// the caller treats as a warning rather than a refusal — or anything else
-    /// `nice(2)` reports.
-    pub fn set_niceness(adjustment: i32) -> io::Result<()> {
-        clear_errno();
-        // SAFETY: `nice` takes no pointers and only alters this process's own
-        // scheduling priority.
-        let value = unsafe { nice(adjustment) };
-        let e = errno();
-        if value == -1 && e != 0 {
-            return Err(io::Error::from_raw_os_error(e));
+    /// `EACCES` when the caller may not raise its own priority — which the
+    /// caller treats as a warning rather than a refusal — or anything else
+    /// `setpriority(2)` reports.
+    pub fn set_niceness(niceness: i32) -> io::Result<()> {
+        // Unlike `getpriority`, this one cannot return −1 as a value, so the
+        // clear-errno idiom is unnecessary: a −1 return *is* the failure.
+        // SAFETY: `setpriority` takes no pointers and only alters this
+        // process's own scheduling priority; `0` means "this process".
+        if unsafe { setpriority(PRIO_PROCESS, 0, niceness) } != 0 {
+            return Err(io::Error::from_raw_os_error(errno()));
         }
         Ok(())
     }
@@ -561,7 +627,7 @@ mod imp {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 
-    pub fn set_niceness(_adjustment: i32) -> io::Result<()> {
+    pub fn set_niceness(_niceness: i32) -> io::Result<()> {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 

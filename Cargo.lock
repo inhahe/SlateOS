@@ -14821,6 +14821,8 @@ version = "0.1.0"
 name = "zip"
 version = "0.1.0"
 dependencies = [
+ "crc32",
+ "deflate",
  "quoting",
 ]
 

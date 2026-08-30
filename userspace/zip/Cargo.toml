@@ -16,5 +16,12 @@ quoting = { path = "../quoting" }
 # verifies against nothing.
 crc32 = { path = "../../crc32" }
 
+# DEFLATE (method 8), the only compressed method ZIP entries use here.
+# `inflate_limited` is the reason this is a dependency rather than a local
+# decoder: it takes the output ceiling as a parameter, so an entry that
+# expands past the size the central directory declares is refused at that
+# byte instead of after the expansion is already in memory.
+deflate = { path = "../../deflate" }
+
 [lints]
 workspace = true

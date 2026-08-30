@@ -14,9 +14,22 @@
 //! - Central directory entries (signature 0x02014b50)
 //! - End of central directory record (signature 0x06054b50)
 //! - Compression methods: Stored (0) and DEFLATE (8)
-//! - CRC32 checksums with standard polynomial 0xEDB88320
-//! - DEFLATE: LZ77 + fixed Huffman encoding; full decompression including
-//!   stored, fixed, and dynamic Huffman blocks
+//! - CRC32 checksums with standard polynomial 0xEDB88320, from the `crc32`
+//!   crate (the reflected-IEEE one PKZIP specifies, not CRC32C)
+//! - Compression methods: Stored (0) and DEFLATE (8)
+//!
+//! # Where DEFLATE lives
+//!
+//! Decompression is [`deflate::inflate_limited`]. It is not implemented here,
+//! and the `_limited` half is the reason it is that call and not `inflate`:
+//! an entry is decoded under a ceiling equal to the size its central
+//! directory declares, so an archive that lies about how far it expands is
+//! refused at the byte that exceeds the claim rather than after the expansion
+//! has been allocated.
+//!
+//! Compression is still local (`deflate_compress`), because `zip` accepts
+//! `-0`..`-9` and the crate's `deflate()` takes no level. See
+//! `requests/b-a-deflate-cannot-express-a-compression-level.md`.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
@@ -319,359 +332,30 @@ impl<W: Write> BitWriter<W> {
 }
 
 // ============================================================================
-// Bit reader (LSB-first)
+// DEFLATE decompressor: see the `deflate` crate
 // ============================================================================
-
-struct BitReader<'a> {
-    data: &'a [u8],
-    pos: usize,
-    buf: u32,
-    bits: u32,
-}
-
-impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self {
-            data,
-            pos: 0,
-            buf: 0,
-            bits: 0,
-        }
-    }
-
-    fn refill(&mut self) -> Result<(), String> {
-        if self.pos >= self.data.len() {
-            return Err("deflate: unexpected end of input".to_string());
-        }
-        self.buf |= u32::from(self.data[self.pos]) << self.bits;
-        self.pos += 1;
-        self.bits += 8;
-        Ok(())
-    }
-
-    fn read_bits(&mut self, n: u32) -> Result<u32, String> {
-        while self.bits < n {
-            self.refill()?;
-        }
-        let val = self.buf & ((1u32 << n) - 1);
-        self.buf >>= n;
-        self.bits -= n;
-        Ok(val)
-    }
-
-    fn align_to_byte(&mut self) {
-        let waste = self.bits % 8;
-        self.buf >>= waste;
-        self.bits -= waste;
-    }
-
-    fn read_u16_le_aligned(&mut self) -> Result<u16, String> {
-        self.align_to_byte();
-        let lo = self.read_bits(8)?;
-        let hi = self.read_bits(8)?;
-        Ok((lo | (hi << 8)) as u16)
-    }
-}
-
-// ============================================================================
-// Dynamic Huffman decoder
-// ============================================================================
-
-struct HuffmanTable {
-    counts: [u16; 16],
-    symbols: Vec<u16>,
-    first_code: [u32; 16],
-    first_sym: [u32; 16],
-    max_len: u32,
-}
-
-impl HuffmanTable {
-    fn from_lengths(lengths: &[u8]) -> Result<Self, String> {
-        let mut counts = [0u16; 16];
-        for &l in lengths {
-            if l > 0 {
-                counts[l as usize] = counts[l as usize]
-                    .checked_add(1)
-                    .ok_or_else(|| "huffman: too many symbols at one length".to_string())?;
-            }
-        }
-
-        let mut first_code = [0u32; 16];
-        let mut code: u32 = 0;
-        for bits in 1..16 {
-            code = (code + u32::from(counts[bits - 1])) << 1;
-            first_code[bits] = code;
-        }
-
-        let mut first_sym = [0u32; 16];
-        let mut pos: u32 = 0;
-        for bits in 1..16 {
-            first_sym[bits] = pos;
-            pos += u32::from(counts[bits]);
-        }
-        let total_syms = pos as usize;
-
-        let mut symbols = vec![0u16; total_syms];
-        let mut offsets = first_sym;
-        for (sym, &l) in lengths.iter().enumerate() {
-            if l > 0 {
-                let idx = offsets[l as usize] as usize;
-                if idx < total_syms {
-                    symbols[idx] = sym as u16;
-                }
-                offsets[l as usize] += 1;
-            }
-        }
-
-        let max_len = lengths.iter().copied().fold(0u8, u8::max) as u32;
-
-        Ok(HuffmanTable {
-            counts,
-            symbols,
-            first_code,
-            first_sym,
-            max_len,
-        })
-    }
-
-    fn decode(&self, reader: &mut BitReader<'_>) -> Result<u16, String> {
-        let mut code: u32 = 0;
-        for bits in 1..=self.max_len {
-            let b = reader.read_bits(1)?;
-            code = (code << 1) | b;
-            let count = u32::from(self.counts[bits as usize]);
-            let f = self.first_code[bits as usize];
-            if count > 0 && code >= f && code < f + count {
-                let idx = (self.first_sym[bits as usize] + (code - f)) as usize;
-                return self
-                    .symbols
-                    .get(idx)
-                    .copied()
-                    .ok_or_else(|| "huffman: symbol index out of range".to_string());
-            }
-        }
-        Err("huffman: no symbol found".to_string())
-    }
-}
-
-fn fixed_litlen_table() -> Result<HuffmanTable, String> {
-    let mut lengths = [0u8; 288];
-    for item in &mut lengths[0..=143] {
-        *item = 8;
-    }
-    for item in &mut lengths[144..=255] {
-        *item = 9;
-    }
-    for item in &mut lengths[256..=279] {
-        *item = 7;
-    }
-    for item in &mut lengths[280..=287] {
-        *item = 8;
-    }
-    HuffmanTable::from_lengths(&lengths)
-}
-
-fn fixed_dist_table() -> Result<HuffmanTable, String> {
-    HuffmanTable::from_lengths(&[5u8; 32])
-}
-
-// ============================================================================
-// DEFLATE decompressor
-// ============================================================================
-
-fn deflate_decompress(reader: &mut BitReader<'_>, output: &mut Vec<u8>) -> Result<(), String> {
-    loop {
-        let bfinal = reader
-            .read_bits(1)
-            .map_err(|e| format!("deflate: BFINAL: {e}"))?;
-        let btype = reader
-            .read_bits(2)
-            .map_err(|e| format!("deflate: BTYPE: {e}"))?;
-
-        match btype {
-            0 => {
-                // Stored block.
-                let len = reader
-                    .read_u16_le_aligned()
-                    .map_err(|e| format!("deflate: stored LEN: {e}"))?
-                    as usize;
-                let nlen = reader
-                    .read_u16_le_aligned()
-                    .map_err(|e| format!("deflate: stored NLEN: {e}"))?
-                    as usize;
-                if (len ^ nlen) != 0xFFFF {
-                    return Err(format!(
-                        "deflate: stored block LEN/NLEN mismatch ({len:#x} ^ {nlen:#x})"
-                    ));
-                }
-                // Drain buffered bits, then copy from raw slice.
-                let start = output.len();
-                output.resize(start + len, 0);
-                let mut i = start;
-                while reader.bits >= 8 && i < start + len {
-                    output[i] = (reader.buf & 0xFF) as u8;
-                    reader.buf >>= 8;
-                    reader.bits -= 8;
-                    i += 1;
-                }
-                let remaining = start + len - i;
-                if remaining > 0 {
-                    let end = reader.pos + remaining;
-                    if end > reader.data.len() {
-                        return Err("deflate: stored block data truncated".to_string());
-                    }
-                    output[i..start + len].copy_from_slice(&reader.data[reader.pos..end]);
-                    reader.pos = end;
-                }
-            }
-            1 => {
-                let litlen = fixed_litlen_table()
-                    .map_err(|e| format!("deflate: fixed litlen table: {e}"))?;
-                let dist =
-                    fixed_dist_table().map_err(|e| format!("deflate: fixed dist table: {e}"))?;
-                decode_huffman_block(reader, output, &litlen, &dist)
-                    .map_err(|e| format!("deflate: fixed block: {e}"))?;
-            }
-            2 => {
-                let (litlen, dist) = decode_dynamic_headers(reader)
-                    .map_err(|e| format!("deflate: dynamic header: {e}"))?;
-                decode_huffman_block(reader, output, &litlen, &dist)
-                    .map_err(|e| format!("deflate: dynamic block: {e}"))?;
-            }
-            _ => return Err(format!("deflate: reserved BTYPE {btype}")),
-        }
-
-        if bfinal == 1 {
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn decode_huffman_block(
-    reader: &mut BitReader<'_>,
-    output: &mut Vec<u8>,
-    litlen: &HuffmanTable,
-    dist: &HuffmanTable,
-) -> Result<(), String> {
-    loop {
-        let sym = litlen.decode(reader)?;
-        match sym {
-            0..=255 => output.push(sym as u8),
-            256 => break, // end of block
-            257..=285 => {
-                let lc = (sym - 257) as usize;
-                if lc >= LENGTH_TABLE.len() {
-                    return Err(format!("deflate: length code {lc} out of range"));
-                }
-                let (base_len, extra_bits) = LENGTH_TABLE[lc];
-                let extra = if extra_bits > 0 {
-                    reader.read_bits(u32::from(extra_bits))? as u16
-                } else {
-                    0
-                };
-                let match_len = (base_len + extra) as usize;
-
-                let dc = dist.decode(reader)? as usize;
-                if dc >= DISTANCE_TABLE.len() {
-                    return Err(format!("deflate: distance code {dc} out of range"));
-                }
-                let (base_dist, extra_dbits) = DISTANCE_TABLE[dc];
-                let dist_extra = if extra_dbits > 0 {
-                    reader.read_bits(u32::from(extra_dbits))? as u16
-                } else {
-                    0
-                };
-                let match_dist = (base_dist + dist_extra) as usize;
-
-                if match_dist > output.len() {
-                    return Err(format!(
-                        "deflate: back-ref dist {match_dist} > output len {}",
-                        output.len()
-                    ));
-                }
-                let copy_start = output.len() - match_dist;
-                for i in 0..match_len {
-                    let b = output[copy_start + (i % match_dist)];
-                    output.push(b);
-                }
-            }
-            _ => return Err(format!("deflate: invalid litlen symbol {sym}")),
-        }
-    }
-    Ok(())
-}
-
-fn decode_dynamic_headers(
-    reader: &mut BitReader<'_>,
-) -> Result<(HuffmanTable, HuffmanTable), String> {
-    const CLEN_ORDER: [usize; 19] = [
-        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
-    ];
-
-    let hlit = reader.read_bits(5)? as usize + 257;
-    let hdist = reader.read_bits(5)? as usize + 1;
-    let hclen = reader.read_bits(4)? as usize + 4;
-
-    let mut clen_lengths = [0u8; 19];
-    for i in 0..hclen {
-        clen_lengths[CLEN_ORDER[i]] = reader.read_bits(3)? as u8;
-    }
-    let clen_table = HuffmanTable::from_lengths(&clen_lengths)?;
-
-    let total = hlit + hdist;
-    let mut lengths = vec![0u8; total];
-    let mut i = 0;
-    while i < total {
-        let sym = clen_table.decode(reader)?;
-        match sym {
-            0..=15 => {
-                lengths[i] = sym as u8;
-                i += 1;
-            }
-            16 => {
-                if i == 0 {
-                    return Err("deflate: RLE code 16 at start".to_string());
-                }
-                let prev = lengths[i - 1];
-                let repeat = reader.read_bits(2)? as usize + 3;
-                for _ in 0..repeat {
-                    if i >= total {
-                        break;
-                    }
-                    lengths[i] = prev;
-                    i += 1;
-                }
-            }
-            17 => {
-                let repeat = reader.read_bits(3)? as usize + 3;
-                for _ in 0..repeat {
-                    if i >= total {
-                        break;
-                    }
-                    lengths[i] = 0;
-                    i += 1;
-                }
-            }
-            18 => {
-                let repeat = reader.read_bits(7)? as usize + 11;
-                for _ in 0..repeat {
-                    if i >= total {
-                        break;
-                    }
-                    lengths[i] = 0;
-                    i += 1;
-                }
-            }
-            _ => return Err(format!("deflate: invalid clen symbol {sym}")),
-        }
-    }
-
-    let litlen_table = HuffmanTable::from_lengths(&lengths[..hlit])?;
-    let dist_table = HuffmanTable::from_lengths(&lengths[hlit..])?;
-    Ok((litlen_table, dist_table))
-}
-
+//
+// This file used to carry its own: a `BitReader`, a canonical-Huffman decoder,
+// and `deflate_decompress` / `decode_huffman_block` / `decode_dynamic_headers`
+// -- about 350 lines, and the tree's third independent implementation of
+// RFC 1951. It is now `deflate::inflate_limited`, per
+// requests/a-b-userspace-zip-carries-a-third-deflate-and-a-second-zip-parser.md.
+//
+// The deletion fixed a live bug rather than merely removing duplication, which
+// is the part worth recording. The decoder that was here grew its output
+// `Vec` with no ceiling, and the only thing that would have noticed a stream
+// expanding beyond the size the archive declared was the length comparison in
+// `zip_extract_entry` -- which runs *after* decompression returns. So a
+// 40 KiB entry claiming to hold 300 bytes was decompressed in full, all of it
+// resident, and only then rejected: the check was real but it was on the far
+// side of the allocation it was supposed to prevent. Lane A found the same
+// hole in the kernel's copy while promoting it to `ziparchive`, which is how
+// we knew to look here.
+//
+// `inflate_limited` takes the cap as a parameter and refuses at the byte that
+// would exceed it, so the entry's declared `uncompressed_size` -- a number we
+// have from the central directory before decoding starts -- is now an
+// enforced ceiling instead of an after-the-fact assertion.
 // ============================================================================
 // DEFLATE compressor (LZ77 + fixed Huffman)
 // ============================================================================
@@ -1076,14 +760,31 @@ fn zip_read_local_data<'a>(data: &'a [u8], entry: &ZipEntry) -> Result<&'a [u8],
 fn zip_extract_entry(data: &[u8], entry: &ZipEntry) -> Result<Vec<u8>, String> {
     let compressed = zip_read_local_data(data, entry)?;
 
+    let declared = entry.uncompressed_size as usize;
+
     let output = match entry.method {
+        // Stored entries cannot expand: the bytes are already the output, and
+        // `zip_read_local_data` has bounded that slice by the file's own size.
         METHOD_STORED => compressed.to_vec(),
         METHOD_DEFLATE => {
-            let mut out = Vec::new();
-            let mut reader = BitReader::new(compressed);
-            deflate_decompress(&mut reader, &mut out)
-                .map_err(|e| format!("zip: '{}': {e}", entry.name))?;
-            out
+            // The cap is the size the central directory declares, so an entry
+            // that decompresses to more than it claims is refused *at* the
+            // byte that exceeds it rather than after the whole expansion is
+            // resident. This is the only check here that runs before the
+            // memory is committed -- the length comparison below and the CRC
+            // after it are both true statements made too late to matter.
+            deflate::inflate_limited(compressed, declared).map_err(|e| match e {
+                // Worth its own wording. The crate's message is "decompressed
+                // size exceeds the caller's limit", which describes a limit
+                // the user did not set and cannot see; what actually happened
+                // is that the archive contradicted itself.
+                deflate::Error::OutputTooLarge => format!(
+                    "zip: '{}': declares {declared} byte(s) but decompresses to more; \
+                     refusing to expand it",
+                    entry.name
+                ),
+                other => format!("zip: '{}': {other}", entry.name),
+            })?
         }
         other => {
             return Err(format!(
@@ -1093,12 +794,14 @@ fn zip_extract_entry(data: &[u8], entry: &ZipEntry) -> Result<Vec<u8>, String> {
         }
     };
 
-    // Verify sizes.
-    if output.len() != entry.uncompressed_size as usize {
+    // The over-long direction is caught above, mid-decode. This still catches
+    // the other one -- an entry decompressing to *fewer* bytes than it
+    // declares -- which no output cap can see.
+    if output.len() != declared {
         return Err(format!(
             "zip: '{}': size mismatch: expected {}, got {}",
             entry.name,
-            entry.uncompressed_size,
+            declared,
             output.len()
         ));
     }
@@ -2302,9 +2005,7 @@ mod tests {
         let input = b"";
         for level in 0u8..=3 {
             let comp = deflate_compress(input, level).unwrap();
-            let mut out = Vec::new();
-            let mut reader = BitReader::new(&comp);
-            deflate_decompress(&mut reader, &mut out).unwrap();
+            let out = deflate::inflate(&comp).unwrap();
             assert_eq!(out.as_slice(), input, "level={level}");
         }
     }
@@ -2313,9 +2014,7 @@ mod tests {
     fn test_deflate_roundtrip_short() {
         let input = b"Hello, DEFLATE world!";
         let comp = deflate_compress(input, 6).unwrap();
-        let mut out = Vec::new();
-        let mut reader = BitReader::new(&comp);
-        deflate_decompress(&mut reader, &mut out).unwrap();
+        let out = deflate::inflate(&comp).unwrap();
         assert_eq!(out.as_slice(), input);
     }
 
@@ -2330,9 +2029,7 @@ mod tests {
                 comp.len(),
                 input.len()
             );
-            let mut out = Vec::new();
-            let mut reader = BitReader::new(&comp);
-            deflate_decompress(&mut reader, &mut out).unwrap();
+            let out = deflate::inflate(&comp).unwrap();
             assert_eq!(out, input, "level={level}");
         }
     }
@@ -2341,9 +2038,7 @@ mod tests {
     fn test_deflate_roundtrip_binary() {
         let input: Vec<u8> = (0u8..=255).cycle().take(3000).collect();
         let comp = deflate_compress(&input, 6).unwrap();
-        let mut out = Vec::new();
-        let mut reader = BitReader::new(&comp);
-        deflate_decompress(&mut reader, &mut out).unwrap();
+        let out = deflate::inflate(&comp).unwrap();
         assert_eq!(out, input);
     }
 
@@ -2351,9 +2046,7 @@ mod tests {
     fn test_deflate_all_same_byte() {
         let input = vec![0xAAu8; 1024];
         let comp = deflate_compress(&input, 9).unwrap();
-        let mut out = Vec::new();
-        let mut reader = BitReader::new(&comp);
-        deflate_decompress(&mut reader, &mut out).unwrap();
+        let out = deflate::inflate(&comp).unwrap();
         assert_eq!(out, input);
     }
 
@@ -2361,9 +2054,7 @@ mod tests {
     fn test_deflate_stored_block() {
         let input = b"stored block test data";
         let comp = deflate_compress_stored(input);
-        let mut out = Vec::new();
-        let mut reader = BitReader::new(&comp);
-        deflate_decompress(&mut reader, &mut out).unwrap();
+        let out = deflate::inflate(&comp).unwrap();
         assert_eq!(out.as_slice(), input);
     }
 
@@ -2399,6 +2090,63 @@ mod tests {
 
         let data = zip_extract_entry(&archive, &entries[0]).unwrap();
         assert_eq!(data, input);
+    }
+
+    #[test]
+    fn test_zip_entry_that_expands_past_its_declared_size_is_refused_mid_decode() {
+        // A decompression bomb is exactly this: a central directory declaring
+        // a small size over a stream that expands to a large one. The parser
+        // copies that field verbatim into `ZipEntry`, so lowering it on the
+        // parsed struct is the same input the crafted bytes would produce,
+        // and far easier to read than patching two headers by hand.
+        let input = vec![b'a'; 50_000];
+        let mut writer = ZipWriter::new();
+        writer.add_file("bomb.bin", &input, 6, 0, 0).unwrap();
+        let archive = writer.finish();
+
+        let mut entries = zip_read_central_directory(&archive).unwrap();
+        assert_eq!(entries[0].uncompressed_size, 50_000);
+        entries[0].uncompressed_size = 10;
+
+        let err = zip_extract_entry(&archive, &entries[0]).unwrap_err();
+
+        // The wording is the assertion, not decoration. Before the output cap
+        // existed this same archive was decompressed in full -- all 50 KB
+        // resident -- and *then* rejected by the length comparison, reporting
+        // "size mismatch: expected 10, got 50000". That message is what the
+        // bug looks like: it proves the check ran on the far side of the
+        // allocation it was meant to prevent. Refusing mid-decode is the only
+        // way to get the message below, so this distinguishes the fix from
+        // the bug rather than merely observing that both reject the file.
+        assert!(
+            err.contains("declares 10 byte(s) but decompresses to more"),
+            "expected a refusal from the output cap, got: {err}"
+        );
+        assert!(
+            !err.contains("size mismatch"),
+            "the after-the-fact length check fired, so the cap did not: {err}"
+        );
+    }
+
+    #[test]
+    fn test_zip_entry_shorter_than_declared_is_still_caught() {
+        // The direction an output cap structurally cannot see: the stream
+        // stops early. Nothing exceeds the ceiling, so `inflate_limited`
+        // returns happily and the length comparison after it is what catches
+        // this. Both checks are load-bearing; they catch opposite faults.
+        let input = vec![b'b'; 4_000];
+        let mut writer = ZipWriter::new();
+        writer.add_file("short.bin", &input, 6, 0, 0).unwrap();
+        let archive = writer.finish();
+
+        let mut entries = zip_read_central_directory(&archive).unwrap();
+        entries[0].uncompressed_size = 9_999;
+
+        let err = zip_extract_entry(&archive, &entries[0]).unwrap_err();
+        assert!(
+            err.contains("size mismatch: expected 9999, got 4000"),
+            "expected the length check to catch the short entry, got: {err}"
+        );
     }
 
     #[test]

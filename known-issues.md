@@ -94699,6 +94699,45 @@ window".
 every test named for an event. Two questions: does the test build the event, and
 does it assert the type the window is actually handed?
 
+### Lesson 79: a stack that ends empty is not a stack that was used correctly (lane C, 2026-08-30)
+
+**In short:** `Frame::is_balanced` — the check every windowed app in this
+campaign runs at every state and every size — was `self.clips.is_empty() &&
+self.translations.is_empty()`. That catches a clip pushed and never popped. It
+does not catch the mirror image: a pop with nothing to pop. `Vec::pop` on an
+empty stack returns `None` and does nothing, so a helper that popped a clip it
+had not pushed silently released *its caller's* clip, and the stack still ended
+the frame empty. Everything drawn after the stray pop escaped the clip it was
+supposed to be held inside, and `is_balanced` said the frame was fine.
+
+**The rule.** When a test asserts that a resource stack is balanced, count the
+operations that *failed to find anything to act on*, not just the depth at the
+end. Depth at the end is a sum, and a sum cannot distinguish "never pushed"
+from "pushed and over-popped" — the two errors cancel. The push-side error and
+the pop-side error are different bugs with different symptoms and need
+different counters.
+
+**The tell.** A `pop()`/`remove()`/`decrement()` whose return value is
+discarded inside a type that also offers an "is it balanced?" or "is it clean?"
+predicate. If the pop can be a no-op and the predicate only reads the depth,
+the predicate has a hole exactly the size of the no-op. `Frame::PopClip` was
+`self.clips.pop();` — a discarded `Option` one line away from a doc comment
+promising to catch "a bug that is invisible in the window it happens in".
+
+**How it was found.** A mutation sweep on `apps/pacman`, deleting an
+`f.clip(...)` and leaving its `f.unclip()` behind. Two mutation rows came back
+`WRONG TESTS` because the balance test — the one whose whole job is that shape
+— did not fail. Fixed by counting stray pops (`gui/toolkit/src/frame.rs`), with
+a test for the plain over-pop and one for the damage: an over-popped clip stops
+trimming the caller's hit boxes, so a control that should have been clipped
+away stays clickable.
+
+**Where else to look.** Any `is_balanced`-style predicate in the tree that is
+written as an emptiness check over a stack whose pop is infallible. Also the
+generalisation: an invariant asserted as a *final* value rather than as a
+property of the whole sequence is blind to any pair of errors that cancel —
+which for a stack is the commonest pair there is.
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print

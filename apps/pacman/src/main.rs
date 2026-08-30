@@ -3265,6 +3265,34 @@ mod tests {
     }
 
     #[test]
+    fn the_bands_are_shares_of_the_height_not_the_width() {
+        // A header measured against the width grows when the window is widened,
+        // which is the one direction that gives it no more room to fill. Where
+        // the bands *end* must not move at all when only the width changes.
+        //
+        // The margin is the deliberate exception: `pad` is a share of the
+        // shorter side, so it does change with the width, and every band's
+        // near edge carries it. So the comparison is on the two pad-free
+        // readings -- the header's bottom edge, which is the band height
+        // itself, and the footer's top edge, which is measured up from the
+        // window's bottom.
+        let narrow = Layout::new(400.0, 738.0);
+        let wide = Layout::new(1600.0, 738.0);
+        assert!(
+            (narrow.header.bottom() - wide.header.bottom()).abs() < 0.01,
+            "the header ended at {} then at {} when only the width changed",
+            narrow.header.bottom(),
+            wide.header.bottom()
+        );
+        assert!(
+            (narrow.footer.y - wide.footer.y).abs() < 0.01,
+            "the footer began at {} then at {} when only the width changed",
+            narrow.footer.y,
+            wide.footer.y
+        );
+    }
+
+    #[test]
     fn a_taller_window_gets_larger_type() {
         // The whole point of solving the layout from the window: at the sizes
         // between the clamps, growing the window grows the type.
@@ -3328,6 +3356,43 @@ mod tests {
                 b.rect,
                 body
             );
+        }
+    }
+
+    #[test]
+    fn a_cell_moves_down_with_its_row_and_right_with_its_column() {
+        // The grid is 28 wide and 31 tall, so a cell placed by its column in
+        // both directions still lands inside the grid -- every box would be in
+        // bounds and the maze would be a transposed smear.
+        let b = Board::new(Layout::new(528.0, 738.0).body);
+        let origin = b.cell_rect(0, 0);
+        for step in 1..5 {
+            let down = b.cell_rect(step, 0);
+            let across = b.cell_rect(0, step);
+            let f = step as f32 * b.cell;
+            assert!(
+                (down.y - (origin.y + f)).abs() < 0.01 && (down.x - origin.x).abs() < 0.01,
+                "row {step} is at {down:?}, not {f} below {origin:?}"
+            );
+            assert!(
+                (across.x - (origin.x + f)).abs() < 0.01 && (across.y - origin.y).abs() < 0.01,
+                "column {step} is at {across:?}, not {f} right of {origin:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_different_cells_never_share_a_box() {
+        let b = Board::new(Layout::new(528.0, 738.0).body);
+        let mut seen = BTreeSet::new();
+        for row in 0..ROWS_I32 {
+            for col in 0..COLS_I32 {
+                let (cx, cy) = b.centre_of(row, col);
+                assert!(
+                    seen.insert((cx.to_bits(), cy.to_bits())),
+                    "cell ({row}, {col}) sits on a cell already placed"
+                );
+            }
         }
     }
 

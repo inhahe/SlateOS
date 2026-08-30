@@ -2531,6 +2531,36 @@ mod tests {
     }
 
     #[test]
+    fn the_scorecard_is_sized_to_the_font_it_is_drawn_at() {
+        // Both windows are the same width, so the only thing that differs is
+        // the font the layout picks from the height.
+        //
+        // This is the half of the floor's job that "is the name legible"
+        // cannot see. The card used to be floored at a constant 170 and capped
+        // at 380; between those two numbers the share `w * 0.44` decided the
+        // width at *both* fonts, so the card was the same 361 pixels whether
+        // its rows were 8.8pt or 17pt -- at the small font it took 44% of the
+        // window to hold text that needed a quarter of it, and the dice paid
+        // for the difference. A card that is too wide still shows its names,
+        // so no legibility check can fail on it.
+        let short = Layout::solve(820.0, 400.0);
+        let tall = Layout::solve(820.0, 1000.0);
+        assert!(
+            tall.font > short.font,
+            "the fixture is broken: both windows draw their rows at {}pt",
+            short.font
+        );
+        assert!(
+            tall.card.w > short.card.w + 1.0,
+            "the scorecard is {} wide at {}pt and {} at {}pt",
+            short.card.w,
+            short.font,
+            tall.card.w,
+            tall.font
+        );
+    }
+
+    #[test]
     fn the_rows_stay_inside_the_scorecard_column() {
         for (w, h) in SIZES {
             let l = Layout::solve(w, h);

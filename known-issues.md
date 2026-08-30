@@ -95340,6 +95340,78 @@ the one `clicking_a_category_lands_on_that_category_and_no_other` already
 uses — click box *i*, then assert the set of filled boxes is exactly `{i}`,
 which names no production helper at all.
 
+### Lesson 85: "big enough for its contents" is a one-sided claim, and a constant can satisfy it forever (lane C, 2026-08-30)
+
+**In short:** a test that says a box is *at least* as big as what goes in it can
+never fail on a box that is *too big*. A hard-coded size that happens to clear
+the bar at every window the app is tried at therefore passes such a test at
+every size — not because it is right, but because the test only looks in one
+direction. Both halves of yahtzee's second mutation sweep were this, and one of
+them was a fault I had already "fixed" once.
+
+**The two cases, both found by re-sweeping after a fix.**
+
+1. **The scorecard's width floor.** Fault (11) in the roadmap entry: the floor
+   was the magic constant `170` and never applied, because at every window shape
+   tried either `w * 0.44` or the `w / 2` cap decided the width. The fix
+   replaced it with a floor measured from the longest category name at the
+   font *this* window uses, and added a sixth test window (350x1000) chosen as
+   the one shape where the floor binds. **The re-sweep showed that was not
+   enough.** At 17pt the measured floor comes out at 171 — so the old 170 was
+   within one pixel of right *at that font*, and a card one pixel narrow still
+   shows every name comfortably, because the measurement deliberately includes
+   `pad * 1.2` of breathing room. The mutation survived a fixture built
+   specifically for it.
+
+   What the constant actually cannot do is **shrink**. Between 170 and 380 the
+   share decided the width at every font, so a card whose rows are 8.8pt was the
+   same 361 pixels as one whose rows are 17pt. The claim that catches it is
+   `the_scorecard_is_sized_to_the_font_it_is_drawn_at`: two windows of one
+   width and different heights, and the card must be narrower at the smaller
+   font. Same shape as `the_button_grows_with_its_text`.
+
+2. **The roll button's width.** `the_button_is_wide_enough_for_its_widest_legend`
+   is a correct and useful claim — and it can never fail on the constant 140,
+   because the font is capped at 17pt and the longest legend measures about 121
+   there. The mutation that pins the width to 140 is caught only by
+   `the_button_grows_with_its_text`, so that is the test it is now named for.
+   Naming it for the legibility check was a lie the first sweep happened not to
+   expose.
+
+**The tell.** A test whose assertion is `actual >= needed` (or `<=`, or "fits
+inside", or "does not overlap") where `needed` is computed from the content. It
+constrains one side of the value and leaves the whole of the other side free. If
+the quantity is *derived*, that is usually fine; if a mutation can replace it
+with a constant and still pass, the claim was never about the derivation.
+
+**Two remedies, and they are different.**
+
+- **Pair every "big enough" with a "sized to".** Draw the same widget at two
+  sizes that differ only in the input the size is supposed to depend on, and
+  assert it *moves*. This is the only claim that distinguishes a measurement
+  from a constant that happens to clear the bar.
+- **Do not accept a fixture that makes a branch bind by a hair.** A fixture is
+  only a fixture if the branch binds by more than the slack the code
+  deliberately leaves — here, `pad * 1.2` of padding meant a floor that bound by
+  1 pixel was invisible. *Solve* for a shape where the difference exceeds the
+  slack, or find a different claim; do not pick a size, see the branch taken,
+  and call it covered.
+
+**And the process lesson underneath both: re-run the sweep after remediating
+it.** Every one of these was a fix that looked right, was committed, and was
+wrong — and the only thing that said so was running the same 68 mutations
+again against the fixed tree. A mutation sweep is not a report you act on once;
+it is the check that your action worked.
+
+**Where else to look.** Grep every app's suite for `>=` / `<=` assertions
+against a measured requirement — `is_wide_enough`, `fits`, `stays_inside`,
+`no_..._is_painted_into_a_box_too_narrow` are all this shape — and ask of each:
+*would a constant pass this at every size in `SIZES`?* Where the answer is yes,
+add the two-size "sized to" partner. `apps/yahtzee` now has two of these
+(`the_button_grows_with_its_text`,
+`the_scorecard_is_sized_to_the_font_it_is_drawn_at`); every other app in the
+campaign has fitted widgets and, so far, none.
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print

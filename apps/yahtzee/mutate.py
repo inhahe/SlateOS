@@ -51,7 +51,11 @@ MUTATIONS = [
         "the card's floor is the old magic constant rather than a measurement",
         "        let card_w = (w * 0.44).clamp(needed, needed * 1.6).min(w / 2.0);",
         "        let card_w = (w * 0.44).clamp(170.0, 380.0).min(w / 2.0);",
-        ["no_category_name_is_painted_into_a_box_too_narrow_to_show_it"],
+        # Not the legibility test: at 17pt the measured floor comes out at 171,
+        # so the old 170 was within a pixel of right *at that one font* and the
+        # names still fit. What the constant cannot do is shrink when the font
+        # does, which is the claim below.
+        ["the_scorecard_is_sized_to_the_font_it_is_drawn_at"],
     ),
     (
         "the floor forgets the row's own inset, so the longest name is clipped",
@@ -238,10 +242,16 @@ MUTATIONS = [
     ),
     # -- The button ----------------------------------------------------
     (
-        "the button is a constant width again, cut for the shortest legend",
+        # Not "cut for the shortest legend": 140 is in fact wide enough for
+        # every legend at every window this app can be given, because the font
+        # is capped at 17pt and the longest legend measures ~121 there. That is
+        # why `the_button_is_wide_enough_for_its_widest_legend` does not own it
+        # -- the constant is wide enough *by luck*, and only a test that watches
+        # the width move with the font can tell luck from measurement.
+        "the button is a constant width again, wide enough today by luck",
         "        let width = (widest + l.pad * 3.0).min(band.w);",
         "        let width = 140.0f32.min(band.w);",
-        ["the_button_is_wide_enough_for_its_widest_legend"],
+        ["the_button_grows_with_its_text"],
     ),
     (
         "the button is sized to the legend it happens to be showing",

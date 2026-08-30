@@ -96959,3 +96959,52 @@ indirection that `OPEN_FILES` (keyed handle → `OpenFile` directly) does not
 have today, even though `OpenFile.refcount` is documented for exactly that
 sharing. Lane B's fd table sidesteps this by keeping the indirection in
 userspace, which is why the gap has not bitten.
+
+### Addendum (2026-08-30): `spawn`'s `fd_map` reasons about this explicitly and gets files wrong
+
+The strongest single piece of evidence that this is a defect rather than a
+deliberate trust model is in `kernel/src/proc/spawn.rs:1615-1692`, where an
+`fd_map` entry `(fd_num, handle_type, parent_handle)` is duplicated into a
+child. The `PTY` arm gates on the parent's ownership and explains why:
+
+> A pty end is the one handle family in this loop whose raw value is
+> *guessable*: it is `(tty_id << 1) | end`, so without an ownership check any
+> process could name `2` and have the kernel hand its child a live master […]
+> Every `SYS_PTY_*` handler gates on `owns_ipc_handle` for exactly this
+> reason, and spawn is another way to obtain the handle, so it gates too.
+
+The `FILE` arm, twenty lines above it, is:
+
+```rust
+fd_handle_type::FILE => {
+    // Duplicate the file handle — child gets an independent copy.
+    crate::fs::handle::dup(parent_handle)
+}
+```
+
+No check. The claim "the one handle family in this loop whose raw value is
+guessable" is false: a `FILE` handle is `NEXT_HANDLE.fetch_add(1)` starting at
+1, which is *more* predictable than `(tty_id << 1) | end`, not less. So
+`spawn` with `fd_map = [(0, FILE, 3)]` hands a child a duplicate of whatever
+open file handle 3 happens to be, no matter which process owns it — a second
+route to the same authority, reachable by a caller that never issues a single
+`SYS_FS_*` call.
+
+This matters for how the fix is scoped: gating the seven fs syscalls is not
+sufficient. `spawn`'s `FILE` arm needs the same `options.parent != 0 &&
+!owns_ipc_handle(options.parent, ResourceType::File, parent_handle)` guard the
+`PTY` arm already has, and the pty comment needs correcting so it stops
+asserting files are safe.
+
+**Prerequisite audit is now complete** (the "must be verified first" list in
+the main entry above):
+
+| Path that transfers a File handle | Registers to the receiver? |
+|---|---|
+| `sys_fs_open` / `sys_fs_open_mode` | yes — `register_ipc_handle` on success |
+| `fork` (`fork.rs:494-524`) | yes — snapshot, `dup_one` each, `fork_create` takes ownership |
+| `spawn` `fd_map` (`spawn.rs:1716`) | yes — `register_ipc_handle(pid, rt, child_handle)` before push |
+| `sys_fs_dup` | **no** — see the sibling entry |
+
+So the ownership gate is safe to add once `sys_fs_dup` is fixed: three of the
+four transfer paths already maintain the records the gate would read.

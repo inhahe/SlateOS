@@ -2369,23 +2369,42 @@ mod tests {
         // runs on its own thread, so a limit set here cannot leak into a
         // sibling test.
 
-        // Seeded directly rather than through `setrlimit`, which refuses it:
-        // RLIMIT_RTPRIO starts at {0, 0} and the kernel rejects every
-        // hard-limit raise, for every resource and every caller, so there is
-        // no supported call sequence that lifts this ceiling.  That is a real
-        // gap — it leaves CAP_SYS_NICE as the only route to an RT policy on
-        // the target, which is the capability-only behaviour these very tests
-        // were written to prove we had moved past — and it is filed as
+        // Installed by the supported sequence, which is the point.
+        //
+        // RLIMIT_RTPRIO starts at {0, 0}, so raising it is a hard-limit raise,
+        // and for a while no call sequence could perform one: the tests wrote
+        // the row directly through a `#[cfg(test)]` door, and the gap that
+        // forced them to was filed as
         // `requests/b-a-a-hard-limit-that-starts-at-zero-can-never-rise.md`.
-        // The tests go on covering the consumer while that is open; see
-        // `resource::seed_rlimit_for_test`.
+        // The kernel now permits the raise to a caller holding the authority
+        // (`requests/a-b-a-resourcelimit-capability-now-raises-a-hard-limit.md`),
+        // so the door is gone and this is a real `setrlimit`.
+        //
+        // That matters for what these tests are *for*.  They exist to show
+        // that an RT policy is reachable by raising a limit rather than only
+        // by holding CAP_SYS_NICE — and a setup that installed the limit by
+        // writing memory could not show that the route existed, only that the
+        // consumer read the field.  Now the whole route is exercised: a
+        // privileged setter installs the ceiling, CAP_SYS_NICE is dropped, and
+        // the RT switch is still granted.
+        //
+        // The capability the setter needs (CAP_SYS_RESOURCE) is deliberately
+        // not the one the tests drop (CAP_SYS_NICE); the seed therefore keeps
+        // working after the drop is added, and the two authorities do not
+        // shadow each other.
+        //
+        // NOTE: rlimits are per-thread in host builds and each `#[test]` runs
+        // on its own thread, so a limit set here cannot leak into a sibling.
         fn set_rtprio_limit(v: u64) {
-            crate::resource::seed_rlimit_for_test(
-                crate::resource::RLIMIT_RTPRIO,
-                crate::resource::Rlimit {
-                    rlim_cur: v,
-                    rlim_max: v,
-                },
+            let new = crate::resource::Rlimit {
+                rlim_cur: v,
+                rlim_max: v,
+            };
+            assert_eq!(
+                crate::resource::setrlimit(crate::resource::RLIMIT_RTPRIO, &new),
+                0,
+                "installing RLIMIT_RTPRIO = {v} must succeed while \
+                 CAP_SYS_RESOURCE is held",
             );
         }
 

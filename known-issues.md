@@ -16078,6 +16078,51 @@ Two things about it are worth reading before touching it:
 `RESOLVE_IN_ROOT` remains the sole open item on this entry, unchanged and still
 without a consumer.
 
+**The libc half landed 2026-08-30 (lane B) — `openat2` forwards, and both
+refusals are gone.** `posix/src/file.rs::openat2` step 7 is now a three-way
+decision rather than a list of refusals: `plan_resolve` returns `Delegate`
+(nothing to carry — plain `openat`), `Forward(k_resolve)` (`BENEATH` and/or
+`NO_SYMLINKS`, translated to the kernel's bit values and sent to
+`SYS_FS_OPENAT2`), or `Refuse(errno)` (`IN_ROOT` → `EOPNOTSUPP`, `CACHED` →
+`EAGAIN`). A native binary can now reach containment; before today it could
+only be told no.
+
+Three things on the libc side that are not obvious from the kernel side:
+
+- **`dirfd == 0` is not usable for a relative path, and the reason is a
+  divergence nobody had written down.** The native ABI reads handle 0 as "the
+  process working directory", meaning the one `pcb::get_cwd` returns — but this
+  libc's `chdir` (`posix/src/unistd.rs`) keeps its answer in a libc-side buffer
+  and *never tells the kernel*. Passing 0 would confine the walk beneath
+  whichever directory the kernel last recorded, which is a containment check
+  against the wrong base, and it fails **open**: a wrong base still returns a
+  valid descriptor, which is this entry's original failure mode again. So
+  `openat2_forward` opens libc's own cwd as a scratch directory handle for
+  `AT_FDCWD` and closes it on every exit path. 0 is passed only for an absolute
+  path, where the base is provably never read — without `BENEATH` the handler
+  takes the fragment as the whole answer, and with `BENEATH` it refuses an
+  absolute fragment before the handle lookup (the ordering pinned by case (b)
+  above).
+- **`/dev/ptmx` and `/dev/pts/<n>` are refused with `EOPNOTSUPP` when a
+  restriction is in play**, because they are answered inside libc and do not
+  exist in the kernel's namespace. Forwarding one would come back `ENOENT` — a
+  lie, since the file exists to that caller. The predicate is factored out as
+  `file::is_pty_device_path` and `open_pty_device` gates on it too, so the
+  refusal cannot name a different set than the claim.
+- **The bit translation is tested directly, not end to end.** A host test cannot
+  open anything (every native syscall is stubbed off-target), so an end-to-end
+  assertion about `RESOLVE_BENEATH` degenerates into "the stub said `ENOSYS`"
+  and would stay green with the translation deleted — exactly the untested
+  marshalling lane A warned about. `plan_resolve` is therefore a pure function
+  with its own tests, including one that asserts every Linux resolve value is
+  `< 0x40` and both kernel values are `>= 0x40`, so a "harmonisation" of the
+  constants fails on this side too and not only in `test_dispatch_openat2_native`.
+
+The five tests that pinned the old refusals for `BENEATH`/`NO_SYMLINKS` are
+gone, replaced rather than inverted: they cannot become "must succeed" on a
+host that cannot open. `IN_ROOT` and `CACHED` keep their end-to-end differential
+tests unchanged.
+
 ### D-NETSTACK-TCP-MINIMAL. Userspace `netstack` TCP client is minimal (slirp-only correctness) — DEBT 2026-07-14
 
 **Where:** `services/netstack/src/main.rs` — `tcp_fetch` / `send_tcp` /
@@ -63252,7 +63297,11 @@ worst where the trailing newline is semantic, which for a line editor it is.
 are no `/RE/` addresses, no `g`/`v`/`G`/`V`. That is
 `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`; the fix is `ere::bre`, which `sed` already
 uses, and the 14 cases that will turn `KFIXED` when it lands are already in the
-harness, so the entry cannot be silently outlived. The scope calls — what this
+harness, so the entry cannot be silently outlived.
+*(Superseded 2026-08-30: regular expressions landed, that entry is closed, and
+the harness cases became ordinary `run_pipe` comparisons. What is still missing
+is eight commands — `TD-B-ED-IS-MISSING-EIGHT-COMMANDS`.)*
+The scope calls — what this
 `ed` refuses rather than guesses at, and why it prints file names raw instead of
 quoted — are `design-decisions.md` §713.
 
@@ -94998,6 +95047,96 @@ generalisation: an invariant asserted as a *final* value rather than as a
 property of the whole sequence is blind to any pair of errors that cancel —
 which for a stack is the commonest pair there is.
 
+### Lesson 80: a box the frame has already trimmed cannot be found outside the frame (lane C, 2026-08-30)
+
+**In short:** nearly every app in this campaign carries a test spelled
+`nothing_is_drawn_outside_the_window`, and nearly every one of them walks
+`Frame::hits()` and asserts each recorded box lies inside the window. That
+assertion cannot fail. `Frame::hit` intersects the box it is given with the
+active clip before recording it, and the apps clip to the window for the whole
+frame — so a hit box outside the window is not something the frame declines to
+produce, it is something the frame is *incapable* of producing. The test passed
+on `apps/reversi` with the panel's whole band deliberately shifted twenty
+pixels down and off the bottom of a 60x60 window.
+
+**The rule.** A containment test is only a test if the thing it measures is
+free to leave. When the type under test enforces the containment on the way in,
+measure something the type does not touch — for a `Frame`, the *commands*,
+which are recorded verbatim — or measure against a boundary the type does not
+enforce. Reversi's replacement does the second: it asserts the panel's own
+background band is painted exactly where the layout put the panel, which the
+clip has no opinion about.
+
+**The tell.** A test whose subject is "X is inside Y" where Y is also the
+argument to a constructor, a clip, a `min`/`clamp`, or an `intersect` on the
+path X takes to get recorded. Two questions settle it: *what code would have to
+be wrong for this to fail*, and *is that code between the fault and the
+assertion, or before it?* If the clamp sits between them, the assertion is
+downstream of its own subject.
+
+**The second half of the same finding.** Once the assertion is real, the
+obvious rewrite — check every painted `FillRect`/`StrokeRect` against the
+window — is *too* strong rather than too weak, and it failed immediately on
+reversi at 60x40. The panel's rows are placed by a cursor walking down the
+panel, and a panel too short for its rows runs the score bar off the bottom;
+the app draws it anyway and the whole-window clip crops it, which is the
+design. So the window is the wrong boundary in both directions: too generous to
+catch a band in the wrong place, too strict to allow deliberate cropping. The
+boundary that works is the layout's own band.
+
+**Where else to look — surveyed and settled, 2026-08-30.** Twenty-one apps
+carry an `outside_the_window`-shaped test, but only three of them assert on
+`Frame::hits()`, and only those three could carry the tautology:
+
+| App | Whole-frame clip? | Verdict |
+|---|---|---|
+| `apps/battleship` | yes, `f.clip(l.window)` | tautology — rewritten |
+| `apps/freecell` | yes, `f.clip(l.window)` | tautology — rewritten |
+| `apps/pdfviewer` | no — clips only individual bands | genuine; left alone |
+
+The other eighteen assert on commands or on the layout and were never affected.
+`apps/pdfviewer` never pushes a window-sized clip — `frame.clip` is called only
+on `bar`, `strip`, `band`, the sidebar rect and `layout.content` — so a control
+placed outside every band really is recorded outside the window and really does
+fail the assertion.
+
+Both are now `the_whole_frame_is_clipped_to_the_window`, keeping only the parts
+that can fail: the outermost `PushClip` is the window, and the clip stack
+balances. Deleting the vacuous loop then raises the real question — *was the
+coverage it pretended to give present anywhere else?* — and the two apps answer
+differently, which is why it is worth asking per-app rather than assuming:
+
+- **`apps/battleship`: yes, already covered.** `the_cells_are_drawn_where_the_grid_says_they_are`
+  compares all two hundred cells against a rectangle worked out by hand. A new
+  mutation drawing the player's grid one cell right of where `Grids` laid it out
+  is caught by four existing tests. So nothing was added; a test that duplicates
+  an existing one is noise, and the clip test's comment now names the test that
+  really holds the ground.
+- **`apps/freecell`: no, genuinely uncovered.** Nothing compared a recorded box
+  against `Table`'s geometry — the table tests exercise `Table` alone, without a
+  frame. A new `at_a_size_that_fits_the_clip_crops_nothing` measures every free
+  cell, foundation and column bottom against `top_slot`/`card_at`, and the
+  matching mutation (free cells drawn one slot right) is caught by **that test
+  and nothing else**.
+
+The boundary that works in both cases is the layout's own rect, which the clip
+has no opinion about: a band that drifts off the edge comes back smaller than
+the layout said and loses the comparison.
+
+Worth noting what made the old test not merely useless but *misleading*: both
+apps carried the comment *"a hit box is recorded whether or not it would survive
+the clip, so the boxes above cannot see a missing clip at all — only the
+commands can."* Every clause of that is the reverse of the truth. `Frame::hit`'s
+own doc says the rect "is moved by the translation in force and trimmed to the
+clip in force, and is **dropped entirely** if nothing of it is visible." So the
+boxes are the only thing that *can* see the clip vanish, and are blind to
+everything else. A wrong comment beside a vacuous assertion is how a tautology
+survives three readings.
+
+Still open: `guitk`'s own tests for `Frame::hit`, and any test asserting a
+widget's rect is inside its parent where the parent rect was used to compute the
+child's.
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print
@@ -97856,7 +97995,51 @@ would have shipped the wrong attribution silently and permanently.
 
 ---
 
-## TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS — `ed`'s `s` matches a literal string, and there are no `/RE/` addresses (lane B, 2026-08-30) — **open**
+## TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS — `ed`'s `s` matches a literal string, and there are no `/RE/` addresses (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+**Fixed the same day it was written.** `ed` now compiles every pattern through
+`ere::bre` (or `ere::Regex` under `-E`), has the `/RE/`, `?RE?`, `//` and `??`
+addresses, `&` and `\1`…`\9` in a replacement, and all four of `g`, `v`, `G`,
+`V`. The five `kbug_pipe` cases that named this entry are ordinary `run_pipe`
+comparisons now, and `scripts/ed-diff.sh` grew a `regular expressions` and a
+`global commands` section — about fifty cases — around them. The rest of the
+original text is kept below because the *fix plan* is what was carried out and
+the table is the record of what changed.
+
+Four things were learned in the doing that the plan did not anticipate, and
+they are the reason this paragraph exists rather than a bare "fixed":
+
+1. **A `g` command list is an input *source*, not a list of steps.** GNU feeds
+   it through the ordinary line-reading path, which is what makes `a` inside a
+   list take its text from the list and stop when the list ends — no `.`
+   required. `Editor::global_input` is that source; `read_line` consults it
+   first. The same field is the nesting guard: a `g` that finds it `Some`
+   answers `Cannot nest global commands`.
+2. **An empty command in a list means `p`.** Measured: `g/a/` prints every
+   matching line, and `g/a/\` followed by a blank line — two empty commands —
+   prints each one *twice*. The empty command cannot simply be handed to
+   `execute`, which would read it as the bare-newline command (`.+1p`).
+3. **`-G`/`--traditional` was never about a regex dialect**, which was the
+   premise of `design-decisions.md` §713 decision 1 and was wrong. It is a
+   compatibility mode over `G`, `V`, `f`, `l`, `m`, `t` and `!!`; of the
+   commands this `ed` has, the single thing it changes is that `l` ends a line
+   without the `$` marker. §713 records the correction.
+4. **`ed`'s empty-match rule for `s///g` is not `sed`'s**, and reaching for
+   `ere`'s ready-made iterator — which implements `sed`'s — was wrong. `sed`
+   advances one character past a match that consumed nothing; `ed` **refuses**,
+   with `Infinite substitution loop`. Measured: `,s/a*/X/g` on `alpha` is an
+   error in GNU and was `XlXpXhX` here. Getting it right needs `REG_NOTBOL` —
+   `^` may match on the first search of a line and not on any later one, which
+   is the whole difference between `s/^x*/X/g` printing `Xalpha` and wrongly
+   reporting the loop. `ere` grew a real `StartOfLine::No` for it (and
+   `Regex::search`, so the walk can be the caller's without re-decoding the
+   subject on every step), rather than `ed` faking the flag with a sentinel
+   byte.
+
+What remains missing is eight *commands*, which never had anything to do with
+regular expressions — that is `TD-B-ED-IS-MISSING-EIGHT-COMMANDS`.
+
+---
 
 **In short:** `ed` is the line editor. Its search-and-replace command, `s`,
 is supposed to take a *regular expression* — a small pattern language in which
@@ -97939,6 +98122,120 @@ the entry be closed at the same time.
 | The parser that would grow the `/RE/` forms | same file, `parse_address`, `parse_substitute` |
 | The engine to use | `userspace/ere/src/bre.rs`, `compile` |
 | The precedent | `userspace/coreutils/src/bin/sed.rs`, which compiles the same dialect |
+| The harness cases | `scripts/ed-diff.sh`, the `kbug_pipe` block |
+
+---
+
+## TD-B-ED-IS-MISSING-EIGHT-COMMANDS — `ed` answers `?` to `m`, `t`, `j`, `k`, `r`, `e`, `u` and `#` (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+> **FIXED 2026-08-30 (lane B).** All eight implemented and measured against GNU
+> ed 1.20.1; the eight `kbug_pipe` cases below are now ordinary `run_pipe`s and
+> `scripts/ed-diff.sh` grew ~150 more. Four things the fix plan below got wrong
+> or did not know, every one of them found by measuring rather than by reading:
+>
+> 1. **Note 1 is backwards.** A line that `m` moves *loses* its `g`/`v`
+>    selection — GNU's `move_lines` calls `unset_active_nodes` over the moved
+>    range. Visible: `g/^\(one\|four\)$/4m0p` over `one two three four five`
+>    runs its list **once**, because moving `four` deselects it. Carrying the
+>    mark, as the note said to, would run it twice. `t` keeps the source's mark
+>    and never selects the copy; `j`'s joined line is a new, unselected line.
+>    The `k` marks *do* travel with `m` — those are GNU node pointers — which is
+>    what `Taken` in `ed.rs` exists to carry.
+> 2. **A global clears the undo record the moment it starts**, whether or not it
+>    changes anything: `1d`, `g/beta/p`, `u` answers `Nothing to undo` rather
+>    than bringing the line back (GNU's `exec_global` calls `clear_undo_stack`
+>    unconditionally). So the whole-global snapshot is *set aside* and installed
+>    only by the first modifying command inside — `Editor::global_before`.
+> 3. **`u` restores the current line as well as the buffer**, and restores it to
+>    where `.` was before the change — including before the whole `g`, not
+>    before the first line the `g` selected. That is why the snapshot is taken
+>    at the top of `global` rather than by an inner command's `begin_change`.
+> 4. **The `Warning: buffer modified` rule is two rules, not one**, and neither
+>    is "sticky until the next command". A change *or* an error retracts the
+>    warning (`1d q 1d q` and `1d q zzz q` both warn twice) while a mere look
+>    does not (`1d q 1p q` quits); and the *end-of-input* warning asks a
+>    different question again — was the command just before EOF the refusal — so
+>    `1d q` exits 1 with one warning and `1d q 1p` exits 2 with two. Two flags:
+>    `Editor::warned` and `Editor::warned_last`.
+>
+> Note 3 of the plan was right as written: `Editor::load` was split so `e` can
+> fail without ending the session. Two further gaps found on the way are logged
+> separately as `TD-B-ED-IS-MISSING-SEVEN-MORE-COMMANDS`, and the claim below
+> that GNU ed has no `z` is **false** — see that entry.
+
+**In short:** `ed` is the line editor. Eight of its commands are simply not
+written yet, so typing one gets a bare `?` — the same answer as a typo. Nothing
+is *wrong* with what `ed` does; there is less of it than there should be. A
+script written for a real `ed` that moves a line, copies one, joins two, sets a
+mark, reads a second file in, switches files, undoes a change, or carries a
+comment will stop at that line rather than do something wrong. This is the
+successor to `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`, which was about the pattern
+language and is closed; this one is about the command list and never involved
+patterns at all.
+
+### What is missing
+
+| Command | What GNU does | What we do |
+|---|---|---|
+| `(.,.)m(.)` | **move** the addressed lines to after another line | `Unknown command` |
+| `(.,.)t(.)` | **copy** ("transfer") them there instead | `Unknown command` |
+| `(.,.)j` | **join** the addressed lines into one | `Unknown command` |
+| `(.)kx` and the `'x` address | set a **mark** on a line and name it later | `Unknown command` |
+| `(.)r FILE` | **read** a file in after the addressed line | `Unknown command` |
+| `e FILE`, `E FILE` | **edit** another file (`E` without the modified warning) | `Unknown command` |
+| `u` | **undo** the last buffer change | `Unknown command` |
+| `#comment` | ignore the rest of the line | `Unknown command` |
+
+Also absent, and smaller: `x`/`y` (the cut buffer), `h`/`H` (the last error's
+explanation — `-v` covers the same ground for a script but not for a person at
+a terminal), and `+line` on the command line.
+
+**Not on this list, on purpose:** `!command` and a file name beginning with `!`.
+Those hand text to a shell and are a *deliberate* refusal, not a gap — see
+`design-decisions.md` §713 decision 2. They answer `Shell access not implemented
+by this ed` and are `xfail_pipe` cases in the harness, not `kbug_pipe` ones.
+`z` is not on it either: GNU ed answers `?` to `z` as well.
+
+### The fix
+
+All eight are ordinary arms in `Editor::execute`
+(`userspace/coreutils/src/bin/ed.rs`). Three notes that are not obvious from
+the command descriptions:
+
+1. **`m`, `t` and `j` must carry the `g` marks with the lines**, exactly as
+   `insert` and `delete` already do (`Editor::marks`). A global command list
+   may contain any of them, and a mark array that does not follow its lines
+   turns "visit each selected line once" into "visit some twice and some never".
+2. **`u` needs a change record, which does not exist yet.** The cheapest honest
+   shape is a single snapshot of `(buffer, current, modified)` taken before each
+   command that modifies the buffer, since GNU's `u` is one level deep and `u`
+   after `u` redoes. A full undo *stack* is not what GNU has and would be a
+   difference, not an improvement.
+3. **`e` re-enters `Editor::load`**, which today is only called at startup and
+   returns `Some(status)` meaning "the session is over before it started". That
+   return has to become "the load failed, keep the old buffer" for the `e`
+   caller, so `load` needs splitting rather than reusing as-is.
+
+### How to see it
+
+```
+$ printf '1m$\n,p\nq\n' | ed f.txt     # f.txt is alpha/beta/gamma
+17
+?                                      # GNU prints beta/gamma/alpha
+```
+
+`scripts/ed-diff.sh` carries eight `kbug_pipe` cases naming this entry, one per
+command. They are loud on every run and do not fail it; when a command lands its
+case turns `KFIXED`, which *does* fail the run, so the entry cannot be silently
+outlived.
+
+### Where
+
+| | |
+|---|---|
+| The dispatch to extend | `userspace/coreutils/src/bin/ed.rs`, `Editor::execute` |
+| The marks that `m`/`t`/`j` must maintain | same file, `Editor::marks`, `insert`, `delete` |
+| The loader `e` needs to reuse | same file, `Editor::load` |
 | The harness cases | `scripts/ed-diff.sh`, the `kbug_pipe` block |
 
 ## `B-A-HOOK-EDIT-DID-NOTHING-BECAUSE-THE-HOOK-WAS-INSTALLED-AS-A-COPY` (lane B, 2026-08-30) — **FIXED 2026-08-30**
@@ -98062,7 +98359,76 @@ of making a thing account for what it did.
   nothing compares them". `git config --get core.hooksPath` should stay unset;
   if a future change sets it, the trampoline is bypassed and this returns.
 
-### C-COREUTILS-STDFD-FLUSH-ORDER-TESTS-RACE — 2026-08-30 — LANE C reporting, lane B's tree, OPEN
+## `TD-B-THE-KERNEL-HAS-A-WORKING-DIRECTORY-AND-LIBC-NEVER-TELLS-IT-ANYTHING` (lane B, 2026-08-30) — DEBT
+
+**In short:** two different parts of the system each believe they know what
+directory this process is "in", and they do not agree. The C library keeps its
+answer in its own memory and never mentions it to the kernel; the kernel keeps
+its own answer, which changes only through the Linux-compatibility calls that
+SlateOS-native programs do not use. Nothing is broken today, because every path
+the library hands the kernel is spelled out in full from the root. It becomes a
+bug the moment any native call resolves a *relative* path — and it would become
+one quietly, since a path resolved against the wrong directory usually still
+finds a file.
+
+**Where:**
+- `posix/src/unistd.rs::chdir` — validates the target with `SYS_FS_STAT`, then
+  stores the normalized absolute path in a libc-side buffer. No syscall tells
+  the kernel.
+- `kernel/src/proc/pcb.rs::{get_cwd, set_cwd}` — the kernel's copy.
+- `kernel/src/syscall/linux.rs` (~42750, ~42821) — the *only* two callers of
+  `set_cwd`, both in the Linux ABI (`chdir`/`fchdir`). There is no native
+  syscall number that sets it.
+
+**How it bites.** A native program that calls `chdir("/a/b")` and then makes any
+syscall whose path is resolved kernel-side against `pcb::get_cwd` gets `/a/b`
+from libc's point of view and the spawn-time directory from the kernel's. Today
+exactly one native call reads that cwd — `SYS_FS_OPENAT2` with `dirfd == 0` —
+and `posix/src/file.rs::openat2_forward` deliberately never passes 0 for a
+relative path for this reason (it opens a scratch handle on libc's own cwd
+instead; `design-decisions.md` §714, decision 2). Every other native fs call
+receives an absolute path from `resolve_or_err`, so the kernel's cwd is never
+consulted.
+
+That makes this latent rather than live, and it is worth being precise about
+why the latent version is still worth an entry: the failure it produces is a
+*wrong answer*, not an error. A relative open resolved against the wrong base
+usually succeeds — on the wrong file. And in the one place it interacts with
+containment, it fails open: `RESOLVE_BENEATH` against the wrong base still
+returns a valid descriptor and still looks like working confinement.
+
+**The rule that holds while this is unfixed:** libc never relies on the
+kernel's process working directory. Any use of `dirfd == 0` (or a future
+equivalent) must be justified by the base being provably unread, as
+`openat2_forward`'s absolute-path case is.
+
+**Trigger to fix:** the first native syscall that resolves a relative path
+against the kernel's cwd, or the first native caller that wants `dirfd == 0`
+for a relative fragment.
+
+**The proper fix, and why it was not done here.** Either (a) a native
+`SYS_FS_SET_CWD` that `chdir`/`fchdir` call, so the two copies stay in step, or
+(b) an explicit statement in the native ABI that the kernel's cwd is not part of
+it, and the removal of `dirfd == 0`'s cwd meaning in favour of an
+`AT_FDCWD`-style sentinel that libc supplies a real handle for. (a) is the
+smaller change and creates a second source of truth that must be kept in sync —
+including across `fork`, `exec` and `spawn`, which is where it would go wrong.
+(b) is the cleaner one and is a request to lane A, not a lane-B change. Neither
+belongs inside a change whose job was to stop refusing `RESOLVE_BENEATH`;
+shipping a cwd-semantics change hidden inside an `openat2` change is how the
+next entry above this one gets written. Filed as
+`requests/b-a-the-kernels-cwd-and-libcs-cwd-are-two-different-directories.md`.
+
+### C-COREUTILS-STDFD-FLUSH-ORDER-TESTS-RACE — 2026-08-30 — LANE C reporting, lane B's tree — **FIXED 2026-08-30 (lane B)**
+
+**Fixed as filed, and the diagnosis was right in every particular.**
+`a_lost_diagnostic_is_remembered_and_a_delivered_one_is_not` now takes
+`shared()` like the other five. The `shared()` doc comment carries the widened
+rule — *hold this if you touch descriptor 1 **or** descriptor 2*, because a
+write to 2 reaches 1 through `before_diagnostic` — and the test's own comment
+records why serialising it costs nothing. `stderr_is_unbuffered` is left
+unguarded, also as filed: `Stream::new` does not write, so it cannot flush.
+The original report follows.
 
 `cargo test --workspace` came back red on an otherwise-green tree with one
 failure in a crate `lane-c` has never touched:
@@ -98105,3 +98471,142 @@ of the state a test *reads*. A side effect on a second global — here, "writing
 diagnostic flushes the output it comes after", which is the feature under test —
 puts a test inside the guard's scope without it ever mentioning the guarded
 state.
+
+---
+
+## TD-B-ED-IS-MISSING-SEVEN-MORE-COMMANDS — `ed` answers `?` to `h`, `H`, `P`, `W`, `x`, `y` and `z` (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+> **FIXED 2026-08-30 (lane B).** All seven landed together with the cut-buffer
+> fills in `d`, `c`, `j` and `s`. `scripts/ed-diff.sh` is 507 cases, 0 differed,
+> 8 differ on purpose, **0 known bugs** — the `kbug_pipe` case is now an
+> ordinary `run_pipe` — and the file's command language is complete but for a
+> `+line` operand on the command line.
+>
+> **One thing the measurements above missed, which only the harness found.**
+> `z`'s default address is `.+1` *outside* a global and `.` *inside* one: GNU's
+> `check_second_addr( current_addr + !isglobal, … )`. It is the only default
+> address in ed that depends on where the command came from, and it is the
+> right quirk — the global has just put `.` on the selected line, so a
+> `g/RE/z` that started at `.+1` would page from the line after every match.
+> The case that caught it is `g/line0/z2` on thirty numbered lines; every
+> single-command probe agreed.
+>
+> **Two smaller corrections while in there.** `q`, `Q` and `u` were checking
+> their print suffix *before* refusing an address, so `1q9` said `Invalid
+> command suffix` where GNU says `Unexpected address`. That was invisible
+> before — both answers are a bare `?` — and `h` is exactly what makes it
+> visible, so the command that reports errors is also the command that found
+> two. And `W` shares the `w` arm rather than duplicating it, with `write`
+> taking an `append` flag; the byte count it prints is what *that* call wrote,
+> which for an append is not the file's new size.
+
+**In short:** `ed` is the line editor. Having just filled in the eight commands
+`TD-B-ED-IS-MISSING-EIGHT-COMMANDS` was about, a sweep of *every* letter GNU ed
+accepts turned up seven more that we still answer `?` to — the same answer as a
+typo. Two of them (`h`, `H`) are how a person sitting at `ed` finds out *why*
+something was refused; without them the only way to see a reason is to have
+started `ed -v`, which you cannot do retroactively. The rest are the scrolling
+command, the cut/paste pair, the prompt toggle, and append-to-a-file.
+
+### What is missing
+
+GNU ed 1.20.1's full command set, measured a letter at a time, is:
+
+```
+a c d e E f g G h H i j k l m n p P q Q r s t u v V w W x y z = # !
+```
+
+Ours has all of those except these seven:
+
+| Command | What GNU does | What we do |
+|---|---|---|
+| `h` | print the **last error's** sentence; print nothing if there has been none | `Unknown command` |
+| `H` | **toggle** printing that sentence after every `?`; printing the pending one if it turns them on | `Unknown command` |
+| `P` | **toggle** the command prompt on and off | `Unknown command` |
+| `(1,$)W FILE` | **append** the addressed lines to a file, rather than truncating it as `w` does | `Unknown command` |
+| `(.)x` | **put** the cut buffer after the addressed line | `Unknown command` |
+| `(.,.)y` | **yank** the addressed lines into the cut buffer | `Unknown command` |
+| `(.+1)z(N)` | print a **window** of N lines and remember N as the new window size | `Unknown command` |
+
+**Not on this list, on purpose:** `!command` and a file name beginning with `!`
+are a *deliberate* refusal — see `design-decisions.md` §713 decision 2.
+
+### What was measured
+
+All of it against GNU ed 1.20.1 under WSL, since that is the only copy on this
+machine. Recorded here because the measuring is most of the work:
+
+- **`h`** prints the last error's sentence and nothing at all when there has
+  been no error. `1h` is `Unexpected address`. `hp` takes an ordinary print
+  suffix, as do `Hp` and `Pp`.
+- **`H`** toggles. When the toggle turns *on* it also prints the pending
+  sentence, so `1d`, `q`, `H` prints `Warning: buffer modified` twice: once as
+  the `H` reports the `q`'s refusal and once for the `H`'s own. `-v` is exactly
+  "`H` already on".
+- **`P`** toggles the prompt; the default prompt string is `*`, and `-p*`
+  starts it on.
+- **`z`** is `(.+1)z(N)(style)`. The default window is **22**, a count
+  *persists* as the new window (so `1z3` then `z` prints lines 4–6), the window
+  clamps at `$`, `.` becomes the last line printed, and a trailing `p`/`n`/`l`
+  styles the whole window. `1z0`, `1z-1` and `1zx` are all `Invalid command
+  suffix`; `41z` on a 5-line buffer is `Invalid address`.
+- **`y`** copies `(.,.)` into the cut buffer. It does *not* move `.` and does
+  *not* mark the buffer modified.
+- **`x`** puts the cut buffer after `(.)`; `.` becomes the last line put; it
+  marks the buffer modified. With an empty cut buffer it is `Nothing to put`
+  (a sentence we do not have yet). `9x` on a 5-line buffer is `Invalid
+  address`.
+- **The cut buffer is filled by `d`, `c`, `j`, `s` and `y`** — and *not* by
+  `m`, `t`, `r`, `a`, `i` or `u`. It survives a `u`, and it carries no marks.
+- **`W`** appends `(1,$)` to a file and prints the byte count. It clears
+  `modified` even when the name is not the default one. `-s` drops the count;
+  `-r` refuses a name with a separator; `1Wp` is `Unexpected command suffix`.
+
+### The `z` correction
+
+`TD-B-ED-IS-MISSING-EIGHT-COMMANDS` says, in its "not on this list" paragraph,
+that "`z` is not on it either: GNU ed answers `?` to `z` as well". **That is
+false.** GNU ed has `z` and it is the paging command described above. The claim
+came from testing `z` on a buffer whose current line was already `$`, where
+`(.+1)` is out of range and the answer is a perfectly ordinary `Invalid
+address`. A `?` from a command that *exists* and a `?` from one that does not
+are the same `?` — which is the whole reason `h` and `H` are worth having, and
+is a neat argument for measuring a command at more than one starting state.
+
+### The fix
+
+Seven more arms in `Editor::execute` (`userspace/coreutils/src/bin/ed.rs`), plus
+state they need that does not exist yet:
+
+| New state | For |
+|---|---|
+| `cut_buffer: Vec<Vec<u8>>` | `x`, `y`, and fills in the `d`/`c`/`j`/`s` arms |
+| `last_error: Option<EdError>` | `h`, `H` |
+| `verbose: bool` as an `Editor` field rather than an `Options` one | `H` toggles it, so it cannot stay immutable on `opts` |
+| `prompt_on: bool` | `P` |
+| `window: usize`, defaulting to 22 | `z` |
+| an `EdError::NothingToPut` variant | `x` on an empty cut buffer |
+
+### How to see it
+
+```
+$ printf '1d\nq\nH\n' | ed f.txt
+17
+?
+?                                # GNU prints `Warning: buffer modified` twice
+```
+
+`scripts/ed-diff.sh` carries a `kbug_pipe` case naming this entry. It is loud on
+every run and does not fail it; when `H` lands the case turns `KFIXED`, which
+*does* fail the run, so the entry cannot be silently outlived. (It did, and it
+is now `run_pipe '1d\nq\nH\n' f.txt` in the `=== explaining the last error ===`
+section, alongside 26 other `h`/`H` cases.)
+
+### Where
+
+| | |
+|---|---|
+| The dispatch to extend | `userspace/coreutils/src/bin/ed.rs`, `Editor::execute` |
+| The error sentences | same file, `EdError`, `EdError::sentence` |
+| Where `-v` is read today | same file, `Options::verbose`, `Editor::fail` |
+| The harness case | `scripts/ed-diff.sh`, the `kbug_pipe` block |

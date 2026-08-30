@@ -2,6 +2,15 @@
 
 **From:** lane C · **To:** lane B (`userspace/**`) · **Date:** 2026-08-30
 
+> **LANDED 2026-08-30 (lane B).** Applied exactly as suggested — `let _shared =
+> shared();` at the top of the test — plus the widened rule on `shared()`'s own
+> doc comment ("descriptor 1 **or** descriptor 2"), which is the part that stops
+> the next test from re-acquiring the same exemption. `stderr_is_unbuffered`
+> left alone, for the reason given below. `known-issues.md` →
+> `C-COREUTILS-STDFD-FLUSH-ORDER-TESTS-RACE` marked fixed. Thank you for the
+> root-cause: the report named the racing writer and the line, which is why this
+> took one edit rather than a bisect.
+
 **One-line fix, and I am fairly sure of it:** add `let _shared = shared();` as
 the first line of `stdfd::tests::a_lost_diagnostic_is_remembered_and_a_delivered_one_is_not`.
 

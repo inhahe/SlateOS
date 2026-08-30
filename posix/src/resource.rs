@@ -270,31 +270,17 @@ mod limit_store {
         imp::set_nice(v);
     }
 
-    /// Write one row directly, bypassing `setrlimit`'s policy.  Test-only.
-    ///
-    /// Needed because the two ceilings whose *consumers* most need testing —
-    /// `RLIMIT_NICE` and `RLIMIT_RTPRIO` — both start at `(0, 0)`, and the
-    /// kernel refuses every hard-limit raise, so there is no supported call
-    /// sequence that lifts either one.  A test of `can_nice()`'s rlimit
-    /// branch would therefore be a test of nothing: it could only ever seed
-    /// the ceiling it already had.
-    ///
-    /// That is a real gap in the system, not just in the tests — see
-    /// `requests/b-a-a-hard-limit-that-starts-at-zero-can-never-rise.md`.
-    /// This door exists so the consumer logic stays covered while the gap is
-    /// open, and it is `#[cfg(test)]` so it cannot become the way production
-    /// code sidesteps the policy.  When the kernel grows a raise permission,
-    /// prefer moving these tests back onto `setrlimit`.
-    #[cfg(test)]
-    pub(crate) fn seed(resource: i32, value: Rlimit) {
-        // SAFETY: the table is per-thread on host builds (the only builds
-        // that compile this), so this touches nothing another test can see.
-        unsafe {
-            if let Some(slot) = (*imp::rlimits()).get_mut(resource as usize) {
-                *slot = value;
-            }
-        }
-    }
+    // There used to be a `seed()` here that wrote a row directly, bypassing
+    // `setrlimit`'s policy, because the two ceilings whose consumers most need
+    // testing — `RLIMIT_NICE` and `RLIMIT_RTPRIO` — start at `(0, 0)` and no
+    // call sequence could lift either one.  The kernel now permits a raise to
+    // a caller holding the authority
+    // (`requests/a-b-a-resourcelimit-capability-now-raises-a-hard-limit.md`),
+    // so the setup line those tests could not write is now writable and the
+    // door is gone.  Tests seed through `setrlimit` with `CAP_SYS_RESOURCE`
+    // held — which also means the seed exercises the policy instead of
+    // stepping around it, so a policy that stopped working would now be caught
+    // by the setup of every test that depends on it.
 
     /// Restore both to their cold-start values.  Test-only.
     #[cfg(test)]
@@ -308,17 +294,11 @@ mod limit_store {
     }
 }
 
-/// Test-only: write one limit row directly, bypassing `setrlimit`'s policy.
-///
-/// The crate-visible spelling of [`limit_store::seed`] — see there for why a
-/// door around the policy has to exist at all.  `sched.rs`'s `RLIMIT_RTPRIO`
-/// tests need it for the same reason this file's `RLIMIT_NICE` tests do: the
-/// ceiling starts at zero and nothing may raise it, so the only way to test a
-/// consumer of a *non-zero* ceiling is to install one out of band.
-#[cfg(test)]
-pub(crate) fn seed_rlimit_for_test(resource: i32, value: Rlimit) {
-    limit_store::seed(resource, value);
-}
+// `seed_rlimit_for_test` was the crate-visible spelling of the door removed
+// above, and `sched.rs`'s `RLIMIT_RTPRIO` tests were its other caller.  Both
+// are gone: a ceiling is now installed by the supported sequence — hold
+// `CAP_SYS_RESOURCE`, call `setrlimit` — which is what the tests should have
+// been able to write all along.
 
 // ---------------------------------------------------------------------------
 // The authoritative limit table
@@ -494,17 +474,31 @@ fn store_set(pid: i32, resource: i32, new_limit: *const Rlimit) -> Result<(), i3
             return Err(errno::EPERM);
         }
 
-        // Raising a hard limit is refused outright, for every resource and
-        // every caller.  This is the kernel's rule as of
-        // `requests/a-b-native-rlimit-syscalls-landed.md` §2, not Linux's —
-        // Linux gates the raise on `CAP_SYS_RESOURCE`, and so did this
-        // function until the native syscalls landed.  The capability is not
-        // consulted here because the kernel does not consult it: the
-        // `ResourceLimit` resource type exists but nothing projects it into a
-        // raise permission yet.  When that lands it lands in
-        // `pcb::set_rlimit`, which both ABIs funnel through, and this arm must
-        // be brought back in step with it — see design-decisions.md §707.
-        if new_limit.rlim_max > old.rlim_max {
+        // Raising a hard limit needs authority; lowering one never does.
+        //
+        // This arm implements the *kernel's* rule, per design-decisions.md
+        // §707 — and as of `requests/a-b-a-resourcelimit-capability-now-\
+        // raises-a-hard-limit.md` the kernel's rule and Linux's are the same
+        // rule here: a raise is permitted to a caller holding the authority
+        // and refused to everyone else.  The kernel spells that authority
+        // `ResourceType::ResourceLimit` with `Rights::WRITE`, checked in
+        // `handlers::rlimit_authority()`; this build has no kernel objects, so
+        // it spells it `CAP_SYS_RESOURCE`, which is the same permission in the
+        // vocabulary this build has.  Two names, one rule — which is what §707
+        // asks for, since what it forbids is the two builds *behaving*
+        // differently, not their using different words for the same authority.
+        //
+        // Between the native syscalls landing and that request, this was an
+        // unconditional refusal, because the kernel refused every raise and a
+        // host arm that permitted one would have described a permission model
+        // the shipping build did not have.  That gap is closed.
+        //
+        // Lacking the authority is not an error in itself: it becomes a
+        // refusal only for a call that actually attempts a raise, so an
+        // unprivileged process lowering its own hard limit still succeeds.
+        if new_limit.rlim_max > old.rlim_max
+            && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_RESOURCE)
+        {
             return Err(errno::EPERM);
         }
 
@@ -2452,6 +2446,42 @@ mod tests {
     // unistd / process Phase-16x suites.
     // ----------------------------------------------------------------------
 
+    /// Establish a starting limit for a test, by the supported sequence.
+    ///
+    /// This goes through `setrlimit` while `CAP_SYS_RESOURCE` is held,
+    /// which is now a route that works in *both* directions: a seed that
+    /// raises a ceiling — `RLIMIT_NICE` and `RLIMIT_RTPRIO` start at
+    /// `(0, 0)`, so every seed of those is a raise — is permitted to a
+    /// caller holding the authority.  It used to write the row directly,
+    /// because no call sequence could lift a hard limit at all.
+    ///
+    /// Callers that want to test an unprivileged refusal must therefore
+    /// drop the capability *after* seeding, which every one of them
+    /// already does: the seed is a precondition and the drop is part of
+    /// the case.
+    ///
+    /// The assertion matters. A seed that silently failed would leave the
+    /// resource at its default — usually `RLIM_INFINITY` — and a test
+    /// expecting a raise from `200` to be refused would instead be asking
+    /// for a *lowering* from infinity, which is permitted, and would fail
+    /// with a confusing message far from the real cause.
+    fn seed_limit(res: i32, cur: u64, max: u64) {
+        assert!(
+            crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_RESOURCE),
+            "seed_limit must run before the capability is dropped — \
+             installing a ceiling is exactly what CAP_SYS_RESOURCE is for",
+        );
+        let new = Rlimit {
+            rlim_cur: cur,
+            rlim_max: max,
+        };
+        assert_eq!(
+            setrlimit(res, &new),
+            0,
+            "seeding resource {res} to ({cur}, {max}) must succeed",
+        );
+    }
+
     mod nice_cap_phase168 {
         use super::*;
 
@@ -2754,16 +2784,12 @@ mod tests {
             // Linux's encoding is inverted: rlim_cur = 20 - lowest allowed
             // nice.  21 therefore allows nice -1 and nothing lower.
             //
-            // Seeded directly rather than through `setrlimit`, which would
-            // refuse it: RLIMIT_NICE starts at (0, 0) and no caller may raise
-            // a hard limit.  See `limit_store::seed`.
-            limit_store::seed(
-                RLIMIT_NICE,
-                Rlimit {
-                    rlim_cur: 21,
-                    rlim_max: 21,
-                },
-            );
+            // Installed by the supported sequence: RLIMIT_NICE starts at
+            // (0, 0), so this is a hard-limit raise, which `setrlimit` permits
+            // to a caller holding CAP_SYS_RESOURCE.  The capability dropped
+            // below is CAP_SYS_*NICE*, which is a different one — that is the
+            // whole point of the test.
+            seed_limit(RLIMIT_NICE, 21, 21);
             drop_cap_sys_nice();
             errno::set_errno(0);
             assert_eq!(
@@ -2787,14 +2813,7 @@ mod tests {
         fn test_nice_raise_beyond_the_rlimit_is_still_eperm() {
             let _g = CapGuard::snapshot();
             reset_global_state();
-            // Seeded directly; see `limit_store::seed`.
-            limit_store::seed(
-                RLIMIT_NICE,
-                Rlimit {
-                    rlim_cur: 21,
-                    rlim_max: 21,
-                },
-            );
+            seed_limit(RLIMIT_NICE, 21, 21);
             drop_cap_sys_nice();
             errno::set_errno(0);
             assert_eq!(nice(-2), -1);
@@ -3160,15 +3179,8 @@ mod tests {
         fn test_setpriority_raise_permitted_by_rlimit_without_the_capability() {
             let _g = CapGuard::snapshot();
             reset_global_state();
-            // rlim_cur = 25 allows nice down to -5.  Seeded directly; see
-            // `limit_store::seed`.
-            limit_store::seed(
-                RLIMIT_NICE,
-                Rlimit {
-                    rlim_cur: 25,
-                    rlim_max: 25,
-                },
-            );
+            // rlim_cur = 25 allows nice down to -5.
+            seed_limit(RLIMIT_NICE, 25, 25);
             drop_cap_sys_nice();
             errno::set_errno(0);
             assert_eq!(
@@ -3186,14 +3198,7 @@ mod tests {
         fn test_setpriority_raise_beyond_the_rlimit_is_still_eacces() {
             let _g = CapGuard::snapshot();
             reset_global_state();
-            // Seeded directly; see `limit_store::seed`.
-            limit_store::seed(
-                RLIMIT_NICE,
-                Rlimit {
-                    rlim_cur: 25,
-                    rlim_max: 25,
-                },
-            );
+            seed_limit(RLIMIT_NICE, 25, 25);
             drop_cap_sys_nice();
             errno::set_errno(0);
             assert_eq!(setpriority(PRIO_PROCESS, 0, -6), -1);
@@ -3294,29 +3299,6 @@ mod tests {
             let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_RESOURCE");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_RESOURCE,));
-        }
-
-        /// Helper: seed a known starting hard limit on a resource so
-        /// tests can then attempt to raise it.  Runs under default
-        /// caps so the seed itself isn't blocked.
-        /// Establish a starting limit for a test.
-        ///
-        /// Writes the row directly rather than going through `setrlimit`.  A
-        /// seed is a precondition, not a case under test, and routing it
-        /// through the policy makes it one: it used to work only because most
-        /// resources start at `RLIM_INFINITY`, so every seed happened to be a
-        /// *lowering*.  Any test wanting to start above its default — or
-        /// wanting `RLIMIT_NICE`/`RLIMIT_RTPRIO`, which start at zero — got a
-        /// failed assertion inside the setup, reported against a line that is
-        /// not what the test is about.  See `limit_store::seed`.
-        fn seed_limit(res: i32, cur: u64, max: u64) {
-            limit_store::seed(
-                res,
-                Rlimit {
-                    rlim_cur: cur,
-                    rlim_max: max,
-                },
-            );
         }
 
         // -- Per-error-class ----------------------------------------------
@@ -3503,60 +3485,76 @@ mod tests {
 
         // -- Workflow -----------------------------------------------------
 
-        /// Privilege-separation workflow: a daemon starts with all caps and
-        /// `RLIMIT_CPU = (100, 200)`, drops `CAP_SYS_RESOURCE`, then a child
-        /// or post-init code path tries to raise the hard limit — `EPERM`.
-        /// Re-acquiring every capability does not change that, because the
-        /// hard limit is a one-way door regardless of who is pushing on it.
+        /// Privilege-separation workflow: a manager hands a worker headroom
+        /// and then drops the authority, after which the worker cannot take
+        /// more — but can still give some back.
         ///
-        /// The workflow is the point rather than either assertion on its own:
-        /// this is the sequence real service managers perform, and what it
-        /// establishes is that a lowered `RLIMIT_CPU` cannot be undone by
-        /// anything short of a fresh process.
+        /// This is the sequence the `ResourceLimit` authority exists to make
+        /// possible, and no other test in this module runs it end to end.
+        /// Each of its three steps is refuted by a different mistake: a build
+        /// that never permits a raise fails step 1; one that permits every
+        /// raise fails step 2; one that answers `EPERM` to any unprivileged
+        /// `setrlimit` at all — rather than only to a raise — fails step 3.
+        ///
+        /// It used to assert that a lowered ceiling could not be undone *by
+        /// anyone*, which was true while the kernel refused every raise. That
+        /// is now the wrong shape: the door is one-way for a caller without
+        /// the authority, not one-way in itself.
+        ///
+        /// Note what this deliberately does not claim. `drop_cap_sys_resource`
+        /// clears the *effective* set only, and `capset` here enforces just
+        /// `effective ⊆ permitted` — Linux's "only `CAP_SETPCAP` may raise
+        /// permitted" is not modelled (see `sys_capability::capset`'s doc). So
+        /// a process in this build can re-acquire what it dropped, and a test
+        /// asserting that a privilege drop is irrevocable would be asserting
+        /// something the code does not implement.
         #[test]
-        fn test_setrlimit_phase179_workflow_lowered_limit_is_a_one_way_door() {
+        fn test_setrlimit_phase179_workflow_manager_grants_headroom_then_drops() {
             let _g = CapGuard::snapshot();
             reset_global_state();
             seed_limit(RLIMIT_CPU, 100, 200);
-            drop_cap_sys_resource();
+
+            // 1. The manager, still privileged, widens the ceiling.
             errno::set_errno(0);
-            let raise = Rlimit {
+            let grant = Rlimit {
                 rlim_cur: 100,
                 rlim_max: 400,
             };
-            assert_eq!(setrlimit(RLIMIT_CPU, &raise), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
-            // Restore caps and try again.
-            let mut hdr = crate::sys_capability::CapUserHeader {
-                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
-                pid: 0,
-            };
-            let data = [
-                crate::sys_capability::CapUserData {
-                    effective: u32::MAX,
-                    permitted: u32::MAX,
-                    inheritable: 0,
-                },
-                crate::sys_capability::CapUserData {
-                    effective: u32::MAX,
-                    permitted: u32::MAX,
-                    inheritable: 0,
-                },
-            ];
-            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
-            errno::set_errno(0);
             assert_eq!(
-                setrlimit(RLIMIT_CPU, &raise),
-                -1,
-                "re-acquiring every capability must not reopen the door"
+                setrlimit(RLIMIT_CPU, &grant),
+                0,
+                "a privileged manager must be able to hand a worker headroom — \
+                 this is the route that did not exist before",
             );
+
+            drop_cap_sys_resource();
+
+            // 2. Unprivileged, the worker cannot take more than it was given.
+            errno::set_errno(0);
+            let grab = Rlimit {
+                rlim_cur: 100,
+                rlim_max: 500,
+            };
+            assert_eq!(setrlimit(RLIMIT_CPU, &grab), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
+
             let mut rb = Rlimit {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
             assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
-            assert_eq!(rb.rlim_max, 200, "the limit is still where it was set");
+            assert_eq!(rb.rlim_max, 400, "the refused raise must not have stuck");
+
+            // 3. But it can still give headroom back, with no authority at
+            //    all. Lowering has never needed one and must not start.
+            errno::set_errno(0);
+            let give_back = Rlimit {
+                rlim_cur: 100,
+                rlim_max: 300,
+            };
+            assert_eq!(setrlimit(RLIMIT_CPU, &give_back), 0);
+            assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
+            assert_eq!(rb.rlim_max, 300);
         }
 
         /// prlimit shares the store with setrlimit: a raise via prlimit
@@ -3613,21 +3611,24 @@ mod tests {
 
         // -- Recovery -----------------------------------------------------
 
-        /// Restoring `CAP_SYS_RESOURCE` does **not** let the refused raise
-        /// through.  The capability is irrelevant to a hard-limit raise: the
-        /// kernel refuses every one, for every resource and every caller, so
-        /// there is no cap state in which the second call behaves differently
-        /// from the first.
+        /// Restoring `CAP_SYS_RESOURCE` lets the refused raise through.
         ///
-        /// This test used to assert the opposite, and was right to, back when
-        /// libc kept its own table and could apply Linux's `do_prlimit` rule
-        /// itself.  Routing through `SYS_RLIMIT_SET` made the kernel the
-        /// authority and the kernel does not implement that rule yet.  Keeping
-        /// the old assertion would have meant a green host test describing a
-        /// permission model the shipping build does not have — see
-        /// design-decisions.md §707.
+        /// The two calls are byte-identical and differ only in what the caller
+        /// holds, which is what makes this a test of the *authority* rather
+        /// than of the arguments: a `setrlimit` that had simply started
+        /// accepting raises from everyone would pass the second assertion and
+        /// fail the first.
+        ///
+        /// This is the original assertion, restored. It was inverted for a
+        /// while — correctly, at the time: routing through `SYS_RLIMIT_SET`
+        /// made the kernel the authority, the kernel then refused every raise,
+        /// and a host test asserting otherwise would have described a
+        /// permission model the shipping build did not have
+        /// (design-decisions.md §707). The kernel has since caught up
+        /// (`requests/a-b-a-resourcelimit-capability-now-raises-a-hard-limit.md`),
+        /// so the inversion is undone rather than left pinning the old rule.
         #[test]
-        fn test_setrlimit_phase179_restoring_the_cap_still_does_not_permit_a_raise() {
+        fn test_setrlimit_phase179_restoring_the_cap_permits_the_refused_raise() {
             let _g = CapGuard::snapshot();
             reset_global_state();
             seed_limit(RLIMIT_CPU, 0, 50);
@@ -3639,6 +3640,13 @@ mod tests {
             errno::set_errno(0);
             assert_eq!(setrlimit(RLIMIT_CPU, &raise), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
+            // The refusal must not have stuck a partial change.
+            let mut rb = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
+            assert_eq!(rb.rlim_max, 50);
             // Restore caps.
             let mut hdr = crate::sys_capability::CapUserHeader {
                 version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
@@ -3660,18 +3668,13 @@ mod tests {
             errno::set_errno(0);
             assert_eq!(
                 setrlimit(RLIMIT_CPU, &raise),
-                -1,
-                "the raise is refused for the resource, not for the caller — \
-                 holding every capability changes nothing"
+                0,
+                "the same call, refused a moment ago, is permitted to a caller \
+                 holding CAP_SYS_RESOURCE — the refusal is about the authority, \
+                 not about the resource",
             );
-            assert_eq!(errno::get_errno(), errno::EPERM);
-            // And the limit is still where the seed put it.
-            let mut rb = Rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
             assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
-            assert_eq!(rb.rlim_max, 50);
+            assert_eq!(rb.rlim_max, 75, "the permitted raise must have stuck");
         }
 
         // -- No-side-effect ----------------------------------------------
@@ -3727,17 +3730,16 @@ mod tests {
 
         // -- Sentinel -----------------------------------------------------
 
-        /// A hard-limit raise is refused even with `CAP_SYS_RESOURCE` held,
-        /// and the refusal leaves the stored value alone.
+        /// The privileged path works: with `CAP_SYS_RESOURCE` held, a
+        /// hard-limit raise succeeds and the new ceiling is what reads back.
         ///
-        /// The sentinel this replaces asserted the opposite — that the
-        /// privileged path worked — because libc used to own the table and
-        /// implement Linux's rule on it.  What the assertion is *for* is
-        /// unchanged: it pins the direction of the one-way door, so that a
-        /// future relaxation is a deliberate edit here rather than something
-        /// that slips in unnoticed.
+        /// This sentinel was inverted for the period in which the kernel
+        /// refused every raise, and is now restored to what it originally
+        /// asserted.  What it is *for* has not changed either way: it pins the
+        /// direction of the door, so that a change to it is a deliberate edit
+        /// here rather than something that slips in unnoticed.
         #[test]
-        fn test_setrlimit_phase179_sentinel_raise_refused_even_with_cap() {
+        fn test_setrlimit_phase179_sentinel_raise_permitted_with_cap() {
             let _g = CapGuard::snapshot();
             reset_global_state();
             seed_limit(RLIMIT_CPU, 0, 100);
@@ -3749,14 +3751,13 @@ mod tests {
                 rlim_cur: 0,
                 rlim_max: 1000,
             };
-            assert_eq!(setrlimit(RLIMIT_CPU, &new), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(setrlimit(RLIMIT_CPU, &new), 0);
             let mut rb = Rlimit {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
             assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
-            assert_eq!(rb.rlim_max, 100, "the refused raise must not have stuck");
+            assert_eq!(rb.rlim_max, 1000, "the permitted raise must have stuck");
         }
 
         /// Lowering still works with the capability held, so the refusal

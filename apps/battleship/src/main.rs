@@ -3077,22 +3077,26 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_drawn_outside_the_window() {
+    fn the_whole_frame_is_clipped_to_the_window() {
         for (w, h) in SIZES {
             let app = firing_app();
             let f = app.draw((w, h));
-            for (target, rect) in f.hits() {
-                assert!(
-                    rect.x >= -0.001
-                        && rect.y >= -0.001
-                        && rect.right() <= w + 0.001
-                        && rect.bottom() <= h + 0.001,
-                    "{target:?} was drawn at {rect:?} outside a {w}x{h} window"
-                );
-            }
-            // A hit box is recorded whether or not it would survive the clip,
-            // so the boxes above cannot see a missing clip at all -- only the
-            // commands can.
+            // What stood here was a loop over `f.hits()` asserting every box
+            // lay inside the window. It could not fail. `Frame::hit` moves a
+            // box by the translation in force, trims it to the clip in force,
+            // and drops it outright if nothing of it is visible -- and this app
+            // clips the whole frame to the window, so a band the layout put
+            // half a window away comes back cropped to the window and the
+            // assertion waves it through. (The comment above it claimed the
+            // reverse: that a box is recorded whether or not it would survive
+            // the clip. See known-issues Lesson 80.)
+            //
+            // So only the clip is asserted here. That the boxes are where the
+            // layout put them is not left uncovered -- it is
+            // `the_cells_are_drawn_where_the_grid_says_they_are`, which
+            // compares every one of the two hundred cells against a rectangle
+            // worked out by hand, and would fail on any drift the loop above
+            // was blind to.
             let outer = f.commands().iter().find_map(|c| match c {
                 RenderCommand::PushClip {
                     x,

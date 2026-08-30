@@ -52491,24 +52491,31 @@ The 140-case harness is `scripts/ed-diff.sh`; all three decisions below appear
 there as explicitly-marked deliberate differences, so none of them can be
 mistaken later for a bug nobody noticed.
 
-### 1. `-E` and `-G` are recognised and refused, not accepted and ignored
+### 1. ~~`-E` and `-G` are recognised and refused~~ — superseded 2026-08-30
 
-`-E`/`--extended-regexp` and `-G`/`--traditional` both select a regular-
-expression dialect. This `ed`'s `s` matches a *literal string* (see
-`known-issues.md` → `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`), so there is no
-dialect to select and no way to honour either flag.
+This decision said `-E`/`--extended-regexp` and `-G`/`--traditional` were
+refused rather than accepted-and-ignored, because a script that passes `-E` and
+gets literal matching does not fail — it **edits the wrong bytes** and writes
+them. It set its own expiry: *"what changes when regular expressions land: both
+flags become accepted, and this half of the entry is deleted rather than
+revised."*
 
-*The alternative was to accept and ignore them*, which is what a compatibility
-shim usually does and what keeps the most scripts running. It was rejected
-because of what "the most scripts" means here. A script that passes `-E` passes
-it because it contains an extended regular expression; running it with literal
-matching does not fail, it **edits the wrong bytes** — `s/foo.*//` deletes
-nothing where it should have deleted to end of line, `w` writes the result, and
-the file is now wrong with no diagnostic anywhere. Refusing costs that script an
-error message it must be fixed to satisfy. Ignoring costs it the file.
+Regular expressions landed the same day (`known-issues.md` →
+`TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`, closed), so both flags are now accepted
+and both do what they say: `-E` compiles through `ere::Regex::new_flags` instead
+of `ere::bre::compile`, and `-G` drops `l`'s trailing `$`.
 
-*What changes when regular expressions land:* both flags become accepted, and
-this half of the entry is deleted rather than revised.
+The heading is kept, and the section not renumbered, because §713's other three
+decisions are cited by number from `ed.rs` and from the harness — renumbering to
+close a gap would break those citations to save a line.
+
+One correction worth keeping, because it was the premise of the original text
+and it was wrong: **`-G` was never about a regex dialect.** GNU's
+`--traditional` is a compatibility mode over `G`, `V`, `f`, `l`, `m`, `t` and
+`!!`. Measured on GNU ed 1.20.1 across the commands this `ed` has, exactly one
+of them differs — `l` ends the line without `$`, and folds identically
+otherwise. Refusing the flag was still the right call while `l` could not honour
+it, but for a different reason than the one recorded.
 
 ### 2. A file name beginning with `!` is refused
 
@@ -52592,3 +52599,260 @@ clause covers both. Each has a named case in `scripts/ed-diff.sh`
 (`xfail_pipe`/`xfail_case`) that must
 move to a plain case in the same change — the harness's `OURS=/usr/bin/ed`
 self-check will report the stale expectation as `XPASS` if it is not.
+
+## 714. libc's `openat2` forwards only when it has a restriction to carry, and gives the kernel a handle on *its own* working directory rather than the number that means the kernel's
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** SlateOS's C library has a call, `openat2`, that opens a file and
+can be asked to keep the search confined to one directory (so a path full of
+`..` cannot climb out of it). Until today the library had no way to ask the
+kernel for that, so it refused the request outright. The kernel now has the
+call, so the library forwards. Two choices inside that forwarding are not
+obvious, and both are about *not* taking the shorter route: the library still
+uses the old ordinary path when no confinement was asked for, and it never uses
+the kernel's shorthand for "my current directory", because the kernel's idea of
+the current directory and the library's are two different directories.
+
+Answers `requests/a-b-openat2-is-661-and-the-mode-is-twelve-bits.md`. The
+counterpart on lane A's side is §639.
+
+### Decision 1 — forward only a non-empty `resolve` word; delegate the rest to `openat`
+
+`plan_resolve` returns one of three things, and `Delegate` is the common case:
+a `resolve` word of 0, or one containing only `RESOLVE_NO_XDEV` /
+`RESOLVE_NO_MAGICLINKS`, still goes to plain `openat`.
+
+*The alternative*: forward everything, so `openat2` has exactly one path to the
+filesystem.
+
+That is the tidier shape and it was rejected, because `openat` is not a thin
+wrapper — it is where `/dev/ptmx` and `/dev/pts/<n>` are answered inside libc,
+where `O_TMPFILE` is refused, where the umask is applied, and where the fd is
+registered with its stored path. Routing every `openat2` through the native
+call would have silently removed pty support from `openat2`, which nothing
+asked for and no test would have caught. The cost of the choice is real and
+should be stated plainly: there are now two paths from `openat2` to the
+filesystem, and they can drift. What holds them together is that the forwarding
+path re-runs `openat`'s gates in `openat`'s order (`validate_open_flags`, then
+the NULL check, then the `O_TMPFILE` refusal) and ends with a copy of `open`'s
+fd registration. A third path would not be acceptable; a second is, because the
+second exists to carry something the first structurally cannot.
+
+### Decision 2 — `AT_FDCWD` opens a scratch handle on libc's cwd; it does not pass `dirfd == 0`
+
+The native ABI reads handle 0 as "the process working directory". Using it for
+`AT_FDCWD` is one line and looks exactly right.
+
+It is wrong here, and the reason is a divergence that is not written down
+anywhere else: `unistd::chdir` keeps this libc's working directory in a
+libc-side buffer and **never tells the kernel**. The kernel's cwd for the
+process is therefore whatever it was at spawn, and after any `chdir` the two
+disagree. Confining a walk beneath the kernel's cwd when the caller meant
+libc's is a containment check against the wrong base — and it fails *open*: a
+wrong base still returns a valid descriptor and still looks like working
+containment. That is the exact failure mode `TD-OPENAT2-BENEATH-INROOT` was
+opened for, so reintroducing it in the fix for it was not acceptable.
+
+So for a relative path with `AT_FDCWD`, libc opens its own cwd with
+`O_DIRECTORY`, uses that handle as the base, and closes it on every exit path.
+The cost is one extra open and close per confined `AT_FDCWD` call.
+
+*The alternative considered and rejected*: make `chdir` tell the kernel, so the
+two cwds agree and 0 becomes usable. That is the better long-term answer and it
+is a bigger change than this one — it makes every `chdir` a syscall, and it has
+to decide what happens when the kernel refuses a directory libc accepted. It
+should be done, but not inside a change whose job is to stop refusing
+`RESOLVE_BENEATH`; doing it here would have meant shipping a cwd-semantics
+change hidden inside an `openat2` change. Logged as the remaining half.
+
+`dirfd == 0` *is* passed for an absolute path, and the justification is not
+"the kernel ignores it" but something provable: without `BENEATH` the handler
+takes the absolute fragment as the whole answer, and with `BENEATH` it refuses
+an absolute fragment *before* the handle lookup. The base is unread on both
+branches, so there is no value that could be wrong.
+
+### Decision 3 — the bit translation is tested as a pure function, not end to end
+
+Every native syscall is stubbed off-target, so a host test cannot open
+anything. An end-to-end assertion about `RESOLVE_BENEATH` therefore reduces to
+"the stub returned `ENOSYS`" — which is also what a *deleted* translation would
+produce. The five tests that pinned the old refusals could not be inverted into
+"must succeed" for the same reason.
+
+`plan_resolve` is consequently a pure function over the `resolve` word, and the
+tests assert its output directly, including that every Linux resolve value is
+`< 0x40` while both kernel values are `>= 0x40` — the divergence lane A made
+deliberate, now pinned from both sides rather than only in
+`test_dispatch_openat2_native`. The judgement being recorded is that a testable
+seam is worth an extra type (`ResolvePlan`) in code that would otherwise be a
+short `if` chain: the alternative was an untestable `if` chain, which is what
+lane A's request warned would become untested marshalling under every program
+that reaches for a contained open.
+
+---
+
+## 715. `ere` gained a real `REG_NOTBOL` rather than `ed` faking one, and a decode-once searcher rather than a second empty-match policy baked into an iterator
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** `ed`'s search-and-replace command, `s`, can be told to replace
+*every* occurrence on a line (`s/old/new/g`). Some patterns match the empty
+string — `a*` matches "zero or more a's", which is satisfied by nothing at all
+— and a program that replaces "nothing" and then looks again at the same spot
+would run for ever. `sed` and `ed` solve that differently, and ours had `sed`'s
+answer. Fixing it needed a switch in the regular-expression library that we did
+not have: a way to say "`^` (start of line) has already been passed; it must
+not match again". These two decisions are about building that switch properly
+instead of simulating it inside `ed`.
+
+The bug: GNU `ed` answers `,s/a*/X/g` on `alpha` with `?` and *Infinite
+substitution loop*; ours answered `XlXpXhX`. Measured against GNU ed 1.20.1.
+The rule GNU actually follows is: substitute, advance past what was consumed,
+search the rest with `REG_NOTBOL` set — and if *that* search matches empty at
+the very position it started from, give up on the command. See
+`known-issues.md` → `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`, point 4.
+
+### Decision 1 — `ere::StartOfLine::No` is a real engine flag, not an `ed`-side trick
+
+`REG_NOTBOL` is the POSIX flag for "the first character of this subject is not
+the beginning of a line", which is exactly what a resumed `s///g` search needs:
+without it, `s/^x*/X/g` on `alpha` finds a *second* empty match at offset 0 and
+is reported as a loop, where GNU prints `Xalpha`. `ere` had no such flag.
+
+**The alternative considered and rejected** was an `ed`-local emulation:
+search a copy of the line with one sentinel newline byte in front of it and
+shift every span back by one. That is provably equivalent for this engine —
+`$` is unaffected, and a word boundary before the first character is decided the
+same way by "no character" and by "a newline", both being non-word — and it
+needed no library change at all. It was rejected because it is the shape the
+project's rules name outright: a band-aid that copies the line on every
+substitution, encodes a proof about the engine's internals in a caller that
+cannot see them, and would silently rot the day `ere` gained a multi-line mode
+in which a newline *is* a line start. The cost of doing it properly was one
+`Copy` enum threaded through five private functions and one `if` at each of the
+two places `Inst::AssertStart` is decided.
+
+**Why an enum rather than a `bool`:** `capture_spans_from(line, at, false)`
+does not say which way round the flag runs, and this is a flag whose two
+readings differ by a data-corrupting bug rather than by a formatting nicety.
+`StartOfLine::No` reads at the call site.
+
+**Cost accepted:** the flag exists on exactly one public entry point, and every
+other one passes `StartOfLine::Yes`. That is deliberate — `grep`, `sed`, `awk`
+and `expr` have no use for it, and an API where every search takes a flag would
+make four callers pay attention to a distinction only one of them has.
+
+### Decision 2 — `Regex::search` returns a reusable searcher; the walk stays the caller's
+
+`ere` already had two ways to step through a subject, and neither fits:
+`capture_spans_at(text, from)` re-decodes the whole subject on every call, so a
+global substitution on a long line is quadratic in its length; and
+`capture_spans_iter(text)` decodes once but **hard-codes one empty-match
+policy** — advance one character — which is precisely `sed`'s rule and
+precisely what `ed` must not do. Using the iterator is what produced the bug:
+it is not that `ed` used it carelessly, it is that the iterator's contract is
+somebody else's answer to the question `ed` was asking.
+
+So the third option: `Regex::search(text)` hands back a `Search` that owns the
+decoded subject and answers `capture_spans_from(at, bol)` any number of times.
+Decoding happens once; the walk — including what to do about an empty match —
+belongs to the caller, which is the only party that knows.
+
+**The alternative considered and rejected** was a second iterator, e.g.
+`capture_spans_iter_ed`, or an iterator parameterised by an empty-match policy
+enum. Rejected because the policy is not a closed set: `ed` does not merely
+"stop" on an empty match, it stops *only on a pass after the first* and reports
+a specific error, which is not a policy an iterator can express without also
+owning the error type. A policy enum would have grown a variant per caller.
+
+**Cost accepted:** one more public type in `ere`, and `capture_spans_at` is now
+a one-line delegation to it. The alternative reading — that `Search` duplicates
+`CaptureMatches` — is answered by what they do *not* share: `CaptureMatches`
+decides where the next search starts, `Search` is told.
+
+---
+
+## 716. `ed`'s undo is one swap of the whole editor, and the two kinds of mark are stored the same way but travel differently
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** `ed` gained `u` (undo) along with `m` (move), `t` (copy) and `k`
+(set a mark on a line so you can name it later as `'x`). Two shapes had to be
+chosen. First, what `u` remembers: a *stack* of past states, as most editors
+keep, or a single one that is swapped in and out. Second, `ed` has two entirely
+different things both called "marks" — the `k` marks a user sets by hand, and
+the internal flags a global command (`g/pattern/command`) uses to remember
+which lines it still has to visit — and when a command moves a line, each has
+to decide whether to move with it. Getting either wrong is invisible in normal
+use and produces a wrong answer in exactly the case people write `g` for.
+
+### Decision 1: one snapshot, swapped, not a stack
+
+`Editor::undo` is a single `Option<Snapshot>` holding the whole editor state —
+buffer, both mark arrays, the current line, and the modified flag. `u` swaps it
+with the live state rather than popping it.
+
+*What changes:* `u` after `u` **redoes** rather than undoing a second change.
+
+- **For:** it is what GNU ed does, exactly. `ed` is a program whose entire value
+  is being the `ed` that scripts and fingers already know; a deeper undo would
+  be a different editor, and one whose difference shows up only after someone
+  has relied on the redo.
+- **Against:** a one-deep undo is genuinely less useful, and a stack is barely
+  more code — `Vec<Snapshot>` and a `pop`.
+- **Why the "for" wins:** the "against" is an argument for a *better editor*,
+  and this is not the place to have it. Every other GNU-compatibility decision
+  in this file (§713 especially) resolves the same way: where we differ from
+  GNU we refuse, we do not improve. Someone who wants a stack can have one the
+  day `design.txt` asks for a non-GNU `ed`.
+
+The snapshot is whole-editor rather than a delta because the commands that
+modify are heterogeneous — `m` relinks, `j` replaces a range with one line, `e`
+throws everything away — and a per-command delta would be seven kinds of
+bookkeeping to save copying a buffer that a line editor keeps in memory anyway.
+The cost is one `Vec<Vec<u8>>` clone per modifying command; inside a global it
+is one clone per *global*, not per selected line, which is what makes
+`g/x/s/a/b/` over a large file linear rather than quadratic.
+
+### Decision 2: `k` marks travel with a moved line, `g` selections do not
+
+Both are parallel arrays indexed by buffer position — `kmarks: Vec<u32>`, 26
+bits per line, and `marks: Vec<bool>`. When `m` lifts a range out and puts it
+back elsewhere, `Editor::cut` carries the `k` marks along inside a `Taken` and
+`Editor::paste` restores them, while the `g` selection is dropped on the way out
+and a clear one inserted on the way in.
+
+*What changes:* after `1ka`, `1m$`, the address `'a` finds the line at the
+*end* of the buffer. But `g/^\(one\|four\)$/4m0p` runs its command list once,
+not twice — moving `four` deselects it.
+
+- **For the asymmetry:** it is GNU's behaviour, measured both ways, and GNU gets
+  it for structural reasons we do not share. GNU's buffer is a linked list and
+  its `k` marks are pointers into it, so relinking a node carries its mark for
+  free; its `g` selections live in a separate array of node pointers that
+  `move_lines` explicitly calls `unset_active_nodes` to prune. Two mechanisms,
+  two answers.
+- **Against:** stated as a rule it sounds arbitrary — "these marks follow the
+  line, those follow the position" is the kind of sentence that invites someone
+  to "fix" it. And it is not what the fix plan in
+  `TD-B-ED-IS-MISSING-EIGHT-COMMANDS` predicted; that plan reasoned from our
+  own array representation and said both should travel.
+- **Why the "for" wins:** the asymmetry is not arbitrary once you ask what each
+  mark *means*. A `k` mark is a name the user gave to a **line**, so it belongs
+  to the line and goes where the line goes. A `g` selection is a note the
+  editor made about **work left to do at a position**, and a command list that
+  moves a line has, by moving it, dealt with it. The alternative — carrying the
+  selection — makes `g` visit lines the list has already handled, which is a
+  worse failure than the surprise: it is a loop whose trip count depends on
+  what its own body does.
+
+**What this cost, and the lesson:** the plan's prediction was written from the
+code and was wrong; the harness (`scripts/ed-diff.sh`, ~400 cases against GNU
+ed 1.20.1) caught it in one run. Three other rules in the same batch were wrong
+the same way — see the `FIXED` note on that `known-issues.md` entry. Reading a
+reference implementation tells you what it does in the case you thought to look
+at; running it tells you what it does.

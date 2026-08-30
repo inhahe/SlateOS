@@ -129,10 +129,16 @@ MUTATIONS = [
         ["each_grid_s_caption_is_centred_over_the_grid_it_names"],
     ),
     (
+        "the player's grid is drawn a cell to the right of where it is laid out",
+        "        let origin = g.own;",
+        "        let origin = (g.own.0 + g.step, g.own.1);",
+        ["the_cells_are_drawn_where_the_grid_says_they_are"],
+    ),
+    (
         "the whole window is left unclipped",
         "        f.clip(l.window);",
         "        f.clip(Rect::new(0.0, 0.0, f32::MAX, f32::MAX));",
-        ["nothing_is_drawn_outside_the_window"],
+        ["the_whole_frame_is_clipped_to_the_window"],
     ),
     # -- Clicks --------------------------------------------------------
     (

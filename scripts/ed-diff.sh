@@ -61,6 +61,14 @@ printf 'x\n\n\ny\n'                    > "$template/blanks.txt"
 # for: the previous implementation turned it into an empty buffer.
 printf 'A\xff\xfe\nB\x80\n'            > "$template/bytes.txt"
 : > "$template/empty.txt"
+# Thirty lines, for `z`. Its default window is 22, and no shorter fixture can
+# tell 22 apart from "the rest of the buffer".
+: > "$template/long.txt"
+i=1
+while [ "$i" -le 30 ]; do
+  printf 'line%02d\n' "$i" >> "$template/long.txt"
+  i=$((i+1))
+done
 
 # --- one invocation of one side ----------------------------------------------
 #
@@ -327,7 +335,6 @@ run_pipe '1lp\nq\n'                  f.txt
 run_pipe '1nn\nq\n'                  f.txt
 run_pipe '1ll\nq\n'                  f.txt
 run_pipe 'Z\nq\n'                    f.txt        # unknown command
-run_pipe 'z\nq\n'                    five.txt     # GNU has no `z` either
 
 # === list =====================================================================
 
@@ -365,10 +372,98 @@ run_pipe 'a\n\xff\xfe\n.\nw\nq\n'    bytes.txt    # bytes survive the round trip
 run_pipe 'd\nw\nq\n'                 bytes.txt
 run_pipe '9d\nq\n'                   f.txt
 
+# === moving, copying and joining ==============================================
+#
+# `m` and `t` take a *third* address after the command letter, which no other
+# command does, and "where did the lines land" is not the same for the two:
+# `m` removes before it inserts, so a destination past the range shifts down by
+# the number of lines moved. Every case here reads `.` with `.=` *before* any
+# `,p`, because `,p` sets `.` to the last line it printed and would otherwise
+# measure the harness rather than the command.
+
+run_pipe '1m$\n.=\n,p\nw\nq\n'       f.txt
+run_pipe '2m0\n.=\n,p\nq\n'          f.txt
+run_pipe '1m1\n.=\n,p\nq\n'          f.txt        # a no-op that still modifies
+run_pipe '1,2m$\n.=\n,p\nq\n'        five.txt
+run_pipe '1,2m0\n.=\n,p\nq\n'        five.txt
+run_pipe '2,4m1\n.=\n,p\nq\n'        five.txt
+run_pipe '1,2m1\nq\n'                f.txt        # a destination inside itself
+run_pipe '1,2m2\n.=\n,p\nq\n'        f.txt        # the far edge is not inside
+run_pipe 'm$\n.=\n,p\nq\n'           f.txt        # default range is `.,.`
+run_pipe '1m\n.=\n,p\nq\n'           f.txt        # default destination is `.`
+run_pipe '1m-1\n.=\n,p\nq\n'         f.txt
+run_pipe '1m/gamma/\n.=\n,p\nq\n'    f.txt        # the destination may be a search
+run_pipe '1m$p\nq\n'                 f.txt        # ...and may carry a suffix
+run_pipe '1m5\nq\n'                  f.txt        # past the end
+run_pipe '1m$x\nq\n'                 f.txt        # a suffix that is not one
+run_pipe '3,1m0\nq\n'                f.txt        # a reversed range
+run_pipe '1mz\nq\n'                  f.txt        # a destination that is not one
+
+run_pipe '1t$\n.=\n,p\nw\nq\n'       f.txt
+run_pipe '1t0\n.=\n,p\nq\n'          f.txt
+run_pipe '1,2t1\n.=\n,p\nq\n'        f.txt        # copying a range into itself
+run_pipe '1,3t2\n.=\n,p\nq\n'        five.txt
+run_pipe '1,2t2\n.=\n,p\nq\n'        f.txt
+run_pipe 't\n.=\n,p\nq\n'            f.txt
+run_pipe '1t9\nq\n'                  f.txt
+run_pipe '1t$p\nq\n'                 f.txt
+
+run_pipe '1,2j\n.=\n,p\nw\nq\n'      f.txt
+run_pipe ',j\n.=\n,p\nw\nq\n'        five.txt
+run_pipe '2j\n.=\n,p\nq\n'           f.txt        # one address: both ends of it
+run_pipe '$j\n.=\n,p\nq\n'           f.txt
+run_pipe 'j\n.=\n,p\nq\n'            f.txt        # `.,.+1`, and `.` is `$` here
+run_pipe '1\nj\n.=\n,p\nq\n'         f.txt        # ...so from line 1 it joins
+run_pipe '1,1j\n.=\n,p\nq\n'         f.txt        # one line is already joined
+run_pipe '1,1jp\n.=\nq\n'            f.txt        # ...and the suffix still runs
+run_pipe '1,2jp\nq\n'                f.txt
+run_pipe '1,2jn\nq\n'                f.txt
+run_pipe '1,2j\nw\nq\n'              nonl.txt     # joining the only line
+run_pipe '1,2j\nq\n'                 empty.txt
+
+# === marks ====================================================================
+#
+# `k` names a line and `'x` addresses it. The name follows the *line*, not the
+# line number, so a mark set before an insertion above it still points at the
+# same text afterwards — which is the whole reason for having marks.
+
+run_pipe "1ka\n'ap\nq\n"             f.txt
+run_pipe "2kb\n0a\nX\n.\n'bp\nq\n"   f.txt        # the line moved; the mark went too
+run_pipe "1ka\n1m\$\n'ap\n.=\nq\n"   f.txt        # ...and `m` carries it as well
+run_pipe "1ka\n1t\$\n'a=\nq\n"       f.txt        # ...but a copy is not marked
+run_pipe "1ka\n1d\n'ap\nq\n"         f.txt        # the line died and the mark with it
+run_pipe "1ka\n2ka\n'a=\nq\n"        f.txt        # one line per letter
+run_pipe "1ka\n2kb\n'a,'bp\nq\n"     f.txt
+run_pipe "1ka\n.=\nq\n"              f.txt        # `k` does not move `.`
+run_pipe "1ka\nq\n"                  f.txt        # ...nor modify the buffer
+run_pipe "'zp\nq\n"                  f.txt        # never set
+run_pipe "'1p\nq\n"                  f.txt        # not a mark name
+run_pipe "'Ap\nq\n"                  f.txt
+run_pipe "'p\nq\n"                   f.txt
+run_pipe '1k\nq\n'                   f.txt        # no name at all
+run_pipe '1kA\nq\n'                  f.txt
+run_pipe '1k1\nq\n'                  f.txt
+run_pipe '1kap\nq\n'                 f.txt        # `p` here is a second name
+run_pipe '0ka\nq\n'                  f.txt
+run_pipe "1,2ka\n'a=\nq\n"           f.txt        # a range marks its last line
+
+# === comments =================================================================
+#
+# `#` swallows the rest of the line. It may be addressed — and the address is
+# still resolved, so `.` moves and a search that fails is still an error.
+
+run_pipe '#comment\n1p\nq\n'         f.txt
+run_pipe '#\nq\n'                    f.txt
+run_pipe '2#comment\n.=\nq\n'        f.txt
+run_pipe '#p\nq\n'                   f.txt        # the `p` is inside the comment
+run_pipe '/zzz/#\nq\n'               f.txt
+run_pipe '/beta/#\n.=\nq\n'          f.txt
+run_pipe 'g/a/#x\nq\n'               f.txt
+
 # === substitution =============================================================
 #
-# Only literal patterns. Anything with a metacharacter in it belongs under
-# KBUG below, not here — see `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`.
+# The mechanics of `s`: delimiters, flags, the unterminated form. What the
+# *pattern* means is a separate section further down.
 
 run_pipe '2s/beta/BETA/\n,p\nq\n'    f.txt
 run_pipe ',s/a/A/\n,p\nq\n'          f.txt
@@ -389,6 +484,147 @@ run_pipe '1s/zz/A\nq\n'              f.txt        # ...unless nothing matched
 run_pipe '1s\nq\n'                   f.txt        # no pattern at all
 run_pipe ',s/\xff/Z/\n,p\nq\n'       bytes.txt    # a byte no String can hold
 
+# === regular expressions ======================================================
+#
+# A pattern is a POSIX *basic* RE through `ere::bre`, or an *extended* one under
+# `-E`. Everything in this section was a KBUG under
+# `TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS` until the engine was wired in.
+#
+# Note on writing these: the script goes through `printf %b`, which turns `\1`
+# into byte 0x01. A backslash meant for ed must be doubled.
+
+run_pipe '1s/./X/\n,p\nq\n'          f.txt
+run_pipe ',s/^/> /\n,p\nq\n'         f.txt
+run_pipe ',s/$/./\n,p\nq\n'          f.txt
+run_pipe ',s/a*/X/\n,p\nq\n'         f.txt        # an empty match at the front
+run_pipe ',s/[aeiou]/./g\n,p\nq\n'   f.txt
+run_pipe ',s/[^aeiou]/./g\n,p\nq\n'  f.txt
+run_pipe ',s/[/]/X/\n,p\nq\n'        f.txt        # the delimiter inside a bracket
+run_pipe ',s/m\\{2\\}/X/\n,p\nq\n'     f.txt        # a BRE interval
+run_pipe ',s/\\(a\\)\\(l\\)/\\2\\1/\n,p\nq\n' f.txt  # \1..\9 in the replacement
+run_pipe ',s/a/[&]/\n,p\nq\n'        f.txt        # & is the whole match
+run_pipe ',s/a/[\\&]/\n,p\nq\n'      f.txt        # ...and \& is a literal one
+run_pipe 'a\nbanana\n.\n$s/\\(an\\)\\1/X/\n$p\nq\n' empty.txt   # a backreference
+run_pipe '1s/[/X/\nq\n'              f.txt        # an unbalanced bracket
+run_pipe '1s/\\(/X/\nq\n'            f.txt        # an unbalanced group
+run_pipe '1s/a\\+/X/\n,p\nq\n'       f.txt        # GNU's BRE extension
+run_pipe ',s/a+/X/\n,p\nq\n'         f.txt        # ...and a bare + is literal
+run_pipe ',s/\\./X/\n,p\nq\n'        f.txt        # an escaped metacharacter
+run_pipe ',s/[[:alpha:]]/X/\n,p\nq\n' f.txt       # a character class
+
+# The empty-match rule for `s///g`, which is ed's and not sed's: a match that
+# consumes nothing, on any pass after the first, ends the command with
+# `Infinite substitution loop` rather than skipping a character. The dividing
+# line is whether the *second* search can still match empty where the first one
+# did — which is what `^` cannot do, and `a*` can. Both halves are here because
+# getting one right by breaking the other is the easy mistake.
+run_pipe ',s/a*/X/g\n,p\nq\n'        f.txt        # empty after consuming: refused
+run_pipe ',s/b*/X/g\n,p\nq\n'        f.txt        # empty at 0 twice: refused
+run_pipe ',s/a*b*/X/g\n,p\nq\n'      f.txt        # ditto, two stars
+run_pipe ',s/\\(a\\)*/X/g\n,p\nq\n'    f.txt        # ditto, through a group
+run_pipe ',s/^x*/X/g\n,p\nq\n'       f.txt        # ^ cannot match twice: allowed
+run_pipe ',s/^a*/X/g\n,p\nq\n'       f.txt        # ...even having consumed
+run_pipe ',s/x*$/X/g\n,p\nq\n'       f.txt        # $ likewise
+run_pipe ',s/al*/X/g\n,p\nq\n'       f.txt        # always consumes: allowed
+run_pipe ',s/a*/X/\n,p\nq\n'         f.txt        # no `g`, so one pass, allowed
+run_pipe 'a\n\n.\n$s/x*/X/g\n$p\nq\n' empty.txt   # an empty line substitutes once
+# A line the walk already changed keeps its change when a later line raises the
+# error — which is also why `q` then refuses.
+run_pipe 'a\naaa\nbbb\n.\n,s/a*/X/g\n,p\nq\n' empty.txt
+run_pipe 'a\nbbb\naaa\n.\n,s/a*/X/g\n,p\nq\n' empty.txt
+
+# A search address, forwards and backwards, and the empty pattern that repeats
+# the last one. The search wraps, so three `/a/` on a three-line file come back
+# to where they started.
+run_pipe '/beta/p\nq\n'              f.txt
+run_pipe '/BETA/p\nq\n'              f.txt        # no match
+run_pipe '?beta?p\nq\n'              f.txt
+run_pipe '/a/p\n//p\nq\n'            f.txt
+run_pipe '/a/p\n??p\nq\n'            f.txt
+run_pipe '//p\nq\n'                  f.txt        # nothing searched for yet
+run_pipe 's//X/\nq\n'                f.txt
+run_pipe '/beta/,/gamma/p\nq\n'      f.txt
+run_pipe '/a/\n/a/\n/a/\np\nq\n'     f.txt        # the search wraps
+run_pipe '/gamma/+p\nq\n'            f.txt        # past the end after a search
+run_pipe '/be/d\n,p\nq\n'            f.txt
+run_pipe '/beta\nq\n'                f.txt        # unterminated, still a search
+
+# `-E` selects the extended dialect, where `+`, `?`, `|` and unbackslashed
+# parentheses are the metacharacters instead of their backslashed forms.
+run_pipe ',s/a+/X/\n,p\nq\n' -E      f.txt
+run_pipe ',s/(a)(l)/\\2\\1/\n,p\nq\n' -E f.txt
+run_pipe ',s/a|b/X/g\n,p\nq\n' -E    f.txt
+run_pipe ',s/al?/X/\n,p\nq\n' -E     f.txt
+run_pipe ',s/\\(a\\)/X/\n,p\nq\n' -E   f.txt      # backslashed parens are literal
+run_pipe 'g/a|g/p\nq\n' --extended-regexp f.txt
+run_null -E
+run_null --extended-regexp
+
+# `-G` is GNU's compatibility mode. Of the commands this ed has, the one thing
+# it changes is that `l` ends the line without the `$` marker.
+run_pipe '1l\nq\n' -G                f.txt
+run_pipe ',l\nq\n' -G -s             bytes.txt
+run_pipe ',l\nq\n' --traditional -s  blanks.txt
+run_pipe '1ll\nq\n' -G               f.txt
+run_null -G
+run_null --traditional
+
+# === global commands ==========================================================
+#
+# `g`/`v` run a command list over every (non-)matching line; `G`/`V` ask at the
+# terminal for the list instead, and read the answers from the same stdin the
+# script arrived on.
+
+run_pipe 'g/a/p\nq\n'                f.txt
+run_pipe 'g/a/\nq\n'                 f.txt        # an empty list means p
+run_pipe 'g/a/\\\n\nq\n'             f.txt        # ...twice, for two empty ones
+run_pipe 'v/a/p\nq\n'                f.txt        # nothing lacks an a
+run_pipe 'v/beta/p\nq\n'             f.txt
+run_pipe 'g/a/d\n,p\nq\n'            f.txt
+run_pipe 'v/beta/d\n,p\nq\n'         f.txt
+run_pipe 'g/a/s/a/X/\n,p\nq\n'       f.txt
+run_pipe 'g/a/s/a/X/g\n,p\nq\n'      f.txt
+run_pipe '2,3g/a/p\nq\n'             f.txt
+run_pipe '1,2v/a/p\nq\n'             f.txt
+run_pipe 'g/zzz/p\nq\n'              f.txt        # nothing matches
+run_pipe 'g/a/=\nq\n'                f.txt
+run_pipe 'g/e/n\nq\n'                five.txt
+run_pipe 'g/o/l\nq\n'                five.txt
+run_pipe 'g/a/g/b/p\nq\n'            f.txt        # nesting is refused
+run_pipe 'g\nq\n'                    f.txt        # no delimiter at all
+run_pipe 'g/a p\nq\n'                f.txt        # a space is not a delimiter
+run_pipe 'g,a,p\nq\n'                f.txt        # any other byte is
+run_pipe 'g/a/w other.txt\nq\n'      f.txt        # the list may write
+# The list may move a line the global has selected but not yet reached, and the
+# selection has to move with it — the loop looks up the next selected line after
+# every step, so a selection left behind on a number would run the list on
+# whatever line slid into that place. Discriminating: without it this ends with
+# the buffer in its original order.
+# A line the list *moves* stops being selected, so a `g` whose list moves a
+# still-pending line runs fewer times than it has matches. GNU gets this from
+# `move_lines` calling `unset_active_nodes`; the first case here runs its list
+# twice, not three times, and the third runs it once, not twice. Copies are
+# never selected either, but the original keeps its mark — so the second case
+# runs twice.
+run_pipe 'g/o/3,4m0\n,p\nq\n'        five.txt
+run_pipe 'g/o/1,2t$\n,p\nq\n'        five.txt
+run_pipe 'g/^\\(one\\|four\\)$/4m0p\n,p\nq\n'  five.txt
+run_pipe 'g/^\\(one\\|four\\)$/4t0p\n,p\nq\n'  five.txt
+run_pipe 'g/e/j\n,p\nq\n'            five.txt
+# The list continues while a line ends in an odd number of backslashes, and the
+# newline the backslash hid separates the two commands.
+run_pipe 'g/beta/s/e/E/\\\ns/t/T/\n,p\nq\n'   f.txt
+# `a` inside a list takes its text from the list and ends when the list does —
+# there is no `.` to close it.
+run_pipe 'g/beta/a\\\ninserted\n,p\nq\n'      f.txt
+run_pipe 'g/a/s/a/X/\\\np\nq\n'               f.txt
+# `G` prints each selected line and takes its list from stdin: a reply is a new
+# list, an empty reply skips the line, and `&` repeats the last list.
+run_pipe 'G/a/\ns/a/X/\n\n&\n,p\nq\n'         f.txt
+run_pipe 'V/beta/\np\n,p\nq\n'                f.txt
+run_pipe 'G/a/\n\n\n\n,p\nq\n'                f.txt
+run_pipe 'G/zzz/\nq\n'                        f.txt
+
 # === file names ===============================================================
 
 run_pipe 'f\nq\n'                    f.txt
@@ -400,6 +636,136 @@ run_pipe 'w /nonexistent-dir/x\nq\n' f.txt
 run_pipe 'w nosuchdir/x\nq\n'        f.txt        # an unwritable path
 run_pipe 'f\nq\n' -r                 f.txt        # restricted, plain name
 run_pipe 'w sub/x\nq\n' -r           f.txt        # restricted, a separator
+# All six file-naming commands demand whitespace after the command letter, and
+# say `Unexpected command suffix` — a different sentence from the `Invalid
+# command suffix` that a bad *print* suffix gets. So a name can never be run
+# straight onto the letter the way `p` runs onto `1`.
+run_pipe 'fother.txt\nq\n'           f.txt
+run_pipe '1,2wother.txt\nq\n'        f.txt
+run_pipe 'f\tother.txt\nf\nq\n'      f.txt        # ...a tab is whitespace
+run_pipe 'f  other.txt\nf\nq\n'      f.txt        # ...and so are two blanks
+
+# === appending to a file ======================================================
+#
+# `W` is `w` that appends instead of truncating. The byte count it prints is
+# what *this* write added, not the file's new size — which is the observable
+# that separates an append from a second truncating write.
+
+run_pipe 'W other.txt\nq\n'          five.txt     # the default range is 1,$
+run_pipe '1,2w other.txt\n1,2W other.txt\nq\n' five.txt
+run_pipe '1W other.txt\n1W other.txt\nq\n'     five.txt
+run_pipe '3,4W other.txt\nq\n'       five.txt
+run_pipe '0W other.txt\nq\n'         five.txt
+run_pipe 'W\nq\n'                    five.txt     # onto the file it is editing
+run_pipe 'W\nW\nq\n'                 five.txt
+run_pipe '1d\nW other.txt\nq\n'      five.txt     # clears `modified`...
+run_pipe '1d\nW other.txt\nq\nq\n'   five.txt     # ...so `q` does not warn
+run_pipe 'W other.txt\nq\n' -s       five.txt     # -s drops the count
+run_pipe 'W sub/x\nq\n' -r           five.txt     # restricted, a separator
+run_pipe 'W nosuchdir/x\nq\n'        five.txt     # an unwritable path
+run_pipe 'Wother.txt\nq\n'           five.txt     # the space is not optional
+run_pipe '1Wp\nq\n'                  five.txt
+run_pipe 'W\nq\n'                                 # no name to write to
+
+# === reading another file in ==================================================
+#
+# `r` is the read half of `w`, and the two are not symmetric: `w` defaults to
+# the whole buffer and `r` defaults to appending after `$`. It reports the byte
+# count the same way a startup read does, appends a missing final newline the
+# same way, and — unlike `e` — leaves the remembered file name alone.
+
+run_pipe '$r f.txt\n.=\n,p\nq\n'     five.txt
+run_pipe 'r f.txt\n.=\n,p\nq\n'      five.txt     # the default address is `$`
+run_pipe '0r f.txt\n.=\n,p\nq\n'     five.txt
+run_pipe '2r f.txt\n.=\n,p\nw\nq\n'  five.txt
+run_pipe 'r\n.=\n,p\nq\n'            f.txt        # no name: the one we opened
+run_pipe 'r nonl.txt\n,p\nw\nq\n'    f.txt        # `Newline appended`
+run_pipe 'r empty.txt\n.=\nq\n'      f.txt        # nothing read, nothing changed
+run_pipe 'r bytes.txt\nw\nq\n'       f.txt
+run_pipe 'r nosuch.txt\nq\n'
+run_pipe 'r nosuch.txt\nq\n'         f.txt
+run_file 'r nosuch.txt\n,p\nq\n'     f.txt        # file-driven: stops there
+run_pipe 'r .\nq\n'                  f.txt        # a directory opens, then will not read
+run_pipe 'r f.txt\nf\nq\n'           five.txt     # `r` does not rename the buffer
+run_pipe 'r f.txt\nw\nq\n' -s        five.txt     # -s drops the count
+run_pipe 'r f.txt\nq\n' -r           five.txt     # restricted, a plain name
+run_pipe 'r sub/x\nq\n' -r           five.txt
+run_pipe '$rf.txt\n,p\nq\n'          five.txt     # ...the space is *not* optional
+run_pipe '$r\tf.txt\n,p\nq\n'        five.txt     # ...but a tab will do
+run_pipe 'r\nq\n'                                 # no name anywhere
+
+# === editing another file =====================================================
+#
+# `e` is `r` over the top of everything: it empties the buffer *first*, so a
+# read that fails leaves nothing behind. It refuses a modified buffer once —
+# and it shares that one refusal with `q`, so a `q` that has already warned
+# lets the next `e` straight through.
+
+run_pipe 'e five.txt\n.=\n,p\nq\n'   f.txt
+run_pipe 'e five.txt\nf\nq\n'        f.txt        # ...and this one does rename
+run_pipe 'e five.txt\nw\nq\n'        f.txt        # so `w` writes five.txt
+run_pipe 'e nosuch.txt\n,p\n.=\nq\n' f.txt        # emptied, then nothing to read
+run_pipe 'e .\n,p\nq\n'              f.txt
+run_pipe 'e empty.txt\n,p\nq\n'      f.txt
+run_pipe 'e nonl.txt\n,p\nw\nq\n'    f.txt
+run_pipe 'e bytes.txt\nw\nq\n'       f.txt
+run_pipe 'e\n,p\nq\n'                f.txt        # no name: reread this one
+run_pipe '1d\ne\n,p\nq\n'            f.txt        # ...which is how you revert
+run_pipe '1d\ne five.txt\nq\n'       f.txt        # modified: refused once
+run_pipe '1d\ne five.txt\ne five.txt\n,p\nq\n' f.txt
+run_pipe '1d\nq\ne five.txt\n,p\nq\n' f.txt       # `q` warned, so `e` goes
+run_pipe '1d\nq\n1p\ne five.txt\nq\n' f.txt       # ...but only straight after
+run_pipe '1d\nq\ne nosuch.txt\nq\n'  f.txt        # a failure for another reason
+run_pipe '1d\ne nosuch.txt\ne nosuch.txt\nq\n' f.txt
+run_pipe '1d\nE five.txt\n,p\nq\n'   f.txt        # E never warns
+run_pipe 'E nosuch.txt\n,p\nq\n'     f.txt
+run_pipe 'e five.txt\nq\n' -s        f.txt
+run_pipe 'e five.txt\nq\n' -r        f.txt        # restricted refuses the name
+run_pipe 'e sub/x\nq\n' -r           f.txt
+run_pipe 'efive.txt\n,p\nq\n'        f.txt
+run_pipe 'e five.txt p\nq\n'         f.txt        # a name, not a suffix
+run_file 'e nosuch.txt\n,p\nq\n'     f.txt
+
+# === undo =====================================================================
+#
+# One level deep, and `u` after `u` redoes — so the record is a swap, not a
+# stack. What clears it is as much of the behaviour as what fills it: a command
+# that starts modifying the buffer and then changes nothing leaves *nothing* to
+# undo rather than leaving the previous command's record in place.
+
+run_pipe '1d\nu\n.=\n,p\nq\n'        f.txt
+run_pipe '1d\nu\nu\n,p\nq\n'         f.txt        # a second `u` redoes
+run_pipe '1d\nu\nu\nu\n,p\nq\n'      f.txt
+run_pipe 'u\nq\n'                    f.txt        # nothing has changed yet
+run_pipe '1p\nu\nq\n'                f.txt        # ...and `p` did not change it
+run_pipe 'a\nX\n.\nu\n,p\nq\n'       f.txt
+run_pipe '0i\nX\n.\nu\n,p\nq\n'      f.txt
+run_pipe '1c\nX\n.\nu\n,p\nq\n'      f.txt
+run_pipe ',d\nu\n,p\nq\n'            f.txt
+run_pipe '1s/a/X/\nu\n,p\nq\n'       f.txt
+run_pipe '1,2j\nu\n,p\nq\n'          f.txt
+run_pipe '1m$\nu\n.=\n,p\nq\n'       f.txt
+run_pipe '1t$\nu\n,p\nq\n'           f.txt
+run_pipe '$r f.txt\nu\n,p\nq\n'      five.txt
+run_pipe 'g/a/d\nu\n,p\nq\n'         f.txt        # a whole global is one undo
+run_pipe 'g/a/s/a/X/\nu\n,p\nq\n'    f.txt
+# A global clears the record the moment it starts, so a global that changes
+# nothing leaves `u` with *nothing to do* rather than a no-op to do — even a
+# `v` that selects no line at all.
+run_pipe '1d\ng/beta/p\nu\n,p\nq\n'  f.txt
+run_pipe '1d\nv/zzz/p\nu\n,p\nq\n'   f.txt
+run_pipe '2\ng/a/d\nu\n.=\n,p\nq\n'  f.txt        # `u` puts `.` back too...
+run_pipe '1\ng/a/d\nu\n.=\n,p\nq\n'  f.txt        # ...to before the `g`, not
+run_pipe '2\n4d\nu\n.=\nu\n.=\nq\n'  five.txt     # ...the first selected line
+run_pipe '1d\nr empty.txt\nu\n,p\nq\n' f.txt      # nor did that read
+run_pipe '1d\n1s/zzz/X/\nu\n,p\nq\n' f.txt        # nor that failed substitution
+run_pipe '1d\ne five.txt\nu\n,p\nq\n' f.txt       # `e` is not undoable
+run_pipe "1ka\n1d\nu\n'ap\nq\n"      f.txt        # the marks come back too
+run_pipe '1d\nw\nu\nq\n'             f.txt        # ...and so does `modified`
+run_pipe '1d\nup\nq\n'               f.txt        # `u` takes a print suffix
+run_pipe '1d\nun\nq\n'               f.txt
+run_pipe '1d\n1u\nq\n'               f.txt        # ...but no address
+run_pipe '1d\nux\nq\n'
 
 # === quitting =================================================================
 
@@ -411,6 +777,163 @@ run_pipe '1d\n'                      f.txt        # EOF on a modified buffer: 2
 run_pipe '1d\nw\nq\n'                f.txt        # written, so no warning
 run_pipe '1d\nq\n' -l                f.txt        # -l forces status 0
 run_pipe '9p\nq\n' -l                f.txt
+# What retracts the warning, which is not what anyone would guess. A command
+# that merely *looks* does not: `1p` leaves the refusal standing and the next
+# `q` goes. A command that *changes* the buffer does, because the warning was
+# about work that has since been added to. And so does a command that *fails*.
+run_pipe '1d\nq\n1p\nq\nq\n'         f.txt
+run_pipe '1d\nq\n=\nq\n'             f.txt
+run_pipe '1d\nq\nf other\nq\n'       f.txt
+run_pipe '1d\nq\nw other.txt\nq\n'   f.txt
+run_pipe '1d\nq\n1ka\nq\n'           f.txt        # `k` changes nothing
+run_pipe '1d\nq\n#c\nq\n'            f.txt
+run_pipe '1d\nq\n1d\nq\n'            f.txt        # a change: warns again
+run_pipe '1d\nq\n1s/beta/X/\nq\n'    f.txt
+run_pipe '1d\nq\n1,2j\nq\n'          f.txt
+run_pipe '1d\nq\n1m$\nq\n'           f.txt
+run_pipe '1d\nq\nr f.txt\nq\n'       f.txt
+run_pipe '1d\nq\nu\nu\nq\n'          f.txt        # ...and a redo is a change
+run_pipe '1d\nq\nu\nq\n'             f.txt        # ...while an undo unmodifies
+run_pipe '1d\nq\nzzz\nq\n'           f.txt        # a failure: warns again
+run_pipe '1d\nq\n9p\nq\n'            f.txt
+run_pipe '1d\nq\n/zzz/\nq\n'         f.txt
+run_pipe '1d\nq\n1s/zzz/X/\nq\n'     f.txt
+# The end-of-input warning asks a *different* question — was the command just
+# before the end the refusal — so these three exit 1, 2 and 2.
+run_pipe '1d\nq\n'                   f.txt
+run_pipe '1d\nq\n1p\n'               f.txt
+run_pipe '1d\nq\n1d\n'               f.txt
+run_pipe '1d\ne five.txt\n'          f.txt        # `e`'s refusal counts too
+run_pipe '1d\nu\nq\n'                f.txt        # undone: nothing to warn about
+run_pipe '1d\nw\nu\nq\n'             f.txt        # ...even back across a `w`
+
+# === explaining the last error ================================================
+#
+# `h` prints the last `?`'s sentence; `H` makes that automatic. They are the
+# only way to see a reason after the fact — `-v` has to be chosen before the
+# session starts, and by the time you want the reason it is too late to ask —
+# which is also why a `?` from a command that does not exist and a `?` from one
+# that exists and was refused have to be told apart by hand.
+
+run_pipe 'h\nq\n'                    f.txt        # nothing has failed yet
+run_pipe '9p\nh\nq\n'                f.txt
+run_pipe '9p\nh\n1p\nh\nq\n'         f.txt        # `h` does not clear the record
+run_pipe 'zzz\nh\nq\n'               f.txt
+run_pipe '1s/zzz/X/\nh\nq\n'         f.txt
+run_pipe 'w\nh\nq\n'                 five.txt     # no current file name
+run_pipe '1d\nq\nh\nq\nq\n'          f.txt        # the buffer warning
+run_pipe '1h\nq\n'                   f.txt        # `h` takes no address...
+run_pipe 'h9\nq\n'                   f.txt        # ...and only a print suffix
+run_pipe '9p\nhp\nq\n'               f.txt
+run_pipe '9p\nhn\nq\n'               f.txt
+run_pipe '9p\nhl\nq\n'               f.txt
+run_pipe 'H\n9p\n8p\nq\n'            f.txt        # `H` turns them on...
+run_pipe 'H\n9p\nH\n8p\nq\n'         f.txt        # ...and off again
+run_pipe '9p\nH\nq\n'                f.txt        # turning on prints the pending
+run_pipe '9p\nH\nH\nq\n'             f.txt        # ...and off does not
+run_pipe '1d\nq\nH\n'                f.txt        # the case this all started on
+run_pipe 'H\n9p\nq\n' -v             f.txt        # -v is exactly "`H` already on"
+run_pipe 'H\nH\n9p\nq\n' -v          f.txt
+run_pipe '1H\nq\n'                   f.txt
+run_pipe 'H9\nq\n'                   f.txt
+run_pipe '9p\nHp\nq\n'               f.txt
+run_pipe 'H\ng/zzz/p\nq\n'           f.txt        # inside a global
+run_file 'H\n9p\n1p\nq\n'            f.txt        # from a file: `script, line 2`
+
+# === the prompt ===============================================================
+#
+# `P` toggles it. GNU writes it before every command it reads whether or not
+# input is a terminal, so it interleaves with the output of a script — which is
+# the only reason this is observable here at all.
+
+run_pipe 'P\n1p\nq\n'                f.txt
+run_pipe 'P\nP\n1p\nq\n'             f.txt        # toggles back off
+run_pipe '1p\nq\n' -p '> '           f.txt        # -p starts it on...
+run_pipe 'P\n1p\nq\n' -p '> '        f.txt        # ...so `P` turns it off
+run_pipe 'P\n1p\nq\n' -s             f.txt
+run_pipe 'P\n1a\nX\n.\n,p\nq\n'      f.txt        # before an `a`'s text too?
+run_pipe 'P\ng/a/p\nq\n'             f.txt        # ...and a global's list?
+run_pipe 'P\n1P\nq\n'                f.txt        # no address
+run_pipe 'P\nP9\nq\n'                f.txt
+run_pipe 'P\nPp\nq\n'                f.txt
+run_pipe 'P\nzzz\nq\n'               f.txt        # a `?` does not stop it
+
+# === the cut buffer ===========================================================
+#
+# `y` fills it and `x` puts it back. The part that is easy to miss is that
+# every command which *removes* a line fills it too — `d`, `c`, `j` and `s` —
+# so a `d` followed by an `x` is a move, while `m` and `t`, which look far more
+# like they should, leave it alone.
+
+run_pipe '1y\n$x\n,p\nq\n'           five.txt
+run_pipe '1,2y\n$x\n,p\nq\n'         five.txt
+run_pipe 'y\n$x\n,p\nq\n'            five.txt     # the default range is `.,.`
+run_pipe '1,2y\n.=\nq\n'             five.txt     # `y` does not move `.`...
+run_pipe '1,2yp\nq\n'                five.txt     # ...so its suffix prints `.`
+run_pipe '1,2y\nq\n'                 five.txt     # ...nor modify the buffer
+run_pipe '0y\nq\n'                   five.txt
+run_pipe '9y\nq\n'                   five.txt
+run_pipe '1yx\nq\n'                  five.txt
+run_pipe '1d\n$x\n,p\nq\n'           five.txt     # `d` fills it
+run_pipe '1,2d\n$x\n,p\nq\n'         five.txt
+run_pipe '1c\nX\n.\n$x\n,p\nq\n'     five.txt     # so does `c`
+run_pipe '1,2j\n$x\n,p\nq\n'         five.txt     # ...and `j`
+run_pipe ',s/o/0/\n$x\n,p\nq\n'      five.txt     # ...and `s` — the last line
+run_pipe '1,2s/o/0/\n$x\n,p\nq\n'    five.txt     # ...it changed, not all of them
+run_pipe '1m$\n$x\nq\n'              five.txt     # but `m` does not
+run_pipe '1t$\n$x\nq\n'              five.txt     # nor `t`
+run_pipe 'r f.txt\n$x\nq\n'          five.txt     # nor `r`
+run_pipe '1a\nX\n.\n$x\nq\n'         five.txt     # nor `a`
+run_pipe '1i\nX\n.\n$x\nq\n'         five.txt     # nor `i`
+run_pipe '1d\nu\n$x\n,p\nq\n'        five.txt     # and it survives a `u`
+run_pipe 'x\nq\n'                    five.txt     # nothing to put
+run_pipe '1y\n0x\n,p\nq\n'           five.txt     # `0x` puts at the front
+run_pipe '1y\n9x\nq\n'               five.txt     # an address off the end
+run_pipe '9x\nq\n'                   five.txt     # ...checked before the buffer
+run_pipe '1y\n$x\n.=\nq\n'           five.txt     # `.` is the last line put
+run_pipe '1,2y\n$xp\nq\n'            five.txt
+run_pipe '1yx\n1y\n$xn\nq\n'         five.txt
+run_pipe '1y\n$x\nq\n'               five.txt     # `x` modifies, so `q` warns
+run_pipe '1y\n$x\nu\n,p\nq\n'        five.txt     # ...and is undoable
+run_pipe '1y\n$x\n$x\n,p\nq\n'       five.txt     # ...and puts more than once
+run_pipe "1ka\n1d\n\$x\n'ap\nq\n"    five.txt     # the marks do not come back
+run_pipe 'g/o/y\n$x\n,p\nq\n'        five.txt
+run_pipe '1y\ng/o/x\n,p\nq\n'        five.txt
+
+# === paging ===================================================================
+#
+# `(.+1)z(N)(style)`. Three things about it are not guessable: the address is
+# the *first* line printed rather than the last, when two are given it is the
+# second that counts, and the count persists as the window for every later `z`.
+
+run_pipe '1z3\nq\n'                  long.txt
+run_pipe '1z3\nz\nq\n'               long.txt     # ...the 3 persists
+run_pipe '1z3\n.=\nq\n'              long.txt     # `.` is the last line printed
+run_pipe '1,3z2\nq\n'                long.txt     # two addresses: the second
+run_pipe 'z\nq\n'                    long.txt     # the default window is 22...
+run_pipe '1\nz\nq\n'                 long.txt     # ...and the address is `.+1`
+run_pipe '1z\nq\n'                   long.txt
+run_pipe '$z\nq\n'                   long.txt     # clamped at the end, not refused
+run_pipe '4z9\nq\n'                  five.txt
+run_pipe 'z\nq\n'                    five.txt     # `.` is `$`, so `.+1` is off it
+run_pipe '1z2p\nq\n'                 long.txt     # a style covers the whole window
+run_pipe '1z2n\nq\n'                 long.txt
+run_pipe '1z2l\nq\n'                 long.txt
+run_pipe '1z0\nq\n'                  long.txt     # a zero count is refused...
+run_pipe '1z-1\nq\n'                 long.txt     # ...and so is a negative one
+run_pipe '1zx\nq\n'                  long.txt
+run_pipe '1z99999999999999999999\nq\n' long.txt   # too large to hold
+run_pipe '41z\nq\n'                  five.txt     # an address off the end
+run_pipe '0z2\nq\n'                  five.txt
+run_pipe 'z\nq\n'                    empty.txt
+run_pipe '1z2\n1z\nq\n'              long.txt     # the window outlives the count
+# Inside a `g` list the default address is `.`, not `.+1` — the one place in ed
+# where a default depends on where the command came from. An explicit address
+# still wins there, and the window still persists out of the global.
+run_pipe 'g/line0/z2\nq\n'           long.txt
+run_pipe 'g/line0[12]/1z2\nq\n'      long.txt
+run_pipe 'g/line01/z2\nz\nq\n'       long.txt
+run_pipe '1\ng/line29/p\nz2\nq\n'    long.txt
 
 # === the two stdin kinds disagree, on purpose =================================
 
@@ -463,40 +986,21 @@ xfail_case 'version names SlateOS' -V
 # is what every other utility here prints; matching ed's would mean a second
 # option parser in the tree for the sake of a worse message.
 xfail_case 'getopt lists the ambiguity candidates and ed does not' --s
-# `-E`/`--extended-regexp` and `-G`/`--traditional` both select a regex engine.
-# We have no regex engine wired in at all yet, so accepting either would be a
-# lie: the option would be taken and change nothing. Refusing it says so.
-xfail_case 'the regex options are refused rather than silently ignored' -E
-xfail_case 'the regex options are refused rather than silently ignored' -G
-xfail_case 'the regex options are refused rather than silently ignored' --extended-regexp
-xfail_case 'the regex options are refused rather than silently ignored' --traditional
-# A file name beginning with `!` is a *shell command* to GNU, which runs it and
-# pipes the buffer through it. We have no `!` at all — see the module docs —
-# and refusing the name is the honest answer, since taking it as a literal file
-# name would write to a file the user did not ask for.
+# `!CMD`, and a file name beginning with `!`, hand the line to a shell. That is
+# a deliberate omission rather than a missing feature — see the module docs and
+# `design-decisions.md` §713 — so all three answer `Shell access not implemented
+# by this ed`. Taking `!cmd` as a literal file name would write to a file the
+# user did not ask for, which is why refusing is the honest answer.
 xfail_pipe 'a name starting with ! is a shell command we do not run' 'w !cmd\nq\n' f.txt
 xfail_pipe 'a name starting with ! is a shell command we do not run' 'r !cmd\nq\n' f.txt
+xfail_pipe '! runs a shell command and we do not have a shell' '!echo hi\nq\n' f.txt
 
 # --- known bugs ---------------------------------------------------------------
 #
-# `s` and the `/RE/` addresses take a literal string where GNU takes a basic
-# regular expression, and the `g`/`v`/`G`/`V` commands are missing entirely.
-# The fix is `ere::bre::compile`, which `sed` already uses.
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '1s/./X/\n,p\nq\n'    f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' ',s/^/> /\n,p\nq\n'   f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' ',s/a*/X/\n,p\nq\n'   f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '/beta/p\nq\n'        f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' 'g/a/p\nq\n'          f.txt
-# Commands we have not written. Each is `?` here and does something there.
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '1m$\n,p\nq\n'        f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '1t$\n,p\nq\n'        f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '1,2j\n,p\nq\n'       f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '1ka\n$\np\nq\n'      f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '$r f.txt\n,p\nq\n'   five.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '1d\nu\n,p\nq\n'      f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' 'e five.txt\n,p\nq\n' f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '#comment\n1p\nq\n'   f.txt
-kbug_pipe 'TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS' '!echo hi\nq\n'       f.txt
+# None. The fifteen commands that used to live here — `m`, `t`, `j`, `k`/`'x`,
+# `r`, `e`/`E`, `u`, `#`, then `h`, `H`, `P`, `W`, `x`, `y` and `z` — are all
+# implemented, and their cases have moved up into the sections above as
+# ordinary `run_pipe`s.
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$kbug" -gt 0 ]; then

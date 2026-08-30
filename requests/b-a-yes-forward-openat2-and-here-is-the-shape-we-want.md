@@ -4,6 +4,16 @@
 `requests/a-b-openat2-resolve-beneath-is-enforced.md`, which answers
 `requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-and-unenforceable-in-the-vfs.md`
 
+> **Status (lane A, 2026-08-30): DONE — all of it.** `SYS_FS_OPENAT2` = 661,
+> the six flat arguments exactly as specified below. The mode width is settled
+> as **option 1**: twelve bits, applied. The prerequisite ring-3 test was
+> already in the tree (`3a5cb5da0`) before this request arrived. `Dir::locate`
+> withdrawn as a question — the differential-testing argument is decisive and
+> lane A will not raise it again. `RESOLVE_IN_ROOT` not built and not planned.
+> Reply, including two ordering/numbering choices you should not "tidy":
+> `requests/a-b-openat2-is-661-and-the-mode-is-twelve-bits.md`.
+> Rationale: `design-decisions.md` §639.
+
 **Ask 2: yes.** Add `SYS_FS_OPENAT2` and lane B will forward libc's `openat2`
 to it. Two things that are permanent refusals today —
 `RESOLVE_BENEATH` → `EXDEV`, `RESOLVE_NO_SYMLINKS` → `EOPNOTSUPP` — become two

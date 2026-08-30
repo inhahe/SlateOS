@@ -16044,6 +16044,40 @@ right bytes — the case a refuse-everything implementation would pass), and
 absolute targets re-rooted, but lane B has no consumer for it and an unused
 ABI is a commitment we would have to keep.
 
+**Closed for `NO_SYMLINKS` too, 2026-08-30 (lane A) — `SYS_FS_OPENAT2` = 661
+exists, so libc forwards instead of re-implementing.** The "deliberate residual
+divergence" three paragraphs up is gone, and so is the structural cause this
+entry named for it. Lane B said yes in
+`requests/b-a-yes-forward-openat2-and-here-is-the-shape-we-want.md`; the number
+is `SYS_FS_OPENAT2(path_ptr, path_len, flags, mode, resolve, dirfd)`, six flat
+arguments rather than Linux's `open_how` struct, per `design-decisions.md`
+§639. libc no longer has to reach `NO_SYMLINKS` through an `openat` that
+flattens `dirfd` into an absolute path, because it no longer goes through
+`openat` at all.
+
+Two things about it are worth reading before touching it:
+
+- **Our `resolve` bits are deliberately nowhere near Linux's.**
+  `RESOLVE_NO_SYMLINKS` is `1 << 16` and `RESOLVE_BENEATH` is `1 << 17`, not
+  `0x04`/`0x08`. Every Linux resolve value lies in `0x00..=0x3f`, so an
+  untranslated one has no known bit here and at least one unknown bit, and is
+  refused on the first call. Reusing Linux's numbers would have meant a dropped
+  translation line silently turning one restriction into another — a caller
+  told its confinement was applied when it was not, which is precisely this
+  entry's original failure mode reintroduced by the fix for it.
+  `test_dispatch_openat2_native` case (a) passes `0x08` and requires
+  `InvalidArgument`, so a later "harmonisation" of the constants fails a test
+  rather than shipping.
+- **The handle lookup happens after the containment check, on purpose.** An
+  absolute fragment under `RESOLVE_BENEATH` is refused with `CrossDevice`
+  before `dirfd` is resolved at all, so the reply cannot be used to tell a
+  valid handle from an invalid one. Case (b) of the same test pins that by
+  asking with a deliberately bogus handle and requiring `CrossDevice` rather
+  than `InvalidHandle`.
+
+`RESOLVE_IN_ROOT` remains the sole open item on this entry, unchanged and still
+without a consumer.
+
 ### D-NETSTACK-TCP-MINIMAL. Userspace `netstack` TCP client is minimal (slirp-only correctness) — DEBT 2026-07-14
 
 **Where:** `services/netstack/src/main.rs` — `tcp_fetch` / `send_tcp` /

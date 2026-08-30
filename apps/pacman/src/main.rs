@@ -3604,6 +3604,90 @@ mod tests {
         }
     }
 
+    // -- Header and footer placement -------------------------------------------
+
+    #[test]
+    fn the_level_reading_is_right_aligned_at_every_width() {
+        // It used to be drawn 120 pixels in from the right edge, which is
+        // where "LVL 1" ends only while the level stays one digit and the font
+        // stays 14 points.
+        for (w, h) in [(528.0, 738.0), (900.0, 738.0), (1400.0, 900.0)] {
+            let mut app = app_in(GameState::Playing);
+            app.level = 12;
+            let l = Layout::new(w, h);
+            let r = probe::rect_of_sized(&app, Target::Level, (w, h)).expect("a level reading");
+            let inset = l.header.right() - r.right();
+            assert!(
+                (inset - l.pad.max(2.0)).abs() < 1.0,
+                "level reading sits {inset} from the right edge at {w}x{h}, not {}",
+                l.pad.max(2.0)
+            );
+        }
+    }
+
+    #[test]
+    fn a_wider_level_reading_starts_further_left() {
+        // Right-aligned means the number growing pushes the text left, not
+        // right off the edge.
+        let mut one = app_in(GameState::Playing);
+        one.level = 1;
+        let mut many = app_in(GameState::Playing);
+        many.level = 4321;
+        let a = probe::rect_of(&one, Target::Level).expect("a level reading");
+        let b = probe::rect_of(&many, Target::Level).expect("a level reading");
+        assert!(
+            b.x < a.x && (b.right() - a.right()).abs() < 1.0,
+            "a longer level reading moved to {b:?} instead of growing leftwards from {a:?}"
+        );
+    }
+
+    #[test]
+    fn the_life_tokens_start_after_the_word_lives() {
+        // They used to start a flat 50 pixels in from the margin, which lands
+        // through the middle of the word in a small window.
+        for (w, h) in [(528.0, 738.0), (1400.0, 900.0), (320.0, 500.0)] {
+            let app = app_in(GameState::Playing);
+            let word = probe::rect_of_sized(&app, Target::Lives, (w, h)).expect("the word LIVES");
+            let first = probe::rect_of_sized(&app, Target::Life(0), (w, h)).expect("a life token");
+            assert!(
+                first.x >= word.right(),
+                "at {w}x{h} the first token at {first:?} overlaps the word at {word:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_life_tokens_do_not_sit_on_top_of_each_other() {
+        let mut app = app_in(GameState::Playing);
+        app.lives = MAX_LIVES_SHOWN;
+        let mut previous: Option<Rect> = None;
+        for i in 0..MAX_LIVES_SHOWN {
+            let r = probe::rect_of(&app, Target::Life(byte_u32(i))).expect("a life token");
+            if let Some(p) = previous {
+                assert!(
+                    r.x >= p.right(),
+                    "token {i} at {r:?} overlaps the one before it at {p:?}"
+                );
+            }
+            previous = Some(r);
+        }
+    }
+
+    #[test]
+    fn the_footer_shows_no_more_tokens_than_it_has_room_for() {
+        // A run of extra lives is a number in the footer, not an unbounded row
+        // of tokens marching over the dot count.
+        let mut app = app_in(GameState::Playing);
+        app.lives = 40;
+        let f = app.frame(528.0, 738.0);
+        let tokens = f
+            .hits()
+            .iter()
+            .filter(|(t, _)| matches!(t, Target::Life(_)))
+            .count();
+        assert_eq!(tokens, MAX_LIVES_SHOWN as usize);
+    }
+
     // -- Click routing ---------------------------------------------------------
 
     #[test]
@@ -3640,6 +3724,19 @@ mod tests {
         assert_eq!(app.state, GameState::Playing);
         assert_eq!(app.score, 0, "a new game starts at nothing");
         assert_eq!(app.level, 1);
+    }
+
+    #[test]
+    fn starting_a_new_game_keeps_the_window_it_is_played_in() {
+        // A new game is built by replacing the whole app, so anything that is
+        // not a fact about the game has to be carried across by hand. The
+        // window size is one of those: losing it would read the next click
+        // against a window that is not on screen.
+        let mut app = app_in(GameState::GameOver);
+        let big = (1100.0, 850.0);
+        app.resize(big.0, big.1);
+        app.start_new_game();
+        assert_eq!(app.size(), big);
     }
 
     #[test]

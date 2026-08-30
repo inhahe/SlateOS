@@ -1,16 +1,3 @@
-#![allow(dead_code)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(clippy::needless_range_loop)]
-#![allow(unused_imports)]
-
 //! Slate OS Pac-Man -- classic maze chase arcade game.
 //!
 //! Features a 28x31 grid-based maze with the classic Pac-Man layout,
@@ -19,44 +6,95 @@
 //! tracking, level progression, and menu/pause/game-over states.
 //! Randomness comes from the shared `randrange` crate, seeded from the
 //! system so that two players do not get the same game.
+//!
+//! Controls: arrow keys to move, P or Esc to pause, N for a new game.
+//! While the game is on the menu, paused or over, a click on one of the sheet's
+//! lines does what that line says the keyboard does -- the pause sheet offers
+//! two of them, so a click has to name which. A click elsewhere on the sheet
+//! does nothing rather than falling through to the board behind it.
+//!
+//! ## What this program was
+//!
+//! `main` built a `PacmanApp` and dropped it. There was no window: the
+//! drawing pass returned a `Vec<RenderCommand>` placed against a fixed
+//! `CELL_SIZE` of 18 pixels, so the picture was the same 528x702 whatever
+//! window it went into, and `handle_event` -- the only way in for a
+//! keystroke -- had no caller and no return value to tell a key it acted on
+//! from one it ignored. Twelve blanket `#![allow(...)]` at the top of the
+//! file, `dead_code` and `unused_imports` among them, are what kept a
+//! compiler from saying so.
+//!
+//! It now opens a real window, fits the maze to the size that window reports
+//! each frame, records a hit box for everything it draws, and answers keys
+//! and clicks through one body that the tests drive too.
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // -- Catppuccin Mocha palette ------------------------------------------------
 const BASE: Color = Color::from_hex(0x1E1E2E);
 const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
 const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
 const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
 const YELLOW: Color = Color::from_hex(0xF9E2AF);
 const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
 
-// -- Layout constants --------------------------------------------------------
+// -- The maze's size, which is a rule of the game --------------------------
+//
+// 28 by 31 is the classic Pac-Man maze and is not a drawing size: it is how
+// far the tunnel runs, how many dots a level holds, and how much room there
+// is to turn a corner ahead of a ghost. So the grid keeps its size in cells
+// and the window decides only how large a cell is drawn.
 const MAZE_COLS: usize = 28;
 const MAZE_ROWS: usize = 31;
-const CELL_SIZE: f32 = 18.0;
-const PADDING: f32 = 12.0;
-const HEADER_HEIGHT: f32 = 48.0;
-const FOOTER_HEIGHT: f32 = 36.0;
-const HEADER_FONT_SIZE: f32 = 16.0;
-const TITLE_FONT_SIZE: f32 = 28.0;
-const OVERLAY_FONT_SIZE: f32 = 16.0;
-const SMALL_FONT_SIZE: f32 = 12.0;
 
-/// Dot radius as a fraction of half-cell.
-const DOT_RADIUS: f32 = 2.0;
-/// Power pellet radius as a fraction of half-cell.
-const POWER_PELLET_RADIUS: f32 = 5.0;
+/// The same two numbers as the signed ones a position is measured in.
+///
+/// A position is an `i32` because a step can take it off the board before
+/// anything checks -- that is how the tunnel and the bounds test work -- so
+/// every comparison against the maze's size needs the signed spelling. Named
+/// once here rather than cast at each of the dozen comparisons.
+const COLS_I32: i32 = MAZE_COLS as i32;
+const ROWS_I32: i32 = MAZE_ROWS as i32;
+
+/// The size the window asks for when it opens.
+///
+/// A cell of about 18 pixels, which is what the program used to draw at
+/// unconditionally, plus room for the header and the footer.
+const WINDOW_WIDTH: f32 = 528.0;
+const WINDOW_HEIGHT: f32 = 738.0;
+
+/// The same, in the whole pixels a window is asked for in.
+///
+/// Two spellings of one number, kept next to each other so they cannot drift:
+/// the window manager wants integers, the layout works in floats.
+const INITIAL_WINDOW_W: u32 = 528;
+const INITIAL_WINDOW_H: u32 = 738;
+
+/// How often the window wakes the game up.
+///
+/// The game itself moves on its own clock -- a player step every 140 ms, a
+/// ghost step every 160 -- so this only has to be fine enough that those
+/// thresholds are not crossed late. Sixty a second is one screen refresh.
+const TICK: Duration = Duration::from_millis(16);
+
+/// Dot radius, in cells. A dot is a ninth of a cell across.
+const DOT_RADIUS_CELLS: f32 = 2.0 / 18.0;
+/// Power pellet radius, in cells.
+const POWER_PELLET_RADIUS_CELLS: f32 = 5.0 / 18.0;
 
 /// Points for eating a normal dot.
 const DOT_POINTS: u32 = 10;
@@ -85,8 +123,383 @@ const CHASE_DURATION_MS: u64 = 20000;
 /// Initial number of lives.
 const INITIAL_LIVES: u32 = 3;
 
+/// How many life tokens the footer draws before it stops counting.
+///
+/// A player who has earned more lives than this still has them; the footer
+/// simply stops widening, because the row shares the strip with the dot count
+/// and would otherwise walk into it.
+const MAX_LIVES_SHOWN: u32 = 5;
+
 /// Tunnel row (0-indexed).
 const TUNNEL_ROW: usize = 14;
+/// The same row, signed.
+const TUNNEL_ROW_I32: i32 = TUNNEL_ROW as i32;
+
+/// Where each ghost heads while it is scattering: one corner apiece.
+///
+/// Written out rather than derived from [`MAZE_COLS`] and [`MAZE_ROWS`]: the
+/// maze is a fixed 28-by-31 picture spelled out in the layout below, so its
+/// corners are fixed too, and `MAZE_COLS as i32 - 3` is an arithmetic
+/// expression the lint against silent overflow cannot see through.
+const SCATTER_BLINKY: Pos = Pos::new(0, 25);
+const SCATTER_PINKY: Pos = Pos::new(0, 2);
+const SCATTER_INKY: Pos = Pos::new(30, 27);
+const SCATTER_CLYDE: Pos = Pos::new(30, 0);
+
+/// The cell just outside the ghost house door.
+///
+/// An eaten ghost aims here, and turns back into a live one on arrival.
+const GHOST_HOUSE_DOOR: Pos = Pos::new(13, 14);
+
+/// The cell a ghost is placed in when it leaves the house.
+const GHOST_HOUSE_EXIT: Pos = Pos::new(11, 14);
+
+// -- What the window can be asked about --------------------------------------
+
+/// Everything the drawing pass records a hit box for.
+///
+/// The game is played with the keyboard, so most of these exist so that a test
+/// can ask *where* a thing was drawn rather than so a player can click it. The
+/// sheet targets are the exception: a click on a sheet does what the sheet says
+/// the keyboard does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// The strip along the top holding the three readings.
+    Header,
+    Score,
+    HighScore,
+    Level,
+    /// The fitted maze area, recorded before anything drawn inside it.
+    Board,
+    /// A dot, by grid position.
+    Dot(u8, u8),
+    /// A power pellet, by grid position.
+    Pellet(u8, u8),
+    Player,
+    /// A ghost, by its index in `ghosts`.
+    Ghost(u8),
+    /// The strip along the bottom holding the lives and the dot count.
+    Footer,
+    Lives,
+    /// One of the pac-man tokens standing for a remaining life.
+    Life(u8),
+    Dots,
+    /// The dimmed sheet over the board while on the menu, paused or over.
+    Overlay,
+    OverlayTitle,
+    /// The line that says a new game can be started.
+    NewGame,
+    /// The line that says the game can be resumed.
+    Resume,
+    /// A line of the menu sheet that only explains a control.
+    Controls(u8),
+    /// A line of the game-over sheet reporting a final number.
+    FinalStat(u8),
+}
+
+/// The bands a window is divided into, solved from the size it reports.
+///
+/// Every number here is a share of the live window rather than a constant.
+/// The program used to place the header at a fixed 48 pixels and the maze at a
+/// fixed 18 pixels a cell, so the picture was the same 528x702 whatever window
+/// it went into -- a larger one left a band of nothing down two sides and a
+/// smaller one cut the maze off.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Layout {
+    /// The whole window.
+    window: Rect,
+    /// The readings along the top.
+    header: Rect,
+    /// What is left for the maze.
+    body: Rect,
+    /// The lives and the dot count along the bottom.
+    footer: Rect,
+    /// Font size for a header reading.
+    head: f32,
+    /// Font size for a sheet's body line.
+    font: f32,
+    /// Font size for a sheet's title.
+    title: f32,
+    /// Font size for a footer reading.
+    small: f32,
+    /// The gap between bands, and the margin at the window's edge.
+    pad: f32,
+}
+
+impl Layout {
+    /// Solve the bands for a window of this size.
+    #[must_use]
+    pub fn new(w: f32, h: f32) -> Self {
+        let w = w.max(0.0);
+        let h = h.max(0.0);
+        let pad = (w.min(h) * 0.014).clamp(2.0, 12.0);
+        let head = (h / 42.0).clamp(9.0, 20.0);
+        let font = (h / 44.0).clamp(9.0, 18.0);
+        let title = (h / 24.0).clamp(14.0, 34.0);
+        let small = (h / 58.0).clamp(7.0, 14.0);
+
+        // Shares of `h`, each held to what there is: a band taller than the
+        // window would leave the next one a negative height, and a rectangle
+        // of negative height draws inside out.
+        let header_h = (h * 0.07).clamp(18.0, 52.0).min(h);
+        let footer_h = (h * 0.05).clamp(14.0, 40.0).min(h);
+        let header = Rect::new(
+            pad,
+            pad,
+            (w - pad * 2.0).max(0.0),
+            (header_h - pad).max(0.0),
+        );
+        let body_y = (header.bottom() + pad).min(h);
+        let footer_y = (h - footer_h).max(body_y);
+        Self {
+            window: Rect::new(0.0, 0.0, w, h),
+            header,
+            body: Rect::new(
+                pad,
+                body_y,
+                (w - pad * 2.0).max(0.0),
+                (footer_y - body_y - pad).max(0.0),
+            ),
+            footer: Rect::new(
+                pad,
+                footer_y,
+                (w - pad * 2.0).max(0.0),
+                (h - footer_y - pad).max(0.0),
+            ),
+            head,
+            font,
+            title,
+            small,
+            pad,
+        }
+    }
+}
+
+/// Where the maze goes, and how a cell reaches the screen.
+///
+/// The maze is 28 by 31 *cells*, and those two numbers are rules of the game
+/// rather than a drawing size, so the window decides only how large a cell is
+/// drawn: the largest square cell that fits the space in both directions, with
+/// the whole grid centred and the leftover left as margin. Square, because a
+/// stretched cell would make a corner look reachable from further away in one
+/// direction than the other.
+///
+/// One number is solved -- `cell` -- and every position, radius and line width
+/// follows from it, so the drawing pass and the hit test cannot disagree about
+/// where anything is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Board {
+    /// The grid's own rectangle, centred in the area it was given.
+    rect: Rect,
+    /// One cell's side, in pixels.
+    cell: f32,
+}
+
+impl Board {
+    /// Fit the grid into `area`.
+    #[must_use]
+    pub fn new(area: Rect) -> Self {
+        // A backwards area is not reachable through `Layout`, which clamps its
+        // bands, but `Board::new` is callable on its own and documents no
+        // precondition, so a caller that hands it one gets an empty grid
+        // rather than one drawn inside out.
+        let aw = area.w.max(0.0);
+        let ah = area.h.max(0.0);
+        let cell = (aw / MAZE_COLS as f32).min(ah / MAZE_ROWS as f32).max(0.0);
+        let w = cell * MAZE_COLS as f32;
+        let h = cell * MAZE_ROWS as f32;
+        Self {
+            rect: Rect::new(area.x + (aw - w) / 2.0, area.y + (ah - h) / 2.0, w, h),
+            cell,
+        }
+    }
+
+    /// The rectangle a cell occupies.
+    #[must_use]
+    pub fn cell_rect(&self, row: i32, col: i32) -> Rect {
+        Rect::new(
+            self.rect.x + col as f32 * self.cell,
+            self.rect.y + row as f32 * self.cell,
+            self.cell,
+            self.cell,
+        )
+    }
+
+    /// The centre of a cell, in window coordinates.
+    #[must_use]
+    pub fn centre_of(&self, row: i32, col: i32) -> (f32, f32) {
+        let r = self.cell_rect(row, col);
+        (r.x + self.cell / 2.0, r.y + self.cell / 2.0)
+    }
+
+    /// A length given in cells, in pixels.
+    ///
+    /// Never thinner than a pixel where it is meant to be visible: a dot that
+    /// rounds to nothing in a small window is a dot the player cannot see but
+    /// still has to eat.
+    #[must_use]
+    pub fn scaled(&self, cells: f32) -> f32 {
+        (cells * self.cell).max(1.0)
+    }
+}
+
+/// One line of a sheet, measured before any of them is placed.
+struct SheetLine {
+    text: String,
+    /// The name a test finds the line by, where the line is worth naming.
+    target: Option<Target>,
+    size: f32,
+    weight: FontWeightHint,
+    color: Color,
+}
+
+/// A grid index as the signed number the board works in.
+///
+/// The maze is 28 by 31, so every index in it fits an `i32` many times over.
+/// The conversion is checked anyway: an index that did not fit is answered
+/// with one so far off the board that whatever is drawn at it lands outside
+/// the window, which is visible, rather than wrapping to a negative row, which
+/// would silently draw in the wrong place.
+fn grid(i: usize) -> i32 {
+    i32::try_from(i).unwrap_or(i32::MAX)
+}
+
+/// A grid index as the small number a `Target` carries.
+///
+/// Same reasoning as [`grid`]: 30 is the largest index the maze has, so the
+/// conversion cannot fail, and the saturating answer is a target no cell owns
+/// rather than a target belonging to a different cell.
+fn byte(i: usize) -> u8 {
+    u8::try_from(i).unwrap_or(u8::MAX)
+}
+
+/// The same for a count that is already a `u32`.
+fn byte_u32(i: u32) -> u8 {
+    u8::try_from(i).unwrap_or(u8::MAX)
+}
+
+/// A small count as a length.
+///
+/// Written out rather than suppressing the precision lint across the file:
+/// the values here are a life index and a pulse counter, both far inside the
+/// range an `f32` holds exactly.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a life index and a pulse counter are small"
+)]
+fn f32_from_u32(v: u32) -> f32 {
+    v as f32
+}
+
+/// The radius Pac-Man and a ghost are drawn at.
+///
+/// A hair inside the cell so two tokens in neighbouring cells do not touch,
+/// and never thinner than a pixel: a token that rounds away is a token the
+/// player cannot see but can still be caught by.
+fn token_radius(b: &Board) -> f32 {
+    (b.cell / 2.0 - b.scaled(1.0 / 18.0)).max(1.0)
+}
+
+/// The square a disc of this radius occupies.
+fn square_at(cx: f32, cy: f32, r: f32) -> Rect {
+    Rect::new(cx - r, cy - r, r * 2.0, r * 2.0)
+}
+
+/// Fill a rectangle, if there is one to fill.
+///
+/// A rectangle of zero or negative size is not a small picture but a backwards
+/// one, and the renderer would draw it inside out. Windows this program can be
+/// given -- one pixel tall, or nothing at all while a resize is in flight --
+/// produce them, so the guard is on the one place that emits fills rather than
+/// repeated at each of the twenty call sites.
+fn fill(f: &mut Frame<Target>, r: Rect, color: Color, corner_radii: CornerRadii) {
+    if r.w <= 0.0 || r.h <= 0.0 {
+        return;
+    }
+    f.push(RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii,
+    });
+}
+
+/// Fill a circle of `r` centred on `(cx, cy)`.
+fn disc(f: &mut Frame<Target>, cx: f32, cy: f32, r: f32, color: Color) {
+    fill(f, square_at(cx, cy, r), color, CornerRadii::all(r));
+}
+
+/// Draw a line of text with its left edge at `x`, and answer the box it fills.
+///
+/// The box is measured, not guessed, so a hit box taken from it is the width
+/// of the words that were actually drawn.
+fn label(
+    f: &mut Frame<Target>,
+    x: f32,
+    y: f32,
+    s: &str,
+    color: Color,
+    size: f32,
+    weight: FontWeightHint,
+) -> Rect {
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: s.to_string(),
+        color,
+        font_size: size,
+        font_weight: weight,
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+    Rect::new(
+        x,
+        y,
+        text::measure(s, size, weight),
+        text::line_height(size, weight),
+    )
+}
+
+/// The same, centred on `cx` by measuring the string.
+fn centred(
+    f: &mut Frame<Target>,
+    cx: f32,
+    y: f32,
+    s: &str,
+    color: Color,
+    size: f32,
+    weight: FontWeightHint,
+) -> Rect {
+    let w = text::measure(s, size, weight);
+    label(f, cx - w / 2.0, y, s, color, size, weight)
+}
+
+/// The walls and the ghost door.
+///
+/// A free function rather than a method: the maze is the only state it reads,
+/// and passing it in is what lets a test draw a maze the game is not playing.
+fn draw_maze(f: &mut Frame<Target>, maze: &[[Cell; MAZE_COLS]; MAZE_ROWS], b: &Board) {
+    for (row, cells) in maze.iter().enumerate() {
+        for (col, cell) in cells.iter().enumerate() {
+            let r = b.cell_rect(grid(row), grid(col));
+            match cell {
+                Cell::Wall => fill(f, r, BLUE, CornerRadii::all(b.scaled(2.0 / 18.0))),
+                // The door is a lintel across the top of its cell, not a full
+                // block: the ghosts pass through it and the player does not,
+                // so it has to read as a gap rather than as wall.
+                Cell::GhostDoor => fill(
+                    f,
+                    Rect::new(r.x, r.y, r.w, r.h / 3.0),
+                    LAVENDER,
+                    CornerRadii::ZERO,
+                ),
+                _ => {}
+            }
+        }
+    }
+}
 
 // -- Random numbers -----------------------------------------------------------
 // This crate used to carry its own LCG, whose `next_u64() % bound` handed back
@@ -144,13 +557,6 @@ impl Direction {
             Direction::Right => (0, 1),
         }
     }
-
-    const ALL: [Direction; 4] = [
-        Direction::Up,
-        Direction::Down,
-        Direction::Left,
-        Direction::Right,
-    ];
 }
 
 // -- Grid position -----------------------------------------------------------
@@ -165,31 +571,100 @@ impl Pos {
         Self { row, col }
     }
 
+    /// One step in `dir`.
+    ///
+    /// Saturating: a step is one cell, so the only way to reach the end of an
+    /// `i32` here is a position that was already impossible, and stopping at
+    /// the end is a position [`in_bounds`](Self::in_bounds) rejects rather
+    /// than one that has wrapped round to the far edge of the maze.
     fn moved(self, dir: Direction) -> Self {
         let (dr, dc) = dir.delta();
         Self {
-            row: self.row + dr,
-            col: self.col + dc,
+            row: self.row.saturating_add(dr),
+            col: self.col.saturating_add(dc),
+        }
+    }
+
+    /// `steps` steps in `dir`, saturating for the reason [`moved`](Self::moved)
+    /// gives.
+    ///
+    /// The target a ghost aims at is allowed to be off the board -- that is
+    /// how Pinky ends up aiming four cells past a player who is standing at
+    /// the edge -- so this deliberately does not clamp to the maze.
+    fn ahead(self, dir: Direction, steps: i32) -> Self {
+        let (dr, dc) = dir.delta();
+        Self {
+            row: self.row.saturating_add(dr.saturating_mul(steps)),
+            col: self.col.saturating_add(dc.saturating_mul(steps)),
+        }
+    }
+
+    /// The point as far beyond `self` as `from` is behind it.
+    ///
+    /// This is Inky's aim: the vector from another ghost to a point ahead of
+    /// the player, doubled. Like [`ahead`](Self::ahead) it may land off the
+    /// board, and is only ever used as something to measure distance to.
+    fn reflected_from(self, from: Pos) -> Self {
+        Self {
+            row: self.row.saturating_add(self.row.saturating_sub(from.row)),
+            col: self.col.saturating_add(self.col.saturating_sub(from.col)),
         }
     }
 
     fn in_bounds(self) -> bool {
-        self.row >= 0 && self.row < MAZE_ROWS as i32 && self.col >= 0 && self.col < MAZE_COLS as i32
+        self.row >= 0 && self.row < ROWS_I32 && self.col >= 0 && self.col < COLS_I32
+    }
+
+    /// Whether this position is in the tunnel's mouth -- on the tunnel row and
+    /// past either end of it.
+    fn in_tunnel_mouth(self) -> bool {
+        self.row == TUNNEL_ROW_I32 && (self.col < 0 || self.col >= COLS_I32)
+    }
+
+    /// This position as a pair of grid indices, or `None` if it is off the
+    /// board.
+    ///
+    /// The one place a position becomes an index. It used to be written
+    /// `self.maze[pos.row as usize][pos.col as usize]` at six call sites, each
+    /// preceded by its own bounds test -- and `as usize` on a negative `i32`
+    /// is a very large index, so any site that ever lost its test would not
+    /// read the wrong cell but panic.
+    fn index(self) -> Option<(usize, usize)> {
+        if !self.in_bounds() {
+            return None;
+        }
+        let row = usize::try_from(self.row).ok()?;
+        let col = usize::try_from(self.col).ok()?;
+        Some((row, col))
     }
 
     /// Wrap position for the tunnel (horizontal wrap-around at tunnel row).
     fn tunnel_wrap(self) -> Self {
-        if self.row == TUNNEL_ROW as i32 {
-            let col = ((self.col % MAZE_COLS as i32) + MAZE_COLS as i32) % MAZE_COLS as i32;
-            Self { row: self.row, col }
+        if self.row == TUNNEL_ROW_I32 {
+            // `rem_euclid` is the wrap this wants: it answers a column in
+            // `0..COLS` for a negative one too, which the plain `%` does not,
+            // and it says so in one operation rather than in the three the
+            // hand-rolled `((c % n) + n) % n` needed.
+            Self {
+                row: self.row,
+                col: self.col.rem_euclid(COLS_I32),
+            }
         } else {
             self
         }
     }
 
     /// Manhattan distance to another position.
+    ///
+    /// Saturating throughout: this is compared against other distances to pick
+    /// a ghost's next step, so an impossible position must give a large answer
+    /// -- one no candidate step beats -- rather than a wrapped negative one,
+    /// which would look like the closest step of all.
     fn manhattan_distance(self, other: Pos) -> i32 {
-        (self.row - other.row).abs() + (self.col - other.col).abs()
+        self.row
+            .saturating_sub(other.row)
+            .saturating_abs()
+            .saturating_add(self.col.saturating_sub(other.col).saturating_abs())
     }
 }
 
@@ -246,19 +721,34 @@ impl GhostId {
     /// Scatter target corner for each ghost.
     fn scatter_target(self) -> Pos {
         match self {
-            GhostId::Blinky => Pos::new(0, MAZE_COLS as i32 - 3),
-            GhostId::Pinky => Pos::new(0, 2),
-            GhostId::Inky => Pos::new(MAZE_ROWS as i32 - 1, MAZE_COLS as i32 - 1),
-            GhostId::Clyde => Pos::new(MAZE_ROWS as i32 - 1, 0),
+            GhostId::Blinky => SCATTER_BLINKY,
+            GhostId::Pinky => SCATTER_PINKY,
+            GhostId::Inky => SCATTER_INKY,
+            GhostId::Clyde => SCATTER_CLYDE,
         }
     }
 
-    fn name(self) -> &'static str {
+    /// The cell inside the ghost house this ghost waits in before release.
+    ///
+    /// Blinky's is the door itself: he is released at once, so he never sits
+    /// there, and giving him a cell inside the house would put a live ghost
+    /// somewhere a live ghost may not walk.
+    fn house_cell(self) -> Pos {
         match self {
-            GhostId::Blinky => "Blinky",
-            GhostId::Pinky => "Pinky",
-            GhostId::Inky => "Inky",
-            GhostId::Clyde => "Clyde",
+            GhostId::Blinky => GHOST_HOUSE_DOOR,
+            GhostId::Pinky => Pos::new(14, 13),
+            GhostId::Inky => Pos::new(14, 14),
+            GhostId::Clyde => Pos::new(14, 15),
+        }
+    }
+
+    /// How long after the level starts this ghost leaves the house.
+    fn release_delay_ms(self) -> u64 {
+        match self {
+            GhostId::Blinky => 0,
+            GhostId::Pinky => 1000,
+            GhostId::Inky => 3000,
+            GhostId::Clyde => 5000,
         }
     }
 }
@@ -279,8 +769,6 @@ struct Ghost {
     pos: Pos,
     direction: Direction,
     mode: GhostMode,
-    /// Home position inside the ghost house.
-    home: Pos,
     /// Whether this ghost has been released from the ghost house.
     released: bool,
     /// Timer for release delay (ms).
@@ -290,20 +778,26 @@ struct Ghost {
 }
 
 impl Ghost {
-    fn new(id: GhostId, home: Pos, release_delay_ms: u64) -> Self {
+    /// A ghost waiting in `house_cell` until `release_delay_ms` have passed.
+    ///
+    /// There used to be a `home: Pos` field here holding `house_cell`. Nothing
+    /// ever read it -- an eaten ghost aims at the house *door*, not at its own
+    /// cell, and a released one is placed at the exit -- so it was a claim
+    /// about the ghost that no behaviour backed. The blanket
+    /// `#![allow(dead_code)]` at the top of the file is what let it sit there.
+    fn new(id: GhostId, house_cell: Pos, release_delay_ms: u64) -> Self {
+        // Blinky is out of the house from the first frame; the other three
+        // wait in it.
         let released = id == GhostId::Blinky;
-        let start_pos = if released {
-            // Blinky starts outside the ghost house
-            Pos::new(11, 14)
-        } else {
-            home
-        };
         Self {
             id,
-            pos: start_pos,
+            pos: if released {
+                GHOST_HOUSE_EXIT
+            } else {
+                house_cell
+            },
             direction: Direction::Left,
             mode: GhostMode::Scatter,
-            home,
             released,
             release_timer_ms: 0,
             release_delay_ms,
@@ -365,22 +859,30 @@ const MAZE_TEMPLATE: [&str; MAZE_ROWS] = [
 ];
 
 /// Parse the maze template into a grid of cells.
+///
+/// A row of the template that is short, or missing altogether, leaves the rest
+/// of that row wall -- which is what the grid starts as. That is the safe
+/// failure: a wall is somewhere the player cannot go, so a mistyped template
+/// gives an unreachable pocket rather than a hole out of the maze.
 fn parse_maze() -> [[Cell; MAZE_COLS]; MAZE_ROWS] {
     let mut grid = [[Cell::Wall; MAZE_COLS]; MAZE_ROWS];
-    for row in 0..MAZE_ROWS {
-        let line = MAZE_TEMPLATE[row].as_bytes();
-        for col in 0..MAZE_COLS {
-            if col < line.len() {
-                grid[row][col] = match line[col] {
-                    b'W' => Cell::Wall,
-                    b'.' => Cell::Dot,
-                    b'o' => Cell::PowerPellet,
-                    b'_' => Cell::Empty,
-                    b'G' => Cell::GhostHouse,
-                    b'D' => Cell::GhostDoor,
-                    _ => Cell::Wall,
-                };
-            }
+    for (row, cells) in grid.iter_mut().enumerate() {
+        let Some(line) = MAZE_TEMPLATE.get(row).map(|l| l.as_bytes()) else {
+            continue;
+        };
+        for (col, cell) in cells.iter_mut().enumerate() {
+            let Some(&glyph) = line.get(col) else {
+                continue;
+            };
+            *cell = match glyph {
+                b'.' => Cell::Dot,
+                b'o' => Cell::PowerPellet,
+                b'_' => Cell::Empty,
+                b'G' => Cell::GhostHouse,
+                b'D' => Cell::GhostDoor,
+                // 'W' and anything unrecognised alike: wall.
+                _ => Cell::Wall,
+            };
         }
     }
     grid
@@ -388,11 +890,16 @@ fn parse_maze() -> [[Cell; MAZE_COLS]; MAZE_ROWS] {
 
 /// Count total dots (including power pellets) in the maze.
 fn count_dots(grid: &[[Cell; MAZE_COLS]; MAZE_ROWS]) -> u32 {
+    count_cells(grid, Cell::Dot).saturating_add(count_cells(grid, Cell::PowerPellet))
+}
+
+/// Count the cells of one kind on a board.
+fn count_cells(grid: &[[Cell; MAZE_COLS]; MAZE_ROWS], want: Cell) -> u32 {
     let mut count = 0u32;
     for row in grid {
         for cell in row {
-            if *cell == Cell::Dot || *cell == Cell::PowerPellet {
-                count += 1;
+            if *cell == want {
+                count = count.saturating_add(1);
             }
         }
     }
@@ -400,7 +907,7 @@ fn count_dots(grid: &[[Cell; MAZE_COLS]; MAZE_ROWS]) -> u32 {
 }
 
 // -- Main app struct ---------------------------------------------------------
-struct PacmanApp {
+pub struct PacmanApp {
     /// The maze grid.
     maze: [[Cell; MAZE_COLS]; MAZE_ROWS],
     /// Player position.
@@ -445,6 +952,9 @@ struct PacmanApp {
     rng: SeededRng,
     /// Total elapsed game time in ms.
     elapsed_total_ms: u64,
+    /// The size the last frame was drawn at, and so the size the next click
+    /// is read against.
+    size: (f32, f32),
 }
 
 impl PacmanApp {
@@ -478,30 +988,52 @@ impl PacmanApp {
             mouth_open: true,
             rng: SeededRng::new(seed),
             elapsed_total_ms: 0,
+            size: (WINDOW_WIDTH, WINDOW_HEIGHT),
         };
         app.init_ghosts();
         app
     }
 
+    /// The size the next frame will be drawn at, and the next click read
+    /// against.
+    pub fn resize(&mut self, width: f32, height: f32) {
+        self.size = (width.max(0.0), height.max(0.0));
+    }
+
+    /// The size the last frame was drawn at.
+    #[must_use]
+    pub const fn size(&self) -> (f32, f32) {
+        self.size
+    }
+
     /// Initialize the four ghosts in their starting positions.
+    ///
+    /// Driven off `GhostId::ALL` rather than four hand-written pushes, so a
+    /// fifth ghost added to the enum arrives on the board instead of being
+    /// silently left off it.
     fn init_ghosts(&mut self) {
         self.ghosts.clear();
-        self.ghosts
-            .push(Ghost::new(GhostId::Blinky, Pos::new(13, 14), 0));
-        self.ghosts
-            .push(Ghost::new(GhostId::Pinky, Pos::new(14, 13), 1000));
-        self.ghosts
-            .push(Ghost::new(GhostId::Inky, Pos::new(14, 14), 3000));
-        self.ghosts
-            .push(Ghost::new(GhostId::Clyde, Pos::new(14, 15), 5000));
+        for id in GhostId::ALL {
+            self.ghosts
+                .push(Ghost::new(id, id.house_cell(), id.release_delay_ms()));
+        }
     }
 
     /// Start a new game.
+    ///
+    /// Built by replacing the whole app, so anything that is *not* a fact
+    /// about the game has to be carried across by hand: the high score, which
+    /// survives a game by definition, and the window size, which is not the
+    /// game's state at all. Forgetting the size here would send the next frame
+    /// back to the size the window opened at, so a player who resized the
+    /// window and then pressed N would watch the maze jump.
     fn start_new_game(&mut self) {
         let high = self.high_score;
+        let size = self.size;
         let seed = self.rng.next_u64();
         *self = Self::with_seed(seed);
         self.high_score = high;
+        self.size = size;
         self.state = GameState::Playing;
     }
 
@@ -521,50 +1053,59 @@ impl PacmanApp {
 
     /// Advance to the next level.
     fn next_level(&mut self) {
-        self.level += 1;
+        self.level = self.level.saturating_add(1);
         self.maze = parse_maze();
         self.total_dots = count_dots(&self.maze);
         self.dots_remaining = self.total_dots;
         self.reset_positions();
     }
 
+    /// The cell at a position, or `None` if the position is off the board.
+    fn cell_at(&self, pos: Pos) -> Option<Cell> {
+        let (row, col) = pos.index()?;
+        self.maze.get(row).and_then(|r| r.get(col)).copied()
+    }
+
+    /// Replace the cell at a position. Off the board, nothing happens.
+    fn set_cell(&mut self, pos: Pos, cell: Cell) {
+        if let Some((row, col)) = pos.index()
+            && let Some(slot) = self.maze.get_mut(row).and_then(|r| r.get_mut(col))
+        {
+            *slot = cell;
+        }
+    }
+
     /// Check if a position is walkable for the player.
     fn is_walkable(&self, pos: Pos) -> bool {
-        // Tunnel wrap-around: allow walking off the edges at the tunnel row.
-        if pos.row == TUNNEL_ROW as i32 && (pos.col < 0 || pos.col >= MAZE_COLS as i32) {
+        // The tunnel's mouth is off the board and still walkable: that is what
+        // makes the wrap-around work.
+        if pos.in_tunnel_mouth() {
             return true;
         }
-        if !pos.in_bounds() {
-            return false;
-        }
-        self.maze[pos.row as usize][pos.col as usize].is_walkable()
+        self.cell_at(pos).is_some_and(Cell::is_walkable)
     }
 
     /// Check if a position is walkable for a ghost.
+    ///
+    /// The mode is what makes the two answers differ: only a pair of eyes on
+    /// its way home may cross the door and stand in the house. A live ghost --
+    /// chasing, scattering or frightened -- is held to the same cells the
+    /// player walks, so it cannot sit out a power pellet inside the house.
+    ///
+    /// This used to be three predicates that were all the same set. `Cell` has
+    /// six variants, and `is_walkable() || cell == GhostDoor || cell ==
+    /// GhostHouse` covers every one of them except `Wall` -- which is exactly
+    /// what the `Eaten` arm covers, and exactly what the deleted
+    /// `is_ghost_passable` ("not a wall") answered. So the mode argument
+    /// decided nothing and the house door stood open in both directions.
     fn is_ghost_walkable(&self, pos: Pos, ghost_mode: GhostMode) -> bool {
-        // Tunnel wrap-around.
-        if pos.row == TUNNEL_ROW as i32 && (pos.col < 0 || pos.col >= MAZE_COLS as i32) {
+        if pos.in_tunnel_mouth() {
             return true;
         }
-        if !pos.in_bounds() {
-            return false;
-        }
-        let cell = self.maze[pos.row as usize][pos.col as usize];
-        match ghost_mode {
+        self.cell_at(pos).is_some_and(|cell| match ghost_mode {
             GhostMode::Eaten => cell.is_ghost_walkable(),
-            _ => cell.is_walkable() || cell == Cell::GhostDoor || cell == Cell::GhostHouse,
-        }
-    }
-
-    /// Check if a position is valid for ghost pathfinding (no walls).
-    fn is_ghost_passable(&self, pos: Pos) -> bool {
-        if pos.row == TUNNEL_ROW as i32 && (pos.col < 0 || pos.col >= MAZE_COLS as i32) {
-            return true;
-        }
-        if !pos.in_bounds() {
-            return false;
-        }
-        self.maze[pos.row as usize][pos.col as usize] != Cell::Wall
+            _ => cell.is_walkable(),
+        })
     }
 
     /// Get the chase target for a ghost based on its AI personality.
@@ -576,23 +1117,18 @@ impl PacmanApp {
             }
             GhostId::Pinky => {
                 // Targets 4 cells ahead of the player in their direction.
-                let (dr, dc) = self.player_dir.delta();
-                Pos::new(self.player_pos.row + dr * 4, self.player_pos.col + dc * 4)
+                self.player_pos.ahead(self.player_dir, 4)
             }
             GhostId::Inky => {
                 // Uses Blinky's position: target is 2 cells ahead of player,
                 // then doubled from Blinky's position.
-                let (dr, dc) = self.player_dir.delta();
-                let ahead = Pos::new(self.player_pos.row + dr * 2, self.player_pos.col + dc * 2);
+                let ahead = self.player_pos.ahead(self.player_dir, 2);
                 let blinky_pos = self
                     .ghosts
                     .iter()
                     .find(|g| g.id == GhostId::Blinky)
                     .map_or(self.player_pos, |g| g.pos);
-                Pos::new(
-                    ahead.row + (ahead.row - blinky_pos.row),
-                    ahead.col + (ahead.col - blinky_pos.col),
-                )
+                ahead.reflected_from(blinky_pos)
             }
             GhostId::Clyde => {
                 // Chases player when far, scatters to corner when within 8 cells.
@@ -636,7 +1172,7 @@ impl PacmanApp {
                 continue;
             }
             let next = ghost_pos.moved(dir).tunnel_wrap();
-            if self.is_ghost_passable(next) || ghost_mode == GhostMode::Eaten {
+            if self.is_ghost_walkable(next, ghost_mode) {
                 let dist = next.manhattan_distance(target);
                 if dist < best_dist {
                     best_dist = dist;
@@ -663,23 +1199,22 @@ impl PacmanApp {
             self.player_pos = next;
             self.mouth_open = !self.mouth_open;
 
-            // Check what is at the new position.
-            if next.in_bounds() {
-                let cell = self.maze[next.row as usize][next.col as usize];
-                match cell {
-                    Cell::Dot => {
-                        self.maze[next.row as usize][next.col as usize] = Cell::Empty;
-                        self.score += DOT_POINTS;
-                        self.dots_remaining = self.dots_remaining.saturating_sub(1);
-                    }
-                    Cell::PowerPellet => {
-                        self.maze[next.row as usize][next.col as usize] = Cell::Empty;
-                        self.score += POWER_PELLET_POINTS;
-                        self.dots_remaining = self.dots_remaining.saturating_sub(1);
-                        self.activate_power_pellet();
-                    }
-                    _ => {}
+            // Check what is at the new position. Off the board -- in the
+            // tunnel's mouth -- there is nothing to eat, which `cell_at`
+            // answers with `None`.
+            match self.cell_at(next) {
+                Some(Cell::Dot) => {
+                    self.set_cell(next, Cell::Empty);
+                    self.score = self.score.saturating_add(DOT_POINTS);
+                    self.dots_remaining = self.dots_remaining.saturating_sub(1);
                 }
+                Some(Cell::PowerPellet) => {
+                    self.set_cell(next, Cell::Empty);
+                    self.score = self.score.saturating_add(POWER_PELLET_POINTS);
+                    self.dots_remaining = self.dots_remaining.saturating_sub(1);
+                    self.activate_power_pellet();
+                }
+                _ => {}
             }
 
             // Update high score.
@@ -712,47 +1247,56 @@ impl PacmanApp {
         let global_mode = self.global_ghost_mode;
 
         for i in 0..self.ghosts.len() {
-            if !self.ghosts[i].released {
+            // Everything this step needs is read out before anything moves:
+            // choosing a direction reads the whole board, so the ghost cannot
+            // be held mutably across it.
+            let Some((ghost_mode, ghost_pos, current_dir, ghost_id)) = self
+                .ghosts
+                .get(i)
+                .filter(|g| g.released)
+                .map(|g| (g.mode, g.pos, g.direction, g.id))
+            else {
                 continue;
-            }
-
-            let ghost_mode = self.ghosts[i].mode;
-            let ghost_pos = self.ghosts[i].pos;
-            let current_dir = self.ghosts[i].direction;
-            let ghost_id = self.ghosts[i].id;
+            };
 
             let target = match ghost_mode {
                 GhostMode::Chase => self.ghost_chase_target(ghost_id),
                 GhostMode::Scatter => ghost_id.scatter_target(),
                 GhostMode::Frightened => random_maze_cell(&mut self.rng),
-                GhostMode::Eaten => {
-                    // Return to ghost house.
-                    Pos::new(13, 14)
-                }
+                GhostMode::Eaten => GHOST_HOUSE_DOOR,
             };
 
             let new_dir = self.ghost_choose_direction(ghost_pos, current_dir, target, ghost_mode);
             let new_pos = ghost_pos.moved(new_dir).tunnel_wrap();
 
-            // Verify the new position is passable.
-            if self.is_ghost_passable(new_pos)
-                || ghost_mode == GhostMode::Eaten
-                || (new_pos.in_bounds()
-                    && self.maze[new_pos.row as usize][new_pos.col as usize] != Cell::Wall)
-            {
-                self.ghosts[i].pos = new_pos;
-                self.ghosts[i].direction = new_dir;
+            // Verify the new position is walkable for a ghost in this mode.
+            // The direction was chosen under the same predicate, so this is a
+            // second opinion rather than a new rule -- it matters only when
+            // every direction was blocked and `best_dir` fell back to the one
+            // the ghost was already going.
+            if self.is_ghost_walkable(new_pos, ghost_mode) {
+                if let Some(ghost) = self.ghosts.get_mut(i) {
+                    ghost.pos = new_pos;
+                    ghost.direction = new_dir;
+                }
             }
 
-            // Check if eaten ghost reached home.
-            if ghost_mode == GhostMode::Eaten {
-                let home_target = Pos::new(13, 14);
-                if self.ghosts[i].pos == home_target {
-                    self.ghosts[i].mode = match global_mode {
-                        GlobalGhostMode::Chase => GhostMode::Chase,
-                        GlobalGhostMode::Scatter => GhostMode::Scatter,
-                    };
-                }
+            // Check if eaten ghost reached home. Reviving puts it back at the
+            // exit facing out, the same place and pose a ghost released from
+            // the house starts in. Leaving it standing on the door would strand
+            // it: the door's other three neighbours are house and wall, a live
+            // ghost may walk neither, and a ghost may not reverse -- so the one
+            // way off the door is the way it came.
+            if ghost_mode == GhostMode::Eaten
+                && let Some(ghost) = self.ghosts.get_mut(i)
+                && ghost.pos == GHOST_HOUSE_DOOR
+            {
+                ghost.mode = match global_mode {
+                    GlobalGhostMode::Chase => GhostMode::Chase,
+                    GlobalGhostMode::Scatter => GhostMode::Scatter,
+                };
+                ghost.pos = GHOST_HOUSE_EXIT;
+                ghost.direction = Direction::Up;
             }
         }
     }
@@ -760,31 +1304,46 @@ impl PacmanApp {
     /// Check for collisions between player and ghosts.
     fn check_ghost_collisions(&mut self) {
         for i in 0..self.ghosts.len() {
-            if self.ghosts[i].pos == self.player_pos {
-                match self.ghosts[i].mode {
-                    GhostMode::Frightened => {
-                        // Eat the ghost.
-                        self.ghosts[i].mode = GhostMode::Eaten;
-                        let multiplier = 1u32 << self.ghosts_eaten_this_power;
-                        self.score += GHOST_BASE_POINTS * multiplier;
-                        self.ghosts_eaten_this_power += 1;
-                        if self.score > self.high_score {
-                            self.high_score = self.score;
-                        }
+            let Some(mode) = self
+                .ghosts
+                .get(i)
+                .filter(|g| g.pos == self.player_pos)
+                .map(|g| g.mode)
+            else {
+                continue;
+            };
+            match mode {
+                GhostMode::Frightened => {
+                    // Eat the ghost. Each one in the same power pellet is
+                    // worth double the last, so the fourth is 1600 -- capped
+                    // by the shift so a long chain cannot roll the multiplier
+                    // over to zero and start paying nothing.
+                    if let Some(ghost) = self.ghosts.get_mut(i) {
+                        ghost.mode = GhostMode::Eaten;
                     }
-                    GhostMode::Eaten => {
-                        // Eaten ghosts don't hurt the player.
+                    let multiplier = 1u32
+                        .checked_shl(self.ghosts_eaten_this_power)
+                        .unwrap_or(u32::MAX);
+                    self.score = self
+                        .score
+                        .saturating_add(GHOST_BASE_POINTS.saturating_mul(multiplier));
+                    self.ghosts_eaten_this_power = self.ghosts_eaten_this_power.saturating_add(1);
+                    if self.score > self.high_score {
+                        self.high_score = self.score;
                     }
-                    _ => {
-                        // Player dies.
-                        self.lives = self.lives.saturating_sub(1);
-                        if self.lives == 0 {
-                            self.state = GameState::GameOver;
-                        } else {
-                            self.reset_positions();
-                        }
-                        return;
+                }
+                GhostMode::Eaten => {
+                    // Eaten ghosts don't hurt the player.
+                }
+                _ => {
+                    // Player dies.
+                    self.lives = self.lives.saturating_sub(1);
+                    if self.lives == 0 {
+                        self.state = GameState::GameOver;
+                    } else {
+                        self.reset_positions();
                     }
+                    return;
                 }
             }
         }
@@ -794,10 +1353,10 @@ impl PacmanApp {
     fn update_ghost_releases(&mut self, elapsed_ms: u64) {
         for ghost in &mut self.ghosts {
             if !ghost.released {
-                ghost.release_timer_ms += elapsed_ms;
+                ghost.release_timer_ms = ghost.release_timer_ms.saturating_add(elapsed_ms);
                 if ghost.release_timer_ms >= ghost.release_delay_ms {
                     ghost.released = true;
-                    ghost.pos = Pos::new(11, 14); // Move to the exit position.
+                    ghost.pos = GHOST_HOUSE_EXIT;
                 }
             }
         }
@@ -805,10 +1364,10 @@ impl PacmanApp {
 
     /// Update the global ghost mode (chase/scatter cycling).
     fn update_ghost_mode_cycle(&mut self, elapsed_ms: u64) {
-        if self.power_timer_ms > 0 {
+        if self.is_power_active() {
             return; // Don't cycle during power pellet.
         }
-        self.ghost_mode_timer_ms += elapsed_ms;
+        self.ghost_mode_timer_ms = self.ghost_mode_timer_ms.saturating_add(elapsed_ms);
         let threshold = match self.global_ghost_mode {
             GlobalGhostMode::Scatter => SCATTER_DURATION_MS,
             GlobalGhostMode::Chase => CHASE_DURATION_MS,
@@ -841,7 +1400,7 @@ impl PacmanApp {
 
     /// Update power pellet timer.
     fn update_power_timer(&mut self, elapsed_ms: u64) {
-        if self.power_timer_ms > 0 {
+        if self.is_power_active() {
             self.power_timer_ms = self.power_timer_ms.saturating_sub(elapsed_ms);
             if self.power_timer_ms == 0 {
                 // Power pellet ended: restore ghosts to normal mode.
@@ -866,7 +1425,7 @@ impl PacmanApp {
             return;
         }
 
-        self.elapsed_total_ms += elapsed_ms;
+        self.elapsed_total_ms = self.elapsed_total_ms.saturating_add(elapsed_ms);
         self.pulse_counter = self.pulse_counter.wrapping_add(1);
 
         // Update ghost releases.
@@ -879,15 +1438,15 @@ impl PacmanApp {
         self.update_power_timer(elapsed_ms);
 
         // Player movement.
-        self.player_move_accum_ms += elapsed_ms;
+        self.player_move_accum_ms = self.player_move_accum_ms.saturating_add(elapsed_ms);
         if self.player_move_accum_ms >= PLAYER_MOVE_MS {
             self.player_move_accum_ms = 0;
             self.move_player();
         }
 
         // Ghost movement.
-        self.ghost_move_accum_ms += elapsed_ms;
-        let ghost_interval = if self.power_timer_ms > 0 {
+        self.ghost_move_accum_ms = self.ghost_move_accum_ms.saturating_add(elapsed_ms);
+        let ghost_interval = if self.is_power_active() {
             GHOST_FRIGHTENED_MOVE_MS
         } else {
             GHOST_MOVE_MS
@@ -907,279 +1466,265 @@ impl PacmanApp {
     }
 
     /// Handle key input.
-    fn handle_key(&mut self, key: Key, pressed: bool) {
+    ///
+    /// Every arm says whether it acted. A key the game does not use has to
+    /// come back `Ignored` so the window can pass it on rather than redrawing
+    /// for nothing -- and so a test can tell "the game did nothing" from "the
+    /// game did the wrong thing", which a `()` return cannot express.
+    fn handle_key(&mut self, key: Key, pressed: bool) -> EventResult {
+        // A release is the tail of a press this game has already acted on.
         if !pressed {
-            return;
+            return EventResult::Ignored;
         }
 
         match self.state {
             GameState::Menu => {
                 if key == Key::N {
-                    self.start_new_game()
+                    self.start_new_game();
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
                 }
             }
             GameState::Playing => match key {
-                Key::Up => self.queued_dir = Some(Direction::Up),
-                Key::Down => self.queued_dir = Some(Direction::Down),
-                Key::Left => self.queued_dir = Some(Direction::Left),
-                Key::Right => self.queued_dir = Some(Direction::Right),
-                Key::P => self.state = GameState::Paused,
-                Key::Escape => self.state = GameState::Paused,
-                _ => {}
+                Key::Up => {
+                    self.queued_dir = Some(Direction::Up);
+                    EventResult::Consumed
+                }
+                Key::Down => {
+                    self.queued_dir = Some(Direction::Down);
+                    EventResult::Consumed
+                }
+                Key::Left => {
+                    self.queued_dir = Some(Direction::Left);
+                    EventResult::Consumed
+                }
+                Key::Right => {
+                    self.queued_dir = Some(Direction::Right);
+                    EventResult::Consumed
+                }
+                Key::P | Key::Escape => {
+                    self.state = GameState::Paused;
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
             },
             GameState::Paused => match key {
-                Key::P => self.state = GameState::Playing,
-                Key::Escape => self.state = GameState::Playing,
-                Key::N => self.start_new_game(),
-                _ => {}
+                Key::P | Key::Escape => {
+                    self.state = GameState::Playing;
+                    EventResult::Consumed
+                }
+                Key::N => {
+                    self.start_new_game();
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
             },
             GameState::GameOver => {
                 if key == Key::N {
-                    self.start_new_game()
+                    self.start_new_game();
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
                 }
             }
         }
     }
 
-    /// Handle incoming events.
-    fn handle_event(&mut self, event: &Event) {
-        match event {
-            Event::Key(ke) => self.handle_key(ke.key, ke.pressed),
-            Event::Tick { elapsed_ms } => self.handle_tick(*elapsed_ms),
-            _ => {}
+    /// Handle a mouse press.
+    ///
+    /// The game is played with the keyboard, so a click does something only
+    /// where a sheet is offering a choice in words: while the game is on the
+    /// menu, paused or over, a click on the sheet does what the sheet says.
+    /// Reading the target from the frame rather than from the coordinates is
+    /// what keeps that promise true after the layout moves the sheet.
+    fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        if ev.kind != MouseEventKind::Press(MouseButton::Left) {
+            return EventResult::Ignored;
+        }
+        let target = self.frame(self.size.0, self.size.1).hit_test(ev.x, ev.y);
+        // Every target the sheet draws is listed, not just the two lines that
+        // name a key: a sheet covers the board, so a click on the dimmed area
+        // is a click on the sheet and must not fall through to the game
+        // underneath. `NewGame` comes first because the pause sheet offers
+        // both, and starting a game is the choice the words name second.
+        match target {
+            Some(Target::NewGame) => {
+                self.start_new_game();
+                EventResult::Consumed
+            }
+            Some(Target::Resume) if self.state == GameState::Paused => {
+                self.state = GameState::Playing;
+                EventResult::Consumed
+            }
+            Some(
+                Target::Overlay
+                | Target::OverlayTitle
+                | Target::Resume
+                | Target::Controls(_)
+                | Target::FinalStat(_),
+            ) => EventResult::Consumed,
+            _ => EventResult::Ignored,
         }
     }
 
     // -- Rendering -----------------------------------------------------------
 
-    /// Produce all render commands for the current frame.
-    fn render(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+    /// Draw one frame at the size the window reports, recording where each
+    /// thing landed.
+    ///
+    /// Everything is solved from `w` and `h` on the way through, so nothing
+    /// here remembers where it put something last frame and there is no
+    /// second copy of the layout for a hit test to disagree with.
+    fn frame(&self, w: f32, h: f32) -> Frame<Target> {
+        let l = Layout::new(w, h);
+        let board = Board::new(l.body);
+        let mut f = Frame::new(w, h);
 
-        // Background.
-        let total_w = PADDING * 2.0 + MAZE_COLS as f32 * CELL_SIZE;
-        let total_h = PADDING * 2.0 + HEADER_HEIGHT + MAZE_ROWS as f32 * CELL_SIZE + FOOTER_HEIGHT;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: total_w,
-            height: total_h,
-            color: BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
+        fill(&mut f, l.window, BASE, CornerRadii::ZERO);
+        self.draw_header(&mut f, &l);
 
-        self.render_header(&mut cmds);
-        self.render_maze(&mut cmds);
-        self.render_dots(&mut cmds);
-        self.render_player(&mut cmds);
-        self.render_ghosts(&mut cmds);
-        self.render_footer(&mut cmds);
-        self.render_overlay(&mut cmds);
+        // The board's own box goes down before anything inside it, so a dot,
+        // a pellet or a ghost drawn on top of it answers a hit test first.
+        f.hit(Target::Board, board.rect);
+        draw_maze(&mut f, &self.maze, &board);
+        self.draw_dots(&mut f, &board);
+        self.draw_player(&mut f, &board);
+        self.draw_ghosts(&mut f, &board);
 
-        cmds
+        self.draw_footer(&mut f, &l);
+        self.draw_sheet(&mut f, &l);
+        f
     }
 
-    /// Render the header (score, high score, level).
-    fn render_header(&self, cmds: &mut Vec<RenderCommand>) {
-        let y = PADDING;
-        let left_x = PADDING;
-        let center_x = PADDING + (MAZE_COLS as f32 * CELL_SIZE) / 2.0;
-        let right_x = PADDING + MAZE_COLS as f32 * CELL_SIZE - 120.0;
-
-        // Score.
-        cmds.push(RenderCommand::Text {
-            x: left_x,
-            y,
-            text: format!("SCORE: {}", self.score),
-            color: TEXT_COLOR,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // High score.
-        cmds.push(RenderCommand::Text {
-            x: center_x - 50.0,
-            y,
-            text: format!("HI: {}", self.high_score),
-            color: SUBTEXT0,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Level.
-        cmds.push(RenderCommand::Text {
-            x: right_x,
-            y,
-            text: format!("LVL {}", self.level),
-            color: LAVENDER,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    /// Pixel x for a maze column.
-    fn cell_x(&self, col: usize) -> f32 {
-        PADDING + col as f32 * CELL_SIZE
-    }
-
-    /// Pixel y for a maze row.
-    fn cell_y(&self, row: usize) -> f32 {
-        PADDING + HEADER_HEIGHT + row as f32 * CELL_SIZE
-    }
-
-    /// Render the maze walls.
-    fn render_maze(&self, cmds: &mut Vec<RenderCommand>) {
-        for row in 0..MAZE_ROWS {
-            for col in 0..MAZE_COLS {
-                let cell = self.maze[row][col];
-                if cell == Cell::Wall {
-                    let x = self.cell_x(col);
-                    let y = self.cell_y(row);
-                    cmds.push(RenderCommand::FillRect {
-                        x,
-                        y,
-                        width: CELL_SIZE,
-                        height: CELL_SIZE,
-                        color: BLUE,
-                        corner_radii: CornerRadii::all(2.0),
-                    });
-                } else if cell == Cell::GhostDoor {
-                    let x = self.cell_x(col);
-                    let y = self.cell_y(row);
-                    cmds.push(RenderCommand::FillRect {
-                        x,
-                        y,
-                        width: CELL_SIZE,
-                        height: CELL_SIZE / 3.0,
-                        color: LAVENDER,
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                }
-            }
+    /// The three readings along the top, each placed by measuring it.
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.header, MANTLE, CornerRadii::all(l.pad * 0.5));
+        f.hit(Target::Header, l.header);
+        if l.header.is_empty() {
+            return;
         }
+        let inner = l.pad.max(2.0);
+        let bold = FontWeightHint::Bold;
+        let y = l.header.y + (l.header.h - text::line_height(l.head, bold)) / 2.0;
+
+        let score = format!("SCORE: {}", self.score);
+        let r = label(f, l.header.x + inner, y, &score, TEXT_COLOR, l.head, bold);
+        f.hit(Target::Score, r);
+
+        let hi = format!("HI: {}", self.high_score);
+        let r = centred(
+            f,
+            l.header.centre().0,
+            y,
+            &hi,
+            SUBTEXT0,
+            l.head,
+            FontWeightHint::Regular,
+        );
+        f.hit(Target::HighScore, r);
+
+        // Right-aligned by measuring the string. It used to be placed 120
+        // pixels in from the right edge, which is where "LVL 1" ends only for
+        // as long as the level stays one digit and the font stays 14 points.
+        let lvl = format!("LVL {}", self.level);
+        let width = text::measure(&lvl, l.head, bold);
+        let r = label(
+            f,
+            l.header.right() - inner - width,
+            y,
+            &lvl,
+            LAVENDER,
+            l.head,
+            bold,
+        );
+        f.hit(Target::Level, r);
     }
 
-    /// Render dots and power pellets.
-    fn render_dots(&self, cmds: &mut Vec<RenderCommand>) {
-        let pulse = (self.pulse_counter % 30) > 15;
-        for row in 0..MAZE_ROWS {
-            for col in 0..MAZE_COLS {
-                let cell = self.maze[row][col];
-                let cx = self.cell_x(col) + CELL_SIZE / 2.0;
-                let cy = self.cell_y(row) + CELL_SIZE / 2.0;
-
-                match cell {
-                    Cell::Dot => {
-                        let r = DOT_RADIUS;
-                        cmds.push(RenderCommand::FillRect {
-                            x: cx - r,
-                            y: cy - r,
-                            width: r * 2.0,
-                            height: r * 2.0,
-                            color: YELLOW,
-                            corner_radii: CornerRadii::all(r),
-                        });
-                    }
+    /// Dots and power pellets, each with the box a test can find it by.
+    fn draw_dots(&self, f: &mut Frame<Target>, b: &Board) {
+        let pulsing = (self.pulse_counter % 30) > 15;
+        for (row, cells) in self.maze.iter().enumerate() {
+            for (col, cell) in cells.iter().enumerate() {
+                let (cx, cy) = b.centre_of(grid(row), grid(col));
+                let (radius, target) = match cell {
+                    Cell::Dot => (
+                        b.scaled(DOT_RADIUS_CELLS),
+                        Target::Dot(byte(row), byte(col)),
+                    ),
                     Cell::PowerPellet => {
-                        let r = if pulse {
-                            POWER_PELLET_RADIUS + 1.0
-                        } else {
-                            POWER_PELLET_RADIUS
-                        };
-                        cmds.push(RenderCommand::FillRect {
-                            x: cx - r,
-                            y: cy - r,
-                            width: r * 2.0,
-                            height: r * 2.0,
-                            color: YELLOW,
-                            corner_radii: CornerRadii::all(r),
-                        });
+                        // The pulse is a share of the pellet, not a pixel: the
+                        // old fixed `+1.0` was invisible in a large window and
+                        // a fifth of the pellet again in a small one.
+                        let base = b.scaled(POWER_PELLET_RADIUS_CELLS);
+                        let r = if pulsing { base * 1.2 } else { base };
+                        (r, Target::Pellet(byte(row), byte(col)))
                     }
-                    _ => {}
-                }
+                    _ => continue,
+                };
+                disc(f, cx, cy, radius, YELLOW);
+                f.hit(target, square_at(cx, cy, radius));
             }
         }
     }
 
-    /// Render the player (Pac-Man: a yellow circle with a mouth).
-    fn render_player(&self, cmds: &mut Vec<RenderCommand>) {
+    /// Pac-Man himself: a disc with a bite taken out of it in the direction
+    /// he is facing.
+    fn draw_player(&self, f: &mut Frame<Target>, b: &Board) {
         if self.state == GameState::Menu {
             return;
         }
-        let cx = self.cell_x(self.player_pos.col as usize) + CELL_SIZE / 2.0;
-        let cy = self.cell_y(self.player_pos.row as usize) + CELL_SIZE / 2.0;
-        let radius = CELL_SIZE / 2.0 - 1.0;
+        let (cx, cy) = b.centre_of(self.player_pos.row, self.player_pos.col);
+        let radius = token_radius(b);
 
-        // Body circle.
-        cmds.push(RenderCommand::FillRect {
-            x: cx - radius,
-            y: cy - radius,
-            width: radius * 2.0,
-            height: radius * 2.0,
-            color: YELLOW,
-            corner_radii: CornerRadii::all(radius),
-        });
+        disc(f, cx, cy, radius, YELLOW);
 
-        // Mouth (wedge approximated by a triangle of background color).
         if self.mouth_open {
-            let mouth_size = radius * 0.5;
+            let reach = radius * 0.5;
             let (mx, my) = match self.player_dir {
-                Direction::Right => (cx + mouth_size, cy),
-                Direction::Left => (cx - mouth_size, cy),
-                Direction::Up => (cx, cy - mouth_size),
-                Direction::Down => (cx, cy + mouth_size),
+                Direction::Right => (cx + reach, cy),
+                Direction::Left => (cx - reach, cy),
+                Direction::Up => (cx, cy - reach),
+                Direction::Down => (cx, cy + reach),
             };
-            // Draw a small dark rect to simulate mouth opening.
             let ms = radius * 0.45;
-            cmds.push(RenderCommand::FillRect {
-                x: mx - ms / 2.0,
-                y: my - ms / 2.0,
-                width: ms,
-                height: ms,
-                color: BASE,
-                corner_radii: CornerRadii::ZERO,
-            });
+            fill(
+                f,
+                Rect::new(mx - ms / 2.0, my - ms / 2.0, ms, ms),
+                BASE,
+                CornerRadii::ZERO,
+            );
         }
 
-        // Eye.
+        // The eye sits at a share of the radius. It used to be nudged by a
+        // flat `+1.0` or `-3.0` pixels, which put it clean off the head once a
+        // cell was drawn smaller than the 18 pixels those numbers were
+        // eyeballed against.
         let (ex, ey) = match self.player_dir {
-            Direction::Right | Direction::Down => (cx + 1.0, cy - radius * 0.35),
-            Direction::Left => (cx - 3.0, cy - radius * 0.35),
-            Direction::Up => (cx + 1.0, cy - radius * 0.5),
+            Direction::Right | Direction::Down => (cx + radius * 0.15, cy - radius * 0.35),
+            Direction::Left => (cx - radius * 0.45, cy - radius * 0.35),
+            Direction::Up => (cx + radius * 0.15, cy - radius * 0.5),
         };
-        let eye_r = 2.0;
-        cmds.push(RenderCommand::FillRect {
-            x: ex - eye_r,
-            y: ey - eye_r,
-            width: eye_r * 2.0,
-            height: eye_r * 2.0,
-            color: BASE,
-            corner_radii: CornerRadii::all(eye_r),
-        });
+        disc(f, ex, ey, (radius * 0.25).max(1.0), BASE);
+
+        f.hit(Target::Player, square_at(cx, cy, radius));
     }
 
-    /// Render the ghosts.
-    fn render_ghosts(&self, cmds: &mut Vec<RenderCommand>) {
+    /// The four ghosts, drawn after the player so one standing on him is the
+    /// one a hit test finds.
+    fn draw_ghosts(&self, f: &mut Frame<Target>, b: &Board) {
         if self.state == GameState::Menu {
             return;
         }
-        let is_flashing = self.power_timer_ms > 0 && self.power_timer_ms < POWER_FLASH_MS;
-        let flash_on = is_flashing && (self.pulse_counter % 10) > 5;
+        let flashing = self.is_power_flashing() && (self.pulse_counter % 10) > 5;
 
-        for ghost in &self.ghosts {
-            let cx = self.cell_x(ghost.pos.col as usize) + CELL_SIZE / 2.0;
-            let cy = self.cell_y(ghost.pos.row as usize) + CELL_SIZE / 2.0;
-            let radius = CELL_SIZE / 2.0 - 1.0;
+        for (i, ghost) in self.ghosts.iter().enumerate() {
+            let (cx, cy) = b.centre_of(ghost.pos.row, ghost.pos.col);
+            let radius = token_radius(b);
 
-            let body_color = match ghost.mode {
+            let body = match ghost.mode {
                 GhostMode::Frightened => {
-                    if flash_on {
+                    if flashing {
                         TEXT_COLOR
                     } else {
                         BLUE
@@ -1189,319 +1734,221 @@ impl PacmanApp {
                 _ => ghost.id.color(),
             };
 
-            // Ghost body (rounded-top rectangle).
-            cmds.push(RenderCommand::FillRect {
-                x: cx - radius,
-                y: cy - radius,
-                width: radius * 2.0,
-                height: radius * 2.0,
-                color: body_color,
-                corner_radii: CornerRadii::all(radius * 0.5),
-            });
+            // A rounded top and a square skirt, which is what makes the shape
+            // read as a ghost rather than as a pill.
+            fill(
+                f,
+                square_at(cx, cy, radius),
+                body,
+                CornerRadii::all(radius * 0.5),
+            );
+            fill(
+                f,
+                Rect::new(cx - radius, cy, radius * 2.0, radius),
+                body,
+                CornerRadii::ZERO,
+            );
 
-            // Ghost skirt (bottom rect, no rounding).
-            cmds.push(RenderCommand::FillRect {
-                x: cx - radius,
-                y: cy,
-                width: radius * 2.0,
-                height: radius,
-                color: body_color,
-                corner_radii: CornerRadii::ZERO,
-            });
-
-            // Eyes (not for eaten ghosts -- they are just eyes).
-            if ghost.mode != GhostMode::Eaten {
-                let eye_r = 2.5;
-                let eye_y = cy - radius * 0.2;
-                // Left eye.
-                cmds.push(RenderCommand::FillRect {
-                    x: cx - radius * 0.4 - eye_r,
-                    y: eye_y - eye_r,
-                    width: eye_r * 2.0,
-                    height: eye_r * 2.0,
-                    color: TEXT_COLOR,
-                    corner_radii: CornerRadii::all(eye_r),
-                });
-                // Right eye.
-                cmds.push(RenderCommand::FillRect {
-                    x: cx + radius * 0.4 - eye_r,
-                    y: eye_y - eye_r,
-                    width: eye_r * 2.0,
-                    height: eye_r * 2.0,
-                    color: TEXT_COLOR,
-                    corner_radii: CornerRadii::all(eye_r),
-                });
-                // Pupils.
-                let pupil_r = 1.5;
-                let (pox, poy) = match ghost.direction {
-                    Direction::Right => (1.0, 0.0),
-                    Direction::Left => (-1.0, 0.0),
-                    Direction::Up => (0.0, -1.0),
-                    Direction::Down => (0.0, 1.0),
-                };
-                cmds.push(RenderCommand::FillRect {
-                    x: cx - radius * 0.4 - pupil_r + pox,
-                    y: eye_y - pupil_r + poy,
-                    width: pupil_r * 2.0,
-                    height: pupil_r * 2.0,
-                    color: BLUE,
-                    corner_radii: CornerRadii::all(pupil_r),
-                });
-                cmds.push(RenderCommand::FillRect {
-                    x: cx + radius * 0.4 - pupil_r + pox,
-                    y: eye_y - pupil_r + poy,
-                    width: pupil_r * 2.0,
-                    height: pupil_r * 2.0,
-                    color: BLUE,
-                    corner_radii: CornerRadii::all(pupil_r),
-                });
+            let eye_r = (radius * 0.3).max(1.0);
+            let eye_y = cy - radius * 0.2;
+            if ghost.mode == GhostMode::Eaten {
+                // An eaten ghost is a pair of eyes on its way home, so the
+                // body above is drawn in the dimmed colour and the eyes are
+                // the only part that reads.
+                let r = (radius * 0.35).max(1.0);
+                disc(f, cx - radius * 0.35, cy, r, TEXT_COLOR);
+                disc(f, cx + radius * 0.35, cy, r, TEXT_COLOR);
             } else {
-                // Eaten ghost: just draw eyes.
-                let eye_r = 3.0;
-                let eye_y = cy - 1.0;
-                cmds.push(RenderCommand::FillRect {
-                    x: cx - radius * 0.35 - eye_r,
-                    y: eye_y - eye_r,
-                    width: eye_r * 2.0,
-                    height: eye_r * 2.0,
+                disc(f, cx - radius * 0.4, eye_y, eye_r, TEXT_COLOR);
+                disc(f, cx + radius * 0.4, eye_y, eye_r, TEXT_COLOR);
+
+                // The pupils lean the way the ghost is going, by a share of
+                // the head rather than by one pixel.
+                let lean = radius * 0.15;
+                let (px, py) = match ghost.direction {
+                    Direction::Right => (lean, 0.0),
+                    Direction::Left => (-lean, 0.0),
+                    Direction::Up => (0.0, -lean),
+                    Direction::Down => (0.0, lean),
+                };
+                let pupil = (radius * 0.18).max(1.0);
+                disc(f, cx - radius * 0.4 + px, eye_y + py, pupil, BLUE);
+                disc(f, cx + radius * 0.4 + px, eye_y + py, pupil, BLUE);
+            }
+
+            // The skirt reaches a full radius below the centre, so the box is
+            // the body and the skirt together and not just the head.
+            f.hit(
+                Target::Ghost(byte(i)),
+                Rect::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0),
+            );
+        }
+    }
+
+    /// The lives and the dot count along the bottom.
+    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.footer, MANTLE, CornerRadii::all(l.pad * 0.5));
+        f.hit(Target::Footer, l.footer);
+        if l.footer.is_empty() {
+            return;
+        }
+        let inner = l.pad.max(2.0);
+        let plain = FontWeightHint::Regular;
+        let line = text::line_height(l.small, plain);
+        let y = l.footer.y + (l.footer.h - line) / 2.0;
+
+        let word = label(f, l.footer.x + inner, y, "LIVES:", SUBTEXT0, l.small, plain);
+        f.hit(Target::Lives, word);
+
+        // The tokens start where the word ends, measured. They used to start a
+        // flat 50 pixels in from the margin and step 22 apart, which lands
+        // through the middle of the word in a small window and a gap short of
+        // it in a large one.
+        let token = (l.footer.h * 0.28).max(1.0);
+        let step = token * 2.0 + inner;
+        for i in 0..self.lives.min(MAX_LIVES_SHOWN) {
+            let cx = word.right() + inner + token + f32_from_u32(i) * step;
+            let cy = y + line / 2.0;
+            disc(f, cx, cy, token, YELLOW);
+            f.hit(Target::Life(byte_u32(i)), square_at(cx, cy, token));
+        }
+
+        let dots = format!("DOTS: {}", self.dots_remaining);
+        let width = text::measure(&dots, l.small, plain);
+        let r = label(
+            f,
+            l.footer.right() - inner - width,
+            y,
+            &dots,
+            SUBTEXT0,
+            l.small,
+            plain,
+        );
+        f.hit(Target::Dots, r);
+    }
+
+    /// The sheet that covers the board while the game is on the menu, paused
+    /// or over.
+    ///
+    /// Every line is stacked and centred from its own measured width. The old
+    /// code placed each one at `centre - 80`, `- 90`, `- 100`, `- 70` or
+    /// `- 50` -- a hand-tuned half-width per string, right only at the one
+    /// font size those numbers were eyeballed at.
+    fn draw_sheet(&self, f: &mut Frame<Target>, l: &Layout) {
+        let (title, title_color, dim) = match self.state {
+            GameState::Playing => return,
+            GameState::Menu => ("PAC-MAN", YELLOW, 220),
+            GameState::Paused => ("PAUSED", YELLOW, 180),
+            GameState::GameOver => ("GAME OVER", RED, 200),
+        };
+
+        fill(f, l.window, Color::rgba(30, 30, 46, dim), CornerRadii::ZERO);
+        f.hit(Target::Overlay, l.window);
+
+        let plain = FontWeightHint::Regular;
+        let mut lines = vec![SheetLine {
+            text: title.to_string(),
+            target: Some(Target::OverlayTitle),
+            size: l.title,
+            weight: FontWeightHint::Bold,
+            color: title_color,
+        }];
+        match self.state {
+            GameState::Menu => {
+                lines.push(SheetLine {
+                    text: "Press N to start".to_string(),
+                    target: Some(Target::NewGame),
+                    size: l.font,
+                    weight: plain,
                     color: TEXT_COLOR,
-                    corner_radii: CornerRadii::all(eye_r),
                 });
-                cmds.push(RenderCommand::FillRect {
-                    x: cx + radius * 0.35 - eye_r,
-                    y: eye_y - eye_r,
-                    width: eye_r * 2.0,
-                    height: eye_r * 2.0,
-                    color: TEXT_COLOR,
-                    corner_radii: CornerRadii::all(eye_r),
+                lines.push(SheetLine {
+                    text: "Arrow keys to move".to_string(),
+                    target: Some(Target::Controls(0)),
+                    size: l.small,
+                    weight: plain,
+                    color: SUBTEXT0,
+                });
+                lines.push(SheetLine {
+                    text: "P to pause".to_string(),
+                    target: Some(Target::Controls(1)),
+                    size: l.small,
+                    weight: plain,
+                    color: SUBTEXT0,
                 });
             }
-        }
-    }
-
-    /// Render the footer (lives indicator).
-    fn render_footer(&self, cmds: &mut Vec<RenderCommand>) {
-        let y = PADDING + HEADER_HEIGHT + MAZE_ROWS as f32 * CELL_SIZE + 8.0;
-        let x_start = PADDING;
-
-        // Lives.
-        cmds.push(RenderCommand::Text {
-            x: x_start,
-            y,
-            text: "LIVES:".to_string(),
-            color: SUBTEXT0,
-            font_size: SMALL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        for i in 0..self.lives.min(5) {
-            let lx = x_start + 50.0 + i as f32 * 22.0;
-            let r = 7.0;
-            cmds.push(RenderCommand::FillRect {
-                x: lx,
-                y: y + 2.0,
-                width: r * 2.0,
-                height: r * 2.0,
-                color: YELLOW,
-                corner_radii: CornerRadii::all(r),
-            });
-        }
-
-        // Dots remaining.
-        let dots_x = PADDING + MAZE_COLS as f32 * CELL_SIZE - 120.0;
-        cmds.push(RenderCommand::Text {
-            x: dots_x,
-            y,
-            text: format!("DOTS: {}", self.dots_remaining),
-            color: SUBTEXT0,
-            font_size: SMALL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    /// Render overlays for menu, pause, game over.
-    fn render_overlay(&self, cmds: &mut Vec<RenderCommand>) {
-        match self.state {
-            GameState::Menu => self.render_menu_overlay(cmds),
-            GameState::Paused => self.render_pause_overlay(cmds),
-            GameState::GameOver => self.render_game_over_overlay(cmds),
+            GameState::Paused => {
+                lines.push(SheetLine {
+                    text: "Press P or Esc to resume".to_string(),
+                    target: Some(Target::Resume),
+                    size: l.font,
+                    weight: plain,
+                    color: TEXT_COLOR,
+                });
+                lines.push(SheetLine {
+                    text: "Press N for new game".to_string(),
+                    target: Some(Target::NewGame),
+                    size: l.font,
+                    weight: plain,
+                    color: SUBTEXT0,
+                });
+            }
+            GameState::GameOver => {
+                lines.push(SheetLine {
+                    text: format!("Score: {}", self.score),
+                    target: Some(Target::FinalStat(0)),
+                    size: l.font,
+                    weight: plain,
+                    color: TEXT_COLOR,
+                });
+                lines.push(SheetLine {
+                    text: format!("Level: {}", self.level),
+                    target: Some(Target::FinalStat(1)),
+                    size: l.font,
+                    weight: plain,
+                    color: SUBTEXT0,
+                });
+                lines.push(SheetLine {
+                    text: "Press N for new game".to_string(),
+                    target: Some(Target::NewGame),
+                    size: l.font,
+                    weight: plain,
+                    color: TEXT_COLOR,
+                });
+            }
             GameState::Playing => {}
         }
-    }
 
-    /// Render the menu overlay.
-    fn render_menu_overlay(&self, cmds: &mut Vec<RenderCommand>) {
-        let total_w = PADDING * 2.0 + MAZE_COLS as f32 * CELL_SIZE;
-        let total_h = PADDING * 2.0 + HEADER_HEIGHT + MAZE_ROWS as f32 * CELL_SIZE + FOOTER_HEIGHT;
+        // Measure the whole stack before placing any of it, so the block is
+        // centred on what it occupies rather than on its first line.
+        let gap = l.font * 0.5;
+        let mut total = 0.0;
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                total += gap;
+            }
+            total += text::line_height(line.size, line.weight);
+        }
 
-        // Semi-transparent overlay.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: total_w,
-            height: total_h,
-            color: Color::rgba(30, 30, 46, 220),
-            corner_radii: CornerRadii::ZERO,
-        });
+        let (cx, cy) = l.window.centre();
+        let mut y = cy - total / 2.0;
+        for line in &lines {
+            let r = centred(f, cx, y, &line.text, line.color, line.size, line.weight);
+            if let Some(t) = line.target {
+                f.hit(t, r);
+            }
+            y += text::line_height(line.size, line.weight) + gap;
+        }
 
-        let center_x = total_w / 2.0;
-        let center_y = total_h / 2.0;
-
-        cmds.push(RenderCommand::Text {
-            x: center_x - 80.0,
-            y: center_y - 60.0,
-            text: "PAC-MAN".to_string(),
-            color: YELLOW,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: center_x - 90.0,
-            y: center_y - 15.0,
-            text: "Press N to start".to_string(),
-            color: TEXT_COLOR,
-            font_size: OVERLAY_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: center_x - 100.0,
-            y: center_y + 15.0,
-            text: "Arrow keys to move".to_string(),
-            color: SUBTEXT0,
-            font_size: SMALL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: center_x - 80.0,
-            y: center_y + 35.0,
-            text: "P to pause".to_string(),
-            color: SUBTEXT0,
-            font_size: SMALL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Animated pac-man on menu.
-        let pac_x = center_x - 60.0 + ((self.pulse_counter % 120) as f32);
-        let r = 12.0;
-        cmds.push(RenderCommand::FillRect {
-            x: pac_x - r,
-            y: center_y + 55.0,
-            width: r * 2.0,
-            height: r * 2.0,
-            color: YELLOW,
-            corner_radii: CornerRadii::all(r),
-        });
-    }
-
-    /// Render the pause overlay.
-    fn render_pause_overlay(&self, cmds: &mut Vec<RenderCommand>) {
-        let total_w = PADDING * 2.0 + MAZE_COLS as f32 * CELL_SIZE;
-        let total_h = PADDING * 2.0 + HEADER_HEIGHT + MAZE_ROWS as f32 * CELL_SIZE + FOOTER_HEIGHT;
-
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: total_w,
-            height: total_h,
-            color: Color::rgba(30, 30, 46, 180),
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        let center_x = total_w / 2.0;
-        let center_y = total_h / 2.0;
-
-        cmds.push(RenderCommand::Text {
-            x: center_x - 50.0,
-            y: center_y - 30.0,
-            text: "PAUSED".to_string(),
-            color: YELLOW,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: center_x - 100.0,
-            y: center_y + 10.0,
-            text: "P to resume, N for new game".to_string(),
-            color: TEXT_COLOR,
-            font_size: OVERLAY_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    /// Render the game over overlay.
-    fn render_game_over_overlay(&self, cmds: &mut Vec<RenderCommand>) {
-        let total_w = PADDING * 2.0 + MAZE_COLS as f32 * CELL_SIZE;
-        let total_h = PADDING * 2.0 + HEADER_HEIGHT + MAZE_ROWS as f32 * CELL_SIZE + FOOTER_HEIGHT;
-
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: total_w,
-            height: total_h,
-            color: Color::rgba(30, 30, 46, 200),
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        let center_x = total_w / 2.0;
-        let center_y = total_h / 2.0;
-
-        cmds.push(RenderCommand::Text {
-            x: center_x - 70.0,
-            y: center_y - 40.0,
-            text: "GAME OVER".to_string(),
-            color: RED,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: center_x - 70.0,
-            y: center_y,
-            text: format!("Score: {}", self.score),
-            color: TEXT_COLOR,
-            font_size: OVERLAY_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: center_x - 100.0,
-            y: center_y + 30.0,
-            text: "Press N for new game".to_string(),
-            color: SUBTEXT0,
-            font_size: OVERLAY_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    /// Get the number of released ghosts.
-    fn released_ghost_count(&self) -> usize {
-        self.ghosts.iter().filter(|g| g.released).count()
+        if self.state == GameState::Menu {
+            // A pac-man walking across under the words. His travel is a share
+            // of the window: the old version added the raw pulse counter as
+            // pixels, so he walked 120 pixels whatever the window was wide.
+            let r = (l.title * 0.35).max(1.0);
+            let span = (l.window.w - r * 2.0).max(0.0);
+            let along = f32_from_u32(self.pulse_counter % 120) / 120.0;
+            disc(f, r + span * along, y + r, r, YELLOW);
+        }
     }
 
     /// Check if power pellet mode is active.
@@ -1511,30 +1958,101 @@ impl PacmanApp {
 
     /// Check if power pellet mode is flashing (near end).
     fn is_power_flashing(&self) -> bool {
-        self.power_timer_ms > 0 && self.power_timer_ms < POWER_FLASH_MS
-    }
-
-    /// Get the ghost at a given position, if any.
-    fn ghost_at(&self, pos: Pos) -> Option<&Ghost> {
-        self.ghosts.iter().find(|g| g.pos == pos)
-    }
-
-    /// Get the count of dots of a specific type remaining.
-    fn count_cell_type(&self, cell_type: Cell) -> u32 {
-        let mut count = 0u32;
-        for row in &self.maze {
-            for cell in row {
-                if *cell == cell_type {
-                    count += 1;
-                }
-            }
-        }
-        count
+        self.is_power_active() && self.power_timer_ms < POWER_FLASH_MS
     }
 }
 
-fn main() {
-    let _app = PacmanApp::new();
+// -- Window plumbing ---------------------------------------------------------
+
+/// The one body both the window and the test probe drive, so what a key or a
+/// click does in a test is what it does on a screen.
+///
+/// The old `handle_event` returned nothing and had no caller at all: `main`
+/// built the game and dropped it, so no event ever reached this match.
+pub fn handle_event(app: &mut PacmanApp, event: &Event) -> EventResult {
+    match event {
+        Event::Key(ke) => app.handle_key(ke.key, ke.pressed),
+        Event::Mouse(me) => app.handle_mouse(me),
+        Event::Tick { elapsed_ms } => {
+            app.handle_tick(*elapsed_ms);
+            // The pulse counter advances on every tick in every state, so
+            // there is always something new to draw -- the pellets breathe and
+            // the menu's pac-man walks even with the game standing still.
+            EventResult::Consumed
+        }
+        Event::Resize { width, height } => {
+            app.resize(f32_from_u32(*width), f32_from_u32(*height));
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+impl App for PacmanApp {
+    fn title(&self) -> String {
+        "Pac-Man".to_string()
+    }
+
+    fn app_id(&self) -> String {
+        "pacman".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (INITIAL_WINDOW_W, INITIAL_WINDOW_H)
+    }
+
+    fn tick_interval(&self) -> Option<Duration> {
+        Some(TICK)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against, which is the only reason it is stored at all.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for PacmanApp {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
+    }
+}
+
+fn main() -> ExitCode {
+    let mut game = PacmanApp::new();
+    app::launch("pacman", &mut game)
 }
 
 // =============================================================================
@@ -1542,7 +2060,21 @@ fn main() {
 // =============================================================================
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it -- that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects,
+        clippy::cast_precision_loss
+    )]
+
     use super::*;
+    use guitk::probe;
     use std::collections::BTreeSet;
 
     // -- Helpers --------------------------------------------------------------
@@ -1558,17 +2090,11 @@ mod tests {
     }
 
     fn make_key_event(key: Key) -> KeyEvent {
-        KeyEvent {
-            key,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        }
+        probe::press(key)
     }
 
-    fn press_key(app: &mut PacmanApp, key: Key) {
-        let event = Event::Key(make_key_event(key));
-        app.handle_event(&event);
+    fn press_key(app: &mut PacmanApp, key: Key) -> EventResult {
+        handle_event(app, &Event::Key(make_key_event(key)))
     }
 
     fn force_player_tick(app: &mut PacmanApp) {
@@ -1844,11 +2370,9 @@ mod tests {
     }
 
     #[test]
-    fn test_ghost_names() {
-        assert_eq!(GhostId::Blinky.name(), "Blinky");
-        assert_eq!(GhostId::Pinky.name(), "Pinky");
-        assert_eq!(GhostId::Inky.name(), "Inky");
-        assert_eq!(GhostId::Clyde.name(), "Clyde");
+    fn test_ghost_roster_is_the_four_ghosts() {
+        let names: Vec<String> = GhostId::ALL.iter().map(probe::variant_name).collect();
+        assert_eq!(names, ["Blinky", "Pinky", "Inky", "Clyde"]);
     }
 
     // -- Ghost initialization tests -------------------------------------------
@@ -2008,13 +2532,8 @@ mod tests {
     #[test]
     fn test_key_release_ignored() {
         let mut app = playing_app();
-        let event = Event::Key(KeyEvent {
-            key: Key::Up,
-            pressed: false,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        app.handle_event(&event);
+        let event = Event::Key(probe::release(Key::Up));
+        assert_eq!(handle_event(&mut app, &event), EventResult::Ignored);
         assert_eq!(app.queued_dir, None);
     }
 
@@ -2276,7 +2795,8 @@ mod tests {
     #[test]
     fn test_released_ghost_count() {
         let app = playing_app();
-        assert_eq!(app.released_ghost_count(), 1, "Only Blinky starts released");
+        let released = app.ghosts.iter().filter(|g| g.released).count();
+        assert_eq!(released, 1, "Only Blinky starts released");
     }
 
     // -- Ghost mode cycle tests -----------------------------------------------
@@ -2388,28 +2908,6 @@ mod tests {
         assert_eq!(target, app.player_pos);
     }
 
-    // -- Render tests ---------------------------------------------------------
-
-    #[test]
-    fn test_render_produces_commands() {
-        let app = test_app();
-        let cmds = app.render();
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_playing_has_more_commands() {
-        let menu_app = test_app();
-        let mut play_app = test_app();
-        play_app.state = GameState::Playing;
-        let menu_cmds = menu_app.render();
-        let play_cmds = play_app.render();
-        // Playing state renders player + ghosts + dots; menu shows overlay.
-        // Both should have commands.
-        assert!(!menu_cmds.is_empty());
-        assert!(!play_cmds.is_empty());
-    }
-
     // -- Walkability tests ----------------------------------------------------
 
     #[test]
@@ -2469,15 +2967,25 @@ mod tests {
     #[test]
     fn test_count_cell_type_dots() {
         let app = test_app();
-        let dot_count = app.count_cell_type(Cell::Dot);
+        let dot_count = count_cells(&app.maze, Cell::Dot);
         assert!(dot_count > 0);
     }
 
     #[test]
     fn test_count_cell_type_power_pellets() {
         let app = test_app();
-        let pp_count = app.count_cell_type(Cell::PowerPellet);
+        let pp_count = count_cells(&app.maze, Cell::PowerPellet);
         assert_eq!(pp_count, 4);
+    }
+
+    #[test]
+    fn test_total_dots_is_dots_plus_power_pellets() {
+        // `count_dots` is the sum of the two counts, not a third traversal
+        // with its own idea of what is edible.
+        let app = test_app();
+        let dots = count_cells(&app.maze, Cell::Dot);
+        let pellets = count_cells(&app.maze, Cell::PowerPellet);
+        assert_eq!(app.total_dots, dots + pellets);
     }
 
     // -- Queued direction tests -----------------------------------------------
@@ -2520,18 +3028,94 @@ mod tests {
     // -- Ghost at position test -----------------------------------------------
 
     #[test]
-    fn test_ghost_at_position() {
+    fn test_no_ghost_starts_inside_a_wall() {
         let app = playing_app();
-        let blinky_pos = app.ghosts[0].pos;
-        let found = app.ghost_at(blinky_pos);
-        assert!(found.is_some());
+        for ghost in &app.ghosts {
+            assert_ne!(
+                app.cell_at(ghost.pos),
+                Some(Cell::Wall),
+                "{:?} starts inside a wall at {:?}",
+                ghost.id,
+                ghost.pos
+            );
+        }
     }
 
     #[test]
-    fn test_no_ghost_at_empty_position() {
+    fn test_live_ghosts_never_stand_in_the_house() {
+        // The house is a hiding place a live ghost must not have: while a power
+        // pellet burns, a frightened ghost that could step inside would sit out
+        // the pellet somewhere the player cannot follow.
+        let mut app = playing_app();
+        for tick in 0..2000 {
+            app.handle_tick(16);
+            for ghost in &app.ghosts {
+                if !ghost.released || ghost.mode == GhostMode::Eaten {
+                    continue;
+                }
+                let cell = app.cell_at(ghost.pos);
+                assert!(
+                    cell != Some(Cell::GhostHouse) && cell != Some(Cell::GhostDoor),
+                    "tick {tick}: live {:?} stands on {cell:?} at {:?}",
+                    ghost.id,
+                    ghost.pos
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_revived_ghost_leaves_the_door_and_keeps_moving() {
+        // Reviving on the door would strand the ghost: its other three
+        // neighbours are house and wall, and a ghost may not reverse, so the
+        // only way off is the way it came.
+        // Approach the door from directly above, heading down: that is the
+        // arrival that strands, because the way back up is the reverse.
+        let mut app = playing_app();
+        {
+            let ghost = &mut app.ghosts[0];
+            ghost.mode = GhostMode::Eaten;
+            ghost.pos = Pos::new(GHOST_HOUSE_DOOR.row - 1, GHOST_HOUSE_DOOR.col);
+            ghost.direction = Direction::Down;
+        }
+        let mut revived_at = None;
+        for _ in 0..200 {
+            app.handle_tick(16);
+            if app.ghosts[0].mode != GhostMode::Eaten {
+                revived_at = Some(app.ghosts[0].pos);
+                break;
+            }
+        }
+        assert_eq!(
+            revived_at,
+            Some(GHOST_HOUSE_EXIT),
+            "a ghost revives at the house exit, not on the door"
+        );
+        let mut seen = BTreeSet::new();
+        for _ in 0..200 {
+            app.handle_tick(16);
+            let p = app.ghosts[0].pos;
+            seen.insert((p.row, p.col));
+        }
+        assert!(
+            seen.len() > 2,
+            "revived ghost visited only {seen:?} -- it is stuck"
+        );
+    }
+
+    #[test]
+    fn test_released_ghosts_start_where_a_live_ghost_may_walk() {
+        // A released ghost is a live ghost, and a live ghost may not walk the
+        // door or the house -- so it must not be standing on one either.
         let app = playing_app();
-        let found = app.ghost_at(Pos::new(0, 0)); // Wall, no ghost here.
-        assert!(found.is_none());
+        for ghost in app.ghosts.iter().filter(|g| g.released) {
+            assert!(
+                app.is_ghost_walkable(ghost.pos, ghost.mode),
+                "{:?} is released but stands on {:?}, which it may not walk",
+                ghost.id,
+                app.cell_at(ghost.pos)
+            );
+        }
     }
 
     // -- Mouth animation test -------------------------------------------------

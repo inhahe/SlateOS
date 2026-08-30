@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window. Without it `main` was `let _app = PacmanApp::new();` — it built
+# the maze, placed the four ghosts and dropped the lot, so no frame ever
+# reached a screen and no arrow key ever arrived.
+oswindow = { path = "../../gui/window" }
 randrange = { path = "../../randrange" }
 
 [lints]

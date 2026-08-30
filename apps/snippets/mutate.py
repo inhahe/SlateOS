@@ -671,12 +671,18 @@ MUTATIONS = [
         ["a_narrowed_query_puts_the_list_back_at_the_top"],
     ),
     # -- The wheel -----------------------------------------------------
+    # This swaps the *panel* out of the list's arm and the code panel into it.
+    # It does not touch `Target::Row(_)`, so every wheel test that goes in over
+    # a row -- which is all of them but one -- carries on passing. The two that
+    # see it are the one that enters through the list's own hit box, in the
+    # strip below the last row, and the one over the code, which the mutant
+    # now routes to the list.
     (
         "the wheel over the list scrolls the code",
         "            Target::List | Target::Row(_) | Target::Star(_) => {",
         "            Target::Code | Target::Row(_) | Target::Star(_) => {",
         [
-            "the_wheel_over_the_list_scrolls_the_list_and_not_the_code",
+            "the_wheel_below_the_last_row_still_scrolls_the_list",
             "the_wheel_over_the_code_scrolls_the_code_and_not_the_list",
         ],
     ),

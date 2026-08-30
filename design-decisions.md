@@ -52351,6 +52351,7 @@ self-check will report the stale expectation as `XPASS` if it is not.
 ## 714. libc's `openat2` forwards only when it has a restriction to carry, and gives the kernel a handle on *its own* working directory rather than the number that means the kernel's
 
 **Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Lane:** B
 
 **In short:** SlateOS's C library has a call, `openat2`, that opens a file and
 can be asked to keep the search confined to one directory (so a path full of

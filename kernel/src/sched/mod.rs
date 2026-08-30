@@ -4045,6 +4045,16 @@ pub fn nr_runnable() -> u64 {
     runnable
 }
 
+/// Number of 5-second load-average samples folded in since boot.
+///
+/// [`update_load_average`] is called once per second and recomputes on every
+/// fifth call, so the sample count is the call count rounded up — the first
+/// call samples immediately.
+#[must_use]
+pub fn load_sample_count() -> u64 {
+    LOAD_SAMPLE_DIVIDER.load(Ordering::Relaxed).div_ceil(5)
+}
+
 /// Get the three system load averages in Linux fixed-point form.
 ///
 /// Each value `v` represents the real load `v / 2048` (`FIXED_1`).  The

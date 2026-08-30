@@ -12995,13 +12995,18 @@ pub fn sys_phys_pages_avail(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: 0 = 1-min, 1 = 5-min, 2 = 15-min.
 ///
-/// Reads `crate::loadavg::get()`, returns the requested fixed-point
-/// value (FSHIFT=11, i.e., load × 2048).  Reports
+/// Reads `crate::sched::load_averages_fixed()`, returns the requested
+/// fixed-point value (FSHIFT=11, i.e., load × 2048).  Reports
 /// `InvalidArgument` for any other index.
+///
+/// Same source as `/proc/loadavg` and `sysinfo(2)`'s `loads[]`, which is the
+/// point: this used to read a second EWMA in `crate::loadavg` that counted
+/// live tasks rather than runnable ones, so a program that asked the kernel
+/// twice got two different answers depending on how it asked.
 ///
 /// Returns: load value in fixed-point on success.
 pub fn sys_loadavg(args: &SyscallArgs) -> SyscallResult {
-    let (l1, l5, l15) = crate::loadavg::get();
+    let (l1, l5, l15) = crate::sched::load_averages_fixed();
     let val = match args.arg0 {
         0 => l1,
         1 => l5,

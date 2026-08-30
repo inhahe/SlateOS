@@ -20,7 +20,7 @@
 //! padded to 512-byte boundaries. Archives are terminated by two consecutive
 //! zero blocks.
 
-use quoting::{quoteaf, quoteaf_os, quotef_os};
+use quoting::{quoteaf, quotef_os};
 use std::env;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Write};
@@ -121,12 +121,39 @@ enum Mode {
     List,
 }
 
+/// One item from the operand stream, kept in the order it appeared.
+///
+/// **`-C` cannot be stored as a setting, because it is not one.** It was an
+/// `Option<String>` here, last-one-wins, applied once before anything began.
+/// GNU applies it *positionally*: it takes effect where it appears and governs
+/// the operands that follow it, so `-C one a -C ../two b` archives `one/a` and
+/// `two/b` under the member names `a` and `b`. Collapsing that to a single
+/// value silently archived the wrong files — measured against GNU tar 1.35,
+/// which is also where the two properties below come from.
+///
+/// Two consequences worth stating, because both are easy to get backwards:
+///
+/// * **The chdirs are cumulative**, each relative to wherever the previous ones
+///   left us, not to the original directory. GNU refuses `-C one a -C two b`
+///   with "two: Cannot open" precisely because `two` is not inside `one`.
+/// * **The archive path is *not* subject to them.** `-C one -cf ../o.tar a`
+///   writes `../o.tar` relative to the original directory. That is why every
+///   mode opens its archive before it walks this list, and it is observable:
+///   GNU leaves an empty archive behind when a later `-C` fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Operand {
+    /// `-C dir` / `--directory=dir`.
+    Chdir(String),
+    /// A file to archive (create), or a member name (extract/list).
+    Member(String),
+}
+
 struct Options {
     mode: Mode,
     archive: String,
     verbose: bool,
-    directory: Option<String>,
-    files: Vec<String>,
+    /// `-C` directives and file operands interleaved, in command-line order.
+    operands: Vec<Operand>,
     excludes: Vec<String>,
     preserve_permissions: bool,
     strip_components: usize,
@@ -149,8 +176,7 @@ fn parse_args() -> Result<Options, String> {
     let mut mode: Option<Mode> = None;
     let mut archive: Option<String> = None;
     let mut verbose = false;
-    let mut directory: Option<String> = None;
-    let mut files: Vec<String> = Vec::new();
+    let mut operands: Vec<Operand> = Vec::new();
     let mut excludes: Vec<String> = Vec::new();
     let mut preserve_permissions = false;
     let mut strip_components: usize = 0;
@@ -199,7 +225,7 @@ fn parse_args() -> Result<Options, String> {
                 if i >= args.len() {
                     return Err("-C/--directory requires an argument".to_string());
                 }
-                directory = Some(args[i].clone());
+                operands.push(Operand::Chdir(args[i].clone()));
             }
             other => {
                 if let Some(rest) = other.strip_prefix("--strip-components=") {
@@ -209,7 +235,7 @@ fn parse_args() -> Result<Options, String> {
                 } else if let Some(rest) = other.strip_prefix("--exclude=") {
                     excludes.push(rest.to_string());
                 } else if let Some(rest) = other.strip_prefix("--directory=") {
-                    directory = Some(rest.to_string());
+                    operands.push(Operand::Chdir(rest.to_string()));
                 } else if let Some(rest) = other.strip_prefix("-f") {
                     // Combined form: -farchive.tar
                     if rest.is_empty() {
@@ -263,7 +289,7 @@ fn parse_args() -> Result<Options, String> {
                 } else if other.starts_with('-') {
                     return Err(format!("unknown option: {}", other));
                 } else {
-                    files.push(other.to_string());
+                    operands.push(Operand::Member(other.to_string()));
                 }
             }
         }
@@ -275,16 +301,17 @@ fn parse_args() -> Result<Options, String> {
     })?;
     let archive = archive.ok_or_else(|| "no archive file specified (use -f <file>)".to_string())?;
 
-    if mode == Mode::Create && files.is_empty() {
-        return Err("create mode requires at least one file argument".to_string());
+    if mode == Mode::Create && !operands.iter().any(|o| matches!(o, Operand::Member(_))) {
+        // GNU's own wording for this, including the case where the only
+        // operands are `-C` directives (`tar -cf o.tar -C one`).
+        return Err("Cowardly refusing to create an empty archive".to_string());
     }
 
     Ok(Options {
         mode,
         archive,
         verbose,
-        directory,
-        files,
+        operands,
         excludes,
         preserve_permissions,
         strip_components,
@@ -846,6 +873,97 @@ fn archive_path_recursive<W: Write>(
     }
 }
 
+/// Every directory a chain of `-C` directives passes through, in order.
+///
+/// Returned as `(directive, directory it lands on)` pairs rather than just the
+/// final directory, because the caller has to be able to name the *directive*
+/// that failed. GNU really does `chdir` at each `-C`, so it stops at the first
+/// unusable one and reports the string the user typed; folding the chain first
+/// and checking only the result would report a composite path (`./d1/../d2`)
+/// that appears nowhere on the command line, and would silently accept
+/// `-C nosuch -C ..` — a chain whose ends exist but whose middle does not,
+/// which GNU rejects (measured, GNU tar 1.35).
+///
+/// Used by extract and list, which do not chdir the process at all: they hold a
+/// base directory and join member names onto it, and `sanitize_member_name` is
+/// what keeps a member from escaping that base. Rebuilding the base by path
+/// arithmetic keeps that boundary exactly where it was, whereas an
+/// `env::set_current_dir` would move the ground underneath it.
+///
+/// Cumulative, and an absolute directive restarts the chain — both matching
+/// GNU: `-C d1 -C ../d2` lands on `d1/../d2`, and `-C d1 -C /tmp` lands on
+/// `/tmp`. The result is deliberately *not* normalised; `d1/../d2` is left for
+/// the filesystem to resolve, because collapsing `..` textually is wrong when a
+/// component is a symlink — the same reason `sanitize_member_name` refuses to
+/// fold `..` rather than rejecting it.
+fn chdir_chain(operands: &[Operand]) -> Vec<(&str, PathBuf)> {
+    let mut chain = Vec::new();
+    let mut base = PathBuf::from(".");
+    for op in operands {
+        if let Operand::Chdir(dir) = op {
+            let d = Path::new(dir.as_str());
+            base = if d.is_absolute() {
+                d.to_path_buf()
+            } else {
+                base.join(d)
+            };
+            chain.push((dir.as_str(), base.clone()));
+        }
+    }
+    chain
+}
+
+/// The directory a chain of `-C` directives lands on, refusing a bad one.
+///
+/// `.` when there are no directives, which is what makes `-C` optional without
+/// a special case at either call site.
+fn resolve_chdir_chain(operands: &[Operand]) -> PathBuf {
+    let mut base = PathBuf::from(".");
+    for (dir, landed) in chdir_chain(operands) {
+        match fs::metadata(&landed) {
+            Ok(m) if m.is_dir() => base = landed,
+            Ok(_) => fail_chdir(dir, &io::Error::from(io::ErrorKind::NotADirectory)),
+            Err(e) => fail_chdir(dir, &e),
+        }
+    }
+    base
+}
+
+/// GNU's response to a `-C` that does not name a usable directory.
+///
+/// Two lines and status 2, and the wording is GNU's rather than ours: it
+/// reports "Cannot open" even though nothing was being opened, and it calls
+/// the failure unrecoverable rather than accumulating it like a missing file
+/// operand. Both are worth copying exactly — a script that greps tar's stderr
+/// is the reason this text is an interface and not a message.
+fn fail_chdir(dir: &str, err: &io::Error) -> ! {
+    eprintln!("tar: {}: Cannot open: {}", quotef_os(dir), strerror(err));
+    eprintln!("tar: Error is not recoverable: exiting now");
+    process::exit(2);
+}
+
+/// The POSIX `strerror` text for an I/O failure.
+///
+/// `io::Error`'s own `Display` is the *host's* wording, which is why this
+/// exists: on Slate OS and Linux a missing directory reads "No such file or
+/// directory", but the same error on a Windows build of these tests reads
+/// "The system cannot find the file specified. (os error 2)". tar's stderr is
+/// an interface — scripts grep it, and the GNU-comparison harnesses in
+/// `scripts/` diff it line for line — so it must not vary with where the
+/// binary was compiled. The mapped kinds are the ones tar can actually
+/// produce here; anything else falls back to the host text, which is still
+/// better than nothing and is visibly odd enough to prompt adding a case.
+fn strerror(err: &io::Error) -> String {
+    match err.kind() {
+        io::ErrorKind::NotFound => "No such file or directory".to_string(),
+        io::ErrorKind::PermissionDenied => "Permission denied".to_string(),
+        io::ErrorKind::NotADirectory => "Not a directory".to_string(),
+        io::ErrorKind::IsADirectory => "Is a directory".to_string(),
+        io::ErrorKind::AlreadyExists => "File exists".to_string(),
+        _ => err.to_string(),
+    }
+}
+
 /// Create a tar archive from the listed files/directories.
 fn create_archive(opts: &Options) -> Result<(), String> {
     let mut writer: Box<dyn Write> = if opts.archive == "-" {
@@ -859,7 +977,22 @@ fn create_archive(opts: &Options) -> Result<(), String> {
 
     let mut errors: Vec<String> = Vec::new();
 
-    for file_arg in &opts.files {
+    // The archive above is already open, which is the whole reason it is
+    // opened before this loop rather than inside it: `-f` names a path in the
+    // directory tar was invoked from, and the chdirs below must not reach it.
+    // GNU makes this observable by leaving an empty archive behind when a
+    // later `-C` fails, and so do we.
+    for operand in &opts.operands {
+        let file_arg = match operand {
+            Operand::Chdir(dir) => {
+                if let Err(e) = env::set_current_dir(dir) {
+                    fail_chdir(dir, &e);
+                }
+                continue;
+            }
+            Operand::Member(name) => name,
+        };
+
         let path = Path::new(file_arg);
         if !path.exists() {
             let msg = format!("tar: {}: No such file or directory", file_arg);
@@ -1057,17 +1190,13 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
         )
     };
 
-    let base_dir = opts
-        .directory
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-
-    // Ensure the extraction directory exists.
-    if !base_dir.exists() {
-        fs::create_dir_all(&base_dir)
-            .map_err(|e| format!("create directory '{}': {}", base_dir.display(), e))?;
-    }
+    // A `-C` target is not created if it is missing. GNU chdirs into it, and a
+    // chdir cannot conjure a directory: `tar -xf a.tar -C nosuch` exits 2 with
+    // "Cannot open", it does not helpfully make `nosuch` and extract into it.
+    // We used to `create_dir_all` here, which turned a typo'd destination into
+    // a silently-created one — the archive would extract, into a directory the
+    // user had no reason to expect and would not think to look in.
+    let base_dir = resolve_chdir_chain(&opts.operands);
 
     let mut errors: Vec<String> = Vec::new();
     let mut consecutive_zero_blocks = 0u32;
@@ -1312,6 +1441,13 @@ fn list_archive(opts: &Options) -> Result<(), String> {
         )
     };
 
+    // Listing writes nothing to the filesystem, so `-C` cannot change the
+    // output — but GNU still chdirs, and so still refuses a directive naming
+    // no directory: `tar -tf a.tar -C nosuch` exits 2 without listing a thing.
+    // Validating and discarding looks redundant and is not: it is the
+    // difference between a typo'd `-C` being reported and being ignored.
+    let _ = resolve_chdir_chain(&opts.operands);
+
     let mut consecutive_zero_blocks = 0u32;
     let mut block = [0u8; BLOCK_SIZE];
 
@@ -1373,7 +1509,8 @@ Required:
 
 Options:
   -v, --verbose             Verbose output
-  -C, --directory <dir>     Change to directory before operating
+  -C, --directory <dir>     Change to directory; applies to the operands that
+                            follow it, and may be given more than once
   -p, --preserve-permissions Preserve file permissions on extract
   -k, --keep-old-files      Don't overwrite existing files on extract
   --strip-components=N      Strip N leading path components on extract
@@ -1409,15 +1546,10 @@ fn main() {
         }
     };
 
-    // Change to target directory if specified (for create mode).
-    if let Some(ref dir) = opts.directory
-        && opts.mode == Mode::Create
-        && let Err(e) = env::set_current_dir(dir)
-    {
-        eprintln!("tar: cannot change to {}: {}", quoteaf_os(dir), e);
-        process::exit(1);
-    }
-
+    // No chdir happens here any more. `-C` is positional: create mode applies
+    // each directive as it reaches it in the operand list, and extract/list
+    // fold the chain into a base directory. Doing it up front here was what
+    // made `-C` behave like a setting — last one wins, applied to everything.
     let result = match opts.mode {
         Mode::Create => create_archive(&opts),
         Mode::Extract => extract_archive(&opts),
@@ -1823,5 +1955,84 @@ mod tests {
         let stripped = strip_components("x/../../etc/passwd", 1).unwrap();
         assert_eq!(stripped, "../../etc/passwd");
         assert!(sanitize_member_name(&stripped).is_err());
+    }
+
+    fn chdir(d: &str) -> Operand {
+        Operand::Chdir(d.to_string())
+    }
+
+    fn member(d: &str) -> Operand {
+        Operand::Member(d.to_string())
+    }
+
+    /// The `.` is not cosmetic: it is what lets extract and list join member
+    /// names onto the base unconditionally, with no "was `-C` given?" branch.
+    #[test]
+    fn test_chdir_chain_of_nothing_is_here() {
+        assert!(chdir_chain(&[]).is_empty());
+        assert_eq!(resolve_chdir_chain(&[]), PathBuf::from("."));
+        assert!(chdir_chain(&[member("a"), member("b")]).is_empty());
+    }
+
+    /// The bug this whole change exists to fix: `-C` used to be one value, so
+    /// the second directive replaced the first instead of being applied inside
+    /// it. `one` and `two` must both appear, in order.
+    #[test]
+    fn test_chdir_directives_accumulate_rather_than_replacing() {
+        let ops = [
+            chdir("one"),
+            member("a"),
+            chdir("../two"),
+            member("b"),
+            member("c"),
+        ];
+        let chain = chdir_chain(&ops);
+        assert_eq!(
+            chain,
+            vec![
+                ("one", PathBuf::from("./one")),
+                ("../two", PathBuf::from("./one/../two")),
+            ]
+        );
+    }
+
+    /// GNU refuses `-C one a -C two b` with "two: Cannot open" — because the
+    /// second chdir happens *inside* `one`, so it looks for `one/two`. Getting
+    /// this backwards (resolving each directive from the invocation directory)
+    /// would silently archive a different file rather than erroring, so the
+    /// joined path is worth asserting on directly.
+    #[test]
+    fn test_second_chdir_is_relative_to_the_first() {
+        let ops = [chdir("one"), member("a"), chdir("two"), member("b")];
+        let chain = chdir_chain(&ops);
+        assert_eq!(chain[1].1, PathBuf::from("./one/two"));
+    }
+
+    #[test]
+    fn test_absolute_directive_restarts_the_chain() {
+        let ops = [chdir("one"), chdir("/tmp"), chdir("sub")];
+        let chain = chdir_chain(&ops);
+        assert_eq!(chain[1].1, PathBuf::from("/tmp"));
+        assert_eq!(chain[2].1, PathBuf::from("/tmp/sub"));
+    }
+
+    /// Deliberate: `..` is left in the path for the filesystem to resolve.
+    /// Collapsing `./one/../two` to `./two` textually is wrong whenever `one`
+    /// is a symlink, which is the same reason `sanitize_member_name` rejects
+    /// `..` instead of folding it.
+    #[test]
+    fn test_chain_is_not_textually_normalised() {
+        let ops = [chdir("one"), chdir("..")];
+        let chain = chdir_chain(&ops);
+        assert_eq!(chain[1].1, PathBuf::from("./one/.."));
+    }
+
+    /// Each pair carries the string the *user typed*, not the path it folds
+    /// to, because that string is what the error message has to name.
+    #[test]
+    fn test_chain_reports_the_directive_not_the_folded_path() {
+        let ops = [chdir("one"), chdir("../two")];
+        let chain = chdir_chain(&ops);
+        assert_eq!(chain[1].0, "../two");
     }
 }

@@ -60763,11 +60763,40 @@ strings tar tee tr tsort uname uniq uptime wc who xargs
 |---|---|---|
 | `tr`, `wc`, `uniq`, `nl`, `cut`, `head`, `join`, `sed`, `seq`, `split`, `tsort`, `expand`, `fold`, `comm`, `paste`, `awk`, `sort` | **`coreutils`** — rewritten Aug 2026 for GNU parity, each certified by its own `*-diff.sh` | standalone, frozen 2026-06-13, roughly half the size |
 | `bc` | **`userspace/bc`** — Aug 2026 rewrite on `bignum::Decimal`, 200/200 against GNU | `coreutils/src/bin/bc.rs`, June, the one that fails 105 cases — **deleted 2026-08-22, this pair is done** |
-| `cal`, `date`, `dd`, `df`, `diff`, `du`, `env`, `free`, `hostname`, `kill`, `logger`, `patch`, `ps`, `stat`, `strings`, `tar`, `tee`, `uname`, `uptime`, `who`, `xargs`, `chown`, `cmp`, `sha256sum` | **standalone** — 1000–2800 lines each | `coreutils/src/bin/<n>.rs`, a 125–450 line stub |
+| `cal`, `date`, `dd`, `df`, `diff`, `du`, `env`, `free`, `hostname`, `kill`, `logger`, `patch`, `ps`, `stat`, `strings`, `tee`, `uname`, `uptime`, `who`, `xargs`, `chown`, `cmp`, `sha256sum` | **standalone** — 1000–2800 lines each | `coreutils/src/bin/<n>.rs`, a 125–450 line stub |
+| `tar` | **`coreutils`** — 7189 lines, 131 tests, certified by `tar-diff.sh` (178/178) | `userspace/tar`, 2724 lines, 72 tests — **moved out of the third row 2026-08-30; see below** |
 
 So resolving it means a per-utility decision, and in the third row it means
 moving the real implementation *into* `coreutils` (or deciding `coreutils` is
 not the home). It is not a delete-41-directories change.
+
+**`tar` changed rows, and the stale entry cost a session's work (2026-08-30).**
+This table put `tar` in the third row — standalone live, `coreutils` a stub —
+which was true when it was written on 2026-08-22 and is not true now.
+`coreutils/src/bin/tar.rs` has since grown to 7189 lines with 131 tests and is
+what `scripts/tar-diff.sh` measures (`DIFF_PKG` defaults to `coreutils`), what
+the old-option style, the `LONG_OPTIONS` refusal table, the delayed-symlink
+defence and the whole overwrite family live in. `userspace/tar` is referenced by
+**nothing**: no script, no image staging, no harness. The only thing that builds
+it is the `userspace/*` workspace glob, and when it does it collides with
+`coreutils`' `tar.exe` and whichever linked last wins.
+
+Acting on the stale row, four commits of GNU-parity work (`c3844c749`,
+`7924a556a`, `b01d77349`, `896d01a2d`, `e161a340c`) went into `userspace/tar` —
+correct code, on the copy nobody runs, duplicating behaviour `coreutils` already
+had and in one case reaching it by a worse route (`userspace/tar` joins paths
+for `-C` and so has to reason about which name to print; `coreutils` chdirs, as
+GNU does, and the question does not arise). Only one genuine gap in the shipped
+tar came out of it: the once-per-run `Extracting contiguous files as regular
+files` notice for type flag `7`, now fixed with a discriminating case in
+`tar-diff.sh`.
+
+**The lesson is the general one, not a `tar` one:** the live/dead split in this
+table is *not* checkable by reading the table, because the table ages. Check it
+the way the harness does — which package does `DIFF_PKG` name, and does anything
+outside the workspace glob reference the standalone crate at all. Before editing
+any utility in either of the two rows above, confirm which copy is live
+**today**.
 
 **Fixed so far (2026-08-22).**
 

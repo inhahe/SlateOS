@@ -4276,6 +4276,13 @@ fn do_extract(
     // a 0500 directory's mode *and* its timestamp, and ours restored neither.
     let mut pending_dirs: Vec<(Vec<u8>, u32, i64)> = Vec::new();
     let mut delayed: Vec<DelayedLink> = Vec::new();
+    // Type flag `7` is announced once per *run*, not once per member, and the
+    // line names no member — unlike the unknown-flag warning below, which does
+    // both the other way round. Measured against GNU 1.35 on an archive with
+    // two members patched to `7`: exactly one line. Worth keeping distinct,
+    // because an archive of ten thousand contiguous members would otherwise
+    // bury every real diagnostic under ten thousand copies of this one.
+    let mut contiguous_warned = false;
     // The same for every member except the directories, which flip one field.
     let ovw = Overwriting {
         old_files,
@@ -4402,6 +4409,17 @@ fn do_extract(
                 Handled::Skip
             }
             b'0' | b'\0' | b'7' => {
+                // A contiguous file is a regular file that a historic
+                // filesystem could promise was laid out in consecutive blocks.
+                // Nothing we target makes that promise, so the guarantee is
+                // dropped and the bytes — which are ordinary data blocks behind
+                // an ordinary header — extract unchanged. GNU says so rather
+                // than staying silent, because the file that comes out is not
+                // quite the file that went in.
+                if member.typeflag == b'7' && !contiguous_warned {
+                    contiguous_warned = true;
+                    diag!("tar: Extracting contiguous files as regular files");
+                }
                 let mode = extraction_mode(member.mode, same_permissions, umask);
                 extract_plain(&root, input, &name, member, mode, ovw, &mut status)
             }

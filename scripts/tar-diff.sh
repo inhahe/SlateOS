@@ -898,6 +898,14 @@ cases = {
   # every following header is misaligned.
   'unknown':    hdr(b'weird', ord('Z'), size=5) + pad(b'ZZZZZ')
                 + hdr(b'after', ord('0'), size=6) + pad(b'after\n'),
+  # Type flag 7, contiguous: a regular file carrying an allocation guarantee no
+  # filesystem we target can keep. The data is ordinary, so both tars must
+  # extract it -- and GNU announces the dropped guarantee *once per run*, naming
+  # no member, which is the opposite of the unknown-flag warning above on both
+  # counts. Two members, so that a per-member warning is a difference rather
+  # than a coincidence.
+  'contig':     hdr(b'c1', ord('7'), size=3) + pad(b'c1\n')
+                + hdr(b'c2', ord('7'), size=3) + pad(b'c2\n'),
   # An empty symlink target, an empty hard link target, an empty *name*. GNU
   # substitutes `.` for the latter two and says so, every time.
   'emptysym':   hdr(b'sl', ord('2'), 0o777, link=b''),
@@ -920,7 +928,7 @@ for name, blocks in cases.items():
     (w / ('h-%s.tar' % name)).write_bytes(blocks + b'\0' * 1024)
 PY
 
-for c in dev orphan absl uplink prefixes dotdot unknown emptysym emptytgt \
+for c in dev orphan absl uplink prefixes dotdot unknown contig emptysym emptytgt \
          emptyname dirnoslash traverse traverse2; do
   [ -f "h-$c.tar" ] || continue
   extract_case "forged header: $c" "h-$c.tar"

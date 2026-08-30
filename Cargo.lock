@@ -7165,6 +7165,7 @@ name = "mahjong"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -14645,6 +14646,7 @@ name = "yahtzee"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
  "randrange",
 ]
 

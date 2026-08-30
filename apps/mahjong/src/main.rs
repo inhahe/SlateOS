@@ -1,15 +1,13 @@
-#![allow(dead_code)]
+// `dead_code` and `unused_imports` were both allowed at the crate root. They
+// were not stylistic: `main` was `let _app = Mahjong::new();`, so *every*
+// drawing and event-handling function in the file was unreachable and the
+// compiler would have said so on every build. Silencing the warning is what
+// let the app sit unwired. Both are now denied by the lane's clippy gate.
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(clippy::needless_range_loop)]
-#![allow(unused_imports)]
 
 //! Slate OS Mahjong Solitaire — a classic tile-matching puzzle game.
 //!
@@ -21,30 +19,42 @@
 //! The deal is seeded from the system and re-dealt from a stored seed, so a
 //! game can be repeated on request but is not the same for every player.
 //! Catppuccin Mocha color palette.
+//!
+//! # Layout
+//!
+//! Every coordinate in this file comes from [`Layout::solve`], which is handed
+//! the size the window reports on the frame being drawn. The board's tile size
+//! is *solved for* rather than fixed: the turtle is 14 columns by 8 rows plus
+//! the four-layer stagger, and the tile is made as large as will fit that
+//! bounding box into the space between the header and the help bar. The
+//! previous version pinned `TILE_W`/`TILE_H`/`BOARD_OFFSET_*` to constants and
+//! put the legend at x = 730, so any window narrower than about 900 pixels
+//! silently lost the legend off its right edge and any window shorter than 500
+//! drew the bottom row of tiles underneath the help bar.
+
+use std::process::ExitCode;
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, App, Response};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
 const MANTLE: Color = Color::from_hex(0x181825);
 const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
 const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
 const YELLOW: Color = Color::from_hex(0xF9E2AF);
 const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const TEAL: Color = Color::from_hex(0x94E2D5);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ── Tile colors (one per suit category) ─────────────────────────────
@@ -61,26 +71,308 @@ const TILE_SELECTED: Color = Color::from_hex(0x89B4FA);
 const TILE_HINT: Color = Color::from_hex(0xA6E3A1);
 const TILE_SHADOW: Color = Color::from_hex(0x11111B);
 
-// ── Layout constants ────────────────────────────────────────────────
-const TILE_W: f32 = 42.0;
-const TILE_H: f32 = 54.0;
-const TILE_GAP_X: f32 = 2.0;
-const TILE_GAP_Y: f32 = 2.0;
-const LAYER_OFFSET_X: f32 = 4.0;
-const LAYER_OFFSET_Y: f32 = 4.0;
-const BOARD_OFFSET_X: f32 = 40.0;
-const BOARD_OFFSET_Y: f32 = 70.0;
-const TILE_CORNER: f32 = 4.0;
-const SHADOW_OFFSET: f32 = 3.0;
+/// The legend's rows: the codes that appear on the tiles, and one tile of that
+/// group to ask for the rest.
+///
+/// A module constant rather than a `let` inside the drawing pass, because
+/// [`legend_width`] measures it to decide how wide the legend column has to be.
+/// Two copies of this list -- one measured, one drawn -- would be a column
+/// sized for a legend other than the one on the screen.
+///
+/// The group's name, its colour and its asterisk are all asked of the tile
+/// rather than written out again beside it. The old table repeated the name and
+/// the colour, so a palette change would have left the legend's swatch behind
+/// and an asterisk typed by hand could promise a matching rule the game does
+/// not play.
+const LEGEND_ITEMS: [(&str, TileKind); 7] = [
+    ("B1-B9", TileKind::Bamboo(1)),
+    ("C1-C9", TileKind::Circle(1)),
+    ("W1-W9", TileKind::Character(1)),
+    ("E/S/W/N", TileKind::Wind(0)),
+    ("Dr/Dg/Dw", TileKind::Dragon(0)),
+    ("Sp/Su/Au/Wi", TileKind::Season(0)),
+    ("Pl/Or/Ch/Bm", TileKind::Flower(0)),
+];
 
-const TITLE_FONT_SIZE: f32 = 22.0;
-const TILE_FONT_SIZE: f32 = 16.0;
-const INFO_FONT_SIZE: f32 = 14.0;
-const STATUS_FONT_SIZE: f32 = 16.0;
-const HELP_FONT_SIZE: f32 = 12.0;
+/// One legend row's text: `codes (Group)`, with an asterisk on the groups whose
+/// tiles match any other tile of the same group rather than only their twin.
+fn legend_label(codes: &str, kind: TileKind) -> String {
+    let wild = if kind.wildcard() { "*" } else { "" };
+    format!("{codes} ({}{wild})", kind.category())
+}
+
+/// The note under the legend explaining the asterisks.
+const LEGEND_NOTE: &str = "* match any in group";
+
+/// The key hints along the bottom of the window.
+const HELP_TEXT: &str =
+    "N=New  Z=Undo  H=Hint  S=Shuffle  Arrows=Navigate  Enter/Space=Select  Esc=Deselect";
+
+// ── Layout ──────────────────────────────────────────────────────────
+
+/// The size the window asks for when it opens.
+const WINDOW_WIDTH: f32 = 1000.0;
+/// The height the window asks for when it opens.
+const WINDOW_HEIGHT: f32 = 700.0;
+
+/// A tile is this many times as tall as it is wide.
+///
+/// The old constants were 42 by 54; the ratio, not either number, is what has
+/// to survive being resized, so it is the ratio that is written down.
+const TILE_ASPECT: f32 = 54.0 / 42.0;
+
+/// The gap between neighbouring tiles, as a share of the tile's width.
+const TILE_GAP_SHARE: f32 = 2.0 / 42.0;
+
+/// How far each layer is shifted up and left from the one below, as a share of
+/// the tile's width. This is what makes the stack read as a stack.
+const LAYER_OFFSET_SHARE: f32 = 4.0 / 42.0;
+
+/// A tile's corner rounding, as a share of its width.
+const TILE_CORNER_SHARE: f32 = 4.0 / 42.0;
+
+/// How far a tile's shadow is displaced, as a share of its width.
+const SHADOW_SHARE: f32 = 3.0 / 42.0;
 
 /// Total number of tile positions in the Turtle layout.
 const LAYOUT_SIZE: usize = 144;
+
+/// The legend's seven rows plus its heading and its footnote.
+const LEGEND_ROWS: usize = 9;
+
+/// Where a tile sits relative to the turtle's origin, measured in tile widths.
+///
+/// One tile is 1.0 wide and [`TILE_ASPECT`] tall in these units, so multiplying
+/// a pair of them by `tile_w` gives pixels. Both [`turtle_extent`] and
+/// [`Layout::tile_rect`] go through here, which is what makes the bounding box
+/// the tiles are fitted into the same box they are then drawn in.
+fn tile_offset_units(pos: TilePos) -> (f32, f32) {
+    // The stagger runs up and left, so a higher layer subtracts.
+    let off = pos.layer as f32 * LAYER_OFFSET_SHARE;
+    (
+        pos.col as f32 * (1.0 + TILE_GAP_SHARE) - off,
+        pos.row as f32 * (TILE_ASPECT + TILE_GAP_SHARE) - off,
+    )
+}
+
+/// The turtle's bounding box in tile widths: `(min_x, min_y, span_w, span_h)`.
+///
+/// Measured over the positions the deal actually uses rather than written down
+/// as `cols x rows + layers`. That formula was here first, and it was wrong in
+/// two directions at once: it reserved four layer-offsets on the left and top
+/// that no tile ever reaches -- the upper layers sit at the *middle* columns,
+/// so nothing is ever staggered out past column 0 -- which shrank every tile to
+/// buy margin, and it restated the turtle's shape a second time, so an edit to
+/// [`turtle_layout`] could put a tile outside the box that was supposed to
+/// contain it with nothing to say so.
+fn turtle_extent() -> (f32, f32, f32, f32) {
+    static EXTENT: std::sync::OnceLock<(f32, f32, f32, f32)> = std::sync::OnceLock::new();
+    *EXTENT.get_or_init(|| {
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for pos in turtle_layout() {
+            let (x, y) = tile_offset_units(pos);
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            // A tile is one unit wide and `TILE_ASPECT` units tall.
+            max_x = max_x.max(x + 1.0);
+            max_y = max_y.max(y + TILE_ASPECT);
+        }
+        if min_x > max_x || min_y > max_y {
+            // An empty layout has no extent; a zero span makes the tile size
+            // solve to zero, which every drawing guard already handles.
+            return (0.0, 0.0, 0.0, 0.0);
+        }
+        (min_x, min_y, max_x - min_x, max_y - min_y)
+    })
+}
+
+/// Every rectangle and font size the frame is drawn from, solved for the size
+/// the window reported.
+#[derive(Clone, Copy, Debug)]
+struct Layout {
+    /// The whole window.
+    window: Rect,
+    /// The strip holding the title, the counters and the message.
+    header: Rect,
+    /// The strip along the bottom holding the key hints.
+    help: Rect,
+    /// The column on the right holding the legend.
+    legend: Rect,
+    /// What is left for the board once the header, help and legend are taken.
+    board: Rect,
+    /// The bounding box the 144 tiles actually occupy inside `board`, centred.
+    turtle: Rect,
+    /// One tile's width. Everything on the board is a multiple of it.
+    tile_w: f32,
+    /// One tile's height.
+    tile_h: f32,
+    /// General padding.
+    pad: f32,
+    /// The title's font size.
+    title: f32,
+    /// The counters' and message's font size.
+    status: f32,
+    /// The legend's font size, also used for the help bar.
+    small: f32,
+    /// The font a tile's label is drawn at.
+    tile_font: f32,
+}
+
+impl Layout {
+    /// Solve the whole layout for a window of `w` by `h`.
+    fn solve(w: f32, h: f32) -> Self {
+        let w = w.max(0.0);
+        let h = h.max(0.0);
+        // Scaled off the smaller side so a wide-and-short window gets small
+        // padding rather than padding that eats its whole height.
+        let pad = (w.min(h) * 0.015).clamp(2.0, 14.0).min(w.min(h) / 2.0);
+        let title = (h * 0.031).clamp(10.0, 26.0);
+        let status = (h * 0.023).clamp(8.0, 18.0);
+        let small = (h * 0.017).clamp(7.0, status);
+
+        let window = Rect::new(0.0, 0.0, w, h);
+        // The header holds two stacked lines -- title, then counters -- so it
+        // is sized from those two fonts rather than from a share of the height
+        // that happens to be big enough at 700 pixels.
+        let header_h = (title + status + pad * 3.0).min(h);
+        let header = Rect::new(0.0, 0.0, w, header_h);
+        let help_h = (small + pad * 2.0).min((h - header_h).max(0.0));
+        let help = Rect::new(0.0, (h - help_h).max(header.bottom()), w, help_h);
+
+        let middle = Rect::new(0.0, header.bottom(), w, (help.y - header.bottom()).max(0.0));
+
+        // The legend takes the width its widest row actually measures, or it is
+        // not drawn at all. The first draft capped it at `w / 3` and then asked
+        // whether the capped width fit in half the window -- which is true for
+        // every `w`, so the whole test was decoration and the legend was drawn
+        // squeezed at every width instead of dropped at the narrow ones. A
+        // column narrowed to fit reads "B1-B9 (Bam..." and tells the player
+        // nothing while still taking the width off the board, so the honest
+        // choice is all of it or none of it.
+        let needed = legend_width(small, pad);
+        let legend_fits = needed <= w / 3.0 && middle.h >= small * LEGEND_ROWS as f32;
+        let legend = if legend_fits {
+            Rect::new(middle.right() - needed, middle.y, needed, middle.h)
+        } else {
+            Rect::new(middle.right(), middle.y, 0.0, middle.h)
+        };
+        let board = Rect::new(middle.x, middle.y, (legend.x - middle.x).max(0.0), middle.h);
+
+        // Solve the tile size: the turtle's bounding box is `span_w` by
+        // `span_h` tile widths, measured over the positions the deal uses, and
+        // both must fit inside the padded board.
+        let inner = inset(board, pad);
+        let (_, _, span_w, span_h) = turtle_extent();
+        let tile_w = if span_w > 0.0 && span_h > 0.0 {
+            (inner.w / span_w).min(inner.h / span_h).max(0.0)
+        } else {
+            0.0
+        };
+        let tile_h = tile_w * TILE_ASPECT;
+
+        // Centre the turtle in what is left, so a window wider than the board
+        // needs does not pin it to the left with all the slack on one side.
+        let turtle = Rect::new(
+            inner.x + (inner.w - tile_w * span_w) / 2.0,
+            inner.y + (inner.h - tile_w * span_h) / 2.0,
+            tile_w * span_w,
+            tile_w * span_h,
+        );
+
+        // A label has to fit inside the tile it names; the widest is three
+        // characters ("Dr", "Su", "B1" are two, but the measure is taken from
+        // the real set rather than assumed).
+        let tile_font = fit_tile_font(tile_w, tile_h);
+
+        Self {
+            window,
+            header,
+            help,
+            legend,
+            board,
+            turtle,
+            tile_w,
+            tile_h,
+            pad,
+            title,
+            status,
+            small,
+            tile_font,
+        }
+    }
+
+    /// The rectangle a tile at `pos` occupies, in window coordinates.
+    ///
+    /// This is the *only* place a tile's position is computed. The drawing pass
+    /// records a hit box from it and the click reads that box back, so the
+    /// picture and the hit test cannot disagree -- the old code had
+    /// `tile_screen_pos` for drawing and `tile_at_screen` for clicking, two
+    /// copies of one geometry kept in step by nothing but care.
+    fn tile_rect(&self, pos: TilePos) -> Rect {
+        let (min_x, min_y, _, _) = turtle_extent();
+        let (x, y) = tile_offset_units(pos);
+        // Subtracting the minimum is what puts the leftmost tile on the
+        // turtle's left edge, whichever layer that tile happens to be on.
+        Rect::new(
+            self.turtle.x + (x - min_x) * self.tile_w,
+            self.turtle.y + (y - min_y) * self.tile_w,
+            self.tile_w,
+            self.tile_h,
+        )
+    }
+}
+
+/// The width the legend column needs: a swatch, a gap and its widest row.
+fn legend_width(font: f32, pad: f32) -> f32 {
+    let widest = LEGEND_ITEMS
+        .iter()
+        .map(|&(codes, kind)| {
+            text::measure(&legend_label(codes, kind), font, FontWeightHint::Regular)
+        })
+        .fold(
+            text::measure(LEGEND_NOTE, font, FontWeightHint::Regular),
+            f32::max,
+        );
+    widest + font + pad * 3.0
+}
+
+/// The largest font at which every tile label still fits inside a tile.
+///
+/// The old code drew every label at a fixed 16pt, which overflowed the tile the
+/// moment the tile was smaller than the window it had been designed for -- and
+/// since the tile was a constant too, that could not happen, so the bug was
+/// invisible until the tile started moving.
+fn fit_tile_font(tile_w: f32, tile_h: f32) -> f32 {
+    // Measured over the real set rather than over a label picked as "surely the
+    // widest": `all_tile_kinds` is the same list the deal is built from, so a
+    // label added to the game cannot escape the fit.
+    let widest = all_tile_kinds()
+        .iter()
+        .map(|k| text::measure(k.label(), 100.0, FontWeightHint::Bold))
+        .fold(0.0_f32, f32::max);
+    // `measure` is linear in the font size, so one measurement at 100 gives the
+    // width per point and the font that fits follows by division.
+    let per_point = widest / 100.0;
+    let by_width = if per_point > 0.0 {
+        (tile_w * 0.8) / per_point
+    } else {
+        tile_h
+    };
+    by_width.min(tile_h * 0.5).max(0.0)
+}
+
+/// Shrink a rectangle by `by` on every side, never past nothing.
+fn inset(r: Rect, by: f32) -> Rect {
+    Rect::new(
+        r.x + by,
+        r.y + by,
+        (r.w - by * 2.0).max(0.0),
+        (r.h - by * 2.0).max(0.0),
+    )
+}
 
 // ── LCG random number generator ────────────────────────────────────
 
@@ -124,14 +416,28 @@ enum TileKind {
 }
 
 impl TileKind {
+    /// Whether this tile matches any other tile of its own group rather than
+    /// only an identical one.
+    ///
+    /// This is the asterisk the legend prints. It is the same predicate
+    /// [`Self::matches`] plays by, so the legend cannot promise a rule the game
+    /// does not follow -- the asterisks used to be typed into the legend table
+    /// by hand, one edit away from saying something untrue.
+    fn wildcard(self) -> bool {
+        matches!(self, TileKind::Season(_) | TileKind::Flower(_))
+    }
+
     /// Whether two tiles can be matched and removed together.
     /// Seasons match any other season; flowers match any other flower;
     /// all other tiles must match exactly.
     fn matches(self, other: Self) -> bool {
-        match (self, other) {
-            (TileKind::Season(_), TileKind::Season(_)) => true,
-            (TileKind::Flower(_), TileKind::Flower(_)) => true,
-            (a, b) => a == b,
+        if self.wildcard() && other.wildcard() {
+            // Same group only: a season does not match a flower. Comparing
+            // discriminants asks "same variant?" without asking "same number?",
+            // which is exactly the rule.
+            std::mem::discriminant(&self) == std::mem::discriminant(&other)
+        } else {
+            self == other
         }
     }
 
@@ -302,85 +608,64 @@ struct PlacedTile {
     removed: bool,
 }
 
-/// The classic "Turtle" Mahjong Solitaire layout.
-/// Returns 144 tile positions across 5 layers.
+/// The classic "Turtle" Mahjong Solitaire layout: exactly 144 positions across
+/// five layers, each layer resting wholly on the one below it.
 ///
-/// Layer 0 (bottom): 12 columns x 8 rows with extras = 86 tiles
-/// Layer 1: 10x6 = 60 tiles (but we use a subset)
-/// ... built up as a pyramid.
+/// | Layer | Tiles | Shape |
+/// |---|---|---|
+/// | 0 | 87 | the body: eight rows of 12/8/10/12/12/10/8/12, plus the tail on the left and the two head tiles on the right |
+/// | 1 | 36 | 6x6, rows 1..=6 by cols 4..=9 |
+/// | 2 | 16 | 4x4, rows 2..=5 by cols 5..=8 |
+/// | 3 | 4 | 2x2, rows 3..=4 by cols 6..=7 |
+/// | 4 | 1 | the cap |
 ///
-/// We use a well-known Turtle/Tortoise layout:
-/// Layer 0: main body (widest)
-/// Layer 1: slightly smaller
-/// Layer 2: smaller still
-/// Layer 3: smaller
-/// Layer 4: single cap tile
+/// The first version of this function returned **172** positions, not 144, and
+/// nothing said so: `Board::new` deals `min(positions, kinds)` tiles, so the
+/// last 28 positions simply never received one. Those 28 were the whole of
+/// layers 3 and 4 and two thirds of layer 2 -- the turtle had no cap, and the
+/// pyramid stopped mid-course. It also floated tiles: layer 1 ran cols 3..=10
+/// over a layer-0 row that only ran 2..=9, so `(1, 1, 10)` and `(1, 6, 10)`
+/// rested on nothing, covering no tile and freeing none when taken.
+///
+/// Both faults were invisible because nothing ever drew the board.
 fn turtle_layout() -> Vec<TilePos> {
     let mut positions = Vec::with_capacity(LAYOUT_SIZE);
-
-    // Layer 0: 12 wide x 8 tall, but with the classic Mahjong
-    // turtle shape (extra tiles on edges).
-    // Row template: which columns have tiles.
-    // Standard turtle layout layer 0 has 86 positions.
-    let layer0: &[(usize, &[usize])] = &[
-        (0, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
-        (1, &[2, 3, 4, 5, 6, 7, 8, 9]),
-        (2, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
-        (3, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]),
-        (4, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]),
-        (5, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
-        (6, &[2, 3, 4, 5, 6, 7, 8, 9]),
-        (7, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
-    ];
-    for &(row, cols) in layer0 {
-        for &col in cols {
-            positions.push(TilePos { layer: 0, row, col });
+    let mut push = |layer: usize, row: usize, cols: std::ops::RangeInclusive<usize>| {
+        for col in cols {
+            positions.push(TilePos { layer, row, col });
         }
+    };
+
+    // Layer 0, the body: 84 tiles in eight rows, waisted in the middle so the
+    // silhouette reads as a shell rather than a rectangle.
+    push(0, 0, 2..=13);
+    push(0, 1, 4..=11);
+    push(0, 2, 3..=12);
+    push(0, 3, 2..=13);
+    push(0, 4, 2..=13);
+    push(0, 5, 3..=12);
+    push(0, 6, 4..=11);
+    push(0, 7, 2..=13);
+    // The tail, one tile off the left of the middle, and the head, two off the
+    // right. Both are always free -- they have an open side by construction --
+    // which is what gives the player a first move on any deal.
+    push(0, 3, 1..=1);
+    push(0, 4, 14..=15);
+
+    // Layers 1..=3, each nested strictly inside the one below so that every
+    // tile rests on a tile and every layer covers fewer squares than it sits on.
+    for row in 1..=6 {
+        push(1, row, 4..=9);
+    }
+    for row in 2..=5 {
+        push(2, row, 5..=8);
+    }
+    for row in 3..=4 {
+        push(3, row, 6..=7);
     }
 
-    // Layer 1: 8 wide x 6 tall = 48 tiles, offset by (1,3)
-    let layer1: &[(usize, &[usize])] = &[
-        (1, &[3, 4, 5, 6, 7, 8, 9, 10]),
-        (2, &[3, 4, 5, 6, 7, 8, 9, 10]),
-        (3, &[3, 4, 5, 6, 7, 8, 9, 10]),
-        (4, &[3, 4, 5, 6, 7, 8, 9, 10]),
-        (5, &[3, 4, 5, 6, 7, 8, 9, 10]),
-        (6, &[3, 4, 5, 6, 7, 8, 9, 10]),
-    ];
-    for &(row, cols) in layer1 {
-        for &col in cols {
-            positions.push(TilePos { layer: 1, row, col });
-        }
-    }
-
-    // Layer 2: 6 wide x 4 tall = 24 tiles
-    let layer2: &[(usize, &[usize])] = &[
-        (2, &[4, 5, 6, 7, 8, 9]),
-        (3, &[4, 5, 6, 7, 8, 9]),
-        (4, &[4, 5, 6, 7, 8, 9]),
-        (5, &[4, 5, 6, 7, 8, 9]),
-    ];
-    for &(row, cols) in layer2 {
-        for &col in cols {
-            positions.push(TilePos { layer: 2, row, col });
-        }
-    }
-
-    // Layer 3: 4 wide x 2 tall = 8 tiles
-    let layer3: &[(usize, &[usize])] = &[(3, &[5, 6, 7, 8]), (4, &[5, 6, 7, 8])];
-    for &(row, cols) in layer3 {
-        for &col in cols {
-            positions.push(TilePos { layer: 3, row, col });
-        }
-    }
-
-    // Layer 4: 2 wide x 2 tall = 4 tiles (cap)
-    let layer4: &[(usize, &[usize])] = &[(3, &[6, 7]), (4, &[6, 7])];
-    for &(row, cols) in layer4 {
-        for &col in cols {
-            positions.push(TilePos { layer: 4, row, col });
-        }
-    }
+    // The cap.
+    push(4, 3, 6..=6);
 
     positions
 }
@@ -421,29 +706,38 @@ impl Board {
 
         rng.shuffle(&mut tile_kinds);
 
-        let mut tiles = Vec::with_capacity(count);
-        for i in 0..count {
-            tiles.push(PlacedTile {
-                pos: positions[i],
-                kind: tile_kinds[i],
+        let tiles = positions
+            .iter()
+            .zip(tile_kinds.iter())
+            .map(|(&pos, &kind)| PlacedTile {
+                pos,
+                kind,
                 removed: false,
-            });
-        }
+            })
+            .collect();
 
         Board { tiles }
     }
 
-    /// Create a board from explicit positions and kinds (for testing).
+    /// Create a board from explicit positions and kinds.
+    ///
+    /// Test-only, and marked so: it was reachable from a non-test build and
+    /// dead there, which is one of the things the crate-wide
+    /// `#![allow(dead_code)]` was hiding.
+    #[cfg(test)]
     fn from_parts(positions: &[TilePos], kinds: &[TileKind]) -> Self {
-        let count = positions.len().min(kinds.len());
-        let mut tiles = Vec::with_capacity(count);
-        for i in 0..count {
-            tiles.push(PlacedTile {
-                pos: positions[i],
-                kind: kinds[i],
+        // `zip` stops at the shorter of the two, which is the same "handle a
+        // mismatch by truncating" rule `new` uses, without an index that
+        // could outrun either slice.
+        let tiles = positions
+            .iter()
+            .zip(kinds.iter())
+            .map(|(&pos, &kind)| PlacedTile {
+                pos,
+                kind,
                 removed: false,
-            });
-        }
+            })
+            .collect();
         Board { tiles }
     }
 
@@ -472,7 +766,7 @@ impl Board {
             if i == idx || other.removed {
                 continue;
             }
-            if other.pos.layer == pos.layer + 1 {
+            if pos.layer.checked_add(1) == Some(other.pos.layer) {
                 // Tiles on adjacent layer overlap if they share the same row/col
                 // position. Because tiles occupy a 1x1 cell in our grid, a tile
                 // at (r, c) on layer L+1 covers (r, c) on layer L.
@@ -492,10 +786,10 @@ impl Board {
                 continue;
             }
             if other.pos.layer == pos.layer && other.pos.row == pos.row {
-                if other.pos.col + 1 == pos.col {
+                if other.pos.col.checked_add(1) == Some(pos.col) {
                     blocked_left = true;
                 }
-                if pos.col + 1 == other.pos.col {
+                if pos.col.checked_add(1) == Some(other.pos.col) {
                     blocked_right = true;
                 }
             }
@@ -513,11 +807,12 @@ impl Board {
     /// Find a matching pair of free tiles, if one exists.
     fn find_hint(&self) -> Option<(usize, usize)> {
         let free = self.free_tiles();
-        for i in 0..free.len() {
-            for j in (i + 1)..free.len() {
-                let a = free[i];
-                let b = free[j];
-                if self.tiles[a].kind.matches(self.tiles[b].kind) {
+        for (n, &a) in free.iter().enumerate() {
+            for &b in free.iter().skip(n).skip(1) {
+                let (Some(ta), Some(tb)) = (self.tiles.get(a), self.tiles.get(b)) else {
+                    continue;
+                };
+                if ta.kind.matches(tb.kind) {
                     return Some((a, b));
                 }
             }
@@ -566,47 +861,47 @@ impl Board {
             .map(|(i, _)| i)
             .collect();
 
-        let mut kinds: Vec<TileKind> = active_indices.iter().map(|&i| self.tiles[i].kind).collect();
+        let mut kinds: Vec<TileKind> = active_indices
+            .iter()
+            .filter_map(|&i| self.tiles.get(i).map(|t| t.kind))
+            .collect();
 
         rng.shuffle(&mut kinds);
 
-        for (slot, &idx) in active_indices.iter().enumerate() {
-            self.tiles[idx].kind = kinds[slot];
-        }
-    }
-
-    /// Screen coordinates for a tile at the given index.
-    fn tile_screen_pos(&self, idx: usize) -> Option<(f32, f32)> {
-        self.tiles.get(idx).map(|t| {
-            let x = BOARD_OFFSET_X + t.pos.col as f32 * (TILE_W + TILE_GAP_X)
-                - t.pos.layer as f32 * LAYER_OFFSET_X;
-            let y = BOARD_OFFSET_Y + t.pos.row as f32 * (TILE_H + TILE_GAP_Y)
-                - t.pos.layer as f32 * LAYER_OFFSET_Y;
-            (x, y)
-        })
-    }
-
-    /// Find which tile (topmost) is at the given screen coordinates.
-    /// Returns the index if found. Searches from highest layer down so
-    /// that the visually topmost tile wins.
-    fn tile_at_screen(&self, sx: f32, sy: f32) -> Option<usize> {
-        // Sort by layer descending so we pick the topmost tile first.
-        let mut indices: Vec<usize> = (0..self.tiles.len())
-            .filter(|&i| !self.tiles[i].removed)
-            .collect();
-        indices.sort_by(|&a, &b| self.tiles[b].pos.layer.cmp(&self.tiles[a].pos.layer));
-
-        for idx in indices {
-            if let Some((tx, ty)) = self.tile_screen_pos(idx)
-                && sx >= tx
-                && sx < tx + TILE_W
-                && sy >= ty
-                && sy < ty + TILE_H
-            {
-                return Some(idx);
+        for (&idx, &kind) in active_indices.iter().zip(kinds.iter()) {
+            if let Some(t) = self.tiles.get_mut(idx) {
+                t.kind = kind;
             }
         }
-        None
+    }
+
+    /// Where a tile sits in the window, at the layout the frame was drawn with.
+    ///
+    /// A thin forward to [`Layout::tile_rect`] so that the board keeps its
+    /// index-based interface -- `move_cursor` compares tile positions and does
+    /// not want to know about `TilePos` -- while there is still exactly one
+    /// piece of code that turns a `TilePos` into a rectangle.
+    fn tile_rect(&self, l: &Layout, idx: usize) -> Option<Rect> {
+        self.tiles.get(idx).map(|t| l.tile_rect(t.pos))
+    }
+
+    /// The live tiles in the order they must be *painted*: bottom layer first,
+    /// so a tile on a higher layer covers the one it rests on.
+    ///
+    /// The hit test then reads this order backwards, which is what makes the
+    /// topmost tile win a click without a second sort keyed on layer -- the old
+    /// `tile_at_screen` had that second sort, and it was the only thing
+    /// standing between a click and the tile buried under the one you aimed at.
+    fn paint_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = self
+            .tiles
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.removed)
+            .map(|(i, _)| i)
+            .collect();
+        order.sort_by_key(|&i| self.tiles.get(i).map_or(0, |t| t.pos.layer));
+        order
     }
 }
 
@@ -618,12 +913,6 @@ impl Board {
 struct Cursor {
     /// Index into the board tiles array that the cursor is on.
     tile_idx: Option<usize>,
-}
-
-impl Cursor {
-    fn new() -> Self {
-        Self { tile_idx: None }
-    }
 }
 
 // ── Main app ────────────────────────────────────────────────────────
@@ -640,6 +929,14 @@ struct Mahjong {
     hint: Option<(usize, usize)>,
     show_hint: bool,
     message: Option<&'static str>,
+    /// The width the window last reported.
+    ///
+    /// Kept because a click arrives as a pair of window coordinates and has to
+    /// be read against the layout the *last frame* was drawn with; without it
+    /// the app would have to guess a size to hit-test against.
+    width: f32,
+    /// The height the window last reported.
+    height: f32,
 }
 
 impl Mahjong {
@@ -674,9 +971,22 @@ impl Mahjong {
             hint: None,
             show_hint: false,
             message: None,
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
         };
         app.update_status();
         app
+    }
+
+    /// Remember the size the window last reported.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.width = width.max(0.0);
+        self.height = height.max(0.0);
+    }
+
+    /// The layout the last frame was drawn with.
+    fn layout(&self) -> Layout {
+        Layout::solve(self.width, self.height)
     }
 
     /// Start a new game with a fresh seed.
@@ -707,14 +1017,21 @@ impl Mahjong {
     }
 
     /// Try to select a tile (by index) and match if two are selected.
-    fn try_select(&mut self, idx: usize) {
+    ///
+    /// Returns whether anything on the screen changed, so the window can be
+    /// told to redraw only when there is something new to draw. It is **not**
+    /// "was the tile selected": clicking a covered tile selects nothing and
+    /// still returns `true`, because the refusal is printed in the message
+    /// line and that line has to be repainted to be read.
+    fn try_select(&mut self, idx: usize) -> bool {
         if self.status != GameStatus::Playing {
-            return;
+            return false;
         }
 
         if !self.board.is_free(idx) {
+            let changed = self.message != Some("Tile is not free");
             self.message = Some("Tile is not free");
-            return;
+            return changed;
         }
 
         match self.selected {
@@ -728,10 +1045,10 @@ impl Mahjong {
                     // Deselect
                     self.selected = None;
                     self.message = None;
-                } else if self.board.tiles[prev]
-                    .kind
-                    .matches(self.board.tiles[idx].kind)
-                {
+                } else if match (self.board.tiles.get(prev), self.board.tiles.get(idx)) {
+                    (Some(a), Some(b)) => a.kind.matches(b.kind),
+                    _ => false,
+                } {
                     // Match found!
                     self.board.remove_pair(prev, idx);
                     self.undo_stack.push(UndoEntry {
@@ -739,7 +1056,7 @@ impl Mahjong {
                         tile_b: idx,
                     });
                     self.selected = None;
-                    self.moves += 1;
+                    self.moves = self.moves.saturating_add(1);
                     self.show_hint = false;
                     self.hint = None;
                     self.message = None;
@@ -756,29 +1073,31 @@ impl Mahjong {
                 }
             }
         }
+        true
     }
 
-    /// Undo the last move.
-    fn undo(&mut self) {
+    /// Undo the last move. Returns whether the screen changed.
+    fn undo(&mut self) -> bool {
         if let Some(entry) = self.undo_stack.pop() {
             self.board.restore_pair(entry.tile_a, entry.tile_b);
-            if self.moves > 0 {
-                self.moves -= 1;
-            }
+            self.moves = self.moves.saturating_sub(1);
             self.selected = None;
             self.show_hint = false;
             self.hint = None;
             self.status = GameStatus::Playing;
             self.message = Some("Undo!");
+            true
         } else {
+            let changed = self.message != Some("Nothing to undo");
             self.message = Some("Nothing to undo");
+            changed
         }
     }
 
-    /// Show a hint (highlight a valid pair).
-    fn show_hint_pair(&mut self) {
+    /// Show a hint (highlight a valid pair). Returns whether anything changed.
+    fn show_hint_pair(&mut self) -> bool {
         if self.status != GameStatus::Playing {
-            return;
+            return false;
         }
         match self.board.find_hint() {
             Some(pair) => {
@@ -791,12 +1110,16 @@ impl Mahjong {
                 self.message = Some("No valid pairs!");
             }
         }
+        true
     }
 
-    /// Shuffle remaining tiles.
-    fn shuffle_tiles(&mut self) {
+    /// Shuffle remaining tiles. Returns whether anything changed.
+    fn shuffle_tiles(&mut self) -> bool {
+        // A won board has nothing left to shuffle; a *lost* one is exactly the
+        // board this is for, which is why the guard names `Won` and not
+        // `!= Playing`.
         if self.status == GameStatus::Won {
-            return;
+            return false;
         }
         self.board.shuffle_remaining(&mut self.rng);
         self.selected = None;
@@ -805,24 +1128,39 @@ impl Mahjong {
         self.status = GameStatus::Playing;
         self.message = Some("Tiles shuffled!");
         self.update_status();
+        true
     }
 
     /// Move cursor in the given direction among free tiles.
-    fn move_cursor(&mut self, dx: i32, dy: i32) {
+    ///
+    /// Distances are measured in *tile widths*, not pixels, so the same key
+    /// press picks the same neighbour whatever size the window is. Measuring in
+    /// pixels would have been just as wrong at every size but the one the
+    /// weights were tuned at, and silently so.
+    fn move_cursor(&mut self, dx: i32, dy: i32) -> bool {
         let free = self.board.free_tiles();
-        if free.is_empty() {
+        let Some(&first_free) = free.first() else {
+            let moved = self.cursor.tile_idx.is_some();
             self.cursor.tile_idx = None;
-            return;
-        }
-
-        let current_idx = self.cursor.tile_idx.unwrap_or(free[0]);
-        let current_pos = match self.board.tile_screen_pos(current_idx) {
-            Some(p) => p,
-            None => {
-                self.cursor.tile_idx = Some(free[0]);
-                return;
-            }
+            return moved;
         };
+
+        let l = self.layout();
+        let current_idx = self.cursor.tile_idx.unwrap_or(first_free);
+        let Some(current) = self.board.tile_rect(&l, current_idx) else {
+            let moved = self.cursor.tile_idx != Some(first_free);
+            self.cursor.tile_idx = Some(first_free);
+            return moved;
+        };
+        let current_pos = (current.x, current.y);
+        // A window so small that a tile has no width leaves every tile at the
+        // same point, and "the closest one in this direction" has no answer.
+        // Sitting still is the honest response; the alternative is a cursor
+        // that jumps to an arbitrary tile on every arrow press.
+        if l.tile_w <= 0.0 {
+            return false;
+        }
+        let unit = l.tile_w;
 
         // Find the closest free tile in the requested direction.
         let mut best: Option<(usize, f32)> = None;
@@ -830,16 +1168,21 @@ impl Mahjong {
             if fi == current_idx {
                 continue;
             }
-            if let Some((fx, fy)) = self.board.tile_screen_pos(fi) {
-                let delta_x = fx - current_pos.0;
-                let delta_y = fy - current_pos.1;
+            if let Some(r) = self.board.tile_rect(&l, fi) {
+                let delta_x = (r.x - current_pos.0) / unit;
+                let delta_y = (r.y - current_pos.1) / unit;
 
-                // Check if the tile is in the requested direction.
+                // Check if the tile is in the requested direction. The
+                // threshold is a fraction of a tile rather than "one pixel":
+                // a layer's stagger is a tenth of a tile, so at any size the
+                // tile directly above another must not read as being to its
+                // left as well.
+                let eps = LAYER_OFFSET_SHARE * 1.5;
                 let in_direction = match (dx, dy) {
-                    (1, 0) => delta_x > 1.0,   // right
-                    (-1, 0) => delta_x < -1.0, // left
-                    (0, 1) => delta_y > 1.0,   // down
-                    (0, -1) => delta_y < -1.0, // up
+                    (1, 0) => delta_x > eps,   // right
+                    (-1, 0) => delta_x < -eps, // left
+                    (0, 1) => delta_y > eps,   // down
+                    (0, -1) => delta_y < -eps, // up
                     _ => false,
                 };
 
@@ -865,19 +1208,35 @@ impl Mahjong {
         }
 
         if let Some((bi, _)) = best {
+            let moved = self.cursor.tile_idx != Some(bi);
             self.cursor.tile_idx = Some(bi);
+            moved
+        } else {
+            // Already at the edge in that direction. Reporting `false` is what
+            // stops the window redrawing an identical frame on every arrow
+            // press held against the edge.
+            false
         }
     }
 
     // ── Event handling ──────────────────────────────────────────────
 
-    fn handle_key(&mut self, event: &KeyEvent) {
+    /// Answer a key press.
+    ///
+    /// Every arm reports whether the screen changed. The old version returned
+    /// `()`, so the window had no way to tell a key that did something from one
+    /// that did nothing and would have had to redraw on every keystroke -- or,
+    /// worse, on none.
+    fn handle_key(&mut self, event: &KeyEvent) -> EventResult {
         if !event.pressed {
-            return;
+            return EventResult::Ignored;
         }
 
-        match event.key {
-            Key::N => self.new_game(),
+        let changed = match event.key {
+            Key::N => {
+                self.new_game();
+                true
+            }
             Key::Z => self.undo(),
             Key::H => self.show_hint_pair(),
             Key::S => self.shuffle_tiles(),
@@ -885,65 +1244,127 @@ impl Mahjong {
             Key::Right => self.move_cursor(1, 0),
             Key::Up => self.move_cursor(0, -1),
             Key::Down => self.move_cursor(0, 1),
-            Key::Enter | Key::Space => {
-                if let Some(ci) = self.cursor.tile_idx {
-                    self.try_select(ci);
-                }
-            }
+            Key::Enter | Key::Space => match self.cursor.tile_idx {
+                Some(ci) => self.try_select(ci),
+                None => false,
+            },
             Key::Escape => {
+                let changed = self.selected.is_some() || self.show_hint || self.message.is_some();
                 self.selected = None;
                 self.show_hint = false;
                 self.message = None;
+                changed
             }
-            _ => {}
+            // A key this game does not use is not this game's to swallow: the
+            // window may want it for a shortcut of its own.
+            _ => return EventResult::Ignored,
+        };
+        if changed {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
         }
     }
 
-    fn handle_mouse(&mut self, event: &MouseEvent) {
-        if let MouseEventKind::Press(MouseButton::Left) = event.kind
-            && let Some(idx) = self.board.tile_at_screen(event.x, event.y)
-        {
-            self.cursor.tile_idx = Some(idx);
-            self.try_select(idx);
+    /// Answer a click by asking the frame what is under it.
+    ///
+    /// The old `handle_mouse` called `tile_at_screen`, which recomputed every
+    /// tile's rectangle from the same constants the drawing pass used -- a
+    /// second copy of the geometry, kept in step with the picture by nothing
+    /// but care, and wrong the moment either side was edited alone.
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // A tile game answers the left button. Answering all three meant a
+        // right-click removed a pair, which is a move the player did not make.
+        if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
+            return EventResult::Ignored;
         }
-    }
-
-    fn handle_event(&mut self, event: &Event) {
-        match event {
-            Event::Key(ke) => self.handle_key(ke),
-            Event::Mouse(me) => self.handle_mouse(me),
-            _ => {}
+        let Some(target) = self
+            .frame(self.width, self.height)
+            .hit_test(event.x, event.y)
+        else {
+            return EventResult::Ignored;
+        };
+        match target {
+            Target::Tile(idx) => {
+                let moved = self.cursor.tile_idx != Some(idx);
+                self.cursor.tile_idx = Some(idx);
+                let acted = self.try_select(idx);
+                if moved || acted {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Target::Title
+            | Target::Status
+            | Target::Message
+            | Target::Legend(_)
+            | Target::Help
+            | Target::Board => EventResult::Ignored,
         }
     }
 
     // ── Rendering ───────────────────────────────────────────────────
 
-    fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::with_capacity(512);
+    /// Draw the whole game at the size the window reports.
+    ///
+    /// Every box a click is tested against is recorded here as it is painted,
+    /// so the hit test cannot disagree with the picture.
+    fn frame(&self, w: f32, h: f32) -> Frame<Target> {
+        let l = Layout::solve(w, h);
+        let mut f = Frame::new(w, h);
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
+        // The background is the window, not a remembered size.
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width,
-            height,
+            width: w,
+            height: h,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
+        f.clip(l.window);
 
-        // Title
-        cmds.push(RenderCommand::Text {
-            x: BOARD_OFFSET_X,
-            y: 20.0,
+        self.draw_header(&mut f, &l);
+        self.draw_board(&mut f, &l);
+        self.draw_legend(&mut f, &l);
+        self.draw_help(&mut f, &l);
+
+        f.unclip();
+        f
+    }
+
+    /// The title, the counters and the message, stacked in the header band.
+    ///
+    /// The title used to be at a fixed `(40, 20)` and the message at
+    /// `BOARD_OFFSET_X + 400.0`, so in any window narrower than about 640 the
+    /// message ran off the right edge and the player never learned why their
+    /// click did nothing.
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+        let inner = inset(l.header, l.pad);
+        if inner.w <= 0.0 || inner.h <= 0.0 {
+            return;
+        }
+        let title_box = Rect::new(inner.x, inner.y, inner.w, l.title);
+        f.push(RenderCommand::Text {
+            x: title_box.x,
+            y: title_box.y,
             text: "Mahjong Solitaire".into(),
             color: LAVENDER,
-            font_size: TITLE_FONT_SIZE,
+            font_size: l.title,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(title_box.w),
+            overflow: TextOverflow::Ellipsis,
         });
+        f.hit(Target::Title, title_box);
 
-        // Status line
+        let line_y = (title_box.bottom() + l.pad).min(inner.bottom() - l.status);
+        // The counters take the left half and the message the right, so the
+        // two can never be drawn over each other however long either gets.
+        let half = inner.w / 2.0;
+        let status_box = Rect::new(inner.x, line_y, half, l.status);
+        let message_box = Rect::new(inner.x + half, line_y, inner.w - half, l.status);
+
         let status_text = match self.status {
             GameStatus::Playing => {
                 format!(
@@ -961,44 +1382,48 @@ impl Mahjong {
             GameStatus::Won => GREEN,
             GameStatus::Lost => RED,
         };
-        cmds.push(RenderCommand::Text {
-            x: BOARD_OFFSET_X,
-            y: 48.0,
+        f.push(RenderCommand::Text {
+            x: status_box.x,
+            y: status_box.y,
             text: status_text,
             color: status_color,
-            font_size: STATUS_FONT_SIZE,
+            font_size: l.status,
             font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(status_box.w),
+            overflow: TextOverflow::Ellipsis,
         });
+        f.hit(Target::Status, status_box);
 
-        // Message line
         if let Some(msg) = self.message {
-            cmds.push(RenderCommand::Text {
-                x: BOARD_OFFSET_X + 400.0,
-                y: 48.0,
+            f.push(RenderCommand::Text {
+                x: message_box.x,
+                y: message_box.y,
                 text: msg.into(),
                 color: PEACH,
-                font_size: STATUS_FONT_SIZE,
+                font_size: l.status,
                 font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some(message_box.w),
+                overflow: TextOverflow::Ellipsis,
             });
+            f.hit(Target::Message, message_box);
+        }
+    }
+
+    /// The turtle: every live tile, bottom layer first.
+    fn draw_board(&self, f: &mut Frame<Target>, l: &Layout) {
+        // A box behind the tiles, so a click in the board's margin is answered
+        // as "the board" and not as whichever tile happens to be nearest.
+        f.hit(Target::Board, l.board);
+        if l.tile_w <= 0.0 || l.tile_h <= 0.0 {
+            return;
         }
 
-        // Render tiles bottom-to-top so higher layers draw on top.
-        // Build a sorted index list by layer.
-        let mut sorted_indices: Vec<usize> = (0..self.board.tiles.len())
-            .filter(|&i| !self.board.tiles[i].removed)
-            .collect();
-        sorted_indices.sort_by_key(|&i| self.board.tiles[i].pos.layer);
-
-        for &idx in &sorted_indices {
-            let tile = &self.board.tiles[idx];
-            let (tx, ty) = match self.board.tile_screen_pos(idx) {
-                Some(p) => p,
-                None => continue,
+        for idx in self.board.paint_order() {
+            let Some(tile) = self.board.tiles.get(idx) else {
+                continue;
             };
+            let r = l.tile_rect(tile.pos);
+            let (tx, ty) = (r.x, r.y);
 
             let is_free = self.board.is_free(idx);
             let is_selected = self.selected == Some(idx);
@@ -1006,14 +1431,16 @@ impl Mahjong {
             let is_hint = self.show_hint && self.hint.is_some_and(|(a, b)| idx == a || idx == b);
 
             // Shadow (gives depth illusion for stacked layers)
+            let shadow = l.tile_w * SHADOW_SHARE;
+            let corner = CornerRadii::all(l.tile_w * TILE_CORNER_SHARE);
             if tile.pos.layer > 0 {
-                cmds.push(RenderCommand::FillRect {
-                    x: tx + SHADOW_OFFSET,
-                    y: ty + SHADOW_OFFSET,
-                    width: TILE_W,
-                    height: TILE_H,
+                f.push(RenderCommand::FillRect {
+                    x: tx + shadow,
+                    y: ty + shadow,
+                    width: r.w,
+                    height: r.h,
                     color: TILE_SHADOW,
-                    corner_radii: CornerRadii::all(TILE_CORNER),
+                    corner_radii: corner,
                 });
             }
 
@@ -1027,52 +1454,54 @@ impl Mahjong {
             } else {
                 TILE_BG
             };
-            cmds.push(RenderCommand::FillRect {
-                x: tx,
-                y: ty,
-                width: TILE_W,
-                height: TILE_H,
+            f.push(RenderCommand::FillRect {
+                x: r.x,
+                y: r.y,
+                width: r.w,
+                height: r.h,
                 color: bg_color,
-                corner_radii: CornerRadii::all(TILE_CORNER),
+                corner_radii: corner,
             });
 
             // Cursor highlight (border effect via slightly larger rect behind)
             if is_cursor && !is_selected {
-                // Draw a thin border by drawing lines on the edges.
-                let bw = 2.0;
+                // A border thick enough to see at any tile size; at the old
+                // fixed 2 pixels it vanished on a large window and swallowed
+                // the tile on a small one.
+                let bw = (l.tile_w * 0.05).clamp(1.0, 4.0);
                 // Top edge
-                cmds.push(RenderCommand::Line {
-                    x1: tx,
-                    y1: ty,
-                    x2: tx + TILE_W,
-                    y2: ty,
+                f.push(RenderCommand::Line {
+                    x1: r.x,
+                    y1: r.y,
+                    x2: r.right(),
+                    y2: r.y,
                     color: YELLOW,
                     width: bw,
                 });
                 // Bottom edge
-                cmds.push(RenderCommand::Line {
-                    x1: tx,
-                    y1: ty + TILE_H,
-                    x2: tx + TILE_W,
-                    y2: ty + TILE_H,
+                f.push(RenderCommand::Line {
+                    x1: r.x,
+                    y1: r.bottom(),
+                    x2: r.right(),
+                    y2: r.bottom(),
                     color: YELLOW,
                     width: bw,
                 });
                 // Left edge
-                cmds.push(RenderCommand::Line {
-                    x1: tx,
-                    y1: ty,
-                    x2: tx,
-                    y2: ty + TILE_H,
+                f.push(RenderCommand::Line {
+                    x1: r.x,
+                    y1: r.y,
+                    x2: r.x,
+                    y2: r.bottom(),
                     color: YELLOW,
                     width: bw,
                 });
                 // Right edge
-                cmds.push(RenderCommand::Line {
-                    x1: tx + TILE_W,
-                    y1: ty,
-                    x2: tx + TILE_W,
-                    y2: ty + TILE_H,
+                f.push(RenderCommand::Line {
+                    x1: r.right(),
+                    y1: r.y,
+                    x2: r.right(),
+                    y2: r.bottom(),
                     color: YELLOW,
                     width: bw,
                 });
@@ -1085,108 +1514,234 @@ impl Mahjong {
             } else {
                 tile.kind.text_color()
             };
-            cmds.push(RenderCommand::Text {
-                x: text::center_x(
-                    label,
-                    tx + TILE_W / 2.0,
-                    TILE_FONT_SIZE,
-                    FontWeightHint::Bold,
-                ),
-                y: ty + TILE_H / 2.0 - TILE_FONT_SIZE / 2.0,
+            f.push(RenderCommand::Text {
+                x: text::center_x(label, r.x + r.w / 2.0, l.tile_font, FontWeightHint::Bold),
+                y: r.y + r.h / 2.0 - l.tile_font / 2.0,
                 text: label.into(),
                 color: text_color,
-                font_size: TILE_FONT_SIZE,
+                font_size: l.tile_font,
                 font_weight: FontWeightHint::Bold,
-                max_width: None,
+                max_width: Some(r.w),
                 overflow: TextOverflow::Clip,
             });
-        }
 
-        // Help bar at the bottom.
-        let help_y = height - 24.0;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: help_y - 6.0,
-            width,
-            height: 30.0,
+            // Recorded last, after everything that draws this tile, so the hit
+            // box and the picture are the same rectangle by construction. The
+            // paint order runs bottom layer first and `hit_test` reads the
+            // boxes back-to-front, so the tile on top of a stack wins the click.
+            f.hit(Target::Tile(idx), r);
+        }
+    }
+
+    /// The key hints along the bottom, on their own strip.
+    ///
+    /// The strip used to be `height - 24.0` tall by a constant 30, which in a
+    /// window shorter than 54 pixels was drawn above its own top edge.
+    fn draw_help(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.help.h <= 0.0 {
+            return;
+        }
+        f.push(RenderCommand::FillRect {
+            x: l.help.x,
+            y: l.help.y,
+            width: l.help.w,
+            height: l.help.h,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
-        cmds.push(RenderCommand::Text {
-            x: 10.0,
-            y: help_y,
-            text: "N=New  Z=Undo  H=Hint  S=Shuffle  Arrows=Navigate  Enter/Space=Select  Esc=Deselect".into(),
+        let inner = inset(l.help, l.pad);
+        f.push(RenderCommand::Text {
+            x: inner.x,
+            y: inner.y,
+            text: HELP_TEXT.into(),
             color: OVERLAY0,
-            font_size: HELP_FONT_SIZE,
+            font_size: l.small,
             font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(inner.w),
+            overflow: TextOverflow::Ellipsis,
         });
+        f.hit(Target::Help, l.help);
+    }
 
-        // Legend (right side)
-        let legend_x = BOARD_OFFSET_X + 15.0 * (TILE_W + TILE_GAP_X) + 30.0;
-        let legend_y = BOARD_OFFSET_Y;
-        cmds.push(RenderCommand::Text {
-            x: legend_x,
-            y: legend_y,
+    /// The legend down the right-hand side.
+    ///
+    /// Its column is solved for in [`Layout::solve`] and is zero-width when the
+    /// window is too narrow to carry it, which is the case the old fixed
+    /// `legend_x = 730` could not express: it drew the legend off the edge and
+    /// left no sign that anything was missing.
+    fn draw_legend(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.legend.w <= 0.0 {
+            return;
+        }
+        let inner = inset(l.legend, l.pad);
+        if inner.w <= 0.0 || inner.h <= 0.0 {
+            return;
+        }
+        // The heading, the seven groups and the footnote share the column
+        // evenly, so the legend cannot run off the bottom of its own band.
+        let line = (inner.h / LEGEND_ROWS as f32).min(l.small * 2.0);
+        let row = |i: usize| Rect::new(inner.x, inner.y + i as f32 * line, inner.w, line);
+
+        let head = row(0);
+        f.push(RenderCommand::Text {
+            x: head.x,
+            y: head.y,
             text: "Legend".into(),
             color: TEXT_COLOR,
-            font_size: INFO_FONT_SIZE,
+            font_size: l.small,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(head.w),
+            overflow: TextOverflow::Ellipsis,
         });
 
-        let legend_items: &[(&str, &str, Color)] = &[
-            ("B1-B9", "Bamboo", BAMBOO_COLOR),
-            ("C1-C9", "Circle", CIRCLE_COLOR),
-            ("W1-W9", "Character", CHARACTER_COLOR),
-            ("E/S/W/N", "Wind", WIND_COLOR),
-            ("Dr/Dg/Dw", "Dragon", DRAGON_COLOR),
-            ("Sp/Su/Au/Wi", "Season*", SEASON_COLOR),
-            ("Pl/Or/Ch/Bm", "Flower*", FLOWER_COLOR),
-        ];
-
-        for (i, &(codes, name, color)) in legend_items.iter().enumerate() {
-            let ly = legend_y + 24.0 + i as f32 * 20.0;
-            cmds.push(RenderCommand::FillRect {
-                x: legend_x,
-                y: ly - 2.0,
-                width: 10.0,
-                height: 10.0,
-                color,
-                corner_radii: CornerRadii::all(2.0),
+        for (i, &(codes, kind)) in LEGEND_ITEMS.iter().enumerate() {
+            let r = row(i.saturating_add(1));
+            let swatch = l.small * 0.7;
+            f.push(RenderCommand::FillRect {
+                x: r.x,
+                y: r.y + (l.small - swatch) / 2.0,
+                width: swatch,
+                height: swatch,
+                color: kind.text_color(),
+                corner_radii: CornerRadii::all(swatch / 4.0),
             });
-            cmds.push(RenderCommand::Text {
-                x: legend_x + 14.0,
-                y: ly,
-                text: format!("{codes} ({name})"),
+            let text_x = r.x + swatch + l.pad / 2.0;
+            f.push(RenderCommand::Text {
+                x: text_x,
+                y: r.y,
+                text: legend_label(codes, kind),
                 color: SUBTEXT0,
-                font_size: HELP_FONT_SIZE,
+                font_size: l.small,
                 font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some((r.right() - text_x).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
             });
+            f.hit(Target::Legend(i), r);
         }
 
         // Note about wildcards
-        cmds.push(RenderCommand::Text {
-            x: legend_x,
-            y: legend_y + 24.0 + 7.0 * 20.0 + 4.0,
-            text: "* match any in group".into(),
+        let note = row(LEGEND_ROWS - 1);
+        f.push(RenderCommand::Text {
+            x: note.x,
+            y: note.y,
+            text: LEGEND_NOTE.into(),
             color: OVERLAY0,
-            font_size: HELP_FONT_SIZE,
+            font_size: l.small,
             font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(note.w),
+            overflow: TextOverflow::Ellipsis,
         });
-
-        cmds
     }
 }
 
-fn main() {
-    let _app = Mahjong::new();
+// ── What a click can land on ────────────────────────────────────────
+
+/// Everything the drawing pass records a box for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// A live tile, by its index into `Board::tiles`.
+    Tile(usize),
+    Title,
+    /// The counters: tiles left, moves made, tiles currently free.
+    Status,
+    /// The line that says why the last thing you did did or did not work.
+    Message,
+    /// One row of the legend, by its index into [`LEGEND_ITEMS`].
+    Legend(usize),
+    Help,
+    /// The board behind the tiles, so a click in its margin is not read as the
+    /// tile nearest to it.
+    Board,
+}
+
+// ── Event dispatch ──────────────────────────────────────────────────
+
+fn handle_event(game: &mut Mahjong, event: &Event) -> EventResult {
+    match event {
+        Event::Key(ke) => game.handle_key(ke),
+        Event::Mouse(me) => game.handle_mouse(me),
+        Event::Resize { width, height } => {
+            game.resize(f32_from_u32(*width), f32_from_u32(*height));
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+/// Widen a window dimension without the lossy-cast lint, and without pretending
+/// a `u32` that does not fit an `f32` exactly is an error.
+fn f32_from_u32(v: u32) -> f32 {
+    // A window dimension is at most a few tens of thousands of pixels, which
+    // every `f32` represents exactly; the cast is only "lossy" in the general
+    // case the lint has to assume.
+    v as f32
+}
+
+impl App for Mahjong {
+    fn title(&self) -> String {
+        "Mahjong Solitaire".to_string()
+    }
+
+    fn app_id(&self) -> String {
+        "mahjong".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        // Converted from the float pair rather than written out again: two
+        // spellings of one size are two things that can drift apart.
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against, which is the only reason it is stored at all.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for Mahjong {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
+    }
+}
+
+// ── Entry point ─────────────────────────────────────────────────────
+
+fn main() -> ExitCode {
+    let mut game = Mahjong::new();
+    app::launch("mahjong", &mut game)
 }
 
 // =====================================================================
@@ -1195,2105 +1750,2342 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    // A test that indexes out of range should fail loudly and point at the line
-    // that did it -- that is the diagnosis. The defensive lints exist to keep
-    // panics out of code that runs on a user's data, which this is not.
+    // A test that indexes past the end, or unwraps a `None`, is a test that
+    // has already failed; panicking is the reporting mechanism, not a fault.
     #![allow(
-        clippy::indexing_slicing,
-        clippy::unwrap_used,
+        clippy::arithmetic_side_effects,
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
         clippy::expect_used,
-        clippy::panic,
         clippy::float_cmp,
-        clippy::arithmetic_side_effects
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::too_many_lines,
+        clippy::unwrap_used
     )]
 
     use super::*;
+    use guitk::event::Modifiers;
+    use guitk::probe;
+    use std::collections::{HashMap, HashSet};
 
-    // ── Helper ──────────────────────────────────────────────────────
-
-    fn make_key(key: Key) -> KeyEvent {
-        KeyEvent {
-            key,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        }
+    /// A game whose deal is the same on every run, so a test that names a tile
+    /// index names the same tile every time.
+    fn game() -> Mahjong {
+        Mahjong::with_seed(42)
     }
 
-    fn make_key_up(key: Key) -> KeyEvent {
-        KeyEvent {
-            key,
-            pressed: false,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        }
+    fn press_key(g: &mut Mahjong, key: Key) -> EventResult {
+        handle_event(
+            g,
+            &Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }),
+        )
     }
 
-    fn make_mouse(x: f32, y: f32) -> MouseEvent {
-        MouseEvent {
-            x,
-            y,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        }
-    }
-
-    // ── Deal tests ──────────────────────────────────────────────────
-    //
-    // The generator is `randrange`'s now, and its own properties -- range,
-    // determinism, that a shuffle is a permutation of its input -- are tested
-    // there, once, instead of here in each of sixteen copies. What belongs
-    // here is the deal that the generator drives.
-
-    /// The tile kinds, in layout order, for each of `deals` consecutive deals
-    /// taken off a *single* generator.
+    /// Shapes the layout has to survive.
     ///
-    /// Consecutive deals off one stream, rather than one deal each off `deals`
-    /// fresh seeds. A low-bit defect in a generator is a counter *along* one
-    /// stream: different seeds have different low bits, so re-seeding between
-    /// samples hides the counter behind the variety of the seeds themselves,
-    /// and the test then passes on exactly the code it exists to catch.
-    fn consecutive_deals(seed: u64, deals: usize) -> Vec<Vec<TileKind>> {
-        let mut rng = SeededRng::new(seed);
-        (0..deals)
-            .map(|_| Board::new(&mut rng).tiles.iter().map(|t| t.kind).collect())
+    /// The last two are not decoration. `(1000, 90)` is short enough that the
+    /// legend's nine rows do not fit its column, and `(360, 700)` is narrow
+    /// enough that its widest row does not fit a third of the window: those are
+    /// the two halves of the legend's fits-test, and without a size that trips
+    /// each of them the whole test is unreachable and can say anything.
+    const SIZES: [(f32, f32); 6] = [
+        (WINDOW_WIDTH, WINDOW_HEIGHT),
+        (640.0, 480.0),
+        (1600.0, 1000.0),
+        (520.0, 900.0),
+        (1000.0, 90.0),
+        (360.0, 700.0),
+    ];
+
+    // ════════════════════════════════════════════════════════════════
+    // The window: every coordinate solved from the live size
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn the_layout_covers_exactly_the_window_it_was_given() {
+        // `Layout::window` is what the frame clips to. If it were ever smaller
+        // than the window the compositor handed over, the difference would be
+        // painted with whatever was in the buffer before.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            assert_eq!((l.window.x, l.window.y), (0.0, 0.0), "at {w}x{h}");
+            assert_eq!((l.window.w, l.window.h), (w, h), "at {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn the_three_bands_stack_without_a_gap_or_an_overlap() {
+        // Header on top, help along the bottom, everything else in between.
+        // A gap would be a stripe of bare background; an overlap would be the
+        // help text drawn over the counters.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            assert_eq!(l.header.y, 0.0, "at {w}x{h}");
+            assert!(
+                l.help.y >= l.header.bottom() - 0.01,
+                "at {w}x{h} the help bar at {} starts above the header's bottom {}",
+                l.help.y,
+                l.header.bottom()
+            );
+            assert!(
+                l.help.bottom() <= h + 0.01,
+                "at {w}x{h} the help bar ends at {} past the window",
+                l.help.bottom()
+            );
+        }
+    }
+
+    #[test]
+    fn the_board_and_the_legend_divide_the_middle_between_them() {
+        // Whatever the legend takes, the board gets the rest -- and neither
+        // reaches into the header or the help bar. The old code had the board
+        // at a fixed offset and the legend at a fixed x = 730, so on a narrow
+        // window they overlapped and on a wide one there was dead space
+        // between them that belonged to neither.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            assert!(
+                l.board.right() <= l.legend.x + 0.01,
+                "at {w}x{h} the board runs to {} and the legend starts at {}",
+                l.board.right(),
+                l.legend.x
+            );
+            assert_eq!(
+                l.legend.right().min(w),
+                w,
+                "at {w}x{h} the legend does not reach the right edge"
+            );
+            assert!(l.board.y >= l.header.bottom() - 0.01, "at {w}x{h}");
+            assert!(l.board.bottom() <= l.help.y + 0.01, "at {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn the_header_is_sized_from_the_two_fonts_it_stacks() {
+        // Two lines -- the title, then the counters -- plus the padding between
+        // and around them. Sized from a share of the height instead, it would
+        // have been right at one window height and wrong at every other.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            if l.header.h < h {
+                assert_eq!(l.header.h, l.title + l.status + l.pad * 3.0, "at {w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_header_grows_with_the_font_it_holds() {
+        // The claim the equality above cannot make on its own: the header is
+        // not merely *equal to* an expression, it *moves* when the fonts move.
+        let small = Layout::solve(1000.0, 300.0);
+        let large = Layout::solve(1000.0, 1200.0);
+        assert!(
+            large.title > small.title,
+            "the fixture is broken: both windows use a {}pt title",
+            small.title
+        );
+        assert!(
+            large.header.h > small.header.h,
+            "the header is {} tall at {}pt and {} at {}pt",
+            small.header.h,
+            small.title,
+            large.header.h,
+            large.title
+        );
+    }
+
+    #[test]
+    fn the_fonts_grow_with_the_window_and_stop_at_both_ends() {
+        // A font that grew without a ceiling would swallow a 4K window; one
+        // without a floor would be a smudge on a small one.
+        let tiny = Layout::solve(300.0, 120.0);
+        let huge = Layout::solve(4000.0, 3000.0);
+        assert_eq!(tiny.title, 10.0, "the title has no floor");
+        assert_eq!(huge.title, 26.0, "the title has no ceiling");
+        assert_eq!(tiny.status, 8.0, "the counters have no floor");
+        assert_eq!(huge.status, 18.0, "the counters have no ceiling");
+        let mid = Layout::solve(1000.0, 700.0);
+        assert!(
+            mid.title > tiny.title && mid.title < huge.title,
+            "the title is pinned to a clamp at every size: {}",
+            mid.title
+        );
+    }
+
+    #[test]
+    fn the_small_font_never_outgrows_the_font_above_it() {
+        // The legend and the help bar are subordinate to the counters; a small
+        // font larger than the status font would read as the more important of
+        // the two. The ceiling is `status`, not a constant, so it follows.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            assert!(
+                l.small <= l.status,
+                "at {w}x{h} the legend is {}pt against {}pt counters",
+                l.small,
+                l.status
+            );
+        }
+    }
+
+    #[test]
+    fn the_padding_is_taken_from_the_shorter_side() {
+        // Scaled off the width alone, a wide-and-short window would get
+        // padding that ate its whole height. `1400x100` is exactly that shape.
+        let wide_short = Layout::solve(1400.0, 100.0);
+        let square = Layout::solve(1400.0, 1400.0);
+        assert!(
+            wide_short.pad < square.pad,
+            "a 1400x100 window pads by {} and a 1400x1400 one by {}",
+            wide_short.pad,
+            square.pad
+        );
+        assert!(
+            wide_short.pad * 2.0 <= 100.0,
+            "the padding alone is {} of a 100-pixel window",
+            wide_short.pad * 2.0
+        );
+    }
+    // ════════════════════════════════════════════════════════════════
+    // The legend column: all of it or none of it
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn the_legend_takes_the_width_its_widest_row_measures() {
+        // Not a constant: the old code put the legend at x = 730 and let it run
+        // to the right edge, so its width was "whatever is left" and the text
+        // was ellipsised or lost depending on the window.
+        let l = Layout::solve(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(
+            l.legend.w,
+            legend_width(l.small, l.pad),
+            "the legend column is not the width its rows need"
+        );
+    }
+
+    #[test]
+    fn the_legend_column_widens_with_the_font_it_is_drawn_at() {
+        // The equality above is satisfied by any function of the font,
+        // including one that ignores it. This is the claim that it does not:
+        // two windows of the same width, differing only in the font the height
+        // picks, must not get the same column.
+        let short = Layout::solve(1400.0, 420.0);
+        let tall = Layout::solve(1400.0, 1400.0);
+        assert!(
+            tall.small > short.small,
+            "the fixture is broken: both draw the legend at {}pt",
+            short.small
+        );
+        assert!(
+            tall.legend.w > short.legend.w + 1.0,
+            "the legend is {} wide at {}pt and {} at {}pt",
+            short.legend.w,
+            short.small,
+            tall.legend.w,
+            tall.small
+        );
+    }
+
+    #[test]
+    fn a_window_too_narrow_for_the_legend_drops_it_rather_than_squeezing_it() {
+        // A column narrowed to fit shows "B1-B9 (Bam..." -- unreadable, and
+        // still charged to the board's width. 360 wide is under three times
+        // what the rows measure.
+        let l = Layout::solve(360.0, 700.0);
+        assert!(
+            legend_width(l.small, l.pad) > 360.0 / 3.0,
+            "the fixture is broken: the legend fits a third of a 360-wide window"
+        );
+        assert_eq!(
+            l.legend.w, 0.0,
+            "the legend was squeezed instead of dropped"
+        );
+        assert_eq!(
+            l.board.right(),
+            360.0,
+            "the width the legend gave up did not go to the board"
+        );
+    }
+
+    #[test]
+    fn a_window_too_short_for_the_legends_rows_drops_it_too() {
+        // Nine rows at the small font is the least the legend can be drawn in.
+        // Below that the rows overlap each other, which the first draft could
+        // not express: its fits-test only looked at the width.
+        let l = Layout::solve(1000.0, 90.0);
+        assert!(
+            l.legend.h < l.small * LEGEND_ROWS as f32,
+            "the fixture is broken: {} of column holds {} rows of {}pt",
+            l.legend.h,
+            LEGEND_ROWS,
+            l.small
+        );
+        assert_eq!(l.legend.w, 0.0, "a legend that cannot be read was drawn");
+    }
+
+    #[test]
+    fn a_window_with_room_for_the_legend_gets_one() {
+        // The two tests above are only meaningful if the drop is not
+        // unconditional -- a `legend.w = 0.0` would pass both of them.
+        let l = Layout::solve(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(l.legend.w > 0.0, "the default window has no legend at all");
+    }
+
+    #[test]
+    fn the_legend_never_takes_more_than_a_third_of_the_window() {
+        // The board is the game; the legend is a reference card. Letting it
+        // grow past a third would leave the tiles smaller than the label they
+        // carry on the very windows where the legend is largest.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            assert!(
+                l.legend.w <= w / 3.0 + 0.01,
+                "at {w}x{h} the legend takes {} of {w}",
+                l.legend.w
+            );
+        }
+    }
+
+    #[test]
+    fn every_legend_row_names_its_group_and_marks_the_wild_ones() {
+        // The asterisks used to be typed into the legend table by hand, one
+        // edit away from promising a matching rule the game does not play.
+        // They are asked of the tile now, so this test compares the label
+        // against `matches`, not against a second copy of the table.
+        for &(codes, kind) in &LEGEND_ITEMS {
+            let label = legend_label(codes, kind);
+            assert!(
+                label.contains(codes),
+                "the row for {codes} does not show its codes: {label}"
+            );
+            assert!(
+                label.contains(kind.category()),
+                "the row {label} does not name its group"
+            );
+            let starred = label.contains('*');
+            let wild = matches!(kind, TileKind::Season(_) | TileKind::Flower(_));
+            assert_eq!(
+                starred, wild,
+                "the row {label} promises a matching rule the game does not play"
+            );
+        }
+    }
+
+    #[test]
+    fn the_legend_lists_every_group_the_deal_contains_exactly_once() {
+        // A group left off the legend is a tile the player cannot look up. A
+        // group listed twice is a row that says nothing new.
+        let listed: Vec<&str> = LEGEND_ITEMS.iter().map(|&(_, k)| k.category()).collect();
+        let mut dealt: Vec<&str> = full_tile_set().iter().map(|k| k.category()).collect();
+        dealt.sort_unstable();
+        dealt.dedup();
+        let mut sorted = listed.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            listed.len(),
+            "a group is listed twice: {listed:?}"
+        );
+        assert_eq!(sorted, dealt, "the legend and the deal disagree");
+    }
+    // ════════════════════════════════════════════════════════════════
+    // The turtle: a tile size solved for the space, not written down
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn every_tile_lands_inside_the_board_band() {
+        // The old code pinned the tiles to `BOARD_OFFSET_X/Y` and a fixed 42x54
+        // tile, so any window shorter than about 500 drew the bottom row of the
+        // turtle underneath the help bar and any window narrower than 900 drew
+        // the right-hand columns under the legend.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            for pos in turtle_layout() {
+                let r = l.tile_rect(pos);
+                assert!(
+                    r.x >= l.board.x - 0.01
+                        && r.right() <= l.board.right() + 0.01
+                        && r.y >= l.board.y - 0.01
+                        && r.bottom() <= l.board.bottom() + 0.01,
+                    "at {w}x{h} the tile at {pos:?} is at ({}, {}) {}x{} outside the board \
+                     ({}, {}) {}x{}",
+                    r.x,
+                    r.y,
+                    r.w,
+                    r.h,
+                    l.board.x,
+                    l.board.y,
+                    l.board.w,
+                    l.board.h
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_turtle_box_is_exactly_the_tiles_it_contains() {
+        // The bounding box is what the tile size is solved against, so a box
+        // larger than the tiles wastes the difference on margin and a box
+        // smaller than them puts tiles outside the board. The first draft
+        // computed the box from `cols x rows + layers x offset`, which reserved
+        // four layer-offsets on the left and top that no tile ever occupies:
+        // the upper layers sit at the middle columns, so nothing is ever
+        // staggered out past column 0.
+        let l = Layout::solve(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for pos in turtle_layout() {
+            let r = l.tile_rect(pos);
+            min_x = min_x.min(r.x);
+            min_y = min_y.min(r.y);
+            max_x = max_x.max(r.right());
+            max_y = max_y.max(r.bottom());
+        }
+        assert!(
+            (min_x - l.turtle.x).abs() < 0.01,
+            "left edge: {min_x} vs {}",
+            l.turtle.x
+        );
+        assert!(
+            (min_y - l.turtle.y).abs() < 0.01,
+            "top edge: {min_y} vs {}",
+            l.turtle.y
+        );
+        assert!(
+            (max_x - l.turtle.right()).abs() < 0.01,
+            "right edge: {max_x} vs {}",
+            l.turtle.right()
+        );
+        assert!(
+            (max_y - l.turtle.bottom()).abs() < 0.01,
+            "bottom edge: {max_y} vs {}",
+            l.turtle.bottom()
+        );
+    }
+
+    #[test]
+    fn the_turtle_is_centred_in_the_space_left_for_it() {
+        // A window wider than the turtle needs must not pin it to one side
+        // with all the slack on the other.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            if l.tile_w <= 0.0 {
+                continue;
+            }
+            let inner = inset(l.board, l.pad);
+            let left = l.turtle.x - inner.x;
+            let right = inner.right() - l.turtle.right();
+            assert!(
+                (left - right).abs() < 0.5,
+                "at {w}x{h} the turtle has {left} of slack on the left and {right} on the right"
+            );
+            let top = l.turtle.y - inner.y;
+            let bottom = inner.bottom() - l.turtle.bottom();
+            assert!(
+                (top - bottom).abs() < 0.5,
+                "at {w}x{h} the turtle has {top} of slack above and {bottom} below"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tile_grows_with_the_window() {
+        // The whole point of solving for the size rather than fixing it at
+        // 42x54. A constant would satisfy every containment test above.
+        let small = Layout::solve(500.0, 400.0);
+        let large = Layout::solve(1600.0, 1200.0);
+        assert!(
+            large.tile_w > small.tile_w * 1.5,
+            "a tile is {} wide in a 500x400 window and {} in a 1600x1200 one",
+            small.tile_w,
+            large.tile_w
+        );
+    }
+
+    #[test]
+    fn a_tile_keeps_its_shape_at_every_size() {
+        // Mahjong tiles are taller than they are wide; a tile that squashed to
+        // the window's own aspect would be a domino at 1600x400.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            if l.tile_w <= 0.0 {
+                continue;
+            }
+            assert!(
+                (l.tile_h / l.tile_w - TILE_ASPECT).abs() < 0.001,
+                "at {w}x{h} a tile is {}x{}, an aspect of {}",
+                l.tile_w,
+                l.tile_h,
+                l.tile_h / l.tile_w
+            );
+        }
+    }
+
+    #[test]
+    fn the_binding_side_is_whichever_runs_out_first() {
+        // A wide, short window is limited by its height and a tall, narrow one
+        // by its width. Taking only one of the two would overflow the other.
+        let wide = Layout::solve(2000.0, 500.0);
+        let inner_wide = inset(wide.board, wide.pad);
+        assert!(
+            wide.turtle.h <= inner_wide.h + 0.01 && wide.turtle.w < inner_wide.w - 1.0,
+            "a 2000x500 window is not limited by its height: turtle {}x{} in {}x{}",
+            wide.turtle.w,
+            wide.turtle.h,
+            inner_wide.w,
+            inner_wide.h
+        );
+        let tall = Layout::solve(500.0, 2000.0);
+        let inner_tall = inset(tall.board, tall.pad);
+        assert!(
+            tall.turtle.w <= inner_tall.w + 0.01 && tall.turtle.h < inner_tall.h - 1.0,
+            "a 500x2000 window is not limited by its width: turtle {}x{} in {}x{}",
+            tall.turtle.w,
+            tall.turtle.h,
+            inner_tall.w,
+            inner_tall.h
+        );
+    }
+
+    #[test]
+    fn a_higher_layer_sits_up_and_to_the_left_of_the_one_below() {
+        // The stagger is the only thing that makes a stack read as a stack.
+        // Without it the cap tile would be drawn exactly over the tile it rests
+        // on and the turtle would look flat.
+        let l = Layout::solve(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let below = l.tile_rect(TilePos {
+            layer: 0,
+            row: 3,
+            col: 6,
+        });
+        let above = l.tile_rect(TilePos {
+            layer: 1,
+            row: 3,
+            col: 6,
+        });
+        assert!(
+            above.x < below.x && above.y < below.y,
+            "the tile on layer 1 is at ({}, {}) and the one under it at ({}, {})",
+            above.x,
+            above.y,
+            below.x,
+            below.y
+        );
+        let cap = l.tile_rect(TilePos {
+            layer: 4,
+            row: 3,
+            col: 6,
+        });
+        assert!(
+            (below.x - cap.x - 4.0 * l.tile_w * LAYER_OFFSET_SHARE).abs() < 0.01,
+            "four layers of stagger is not four offsets: {} vs {}",
+            below.x - cap.x,
+            4.0 * l.tile_w * LAYER_OFFSET_SHARE
+        );
+    }
+
+    #[test]
+    fn neighbouring_tiles_on_one_layer_are_separated_by_a_gap() {
+        // Without it the turtle is a solid slab and the player cannot see where
+        // one tile ends and the next begins.
+        let l = Layout::solve(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let a = l.tile_rect(TilePos {
+            layer: 0,
+            row: 0,
+            col: 0,
+        });
+        let b = l.tile_rect(TilePos {
+            layer: 0,
+            row: 0,
+            col: 1,
+        });
+        let gap = b.x - a.right();
+        assert!(
+            gap > 0.0,
+            "adjacent tiles touch: one ends at {} and the next starts at {}",
+            a.right(),
+            b.x
+        );
+        assert!(
+            (gap - l.tile_w * TILE_GAP_SHARE).abs() < 0.01,
+            "the gap is {gap}, not the {} a tile's width asks for",
+            l.tile_w * TILE_GAP_SHARE
+        );
+    }
+
+    #[test]
+    fn the_turtle_holds_the_whole_deal_with_nothing_stacked_on_a_shared_square() {
+        // Two tiles at one (layer, row, col) would be drawn on top of each
+        // other, and the lower of the two could never be reached by a click.
+        let positions = turtle_layout();
+        assert_eq!(positions.len(), LAYOUT_SIZE, "the turtle is not 144 tiles");
+        let unique: HashSet<TilePos> = positions.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            positions.len(),
+            "the turtle places two tiles on one square"
+        );
+    }
+
+    #[test]
+    fn the_turtle_is_a_pyramid_narrowing_towards_the_top() {
+        // A layer no smaller than the one below it would leave the tiles under
+        // it permanently covered, and the deal unwinnable from the first move.
+        let positions = turtle_layout();
+        let mut per_layer: HashMap<usize, usize> = HashMap::new();
+        for pos in &positions {
+            *per_layer.entry(pos.layer).or_insert(0) += 1;
+        }
+        let top = *per_layer.keys().max().expect("the turtle has no layers");
+        for layer in 1..=top {
+            let above = per_layer.get(&layer).copied().unwrap_or(0);
+            let below = per_layer.get(&(layer - 1)).copied().unwrap_or(0);
+            assert!(
+                above > 0 && above < below,
+                "layer {layer} has {above} tiles against {below} on layer {}",
+                layer - 1
+            );
+        }
+    }
+
+    #[test]
+    fn every_stacked_tile_rests_on_one_that_is_actually_there() {
+        // A tile floating over an empty square would be unreachable in the
+        // other direction: it covers nothing, so nothing is freed by taking it,
+        // and the shape the player sees would not be the shape the rules play.
+        let positions: HashSet<TilePos> = turtle_layout().into_iter().collect();
+        for pos in &positions {
+            if pos.layer == 0 {
+                continue;
+            }
+            let under = TilePos {
+                layer: pos.layer - 1,
+                row: pos.row,
+                col: pos.col,
+            };
+            assert!(
+                positions.contains(&under),
+                "the tile at {pos:?} rests on nothing"
+            );
+        }
+    }
+    // ════════════════════════════════════════════════════════════════
+    // The tiles and the matching rule
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn a_tile_matches_its_own_twin_and_nothing_else_in_its_suit() {
+        assert!(TileKind::Bamboo(3).matches(TileKind::Bamboo(3)));
+        assert!(!TileKind::Bamboo(3).matches(TileKind::Bamboo(4)));
+        assert!(!TileKind::Bamboo(3).matches(TileKind::Circle(3)));
+        assert!(TileKind::Wind(2).matches(TileKind::Wind(2)));
+        assert!(!TileKind::Wind(2).matches(TileKind::Wind(3)));
+        assert!(TileKind::Dragon(0).matches(TileKind::Dragon(0)));
+        assert!(!TileKind::Dragon(0).matches(TileKind::Dragon(1)));
+    }
+
+    #[test]
+    fn any_season_matches_any_other_season_and_the_same_for_flowers() {
+        // The four seasons are one tile each, so without the group rule none of
+        // them could ever be removed and every deal would end with eight tiles
+        // stranded on the board.
+        for a in 0..4 {
+            for b in 0..4 {
+                assert!(
+                    TileKind::Season(a).matches(TileKind::Season(b)),
+                    "season {a} does not match season {b}"
+                );
+                assert!(
+                    TileKind::Flower(a).matches(TileKind::Flower(b)),
+                    "flower {a} does not match flower {b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_season_does_not_match_a_flower() {
+        // Both groups are wild, so a rule written as "either is wild" would
+        // match them to each other. The rule is "wild, and the same group",
+        // which is what the discriminant comparison says.
+        for a in 0..4 {
+            for b in 0..4 {
+                assert!(
+                    !TileKind::Season(a).matches(TileKind::Flower(b)),
+                    "season {a} matched flower {b}"
+                );
+                assert!(
+                    !TileKind::Flower(a).matches(TileKind::Season(b)),
+                    "flower {a} matched season {b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_wild_tile_does_not_match_an_ordinary_one() {
+        // The wild branch is only taken when *both* sides are wild; a season
+        // against a bamboo falls through to equality, which it fails.
+        assert!(!TileKind::Season(0).matches(TileKind::Bamboo(1)));
+        assert!(!TileKind::Bamboo(1).matches(TileKind::Season(0)));
+        assert!(!TileKind::Flower(2).matches(TileKind::Dragon(2)));
+    }
+
+    #[test]
+    fn matching_is_symmetric_and_reflexive_across_the_whole_set() {
+        // A rule that held one way round would make a pair removable by
+        // clicking its two tiles in one order and not the other.
+        let kinds = all_tile_kinds();
+        for &a in &kinds {
+            assert!(a.matches(a), "{a:?} does not match itself");
+            for &b in &kinds {
+                assert_eq!(
+                    a.matches(b),
+                    b.matches(a),
+                    "{a:?} and {b:?} disagree about each other"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_wildcard_flag_says_exactly_which_tiles_match_a_stranger() {
+        // The legend's asterisk is drawn from `wildcard`, so if the two ever
+        // parted company the legend would promise a rule the game does not
+        // play. This compares the flag against `matches` itself.
+        let kinds = all_tile_kinds();
+        for &a in &kinds {
+            let matches_a_stranger = kinds.iter().any(|&b| b != a && a.matches(b));
+            assert_eq!(
+                a.wildcard(),
+                matches_a_stranger,
+                "{a:?} is marked wildcard={} but {}",
+                a.wildcard(),
+                if matches_a_stranger {
+                    "matches a tile that is not its twin"
+                } else {
+                    "matches only itself"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn every_tile_in_the_deal_carries_a_label_of_its_own() {
+        // `label` ends in a `_ => "??"` arm, so a tile added to the set without
+        // a label would be drawn as "??" rather than failing to compile.
+        let kinds = all_tile_kinds();
+        let mut seen: HashMap<&str, TileKind> = HashMap::new();
+        for &k in &kinds {
+            let label = k.label();
+            assert_ne!(label, "??", "{k:?} has no label of its own");
+            assert!(!label.is_empty(), "{k:?} has an empty label");
+            if let Some(other) = seen.insert(label, k) {
+                panic!("{k:?} and {other:?} are both drawn as {label}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_groups_are_told_apart_by_colour() {
+        // The legend's swatch is this colour, and it is the only thing that
+        // distinguishes "W1" (a character) from "W" (the west wind) at a
+        // glance. Two groups sharing one colour would make the swatch useless.
+        let mut by_colour: HashMap<(u8, u8, u8, u8), &str> = HashMap::new();
+        for &(_, kind) in &LEGEND_ITEMS {
+            let c = kind.text_color();
+            let key = (c.r, c.g, c.b, c.a);
+            if let Some(other) = by_colour.insert(key, kind.category()) {
+                assert_eq!(
+                    other,
+                    kind.category(),
+                    "{} and {other} are drawn in the same colour",
+                    kind.category()
+                );
+            }
+        }
+        assert_eq!(
+            by_colour.len(),
+            LEGEND_ITEMS.len(),
+            "the seven groups share fewer than seven colours"
+        );
+    }
+
+    #[test]
+    fn the_deal_is_a_full_mahjong_set_of_a_hundred_and_forty_four() {
+        let set = full_tile_set();
+        assert_eq!(set.len(), 144, "the deal is not a full set");
+        assert_eq!(
+            set.len(),
+            LAYOUT_SIZE,
+            "the deal and the turtle are different sizes, so one of them is truncated"
+        );
+    }
+
+    #[test]
+    fn every_tile_dealt_has_a_partner_it_can_be_removed_with() {
+        // A tile with no possible partner is a tile that can never leave the
+        // board, so no deal containing one is winnable. Counting the base kinds
+        // in fours is the usual way to state this; counting *matchable
+        // partners* states it without repeating the construction.
+        let set = full_tile_set();
+        for (i, &tile) in set.iter().enumerate() {
+            let partners = set
+                .iter()
+                .enumerate()
+                .filter(|&(j, &other)| j != i && tile.matches(other))
+                .count();
+            assert!(
+                partners > 0 && partners % 2 == 1,
+                "{tile:?} has {partners} possible partners, so it cannot be paired off cleanly"
+            );
+        }
+    }
+
+    #[test]
+    fn the_base_kinds_come_four_at_a_time_and_the_bonus_kinds_once() {
+        // The traditional set: 34 base kinds x 4, plus one each of four
+        // seasons and four flowers.
+        let set = full_tile_set();
+        let mut counts: HashMap<TileKind, usize> = HashMap::new();
+        for &k in &set {
+            *counts.entry(k).or_insert(0) += 1;
+        }
+        for &k in &base_tile_kinds() {
+            assert_eq!(
+                counts.get(&k).copied(),
+                Some(4),
+                "{k:?} is not dealt four times"
+            );
+        }
+        for i in 0..4 {
+            assert_eq!(
+                counts.get(&TileKind::Season(i)).copied(),
+                Some(1),
+                "season {i} is not unique"
+            );
+            assert_eq!(
+                counts.get(&TileKind::Flower(i)).copied(),
+                Some(1),
+                "flower {i} is not unique"
+            );
+        }
+        assert_eq!(
+            counts.len(),
+            all_tile_kinds().len(),
+            "a kind was never dealt"
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // The board: what is free, what pairs, what is left
+    // ════════════════════════════════════════════════════════════════
+
+    /// A board of exactly the tiles named, at the positions named.
+    fn board_of(parts: &[(usize, usize, usize, TileKind)]) -> Board {
+        let positions: Vec<TilePos> = parts
+            .iter()
+            .map(|&(layer, row, col, _)| TilePos { layer, row, col })
+            .collect();
+        let kinds: Vec<TileKind> = parts.iter().map(|&(_, _, _, k)| k).collect();
+        Board::from_parts(&positions, &kinds)
+    }
+
+    #[test]
+    fn a_tile_with_open_air_on_one_side_is_free() {
+        let b = board_of(&[
+            (0, 0, 0, TileKind::Bamboo(1)),
+            (0, 0, 1, TileKind::Bamboo(2)),
+            (0, 0, 2, TileKind::Bamboo(3)),
+        ]);
+        assert!(b.is_free(0), "the leftmost tile of a row is not free");
+        assert!(!b.is_free(1), "a tile walled in on both sides is free");
+        assert!(b.is_free(2), "the rightmost tile of a row is not free");
+    }
+
+    #[test]
+    fn a_tile_with_another_on_top_of_it_is_not_free() {
+        // Even with both sides open: the tile above has to come off first.
+        let b = board_of(&[
+            (0, 0, 0, TileKind::Bamboo(1)),
+            (1, 0, 0, TileKind::Bamboo(2)),
+        ]);
+        assert!(!b.is_free(0), "a covered tile is free");
+        assert!(b.is_free(1), "the covering tile is not free");
+    }
+
+    #[test]
+    fn a_tile_is_only_blocked_by_a_neighbour_on_its_own_layer_and_row() {
+        // A tile one row down or one layer up is not beside it, however close
+        // its column. Getting this wrong walls in tiles that a player can see
+        // are open.
+        let b = board_of(&[
+            (0, 0, 1, TileKind::Bamboo(1)),
+            (0, 1, 0, TileKind::Bamboo(2)),
+            (0, 1, 2, TileKind::Bamboo(3)),
+            (1, 5, 0, TileKind::Bamboo(4)),
+            (1, 5, 2, TileKind::Bamboo(5)),
+        ]);
+        assert!(b.is_free(0), "a tile was blocked by neighbours a row away");
+    }
+
+    #[test]
+    fn a_removed_tile_blocks_nothing_and_is_itself_not_free() {
+        // The whole game is the consequence of this: taking a pair opens up
+        // whatever they were holding down.
+        let mut b = board_of(&[
+            (0, 0, 0, TileKind::Bamboo(1)),
+            (0, 0, 1, TileKind::Bamboo(2)),
+            (0, 0, 2, TileKind::Bamboo(3)),
+        ]);
+        assert!(
+            !b.is_free(1),
+            "the fixture is broken: the middle tile is free"
+        );
+        b.remove_pair(0, 2);
+        assert!(
+            b.is_free(1),
+            "removing both neighbours did not free the tile"
+        );
+        assert!(!b.is_free(0), "a removed tile counts as free");
+    }
+
+    #[test]
+    fn an_index_off_the_end_of_the_board_is_not_free() {
+        // A click that arrives with a stale index -- after a new deal, say --
+        // must be answered, not indexed with.
+        let b = board_of(&[(0, 0, 0, TileKind::Bamboo(1))]);
+        assert!(!b.is_free(1));
+        assert!(!b.is_free(usize::MAX));
+    }
+
+    #[test]
+    fn undoing_a_pair_puts_both_tiles_back_where_they_were() {
+        let mut b = board_of(&[
+            (0, 0, 0, TileKind::Bamboo(1)),
+            (0, 0, 2, TileKind::Bamboo(1)),
+        ]);
+        assert_eq!(b.remaining(), 2);
+        b.remove_pair(0, 1);
+        assert_eq!(b.remaining(), 0);
+        b.restore_pair(0, 1);
+        assert_eq!(b.remaining(), 2, "undo did not restore the pair");
+    }
+
+    #[test]
+    fn a_hint_names_two_free_tiles_that_actually_match() {
+        // A hint that named a covered tile, or a pair that does not match,
+        // would be worse than no hint: the player would click it and be told
+        // the tile is not free.
+        let b = game().board;
+        let (a, c) = b.find_hint().expect("a fresh deal has no legal move");
+        assert_ne!(a, c, "the hint names one tile twice");
+        assert!(
+            b.is_free(a) && b.is_free(c),
+            "the hint names a tile that is not free"
+        );
+        assert!(
+            b.tiles[a].kind.matches(b.tiles[c].kind),
+            "the hint names {:?} and {:?}, which do not match",
+            b.tiles[a].kind,
+            b.tiles[c].kind
+        );
+    }
+
+    #[test]
+    fn a_board_with_no_matching_free_pair_offers_no_hint() {
+        // Two free tiles that do not match, and nothing else.
+        let b = board_of(&[
+            (0, 0, 0, TileKind::Bamboo(1)),
+            (0, 0, 2, TileKind::Circle(9)),
+        ]);
+        assert!(
+            b.find_hint().is_none(),
+            "a hint was found among tiles that do not match"
+        );
+        assert!(b.is_lost(), "a board with no move left is not lost");
+        assert!(!b.is_won(), "a board with tiles on it is won");
+    }
+
+    #[test]
+    fn a_matching_pair_that_is_buried_is_not_a_hint() {
+        // The pair matches, but the covering tile has to come off first.
+        // Offering it would send the player at a tile the rules refuse.
+        let b = board_of(&[
+            (0, 0, 0, TileKind::Bamboo(1)),
+            (0, 0, 1, TileKind::Bamboo(1)),
+            (1, 0, 0, TileKind::Circle(2)),
+            (1, 0, 1, TileKind::Circle(3)),
+        ]);
+        assert!(
+            b.find_hint().is_none(),
+            "a buried pair was offered as a hint"
+        );
+    }
+
+    #[test]
+    fn an_empty_board_is_won_and_not_lost() {
+        // `is_lost` asks for a board with tiles left *and* no move; without the
+        // first half, the winning board would report both at once.
+        let mut b = board_of(&[
+            (0, 0, 0, TileKind::Bamboo(1)),
+            (0, 0, 2, TileKind::Bamboo(1)),
+        ]);
+        b.remove_pair(0, 1);
+        assert!(b.is_won(), "a cleared board is not won");
+        assert!(!b.is_lost(), "a cleared board is also reported lost");
+    }
+
+    #[test]
+    fn a_shuffle_keeps_every_tile_where_it_is_and_deals_it_a_new_face() {
+        // Shuffling the *kinds* and not the positions is what lets a stuck
+        // board be re-dealt without the turtle changing shape under the player.
+        let mut g = game();
+        let before: Vec<TilePos> = g.board.tiles.iter().map(|t| t.pos).collect();
+        let faces_before: Vec<TileKind> = g.board.tiles.iter().map(|t| t.kind).collect();
+        g.board.shuffle_remaining(&mut g.rng);
+        let after: Vec<TilePos> = g.board.tiles.iter().map(|t| t.pos).collect();
+        assert_eq!(before, after, "the shuffle moved the tiles");
+        let faces_after: Vec<TileKind> = g.board.tiles.iter().map(|t| t.kind).collect();
+        assert_ne!(faces_before, faces_after, "the shuffle changed nothing");
+        let mut a: Vec<&str> = faces_before.iter().map(|k| k.label()).collect();
+        let mut b: Vec<&str> = faces_after.iter().map(|k| k.label()).collect();
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b, "the shuffle invented or lost a tile");
+    }
+
+    #[test]
+    fn a_shuffle_leaves_the_removed_tiles_removed() {
+        // Redealing the faces of tiles that are off the board would put them
+        // back into circulation and break the count of what is left.
+        let mut g = game();
+        g.board.remove_pair(0, 1);
+        let removed_before: Vec<bool> = g.board.tiles.iter().map(|t| t.removed).collect();
+        let remaining = g.board.remaining();
+        g.board.shuffle_remaining(&mut g.rng);
+        let removed_after: Vec<bool> = g.board.tiles.iter().map(|t| t.removed).collect();
+        assert_eq!(
+            removed_before, removed_after,
+            "the shuffle revived a removed tile"
+        );
+        assert_eq!(g.board.remaining(), remaining);
+    }
+
+    #[test]
+    fn the_paint_order_runs_bottom_layer_first_and_skips_what_is_gone() {
+        // Painted in any other order, a tile on layer 0 would be drawn over the
+        // one resting on it, and the stack would read upside down. The hit test
+        // reads this list backwards, so the order is also what decides which
+        // tile a click on a stack reaches.
+        let mut g = game();
+        let order = g.board.paint_order();
+        assert_eq!(order.len(), g.board.remaining());
+        let mut last = 0usize;
+        for &i in &order {
+            let layer = g.board.tiles[i].pos.layer;
+            assert!(
+                layer >= last,
+                "layer {layer} was painted after layer {last}"
+            );
+            last = layer;
+        }
+        let gone = order[0];
+        g.board.remove_pair(gone, gone);
+        assert!(
+            !g.board.paint_order().contains(&gone),
+            "a removed tile is still painted"
+        );
+    }
+    // ════════════════════════════════════════════════════════════════
+    // The drawing pass: what reaches the screen, and where
+    // ════════════════════════════════════════════════════════════════
+
+    /// Every string the frame draws, with the box it was drawn in.
+    fn texts(f: &Frame<Target>) -> Vec<(String, f32, f32, f32, Option<f32>)> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size,
+                    max_width,
+                    ..
+                } => Some((text.clone(), *x, *y, *font_size, *max_width)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The one string containing `needle`, or a failure naming what was drawn.
+    fn text_saying(f: &Frame<Target>, needle: &str) -> (String, f32, f32, f32, Option<f32>) {
+        let all = texts(f);
+        let mut hits = all.iter().filter(|(t, ..)| t.contains(needle));
+        let first = hits
+            .next()
+            .unwrap_or_else(|| {
+                panic!(
+                    "nothing on screen says {needle:?}; what was drawn: {:?}",
+                    all.iter().map(|(t, ..)| t.as_str()).collect::<Vec<_>>()
+                )
+            })
+            .clone();
+        assert!(
+            hits.next().is_none(),
+            "{needle:?} is drawn more than once, so a test naming it is ambiguous"
+        );
+        first
+    }
+
+    /// Every filled rectangle in the frame.
+    fn fills(f: &Frame<Target>) -> Vec<(Rect, Color)> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } => Some((Rect::new(*x, *y, *width, *height), *color)),
+                _ => None,
+            })
             .collect()
     }
 
     #[test]
-    fn every_deal_lays_out_the_whole_tile_set() {
-        // A shuffle that drops or duplicates a tile leaves a board the player
-        // cannot clear, and they do not find out until the last pair.
-        for (n, deal) in consecutive_deals(4242, 8).into_iter().enumerate() {
-            assert_eq!(deal.len(), 144, "deal {n} is not a full board");
-            for kind in base_tile_kinds() {
-                let count = deal.iter().filter(|k| **k == kind).count();
-                assert_eq!(count, 4, "deal {n} holds {count} of {kind:?}, not 4");
-            }
-            for i in 0..4u8 {
-                let seasons = deal.iter().filter(|k| **k == TileKind::Season(i)).count();
-                assert_eq!(seasons, 1, "deal {n} holds {seasons} of Season({i}), not 1");
-                let flowers = deal.iter().filter(|k| **k == TileKind::Flower(i)).count();
-                assert_eq!(flowers, 1, "deal {n} holds {flowers} of Flower({i}), not 1");
-            }
-        }
-    }
-
-    #[test]
-    fn consecutive_deals_differ_from_one_another() {
-        let deals = consecutive_deals(4242, 8);
-        for (i, a) in deals.iter().enumerate() {
-            for b in deals.iter().skip(i + 1) {
-                assert_ne!(a, b, "two deals off one generator came out identical");
-            }
-        }
-    }
-
-    #[test]
-    fn a_tile_kind_reaches_many_different_positions() {
-        // Bamboo(1) has four copies, so eight deals fill 32 of the 144 slots
-        // and a working shuffle reaches the high twenties distinct.
-        //
-        // What this does *not* do, measured: discriminate against the broken
-        // `state % bound` reduction. Simulating all three reductions over the
-        // same 144-element shuffle from the same seed gives 28 distinct
-        // positions for the broken one, 28 for the `>> 33` variant this crate
-        // actually shipped, and 29 for the fix. A 143-swap shuffle makes too
-        // many draws, at too many non-power-of-two bounds, for a low-bit
-        // counter to survive out to where any one tile lands -- unlike the
-        // four-element shuffle in `apps/maze`, which collapsed to 3 of its 24
-        // orderings. So this is an invariant -- a deal must not park tiles in
-        // a handful of slots, however that came about -- and not a regression
-        // test for the reduction. Nor does it need to be one: the note on
-        // `FALLBACK_SEED` above records that this crate's copy shifted before
-        // reducing and so never had the defect. It was deleted for being a
-        // copy, not for being wrong.
-        let deals = consecutive_deals(4242, 8);
-        let mut seen: Vec<usize> = Vec::new();
-        for deal in &deals {
-            for (i, kind) in deal.iter().enumerate() {
-                if *kind == TileKind::Bamboo(1) && !seen.contains(&i) {
-                    seen.push(i);
-                }
-            }
-        }
-        assert!(
-            seen.len() >= 24,
-            "Bamboo(1) reached only {} distinct positions across 8 deals",
-            seen.len()
-        );
-    }
-
-    #[cfg(not(unix))]
-    #[test]
-    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
-        // A host `cargo test` has no SlateOS kernel to ask, so
-        // `seed_from_system` takes the fallback -- and two fresh games really
-        // are identical here, exactly as they were under the old hardcoded
-        // 42. That is why this asserts *which* seed rather than checking that
-        // two games differ: a variety check would pass on the broken code and
-        // fail on the fix.
-        let app = Mahjong::new();
+    fn the_frame_paints_a_face_for_every_tile_and_not_just_a_background() {
+        // The window's own background fill covers every pixel, so "something is
+        // drawn here" is true everywhere and proves nothing on its own. What
+        // has to be true is that each live tile got a face and a label of its
+        // own -- and a count of *commands* would not say that either, since one
+        // tile drawn 144 times would satisfy it.
+        let g = game();
+        let f = g.draw(Mahjong::SIZE);
+        let all = fills(&f);
+        let background = all
+            .first()
+            .copied()
+            .expect("the frame paints no background at all");
         assert_eq!(
-            app.seed, FALLBACK_SEED,
-            "a fresh game did not ask the system for its seed"
+            (background.0.w, background.0.h),
+            Mahjong::SIZE,
+            "the background is not the window"
         );
-        assert_ne!(app.seed, 42, "a fresh game is still dealt from a literal");
-    }
-
-    // ── TileKind tests ──────────────────────────────────────────────
-
-    #[test]
-    fn tile_kind_exact_match() {
-        assert!(TileKind::Bamboo(1).matches(TileKind::Bamboo(1)));
-        assert!(TileKind::Circle(5).matches(TileKind::Circle(5)));
-        assert!(TileKind::Wind(0).matches(TileKind::Wind(0)));
-        assert!(TileKind::Dragon(2).matches(TileKind::Dragon(2)));
-    }
-
-    #[test]
-    fn tile_kind_no_match_different_number() {
-        assert!(!TileKind::Bamboo(1).matches(TileKind::Bamboo(2)));
-        assert!(!TileKind::Circle(3).matches(TileKind::Circle(9)));
-    }
-
-    #[test]
-    fn tile_kind_no_match_different_suit() {
-        assert!(!TileKind::Bamboo(1).matches(TileKind::Circle(1)));
-        assert!(!TileKind::Character(5).matches(TileKind::Bamboo(5)));
-    }
-
-    #[test]
-    fn tile_kind_seasons_match_any_season() {
-        assert!(TileKind::Season(0).matches(TileKind::Season(1)));
-        assert!(TileKind::Season(0).matches(TileKind::Season(2)));
-        assert!(TileKind::Season(0).matches(TileKind::Season(3)));
-        assert!(TileKind::Season(1).matches(TileKind::Season(3)));
-        assert!(TileKind::Season(2).matches(TileKind::Season(2)));
-    }
-
-    #[test]
-    fn tile_kind_flowers_match_any_flower() {
-        assert!(TileKind::Flower(0).matches(TileKind::Flower(1)));
-        assert!(TileKind::Flower(0).matches(TileKind::Flower(2)));
-        assert!(TileKind::Flower(0).matches(TileKind::Flower(3)));
-        assert!(TileKind::Flower(1).matches(TileKind::Flower(3)));
-        assert!(TileKind::Flower(2).matches(TileKind::Flower(2)));
-    }
-
-    #[test]
-    fn tile_kind_season_does_not_match_flower() {
-        assert!(!TileKind::Season(0).matches(TileKind::Flower(0)));
-        assert!(!TileKind::Flower(1).matches(TileKind::Season(1)));
-    }
-
-    #[test]
-    fn tile_kind_wind_does_not_match_dragon() {
-        assert!(!TileKind::Wind(0).matches(TileKind::Dragon(0)));
-    }
-
-    #[test]
-    fn all_tile_kinds_count() {
-        let kinds = all_tile_kinds();
-        // 9 Bamboo + 9 Circle + 9 Character + 4 Wind + 3 Dragon + 4 Season + 4 Flower = 42.
-        assert_eq!(kinds.len(), 42);
-    }
-
-    #[test]
-    fn all_tile_kinds_unique() {
-        let kinds = all_tile_kinds();
-        for i in 0..kinds.len() {
-            for j in (i + 1)..kinds.len() {
-                assert_ne!(kinds[i], kinds[j]);
-            }
-        }
-    }
-
-    #[test]
-    fn full_tile_set_has_144() {
-        let tiles = full_tile_set();
-        assert_eq!(tiles.len(), 144);
-    }
-
-    #[test]
-    fn full_tile_set_four_copies_of_base() {
-        let tiles = full_tile_set();
-        let base = base_tile_kinds();
-        for kind in &base {
-            let count = tiles.iter().filter(|t| *t == kind).count();
-            assert_eq!(count, 4, "Expected 4 copies of base {:?}", kind);
-        }
-    }
-
-    #[test]
-    fn full_tile_set_one_copy_of_bonus() {
-        let tiles = full_tile_set();
-        // Seasons and flowers appear once each.
-        for i in 0..4u8 {
-            let sc = tiles.iter().filter(|t| **t == TileKind::Season(i)).count();
-            assert_eq!(sc, 1, "Expected 1 copy of Season({i})");
-            let fc = tiles.iter().filter(|t| **t == TileKind::Flower(i)).count();
-            assert_eq!(fc, 1, "Expected 1 copy of Flower({i})");
-        }
-    }
-
-    #[test]
-    fn tile_kind_labels_not_empty() {
-        let kinds = all_tile_kinds();
-        for kind in &kinds {
-            assert!(!kind.label().is_empty());
-        }
-    }
-
-    #[test]
-    fn tile_kind_category_not_empty() {
-        let kinds = all_tile_kinds();
-        for kind in &kinds {
-            assert!(!kind.category().is_empty());
-        }
-    }
-
-    // ── Layout tests ────────────────────────────────────────────────
-
-    #[test]
-    fn turtle_layout_has_correct_count() {
-        let layout = turtle_layout();
-        // The exact count depends on our layout. We target 144 for a standard set.
-        // Our turtle layout: 86 + 48 + 24 + 8 + 4 = 170, but we only use 144
-        // because we have 144 tiles. The layout can have more positions than tiles
-        // if we trim.
-        // Actually, let's verify the layout count.
-        assert!(
-            layout.len() >= 144,
-            "Layout has {} positions, need at least 144",
-            layout.len()
-        );
-    }
-
-    #[test]
-    fn turtle_layout_no_duplicates() {
-        let layout = turtle_layout();
-        for i in 0..layout.len() {
-            for j in (i + 1)..layout.len() {
-                assert_ne!(
-                    layout[i], layout[j],
-                    "Duplicate position at indices {i} and {j}: {:?}",
-                    layout[i]
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn turtle_layout_layers_ascending() {
-        let layout = turtle_layout();
-        // Each layer should have tiles defined in contiguous blocks
-        // (layer 0 first, then layer 1, etc.)
-        let max_layer = layout.iter().map(|p| p.layer).max().unwrap_or(0);
-        assert!(max_layer >= 3, "Should have at least 4 layers");
-    }
-
-    // ── Board tests ─────────────────────────────────────────────────
-
-    #[test]
-    fn board_new_has_tiles() {
-        let mut rng = SeededRng::new(42);
-        let board = Board::new(&mut rng);
-        assert!(!board.tiles.is_empty());
-        assert!(board.remaining() > 0);
-    }
-
-    #[test]
-    fn board_new_all_tiles_present() {
-        let mut rng = SeededRng::new(42);
-        let board = Board::new(&mut rng);
-        // All tiles should start as not removed.
-        for tile in &board.tiles {
-            assert!(!tile.removed);
-        }
-    }
-
-    #[test]
-    fn board_remaining_decreases_on_remove() {
-        let mut rng = SeededRng::new(42);
-        let mut board = Board::new(&mut rng);
-        let initial = board.remaining();
-        board.remove_pair(0, 1);
-        assert_eq!(board.remaining(), initial - 2);
-    }
-
-    #[test]
-    fn board_restore_pair() {
-        let mut rng = SeededRng::new(42);
-        let mut board = Board::new(&mut rng);
-        let initial = board.remaining();
-        board.remove_pair(0, 1);
-        board.restore_pair(0, 1);
-        assert_eq!(board.remaining(), initial);
-    }
-
-    #[test]
-    fn board_remove_pair_marks_removed() {
-        let mut rng = SeededRng::new(42);
-        let mut board = Board::new(&mut rng);
-        board.remove_pair(0, 1);
-        assert!(board.tiles[0].removed);
-        assert!(board.tiles[1].removed);
-    }
-
-    #[test]
-    fn board_is_won_when_empty() {
-        let board = Board::from_parts(&[], &[]);
-        assert!(board.is_won());
-    }
-
-    #[test]
-    fn board_is_not_won_with_tiles() {
-        let board = Board::from_parts(
-            &[TilePos {
-                layer: 0,
-                row: 0,
-                col: 0,
-            }],
-            &[TileKind::Bamboo(1)],
-        );
-        assert!(!board.is_won());
-    }
-
-    #[test]
-    fn board_free_tile_no_neighbors() {
-        // Single tile on layer 0 — should be free.
-        let board = Board::from_parts(
-            &[TilePos {
-                layer: 0,
-                row: 0,
-                col: 0,
-            }],
-            &[TileKind::Bamboo(1)],
-        );
-        assert!(board.is_free(0));
-    }
-
-    #[test]
-    fn board_tile_blocked_by_tile_above() {
-        let board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 1,
-                    row: 0,
-                    col: 0,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
-        );
-        assert!(!board.is_free(0)); // bottom tile blocked by top
-        assert!(board.is_free(1)); // top tile is free
-    }
-
-    #[test]
-    fn board_tile_blocked_both_sides() {
-        let board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 1,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 2,
-                },
-            ],
-            &[
-                TileKind::Bamboo(1),
-                TileKind::Bamboo(2),
-                TileKind::Bamboo(3),
-            ],
-        );
-        // Middle tile (col=1) is blocked on left (col=0) and right (col=2).
-        assert!(!board.is_free(1));
-        // Edge tiles are free (open side).
-        assert!(board.is_free(0));
-        assert!(board.is_free(2));
-    }
-
-    #[test]
-    fn board_tile_blocked_one_side_is_free() {
-        let board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 1,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
-        );
-        // Each tile has one side blocked and one open: both are free.
-        assert!(board.is_free(0));
-        assert!(board.is_free(1));
-    }
-
-    #[test]
-    fn board_removed_tile_not_free() {
-        let mut board = Board::from_parts(
-            &[TilePos {
-                layer: 0,
-                row: 0,
-                col: 0,
-            }],
-            &[TileKind::Bamboo(1)],
-        );
-        board.tiles[0].removed = true;
-        assert!(!board.is_free(0));
-    }
-
-    #[test]
-    fn board_free_tiles_returns_correct_count() {
-        let board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 1,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 2,
-                },
-            ],
-            &[
-                TileKind::Bamboo(1),
-                TileKind::Bamboo(2),
-                TileKind::Bamboo(3),
-            ],
-        );
-        // Edge tiles are free, middle is not.
-        assert_eq!(board.free_tiles().len(), 2);
-    }
-
-    #[test]
-    fn board_find_hint_with_match() {
-        let board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
-        );
-        let hint = board.find_hint();
-        assert!(hint.is_some());
-        let (a, b) = hint.unwrap();
-        assert!(board.tiles[a].kind.matches(board.tiles[b].kind));
-    }
-
-    #[test]
-    fn board_find_hint_no_match() {
-        let board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
-        );
-        assert!(board.find_hint().is_none());
-    }
-
-    #[test]
-    fn board_find_hint_season_wildcard() {
-        let board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Season(0), TileKind::Season(3)],
-        );
-        assert!(board.find_hint().is_some());
-    }
-
-    #[test]
-    fn board_find_hint_flower_wildcard() {
-        let board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Flower(1), TileKind::Flower(2)],
-        );
-        assert!(board.find_hint().is_some());
-    }
-
-    #[test]
-    fn board_is_lost_no_pairs() {
-        let board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Circle(2)],
-        );
-        assert!(board.is_lost());
-    }
-
-    #[test]
-    fn board_is_not_lost_with_pairs() {
-        let board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
-        );
-        assert!(!board.is_lost());
-    }
-
-    #[test]
-    fn board_shuffle_preserves_count() {
-        let mut rng = SeededRng::new(42);
-        let mut board = Board::new(&mut rng);
-        let before = board.remaining();
-        board.shuffle_remaining(&mut rng);
-        assert_eq!(board.remaining(), before);
-    }
-
-    #[test]
-    fn board_shuffle_preserves_positions() {
-        let mut rng = SeededRng::new(42);
-        let mut board = Board::new(&mut rng);
-        let positions_before: Vec<TilePos> = board.tiles.iter().map(|t| t.pos).collect();
-        board.shuffle_remaining(&mut rng);
-        let positions_after: Vec<TilePos> = board.tiles.iter().map(|t| t.pos).collect();
-        assert_eq!(positions_before, positions_after);
-    }
-
-    #[test]
-    fn board_tile_screen_pos_exists() {
-        let mut rng = SeededRng::new(42);
-        let board = Board::new(&mut rng);
-        for i in 0..board.tiles.len() {
-            assert!(board.tile_screen_pos(i).is_some());
-        }
-    }
-
-    #[test]
-    fn board_tile_screen_pos_out_of_bounds() {
-        let board = Board::from_parts(&[], &[]);
-        assert!(board.tile_screen_pos(0).is_none());
-    }
-
-    #[test]
-    fn board_tile_at_screen_finds_tile() {
-        let board = Board::from_parts(
-            &[TilePos {
-                layer: 0,
-                row: 0,
-                col: 0,
-            }],
-            &[TileKind::Bamboo(1)],
-        );
-        let (tx, ty) = board.tile_screen_pos(0).unwrap();
-        let found = board.tile_at_screen(tx + 5.0, ty + 5.0);
-        assert_eq!(found, Some(0));
-    }
-
-    #[test]
-    fn board_tile_at_screen_misses_empty() {
-        let board = Board::from_parts(
-            &[TilePos {
-                layer: 0,
-                row: 0,
-                col: 0,
-            }],
-            &[TileKind::Bamboo(1)],
-        );
-        // Far away from any tile.
-        let found = board.tile_at_screen(9999.0, 9999.0);
-        assert_eq!(found, None);
-    }
-
-    #[test]
-    fn board_tile_at_screen_topmost_wins() {
-        let board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 1,
-                    row: 0,
-                    col: 0,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
-        );
-        // The top-layer tile is offset slightly, so click in the overlap area.
-        let (_tx0, _ty0) = board.tile_screen_pos(0).unwrap();
-        let (tx1, ty1) = board.tile_screen_pos(1).unwrap();
-        // Click in the overlap region (upper tile's area).
-        let cx = tx1 + TILE_W / 2.0;
-        let cy = ty1 + TILE_H / 2.0;
-        // Only if the click falls within the upper tile's bounds.
-        if cx >= tx1 && cx < tx1 + TILE_W && cy >= ty1 && cy < ty1 + TILE_H {
-            let found = board.tile_at_screen(cx, cy);
-            assert_eq!(found, Some(1)); // Layer 1 tile wins.
-        }
-    }
-
-    // ── App / Mahjong tests ─────────────────────────────────────────
-
-    #[test]
-    fn app_new_creates_game() {
-        let app = Mahjong::new();
-        assert_eq!(app.status, GameStatus::Playing);
-        assert_eq!(app.moves, 0);
-        assert!(app.board.remaining() > 0);
-    }
-
-    #[test]
-    fn app_with_seed_deterministic() {
-        let a1 = Mahjong::with_seed(123);
-        let a2 = Mahjong::with_seed(123);
-        // Same seed should produce same tile kinds at same positions.
-        for i in 0..a1.board.tiles.len() {
-            assert_eq!(a1.board.tiles[i].kind, a2.board.tiles[i].kind);
-            assert_eq!(a1.board.tiles[i].pos, a2.board.tiles[i].pos);
-        }
-    }
-
-    #[test]
-    fn app_different_seeds_different_layout() {
-        let a1 = Mahjong::with_seed(1);
-        let a2 = Mahjong::with_seed(2);
-        // At least some tiles should differ in kind assignment.
-        let diffs = a1
+        // A face is a fill the size of a tile that is not the shadow behind
+        // one. Selecting them by *colour* does not work and is worth recording
+        // why: `TILE_SELECTED` and `TILE_HINT` are the same two hex values as
+        // the circle and bamboo swatches in the legend, so a colour filter
+        // counts two legend swatches as tiles.
+        let l = Layout::solve(Mahjong::SIZE.0, Mahjong::SIZE.1);
+        let faces: HashSet<(u32, u32)> = all
+            .iter()
+            .filter(|(r, c)| *c != TILE_SHADOW && r.w == l.tile_w && r.h == l.tile_h)
+            .map(|(r, _)| (r.x.to_bits(), r.y.to_bits()))
+            .collect();
+        let expected: HashSet<(u32, u32)> = g
             .board
             .tiles
             .iter()
-            .zip(a2.board.tiles.iter())
-            .filter(|(a, b)| a.kind != b.kind)
-            .count();
-        assert!(diffs > 0);
-    }
-
-    #[test]
-    fn app_new_game_resets() {
-        let mut app = Mahjong::with_seed(42);
-        app.moves = 10;
-        app.status = GameStatus::Won;
-        app.new_game();
-        assert_eq!(app.moves, 0);
-        assert_eq!(app.status, GameStatus::Playing);
-    }
-
-    #[test]
-    fn app_select_free_tile() {
-        let mut app = Mahjong::with_seed(42);
-        let free = app.board.free_tiles();
-        if !free.is_empty() {
-            app.try_select(free[0]);
-            assert_eq!(app.selected, Some(free[0]));
-        }
-    }
-
-    #[test]
-    fn app_deselect_same_tile() {
-        let mut app = Mahjong::with_seed(42);
-        let free = app.board.free_tiles();
-        if !free.is_empty() {
-            app.try_select(free[0]);
-            app.try_select(free[0]);
-            assert_eq!(app.selected, None);
-        }
-    }
-
-    #[test]
-    fn app_select_non_free_tile() {
-        let mut app = Mahjong::with_seed(42);
-        // Find a non-free tile.
-        let non_free: Vec<usize> = (0..app.board.tiles.len())
-            .filter(|&i| !app.board.is_free(i) && !app.board.tiles[i].removed)
+            .filter(|t| !t.removed)
+            .map(|t| {
+                let r = l.tile_rect(t.pos);
+                (r.x.to_bits(), r.y.to_bits())
+            })
             .collect();
-        if !non_free.is_empty() {
-            app.try_select(non_free[0]);
-            assert_eq!(app.selected, None);
-            assert!(app.message.is_some());
+        assert_eq!(
+            faces.len(),
+            g.board.remaining(),
+            "{} faces were painted for {} live tiles, and no two at one place",
+            faces.len(),
+            g.board.remaining()
+        );
+        assert_eq!(faces, expected, "a face was painted somewhere no tile is");
+        let labels = all_tile_kinds();
+        let drawn = texts(&f)
+            .iter()
+            .filter(|(t, ..)| labels.iter().any(|k| k.label() == t))
+            .count();
+        assert_eq!(
+            drawn,
+            g.board.remaining(),
+            "{drawn} labels were drawn for {} live tiles",
+            g.board.remaining()
+        );
+    }
+
+    #[test]
+    fn the_frame_is_balanced_and_clips_to_the_window() {
+        // An unbalanced clip stack leaks into whatever is drawn next.
+        let g = game();
+        for (w, h) in SIZES {
+            let f = g.draw((w, h));
+            assert!(f.is_balanced(), "the frame at {w}x{h} leaves a clip open");
         }
     }
 
     #[test]
-    fn app_match_pair_removes_tiles() {
-        // Create a small board with two matching free tiles.
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
+    fn every_live_tile_is_painted_and_given_a_box_a_click_can_find() {
+        // The old `main` built this board and dropped it; not one of these
+        // rectangles ever existed. A tile with no hit box is a tile the player
+        // can see and cannot click.
+        let g = game();
+        let f = g.draw(Mahjong::SIZE);
+        let boxed: HashSet<usize> = f
+            .hits()
+            .iter()
+            .filter_map(|(t, _)| match t {
+                Target::Tile(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            boxed.len(),
+            g.board.remaining(),
+            "{} of {} live tiles have a hit box",
+            boxed.len(),
+            g.board.remaining()
         );
-        app.status = GameStatus::Playing;
-        app.try_select(0);
-        app.try_select(1);
-        assert_eq!(app.board.remaining(), 0);
-        assert_eq!(app.moves, 1);
-    }
-
-    #[test]
-    fn app_mismatch_does_not_remove() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
-        );
-        app.status = GameStatus::Playing;
-        app.try_select(0);
-        app.try_select(1);
-        assert_eq!(app.board.remaining(), 2);
-        assert_eq!(app.moves, 0);
-        // Second tile should now be selected instead.
-        assert_eq!(app.selected, Some(1));
-    }
-
-    #[test]
-    fn app_undo_restores_tiles() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 10,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 15,
-                },
-            ],
-            &[
-                TileKind::Bamboo(1),
-                TileKind::Bamboo(1),
-                TileKind::Bamboo(2),
-                TileKind::Bamboo(2),
-            ],
-        );
-        app.status = GameStatus::Playing;
-        app.try_select(0);
-        app.try_select(1);
-        assert_eq!(app.board.remaining(), 2);
-        assert_eq!(app.moves, 1);
-        app.undo();
-        assert_eq!(app.board.remaining(), 4);
-        assert_eq!(app.moves, 0);
-    }
-
-    #[test]
-    fn app_undo_empty_stack() {
-        let mut app = Mahjong::with_seed(42);
-        app.undo();
-        assert!(app.message.is_some());
-    }
-
-    #[test]
-    fn app_hint_finds_pair() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
-        );
-        app.status = GameStatus::Playing;
-        app.show_hint_pair();
-        assert!(app.show_hint);
-        assert!(app.hint.is_some());
-    }
-
-    #[test]
-    fn app_hint_no_pair() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Circle(2)],
-        );
-        app.status = GameStatus::Playing;
-        app.show_hint_pair();
-        assert!(!app.show_hint);
-    }
-
-    #[test]
-    fn app_shuffle_keeps_tile_count() {
-        let mut app = Mahjong::with_seed(42);
-        let before = app.board.remaining();
-        app.shuffle_tiles();
-        assert_eq!(app.board.remaining(), before);
-    }
-
-    #[test]
-    fn app_shuffle_clears_selection() {
-        let mut app = Mahjong::with_seed(42);
-        let free = app.board.free_tiles();
-        if !free.is_empty() {
-            app.try_select(free[0]);
-            assert!(app.selected.is_some());
-        }
-        app.shuffle_tiles();
-        assert!(app.selected.is_none());
-    }
-
-    #[test]
-    fn app_key_n_new_game() {
-        let mut app = Mahjong::with_seed(42);
-        app.moves = 5;
-        app.handle_key(&make_key(Key::N));
-        assert_eq!(app.moves, 0);
-    }
-
-    #[test]
-    fn app_key_z_undo() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
-        );
-        app.status = GameStatus::Playing;
-        app.try_select(0);
-        app.try_select(1);
-        assert_eq!(app.board.remaining(), 0);
-        app.handle_key(&make_key(Key::Z));
-        assert_eq!(app.board.remaining(), 2);
-    }
-
-    #[test]
-    fn app_key_h_hint() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
-        );
-        app.status = GameStatus::Playing;
-        app.handle_key(&make_key(Key::H));
-        assert!(app.show_hint);
-    }
-
-    #[test]
-    fn app_key_s_shuffle() {
-        let mut app = Mahjong::with_seed(42);
-        app.handle_key(&make_key(Key::S));
-        assert!(app.message.is_some());
-    }
-
-    #[test]
-    fn app_key_escape_deselects() {
-        let mut app = Mahjong::with_seed(42);
-        let free = app.board.free_tiles();
-        if !free.is_empty() {
-            app.try_select(free[0]);
-            assert!(app.selected.is_some());
-            app.handle_key(&make_key(Key::Escape));
-            assert!(app.selected.is_none());
+        for (i, tile) in g.board.tiles.iter().enumerate() {
+            assert_eq!(
+                boxed.contains(&i),
+                !tile.removed,
+                "tile {i} is removed={} and boxed={}",
+                tile.removed,
+                boxed.contains(&i)
+            );
         }
     }
 
     #[test]
-    fn app_key_enter_selects_cursor() {
-        let mut app = Mahjong::with_seed(42);
-        // Set cursor to a free tile.
-        let free = app.board.free_tiles();
-        if !free.is_empty() {
-            app.cursor.tile_idx = Some(free[0]);
-            app.handle_key(&make_key(Key::Enter));
-            assert_eq!(app.selected, Some(free[0]));
-        }
+    fn a_removed_tile_is_neither_painted_nor_clickable() {
+        // Without this the board would keep answering clicks on tiles the
+        // player has already taken.
+        let mut g = game();
+        let hint = g.board.find_hint().expect("a fresh deal has no move");
+        let before = texts(&g.draw(Mahjong::SIZE)).len();
+        g.board.remove_pair(hint.0, hint.1);
+        let f = g.draw(Mahjong::SIZE);
+        assert_eq!(
+            texts(&f).len(),
+            before - 2,
+            "removing two tiles did not remove two labels"
+        );
+        assert!(
+            probe::rect_of_sized(&g, Target::Tile(hint.0), Mahjong::SIZE).is_none(),
+            "a removed tile still answers a click"
+        );
     }
 
     #[test]
-    fn app_key_space_selects_cursor() {
-        let mut app = Mahjong::with_seed(42);
-        let free = app.board.free_tiles();
-        if !free.is_empty() {
-            app.cursor.tile_idx = Some(free[0]);
-            app.handle_key(&make_key(Key::Space));
-            assert_eq!(app.selected, Some(free[0]));
-        }
-    }
-
-    #[test]
-    fn app_key_up_ignored() {
-        let mut app = Mahjong::with_seed(42);
-        // Key release should be ignored.
-        app.handle_key(&make_key_up(Key::N));
-        // App should still be in the same state (seed 42).
-        assert_eq!(app.seed, 42);
-    }
-
-    #[test]
-    fn app_arrow_keys_move_cursor() {
-        let mut app = Mahjong::with_seed(42);
-
-        // The cursor must stay on a real tile after every move. It was not
-        // checked before -- the test bound the index to `_initial` and then
-        // discarded it, so a move that ran the cursor off the end of the
-        // layout would have passed. `tile_screen_pos` returning `Some` is the
-        // same question the renderer asks, so this is the property that
-        // matters rather than a bare bounds check.
-        let mut moved = false;
-        for key in [Key::Right, Key::Left, Key::Up, Key::Down] {
-            let before = app.cursor.tile_idx;
-            app.handle_key(&make_key(key));
-            if let Some(idx) = app.cursor.tile_idx {
+    fn a_tiles_hit_box_is_the_rectangle_it_was_drawn_in() {
+        // The old code computed the picture in `tile_screen_pos` and the hit
+        // test in `tile_at_screen` -- two copies of one geometry, kept in step
+        // by nothing but care. The box is recorded by the drawing pass now, so
+        // this compares it against the layout that placed it.
+        let g = game();
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            if l.tile_w <= 0.0 {
+                continue;
+            }
+            let f = g.draw((w, h));
+            for (target, rect) in f.hits() {
+                let Target::Tile(i) = target else { continue };
+                let expected = l.tile_rect(g.board.tiles[*i].pos);
                 assert!(
-                    app.board.tile_screen_pos(idx).is_some(),
-                    "cursor left the layout after {key:?}, at index {idx}"
+                    (rect.x - expected.x).abs() < 0.01
+                        && (rect.y - expected.y).abs() < 0.01
+                        && (rect.w - expected.w).abs() < 0.01
+                        && (rect.h - expected.h).abs() < 0.01,
+                    "at {w}x{h} tile {i} is drawn at {expected:?} and clicked at {rect:?}"
                 );
             }
-            moved |= app.cursor.tile_idx != before;
-        }
-
-        // Note what is deliberately *not* asserted: that Right-then-Left
-        // returns the cursor where it started. It does not -- from tile 0 the
-        // four moves end on tile 96 -- because navigation picks the nearest
-        // tile in the pressed direction on a three-layer turtle layout, and
-        // "nearest to the right of X" is not the inverse of "nearest to the
-        // left of Y". That is spatial navigation working, not a bug.
-        assert!(moved, "no arrow key moved the cursor at all");
-        assert_ne!(app.cursor.tile_idx, None, "cursor fell off the board");
-    }
-
-    #[test]
-    fn app_handle_event_key() {
-        let mut app = Mahjong::with_seed(42);
-        app.handle_event(&Event::Key(make_key(Key::S)));
-        // Shuffle should have occurred.
-        assert!(app.message.is_some());
-    }
-
-    #[test]
-    fn app_handle_event_mouse() {
-        let mut app = Mahjong::with_seed(42);
-        // Click at a position that might hit a tile.
-        let free = app.board.free_tiles();
-        if !free.is_empty()
-            && let Some((tx, ty)) = app.board.tile_screen_pos(free[0])
-        {
-            app.handle_event(&Event::Mouse(make_mouse(tx + 5.0, ty + 5.0)));
-            // Should have selected the tile.
-            assert_eq!(app.selected, Some(free[0]));
         }
     }
 
     #[test]
-    fn app_mouse_click_selects_tile() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[TilePos {
-                layer: 0,
-                row: 0,
-                col: 0,
-            }],
-            &[TileKind::Bamboo(1)],
-        );
-        app.status = GameStatus::Playing;
-        let (tx, ty) = app.board.tile_screen_pos(0).unwrap();
-        app.handle_mouse(&make_mouse(tx + 1.0, ty + 1.0));
-        assert_eq!(app.selected, Some(0));
-    }
-
-    #[test]
-    fn app_mouse_click_empty_area() {
-        let mut app = Mahjong::with_seed(42);
-        app.handle_mouse(&make_mouse(9999.0, 9999.0));
-        assert_eq!(app.selected, None);
-    }
-
-    #[test]
-    fn app_won_status_on_clear() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
-        );
-        app.status = GameStatus::Playing;
-        app.try_select(0);
-        app.try_select(1);
-        assert_eq!(app.status, GameStatus::Won);
-    }
-
-    #[test]
-    fn app_lost_status_no_pairs() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Circle(2)],
-        );
-        app.status = GameStatus::Playing;
-        app.update_status();
-        assert_eq!(app.status, GameStatus::Lost);
-    }
-
-    #[test]
-    fn app_no_action_when_won() {
-        let mut app = Mahjong::with_seed(42);
-        app.status = GameStatus::Won;
-        app.try_select(0);
-        // Should not change selection.
-        assert_eq!(app.selected, None);
-    }
-
-    #[test]
-    fn app_shuffle_when_lost() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Circle(2)],
-        );
-        app.status = GameStatus::Lost;
-        app.shuffle_tiles();
-        // After shuffle status is rechecked. Tiles are same types but may
-        // still be unmatched — status depends on shuffle result.
-        assert!(app.board.remaining() > 0);
-    }
-
-    #[test]
-    fn app_cursor_starts_on_free_tile() {
-        let app = Mahjong::with_seed(42);
-        if let Some(ci) = app.cursor.tile_idx {
-            assert!(app.board.is_free(ci));
-        }
-    }
-
-    #[test]
-    fn app_cursor_none_on_empty_board() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(&[], &[]);
-        app.cursor.tile_idx = app.board.free_tiles().first().copied();
-        assert_eq!(app.cursor.tile_idx, None);
-    }
-
-    #[test]
-    fn app_move_cursor_on_empty_board() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(&[], &[]);
-        app.cursor.tile_idx = None;
-        app.move_cursor(1, 0);
-        assert_eq!(app.cursor.tile_idx, None);
-    }
-
-    // ── Render tests ────────────────────────────────────────────────
-
-    #[test]
-    fn render_produces_commands() {
-        let app = Mahjong::new();
-        let cmds = app.render(900.0, 700.0);
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn render_has_background() {
-        let app = Mahjong::new();
-        let cmds = app.render(900.0, 700.0);
-        let has_bg = cmds
+    fn a_click_on_a_stack_reaches_the_tile_on_top() {
+        // The cap sits inside the footprint of every tile beneath it. A hit
+        // test that answered with the first match would hand the click to the
+        // bottom of the stack, which the rules then refuse as "not free" --
+        // leaving the player unable to take the one tile that is.
+        let g = game();
+        let l = Layout::solve(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cap = g
+            .board
+            .tiles
             .iter()
-            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == BASE));
-        assert!(has_bg);
-    }
-
-    #[test]
-    fn render_has_title() {
-        let app = Mahjong::new();
-        let cmds = app.render(900.0, 700.0);
-        let has_title = cmds
+            .position(|t| t.pos.layer == 4)
+            .expect("the turtle has no cap");
+        let r = l.tile_rect(g.board.tiles[cap].pos);
+        let (cx, cy) = r.centre();
+        let under = g
+            .board
+            .tiles
             .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Mahjong")));
-        assert!(has_title);
-    }
-
-    #[test]
-    fn render_has_tiles() {
-        let app = Mahjong::new();
-        let cmds = app.render(900.0, 700.0);
-        // Should have tile rectangles (at least the number of visible tiles).
-        let rects = cmds
-            .iter()
-            .filter(|c| matches!(c, RenderCommand::FillRect { .. }))
+            .enumerate()
+            .filter(|&(i, t)| i != cap && t.pos.layer < 4 && l.tile_rect(t.pos).contains(cx, cy))
             .count();
-        assert!(rects >= 10); // Many tile backgrounds.
-    }
-
-    #[test]
-    fn render_has_help_bar() {
-        let app = Mahjong::new();
-        let cmds = app.render(900.0, 700.0);
-        let has_help = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Undo")));
-        assert!(has_help);
-    }
-
-    #[test]
-    fn render_has_legend() {
-        let app = Mahjong::new();
-        let cmds = app.render(900.0, 700.0);
-        let has_legend = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Legend")));
-        assert!(has_legend);
-    }
-
-    #[test]
-    fn render_selected_tile_highlighted() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
+        assert!(
+            under > 0,
+            "the fixture is broken: the cap covers no other tile"
         );
-        app.status = GameStatus::Playing;
-        app.try_select(0);
-        let cmds = app.render(900.0, 700.0);
-        let has_selected = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == TILE_SELECTED));
-        assert!(has_selected);
+        assert_eq!(
+            g.draw(Mahjong::SIZE).hit_test(cx, cy),
+            Some(Target::Tile(cap)),
+            "the click went through the cap to one of the {under} tiles under it"
+        );
     }
 
     #[test]
-    fn render_hint_tiles_highlighted() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
-        );
-        app.status = GameStatus::Playing;
-        app.show_hint_pair();
-        let cmds = app.render(900.0, 700.0);
-        // Count tile-sized hint rects (TILE_W x TILE_H). The legend also uses
-        // the same green color for small swatches, so filter by size.
-        let hint_count = cmds.iter().filter(|c| {
-            matches!(c, RenderCommand::FillRect { color, width, height, .. }
-                if *color == TILE_HINT && (*width - TILE_W).abs() < 1.0 && (*height - TILE_H).abs() < 1.0)
-        }).count();
-        assert_eq!(hint_count, 2);
+    fn a_tiles_label_is_drawn_inside_the_tile_at_every_size() {
+        // The old code drew every label at a fixed 16pt, which was fine only
+        // for the fixed 42x54 tile it was designed beside. Once the tile
+        // started moving the label spilled over its own edges.
+        let g = game();
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            if l.tile_w <= 0.0 {
+                continue;
+            }
+            assert!(
+                l.tile_font <= l.tile_h * 0.5 + 0.001,
+                "at {w}x{h} a {}pt label is drawn in a tile {} tall",
+                l.tile_font,
+                l.tile_h
+            );
+            // Measure the labels the frame actually drew, not the ones it
+            // could have drawn: a bound checked against `all_tile_kinds()`
+            // holds even for a draw pass that puts no label on any tile.
+            let drawn: Vec<String> = texts(&g.draw((w, h)))
+                .into_iter()
+                .filter(|(_, _, _, size, _)| *size == l.tile_font)
+                .map(|(s, ..)| s)
+                .collect();
+            assert!(
+                !drawn.is_empty(),
+                "at {w}x{h} the tiles were painted with no labels on them"
+            );
+            for label in &drawn {
+                let width = text::measure(label, l.tile_font, FontWeightHint::Bold);
+                assert!(
+                    width <= l.tile_w + 0.01,
+                    "at {w}x{h} the label {label:?} measures {width} across a {} tile",
+                    l.tile_w
+                );
+            }
+        }
     }
 
     #[test]
-    fn render_cursor_draws_lines() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
+    fn the_label_font_grows_with_the_tile_it_is_drawn_on() {
+        // The bound above is one-sided: a label of 1pt satisfies it at every
+        // size. This is the claim the fit is a *measurement* and not a floor.
+        let small = Layout::solve(500.0, 400.0);
+        let large = Layout::solve(1600.0, 1200.0);
+        assert!(
+            large.tile_font > small.tile_font * 1.5,
+            "a label is {}pt on a {} tile and {}pt on a {} one",
+            small.tile_font,
+            small.tile_w,
+            large.tile_font,
+            large.tile_w
         );
-        app.cursor.tile_idx = Some(0);
-        app.selected = None;
-        let cmds = app.render(900.0, 700.0);
-        let line_count = cmds
+    }
+
+    #[test]
+    fn a_selected_tile_is_painted_differently_from_an_unselected_one() {
+        // Without it the player has no way to see which tile they picked, and
+        // a mis-click is indistinguishable from a click that did nothing.
+        let mut g = game();
+        let (a, _) = g.board.find_hint().expect("a fresh deal has no move");
+        let before = fills(&g.draw(Mahjong::SIZE));
+        g.selected = Some(a);
+        let after = fills(&g.draw(Mahjong::SIZE));
+        let changed = before
             .iter()
-            .filter(|c| matches!(c, RenderCommand::Line { .. }))
+            .zip(after.iter())
+            .filter(|((_, c1), (_, c2))| c1 != c2)
             .count();
-        assert!(line_count >= 4); // 4 edges for the cursor border.
+        assert_eq!(
+            changed, 1,
+            "selecting one tile repainted {changed} rectangles"
+        );
     }
 
     #[test]
-    fn render_won_shows_win_text() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(&[], &[]);
-        app.status = GameStatus::Won;
-        app.message = Some("You win! Press N for new game.");
-        let cmds = app.render(900.0, 700.0);
-        let has_win = cmds
+    fn a_hinted_pair_is_painted_differently_from_the_rest() {
+        let mut g = game();
+        let before = fills(&g.draw(Mahjong::SIZE));
+        assert!(g.show_hint_pair(), "the hint key did nothing");
+        let after = fills(&g.draw(Mahjong::SIZE));
+        let changed = before
             .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("WIN")));
-        assert!(has_win);
+            .zip(after.iter())
+            .filter(|((_, c1), (_, c2))| c1 != c2)
+            .count();
+        assert_eq!(
+            changed, 2,
+            "a hint of two tiles repainted {changed} of them"
+        );
     }
 
     #[test]
-    fn render_lost_shows_lost_text() {
-        let mut app = Mahjong::with_seed(42);
-        app.status = GameStatus::Lost;
-        let cmds = app.render(900.0, 700.0);
-        let has_lost = cmds
+    fn the_cursor_is_drawn_as_a_border_thick_enough_to_see_at_any_size() {
+        // At the old fixed two pixels the border vanished on a large window and
+        // swallowed the tile on a small one.
+        let g = game();
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            if l.tile_w <= 0.0 {
+                continue;
+            }
+            let f = g.draw((w, h));
+            let widths: Vec<f32> = f
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Line { width, .. } => Some(*width),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                widths.len(),
+                4,
+                "at {w}x{h} the cursor is drawn with {} edges, not four",
+                widths.len()
+            );
+            for bw in widths {
+                assert!(
+                    (1.0..=4.0).contains(&bw),
+                    "at {w}x{h} the cursor border is {bw} pixels"
+                );
+                assert!(
+                    bw < l.tile_w / 2.0,
+                    "at {w}x{h} a {bw}-pixel border swallows a {} tile",
+                    l.tile_w
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_header_reports_what_is_left_what_was_played_and_what_can_be_played() {
+        let g = game();
+        let f = g.draw(Mahjong::SIZE);
+        let (line, ..) = text_saying(&f, "Tiles:");
+        assert!(
+            line.contains(&format!("Tiles: {}", g.board.remaining())),
+            "the header says {line:?} of a board with {} tiles",
+            g.board.remaining()
+        );
+        assert!(
+            line.contains("Moves: 0"),
+            "a fresh game has been played: {line:?}"
+        );
+        assert!(
+            line.contains(&format!("Free: {}", g.board.free_tiles().len())),
+            "the header says {line:?} of a board with {} free tiles",
+            g.board.free_tiles().len()
+        );
+    }
+
+    #[test]
+    fn the_counters_follow_the_board_rather_than_being_written_once() {
+        let mut g = game();
+        let before = g.board.remaining();
+        let (a, b) = g.board.find_hint().expect("a fresh deal has no move");
+        g.cursor.tile_idx = Some(a);
+        assert!(g.try_select(a));
+        assert!(g.try_select(b));
+        let f = g.draw(Mahjong::SIZE);
+        let (line, ..) = text_saying(&f, "Tiles:");
+        assert!(
+            line.contains(&format!("Tiles: {}", before - 2)),
+            "after taking a pair the header still says {line:?}"
+        );
+        assert!(
+            line.contains("Moves: 1"),
+            "the move was not counted: {line:?}"
+        );
+    }
+
+    #[test]
+    fn the_title_and_the_key_hints_are_on_screen() {
+        let g = game();
+        let f = g.draw(Mahjong::SIZE);
+        text_saying(&f, "Mahjong Solitaire");
+        let (help, ..) = text_saying(&f, "N=New");
+        for key in ["Z=Undo", "H=Hint", "S=Shuffle", "Esc=Deselect"] {
+            assert!(
+                help.contains(key),
+                "the help bar does not mention {key}: {help:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_is_drawn_only_when_there_is_one_to_draw() {
+        // An empty message box would still take a hit box, so a click on the
+        // right half of the header would be answered as "the message".
+        let mut g = game();
+        assert!(
+            g.message.is_none(),
+            "a fresh game already has something to say"
+        );
+        assert!(
+            probe::rect_of_sized(&g, Target::Message, Mahjong::SIZE).is_none(),
+            "a box was recorded for a message that does not exist"
+        );
+        g.message = Some("Tile is not free");
+        let f = g.draw(Mahjong::SIZE);
+        text_saying(&f, "Tile is not free");
+        assert!(
+            probe::rect_of_sized(&g, Target::Message, Mahjong::SIZE).is_some(),
+            "the message is drawn but cannot be found"
+        );
+    }
+
+    #[test]
+    fn the_counters_and_the_message_never_share_a_pixel() {
+        // They used to be at fixed x offsets 40 and `BOARD_OFFSET_X + 400`, so
+        // a long status line ran straight into the message.
+        let mut g = game();
+        g.message = Some("No moves left! S=shuffle, N=new");
+        for (w, h) in SIZES {
+            let status = probe::rect_of_sized(&g, Target::Status, (w, h));
+            let message = probe::rect_of_sized(&g, Target::Message, (w, h));
+            let (Some(s), Some(m)) = (status, message) else {
+                continue;
+            };
+            assert!(
+                s.intersect(m).is_none(),
+                "at {w}x{h} the counters at {s:?} overlap the message at {m:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_line_of_text_is_told_how_wide_its_box_is() {
+        // Without `max_width` the renderer has no licence to elide, so a string
+        // longer than its box is drawn straight over its neighbour. This is the
+        // fault the header had at a fixed offset, generalised.
+        let mut g = game();
+        g.message = Some("No moves left! S=shuffle, N=new");
+        for (w, h) in SIZES {
+            let f = g.draw((w, h));
+            for (text, x, _, _, max) in texts(&f) {
+                let max = max.unwrap_or_else(|| panic!("at {w}x{h} {text:?} has no width limit"));
+                assert!(
+                    max >= 0.0,
+                    "at {w}x{h} {text:?} is given a negative width of {max}"
+                );
+                assert!(
+                    x + max <= w + 0.01,
+                    "at {w}x{h} {text:?} starts at {x} and is allowed {max}, past the window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_legend_draws_one_row_for_each_group_and_a_note_for_the_asterisks() {
+        let g = game();
+        let f = g.draw(Mahjong::SIZE);
+        text_saying(&f, "Legend");
+        text_saying(&f, LEGEND_NOTE);
+        for (i, &(codes, kind)) in LEGEND_ITEMS.iter().enumerate() {
+            let (row, ..) = text_saying(&f, codes);
+            assert_eq!(row, legend_label(codes, kind));
+            assert!(
+                probe::rect_of_sized(&g, Target::Legend(i), Mahjong::SIZE).is_some(),
+                "legend row {i} was drawn without a box"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dropped_legend_draws_nothing_and_records_nothing() {
+        // Half a legend -- a heading with no rows, or boxes with no text -- is
+        // worse than none, because a click would land on a row that is not there.
+        let g = game();
+        let size = (360.0, 700.0);
+        assert_eq!(
+            Layout::solve(size.0, size.1).legend.w,
+            0.0,
+            "the fixture is broken"
+        );
+        let f = g.draw(size);
+        for (text, ..) in texts(&f) {
+            assert!(
+                !text.contains("Legend") && !text.contains(LEGEND_NOTE),
+                "a dropped legend still drew {text:?}"
+            );
+        }
+        for i in 0..LEGEND_ITEMS.len() {
+            assert!(
+                probe::rect_of_sized(&g, Target::Legend(i), size).is_none(),
+                "a dropped legend still records a box for row {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_legend_row_stays_inside_the_legend_column() {
+        // Nine rows sharing the column evenly, so the note cannot run off the
+        // bottom however short the window gets.
+        let g = game();
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            if l.legend.w <= 0.0 {
+                continue;
+            }
+            for i in 0..LEGEND_ITEMS.len() {
+                let Some(r) = probe::rect_of_sized(&g, Target::Legend(i), (w, h)) else {
+                    panic!("at {w}x{h} legend row {i} is missing");
+                };
+                assert!(
+                    r.y >= l.legend.y - 0.01 && r.bottom() <= l.legend.bottom() + 0.01,
+                    "at {w}x{h} legend row {i} runs from {} to {} in a column {} to {}",
+                    r.y,
+                    r.bottom(),
+                    l.legend.y,
+                    l.legend.bottom()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_help_bar_is_painted_before_its_text_and_covers_the_bottom_strip() {
+        // The strip used to be `height - 24.0` tall by a constant 30, which in
+        // a window shorter than 54 pixels was drawn above its own top edge.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            if l.help.h <= 0.0 {
+                continue;
+            }
+            let g = game();
+            let f = g.draw((w, h));
+            let strip = fills(&f)
+                .into_iter()
+                .find(|&(r, c)| c == MANTLE && r.w == w)
+                .unwrap_or_else(|| panic!("at {w}x{h} the help bar has no background"));
+            assert!(
+                strip.0.y >= l.header.bottom() - 0.01,
+                "at {w}x{h} the help bar at {} is drawn over the header",
+                strip.0.y
+            );
+            assert!(
+                (strip.0.bottom() - h).abs() < 0.01,
+                "at {w}x{h} the help bar ends at {} rather than the bottom",
+                strip.0.bottom()
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_with_no_room_for_a_tile_draws_no_tiles_rather_than_zero_sized_ones() {
+        // A zero-width tile is a hit box every click lands in at once, and a
+        // divide by it is how the cursor arithmetic would produce infinities.
+        let g = game();
+        // Four pixels square: the padding alone consumes the whole window, so
+        // the board's inner box has no width at all.
+        let size = (4.0, 4.0);
+        let l = Layout::solve(size.0, size.1);
+        assert_eq!(
+            l.tile_w, 0.0,
+            "the fixture is broken: a 4x4 window fits a tile"
+        );
+        let f = g.draw(size);
+        assert!(
+            !f.hits().iter().any(|(t, _)| matches!(t, Target::Tile(_))),
+            "a window with no room for a tile still recorded tile boxes"
+        );
+    }
+    // ════════════════════════════════════════════════════════════════
+    // Clicks: aimed by name at the box the drawing pass recorded
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn clicking_a_free_tile_selects_it() {
+        // The whole feature that did not exist: `main` dropped the board, so
+        // this click had nowhere to arrive.
+        let mut g = game();
+        let (a, _) = g.board.find_hint().expect("a fresh deal has no move");
+        assert_eq!(
+            probe::click(&mut g, Target::Tile(a)),
+            EventResult::Consumed,
+            "a click on a free tile was ignored"
+        );
+        assert_eq!(g.selected, Some(a), "the click selected {:?}", g.selected);
+    }
+
+    #[test]
+    fn clicking_a_matching_pair_takes_both_off_the_board() {
+        let mut g = game();
+        let (a, b) = g.board.find_hint().expect("a fresh deal has no move");
+        let before = g.board.remaining();
+        probe::click(&mut g, Target::Tile(a));
+        probe::click(&mut g, Target::Tile(b));
+        assert_eq!(
+            g.board.remaining(),
+            before - 2,
+            "the pair is still on the board"
+        );
+        assert_eq!(
+            g.selected, None,
+            "a tile is still selected after the pair went"
+        );
+        assert_eq!(g.moves, 1, "the move was not counted");
+        assert_eq!(g.undo_stack.len(), 1, "the move cannot be undone");
+    }
+
+    #[test]
+    fn clicking_two_tiles_that_do_not_match_selects_the_second_and_says_so() {
+        // Not "deselect both": the player almost always meant the second tile
+        // as the start of a new attempt, and clearing it would cost them a
+        // click every time they guessed wrong.
+        let mut g = game();
+        let free = g.board.free_tiles();
+        let (a, b) = free
             .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("No valid")));
-        assert!(has_lost);
+            .flat_map(|&i| free.iter().map(move |&j| (i, j)))
+            .find(|&(i, j)| i != j && !g.board.tiles[i].kind.matches(g.board.tiles[j].kind))
+            .expect("every free tile matches every other");
+        probe::click(&mut g, Target::Tile(a));
+        probe::click(&mut g, Target::Tile(b));
+        assert_eq!(
+            g.selected,
+            Some(b),
+            "the second tile of a bad guess is not selected"
+        );
+        assert_eq!(g.message, Some("Tiles don't match!"));
+        assert_eq!(g.moves, 0, "a failed match was counted as a move");
     }
 
     #[test]
-    fn render_message_shown() {
-        let mut app = Mahjong::with_seed(42);
-        app.message = Some("Test message");
-        let cmds = app.render(900.0, 700.0);
-        let has_msg = cmds.iter().any(
-            |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Test message")),
+    fn clicking_the_selected_tile_again_puts_it_back() {
+        let mut g = game();
+        let (a, _) = g.board.find_hint().expect("a fresh deal has no move");
+        probe::click(&mut g, Target::Tile(a));
+        probe::click(&mut g, Target::Tile(a));
+        assert_eq!(
+            g.selected, None,
+            "a tile cannot be deselected by clicking it"
         );
-        assert!(has_msg);
+        assert_eq!(g.board.remaining(), 144, "a tile matched itself");
     }
 
     #[test]
-    fn render_shadow_on_upper_layers() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 1,
-                    row: 1,
-                    col: 1,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
+    fn clicking_a_hemmed_in_tile_says_why_nothing_happened() {
+        // Silence here is the worst answer: the player clicks, nothing moves,
+        // and there is no way to learn that the tile is pinned rather than that
+        // the click missed.
+        //
+        // "Not free" covers two different situations and only one of them is
+        // reachable by clicking. A tile with neighbours on both sides is in
+        // plain sight and takes its own click -- that is this test. A tile
+        // *underneath* another one cannot be clicked at all, because the tile
+        // on top is painted over it, which is what
+        // `a_click_on_a_stack_reaches_the_tile_on_top` checks. The first draft
+        // confused the two, took the first not-free tile it found (which is
+        // hemmed in, not buried) and then asserted that something else took
+        // the click.
+        let mut g = game();
+        let l = Layout::solve(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let hemmed = (0..g.board.tiles.len())
+            .find(|&i| {
+                let r = l.tile_rect(g.board.tiles[i].pos);
+                !g.board.is_free(i)
+                    && !g.board.tiles.iter().any(|t| {
+                        t.pos.layer > g.board.tiles[i].pos.layer
+                            && l.tile_rect(t.pos).contains(r.centre().0, r.centre().1)
+                    })
+            })
+            .expect("every tile on a fresh deal is either free or buried");
+        assert_eq!(
+            probe::click(&mut g, Target::Tile(hemmed)),
+            EventResult::Consumed,
+            "the refusal was not worth repainting"
         );
-        let cmds = app.render(900.0, 700.0);
-        let has_shadow = cmds
+        assert_eq!(g.message, Some("Tile is not free"));
+        assert_eq!(g.selected, None, "a blocked tile was selected");
+        // `try_select` answers "does the screen need repainting", not "was the
+        // tile selected", so the *second* identical refusal is the one that
+        // reports no change.
+        assert!(
+            !g.try_select(hemmed),
+            "the same refusal twice asked for a second repaint"
+        );
+    }
+
+    #[test]
+    fn clicking_the_furniture_is_not_a_move() {
+        // The title, the counters and the help bar record boxes so that a click
+        // there is answered rather than falling through to the nearest tile.
+        //
+        // `Target::Board` is deliberately not in this list, and the reason is
+        // worth keeping: the board's box spans the whole playing area and the
+        // tiles are painted *over* it, so its centre belongs to a tile and
+        // clicking "the board" by its rectangle's midpoint plays a tile
+        // instead. Only its margin is its own; that is what the next case
+        // checks.
+        for target in [Target::Title, Target::Status, Target::Help] {
+            let mut g = game();
+            let before = g.board.remaining();
+            assert_eq!(
+                probe::click(&mut g, target),
+                EventResult::Ignored,
+                "a click on {target:?} was consumed"
+            );
+            assert_eq!(g.selected, None, "a click on {target:?} selected a tile");
+            assert_eq!(
+                g.board.remaining(),
+                before,
+                "a click on {target:?} took a pair"
+            );
+            assert_eq!(g.moves, 0, "a click on {target:?} counted as a move");
+        }
+    }
+
+    #[test]
+    fn clicking_the_boards_margin_lands_on_the_board_and_not_on_a_tile() {
+        // The turtle is centred in the board with room to spare, so the board's
+        // top-left corner is bare felt. A click there must be answered by the
+        // board -- if it fell through to a tile the player would be playing
+        // tiles by clicking empty space near them.
+        let mut g = game();
+        let l = g.layout();
+        let (x, y) = (l.board.x + 1.0, l.board.y + 1.0);
+        let f = g.draw(Mahjong::SIZE);
+        assert_eq!(
+            f.hit_test(x, y),
+            Some(Target::Board),
+            "the board's own corner is claimed by something else"
+        );
+        assert_eq!(
+            g.click_at(x, y, MouseButton::Left, Mahjong::SIZE),
+            EventResult::Ignored,
+            "a click on bare felt was consumed"
+        );
+        assert_eq!(g.selected, None, "bare felt selected a tile");
+        assert_eq!(g.board.remaining(), 144, "bare felt took a pair");
+    }
+
+    #[test]
+    fn clicking_a_legend_row_is_not_a_move_either() {
+        let mut g = game();
+        for i in 0..LEGEND_ITEMS.len() {
+            assert_eq!(
+                probe::click(&mut g, Target::Legend(i)),
+                EventResult::Ignored,
+                "a click on legend row {i} was consumed"
+            );
+        }
+        assert_eq!(g.board.remaining(), 144);
+        assert_eq!(g.selected, None);
+    }
+
+    #[test]
+    fn a_click_outside_every_box_does_nothing() {
+        let mut g = game();
+        assert_eq!(
+            g.click_at(-5.0, -5.0, MouseButton::Left, Mahjong::SIZE),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            g.click_at(
+                WINDOW_WIDTH + 10.0,
+                WINDOW_HEIGHT + 10.0,
+                MouseButton::Left,
+                Mahjong::SIZE
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(g.selected, None);
+    }
+
+    #[test]
+    fn only_the_left_button_plays_a_tile() {
+        // Answering all three meant a right-click removed a pair, which is a
+        // move the player did not make.
+        let mut g = game();
+        let (a, _) = g.board.find_hint().expect("a fresh deal has no move");
+        for button in [MouseButton::Right, MouseButton::Middle] {
+            assert_eq!(
+                probe::click_with(&mut g, Target::Tile(a), button),
+                EventResult::Ignored,
+                "the {button:?} button played a tile"
+            );
+            assert_eq!(g.selected, None);
+        }
+        assert_eq!(probe::click(&mut g, Target::Tile(a)), EventResult::Consumed);
+    }
+
+    #[test]
+    fn a_click_moves_the_keyboard_cursor_to_the_tile_it_landed_on() {
+        // Otherwise the next arrow press would jump back to wherever the
+        // cursor had been left, which reads as the cursor teleporting.
+        let mut g = game();
+        let free = g.board.free_tiles();
+        let target = *free
             .iter()
-            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == TILE_SHADOW));
-        assert!(has_shadow);
+            .find(|&&i| Some(i) != g.cursor.tile_idx)
+            .expect("there is only one free tile");
+        probe::click(&mut g, Target::Tile(target));
+        assert_eq!(g.cursor.tile_idx, Some(target));
     }
 
     #[test]
-    fn render_no_shadow_on_layer_zero() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[TilePos {
-                layer: 0,
-                row: 0,
-                col: 0,
-            }],
-            &[TileKind::Bamboo(1)],
+    fn a_click_is_read_against_the_size_the_frame_was_drawn_at() {
+        // A click is a pair of window coordinates and means nothing without the
+        // layout it was aimed at. Read against the *default* size, a click near
+        // the edge of a large window would land on a different tile.
+        let big = (1600.0, 1200.0);
+        let g = game();
+        let l = Layout::solve(big.0, big.1);
+        let (a, _) = g.board.find_hint().expect("a fresh deal has no move");
+        let (cx, cy) = l.tile_rect(g.board.tiles[a].pos).centre();
+        assert!(
+            cx > WINDOW_WIDTH
+                || cy > WINDOW_HEIGHT
+                || l.tile_w > 1.5 * Layout::solve(WINDOW_WIDTH, WINDOW_HEIGHT).tile_w,
+            "the fixture is broken: the large window is not meaningfully different"
         );
-        let cmds = app.render(900.0, 700.0);
-        let has_shadow = cmds
+        let mut g = game();
+        assert_eq!(
+            g.click_at(cx, cy, MouseButton::Left, big),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            g.selected,
+            Some(a),
+            "the click was read against the wrong size"
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Keys
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn n_deals_a_new_game_from_a_new_seed() {
+        let mut g = game();
+        let (a, b) = g.board.find_hint().expect("a fresh deal has no move");
+        probe::click(&mut g, Target::Tile(a));
+        probe::click(&mut g, Target::Tile(b));
+        let seed = g.seed;
+        let faces: Vec<TileKind> = g.board.tiles.iter().map(|t| t.kind).collect();
+        assert_eq!(press_key(&mut g, Key::N), EventResult::Consumed);
+        assert_ne!(g.seed, seed, "the new game reused the old seed");
+        assert_eq!(g.board.remaining(), 144, "the new deal is short of tiles");
+        assert_eq!(g.moves, 0, "the move count survived the new deal");
+        assert!(g.undo_stack.is_empty(), "the old game can still be undone");
+        assert_eq!(g.status, GameStatus::Playing);
+        assert_ne!(
+            g.board.tiles.iter().map(|t| t.kind).collect::<Vec<_>>(),
+            faces,
+            "the new deal is the old deal"
+        );
+    }
+
+    #[test]
+    fn z_undoes_the_last_pair_and_says_so_when_there_is_none() {
+        let mut g = game();
+        let (a, b) = g.board.find_hint().expect("a fresh deal has no move");
+        probe::click(&mut g, Target::Tile(a));
+        probe::click(&mut g, Target::Tile(b));
+        assert_eq!(press_key(&mut g, Key::Z), EventResult::Consumed);
+        assert_eq!(g.board.remaining(), 144, "the pair did not come back");
+        assert_eq!(g.moves, 0, "the move count did not come back down");
+        assert_eq!(g.message, Some("Undo!"));
+        // A second undo has nothing to undo, and must say so rather than
+        // running the counter below zero.
+        assert_eq!(press_key(&mut g, Key::Z), EventResult::Consumed);
+        assert_eq!(g.message, Some("Nothing to undo"));
+        assert_eq!(g.moves, 0);
+        // ...and repeating it changes nothing, so the window is not asked to
+        // redraw an identical frame.
+        assert_eq!(press_key(&mut g, Key::Z), EventResult::Ignored);
+    }
+
+    #[test]
+    fn h_shows_a_hint_and_the_hint_is_a_pair_the_rules_accept() {
+        let mut g = game();
+        assert_eq!(press_key(&mut g, Key::H), EventResult::Consumed);
+        assert!(g.show_hint, "the hint was found but not shown");
+        let (a, b) = g.hint.expect("the hint names no pair");
+        assert!(g.board.is_free(a) && g.board.is_free(b));
+        assert!(g.board.tiles[a].kind.matches(g.board.tiles[b].kind));
+        assert_eq!(g.message, Some("Hint shown (green tiles)"));
+    }
+
+    #[test]
+    fn h_says_so_when_there_is_nothing_to_hint() {
+        let mut g = game();
+        g.board = board_of(&[
+            (0, 0, 0, TileKind::Bamboo(1)),
+            (0, 0, 2, TileKind::Circle(9)),
+        ]);
+        assert_eq!(press_key(&mut g, Key::H), EventResult::Consumed);
+        assert!(!g.show_hint, "a hint was shown for a board that has none");
+        assert_eq!(g.message, Some("No valid pairs!"));
+    }
+
+    #[test]
+    fn s_shuffles_a_stuck_board_back_into_play() {
+        // The guard names `Won` rather than `!= Playing`, because a *lost*
+        // board is exactly the one this key is for.
+        let mut g = game();
+        g.status = GameStatus::Lost;
+        assert_eq!(press_key(&mut g, Key::S), EventResult::Consumed);
+        assert_eq!(
+            g.status,
+            GameStatus::Playing,
+            "a shuffled board is still reported lost"
+        );
+        assert_eq!(g.message, Some("Tiles shuffled!"));
+    }
+
+    #[test]
+    fn s_does_nothing_to_a_board_that_has_already_been_cleared() {
+        let mut g = game();
+        g.status = GameStatus::Won;
+        assert_eq!(press_key(&mut g, Key::S), EventResult::Ignored);
+        assert_eq!(
+            g.status,
+            GameStatus::Won,
+            "a won game was put back into play"
+        );
+    }
+
+    #[test]
+    fn the_arrows_walk_the_cursor_between_free_tiles() {
+        let mut g = game();
+        let start = g.cursor.tile_idx.expect("a fresh deal has no cursor");
+        assert_eq!(press_key(&mut g, Key::Right), EventResult::Consumed);
+        let moved = g.cursor.tile_idx.expect("the cursor vanished");
+        assert_ne!(moved, start, "the right arrow did not move the cursor");
+        assert!(
+            g.board.is_free(moved),
+            "the cursor landed on a covered tile"
+        );
+        let l = g.layout();
+        assert!(
+            l.tile_rect(g.board.tiles[moved].pos).x > l.tile_rect(g.board.tiles[start].pos).x,
+            "the right arrow moved the cursor left"
+        );
+        assert_eq!(press_key(&mut g, Key::Left), EventResult::Consumed);
+        // Left is not "undo right", and asserting that it was is how this test
+        // first failed. The cursor walks the *free* tiles, so from tile 0 the
+        // nearest playable tile rightwards is the layer-1 tile at (1,4) --
+        // tile 1 is buried between its neighbours and is skipped -- and the
+        // nearest playable tile leftwards of *that* is a third tile, (0,2,3),
+        // not the one we came from. Only the direction is promised.
+        let back = g.cursor.tile_idx.expect("the cursor vanished going back");
+        assert!(g.board.is_free(back), "the cursor landed on a covered tile");
+        assert!(
+            l.tile_rect(g.board.tiles[back].pos).x < l.tile_rect(g.board.tiles[moved].pos).x,
+            "the left arrow moved the cursor right"
+        );
+    }
+
+    #[test]
+    fn the_arrows_measure_in_tile_widths_so_the_same_press_picks_the_same_tile() {
+        // Measured in pixels the weights would have been right at one window
+        // size and silently wrong at every other.
+        let mut small = game();
+        let mut large = game();
+        for key in [Key::Right, Key::Down, Key::Right, Key::Up] {
+            small.resize(700.0, 500.0);
+            press_key(&mut small, key);
+            large.resize(1900.0, 1300.0);
+            press_key(&mut large, key);
+        }
+        assert_eq!(
+            small.cursor.tile_idx, large.cursor.tile_idx,
+            "four arrow presses land on different tiles in different windows"
+        );
+    }
+
+    #[test]
+    fn an_arrow_at_the_edge_of_the_board_reports_that_nothing_changed() {
+        // Otherwise a key held against the edge repaints an identical frame
+        // for as long as it is held.
+        let mut g = game();
+        for _ in 0..40 {
+            press_key(&mut g, Key::Left);
+        }
+        let settled = g.cursor.tile_idx;
+        assert_eq!(
+            press_key(&mut g, Key::Left),
+            EventResult::Ignored,
+            "the cursor is still moving after forty presses"
+        );
+        assert_eq!(g.cursor.tile_idx, settled);
+    }
+
+    #[test]
+    fn a_window_too_small_to_draw_a_tile_leaves_the_cursor_where_it_is() {
+        // Every tile is at the same point when the tile has no width, so
+        // "the closest one in this direction" has no answer; jumping to an
+        // arbitrary tile would be worse than sitting still.
+        let mut g = game();
+        let before = g.cursor.tile_idx;
+        g.resize(4.0, 4.0);
+        assert_eq!(g.layout().tile_w, 0.0, "the fixture is broken");
+        assert_eq!(press_key(&mut g, Key::Right), EventResult::Ignored);
+        assert_eq!(g.cursor.tile_idx, before);
+    }
+
+    #[test]
+    fn enter_and_space_play_the_tile_under_the_cursor() {
+        for key in [Key::Enter, Key::Space] {
+            let mut g = game();
+            let (a, b) = g.board.find_hint().expect("a fresh deal has no move");
+            g.cursor.tile_idx = Some(a);
+            assert_eq!(press_key(&mut g, key), EventResult::Consumed);
+            assert_eq!(
+                g.selected,
+                Some(a),
+                "{key:?} did not select the cursor's tile"
+            );
+            g.cursor.tile_idx = Some(b);
+            assert_eq!(press_key(&mut g, key), EventResult::Consumed);
+            assert_eq!(
+                g.board.remaining(),
+                142,
+                "{key:?} did not complete the pair"
+            );
+        }
+    }
+
+    #[test]
+    fn enter_with_no_cursor_does_nothing() {
+        let mut g = game();
+        g.cursor.tile_idx = None;
+        assert_eq!(press_key(&mut g, Key::Enter), EventResult::Ignored);
+        assert_eq!(g.selected, None);
+    }
+
+    #[test]
+    fn escape_clears_the_selection_the_hint_and_the_message_together() {
+        let mut g = game();
+        let (a, _) = g.board.find_hint().expect("a fresh deal has no move");
+        probe::click(&mut g, Target::Tile(a));
+        press_key(&mut g, Key::H);
+        assert_eq!(press_key(&mut g, Key::Escape), EventResult::Consumed);
+        assert_eq!(g.selected, None);
+        assert!(!g.show_hint);
+        assert_eq!(g.message, None);
+        // With nothing left to clear it reports no change, so the window is not
+        // asked to redraw the same frame again.
+        assert_eq!(press_key(&mut g, Key::Escape), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_key_this_game_does_not_use_is_left_for_the_window() {
+        // Swallowing it would break every shortcut the window itself owns.
+        let mut g = game();
+        for key in [Key::A, Key::Q, Key::F1, Key::Tab] {
+            assert_eq!(
+                press_key(&mut g, key),
+                EventResult::Ignored,
+                "{key:?} was swallowed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_release_is_not_a_key_press() {
+        // Without the guard every keystroke would act twice -- once down and
+        // once up -- so N would deal two games and Z would undo two moves.
+        let mut g = game();
+        let before = g.seed;
+        let result = handle_event(&mut g, &Event::Key(probe::release(Key::N)));
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(g.seed, before, "releasing N dealt a new game");
+    }
+
+    #[test]
+    fn taking_the_last_pair_wins_the_game() {
+        let mut g = game();
+        g.board = board_of(&[
+            (0, 0, 0, TileKind::Season(0)),
+            (0, 0, 2, TileKind::Season(3)),
+        ]);
+        g.cursor.tile_idx = Some(0);
+        assert!(g.try_select(0));
+        assert!(g.try_select(1));
+        assert_eq!(g.status, GameStatus::Won);
+        let f = g.draw(Mahjong::SIZE);
+        text_saying(&f, "YOU WIN!");
+        text_saying(&f, "You win!");
+    }
+
+    #[test]
+    fn a_game_that_is_over_stops_answering_clicks_on_tiles() {
+        // Otherwise a stray click after the win would count a move against a
+        // board that has none left to make.
+        let mut g = game();
+        g.status = GameStatus::Won;
+        let (a, _) = g.board.find_hint().expect("a fresh deal has no move");
+        assert!(!g.try_select(a), "a finished game accepted a move");
+        assert_eq!(g.selected, None);
+    }
+
+    #[test]
+    fn a_board_with_no_move_left_is_announced_rather_than_left_silent() {
+        let mut g = game();
+        g.board = board_of(&[
+            (0, 0, 0, TileKind::Bamboo(1)),
+            (0, 0, 2, TileKind::Circle(9)),
+        ]);
+        g.update_status();
+        assert_eq!(g.status, GameStatus::Lost);
+        let f = g.draw(Mahjong::SIZE);
+        text_saying(&f, "No valid moves remain!");
+        text_saying(&f, "No moves left!");
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // The window itself
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn the_app_names_itself_for_the_taskbar_and_asks_for_a_size_it_can_use() {
+        let g = game();
+        assert_eq!(g.title(), "Mahjong Solitaire");
+        assert_eq!(g.app_id(), "mahjong");
+        let (w, h) = g.initial_size();
+        assert_eq!((w, h), (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
+        let l = Layout::solve(f32_from_u32(w), f32_from_u32(h));
+        assert!(
+            l.tile_w > 10.0 && l.legend.w > 0.0,
+            "the window opens at a size that cannot show a legend or a readable tile"
+        );
+    }
+
+    #[test]
+    fn the_close_button_ends_the_program() {
+        let mut g = game();
+        assert_eq!(g.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn a_resize_is_remembered_so_the_next_click_is_read_against_it() {
+        let mut g = game();
+        assert_eq!(
+            g.on_event(&Event::Resize {
+                width: 1600,
+                height: 1200
+            }),
+            Response::Redraw
+        );
+        assert_eq!((g.width, g.height), (1600.0, 1200.0));
+        assert_eq!(g.layout().tile_w, Layout::solve(1600.0, 1200.0).tile_w);
+    }
+
+    #[test]
+    fn a_render_records_the_size_it_was_drawn_at() {
+        // `render` is the only place the window states its size on a frame that
+        // is actually painted; a click arrives afterwards with nothing but
+        // coordinates.
+        let mut g = game();
+        let tree = g.render(1234.0, 567.0);
+        assert_eq!((g.width, g.height), (1234.0, 567.0));
+        assert!(
+            !tree.commands.is_empty(),
+            "the render produced an empty tree"
+        );
+    }
+
+    #[test]
+    fn an_event_that_changes_nothing_does_not_ask_for_a_repaint() {
+        // Redrawing on every event is how a game at rest burns a core.
+        let mut g = game();
+        assert_eq!(
+            g.on_event(&Event::Key(probe::press(Key::A))),
+            Response::Idle
+        );
+        assert_eq!(
+            g.on_event(&Event::Mouse(MouseEvent {
+                x: -1.0,
+                y: -1.0,
+                kind: MouseEventKind::Press(MouseButton::Left)
+            })),
+            Response::Idle
+        );
+    }
+
+    #[test]
+    fn an_event_that_changes_something_asks_for_a_repaint() {
+        let mut g = game();
+        assert_eq!(
+            g.on_event(&Event::Key(probe::press(Key::H))),
+            Response::Redraw
+        );
+    }
+
+    #[test]
+    fn two_games_from_one_seed_are_the_same_and_from_two_seeds_are_not() {
+        // The deal used to be `with_seed(42)` in `new`, so every player on
+        // every machine got the same 144 tiles in the same order for ever.
+        let a: Vec<TileKind> = Mahjong::with_seed(7)
+            .board
+            .tiles
             .iter()
-            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == TILE_SHADOW));
-        assert!(!has_shadow);
-    }
-
-    // ── Edge cases and integration ──────────────────────────────────
-
-    #[test]
-    fn full_game_remove_all_pairs_small() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 1,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 1,
-                    col: 5,
-                },
-            ],
-            &[
-                TileKind::Bamboo(1),
-                TileKind::Bamboo(1),
-                TileKind::Circle(3),
-                TileKind::Circle(3),
-            ],
-        );
-        app.status = GameStatus::Playing;
-        // Remove first pair
-        app.try_select(0);
-        app.try_select(1);
-        assert_eq!(app.moves, 1);
-        // Remove second pair
-        app.try_select(2);
-        app.try_select(3);
-        assert_eq!(app.moves, 2);
-        assert_eq!(app.status, GameStatus::Won);
+            .map(|t| t.kind)
+            .collect();
+        let b: Vec<TileKind> = Mahjong::with_seed(7)
+            .board
+            .tiles
+            .iter()
+            .map(|t| t.kind)
+            .collect();
+        let c: Vec<TileKind> = Mahjong::with_seed(8)
+            .board
+            .tiles
+            .iter()
+            .map(|t| t.kind)
+            .collect();
+        assert_eq!(a, b, "one seed dealt two different games");
+        assert_ne!(a, c, "two seeds dealt the same game");
     }
 
     #[test]
-    fn undo_after_win_returns_to_playing() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
-        );
-        app.status = GameStatus::Playing;
-        app.try_select(0);
-        app.try_select(1);
-        assert_eq!(app.status, GameStatus::Won);
-        app.undo();
-        assert_eq!(app.status, GameStatus::Playing);
-        assert_eq!(app.board.remaining(), 2);
-    }
-
-    #[test]
-    fn multiple_undos() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 1,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 1,
-                    col: 5,
-                },
-            ],
-            &[
-                TileKind::Bamboo(1),
-                TileKind::Bamboo(1),
-                TileKind::Circle(3),
-                TileKind::Circle(3),
-            ],
-        );
-        app.status = GameStatus::Playing;
-        app.try_select(0);
-        app.try_select(1);
-        app.try_select(2);
-        app.try_select(3);
-        assert_eq!(app.moves, 2);
-        app.undo();
-        assert_eq!(app.moves, 1);
-        app.undo();
-        assert_eq!(app.moves, 0);
-        assert_eq!(app.board.remaining(), 4);
-    }
-
-    #[test]
-    fn hint_not_shown_when_won() {
-        let mut app = Mahjong::with_seed(42);
-        app.status = GameStatus::Won;
-        app.show_hint_pair();
-        assert!(!app.show_hint);
-    }
-
-    #[test]
-    fn shuffle_not_when_won() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(&[], &[]);
-        app.status = GameStatus::Won;
-        app.shuffle_tiles();
-        // Should not crash, board is empty.
-        assert_eq!(app.board.remaining(), 0);
-    }
-
-    #[test]
-    fn season_match_through_game() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Season(0), TileKind::Season(3)],
-        );
-        app.status = GameStatus::Playing;
-        app.try_select(0);
-        app.try_select(1);
-        assert_eq!(app.board.remaining(), 0);
-        assert_eq!(app.status, GameStatus::Won);
-    }
-
-    #[test]
-    fn flower_match_through_game() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Flower(0), TileKind::Flower(2)],
-        );
-        app.status = GameStatus::Playing;
-        app.try_select(0);
-        app.try_select(1);
-        assert_eq!(app.board.remaining(), 0);
-        assert_eq!(app.status, GameStatus::Won);
-    }
-
-    #[test]
-    fn layer_blocking_prevents_match() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-                TilePos {
-                    layer: 1,
-                    row: 0,
-                    col: 0,
-                }, // blocks tile 0
-            ],
-            &[
-                TileKind::Bamboo(1),
-                TileKind::Bamboo(1),
-                TileKind::Circle(1),
-            ],
-        );
-        app.status = GameStatus::Playing;
-        // Tile 0 is blocked by tile 2 on layer above.
-        assert!(!app.board.is_free(0));
-        app.try_select(0);
-        // Should not be selected (not free).
-        assert_eq!(app.selected, None);
-    }
-
-    #[test]
-    fn cursor_moves_right() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
-        );
-        app.cursor.tile_idx = Some(0);
-        app.move_cursor(1, 0);
-        assert_eq!(app.cursor.tile_idx, Some(1));
-    }
-
-    #[test]
-    fn cursor_moves_left() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
-        );
-        app.cursor.tile_idx = Some(1);
-        app.move_cursor(-1, 0);
-        assert_eq!(app.cursor.tile_idx, Some(0));
-    }
-
-    #[test]
-    fn cursor_moves_down() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 3,
-                    col: 0,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
-        );
-        app.cursor.tile_idx = Some(0);
-        app.move_cursor(0, 1);
-        assert_eq!(app.cursor.tile_idx, Some(1));
-    }
-
-    #[test]
-    fn cursor_moves_up() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 3,
-                    col: 0,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
-        );
-        app.cursor.tile_idx = Some(1);
-        app.move_cursor(0, -1);
-        assert_eq!(app.cursor.tile_idx, Some(0));
-    }
-
-    #[test]
-    fn cursor_stays_if_no_tile_in_direction() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[TilePos {
-                layer: 0,
-                row: 0,
-                col: 0,
-            }],
-            &[TileKind::Bamboo(1)],
-        );
-        app.cursor.tile_idx = Some(0);
-        app.move_cursor(1, 0); // no tile to the right
-        assert_eq!(app.cursor.tile_idx, Some(0));
-    }
-
-    #[test]
-    fn new_game_increments_seed() {
-        let mut app = Mahjong::with_seed(42);
-        app.new_game();
-        assert_eq!(app.seed, 43);
-    }
-
-    #[test]
-    fn board_from_parts_correct_count() {
-        let board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 1,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 2,
-                },
-            ],
-            &[
-                TileKind::Bamboo(1),
-                TileKind::Bamboo(2),
-                TileKind::Bamboo(3),
-            ],
-        );
-        assert_eq!(board.tiles.len(), 3);
-        assert_eq!(board.remaining(), 3);
-    }
-
-    #[test]
-    fn render_empty_board() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(&[], &[]);
-        let cmds = app.render(900.0, 700.0);
-        // Should still have background, title, help bar, legend.
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn tile_kind_label_bamboo() {
-        assert_eq!(TileKind::Bamboo(1).label(), "B1");
-        assert_eq!(TileKind::Bamboo(9).label(), "B9");
-    }
-
-    #[test]
-    fn tile_kind_label_circle() {
-        assert_eq!(TileKind::Circle(1).label(), "C1");
-        assert_eq!(TileKind::Circle(9).label(), "C9");
-    }
-
-    #[test]
-    fn tile_kind_label_character() {
-        assert_eq!(TileKind::Character(1).label(), "W1");
-        assert_eq!(TileKind::Character(9).label(), "W9");
-    }
-
-    #[test]
-    fn tile_kind_label_wind() {
-        assert_eq!(TileKind::Wind(0).label(), "E");
-        assert_eq!(TileKind::Wind(1).label(), "S");
-        assert_eq!(TileKind::Wind(2).label(), "W");
-        assert_eq!(TileKind::Wind(3).label(), "N");
-    }
-
-    #[test]
-    fn tile_kind_label_dragon() {
-        assert_eq!(TileKind::Dragon(0).label(), "Dr");
-        assert_eq!(TileKind::Dragon(1).label(), "Dg");
-        assert_eq!(TileKind::Dragon(2).label(), "Dw");
-    }
-
-    #[test]
-    fn tile_kind_label_season() {
-        assert_eq!(TileKind::Season(0).label(), "Sp");
-        assert_eq!(TileKind::Season(1).label(), "Su");
-        assert_eq!(TileKind::Season(2).label(), "Au");
-        assert_eq!(TileKind::Season(3).label(), "Wi");
-    }
-
-    #[test]
-    fn tile_kind_label_flower() {
-        assert_eq!(TileKind::Flower(0).label(), "Pl");
-        assert_eq!(TileKind::Flower(1).label(), "Or");
-        assert_eq!(TileKind::Flower(2).label(), "Ch");
-        assert_eq!(TileKind::Flower(3).label(), "Bm");
-    }
-
-    #[test]
-    fn tile_kind_text_color_varies() {
-        // Each suit category should have a different text color.
-        let bamboo = TileKind::Bamboo(1).text_color();
-        let circle = TileKind::Circle(1).text_color();
-        let wind = TileKind::Wind(0).text_color();
-        assert_ne!(bamboo, circle);
-        assert_ne!(circle, wind);
-    }
-
-    #[test]
-    fn tile_kind_category_values() {
-        assert_eq!(TileKind::Bamboo(1).category(), "Bamboo");
-        assert_eq!(TileKind::Circle(1).category(), "Circle");
-        assert_eq!(TileKind::Character(1).category(), "Character");
-        assert_eq!(TileKind::Wind(0).category(), "Wind");
-        assert_eq!(TileKind::Dragon(0).category(), "Dragon");
-        assert_eq!(TileKind::Season(0).category(), "Season");
-        assert_eq!(TileKind::Flower(0).category(), "Flower");
-    }
-
-    #[test]
-    fn board_free_tiles_on_full_board() {
-        let mut rng = SeededRng::new(42);
-        let board = Board::new(&mut rng);
-        let free = board.free_tiles();
-        // On a standard layout, there should be some free tiles.
-        assert!(!free.is_empty());
-    }
-
-    #[test]
-    fn board_hint_on_full_board() {
-        let mut rng = SeededRng::new(42);
-        let board = Board::new(&mut rng);
-        // A freshly shuffled board with 4 copies of each type should almost
-        // always have a valid pair among the free tiles.
-        // This test may very rarely fail if the shuffle is extremely unlucky,
-        // but with 36 types x 4 copies it's virtually guaranteed.
-        let hint = board.find_hint();
-        // We just check it doesn't crash. The hint may or may not exist
-        // depending on the specific shuffle.
-        let _ = hint;
-    }
-
-    #[test]
-    fn app_undo_clears_selection() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 1,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 1,
-                    col: 5,
-                },
-            ],
-            &[
-                TileKind::Bamboo(1),
-                TileKind::Bamboo(1),
-                TileKind::Bamboo(2),
-                TileKind::Bamboo(2),
-            ],
-        );
-        app.status = GameStatus::Playing;
-        app.try_select(0);
-        app.try_select(1);
-        app.try_select(2); // select a tile
-        assert_eq!(app.selected, Some(2));
-        app.undo();
-        assert_eq!(app.selected, None); // undo clears selection
-    }
-
-    #[test]
-    fn app_hint_clears_on_match() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 1,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 1,
-                    col: 5,
-                },
-            ],
-            &[
-                TileKind::Bamboo(1),
-                TileKind::Bamboo(1),
-                TileKind::Bamboo(2),
-                TileKind::Bamboo(2),
-            ],
-        );
-        app.status = GameStatus::Playing;
-        app.show_hint_pair();
-        assert!(app.show_hint);
-        app.try_select(0);
-        app.try_select(1);
-        assert!(!app.show_hint); // hint clears after match
-    }
-
-    #[test]
-    fn board_tile_at_screen_respects_removed() {
-        let mut board = Board::from_parts(
-            &[TilePos {
-                layer: 0,
-                row: 0,
-                col: 0,
-            }],
-            &[TileKind::Bamboo(1)],
-        );
-        let (tx, ty) = board.tile_screen_pos(0).unwrap();
-        board.tiles[0].removed = true;
-        assert_eq!(board.tile_at_screen(tx + 1.0, ty + 1.0), None);
-    }
-
-    #[test]
-    fn cursor_selects_via_enter_match() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
-        );
-        app.status = GameStatus::Playing;
-        app.cursor.tile_idx = Some(0);
-        app.handle_key(&make_key(Key::Enter));
-        assert_eq!(app.selected, Some(0));
-        app.cursor.tile_idx = Some(1);
-        app.handle_key(&make_key(Key::Enter));
-        assert_eq!(app.board.remaining(), 0);
-    }
-
-    #[test]
-    fn mouse_click_updates_cursor() {
-        let mut app = Mahjong::with_seed(42);
-        app.board = Board::from_parts(
-            &[
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 0,
-                },
-                TilePos {
-                    layer: 0,
-                    row: 0,
-                    col: 5,
-                },
-            ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
-        );
-        app.status = GameStatus::Playing;
-        let (tx, ty) = app.board.tile_screen_pos(1).unwrap();
-        app.handle_mouse(&make_mouse(tx + 1.0, ty + 1.0));
-        assert_eq!(app.cursor.tile_idx, Some(1));
+    fn a_fresh_deal_is_playable_and_the_cursor_starts_on_a_tile_that_can_be_played() {
+        // A cursor pointing at a covered tile would answer Enter with "Tile is
+        // not free" before the player had touched anything.
+        for seed in 0..12u64 {
+            let g = Mahjong::with_seed(seed);
+            assert_eq!(g.board.remaining(), 144, "seed {seed} dealt a short board");
+            assert!(
+                g.board.find_hint().is_some(),
+                "seed {seed} deals a dead board"
+            );
+            let cursor = g.cursor.tile_idx.expect("seed {seed} deals no cursor");
+            assert!(
+                g.board.is_free(cursor),
+                "seed {seed} starts the cursor on a covered tile"
+            );
+            assert_eq!(g.status, GameStatus::Playing);
+        }
     }
 }

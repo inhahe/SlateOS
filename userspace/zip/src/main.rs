@@ -29,6 +29,7 @@
 // errors surface as Err rather than panic.
 #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
+use crc32::crc32;
 use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::{self, File};
@@ -42,47 +43,6 @@ use std::time::SystemTime;
 // hand-rolled syscall stub here hardcoded Linux numbers (WRITE=1=SYS_EXIT,
 // OPEN=2=SYS_TASK_ID, EXIT=60=SYS_SYSCTL_GET, ...) that collide with
 // unrelated native syscalls; it was dead code and has been removed.
-
-// ============================================================================
-// CRC32 (polynomial 0xEDB88320 — same as PKZIP standard)
-// ============================================================================
-
-const fn make_crc32_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
-    let mut i = 0usize;
-    while i < 256 {
-        let mut c = i as u32;
-        let mut k = 0;
-        while k < 8 {
-            if c & 1 != 0 {
-                c = 0xEDB8_8320 ^ (c >> 1);
-            } else {
-                c >>= 1;
-            }
-            k += 1;
-        }
-        table[i] = c;
-        i += 1;
-    }
-    table
-}
-
-static CRC32_TABLE: [u32; 256] = make_crc32_table();
-
-/// Update a running CRC32 with a slice of bytes.
-fn crc32_update(crc: u32, data: &[u8]) -> u32 {
-    let mut c = !crc;
-    for &b in data {
-        let idx = ((c ^ u32::from(b)) & 0xFF) as usize;
-        c = CRC32_TABLE[idx] ^ (c >> 8);
-    }
-    !c
-}
-
-/// Compute the CRC32 of a complete byte slice.
-fn crc32(data: &[u8]) -> u32 {
-    crc32_update(0, data)
-}
 
 // ============================================================================
 // DOS date/time encoding (ZIP uses MS-DOS date/time fields)
@@ -2217,30 +2177,27 @@ mod tests {
     use super::*;
 
     // ---- CRC32 ----
+    //
+    // The polynomial's own test vectors (empty, "123456789" = 0xCBF43926,
+    // incremental chaining) moved out with the implementation: they belong to
+    // the `crc32` crate, which asserts them in its doctests, and repeating
+    // them here would test that crate twice rather than testing this one.
+    //
+    // What is left is the question this crate cannot answer for us: that zip
+    // reaches for the *right* CRC-32. Two functions in this tree answer to
+    // that name -- the reflected-IEEE one PKZIP specifies, and the CRC32C
+    // (Castagnoli) the kernel uses for ext4 -- and picking the wrong one
+    // still compiles, still produces a stable checksum, and still round-trips
+    // against ourselves. It fails only against every other unzip in the
+    // world, which is not something our own round-trip tests below can see.
+    // So this pins the value an outside implementation would compute.
 
     #[test]
-    fn test_crc32_empty() {
-        assert_eq!(crc32(b""), 0x0000_0000);
-    }
-
-    #[test]
-    fn test_crc32_known() {
-        // CRC32("123456789") = 0xCBF43926 per ISO 3309.
+    fn test_zip_uses_reflected_ieee_crc32_not_crc32c() {
+        // 0xCBF43926 is reflected-IEEE over "123456789"; CRC32C over the same
+        // input is 0xE3069283. Only the first is a valid ZIP checksum.
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
-    }
-
-    #[test]
-    fn test_crc32_hello() {
-        assert_eq!(crc32(b"Hello, World!"), 0xEC4A_C3D0);
-    }
-
-    #[test]
-    fn test_crc32_incremental() {
-        let data = b"Hello, World!";
-        let full = crc32(data);
-        let partial = crc32_update(0, &data[..7]);
-        let incr = crc32_update(partial, &data[7..]);
-        assert_eq!(full, incr);
+        assert_ne!(crc32(b"123456789"), 0xE306_9283);
     }
 
     // ---- DOS date/time ----

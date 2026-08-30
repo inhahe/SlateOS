@@ -8,5 +8,13 @@ description = "SlateOS zip/unzip archive utility"
 # extracted into; both are paths, and the second was passed to -d.
 quoting = { path = "../quoting" }
 
+# The ZIP checksum. This is the *reflected IEEE* CRC-32 (polynomial
+# 0xEDB88320) that PKZIP and gzip specify — not the CRC32C (Castagnoli) the
+# kernel uses for ext4 metadata. Both are called "CRC-32" in conversation and
+# they produce entirely different values, so the distinction is worth stating
+# here rather than leaving it to be rediscovered from a checksum that
+# verifies against nothing.
+crc32 = { path = "../../crc32" }
+
 [lints]
 workspace = true

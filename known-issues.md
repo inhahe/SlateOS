@@ -62532,17 +62532,30 @@ nice nohup patch ps readlink realpath renice rm rmdir sed sh sha256sum sleep
 stat strings tar tee time_cmd touch tty which xargs yes
 ```
 
-**Burn-down progress.** Converted so far: `rm`, `mv`, `cp`, `ln`, `mkdir` (all
-2026-08-22, see the sections at the end of this entry). The live count is
-whatever `python scripts/argv-utf8.py --check` prints; the baseline shrinks by
-one line per conversion and never grows, so this paragraph cannot silently go
-stale in the dangerous direction — if it disagrees with the tool, the tool is
-right.
+**Burn-down progress — 2026-08-30: seven findings left, in six files.** Naming
+what is *left* is now shorter than naming what is done, so this paragraph names
+that instead:
 
-**Every conversion so far has uncovered unrelated bugs in the `main` it
+```
+diff  fetch  logger  patch  ps  sh (twice — argv and the environment)
+```
+
+`fetch` and `sh` are unblocked and are the next two to do. `diff`, `logger`,
+`patch` and `ps` each have a second implementation of the same utility outside
+`userspace/coreutils/` (`userspace/diff/`, `userspace/logger/`,
+`userspace/patch/`, `userspace/ps/`), so converting one of them means first
+deciding which copy is the real one — `open-questions.md` → **B-Q7** — and doing
+it before that is answered means doing it twice.
+
+The live count is whatever `python scripts/argv-utf8.py --check` prints; the
+baseline shrinks by one line per conversion and never grows, so this paragraph
+cannot silently go stale in the dangerous direction — if it disagrees with the
+tool, the tool is right.
+
+**Every conversion has uncovered unrelated bugs in the `main` it
 replaced** — three in `rm`, four in `mv`, six in `cp`, four in `ln`, four in
-`mkdir`, none of
-them about UTF-8 and all of them in code that no test touched. That is the argument for converting these
+`mkdir`, nine in `ed`, none of
+them about UTF-8. In the first five, all of them were in code that no test touched. `ed` broke that half of the pattern and kept the other half — it had 35 unit tests and all nine defects survived them (see its section below) — which sharpens the claim rather than weakening it: the marker is not "no tests", it is *no test of the observable behaviour*. That is the argument for converting these
 files properly rather than mechanically swapping `env::args()` for
 `env::args_os()`: the defect is a marker for *untested `main`*, and the panic
 is only the part of that a checker can see.
@@ -63155,6 +63168,101 @@ list), and returns the entry it matched. `resolve_long` delegates to it with an
 empty map, so the 23 call sites with no aliases needed no change and there is
 still only one implementation. `cp` was the one live bin affected; `rmdir` would
 have been wrong the same way the moment it was converted.
+
+### `ed` converted, and the nine further defects the rewrite uncovered (2026-08-30)
+
+Gate count 8 → 7. Commit `0a337ffdd`. 44 tests, up from 35 — and **35 is the
+number that matters here**, because this is the first conversion where the
+replaced `main` was not untested. See "what the 35 tests were" below.
+
+**For an editor the argv panic was the smaller half.** The buffer was
+`Vec<String>` filled by `fs::read_to_string`, so a file holding one byte that is
+not valid UTF-8 could not be opened at all: the read returned `InvalidData`,
+which the old `main` could not distinguish from "no such file", and answered by
+printing `0` and presenting an **empty buffer**. A subsequent `w` then truncated
+the file to nothing. That is silent data loss on a file the user asked to edit,
+and it is why this went all the way to `Vec<Vec<u8>>` — argv, the name handed to
+the syscall, the buffer, the substitution and stdout are all bytes now — rather
+than swapping one `env::args()` call. GNU `ed` is byte-clean throughout;
+measured, a name and a content both holding `0x80` round-trip unchanged.
+
+So this conversion lands on the `rm`/`mv`/`cp` side of the split, not the
+`ln`/`mkdir` side: the argv defect was again a marker for something that loses
+data.
+
+**The nine defects**, one line each; the full write-up with the measurements is
+in `userspace/coreutils/src/bin/ed.rs`'s module header, which is the copy to
+keep current:
+
+1. **No options at all**, `--help` and `--version` included — the first argument
+   was the file name whatever it looked like, so `ed -s f` opened a file called
+   `-s`.
+2. **Every diagnostic went to stdout and the status was always 0.** GNU splits
+   them (`?` and the `-v` explanation to stdout, the OS's own complaint to
+   stderr) and grades 0 / 1 / 2. A script could not tell success from failure.
+3. **`,p` printed one line.** A leading `,` was read as "no address", so the
+   documented "print all lines" printed the current one. `%` was not understood.
+4. **`=` printed the line *count*, never the addressed line.**
+5. **An out-of-range or reversed address was silent** — `0p`, `9p`, `4,2p` all
+   printed nothing and continued, where GNU answers `?` and stops.
+6. **`s` echoed the line it changed**, so a script's `1,$s/…/…/` got the whole
+   file printed back at it.
+7. **A trailing `\r` was stripped from every line unconditionally**, so `w`
+   silently rewrote a CRLF file as LF. GNU does this only under
+   `--strip-trailing-cr`.
+8. **A file whose last line had no newline was miscounted** and got no
+   `Newline appended` notice.
+9. **A command suffix was ignored rather than refused** — `1pX` printed the line.
+
+**What the 35 tests were, and why they caught none of this.** Every one of them
+called a helper directly: `nth_line_basic`, `insert_at_out_of_range_clamps_to_end`,
+`substitute_global`, `parse_sub_escape_delim`, `parse_range_with_dollar`, and so
+on. Not one ran a command through the dispatch loop, and not one looked at
+stdout, stderr, the exit status, or the file on disk. The helpers were correct;
+all nine defects live in the layer above them. **A utility's tests can be
+numerous, passing and entirely beside the point** — the shape to look for is a
+test module that never produces the program's own output.
+
+**The harness compares four observables, not three.** `scripts/ed-diff.sh` runs
+140 cases against GNU ed 1.20.1 under WSL and checks stdout, stderr, the exit
+status **and the bytes left on disk**. The fourth is not belt-and-braces: the
+truncation bug at the top of this section agreed with GNU on all three of the
+usual observables and disagreed only on the file. Any harness for a program that
+*writes* wants that column.
+
+Every case runs in both stdin kinds, because GNU's governing predicate is
+`is_regular_file(stdin)` and **not `isatty`** — it decides the `script, line N:`
+prefix, whether `ed` stops at the first error, and whether a bad operand is
+fatal. Measuring rather than recalling also produced four findings that no
+amount of reading would have: `p`/`n`/`l` are an *additive bitfield* rather than
+three styles (`1nl` prints numbered *and* listed); the `l` fold margin is 72
+printed columns tested *before* each escape, with no look-ahead; an unterminated
+`s` implies print; and a failed open and a failed read are graded differently (a
+directory operand opens, then fails to read — two lines, status 1).
+
+**The harness had a bug of its own, worth carrying to the next one.** It built
+each script through `$(...)`, which strips trailing newlines — and for `ed` that
+changes the exit status (`printf '1d\nq\n'` exits 1; the same text without the
+final newline exits 2). It manufactured 14 differences in code that was already
+correct. Scripts are now passed down `%b`-escaped and expanded at the point of
+use. **`$(...)` is not a faithful carrier for test input**, and the failure is
+worst where the trailing newline is semantic, which for a line editor it is.
+
+**Still missing: regular expressions.** `s` matches a literal string and there
+are no `/RE/` addresses, no `g`/`v`/`G`/`V`. That is
+`TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS`; the fix is `ere::bre`, which `sed` already
+uses, and the 14 cases that will turn `KFIXED` when it lands are already in the
+harness, so the entry cannot be silently outlived. The scope calls — what this
+`ed` refuses rather than guesses at, and why it prints file names raw instead of
+quoted — are `design-decisions.md` §713.
+
+**`ed` is also the first bin whose option table the gate could not read**, since
+GNU `ed` links its own argument parser rather than glibc's `getopt_long` and so
+prints no `possibilities:` list. That is written up under
+`scripts/getopt-ambiguity-check.py`'s `OWN_PARSER`, with the cross-validation
+that made the second measurement path sound: `--help` is a **one-sided** readout
+of an option table — checked on six glibc utilities, it never named an option the
+parser lacked, but routinely omitted ones it had.
 
 ---
 
@@ -97558,3 +97666,255 @@ throughout; only the test's way of naming its own caller was wrong.
 | The fix | `kernel/src/lockdep.rs::site_probe_acquire` |
 | How to reproduce (before the fix) | `./scripts/boot-test.sh --bench` — release build, panics before the bench task runs |
 | The gate that missed it | `scripts/boot-test.sh` without `--bench` builds debug |
+
+---
+
+## TD-B-ED-HAS-NO-REGULAR-EXPRESSIONS — `ed`'s `s` matches a literal string, and there are no `/RE/` addresses (lane B, 2026-08-30) — **open**
+
+**In short:** `ed` is the line editor. Its search-and-replace command, `s`,
+is supposed to take a *regular expression* — a small pattern language in which
+`.` means "any character", `*` means "the thing before, repeated", `^` means
+"the start of the line", and so on. Ours takes the pattern **literally**: it
+looks for a full stop, an asterisk, a caret. So `s/./X/` replaces the first
+full stop where GNU replaces the first character, and a script written for a
+real `ed` will quietly do the wrong thing rather than fail. The same gap
+removes the `/pattern/` form of naming a line, and with it the `g` and `v`
+commands that act on every line matching one.
+
+Nothing is wrong with what `ed` *does* today — the literal path is correct for
+literal patterns, and the differential harness pins all of it. What is missing
+is the pattern language.
+
+### What is affected
+
+| Missing | What GNU does | What we do |
+|---|---|---|
+| `s/RE/repl/` | matches a basic regular expression | matches the bytes literally |
+| `/RE/`, `?RE?` as an address | the next (previous) matching line | `Invalid address` |
+| `//` and `??` | repeat the last pattern | `Invalid address` |
+| `g/RE/cmd`, `v/RE/cmd` | run `cmd` on every (non-)matching line | `Unknown command` |
+| `G/RE/`, `V/RE/` | the interactive forms of the above | `Unknown command` |
+| `&` in a replacement | the whole match | a literal ampersand |
+| `\1`…`\9` in a replacement | the *n*th parenthesised group | a literal backslash-digit |
+
+Also absent, and worth doing in the same pass because they are what a real
+script uses next: `m` (move), `t` (copy), `j` (join), `k` (mark) and the `'x`
+address, `r` (read a file in), `e`/`E` (edit another file), `u` (undo), `x`/`y`
+(the cut buffer), `#` (a comment), and `!command` (run a shell command, which
+also decides what a file name starting with `!` means). `h`/`H` — the last
+error's explanation — are absent too; `-v` covers the same ground for a script
+but not for a person at a terminal.
+
+### The fix
+
+`ere::bre::compile(pattern, ci) -> Result<Regex, EreError>`, which is already
+in the tree and already used by `sed` (`userspace/coreutils/src/bin/sed.rs`
+line ~626 — the same POSIX *basic* dialect `ed` wants, so no new engine and no
+second dialect to keep in step). `ere`'s alphabet is bytes (`BStr<'a> = &'a
+[u8]`, `Str = Vec<u8>`), which is what `ed`'s buffer already holds, so nothing
+has to be decoded on the way in.
+
+Concretely, in `userspace/coreutils/src/bin/ed.rs`:
+
+1. `Substitution.pattern` becomes a compiled `Regex` instead of a `Vec<u8>`,
+   and `substitute_line` uses `find_at`/`capture_spans_at` rather than a
+   window comparison. Keep the last compiled pattern on the `Editor` so `//`
+   and a bare `s//repl/` can reuse it.
+2. `parse_address` grows the `/`…`/` and `?`…`?` forms, searching forward and
+   backward from `.` and wrapping, which is what GNU does.
+3. `g`, `v`, `G`, `V` join the `execute` dispatch: mark every matching line
+   first, *then* run the command list, because the command list can renumber
+   the buffer underneath a one-pass loop.
+4. `&` and `\1`…`\9` in the replacement, from `capture_spans`.
+5. A compile failure is its own diagnostic. GNU's wording for a bad pattern is
+   the regex library's own text (e.g. `Unmatched [ or [^`), not one of ed's
+   twelve sentences; measure it rather than invent one.
+
+### How to see it
+
+```
+$ printf '1s/./X/\n,p\nq\n' | ed f.txt     # f.txt is alpha/beta/gamma
+17
+?                                          # GNU prints Xlpha
+```
+
+`scripts/ed-diff.sh` carries 14 `kbug_pipe` cases naming this entry — the
+substitutions above, the `/beta/p` address, `g/a/p`, and one for each missing
+command. They are loud on every run and do not fail it. When this is fixed
+they turn into `KFIXED`, which *does* fail the run, so the harness will insist
+the entry be closed at the same time.
+
+### Where
+
+| | |
+|---|---|
+| The literal matcher | `userspace/coreutils/src/bin/ed.rs`, `substitute_line` |
+| The parser that would grow the `/RE/` forms | same file, `parse_address`, `parse_substitute` |
+| The engine to use | `userspace/ere/src/bre.rs`, `compile` |
+| The precedent | `userspace/coreutils/src/bin/sed.rs`, which compiles the same dialect |
+| The harness cases | `scripts/ed-diff.sh`, the `kbug_pipe` block |
+
+## `B-A-HOOK-EDIT-DID-NOTHING-BECAUSE-THE-HOOK-WAS-INSTALLED-AS-A-COPY` (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+**In short:** Git "hooks" are little scripts git runs automatically at certain
+moments — ours run at `git push` and refuse the push if a check fails. The
+tracked source of the push hook lives at `scripts/hooks/pre-push`, but what git
+actually ran was a **copy** of it made by `scripts/install-hooks.sh` at some
+earlier date. So editing the tracked file changed nothing until somebody
+remembered to re-run the installer, and nobody did. A gate added, committed and
+pushed on 2026-08-30 never ran — including on the very push it was written to
+check. Fixed by making the installer install a *trampoline* (a two-line stub
+that finds and runs the tracked file) instead of a copy.
+
+### Why it is the worst shape a guard can fail in
+
+**"The gate found nothing" and "the gate does not exist" print the same thing,
+which is nothing.** The push output looked entirely normal: every other gate
+reported in, the getopt sweep printed its usual `1 table(s) checked; 0
+disagreement(s)`, and the new `selftest: 5/5 rules ok` line simply was not
+there. Absence of a line is not something a reader notices, and there was no
+non-zero status anywhere to notice instead. This is the same rule the gates
+already state about their own exemption lists — *a check that cannot fire must
+not be indistinguishable from a check that passes* — turned around and pointed
+at the delivery mechanism rather than the check.
+
+It was found only because the line was expected within a minute of adding it. A
+gate added and not watched for would still be dormant.
+
+### The second failure, which is worse and was silent for longer
+
+`.git/hooks` is **shared by all four worktrees**. `core.hooksPath` is unset, and
+a linked worktree has no `hooks` directory of its own, so git falls back to
+`$GIT_COMMON_DIR/hooks` — one directory, serving `os`, `os-lane-a`, `os-lane-b`
+and `os-lane-c`.
+
+One installed copy cannot serve four checkouts sitting at four different
+commits. The hook runs the checker scripts out of `git rev-parse
+--show-toplevel` (`pre-push` line 191), which resolves per push to *the pushing
+lane's* tree — so a copy installed from lane B's checkout was already running
+lane A's checker scripts whenever lane A pushed. **Hook body and checker scripts
+came from different commits**, and whichever lane re-ran the installer last
+silently set the hook version for the other three. A lane that added a gate and
+correctly re-installed it would have been overwritten by the next lane to run
+the installer, with no message either way.
+
+### The fix
+
+`scripts/install-hooks.sh` now writes an eight-line trampoline per hook:
+
+```sh
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+real="$root/scripts/hooks/${0##*/}"
+if [ ! -f "$real" ]; then
+    echo "hook ${0##*/}: $real does not exist in this checkout; nothing ran" >&2
+    exit 0
+fi
+SLATEOS_HOOK_TRAMPOLINE=1
+export SLATEOS_HOOK_TRAMPOLINE
+exec sh "$real" "$@"
+```
+
+Four properties, each answering one of the failures above:
+
+| | |
+|---|---|
+| It resolves the tree **at push time** | each lane runs its own checked-out hook, so hook and checkers come from one commit |
+| It names the hook by `$0`'s basename | the body has no version of its own to drift, and is the same for every hook |
+| `exec` rather than a call | keeps stdin — git feeds `pre-push` its ref list that way, and a trampoline that swallowed it would make every hook see an empty push |
+| It sets `SLATEOS_HOOK_TRAMPOLINE=1` | `pre-push` warns on stderr when that is unset, which is exactly the condition "I am a stale copy" |
+
+A missing tracked hook is a **skip with a message on stderr, not a failure** —
+checking out a commit from before the hook existed (a bisect, an archaeology
+dig) must not make the tree unpushable, and the message says why nothing ran.
+
+Installing it is a one-time act per clone, and one run arms all four worktrees
+because they share the one `.git`. It is already done. Verified the same day:
+the next push printed `selftest: 5/5 rules ok` followed by the getopt sweep,
+which is the line whose absence started this.
+
+### The hook now says what it did, which is the other half of the fix
+
+The trampoline stops the hook being *stale*. It does not stop it being
+*absent* — and on a push that edits only documentation every path-gated check
+legitimately skips, so `pre-push` printed nothing at all, which is exactly the
+output a hook that never ran produces. That ambiguity is what hid this bug, and
+removing the cause without removing the ambiguity would leave the next delivery
+failure just as invisible.
+
+So each gate now calls `note_gate <name> <skip-flag>`, and the hook ends with an
+unconditional tally:
+
+```
+pre-push: 3 gate(s) ran, 7 skipped.
+  ran:    private-file rustfmt fixture-identity
+  skipped: unreachable-command raced-global argv-utf8 getopt-table host-errmsg
+           quote-names request-deletion
+```
+
+Three readings that silence could not carry: **no line at all** means the hook
+did not execute; `0 ran, 10 skipped` means the push was judged by nothing; and a
+gate named in `skipped` on a push that plainly should have triggered it is a
+`touches` pattern that is too narrow — previously indistinguishable from a gate
+that ran and was content. A refusing gate exits before the tally, so it records
+what was *asked*, not that the push passed.
+
+Gate 5 is the shape worth copying. Its `skip_getopt` was not its real skip
+condition: a push that changed no coreutils bin left both of its blocks as
+no-ops while the flag still said "running". Having to report itself forced the
+effective condition to be named (`skip_getopt_eff`), which is the usual effect
+of making a thing account for what it did.
+
+### Where else to look
+
+- **Any check whose only evidence of running is a line of output.** Prefer a
+  gate that reports a *count* it had to compute (`1 table(s) checked`) over one
+  that prints only on failure: a count of zero and a check that never ran are
+  distinguishable, silence and success are not.
+- **Anything else installed by copying a tracked file into an untracked
+  location.** The class of bug is "the artefact and its source can disagree, and
+  nothing compares them". `git config --get core.hooksPath` should stay unset;
+  if a future change sets it, the trampoline is bypassed and this returns.
+
+### C-COREUTILS-STDFD-FLUSH-ORDER-TESTS-RACE — 2026-08-30 — LANE C reporting, lane B's tree, OPEN
+
+`cargo test --workspace` came back red on an otherwise-green tree with one
+failure in a crate `lane-c` has never touched:
+
+```
+---- stdfd::tests::a_stream_on_standard_error_flushes_standard_output_too stdout ----
+thread '…' panicked at userspace\coreutils\src\stdfd.rs:1270:9:
+the write should still be buffered
+```
+
+Line 1270 is the test's *first* assertion, one line after its own seven-byte
+write into descriptor 1's process-global buffer. Descriptor 1 is never
+`Buffering::None`, so an empty buffer there means another thread flushed it.
+
+Green in isolation (15 passed), green on three consecutive full `-p coreutils
+--lib` runs (299 each), red only under the parallelism of a workspace run.
+`git diff --stat origin/main -- userspace/coreutils` is empty, so it is
+pre-existing rather than merge-induced, and `src/bin/*.rs` are separate
+processes, so the racer is inside the lib test binary.
+
+**The racer is `stdfd::tests::a_lost_diagnostic_is_remembered_and_a_delivered_one_is_not`**,
+which is the one test in the module that touches descriptor 2 without taking
+the `shared()` mutex. `Inner::put`/`Inner::drain` open with
+`before_diagnostic(fd)`, which flushes stdout whenever `fd == 2` — so its two
+`diag_to(2, b"")` calls empty the buffer that the two flush-ordering tests have
+just written and are about to assert on.
+
+Its own doc comment explains why it is unguarded, and the reasoning is sound as
+far as it goes: it is the only reader of the sticky `DIAGNOSTIC_LOST` flag. What
+it misses is that `diag_to(2, …)` also writes a *different* global. The guard's
+rule was stated as "hold this if you assert on descriptor 1"; stated correctly —
+"hold this if you touch descriptor 1 **or** descriptor 2" — this test is
+obviously inside it.
+
+Fix is one line: `let _shared = shared();` at the top of that test. Filed for
+lane B as `requests/c-b-the-lost-diagnostic-test-flushes-the-two-flush-order-tests-buffer.md`.
+
+**Where else to look:** any test-module mutex whose contract is written in terms
+of the state a test *reads*. A side effect on a second global — here, "writing a
+diagnostic flushes the output it comes after", which is the feature under test —
+puts a test inside the guard's scope without it ever mentioning the guarded
+state.

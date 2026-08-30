@@ -2887,6 +2887,14 @@ mod tests {
             (0, 1, 2, TileKind::Bamboo(3)),
             (1, 5, 0, TileKind::Bamboo(4)),
             (1, 5, 2, TileKind::Bamboo(5)),
+            // The layer half of the claim, which the rows above cannot make:
+            // these two are beside tile 0 by column and share its row, and are
+            // not beside it only because they are a layer up. Without them the
+            // sweep could delete the layer test from `is_free` and this fixture
+            // -- where every other tile is a row away -- still called tile 0
+            // free. (Neither covers it: covering needs the same column too.)
+            (1, 0, 0, TileKind::Bamboo(6)),
+            (1, 0, 2, TileKind::Bamboo(7)),
         ]);
         assert!(b.is_free(0), "a tile was blocked by neighbours a row away");
     }
@@ -3394,6 +3402,36 @@ mod tests {
         assert_eq!(
             changed, 2,
             "a hint of two tiles repainted {changed} of them"
+        );
+    }
+
+    #[test]
+    fn a_hint_stops_being_painted_once_it_is_dismissed() {
+        // `self.hint` outlives `self.show_hint` on purpose -- selecting a tile
+        // puts the hint away without forgetting which pair it was -- so the
+        // drawing pass has to consult both. The sweep deleted the `show_hint`
+        // half and every test agreed with it, because none of them ever drew a
+        // frame in the one state that distinguishes them: a hint remembered
+        // but not shown.
+        let mut g = game();
+        assert!(g.show_hint_pair(), "the hint key did nothing");
+        let (a, b) = g.hint.expect("the hint key set no pair");
+        let other = (0..g.board.tiles.len())
+            .find(|&i| i != a && i != b && g.board.is_free(i))
+            .expect("a fresh deal has a third free tile");
+        assert!(g.try_select(other), "selecting a free tile changed nothing");
+
+        assert!(!g.show_hint, "selecting a tile left the hint on show");
+        assert_eq!(g.hint, Some((a, b)), "selecting a tile forgot the hint");
+        // Sized as well as coloured: `TILE_HINT` is the same hex value as the
+        // bamboo swatch in the legend, so a colour-only filter finds a hint on
+        // every frame ever drawn.
+        let l = g.layout();
+        assert!(
+            !fills(&g.draw(Mahjong::SIZE))
+                .iter()
+                .any(|&(r, c)| c == TILE_HINT && r.w == l.tile_w && r.h == l.tile_h),
+            "a hint that was put away is still painted"
         );
     }
 
@@ -4210,6 +4248,14 @@ mod tests {
             (0, 0, 2, TileKind::Season(3)),
         ]);
         g.cursor.tile_idx = Some(0);
+        // Not won *yet*, which is half the claim the name makes and the half
+        // this test was missing: a board declared won with a pair still on it
+        // passed everything here, because nothing looked at the board until
+        // after the pair had been taken.
+        assert!(
+            !g.board.is_won(),
+            "a board with a pair still on it is already won"
+        );
         assert!(g.try_select(0));
         assert!(g.try_select(1));
         assert_eq!(g.status, GameStatus::Won);

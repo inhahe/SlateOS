@@ -450,10 +450,14 @@ MUTATIONS = [
         ["the_deal_is_a_full_mahjong_set_of_a_hundred_and_forty_four"],
     ),
     (
-        "the board is only won when it is also unwinnable",
+        # Not `remaining() == 0 && find_hint().is_none()`, the first try: an
+        # empty board has no hint either, so the added half is always true
+        # where the first half is, and the mutant computed the same answer.
+        # Winning two tiles early is the same mistake made observable.
+        "the board is won a pair before it is empty",
         "        self.remaining() == 0",
-        "        self.remaining() == 0 && self.find_hint().is_none()",
-        ["an_empty_board_is_won_and_not_lost"],
+        "        self.remaining() <= 2",
+        ["taking_the_last_pair_wins_the_game"],
     ),
     (
         "an empty board is reported as lost",
@@ -535,9 +539,13 @@ MUTATIONS = [
         ["n_deals_a_new_game_from_a_new_seed"],
     ),
     (
-        "the deal is not seeded, so the same seed gives two different games",
+        # Not `seed.wrapping_add(1)`, the first try: shifting every seed by one
+        # relabels the deals without merging any two of them, so the same seed
+        # still gives the same game and two seeds still differ. It survived by
+        # being a permutation. Ignoring the seed is the real fault.
+        "the deal ignores its seed, so every game is the same one",
         "    fn with_seed(seed: u64) -> Self {",
-        "    fn with_seed(seed: u64) -> Self {\n        let seed = seed.wrapping_add(1);",
+        "    fn with_seed(seed: u64) -> Self {\n        let seed = 0x5eed_u64;",
         ["two_games_from_one_seed_are_the_same_and_from_two_seeds_are_not"],
     ),
     # -- The picture ---------------------------------------------------
@@ -598,10 +606,10 @@ MUTATIONS = [
         ["a_hinted_pair_is_painted_differently_from_the_rest"],
     ),
     (
-        "the hint highlights both tiles of the wrong pair",
+        "a hint is painted even after it has been put away",
         "            let is_hint = self.show_hint && self.hint.is_some_and(|(a, b)| idx == a || idx == b);",
         "            let is_hint = self.hint.is_some_and(|(a, b)| idx == a || idx == b);",
-        ["a_hinted_pair_is_painted_differently_from_the_rest"],
+        ["a_hint_stops_being_painted_once_it_is_dismissed"],
     ),
     (
         "the cursor border is the old fixed two pixels",

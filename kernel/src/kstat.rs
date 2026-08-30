@@ -315,6 +315,25 @@ pub fn recent(count: usize) -> alloc::vec::Vec<Sample> {
     result
 }
 
+/// How many samples the history buffer holds before it wraps.
+///
+/// Exposed so a projection over this buffer can report the real depth rather
+/// than carry a second copy of the number — `fs::perfmon` used to advertise a
+/// 300-sample window it had no way to fill.
+#[must_use]
+pub const fn history_depth() -> usize {
+    HISTORY_SIZE
+}
+
+/// The interval between samples, in milliseconds.
+///
+/// Derived from the tick rate rather than written out, so it cannot disagree
+/// with [`SAMPLE_INTERVAL_TICKS`] after someone changes one of them.
+#[must_use]
+pub const fn sample_interval_ms() -> u64 {
+    SAMPLE_INTERVAL_TICKS * 1000 / crate::apic::TICK_RATE_HZ as u64
+}
+
 /// Get total number of samples recorded.
 #[must_use]
 pub fn total_samples() -> u64 {

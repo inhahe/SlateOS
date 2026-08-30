@@ -7636,41 +7636,49 @@ fn gen_perfmon() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (cpu_n, mem_n, disk_n, net_n, alerts_n, ops) = super::perfmon::stats();
+    let (in_window, since_boot, alerts_n, changes) = super::perfmon::stats();
     let cfg = super::perfmon::get_config();
 
     out.push_str("Performance Monitor\n");
     out.push_str("===================\n\n");
-    out.push_str(&format!("Interval:    {} ms\n", cfg.sample_interval_ms));
+    out.push_str(&format!("Interval:      {} ms\n", cfg.sample_interval_ms));
     out.push_str(&format!(
-        "CPU samples: {} ({})\n",
-        cpu_n,
-        if cfg.cpu_enabled { "on" } else { "off" }
+        "Window:        {in_window} of {} samples\n",
+        cfg.max_samples
     ));
+    out.push_str(&format!("Since boot:    {since_boot} samples\n"));
     out.push_str(&format!(
-        "Mem samples: {} ({})\n",
-        mem_n,
-        if cfg.mem_enabled { "on" } else { "off" }
+        "Thresholds:    cpu {}%, mem {}% ({changes} changes)\n",
+        cfg.cpu_alert_pct, cfg.mem_alert_pct
     ));
-    out.push_str(&format!(
-        "Disk samples:{} ({})\n",
-        disk_n,
-        if cfg.disk_enabled { "on" } else { "off" }
-    ));
-    out.push_str(&format!(
-        "Net samples: {} ({})\n",
-        net_n,
-        if cfg.net_enabled { "on" } else { "off" }
-    ));
-    out.push_str(&format!("Alerts:      {}\n", alerts_n));
-    out.push_str(&format!("Operations:  {}\n", ops));
+    out.push_str(&format!("Alerts firing: {alerts_n}\n"));
 
     if let Some(cpu) = super::perfmon::cpu_latest() {
         out.push_str(&format!(
-            "\nLatest CPU: {}% ({} MHz, {} procs, {} threads)\n",
-            cpu.usage_pct, cpu.freq_mhz, cpu.process_count, cpu.thread_count
+            "\nLatest CPU: {}% over the last interval ({} runnable, {} live tasks)\n",
+            cpu.usage_pct, cpu.runnable_tasks, cpu.live_tasks
+        ));
+        out.push_str("Per core:  ");
+        for (i, pct) in cpu.per_core.iter().enumerate() {
+            out.push_str(&format!(" cpu{i}={pct}%"));
+        }
+        out.push('\n');
+    }
+    if let Some(mem) = super::perfmon::mem_latest() {
+        out.push_str(&format!(
+            "Latest mem: {}% used ({} of {} KiB), heap {} KiB, pressure {}\n",
+            mem.used_pct(),
+            mem.used_bytes / 1024,
+            mem.total_bytes / 1024,
+            mem.heap_bytes / 1024,
+            mem.pressure_score
         ));
     }
+
+    // Disk and network time series are deliberately absent, not missing: the
+    // sampler runs in the timer softirq and cannot take the locks their
+    // counters live behind. The cumulative figures are here instead.
+    out.push_str("\nDisk/network: see /proc/diskstat and /proc/netdev (cumulative, not sampled)\n");
 
     out.into_bytes()
 }

@@ -1,0 +1,9 @@
+[package]
+name = "objdump"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS ELF object file analysis tools"
+[dependencies]
+
+[lints]
+workspace = true

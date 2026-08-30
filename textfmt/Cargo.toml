@@ -1,0 +1,19 @@
+[package]
+name = "textfmt"
+version = "0.1.0"
+edition = "2024"
+description = "Escaping and parsing for the line-oriented text formats SlateOS reads and writes: CSV, markup, and `key = value` config."
+
+[lib]
+path = "src/lib.rs"
+
+# Intentionally dependency-free and `no_std` + `alloc`, mirroring `yamldoc`
+# and `tzrules`. These primitives were extracted from the GUI toolkit because
+# the components that most need them are the ones that cannot depend on it:
+# the file indexer, the backup tool and the installer are headless, so before
+# this crate existed each of them wrote its own escaper — and each got it
+# wrong in the same way. See `src/lib.rs`.
+[dependencies]
+
+[lints]
+workspace = true

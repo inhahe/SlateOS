@@ -1,0 +1,17 @@
+[package]
+name = "blockbuf"
+version = "0.1.0"
+edition = "2024"
+description = "Merkle-Damgard block buffering and length padding, written once."
+
+[lib]
+path = "src/lib.rs"
+
+# Dependency-free and `no_std` with no `alloc`, for the same reason `sha2` is:
+# its callers include the kernel, the bootloader's `build.rs` and the
+# bare-metal service binaries, none of which have a heap. The state is one
+# fixed-size array and two counters, so there is nothing to allocate.
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,41 @@
+[package]
+name = "compositor"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS Compositor — display server with window compositing and input routing"
+
+[dependencies]
+# The user's appearance settings, as a model rather than a panel. The
+# compositor draws the window frames, so it is the process that has to know
+# how round the user asked their corners to be and whether they want shadows;
+# reading the same definitions the Settings panel writes is what stops the
+# display server and the settings UI disagreeing about what "Rounded" means.
+# No cycle: `appearance` depends only on `guitk`, `settingsfile` and `yamldoc`.
+appearance = { path = "../appearance" }
+
+# The user's input settings, on the same terms. The compositor decides whether
+# two title-bar clicks are one double click, so it is the process that has to
+# know how long the user asked to be given between them.
+inputsettings = { path = "../inputsettings" }
+
+# The keyboard layouts. `design-decisions.md` §456 puts scancode-to-letter
+# translation here, in the one process every client's keystrokes pass through,
+# so that a layout change takes effect everywhere at once; this is the table it
+# translates with. A leaf crate with no dependencies of its own — the desktop
+# shell reads the same one to draw a picture of the keyboard, and neither of
+# them should have to link the other to agree about what a key produces.
+keylayout = { path = "../keylayout" }
+
+guitk = { path = "../toolkit" }
+guiremote = { path = "../remote" }
+osfont = { path = "../font" }
+
+# `settingsfile::testing` -- reached here as `appearance::config::testing` -- for the tests that
+# run against a scratch configuration directory instead of the developer's
+# own. Cargo unifies this with the ordinary dependency when building tests,
+# so the module exists for `cargo test` and nowhere else.
+[dev-dependencies]
+settingsfile = { path = "../settingsfile", features = ["testing"] }
+
+[lints]
+workspace = true

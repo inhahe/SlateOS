@@ -1,0 +1,449 @@
+//! Auto Fix — automated problem detection and repair.
+//!
+//! Scans for common system issues (orphaned files, broken shortcuts,
+//! registry inconsistencies, corrupted caches) and offers automatic repair.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! Scheduled or manual scan
+//!   → autofix::scan() → list of detected issues
+//!   → autofix::fix(issue_id) → attempt repair
+//!   → autofix::fix_all() → repair all fixable issues
+//!
+//! Integration:
+//!   → sysdiag (system diagnostics)
+//!   → health (filesystem health)
+//!   → storageclean (cleanup)
+//!   → crashreport (crash recovery)
+//! ```
+
+#![allow(dead_code)]
+
+use crate::sync::PreemptSpinMutex as Mutex;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use crate::error::{KernelError, KernelResult};
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/// Issue severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Info,
+    Warning,
+    Error,
+    Critical,
+}
+
+impl Severity {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Info => "Info",
+            Self::Warning => "Warning",
+            Self::Error => "Error",
+            Self::Critical => "Critical",
+        }
+    }
+}
+
+/// Issue category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueCategory {
+    OrphanedFiles,
+    BrokenShortcuts,
+    CorruptedCache,
+    MissingDependency,
+    DiskErrors,
+    PermissionErrors,
+    ConfigInconsistency,
+    TempFileAccumulation,
+    ServiceFailure,
+    DriverIssue,
+}
+
+impl IssueCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OrphanedFiles => "Orphaned Files",
+            Self::BrokenShortcuts => "Broken Shortcuts",
+            Self::CorruptedCache => "Corrupted Cache",
+            Self::MissingDependency => "Missing Dependency",
+            Self::DiskErrors => "Disk Errors",
+            Self::PermissionErrors => "Permission Errors",
+            Self::ConfigInconsistency => "Config Inconsistency",
+            Self::TempFileAccumulation => "Temp File Accumulation",
+            Self::ServiceFailure => "Service Failure",
+            Self::DriverIssue => "Driver Issue",
+        }
+    }
+}
+
+/// Fix status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixStatus {
+    Detected,
+    FixAvailable,
+    Fixed,
+    CannotFix,
+    Ignored,
+}
+
+impl FixStatus {
+    /// Whether the issue is still outstanding — detected and not yet resolved.
+    ///
+    /// Named rather than open-coded because three call sites need this exact
+    /// pair and a fourth got it wrong: `scan`'s duplicate suppression tested
+    /// `== Detected` alone, while `scan` itself records new issues as
+    /// `FixAvailable`, so the check matched nothing it was meant to match and
+    /// every scan re-added every issue it had already found. `fix` and
+    /// `fix_all` had the pair right; centralising it leaves one spelling to
+    /// get right rather than four.
+    ///
+    /// `Fixed` and `Ignored` are deliberately excluded: an issue that recurs
+    /// after being resolved is a genuinely new finding and should be reported
+    /// again rather than suppressed.
+    pub fn is_outstanding(self) -> bool {
+        matches!(self, Self::Detected | Self::FixAvailable)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Detected => "Detected",
+            Self::FixAvailable => "Fix Available",
+            Self::Fixed => "Fixed",
+            Self::CannotFix => "Cannot Fix",
+            Self::Ignored => "Ignored",
+        }
+    }
+}
+
+/// A detected issue.
+#[derive(Debug, Clone)]
+pub struct Issue {
+    pub id: u32,
+    pub category: IssueCategory,
+    pub severity: Severity,
+    pub description: String,
+    pub status: FixStatus,
+    pub detected_ns: u64,
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+const MAX_ISSUES: usize = 200;
+
+struct State {
+    issues: Vec<Issue>,
+    next_id: u32,
+    total_scans: u64,
+    total_fixes: u64,
+    total_ignored: u64,
+    ops: u64,
+}
+
+static STATE: Mutex<Option<State>> = Mutex::new(None);
+static OPS: AtomicU64 = AtomicU64::new(0);
+
+fn with_state<F, R>(f: F) -> KernelResult<R>
+where
+    F: FnOnce(&mut State) -> KernelResult<R>,
+{
+    let mut guard = STATE.lock();
+    let state = guard.as_mut().ok_or(KernelError::NotSupported)?;
+    state.ops += 1;
+    OPS.store(state.ops, Ordering::Relaxed);
+    f(state)
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+pub fn init_defaults() {
+    let mut guard = STATE.lock();
+    if guard.is_some() {
+        return;
+    }
+    *guard = Some(State {
+        issues: Vec::new(),
+        next_id: 1,
+        total_scans: 0,
+        total_fixes: 0,
+        total_ignored: 0,
+        ops: 0,
+    });
+}
+
+/// Run a system scan. Returns number of issues found.
+pub fn scan() -> KernelResult<usize> {
+    with_state(|state| {
+        let now = crate::hpet::elapsed_ns();
+        state.total_scans += 1;
+        // Simulate finding common issues.
+        let simulated = [
+            (
+                IssueCategory::TempFileAccumulation,
+                Severity::Info,
+                "Temporary files older than 7 days",
+            ),
+            (
+                IssueCategory::CorruptedCache,
+                Severity::Warning,
+                "Thumbnail cache inconsistency detected",
+            ),
+            (
+                IssueCategory::BrokenShortcuts,
+                Severity::Info,
+                "2 shortcuts point to missing targets",
+            ),
+        ];
+        let mut found = 0;
+        for (cat, sev, desc) in &simulated {
+            // Don't re-add if the same category is already outstanding.
+            if state
+                .issues
+                .iter()
+                .any(|i| i.category == *cat && i.status.is_outstanding())
+            {
+                continue;
+            }
+            if state.issues.len() >= MAX_ISSUES {
+                break;
+            }
+            let id = state.next_id;
+            state.next_id += 1;
+            state.issues.push(Issue {
+                id,
+                category: *cat,
+                severity: *sev,
+                description: String::from(*desc),
+                status: FixStatus::FixAvailable,
+                detected_ns: now,
+            });
+            found += 1;
+        }
+        Ok(found)
+    })
+}
+
+/// Fix a specific issue.
+pub fn fix(issue_id: u32) -> KernelResult<()> {
+    with_state(|state| {
+        let issue = state
+            .issues
+            .iter_mut()
+            .find(|i| i.id == issue_id)
+            .ok_or(KernelError::NotFound)?;
+        // Deliberately an exhaustive match rather than `is_outstanding()`:
+        // the question here is "can this transition to Fixed", which also
+        // admits `Ignored`, so the two predicates only look alike. The match
+        // also means a new `FixStatus` variant fails to compile here rather
+        // than silently taking a default branch.
+        match issue.status {
+            FixStatus::FixAvailable | FixStatus::Detected => {
+                issue.status = FixStatus::Fixed;
+                state.total_fixes += 1;
+                Ok(())
+            }
+            FixStatus::Fixed => Ok(()), // Already fixed.
+            FixStatus::CannotFix => Err(KernelError::NotSupported),
+            FixStatus::Ignored => {
+                issue.status = FixStatus::Fixed;
+                state.total_fixes += 1;
+                Ok(())
+            }
+        }
+    })
+}
+
+/// Fix all fixable issues.
+pub fn fix_all() -> KernelResult<usize> {
+    with_state(|state| {
+        let mut fixed = 0;
+        for issue in state.issues.iter_mut() {
+            if issue.status.is_outstanding() {
+                issue.status = FixStatus::Fixed;
+                state.total_fixes += 1;
+                fixed += 1;
+            }
+        }
+        Ok(fixed)
+    })
+}
+
+/// Ignore an issue.
+pub fn ignore(issue_id: u32) -> KernelResult<()> {
+    with_state(|state| {
+        let issue = state
+            .issues
+            .iter_mut()
+            .find(|i| i.id == issue_id)
+            .ok_or(KernelError::NotFound)?;
+        issue.status = FixStatus::Ignored;
+        state.total_ignored += 1;
+        Ok(())
+    })
+}
+
+/// Clear fixed/ignored issues.
+pub fn clear_resolved() -> KernelResult<usize> {
+    with_state(|state| {
+        let before = state.issues.len();
+        state
+            .issues
+            .retain(|i| i.status != FixStatus::Fixed && i.status != FixStatus::Ignored);
+        Ok(before - state.issues.len())
+    })
+}
+
+/// List issues, optionally filtered by status.
+pub fn list_issues(status_filter: Option<FixStatus>) -> Vec<Issue> {
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(Vec::new(), |s| match status_filter {
+            Some(f) => s.issues.iter().filter(|i| i.status == f).cloned().collect(),
+            None => s.issues.clone(),
+        })
+}
+
+/// Statistics: (issue_count, total_scans, total_fixes, total_ignored, ops).
+pub fn stats() -> (usize, u64, u64, u64, u64) {
+    let guard = STATE.lock();
+    match guard.as_ref() {
+        Some(s) => (
+            s.issues.len(),
+            s.total_scans,
+            s.total_fixes,
+            s.total_ignored,
+            s.ops,
+        ),
+        None => (0, 0, 0, 0, 0),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Run the module's self-test suite against a table of its own.
+///
+/// The suite asserts exact table contents, and it used to get a table it could
+/// make those claims about by emptying the live one -- which, since it is also
+/// a kernel-shell subcommand, destroyed whatever the user had here and then
+/// reported success.  The live state is moved aside for the duration and put
+/// back afterwards; `crate::fs::selftest` records why this shape rather than
+/// the alternatives.
+///
+/// The pristine value is `None` rather than a table: this module initialises
+/// lazily, and `None` is exactly what a fresh boot holds.
+pub fn self_test() {
+    // `OPS` is a lock-free mirror of `state.ops`, which lives *inside* the
+    // table. `with_pristine` restores the table and so restores `state.ops`,
+    // but it cannot know about the mirror -- leave it and the two disagree
+    // permanently, with `<module> stats` reporting the suite's activity as
+    // the user's.
+    let saved_ops = OPS.load(Ordering::Relaxed);
+    crate::fs::selftest::with_pristine(&STATE, None, self_test_inner);
+    OPS.store(saved_ops, Ordering::Relaxed);
+}
+
+fn self_test_inner() {
+    crate::serial_println!("autofix::self_test() — running tests...");
+    init_defaults();
+
+    // 1: No issues initially.
+    assert_eq!(list_issues(None).len(), 0);
+    crate::serial_println!("  [1/8] no issues: OK");
+
+    // 2: Scan finds issues.
+    let found = scan().expect("scan");
+    assert_eq!(found, 3);
+    assert_eq!(list_issues(None).len(), 3);
+    crate::serial_println!("  [2/8] scan: OK");
+
+    // 3: Fix one issue.
+    let issues = list_issues(None);
+    fix(issues[0].id).expect("fix");
+    let fixed = list_issues(Some(FixStatus::Fixed));
+    assert_eq!(fixed.len(), 1);
+    crate::serial_println!("  [3/8] fix one: OK");
+
+    // 4: Ignore one issue.
+    ignore(issues[1].id).expect("ignore");
+    let ignored = list_issues(Some(FixStatus::Ignored));
+    assert_eq!(ignored.len(), 1);
+    crate::serial_println!("  [4/8] ignore: OK");
+
+    // 5: Fix all remaining.
+    let count = fix_all().expect("fix_all");
+    assert_eq!(count, 1); // Only 1 remaining unfixed.
+    crate::serial_println!("  [5/8] fix all: OK");
+
+    // 6: Clear resolved.
+    let cleared = clear_resolved().expect("clear");
+    assert_eq!(cleared, 3);
+    assert_eq!(list_issues(None).len(), 0);
+    crate::serial_println!("  [6/8] clear: OK");
+
+    // 7: Re-scan doesn't duplicate.
+    //
+    // This is the assertion that caught the dedup being dead: `scan` recorded
+    // new issues as `FixAvailable` while the suppression check tested for
+    // `Detected`, so it matched nothing and a second scan re-added all three.
+    // It failed the first time it was ever run, having been correct and unrun
+    // for as long as it existed.
+    //
+    // Both halves of the predicate are covered now. Suppression is about the
+    // table, not the return value — a `scan` that returned 0 while still
+    // pushing rows would satisfy the old assertion — so the length is checked
+    // too. And the exclusion is checked as well: resolving an issue must let
+    // a later scan report it again, since a fault that recurs is a new
+    // finding rather than a duplicate.
+    let found = scan().expect("scan2");
+    assert_eq!(found, 3);
+    let after_first = list_issues(None).len();
+    let found2 = scan().expect("scan3");
+    assert_eq!(found2, 0, "outstanding issues are not re-detected");
+    assert_eq!(
+        list_issues(None).len(),
+        after_first,
+        "and no rows were added behind the count"
+    );
+    // Resolve one, and it becomes re-detectable.
+    let outstanding = list_issues(None);
+    fix(outstanding[0].id).expect("fix for re-detect");
+    assert_eq!(
+        scan().expect("scan4"),
+        1,
+        "a resolved issue is reported again if it recurs"
+    );
+    crate::serial_println!("  [7/8] no duplicates: OK");
+
+    // 8: Stats.
+    //
+    // `stats` reports `issues.len()`, i.e. every row including resolved ones,
+    // so this tracks whatever test 7 left rather than restating a constant:
+    // the three from its first scan plus the one its re-detect step added.
+    let (issues, scans, fixes, ignored, ops) = stats();
+    assert_eq!(
+        issues,
+        list_issues(None).len(),
+        "stats agrees with the table"
+    );
+    assert_eq!(issues, 4);
+    assert!(scans >= 3);
+    assert!(fixes >= 2);
+    assert_eq!(ignored, 1);
+    assert!(ops > 0);
+    crate::serial_println!("  [8/8] stats: OK");
+
+    crate::serial_println!("autofix::self_test() — all 8 tests passed");
+}

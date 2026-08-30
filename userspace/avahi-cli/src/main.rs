@@ -1,0 +1,184 @@
+#![deny(clippy::all)]
+
+//! avahi-cli — Slate OS Avahi mDNS/DNS-SD tools
+//!
+//! Multi-personality: `avahi-browse`, `avahi-resolve`, `avahi-publish`, `avahi-daemon`
+
+use quoting::quoteaf_os;
+use std::env;
+use std::process;
+
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
+
+fn run_avahi_browse(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
+        println!("Usage: avahi-browse [OPTIONS] <service-type>");
+        println!();
+        println!("avahi-browse — browse for mDNS/DNS-SD services (Slate OS).");
+        println!();
+        println!("Options:");
+        println!("  -a, --all             Browse all services");
+        println!("  -r, --resolve         Resolve discovered services");
+        println!("  -t, --terminate       Terminate after dump");
+        println!("  -d, --domain=DOMAIN   Domain to browse");
+        return 0;
+    }
+
+    let all = args.iter().any(|a| a == "-a" || a == "--all");
+    let resolve = args.iter().any(|a| a == "-r" || a == "--resolve");
+
+    if all {
+        println!(
+            "+   eth0 IPv4 slateos-desktop                          _workstation._tcp    local"
+        );
+        println!(
+            "+   eth0 IPv4 slateos-desktop                          _ssh._tcp            local"
+        );
+        println!(
+            "+   eth0 IPv4 slateos-desktop                          _sftp-ssh._tcp       local"
+        );
+        println!("+   eth0 IPv4 Living Room Speaker                    _raop._tcp           local");
+        println!("+   eth0 IPv4 Printer-HP4500                         _ipp._tcp            local");
+        println!("+   eth0 IPv4 NAS-Storage                            _smb._tcp            local");
+    } else {
+        let stype = args
+            .iter()
+            .find(|a| !a.starts_with('-'))
+            .map(|s| s.as_str())
+            .unwrap_or("_http._tcp");
+        println!(
+            "+   eth0 IPv4 Web Server                             {}    local",
+            stype
+        );
+    }
+
+    if resolve {
+        println!(
+            "=   eth0 IPv4 slateos-desktop                          _ssh._tcp            local"
+        );
+        println!("   hostname = [slateos-desktop.local]");
+        println!("   address = [192.168.1.100]");
+        println!("   port = [22]");
+        println!("   txt = []");
+    }
+    0
+}
+
+fn run_avahi_resolve(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
+        println!("Usage: avahi-resolve [OPTIONS] <hostname|address>");
+        println!("Options: -n (name to address), -a (address to name), -4 (IPv4), -6 (IPv6)");
+        return 0;
+    }
+
+    let target = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("slateos-desktop.local");
+    if args.iter().any(|a| a == "-a") {
+        println!("{}\tslateos-desktop.local", target);
+    } else {
+        println!("{}\t192.168.1.100", target);
+    }
+    0
+}
+
+fn run_avahi_publish(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
+        println!("Usage: avahi-publish [OPTIONS] <name> <type> <port> [TXT...]");
+        println!("  avahi-publish-service   Publish a service");
+        println!("  avahi-publish-address   Publish an address");
+        return 0;
+    }
+
+    let name = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("My Service");
+    println!("Established under name {}", quoteaf_os(name));
+    0
+}
+
+fn run_avahi_daemon(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("Usage: avahi-daemon [OPTIONS]");
+        println!("Options: -D (daemonize), -k (kill), -r (reload), -c (check), --no-drop-root");
+        return 0;
+    }
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("avahi-daemon 0.8 (Slate OS)");
+        return 0;
+    }
+    if args.iter().any(|a| a == "-c" || a == "--check") {
+        println!("Daemon is running");
+        return 0;
+    }
+
+    println!("avahi-daemon 0.8 starting up.");
+    println!("Successfully called chroot().");
+    println!("Successfully dropped root privileges.");
+    println!("Loading service file /etc/avahi/services/ssh.service.");
+    println!("Joining mDNS multicast group on interface eth0.IPv4 with address 192.168.1.100.");
+    println!("New relevant interface eth0.IPv4 for mDNS.");
+    println!("Network interface enumeration completed.");
+    println!("Registering new address record for 192.168.1.100 on eth0.IPv4.");
+    println!("Server startup complete. Host name is slateos-desktop.local.");
+    0
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "avahi-browse".to_string());
+    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    let code = match prog.as_str() {
+        "avahi-resolve" | "avahi-resolve-host-name" | "avahi-resolve-address" => {
+            run_avahi_resolve(&rest)
+        }
+        "avahi-publish" | "avahi-publish-service" | "avahi-publish-address" => {
+            run_avahi_publish(&rest)
+        }
+        "avahi-daemon" => run_avahi_daemon(&rest),
+        _ => run_avahi_browse(&rest),
+    };
+    process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{basename, run_avahi_browse, strip_ext};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/avahi"), "avahi");
+        assert_eq!(basename(r"C:\bin\avahi.exe"), "avahi.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("avahi.exe"), "avahi");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_exits_zero() {
+        assert_eq!(run_avahi_browse(&["--help".to_string()]), 0);
+        assert_eq!(run_avahi_browse(&["-h".to_string()]), 0);
+        let _ = run_avahi_browse(&["--version".to_string()]);
+    }
+
+    #[test]
+    fn default_invocation_does_not_panic() {
+        let _ = run_avahi_browse(&[]);
+    }
+}

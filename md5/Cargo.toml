@@ -1,0 +1,16 @@
+[package]
+name = "md5"
+version = "0.1.0"
+edition = "2024"
+description = "MD5, written once, checked against the RFC 1321 vectors."
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` with no `alloc`, like `sha2` and `sha1`: the digest is a `[u8; 16]`
+# and the hex form is a `[u8; 32]` wrapper, so there is nothing to allocate.
+[dependencies]
+blockbuf = { path = "../blockbuf" }
+
+[lints]
+workspace = true

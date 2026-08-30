@@ -1,0 +1,15 @@
+[package]
+name = "launcher"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS App Launcher — quick launch dialog with search"
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+# The window and its event loop. Without this the whole dialog was
+# unreachable: `fn main` built a launcher, rendered one frame into a `let _`,
+# and returned -- so `handle_key`, correct and well covered, was called by
+# nothing but its own tests.
+oswindow = { path = "../../gui/window" }
+
+[lints]
+workspace = true

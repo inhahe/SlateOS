@@ -1,0 +1,5 @@
+[package]
+name = "init"
+version = "0.1.0"
+edition = "2024"
+description = "First userspace process — boots the system to a shell prompt"

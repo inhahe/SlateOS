@@ -1,0 +1,4781 @@
+//! backup — Slate OS snapshot-based backup system.
+//!
+//! A CLI tool for creating, managing, and restoring backups with content
+//! deduplication via a SHA-256 content-addressed store.
+//!
+//! Usage:
+//!   backup create [--full|--incremental|--differential] --source <PATH> --dest <PATH> [--exclude PATTERN]...
+//!   backup restore <BACKUP_ID> --dest <PATH> [--files PATTERN]
+//!   backup list [--source <PATH>]
+//!   backup verify <BACKUP_ID>
+//!   backup prune --keep-last N [--keep-daily N] [--keep-weekly N] [--keep-monthly N]
+//!   backup schedule --source <PATH> --dest <PATH> --interval <daily|weekly|monthly>
+//!   backup diff <BACKUP_ID1> <BACKUP_ID2>
+//!   backup info <BACKUP_ID>
+
+#![allow(dead_code)]
+
+use std::collections::BTreeMap;
+use std::env;
+use std::ffi::OsString;
+use std::fmt;
+use std::fs;
+use std::io::{self, Read};
+use std::path::{Component, Path, PathBuf};
+use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+// ============================================================================
+// SHA-256
+// ============================================================================
+//
+// This file used to carry its own copy of SHA-256 -- one of twenty-six in the
+// tree. The algorithm and its FIPS 180-4 vectors now live in `sha2`, once. The
+// two wrappers below are all that remains, and they exist only to render a
+// digest as a `String`: the crate returns a fixed-size `Hex` because it is
+// `no_std` and allocation-free, so that the kernel can use it too.
+//
+// There was a third, `sha256_bytes`, a one-line pass-through to `sha2::sha256`
+// returning `[u8; 32]`.  It rendered nothing, no caller outside the tests ever
+// wanted it, and the one test it had compared it against `sha256_hex` -- two
+// wrappers over the same `sha2` entry points, which is `sha2`'s FIPS vectors
+// restated at one remove.  Deleted with that test.
+
+fn sha256_hex(data: &[u8]) -> String {
+    sha2::sha256_hex(data).as_str().to_string()
+}
+
+/// Hash a file without holding it in memory.
+fn sha256_file(path: &Path) -> io::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        // `get` rather than `&buf[..n]` because `read` returning more than the
+        // buffer length would be a broken `Read` impl rather than something we
+        // can handle; a short read is the only reading of `None` that makes
+        // sense, and it stops the loop.
+        let Some(chunk) = buf.get(..n) else { break };
+        hasher.update(chunk);
+    }
+    Ok(sha2::hex(&hasher.finalize()).as_str().to_string())
+}
+
+// ============================================================================
+// Glob Pattern Matching
+// ============================================================================
+
+/// Matches a path component against a glob pattern.
+/// Supports: * (any chars except /), ? (single char except /), ** (any path segments)
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    glob_match_recursive(pattern.as_bytes(), path.as_bytes())
+}
+
+/// The length in bytes of the UTF-8 character starting at `i`, or 1 if the byte
+/// there does not begin a well-formed sequence.
+///
+/// Matching runs over bytes, which is right: our paths are byte strings and are
+/// not required to be valid UTF-8. But `?` is documented as "single char except
+/// /", and a character is not a byte. Advancing one byte per `?` meant
+/// `?.txt` did not match `日.txt` — the `?` ate a third of the kanji and the
+/// literal `.` was then compared against a continuation byte. `?` has no
+/// backtracking (only `*` does), so the match simply failed.
+///
+/// In a backup tool that is not cosmetic. These patterns drive include and
+/// exclude lists, so a pattern that silently fails to match either backs up a
+/// file the user meant to exclude or, worse, skips one they believed was
+/// covered — and they find out when they try to restore it.
+///
+/// Only `?` needs this. `*` is byte-greedy but can only *succeed* on a
+/// character boundary, because UTF-8 is self-synchronising: the literal that
+/// follows a `*` comes from a `&str`, so it is well-formed, and a well-formed
+/// sequence can never match starting inside another one. `/` is likewise safe
+/// to test byte-wise, as an ASCII byte cannot occur inside a multi-byte
+/// character.
+fn utf8_char_len(text: &[u8], i: usize) -> usize {
+    let Some(&b) = text.get(i) else {
+        return 1;
+    };
+    let want = if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else if b >> 3 == 0b11110 {
+        4
+    } else {
+        // A continuation byte or an invalid lead: not a character start, so
+        // consume one byte and let the literal comparison decide.
+        return 1;
+    };
+    // Only treat this as a multi-byte character if the sequence it announces is
+    // actually there and well-formed. Clamping to what remains instead would be
+    // wrong in a way that matters: for the bytes `[0xE6, b'/']` a lead byte
+    // claiming three bytes would consume both, and `?` would have crossed a
+    // separator — the one thing it must never do. Falling back to a single byte
+    // for an ill-formed sequence keeps that invariant and still guarantees
+    // forward progress.
+    let follows_are_continuations = (1..want).all(|k| {
+        text.get(i.saturating_add(k))
+            .is_some_and(|&c| (0x80..=0xBF).contains(&c))
+    });
+    if follows_are_continuations { want } else { 1 }
+}
+
+fn glob_match_recursive(pattern: &[u8], text: &[u8]) -> bool {
+    // Check for ** at the start — matches any number of path segments
+    if pattern.starts_with(b"**") {
+        let rest = if pattern.get(2) == Some(&b'/') {
+            pattern.get(3..).unwrap_or_default()
+        } else if pattern.len() == 2 {
+            // `**` with nothing after it: there is no remainder to match.
+            &[]
+        } else {
+            // `**` followed by something other than `/` is not a globstar.
+            // Handing it back to `glob_match_simple` is safe now that
+            // `glob_match_simple` agrees about that and degrades it to a
+            // single `*`; while the two disagreed this line was half of an
+            // infinite mutual recursion. See the note there.
+            return glob_match_simple(pattern, text);
+        };
+
+        // "**" matches zero or more path segments
+        if rest.is_empty() {
+            return true;
+        }
+
+        // Try matching rest against every suffix of text starting at path
+        // boundaries. `i` runs to `text.len()` inclusive, so the suffix may be
+        // empty — that is the zero-segment case.
+        for i in 0..=text.len() {
+            let at_boundary = i == 0 || i.checked_sub(1).and_then(|k| text.get(k)) == Some(&b'/');
+            if at_boundary && glob_match_recursive(rest, text.get(i..).unwrap_or_default()) {
+                return true;
+            }
+        }
+        // Also try without consuming any leading slash
+        return glob_match_recursive(rest, text);
+    }
+
+    glob_match_simple(pattern, text)
+}
+
+fn glob_match_simple(pattern: &[u8], text: &[u8]) -> bool {
+    let mut pi = 0usize;
+    let mut ti = 0usize;
+    // `None` until a single `*` has been seen. This was `usize::MAX` as a
+    // sentinel, which is a valid index the loop could in principle reach;
+    // `Option` says the same thing without borrowing a value from the range.
+    let mut star_pi: Option<usize> = None;
+    let mut star_ti = 0usize;
+
+    // Matching `text.get(ti)` rather than testing `ti < text.len()` and then
+    // indexing gives the loop its bound and its byte in one step, so there is
+    // no window in which the two could disagree.
+    while let Some(&t) = text.get(ti) {
+        match pattern.get(pi) {
+            // `?` matches one character that is not a separator.
+            Some(&b'?') if t != b'/' => {
+                pi = pi.saturating_add(1);
+                // One character, not one byte — see `utf8_char_len`.
+                ti = ti.saturating_add(utf8_char_len(text, ti));
+            }
+            Some(&b'*') => {
+                // Hand `**` to the recursive matcher, but only for a `**` that
+                // is a whole path segment — `**` at the end of the pattern, or
+                // `**/`. That is exactly the condition
+                // `glob_match_recursive` accepts, and the two MUST agree.
+                //
+                // They did not. This delegated on any `**` while
+                // `glob_match_recursive` accepted only a whole segment, so
+                // `**a` bounced between the two forever: `recursive` saw a `**`
+                // it would not handle and passed the pattern to `simple`
+                // unchanged, `simple` saw `**` and passed it straight back, and
+                // neither consumed a byte. `backup create --exclude '**a'`
+                // overflowed the stack and took the backup down with it.
+                //
+                // A `**` that is not a whole segment is not a globstar; bash's
+                // `globstar` and gitignore both degrade it to a single `*`, and
+                // falling through to the ordinary-star arm below does that —
+                // `**a` behaves as `*a`, which also guarantees progress because
+                // `pi` advances every time.
+                let is_whole_segment = pattern.get(pi.saturating_add(1)) == Some(&b'*')
+                    && matches!(pattern.get(pi.saturating_add(2)), None | Some(&b'/'));
+                if is_whole_segment {
+                    return glob_match_recursive(
+                        pattern.get(pi..).unwrap_or_default(),
+                        text.get(ti..).unwrap_or_default(),
+                    );
+                }
+                // Single * — match anything except /
+                star_pi = Some(pi);
+                star_ti = ti;
+                pi = pi.saturating_add(1);
+            }
+            Some(&p) if p == t => {
+                pi = pi.saturating_add(1);
+                ti = ti.saturating_add(1);
+            }
+            // Either the pattern ran out or this byte does not match. Both are
+            // recoverable only by making the last single `*` swallow one more
+            // byte — and `None` here (no star yet) is the outright failure.
+            _ => {
+                let Some(resume_at) = star_pi else {
+                    return false;
+                };
+                star_ti = star_ti.saturating_add(1);
+                let swallowed = star_ti.checked_sub(1).and_then(|k| text.get(k));
+                if star_ti > text.len() || swallowed == Some(&b'/') {
+                    return false; // * doesn't cross /
+                }
+                ti = star_ti;
+                pi = resume_at.saturating_add(1);
+            }
+        }
+    }
+
+    // Consume trailing stars
+    while pattern.get(pi) == Some(&b'*') {
+        pi = pi.saturating_add(1);
+    }
+
+    pi == pattern.len()
+}
+
+/// Check if a path should be excluded based on exclude patterns.
+fn is_excluded(path: &Path, patterns: &[String]) -> bool {
+    // Exclusion patterns are UTF-8 text the user typed, so matching against a
+    // lossy rendering is the only thing that can be meant. This is a selection
+    // heuristic, not an identity check: the ASCII structure a glob keys on
+    // (separators, extensions) survives the conversion exactly, and the
+    // undecodable bytes a pattern could never have named become U+FFFD, which
+    // no pattern contains.
+    let path = path.to_string_lossy();
+    let path = path.as_ref();
+    for pattern in patterns {
+        if glob_matches(pattern, path) {
+            return true;
+        }
+        // Also check just the filename component
+        if let Some(name) = path.rsplit('/').next()
+            && glob_matches(pattern, name)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+// ============================================================================
+// JSON Serialization/Deserialization (hand-written, no external crate)
+// ============================================================================
+
+/// Simple JSON value type for serialization/deserialization.
+#[derive(Clone, Debug, PartialEq)]
+enum JsonValue {
+    Null,
+    Bool(bool),
+    Number(f64),
+    Str(String),
+    Array(Vec<JsonValue>),
+    Object(Vec<(String, JsonValue)>),
+}
+
+impl JsonValue {
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            JsonValue::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    fn as_u64(&self) -> Option<u64> {
+        match self {
+            JsonValue::Number(n) => Some(*n as u64),
+            _ => None,
+        }
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            JsonValue::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    fn as_array(&self) -> Option<&Vec<JsonValue>> {
+        match self {
+            JsonValue::Array(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    fn as_object(&self) -> Option<&Vec<(String, JsonValue)>> {
+        match self {
+            JsonValue::Object(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&JsonValue> {
+        match self {
+            JsonValue::Object(entries) => {
+                for (k, v) in entries {
+                    if k == key {
+                        return Some(v);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for JsonValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JsonValue::Null => write!(f, "null"),
+            JsonValue::Bool(b) => write!(f, "{}", if *b { "true" } else { "false" }),
+            JsonValue::Number(n) => {
+                // The exact comparison is the point, and clippy's suggested
+                // epsilon would be a bug: this asks "is this float an integer,
+                // so I may print it without a decimal point?", and only an
+                // exact round-trip answers it. Within a margin of error,
+                // 3.0000001 would print as `3` and the manifest would claim a
+                // file size, mtime or block count that was never measured.
+                // `as u64` saturates rather than wrapping, so a value too large
+                // for u64 round-trips to u64::MAX-as-f64, compares unequal, and
+                // correctly takes the float branch; NaN fails every comparison
+                // and does the same.
+                #[allow(
+                    clippy::float_cmp,
+                    reason = "exactness is the question being asked; see comment"
+                )]
+                let integral = *n == (*n as u64) as f64 && *n >= 0.0;
+                if integral {
+                    write!(f, "{}", *n as u64)
+                } else {
+                    write!(f, "{n}")
+                }
+            }
+            JsonValue::Str(s) => {
+                write!(f, "\"")?;
+                for ch in s.chars() {
+                    match ch {
+                        '"' => write!(f, "\\\"")?,
+                        '\\' => write!(f, "\\\\")?,
+                        '\n' => write!(f, "\\n")?,
+                        '\r' => write!(f, "\\r")?,
+                        '\t' => write!(f, "\\t")?,
+                        c if c < '\x20' => write!(f, "\\u{:04x}", c as u32)?,
+                        c => write!(f, "{}", c)?,
+                    }
+                }
+                write!(f, "\"")
+            }
+            JsonValue::Array(items) => {
+                write!(f, "[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, "]")
+            }
+            JsonValue::Object(entries) => {
+                write!(f, "{{")?;
+                for (i, (key, val)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, "\"{}\":{}", key, val)?;
+                }
+                write!(f, "}}")
+            }
+        }
+    }
+}
+
+/// Pretty-print JSON with indentation.
+fn json_pretty(value: &JsonValue, indent: usize) -> String {
+    let mut out = String::new();
+    json_pretty_inner(value, indent, 0, &mut out);
+    out
+}
+
+fn json_pretty_inner(value: &JsonValue, indent: usize, depth: usize, out: &mut String) {
+    // Saturating because `depth` is recursion depth over attacker-shaped input:
+    // a manifest nested a few thousand deep would overflow the multiplication
+    // long before it produced a line anyone would read.
+    let prefix = " ".repeat(indent.saturating_mul(depth));
+    let inner_depth = depth.saturating_add(1);
+    let inner_prefix = " ".repeat(indent.saturating_mul(inner_depth));
+
+    match value {
+        // The separator is written *before* every entry but the first rather
+        // than after every entry but the last. Both produce the same bytes, but
+        // the leading form needs no lookahead to the container's length, so
+        // there is no `i + 1` to compare against it.
+        JsonValue::Object(entries) if !entries.is_empty() => {
+            out.push_str("{\n");
+            for (i, (key, val)) in entries.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(",\n");
+                }
+                out.push_str(&inner_prefix);
+                out.push('"');
+                out.push_str(key);
+                out.push_str("\": ");
+                json_pretty_inner(val, indent, inner_depth, out);
+            }
+            out.push('\n');
+            out.push_str(&prefix);
+            out.push('}');
+        }
+        JsonValue::Array(items) if !items.is_empty() => {
+            out.push_str("[\n");
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(",\n");
+                }
+                out.push_str(&inner_prefix);
+                json_pretty_inner(item, indent, inner_depth, out);
+            }
+            out.push('\n');
+            out.push_str(&prefix);
+            out.push(']');
+        }
+        _ => {
+            out.push_str(&value.to_string());
+        }
+    }
+}
+
+/// Parse a JSON string into a JsonValue.
+fn json_parse(input: &str) -> Result<JsonValue, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("empty input".to_string());
+    }
+    let (val, rest) = parse_value(trimmed)?;
+    if !rest.trim().is_empty() {
+        // Take twenty *characters*, not twenty bytes. `&rest[..20]` panics if
+        // byte 20 lands inside a multi-byte character, and trailing garbage is
+        // precisely where a stray non-ASCII byte turns up — so the diagnostic
+        // for a corrupt manifest would itself have been the crash.
+        let shown: String = rest.chars().take(20).collect();
+        return Err(format!("trailing characters: {shown:?}"));
+    }
+    Ok(val)
+}
+
+fn parse_value(input: &str) -> Result<(JsonValue, &str), String> {
+    let s = input.trim_start();
+    let Some(&lead) = s.as_bytes().first() else {
+        return Err("unexpected end of input".to_string());
+    };
+    match lead {
+        b'"' => parse_string(s),
+        b'{' => parse_object(s),
+        b'[' => parse_array(s),
+        b't' | b'f' => parse_bool(s),
+        b'n' => parse_null(s),
+        b'-' | b'0'..=b'9' => parse_number(s),
+        c => Err(format!("unexpected character: {}", c as char)),
+    }
+}
+
+/// Parse a JSON string literal, returning the decoded value and the remaining
+/// input.
+///
+/// Literal stretches are copied out as whole `&str` slices rather than a byte
+/// at a time. This matters more here than in most JSON readers: the strings in
+/// a manifest are **file paths**, and pushing `byte as char` reads each UTF-8
+/// byte as the Latin-1 scalar of that value — so a manifest listing
+/// `写真/2024.jpg` read back as a mojibake path that no longer names any file,
+/// and restore and verify both reported it missing.
+fn parse_string(input: &str) -> Result<(JsonValue, &str), String> {
+    if !input.starts_with('"') {
+        return Err("expected '\"'".to_string());
+    }
+    let bytes = input.as_bytes();
+    let mut result = String::new();
+    let mut i = 1;
+    // Start of the current run of literal (unescaped) text.
+    let mut run_start = i;
+    while let Some(&b) = bytes.get(i) {
+        // `"` and `\` are ASCII, and an ASCII byte can never occur inside a
+        // multi-byte UTF-8 sequence, so `i` is always on a character boundary
+        // where a run is cut.
+        if b == b'"' {
+            result.push_str(input.get(run_start..i).ok_or("string cut mid-character")?);
+            let rest = input
+                .get(i.saturating_add(1)..)
+                .ok_or("string cut mid-character")?;
+            return Ok((JsonValue::Str(result), rest));
+        }
+        if b != b'\\' {
+            i = i.saturating_add(1);
+            continue;
+        }
+        result.push_str(input.get(run_start..i).ok_or("string cut mid-character")?);
+        let after = i.saturating_add(1);
+        // Take a whole character: an unknown escape may be followed by a
+        // multi-byte one, and consuming a single byte of it would both corrupt
+        // it and strand the scan inside a UTF-8 sequence.
+        let esc = input
+            .get(after..)
+            .and_then(|s| s.chars().next())
+            .ok_or("unexpected end in string escape")?;
+        let mut next = after.saturating_add(esc.len_utf8());
+        match esc {
+            '"' => result.push('"'),
+            '\\' => result.push('\\'),
+            '/' => result.push('/'),
+            'n' => result.push('\n'),
+            'r' => result.push('\r'),
+            't' => result.push('\t'),
+            'b' => result.push('\u{08}'),
+            'f' => result.push('\u{0c}'),
+            'u' => {
+                let (c, after_escape) = parse_unicode_escape(input, next)?;
+                result.push(c);
+                next = after_escape;
+            }
+            other => {
+                // Unknown escape: keep it verbatim rather than silently
+                // dropping the backslash out of a path.
+                result.push('\\');
+                result.push(other);
+            }
+        }
+        i = next;
+        run_start = i;
+    }
+    Err("unterminated string".to_string())
+}
+
+/// Decode a `\u` escape whose four hex digits begin at `start` (just past the
+/// `u`), returning the character and the offset just past the escape.
+///
+/// A leading surrogate is combined with a following `\uXXXX` trailing
+/// surrogate, which is how JSON spells anything outside the BMP.
+fn parse_unicode_escape(input: &str, start: usize) -> Result<(char, usize), String> {
+    let (hi, after_hi) = parse_hex4(input, start)?;
+    let bytes = input.as_bytes();
+    if (0xD800..0xDC00).contains(&hi)
+        && bytes.get(after_hi).copied() == Some(b'\\')
+        && bytes.get(after_hi.saturating_add(1)).copied() == Some(b'u')
+        && let Ok((lo, after_lo)) = parse_hex4(input, after_hi.saturating_add(2))
+        && (0xDC00..0xE000).contains(&lo)
+        // Bounded by the two range checks above: at most 0x10000 + 0xFFC00 +
+        // 0x3FF = 0x10FFFF, so neither the shift nor the sums can overflow.
+        && let Some(c) = char::from_u32(
+            0x1_0000_u32
+                .saturating_add(hi.saturating_sub(0xD800) << 10)
+                .saturating_add(lo.saturating_sub(0xDC00)),
+        )
+    {
+        return Ok((c, after_lo));
+    }
+    // A lone surrogate has no scalar value. The old code dropped it silently,
+    // so an escaped emoji in a path simply vanished from the manifest; U+FFFD
+    // at least leaves the loss visible.
+    Ok((char::from_u32(hi).unwrap_or('\u{FFFD}'), after_hi))
+}
+
+/// Read exactly four ASCII hex digits at `start`.
+fn parse_hex4(input: &str, start: usize) -> Result<(u32, usize), String> {
+    let end = start.saturating_add(4);
+    // `get`, not a slice: the old code sliced these four bytes blindly, so a
+    // `\u` followed by multi-byte text (`"\u日本"` cuts at byte 7, inside 本)
+    // panicked while merely reading a manifest off disk.
+    let hex = input.get(start..end).ok_or("incomplete unicode escape")?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("invalid unicode escape".to_string());
+    }
+    u32::from_str_radix(hex, 16)
+        .map(|v| (v, end))
+        .map_err(|_| "invalid unicode escape".to_string())
+}
+
+fn parse_object(input: &str) -> Result<(JsonValue, &str), String> {
+    let mut s = &input[1..]; // skip '{'
+    let mut entries = Vec::new();
+
+    s = s.trim_start();
+    if let Some(rest) = s.strip_prefix('}') {
+        return Ok((JsonValue::Object(entries), rest));
+    }
+
+    loop {
+        s = s.trim_start();
+        let (key_val, rest) = parse_string(s)?;
+        let key = match key_val {
+            JsonValue::Str(k) => k,
+            _ => return Err("object key must be string".to_string()),
+        };
+        s = rest.trim_start();
+        let Some(after_colon) = s.strip_prefix(':') else {
+            return Err("expected ':'".to_string());
+        };
+        s = after_colon;
+        let (val, rest) = parse_value(s)?;
+        entries.push((key, val));
+        s = rest.trim_start();
+        if let Some(rest) = s.strip_prefix('}') {
+            return Ok((JsonValue::Object(entries), rest));
+        }
+        let Some(after_comma) = s.strip_prefix(',') else {
+            return Err("expected ',' or '}'".to_string());
+        };
+        s = after_comma;
+    }
+}
+
+fn parse_array(input: &str) -> Result<(JsonValue, &str), String> {
+    let mut s = &input[1..]; // skip '['
+    let mut items = Vec::new();
+
+    s = s.trim_start();
+    if let Some(rest) = s.strip_prefix(']') {
+        return Ok((JsonValue::Array(items), rest));
+    }
+
+    loop {
+        let (val, rest) = parse_value(s)?;
+        items.push(val);
+        s = rest.trim_start();
+        if let Some(rest) = s.strip_prefix(']') {
+            return Ok((JsonValue::Array(items), rest));
+        }
+        let Some(after_comma) = s.strip_prefix(',') else {
+            return Err("expected ',' or ']'".to_string());
+        };
+        s = after_comma;
+    }
+}
+
+fn parse_bool(input: &str) -> Result<(JsonValue, &str), String> {
+    if let Some(rest) = input.strip_prefix("true") {
+        Ok((JsonValue::Bool(true), rest))
+    } else if let Some(rest) = input.strip_prefix("false") {
+        Ok((JsonValue::Bool(false), rest))
+    } else {
+        Err("expected 'true' or 'false'".to_string())
+    }
+}
+
+fn parse_null(input: &str) -> Result<(JsonValue, &str), String> {
+    if let Some(rest) = input.strip_prefix("null") {
+        Ok((JsonValue::Null, rest))
+    } else {
+        Err("expected 'null'".to_string())
+    }
+}
+
+fn parse_number(input: &str) -> Result<(JsonValue, &str), String> {
+    let bytes = input.as_bytes();
+    let mut end = 0usize;
+
+    // Reading through `get` carries the bound with the byte, so the "am I still
+    // inside the string?" test cannot drift apart from the byte it guards.
+    if bytes.get(end) == Some(&b'-') {
+        end = end.saturating_add(1);
+    }
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end = end.saturating_add(1);
+    }
+    if bytes.get(end) == Some(&b'.') {
+        end = end.saturating_add(1);
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end = end.saturating_add(1);
+        }
+    }
+    if matches!(bytes.get(end), Some(&b'e' | &b'E')) {
+        end = end.saturating_add(1);
+        if matches!(bytes.get(end), Some(&b'+' | &b'-')) {
+            end = end.saturating_add(1);
+        }
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end = end.saturating_add(1);
+        }
+    }
+
+    // Every byte the scan accepted is ASCII, so `end` is always on a character
+    // boundary and neither split can panic — but `get` states that rather than
+    // relying on the reader to re-derive it.
+    let num_str = input.get(..end).unwrap_or_default();
+    let rest = input.get(end..).unwrap_or_default();
+    let num: f64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid number: {num_str}"))?;
+    Ok((JsonValue::Number(num), rest))
+}
+
+// ============================================================================
+// Data Structures
+// ============================================================================
+
+/// Type of backup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackupType {
+    Full,
+    Incremental,
+    Differential,
+}
+
+impl BackupType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            BackupType::Full => "full",
+            BackupType::Incremental => "incremental",
+            BackupType::Differential => "differential",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "full" => Some(BackupType::Full),
+            "incremental" => Some(BackupType::Incremental),
+            "differential" => Some(BackupType::Differential),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for BackupType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Manifest format version written into every new manifest.
+///
+/// Version 1 stored paths as plain JSON strings, which meant they had already
+/// been through `to_string_lossy` and could not name a non-UTF-8 file. Version 2
+/// stores them percent-encoded (see [`encode_path`]). Absence of the field means
+/// version 1, so an existing archive still restores.
+const MANIFEST_VERSION: u64 = 2;
+
+/// Metadata about a single file in a backup manifest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileEntry {
+    /// Relative path from backup source root.
+    ///
+    /// A `PathBuf`, not a `String`: paths on this OS may contain any byte
+    /// except `/` and NUL, and a backup that cannot record the name of a file
+    /// it copied cannot restore it either.
+    path: PathBuf,
+    /// File size in bytes.
+    size: u64,
+    /// Modification time as seconds since UNIX epoch.
+    mtime: u64,
+    /// SHA-256 hash of file contents.
+    hash: String,
+    /// Whether this is a symlink.
+    is_symlink: bool,
+    /// Symlink target (if is_symlink). Also an arbitrary byte string.
+    link_target: Option<PathBuf>,
+}
+
+impl FileEntry {
+    /// This entry as the object written to the manifest on disk.
+    ///
+    /// A field missing from here is a field the backup does not record, and so
+    /// one the restore cannot put back: the value is set, the backup reports
+    /// success, and the loss surfaces only when someone needs the file.
+    /// Nothing in the language ties a writer to the struct it writes, so the
+    /// destructure below does it — see known-issues.md lesson 44.
+    fn to_json(&self) -> JsonValue {
+        // Exhaustive (no `..`), so a new `FileEntry` field stops this
+        // compiling until someone decides whether it belongs on disk. Without
+        // it the addition errors only in `from_json`'s struct literal, which
+        // is the *reader*: fix that and the writer silently drops the field.
+        let Self {
+            path,
+            size,
+            mtime,
+            hash,
+            is_symlink,
+            link_target,
+        } = self;
+        let mut entries = vec![
+            ("path".to_string(), JsonValue::Str(encode_path(path))),
+            ("size".to_string(), JsonValue::Number(*size as f64)),
+            ("mtime".to_string(), JsonValue::Number(*mtime as f64)),
+            ("hash".to_string(), JsonValue::Str(hash.clone())),
+            ("is_symlink".to_string(), JsonValue::Bool(*is_symlink)),
+        ];
+        // Absent rather than null when there is no target: `from_json` reads
+        // this key with `.and_then`, so absent and null mean the same to the
+        // reader, and a non-symlink has no target to record.
+        if let Some(target) = link_target {
+            entries.push((
+                "link_target".to_string(),
+                JsonValue::Str(encode_path(target)),
+            ));
+        }
+        JsonValue::Object(entries)
+    }
+
+    /// Read one entry. `encoded` selects the path representation: version 2
+    /// manifests percent-encode, version 1 stored the path verbatim.
+    fn from_json(val: &JsonValue, encoded: bool) -> Option<Self> {
+        let read_path = |s: &str| {
+            if encoded {
+                decode_path(s)
+            } else {
+                PathBuf::from(s)
+            }
+        };
+        let path = read_path(val.get("path")?.as_str()?);
+        let size = val.get("size")?.as_u64()?;
+        let mtime = val.get("mtime")?.as_u64()?;
+        let hash = val.get("hash")?.as_str()?.to_string();
+        let is_symlink = val
+            .get("is_symlink")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let link_target = val
+            .get("link_target")
+            .and_then(|v| v.as_str())
+            .map(&read_path);
+        Some(FileEntry {
+            path,
+            size,
+            mtime,
+            hash,
+            is_symlink,
+            link_target,
+        })
+    }
+}
+
+/// Escape a path into printable ASCII, losslessly.
+///
+/// The manifest is JSON, whose strings are Unicode, but a path is a byte
+/// string. `to_string_lossy` would substitute U+FFFD for every undecodable
+/// byte — and since the manifest is the only record of what a backup contains,
+/// that byte is then gone: restore recreates the file under a different name
+/// and verify reports the original as missing. `OsStr::as_encoded_bytes` gives
+/// the exact bytes; anything outside printable ASCII, plus `%` itself, is
+/// percent-encoded.
+fn encode_path(path: &Path) -> String {
+    encode_bytes(path.as_os_str().as_encoded_bytes())
+}
+
+/// The lossless core of [`encode_path`], on bytes rather than a path.
+///
+/// Kept separate because this — not the `OsStr` conversion around it — is where
+/// the round-trip property lives, and it can be tested on any host.
+fn encode_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
+        if b == b'%' || !(0x20..0x7f).contains(&b) {
+            out.push_str(&format!("%{b:02X}"));
+        } else {
+            out.push(b as char); // guarded: printable ASCII only
+        }
+    }
+    out
+}
+
+/// Reverse of [`encode_path`].
+fn decode_path(encoded: &str) -> PathBuf {
+    PathBuf::from(os_string_from_bytes(decode_bytes(encoded)))
+}
+
+/// Reverse of [`encode_bytes`].
+///
+/// A `%` not followed by two hex digits is passed through literally rather than
+/// dropped: this reads files that may have been hand-edited, and losing a byte
+/// silently is worse than keeping one that was never an escape.
+fn decode_bytes(encoded: &str) -> Vec<u8> {
+    let bytes = encoded.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&b) = bytes.get(i) {
+        if b == b'%'
+            && let Some(hex) = encoded.get(i.saturating_add(1)..i.saturating_add(3))
+            && let Ok(v) = u8::from_str_radix(hex, 16)
+        {
+            out.push(v);
+            i = i.saturating_add(3);
+            continue;
+        }
+        out.push(b);
+        i = i.saturating_add(1);
+    }
+    out
+}
+
+/// Build an `OsString` from the raw bytes of a path.
+///
+/// This is where the byte world meets the platform's path type, so it is split
+/// per platform rather than papered over with
+/// `OsStr::from_encoded_bytes_unchecked`: that function's contract is that the
+/// bytes are valid for the platform's `OsStr` encoding, which is true for
+/// arbitrary bytes on Unix but *not* on Windows, where `OsStr` is WTF-8. Since
+/// our target is `target-family = ["unix"]`, the safe, total conversion below
+/// is the one that actually runs; Windows appears only as a test host.
+#[cfg(unix)]
+fn os_string_from_bytes(bytes: Vec<u8>) -> OsString {
+    use std::os::unix::ffi::OsStringExt;
+    OsString::from_vec(bytes)
+}
+
+/// Test-host fallback. Windows `OsString` cannot hold a byte string that is not
+/// WTF-8, so bytes that are not valid UTF-8 cannot survive here. They are not
+/// silently mangled: [`decode_bytes`] is still exact, and the tests assert the
+/// round-trip at that level, which is the level the manifest is written at.
+#[cfg(not(unix))]
+fn os_string_from_bytes(bytes: Vec<u8>) -> OsString {
+    match String::from_utf8(bytes) {
+        Ok(s) => OsString::from(s),
+        // Reachable only on a non-Unix host reading a manifest written on the
+        // target. Nothing better is representable; `decode_bytes` is the API to
+        // use if the exact bytes are needed.
+        Err(e) => OsString::from(String::from_utf8_lossy(e.as_bytes()).into_owned()),
+    }
+}
+
+/// Manifest for a single backup — lists all files included.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Manifest {
+    files: Vec<FileEntry>,
+}
+
+impl Manifest {
+    fn new() -> Self {
+        Self { files: Vec::new() }
+    }
+
+    /// The manifest as written to disk.
+    ///
+    /// Destructured for the reason [`FileEntry::to_json`] gives. `version` is
+    /// in the object but not in the struct: it is a property of the on-disk
+    /// format rather than of this value, and is always written as the current
+    /// one because that is the format being written.
+    fn to_json(&self) -> JsonValue {
+        let Self { files } = self;
+        JsonValue::Object(vec![
+            (
+                "version".to_string(),
+                JsonValue::Number(MANIFEST_VERSION as f64),
+            ),
+            (
+                "files".to_string(),
+                JsonValue::Array(files.iter().map(FileEntry::to_json).collect()),
+            ),
+        ])
+    }
+
+    fn from_json(val: &JsonValue) -> Option<Self> {
+        // A manifest with no version field predates path escaping and stored
+        // paths verbatim. Reading it is still worth doing: refusing would
+        // strand every backup taken before this change.
+        let version = val.get("version").and_then(|v| v.as_u64()).unwrap_or(1);
+        let encoded = version >= 2;
+        let files_val = val.get("files")?.as_array()?;
+        let mut files = Vec::new();
+        for fv in files_val {
+            files.push(FileEntry::from_json(fv, encoded)?);
+        }
+        Some(Manifest { files })
+    }
+
+    fn serialize(&self) -> String {
+        json_pretty(&self.to_json(), 2)
+    }
+
+    fn deserialize(input: &str) -> Result<Self, String> {
+        let val = json_parse(input)?;
+        Self::from_json(&val).ok_or_else(|| "invalid manifest structure".to_string())
+    }
+}
+
+/// Metadata about a backup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BackupMeta {
+    /// Unique backup ID (timestamp-based).
+    id: String,
+    /// Backup type.
+    backup_type: BackupType,
+    /// Unix timestamp when backup was created.
+    timestamp: u64,
+    /// Source path that was backed up.
+    source: String,
+    /// Parent backup ID (for incremental/differential).
+    parent_id: Option<String>,
+    /// Number of files in backup.
+    file_count: u64,
+    /// Total size of all files.
+    total_size: u64,
+    /// Number of new blobs stored (non-deduplicated).
+    new_blobs: u64,
+    /// Number of blobs reused via deduplication.
+    dedup_blobs: u64,
+}
+
+impl BackupMeta {
+    /// This record as the object written beside the backup on disk.
+    ///
+    /// Held to the struct by the destructure, for the reason
+    /// [`FileEntry::to_json`] gives: a field omitted here is not recorded, and
+    /// on the next read comes back as whatever `from_json`'s `unwrap_or`
+    /// supplies — a wrong number reported confidently, which is worse than a
+    /// missing one.
+    fn to_json(&self) -> JsonValue {
+        let Self {
+            id,
+            backup_type,
+            timestamp,
+            source,
+            parent_id,
+            file_count,
+            total_size,
+            new_blobs,
+            dedup_blobs,
+        } = self;
+        let mut entries = vec![
+            ("id".to_string(), JsonValue::Str(id.clone())),
+            (
+                "backup_type".to_string(),
+                JsonValue::Str(backup_type.as_str().to_string()),
+            ),
+            (
+                "timestamp".to_string(),
+                JsonValue::Number(*timestamp as f64),
+            ),
+            ("source".to_string(), JsonValue::Str(source.clone())),
+            (
+                "file_count".to_string(),
+                JsonValue::Number(*file_count as f64),
+            ),
+            (
+                "total_size".to_string(),
+                JsonValue::Number(*total_size as f64),
+            ),
+            (
+                "new_blobs".to_string(),
+                JsonValue::Number(*new_blobs as f64),
+            ),
+            (
+                "dedup_blobs".to_string(),
+                JsonValue::Number(*dedup_blobs as f64),
+            ),
+        ];
+        // Explicitly null rather than absent, unlike `FileEntry::link_target`:
+        // a full backup having no parent is a fact about the backup, and one
+        // worth being able to read back off the disk rather than infer from a
+        // key that is not there.
+        match parent_id {
+            Some(pid) => entries.push(("parent_id".to_string(), JsonValue::Str(pid.clone()))),
+            None => entries.push(("parent_id".to_string(), JsonValue::Null)),
+        }
+        JsonValue::Object(entries)
+    }
+
+    fn from_json(val: &JsonValue) -> Option<Self> {
+        let id = val.get("id")?.as_str()?.to_string();
+        let backup_type_str = val.get("backup_type")?.as_str()?;
+        let backup_type = BackupType::from_str(backup_type_str)?;
+        let timestamp = val.get("timestamp")?.as_u64()?;
+        let source = val.get("source")?.as_str()?.to_string();
+        let parent_id = val
+            .get("parent_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let file_count = val.get("file_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let total_size = val.get("total_size").and_then(|v| v.as_u64()).unwrap_or(0);
+        let new_blobs = val.get("new_blobs").and_then(|v| v.as_u64()).unwrap_or(0);
+        let dedup_blobs = val.get("dedup_blobs").and_then(|v| v.as_u64()).unwrap_or(0);
+        Some(BackupMeta {
+            id,
+            backup_type,
+            timestamp,
+            source,
+            parent_id,
+            file_count,
+            total_size,
+            new_blobs,
+            dedup_blobs,
+        })
+    }
+
+    fn serialize(&self) -> String {
+        json_pretty(&self.to_json(), 2)
+    }
+
+    fn deserialize(input: &str) -> Result<Self, String> {
+        let val = json_parse(input)?;
+        Self::from_json(&val).ok_or_else(|| "invalid backup meta structure".to_string())
+    }
+}
+
+/// Schedule entry for automated backups.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScheduleEntry {
+    source: String,
+    dest: String,
+    interval: String,
+}
+
+impl ScheduleEntry {
+    /// This entry as the object written to the schedule file.
+    ///
+    /// Destructured for the reason [`FileEntry::to_json`] gives — a schedule
+    /// field that is not written is a setting the user chose and the next run
+    /// will not honour.
+    fn to_json(&self) -> JsonValue {
+        let Self {
+            source,
+            dest,
+            interval,
+        } = self;
+        JsonValue::Object(vec![
+            ("source".to_string(), JsonValue::Str(source.clone())),
+            ("dest".to_string(), JsonValue::Str(dest.clone())),
+            ("interval".to_string(), JsonValue::Str(interval.clone())),
+        ])
+    }
+
+    fn from_json(val: &JsonValue) -> Option<Self> {
+        let source = val.get("source")?.as_str()?.to_string();
+        let dest = val.get("dest")?.as_str()?.to_string();
+        let interval = val.get("interval")?.as_str()?.to_string();
+        Some(ScheduleEntry {
+            source,
+            dest,
+            interval,
+        })
+    }
+}
+
+/// Result of comparing two manifests.
+#[derive(Debug)]
+struct DiffResult {
+    added: Vec<FileEntry>,
+    modified: Vec<(FileEntry, FileEntry)>, // (old, new)
+    deleted: Vec<FileEntry>,
+}
+
+impl DiffResult {
+    fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.modified.is_empty() && self.deleted.is_empty()
+    }
+}
+
+/// Progress tracker for long-running operations.
+struct Progress {
+    total_files: u64,
+    processed_files: u64,
+    total_bytes: u64,
+    processed_bytes: u64,
+    current_file: String,
+}
+
+impl Progress {
+    fn new() -> Self {
+        Self {
+            total_files: 0,
+            processed_files: 0,
+            total_bytes: 0,
+            processed_bytes: 0,
+            current_file: String::new(),
+        }
+    }
+
+    fn report(&self) {
+        let file_pct = self
+            .processed_files
+            .checked_mul(100)
+            .and_then(|n| n.checked_div(self.total_files))
+            .unwrap_or(0);
+        let byte_pct = self
+            .processed_bytes
+            .checked_mul(100)
+            .and_then(|n| n.checked_div(self.total_bytes))
+            .unwrap_or(0);
+        eprintln!(
+            "  [{}/{}] files ({}%) | [{}/{}] bytes ({}%) | {}",
+            self.processed_files,
+            self.total_files,
+            file_pct,
+            format_size(self.processed_bytes),
+            format_size(self.total_bytes),
+            byte_pct,
+            self.current_file,
+        );
+    }
+}
+
+// ============================================================================
+// Path Utilities
+// ============================================================================
+
+// `normalize_path` was deleted here, together with its four tests.  It was
+// reachable from no path out of `main` -- only from those tests -- and it
+// answered the same question as `restore_path_within` below with the opposite
+// policy: it *sanitised* `..` away (`test_normalize_leading_dotdot` asserted
+// `"../a/b"` -> `"a/b"`, commented "Can't go above root"), where the live
+// check *refuses* the entry and makes the caller report it, for the reason
+// spelled out on that function -- silently relocating a file during a restore
+// puts the user's data somewhere they did not ask for and gives them no way
+// to notice.
+//
+// Deleting rather than leaving it: a dead function with four green tests is
+// not inert.  The next person who needs "normalise a manifest path" finds it,
+// reads the tests as a specification, and reintroduces the traversal the
+// live check exists to stop.  See known-issues.md lesson 45.
+
+/// Get relative path of `full` with respect to `base`.
+///
+/// Byte-exact. The previous implementation went through `to_string_lossy`,
+/// which is where a non-UTF-8 filename was destroyed — before the manifest
+/// writer ever saw it, so fixing the manifest parser alone was not enough.
+///
+/// Components are rejoined with `/` rather than by `PathBuf::push` so the
+/// manifest records the same text regardless of the host's separator. `/` is
+/// ASCII and cannot occur inside a component's encoding, so the join is
+/// reversible.
+///
+/// The root and prefix components are handled separately because their
+/// `as_os_str` is already a separator (`/`, or `\` on Windows): joining them
+/// like a normal component yields a doubled or mixed separator.
+fn relative_path(full: &Path, base: &Path) -> PathBuf {
+    let rel = full.strip_prefix(base).unwrap_or(full);
+    let mut out: Vec<u8> = Vec::new();
+    for comp in rel.components() {
+        match comp {
+            Component::Prefix(prefix) => {
+                out.extend_from_slice(prefix.as_os_str().as_encoded_bytes());
+            }
+            Component::RootDir => out.push(b'/'),
+            _ => {
+                if !out.is_empty() && !out.ends_with(b"/") {
+                    out.push(b'/');
+                }
+                out.extend_from_slice(comp.as_os_str().as_encoded_bytes());
+            }
+        }
+    }
+    PathBuf::from(os_string_from_bytes(out))
+}
+
+/// Format byte size as human-readable string.
+fn format_size(bytes: u64) -> String {
+    textfmt::bytes::iec(bytes)
+}
+
+/// Get current unix timestamp.
+fn now_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Format a unix timestamp as a human-readable date string.
+fn format_timestamp(ts: u64) -> String {
+    // Simple formatting: YYYY-MM-DD HH:MM:SS (approximate, not accounting for
+    // leap seconds perfectly but good enough for display purposes)
+    let secs_per_day: u64 = 86400;
+    let days = ts / secs_per_day;
+    let time_of_day = ts % secs_per_day;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // The exact inverse of `tzrules::days_from_civil`, total over `i64` — not
+    // the "simplified Gregorian calculation" that used to live below this
+    // function, whose sibling transcription in the file manager was wrong for
+    // every date before 2000-03-01.
+    let (year, month, day) = tzrules::civil_from_days(i64::try_from(days).unwrap_or(i64::MAX));
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        year, month, day, hours, minutes, seconds
+    )
+}
+
+// ============================================================================
+// Content-Addressed Store
+// ============================================================================
+
+/// The content-addressed store manages blobs keyed by SHA-256 hash.
+struct ContentStore {
+    base_path: PathBuf,
+}
+
+impl ContentStore {
+    fn new(dest: &Path) -> Self {
+        let base_path = dest.join("cas");
+        Self { base_path }
+    }
+
+    /// Get the filesystem path for a blob by its hash.
+    fn blob_path(&self, hash: &str) -> PathBuf {
+        // Use first 2 chars as directory prefix for filesystem efficiency
+        let (prefix, rest) = hash.split_at(2.min(hash.len()));
+        self.base_path.join(prefix).join(rest)
+    }
+
+    /// Check if a blob exists in the store.
+    ///
+    /// Existence *is* the deduplication test — there is no hash verification
+    /// on this path — so it is only sound if a blob can never appear at its
+    /// final name in a partial state. That is why both store methods below go
+    /// through `safeio`: a blob is built under a temporary name and renamed
+    /// into place, so a blob that exists is a blob that is whole.
+    ///
+    /// Before that, an interrupted `fs::copy`/`fs::write` left a truncated
+    /// blob sitting at the hash's path. Nothing ever rechecked it, so every
+    /// later backup containing that content deduplicated against the damaged
+    /// copy and `store_*` cheerfully reported "already have it". One
+    /// interrupted write silently poisoned that content for every future
+    /// backup — in the one application whose entire purpose is that the data
+    /// survives.
+    fn has_blob(&self, hash: &str) -> bool {
+        self.blob_path(hash).exists()
+    }
+
+    /// Store a file in the CAS. Returns true if the blob was new (not deduplicated).
+    fn store_file(&self, source_path: &Path, hash: &str) -> io::Result<bool> {
+        if self.has_blob(hash) {
+            return Ok(false); // Already exists — deduplicated
+        }
+
+        let blob_path = self.blob_path(hash);
+        if let Some(parent) = blob_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        safeio::copy_atomically(source_path, &blob_path)?;
+        Ok(true)
+    }
+
+    // `store_bytes` was deleted here.  It stored a `&[u8]` in the CAS through
+    // `safeio::write_atomically` and was correct, but nothing outside the
+    // tests ever called it: `store_file` is how every blob this program
+    // writes gets there, and a symlink's target is carried in the manifest
+    // rather than as a blob.  Its test asserted that "both ways a blob enters
+    // the store" are atomic, which read as twice the coverage it was -- there
+    // is one way.  Re-add it with its caller, not before.
+
+    /// Retrieve a blob's contents.
+    fn read_blob(&self, hash: &str) -> io::Result<Vec<u8>> {
+        fs::read(self.blob_path(hash))
+    }
+
+    /// Verify a blob's integrity.
+    fn verify_blob(&self, hash: &str) -> io::Result<bool> {
+        let data = self.read_blob(hash)?;
+        let actual = sha256_hex(&data);
+        Ok(actual == hash)
+    }
+
+    /// Remove a blob from the store.
+    fn remove_blob(&self, hash: &str) -> io::Result<()> {
+        let path = self.blob_path(hash);
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        Ok(())
+    }
+
+    /// Get all blob hashes currently in the store.
+    fn all_blobs(&self) -> io::Result<Vec<String>> {
+        let mut blobs = Vec::new();
+        if !self.base_path.exists() {
+            return Ok(blobs);
+        }
+        for prefix_entry in fs::read_dir(&self.base_path)? {
+            let prefix_entry = prefix_entry?;
+            if !prefix_entry.file_type()?.is_dir() {
+                continue;
+            }
+            let prefix = prefix_entry.file_name().to_string_lossy().to_string();
+            for blob_entry in fs::read_dir(prefix_entry.path())? {
+                let blob_entry = blob_entry?;
+                let rest = blob_entry.file_name().to_string_lossy().to_string();
+                blobs.push(format!("{}{}", prefix, rest));
+            }
+        }
+        Ok(blobs)
+    }
+}
+
+// ============================================================================
+// File Scanner
+// ============================================================================
+
+/// Scan a directory tree and collect file entries.
+fn scan_directory(
+    source: &Path,
+    exclude_patterns: &[String],
+    follow_symlinks: bool,
+    progress: &mut Progress,
+) -> io::Result<Vec<FileEntry>> {
+    let mut entries = Vec::new();
+    scan_dir_recursive(
+        source,
+        source,
+        exclude_patterns,
+        follow_symlinks,
+        &mut entries,
+        progress,
+    )?;
+    Ok(entries)
+}
+
+fn scan_dir_recursive(
+    root: &Path,
+    dir: &Path,
+    excludes: &[String],
+    follow_symlinks: bool,
+    entries: &mut Vec<FileEntry>,
+    progress: &mut Progress,
+) -> io::Result<()> {
+    let read_dir = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) => {
+            eprintln!("warning: cannot read directory {}: {}", dir.display(), e);
+            return Ok(());
+        }
+    };
+
+    for entry in read_dir {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("warning: directory entry error: {}", e);
+                continue;
+            }
+        };
+
+        let path = entry.path();
+        let rel = relative_path(&path, root);
+
+        // Check exclusions
+        if is_excluded(&rel, excludes) {
+            continue;
+        }
+
+        let meta = if follow_symlinks {
+            match fs::metadata(&path) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("warning: cannot stat {}: {}", path.display(), e);
+                    continue;
+                }
+            }
+        } else {
+            match fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("warning: cannot stat {}: {}", path.display(), e);
+                    continue;
+                }
+            }
+        };
+
+        if meta.is_dir() {
+            scan_dir_recursive(root, &path, excludes, follow_symlinks, entries, progress)?;
+        } else if meta.is_file() {
+            let mtime = meta
+                .modified()
+                .unwrap_or(UNIX_EPOCH)
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            let hash = match sha256_file(&path) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("warning: cannot hash {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+
+            // Saturating rather than wrapping: these two counters are only ever
+            // read to print a progress line and a summary, so a total that stops
+            // climbing is a wrong number a human notices, whereas one that wraps
+            // to zero mid-backup reads as "nothing has been copied yet".
+            progress.processed_files = progress.processed_files.saturating_add(1);
+            progress.processed_bytes = progress.processed_bytes.saturating_add(meta.len());
+            progress.current_file = rel.display().to_string();
+
+            // Report progress every 100 files
+            if progress.processed_files.is_multiple_of(100) {
+                progress.report();
+            }
+
+            entries.push(FileEntry {
+                path: rel,
+                size: meta.len(),
+                mtime,
+                hash,
+                is_symlink: false,
+                link_target: None,
+            });
+        } else if meta.file_type().is_symlink() {
+            // A symlink target is an arbitrary byte string too, and it is
+            // what restore recreates, so it must not be flattened either.
+            let target = fs::read_link(&path).unwrap_or_default();
+            let hash = sha256_hex(target.as_os_str().as_encoded_bytes());
+
+            entries.push(FileEntry {
+                path: rel,
+                size: 0,
+                mtime: 0,
+                hash,
+                is_symlink: true,
+                link_target: Some(target),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Pre-scan to estimate total files and bytes (for progress reporting).
+fn estimate_scan(source: &Path, excludes: &[String]) -> (u64, u64) {
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    estimate_recursive(source, source, excludes, &mut files, &mut bytes);
+    (files, bytes)
+}
+
+fn estimate_recursive(
+    root: &Path,
+    dir: &Path,
+    excludes: &[String],
+    files: &mut u64,
+    bytes: &mut u64,
+) {
+    let read_dir = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        let rel = relative_path(&path, root);
+        if is_excluded(&rel, excludes) {
+            continue;
+        }
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if meta.is_dir() {
+                estimate_recursive(root, &path, excludes, files, bytes);
+            } else if meta.is_file() {
+                *files = files.saturating_add(1);
+                *bytes = bytes.saturating_add(meta.len());
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Change Detection
+// ============================================================================
+
+/// Compare current scan against a previous manifest to detect changes.
+fn detect_changes(current: &[FileEntry], previous: &Manifest) -> DiffResult {
+    let prev_map: BTreeMap<&Path, &FileEntry> = previous
+        .files
+        .iter()
+        .map(|f| (f.path.as_path(), f))
+        .collect();
+
+    let curr_map: BTreeMap<&Path, &FileEntry> =
+        current.iter().map(|f| (f.path.as_path(), f)).collect();
+
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
+    let mut deleted = Vec::new();
+
+    // A path present now but not before is an addition; a path present in both
+    // whose content hash differs is a modification. Size and mtime are not
+    // consulted: the hash is authoritative, and a file can be rewritten with
+    // identical size and a preserved mtime.
+    for entry in current {
+        match prev_map.get(entry.path.as_path()) {
+            None => added.push(entry.clone()),
+            Some(prev_entry) => {
+                if entry.hash != prev_entry.hash {
+                    modified.push(((*prev_entry).clone(), entry.clone()));
+                }
+            }
+        }
+    }
+
+    // Find deleted files
+    for prev_entry in &previous.files {
+        if !curr_map.contains_key(prev_entry.path.as_path()) {
+            deleted.push(prev_entry.clone());
+        }
+    }
+
+    DiffResult {
+        added,
+        modified,
+        deleted,
+    }
+}
+
+// ============================================================================
+// Backup Repository Operations
+// ============================================================================
+
+/// Get the path to the backups directory within the destination.
+fn backups_dir(dest: &Path) -> PathBuf {
+    dest.join("backups")
+}
+
+/// Get the path to the schedules file.
+fn schedules_path(dest: &Path) -> PathBuf {
+    dest.join("schedules.json")
+}
+
+/// List all backup metadata in the destination, sorted by timestamp.
+fn list_backups(dest: &Path) -> io::Result<Vec<BackupMeta>> {
+    let bdir = backups_dir(dest);
+    if !bdir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut metas = Vec::new();
+    for entry in fs::read_dir(&bdir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let meta_path = entry.path().join("meta.json");
+        if meta_path.exists() {
+            let content = fs::read_to_string(&meta_path)?;
+            if let Ok(meta) = BackupMeta::deserialize(&content) {
+                metas.push(meta);
+            }
+        }
+    }
+
+    metas.sort_by_key(|m| m.timestamp);
+    Ok(metas)
+}
+
+/// Find the most recent backup of a given type (or any type if None).
+fn find_latest_backup(
+    dest: &Path,
+    backup_type: Option<BackupType>,
+) -> io::Result<Option<BackupMeta>> {
+    let metas = list_backups(dest)?;
+    Ok(metas
+        .into_iter()
+        .rev()
+        .find(|m| backup_type.is_none() || Some(m.backup_type) == backup_type))
+}
+
+/// Find the most recent full backup.
+fn find_latest_full_backup(dest: &Path) -> io::Result<Option<BackupMeta>> {
+    find_latest_backup(dest, Some(BackupType::Full))
+}
+
+/// Load a manifest for a given backup ID.
+fn load_manifest(dest: &Path, backup_id: &str) -> io::Result<Manifest> {
+    let manifest_path = backups_dir(dest).join(backup_id).join("manifest.json");
+    let content = fs::read_to_string(&manifest_path)?;
+    Manifest::deserialize(&content).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Load metadata for a given backup ID.
+fn load_meta(dest: &Path, backup_id: &str) -> io::Result<BackupMeta> {
+    let meta_path = backups_dir(dest).join(backup_id).join("meta.json");
+    let content = fs::read_to_string(&meta_path)?;
+    BackupMeta::deserialize(&content).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+// ============================================================================
+// Command: create
+// ============================================================================
+
+struct CreateOptions {
+    backup_type: BackupType,
+    source: PathBuf,
+    dest: PathBuf,
+    exclude: Vec<String>,
+    follow_symlinks: bool,
+}
+
+fn cmd_create(opts: CreateOptions) -> io::Result<()> {
+    let source = opts.source.canonicalize().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("source path {}: {}", opts.source.display(), e),
+        )
+    })?;
+
+    // Ensure destination exists
+    fs::create_dir_all(&opts.dest)?;
+    fs::create_dir_all(backups_dir(&opts.dest))?;
+
+    let store = ContentStore::new(&opts.dest);
+
+    // Determine parent backup for incremental/differential
+    let parent_manifest = match opts.backup_type {
+        BackupType::Full => None,
+        BackupType::Incremental => {
+            // Parent is the most recent backup of any type
+            match find_latest_backup(&opts.dest, None)? {
+                Some(meta) => Some((meta.id.clone(), load_manifest(&opts.dest, &meta.id)?)),
+                None => {
+                    eprintln!("No previous backup found. Performing full backup instead.");
+                    None
+                }
+            }
+        }
+        BackupType::Differential => {
+            // Parent is the most recent full backup
+            match find_latest_full_backup(&opts.dest)? {
+                Some(meta) => Some((meta.id.clone(), load_manifest(&opts.dest, &meta.id)?)),
+                None => {
+                    eprintln!("No previous full backup found. Performing full backup instead.");
+                    None
+                }
+            }
+        }
+    };
+
+    let effective_type = if parent_manifest.is_none() && opts.backup_type != BackupType::Full {
+        BackupType::Full
+    } else {
+        opts.backup_type
+    };
+
+    println!(
+        "Creating {} backup of {} -> {}",
+        effective_type,
+        source.display(),
+        opts.dest.display()
+    );
+
+    // Estimate for progress
+    eprintln!("Scanning directory tree...");
+    let (est_files, est_bytes) = estimate_scan(&source, &opts.exclude);
+    eprintln!(
+        "  Estimated: {} files, {}",
+        est_files,
+        format_size(est_bytes)
+    );
+
+    let mut progress = Progress::new();
+    progress.total_files = est_files;
+    progress.total_bytes = est_bytes;
+
+    // Scan source directory
+    let all_files = scan_directory(&source, &opts.exclude, opts.follow_symlinks, &mut progress)?;
+
+    // Determine which files to include based on backup type
+    let files_to_backup = match (&parent_manifest, effective_type) {
+        (Some((_, prev_manifest)), BackupType::Incremental | BackupType::Differential) => {
+            let diff = detect_changes(&all_files, prev_manifest);
+            let mut to_backup = diff.added;
+            to_backup.extend(diff.modified.into_iter().map(|(_, new)| new));
+            to_backup
+        }
+        _ => all_files.clone(),
+    };
+
+    // Store blobs and build manifest
+    let mut manifest = Manifest::new();
+    let mut new_blobs: u64 = 0;
+    let mut dedup_blobs: u64 = 0;
+    let mut total_size: u64 = 0;
+
+    for entry in &files_to_backup {
+        total_size = total_size.saturating_add(entry.size);
+
+        if entry.is_symlink {
+            // Symlinks don't need blob storage
+            manifest.files.push(entry.clone());
+            continue;
+        }
+
+        // Store blob in CAS
+        let file_path = source.join(&entry.path);
+        match store.store_file(&file_path, &entry.hash) {
+            Ok(true) => new_blobs = new_blobs.saturating_add(1),
+            Ok(false) => dedup_blobs = dedup_blobs.saturating_add(1),
+            Err(e) => {
+                eprintln!("warning: failed to store {}: {}", entry.path.display(), e);
+                continue;
+            }
+        }
+
+        manifest.files.push(entry.clone());
+    }
+
+    // For incremental/differential, also include unchanged files in manifest
+    // so that restore can reconstruct the full state
+    if effective_type == BackupType::Full {
+        // manifest already has all files
+    }
+
+    // Create backup directory
+    let timestamp = now_timestamp();
+    let backup_id = format!("{}-{}", timestamp, effective_type.as_str());
+    let backup_dir = backups_dir(&opts.dest).join(&backup_id);
+    fs::create_dir_all(&backup_dir)?;
+
+    // Write manifest.
+    //
+    // The order of these two writes is load-bearing and must not be swapped:
+    // `list_backups` only counts a directory as a backup if `meta.json` is
+    // present *and* parses, so writing meta.json last makes it the completion
+    // marker. An interrupted backup leaves a directory with no meta, which is
+    // correctly ignored rather than offered to the user as restorable.
+    //
+    // Both go through `safeio` as well, so that neither file can exist in a
+    // half-written state even momentarily. That is belt-and-braces given the
+    // ordering above, and cheap enough to be worth not having the safety rest
+    // on a subtle argument that a future edit could invalidate silently.
+    let manifest_str = manifest.serialize();
+    safeio::write_str_atomically(&backup_dir.join("manifest.json"), &manifest_str)?;
+
+    // Write metadata
+    let parent_id = parent_manifest.map(|(id, _)| id);
+    let meta = BackupMeta {
+        id: backup_id.clone(),
+        backup_type: effective_type,
+        timestamp,
+        source: source.to_string_lossy().to_string(),
+        parent_id,
+        file_count: manifest.files.len() as u64,
+        total_size,
+        new_blobs,
+        dedup_blobs,
+    };
+    let meta_str = meta.serialize();
+    safeio::write_str_atomically(&backup_dir.join("meta.json"), &meta_str)?;
+
+    println!("\nBackup complete: {}", backup_id);
+    println!("  Type: {}", effective_type);
+    println!("  Files: {}", manifest.files.len());
+    println!("  Total size: {}", format_size(total_size));
+    println!("  New blobs: {}", new_blobs);
+    println!("  Deduplicated: {}", dedup_blobs);
+    if dedup_blobs > 0 {
+        // Widened to `u128` so the `* 100` is exact rather than saturated: both
+        // operands are file counts, so the product cannot come close to the
+        // range, and a ratio that saturates would print a percentage nobody
+        // could tell apart from a real one.  The divisor is non-zero because
+        // this branch is only reached when `dedup_blobs > 0`, but `checked_div`
+        // states that instead of leaving the reader to re-derive it.
+        let total_blobs = u128::from(new_blobs).saturating_add(u128::from(dedup_blobs));
+        let saved_pct = u128::from(dedup_blobs)
+            .saturating_mul(100)
+            .checked_div(total_blobs)
+            .unwrap_or(0);
+        println!("  Dedup ratio: {}%", saved_pct);
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Command: restore
+// ============================================================================
+
+struct RestoreOptions {
+    backup_id: String,
+    backup_dest: PathBuf,  // Where backups are stored
+    restore_dest: PathBuf, // Where to restore files to
+    file_pattern: Option<String>,
+}
+
+fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
+    let manifest = load_manifest(&opts.backup_dest, &opts.backup_id)?;
+    let meta = load_meta(&opts.backup_dest, &opts.backup_id)?;
+    let store = ContentStore::new(&opts.backup_dest);
+
+    println!(
+        "Restoring backup {} to {}",
+        opts.backup_id,
+        opts.restore_dest.display()
+    );
+    println!("  Type: {}", meta.backup_type);
+    println!("  Files in manifest: {}", manifest.files.len());
+
+    // For incremental/differential, we need to reconstruct the full file set
+    // by walking back through parent manifests
+    let full_files = if meta.backup_type != BackupType::Full {
+        reconstruct_full_manifest(&opts.backup_dest, &meta, &manifest)?
+    } else {
+        manifest.files.clone()
+    };
+
+    let files_to_restore: Vec<&FileEntry> = if let Some(ref pattern) = opts.file_pattern {
+        full_files
+            .iter()
+            // The pattern is UTF-8 text the user typed, so matching a lossy
+            // rendering of the stored path is a selection heuristic, not an
+            // identity check. The path itself is still restored byte-exactly.
+            .filter(|f| glob_matches(pattern, &f.path.to_string_lossy()))
+            .collect()
+    } else {
+        full_files.iter().collect()
+    };
+
+    println!("  Restoring {} files", files_to_restore.len());
+
+    fs::create_dir_all(&opts.restore_dest)?;
+
+    let mut restored = 0u64;
+    let mut errors = 0u64;
+
+    for entry in &files_to_restore {
+        let Some(dest_path) = restore_path_within(&opts.restore_dest, &entry.path) else {
+            eprintln!(
+                "error: refusing to restore {}: it names a location outside {}",
+                entry.path.display(),
+                opts.restore_dest.display()
+            );
+            errors = errors.saturating_add(1);
+            continue;
+        };
+
+        if let Some(parent) = dest_path.parent()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            // Counted rather than propagated: one directory the user cannot
+            // write must not strand the other several thousand files.
+            eprintln!("error: cannot create {}: {}", parent.display(), e);
+            errors = errors.saturating_add(1);
+            continue;
+        }
+
+        if entry.is_symlink {
+            let Some(ref target) = entry.link_target else {
+                eprintln!(
+                    "error: {} is recorded as a symlink but the manifest gives no target",
+                    entry.path.display()
+                );
+                errors = errors.saturating_add(1);
+                continue;
+            };
+
+            // Whether the link was made used to be discarded with `.ok()`,
+            // and the entry counted as restored either way — so a restore
+            // that silently dropped every symlink reported complete success.
+            #[cfg(unix)]
+            let made = std::os::unix::fs::symlink(target, &dest_path);
+            // No symlinks here: the target is written as file content so the
+            // information survives the round trip, but it is no longer a link.
+            #[cfg(not(unix))]
+            let made = fs::write(&dest_path, target.as_os_str().as_encoded_bytes());
+
+            match made {
+                Ok(()) => restored = restored.saturating_add(1),
+                Err(e) => {
+                    eprintln!(
+                        "error: cannot restore symlink {}: {}",
+                        entry.path.display(),
+                        e
+                    );
+                    errors = errors.saturating_add(1);
+                }
+            }
+            continue;
+        }
+
+        // Read blob from CAS and write to destination
+        match store.read_blob(&entry.hash) {
+            Ok(data) => {
+                // Verify hash
+                let actual_hash = sha256_hex(&data);
+                if actual_hash != entry.hash {
+                    eprintln!(
+                        "error: hash mismatch for {}: expected {}, got {}",
+                        entry.path.display(),
+                        entry.hash,
+                        actual_hash
+                    );
+                    errors = errors.saturating_add(1);
+                    continue;
+                }
+                // Crash-safe: a restore usually writes *over* a file the user
+                // still has. `fs::write` truncates first, so an interrupted
+                // restore destroyed the existing file and failed to supply
+                // the replacement — the one outcome a restore must never
+                // produce.
+                if let Err(e) = safeio::write_atomically(&dest_path, &data) {
+                    eprintln!("error: cannot write {}: {}", dest_path.display(), e);
+                    errors = errors.saturating_add(1);
+                } else {
+                    restored = restored.saturating_add(1);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "error: cannot read blob for {}: {}",
+                    entry.path.display(),
+                    e
+                );
+                errors = errors.saturating_add(1);
+            }
+        }
+    }
+
+    println!(
+        "\nRestore finished: {} of {} files restored",
+        restored,
+        files_to_restore.len()
+    );
+
+    if errors > 0 {
+        // A restore that could not deliver every file has not restored the
+        // backup, and the exit status is the only thing a script can see. It
+        // used to print an error count under the heading "Restore complete:"
+        // and return `Ok(())`, so `backup restore … && rm -rf original/` was
+        // a way to lose data.
+        return Err(io::Error::other(format!(
+            "{errors} file(s) could not be restored"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Join a manifest-supplied path onto the restore destination, refusing
+/// anything that would land outside it.
+///
+/// `Path::join` **replaces** its base when given an absolute path, so an
+/// absolute entry in a manifest silently redirects a restore away from the
+/// directory the user named and onto that absolute path — `backup restore
+/// --to /tmp/check` writing over `/etc`. A `..` component escapes upward the
+/// same way. This is not hypothetical input: [`relative_path`] falls back to
+/// `unwrap_or(full)` when `strip_prefix` fails, so this program writes absolute
+/// paths into its own manifests whenever that happens.
+///
+/// A manifest is parsed data — hand-editable, corruptible, and often from a
+/// backup someone else made — so it is untrusted, and the check belongs at the
+/// point of use rather than at the point it was written.
+///
+/// Refused rather than sanitised: quietly relocating a file during a *restore*
+/// puts the user's data somewhere they did not ask for and gives them no way
+/// to notice. The caller reports the path and counts it as an error.
+fn restore_path_within(dest_root: &Path, rel: &Path) -> Option<PathBuf> {
+    let mut out = dest_root.to_path_buf();
+    let mut pushed = false;
+    for comp in rel.components() {
+        match comp {
+            Component::Normal(part) => {
+                out.push(part);
+                pushed = true;
+            }
+            Component::CurDir => {}
+            // `RootDir`/`Prefix` are how an absolute path presents itself;
+            // `ParentDir` is the classic archive traversal.
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    // An empty or `.`-only path names the destination directory itself, which
+    // is not a file the restore can write.
+    pushed.then_some(out)
+}
+
+/// Reconstruct the full file list by walking back through parent backups.
+fn reconstruct_full_manifest(
+    dest: &Path,
+    meta: &BackupMeta,
+    manifest: &Manifest,
+) -> io::Result<Vec<FileEntry>> {
+    let mut file_map: BTreeMap<PathBuf, FileEntry> = BTreeMap::new();
+
+    // Walk back to find the full base
+    let mut chain = vec![(meta.clone(), manifest.clone())];
+    let mut current_meta = meta.clone();
+    while let Some(ref pid) = current_meta.parent_id {
+        let parent_meta = load_meta(dest, pid)?;
+        let parent_manifest = load_manifest(dest, pid)?;
+        chain.push((parent_meta.clone(), parent_manifest));
+        if parent_meta.backup_type == BackupType::Full {
+            break;
+        }
+        current_meta = parent_meta;
+    }
+
+    // Apply from oldest (full) to newest (incremental)
+    for (_, m) in chain.iter().rev() {
+        for entry in &m.files {
+            file_map.insert(entry.path.clone(), entry.clone());
+        }
+    }
+
+    Ok(file_map.into_values().collect())
+}
+
+// ============================================================================
+// Command: list
+// ============================================================================
+
+fn cmd_list(dest: &Path, source_filter: Option<&str>) -> io::Result<()> {
+    let metas = list_backups(dest)?;
+
+    if metas.is_empty() {
+        println!("No backups found.");
+        return Ok(());
+    }
+
+    let filtered: Vec<&BackupMeta> = if let Some(source) = source_filter {
+        metas.iter().filter(|m| m.source.contains(source)).collect()
+    } else {
+        metas.iter().collect()
+    };
+
+    println!(
+        "{:<30} {:<12} {:<20} {:>8} {:>12}",
+        "BACKUP ID", "TYPE", "DATE", "FILES", "SIZE"
+    );
+    println!("{}", "-".repeat(84));
+
+    for meta in &filtered {
+        println!(
+            "{:<30} {:<12} {:<20} {:>8} {:>12}",
+            meta.id,
+            meta.backup_type.as_str(),
+            format_timestamp(meta.timestamp),
+            meta.file_count,
+            format_size(meta.total_size),
+        );
+    }
+
+    println!("\nTotal: {} backups", filtered.len());
+
+    Ok(())
+}
+
+// ============================================================================
+// Command: verify
+// ============================================================================
+
+fn cmd_verify(dest: &Path, backup_id: &str) -> io::Result<()> {
+    let manifest = load_manifest(dest, backup_id)?;
+    let meta = load_meta(dest, backup_id)?;
+    let store = ContentStore::new(dest);
+
+    println!("Verifying backup: {}", backup_id);
+    println!("  Type: {}", meta.backup_type);
+    println!("  Files: {}", manifest.files.len());
+    println!();
+
+    let mut ok = 0u64;
+    let mut missing = 0u64;
+    let mut corrupt = 0u64;
+
+    for entry in &manifest.files {
+        if entry.is_symlink {
+            ok = ok.saturating_add(1);
+            continue;
+        }
+
+        if !store.has_blob(&entry.hash) {
+            eprintln!("  MISSING: {} (hash: {})", entry.path.display(), entry.hash);
+            missing = missing.saturating_add(1);
+            continue;
+        }
+
+        match store.verify_blob(&entry.hash) {
+            Ok(true) => ok = ok.saturating_add(1),
+            Ok(false) => {
+                eprintln!("  CORRUPT: {} (hash: {})", entry.path.display(), entry.hash);
+                corrupt = corrupt.saturating_add(1);
+            }
+            Err(e) => {
+                eprintln!("  ERROR: {} — {}", entry.path.display(), e);
+                corrupt = corrupt.saturating_add(1);
+            }
+        }
+    }
+
+    println!("\nVerification results:");
+    println!("  OK: {}", ok);
+    if missing > 0 {
+        println!("  Missing blobs: {}", missing);
+    }
+    if corrupt > 0 {
+        println!("  Corrupt blobs: {}", corrupt);
+    }
+
+    if missing == 0 && corrupt == 0 {
+        println!("  Status: PASSED");
+        Ok(())
+    } else {
+        println!("  Status: FAILED");
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "backup verification failed",
+        ))
+    }
+}
+
+// ============================================================================
+// Command: prune
+// ============================================================================
+
+struct PruneOptions {
+    dest: PathBuf,
+    keep_last: Option<u64>,
+    keep_daily: Option<u64>,
+    keep_weekly: Option<u64>,
+    keep_monthly: Option<u64>,
+}
+
+fn cmd_prune(opts: PruneOptions) -> io::Result<()> {
+    let metas = list_backups(&opts.dest)?;
+
+    if metas.is_empty() {
+        println!("No backups to prune.");
+        return Ok(());
+    }
+
+    let retention = compute_retention(&metas, &opts);
+
+    let to_remove: Vec<&BackupMeta> = metas
+        .iter()
+        .filter(|m| !retention.keep.contains(&m.id))
+        .collect();
+
+    if !retention.held_by_chain.is_empty() {
+        println!(
+            "Keeping {} older backup(s) that newer ones are built on top of:",
+            retention.held_by_chain.len()
+        );
+        for id in &retention.held_by_chain {
+            println!("  = {id}");
+        }
+    }
+
+    if !retention.broken_chains.is_empty() {
+        // Not caused by this prune — the link was already gone. Said out loud
+        // because the alternative is keeping a backup that `backup restore`
+        // will refuse, and letting the user find out during a recovery.
+        eprintln!(
+            "warning: {} kept backup(s) cannot be restored: their parent is missing",
+            retention.broken_chains.len()
+        );
+        for (child, parent) in &retention.broken_chains {
+            eprintln!(
+                "  ! {child} refers to parent {parent}, which is not in {}",
+                opts.dest.display()
+            );
+        }
+    }
+
+    if to_remove.is_empty() {
+        println!("No backups to prune (all match retention policy).");
+        return Ok(());
+    }
+
+    println!("Pruning {} backups:", to_remove.len());
+    for meta in &to_remove {
+        println!(
+            "  - {} ({}, {})",
+            meta.id,
+            meta.backup_type,
+            format_timestamp(meta.timestamp)
+        );
+    }
+
+    // Remove backup directories
+    for meta in &to_remove {
+        let backup_dir = backups_dir(&opts.dest).join(&meta.id);
+        if backup_dir.exists() {
+            fs::remove_dir_all(&backup_dir)?;
+        }
+    }
+
+    // Clean up unreferenced blobs
+    let remaining_metas = list_backups(&opts.dest)?;
+    let mut referenced_hashes = std::collections::HashSet::new();
+    for meta in &remaining_metas {
+        // Propagated, not skipped. A manifest that will not load used to be
+        // treated as referencing nothing, so every blob only that backup used
+        // was deleted as an orphan — one unreadable file turning a transient
+        // error into permanent, silent data loss. Refusing to prune leaves the
+        // store exactly as it was, which is always recoverable; deleting the
+        // blobs is not.
+        let manifest = load_manifest(&opts.dest, &meta.id).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "refusing to collect unreferenced blobs: cannot read the manifest \
+                     for backup {}: {e}. Blobs it references would be deleted as orphans.",
+                    meta.id
+                ),
+            )
+        })?;
+        for entry in &manifest.files {
+            referenced_hashes.insert(entry.hash.clone());
+        }
+    }
+
+    let store = ContentStore::new(&opts.dest);
+    let all_blobs = store.all_blobs()?;
+    let mut removed_blobs = 0u64;
+    for blob_hash in &all_blobs {
+        if !referenced_hashes.contains(blob_hash) {
+            store.remove_blob(blob_hash)?;
+            removed_blobs = removed_blobs.saturating_add(1);
+        }
+    }
+
+    println!("\nPrune complete:");
+    println!("  Backups removed: {}", to_remove.len());
+    println!("  Orphan blobs removed: {}", removed_blobs);
+
+    Ok(())
+}
+
+/// What a retention policy decided.
+struct Retention {
+    /// Every backup id that must survive the prune.
+    keep: std::collections::HashSet<String>,
+    /// Ids the policy did *not* select, but which a kept backup descends from.
+    /// Reported so a prune that removes fewer backups than asked can say why.
+    held_by_chain: Vec<String>,
+    /// `(child, missing parent)` for every kept backup whose chain does not
+    /// reach a full backup. These are already unrestorable — the link was gone
+    /// before this prune ran — so they are reported, not silently kept as if
+    /// they were data.
+    broken_chains: Vec<(String, String)>,
+}
+
+/// Compute which backup IDs to keep based on retention policy.
+fn compute_retention(metas: &[BackupMeta], opts: &PruneOptions) -> Retention {
+    let mut keep = retention_by_policy(metas, opts);
+    let (held_by_chain, broken_chains) = keep_ancestors(metas, &mut keep);
+    Retention {
+        keep,
+        held_by_chain,
+        broken_chains,
+    }
+}
+
+/// Add to `keep` every backup that a kept backup descends from, returning the
+/// ids that were added.
+///
+/// An incremental backup stores only the difference from its parent: restoring
+/// one walks `parent_id` back to the full backup at the root of its chain, and
+/// [`reconstruct_full_manifest`] fails outright when a link is missing. The
+/// policies below select purely by *age*, and for the usual full-then-many-
+/// incrementals chain that selects the newest and drops the full base they all
+/// depend on.
+///
+/// So `backup prune --keep-last 3` used to delete the one backup that made the
+/// three it kept restorable — and then, because nothing referenced its blobs
+/// any more, garbage-collect the file contents too. It printed "Prune
+/// complete" and exited 0. Every surviving backup was unrestorable, the data
+/// was physically gone, and the first anyone would learn of it is the next
+/// time they tried to restore.
+///
+/// Returns `(ids added to keep, broken links found)`. A `parent_id` naming a
+/// backup that is not in `metas` is *not* added: keeping a phantom id would
+/// tell the user we are holding a backup that does not exist. It is returned as
+/// a broken link instead, because its child cannot be restored either way.
+fn keep_ancestors(
+    metas: &[BackupMeta],
+    keep: &mut std::collections::HashSet<String>,
+) -> (Vec<String>, Vec<(String, String)>) {
+    let parents: BTreeMap<&str, &str> = metas
+        .iter()
+        .filter_map(|m| m.parent_id.as_deref().map(|p| (m.id.as_str(), p)))
+        .collect();
+    let known: std::collections::HashSet<&str> = metas.iter().map(|m| m.id.as_str()).collect();
+
+    let mut added = Vec::new();
+    let mut broken = Vec::new();
+    let mut pending: Vec<String> = keep.iter().cloned().collect();
+    while let Some(id) = pending.pop() {
+        let Some(parent) = parents.get(id.as_str()) else {
+            continue;
+        };
+        if !known.contains(*parent) {
+            broken.push((id, (*parent).to_string()));
+            continue;
+        }
+        // `insert` returning false is also what terminates a `parent_id` cycle
+        // in a hand-edited or corrupt set of metadata.
+        if keep.insert((*parent).to_string()) {
+            added.push((*parent).to_string());
+            pending.push((*parent).to_string());
+        }
+    }
+    added.sort();
+    broken.sort();
+    (added, broken)
+}
+
+/// Apply the age-based retention policies, ignoring backup chains.
+fn retention_by_policy(
+    metas: &[BackupMeta],
+    opts: &PruneOptions,
+) -> std::collections::HashSet<String> {
+    let mut keep = std::collections::HashSet::new();
+
+    // Keep last N
+    if let Some(n) = opts.keep_last {
+        for meta in metas.iter().rev().take(n as usize) {
+            keep.insert(meta.id.clone());
+        }
+    }
+
+    // Keep daily: one backup per day for last N days
+    if let Some(n) = opts.keep_daily {
+        let mut days_seen = std::collections::HashSet::new();
+        for meta in metas.iter().rev() {
+            let day = meta.timestamp / 86400;
+            if days_seen.len() < n as usize && days_seen.insert(day) {
+                keep.insert(meta.id.clone());
+            }
+        }
+    }
+
+    // Keep weekly: one backup per week for last N weeks
+    if let Some(n) = opts.keep_weekly {
+        let mut weeks_seen = std::collections::HashSet::new();
+        for meta in metas.iter().rev() {
+            let week = meta.timestamp / (86400 * 7);
+            if weeks_seen.len() < n as usize && weeks_seen.insert(week) {
+                keep.insert(meta.id.clone());
+            }
+        }
+    }
+
+    // Keep monthly: one backup per month for last N months
+    if let Some(n) = opts.keep_monthly {
+        let mut months_seen = std::collections::HashSet::new();
+        for meta in metas.iter().rev() {
+            let month = meta.timestamp / (86400 * 30); // approximate
+            if months_seen.len() < n as usize && months_seen.insert(month) {
+                keep.insert(meta.id.clone());
+            }
+        }
+    }
+
+    // If no retention policy specified, keep everything
+    if opts.keep_last.is_none()
+        && opts.keep_daily.is_none()
+        && opts.keep_weekly.is_none()
+        && opts.keep_monthly.is_none()
+    {
+        for meta in metas {
+            keep.insert(meta.id.clone());
+        }
+    }
+
+    keep
+}
+
+// ============================================================================
+// Command: schedule
+// ============================================================================
+
+fn cmd_schedule(dest: &Path, source: &str, interval: &str) -> io::Result<()> {
+    let sched_path = schedules_path(dest);
+    let mut schedules: Vec<ScheduleEntry> = if sched_path.exists() {
+        let content = fs::read_to_string(&sched_path)?;
+        if let Ok(val) = json_parse(&content) {
+            if let Some(arr) = val.as_array() {
+                arr.iter().filter_map(ScheduleEntry::from_json).collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Validate interval
+    match interval {
+        "daily" | "weekly" | "monthly" => {}
+        _ => {
+            eprintln!(
+                "error: invalid interval '{}'. Must be daily, weekly, or monthly.",
+                interval
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid interval",
+            ));
+        }
+    }
+
+    let entry = ScheduleEntry {
+        source: source.to_string(),
+        dest: dest.to_string_lossy().to_string(),
+        interval: interval.to_string(),
+    };
+
+    // Remove existing schedule for same source/dest
+    schedules.retain(|s| !(s.source == entry.source && s.dest == entry.dest));
+    schedules.push(entry);
+
+    // Save
+    let json_arr = JsonValue::Array(schedules.iter().map(|s| s.to_json()).collect());
+    fs::create_dir_all(dest)?;
+    // Crash-safe: this rewrites the whole schedule list, so a truncated write
+    // does not lose the one schedule being added — it loses all of them.
+    safeio::write_str_atomically(&sched_path, &json_pretty(&json_arr, 2))?;
+
+    println!(
+        "Schedule saved: {} -> {} ({})",
+        source,
+        dest.display(),
+        interval
+    );
+    Ok(())
+}
+
+// ============================================================================
+// Command: diff
+// ============================================================================
+
+fn cmd_diff(dest: &Path, id1: &str, id2: &str) -> io::Result<()> {
+    let manifest1 = load_manifest(dest, id1)?;
+    let manifest2 = load_manifest(dest, id2)?;
+    let meta1 = load_meta(dest, id1)?;
+    let meta2 = load_meta(dest, id2)?;
+
+    println!("Comparing backups:");
+    println!("  [1] {} ({})", id1, format_timestamp(meta1.timestamp));
+    println!("  [2] {} ({})", id2, format_timestamp(meta2.timestamp));
+    println!();
+
+    let diff = detect_changes(&manifest2.files, &manifest1);
+
+    if diff.is_empty() {
+        println!("No differences found.");
+        return Ok(());
+    }
+
+    if !diff.added.is_empty() {
+        println!("Added ({}):", diff.added.len());
+        for f in &diff.added {
+            println!("  + {} ({})", f.path.display(), format_size(f.size));
+        }
+        println!();
+    }
+
+    if !diff.modified.is_empty() {
+        println!("Modified ({}):", diff.modified.len());
+        for (old, new) in &diff.modified {
+            // Going through `i64` was two lossy casts and a subtraction that
+            // overflows for a large enough pair of sizes — and a file bigger
+            // than `i64::MAX` is not the absurdity it sounds like once a
+            // manifest can be hand-edited or corrupted.  `abs_diff` is exact
+            // for every pair of `u64`, and the sign is already known from the
+            // comparison that chose which way round to subtract.
+            let (sign, size_change) = if new.size >= old.size {
+                ("+", new.size.abs_diff(old.size))
+            } else {
+                ("-", old.size.abs_diff(new.size))
+            };
+            println!("  ~ {} ({}{} bytes)", new.path.display(), sign, size_change);
+        }
+        println!();
+    }
+
+    if !diff.deleted.is_empty() {
+        println!("Deleted ({}):", diff.deleted.len());
+        for f in &diff.deleted {
+            println!("  - {} ({})", f.path.display(), format_size(f.size));
+        }
+        println!();
+    }
+
+    // Summary
+    let added_size: u64 = diff.added.iter().map(|f| f.size).sum();
+    let deleted_size: u64 = diff.deleted.iter().map(|f| f.size).sum();
+    let modified_new_size: u64 = diff.modified.iter().map(|(_, n)| n.size).sum();
+    let modified_old_size: u64 = diff.modified.iter().map(|(o, _)| o.size).sum();
+
+    println!("Summary:");
+    println!(
+        "  Added: {} files (+{})",
+        diff.added.len(),
+        format_size(added_size)
+    );
+    println!(
+        "  Modified: {} files (was {}, now {})",
+        diff.modified.len(),
+        format_size(modified_old_size),
+        format_size(modified_new_size),
+    );
+    println!(
+        "  Deleted: {} files (-{})",
+        diff.deleted.len(),
+        format_size(deleted_size)
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Command: info
+// ============================================================================
+
+fn cmd_info(dest: &Path, backup_id: &str) -> io::Result<()> {
+    let meta = load_meta(dest, backup_id)?;
+    let manifest = load_manifest(dest, backup_id)?;
+
+    println!("Backup: {}", meta.id);
+    println!("  Type:       {}", meta.backup_type);
+    println!("  Created:    {}", format_timestamp(meta.timestamp));
+    println!("  Source:     {}", meta.source);
+    println!(
+        "  Parent:     {}",
+        meta.parent_id.as_deref().unwrap_or("(none)")
+    );
+    println!("  Files:      {}", meta.file_count);
+    println!("  Total size: {}", format_size(meta.total_size));
+    println!("  New blobs:  {}", meta.new_blobs);
+    println!("  Dedup:      {}", meta.dedup_blobs);
+    println!();
+
+    // File type breakdown
+    let mut by_ext: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    for entry in &manifest.files {
+        // `Path::extension` (unlike splitting on '.') correctly reports no
+        // extension for "README" and for a dotfile like ".gitignore".
+        let ext = entry.path.extension().map_or_else(
+            || "(no ext)".to_string(),
+            |e| e.to_string_lossy().into_owned(),
+        );
+        let (count, size) = by_ext.entry(ext).or_insert((0, 0));
+        *count = count.saturating_add(1);
+        *size = size.saturating_add(entry.size);
+    }
+
+    if !by_ext.is_empty() {
+        println!("  File types:");
+        let mut sorted: Vec<_> = by_ext.into_iter().collect();
+        sorted.sort_by_key(|item| std::cmp::Reverse(item.1.1));
+        for (ext, (count, size)) in sorted.iter().take(10) {
+            println!(
+                "    .{:<12} {:>6} files  {:>12}",
+                ext,
+                count,
+                format_size(*size)
+            );
+        }
+        if sorted.len() > 10 {
+            println!("    ... and {} more types", sorted.len().saturating_sub(10));
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Argument Parsing
+// ============================================================================
+
+enum Command {
+    Create(CreateOptions),
+    Restore(RestoreOptions),
+    List {
+        dest: PathBuf,
+        source: Option<String>,
+    },
+    Verify {
+        dest: PathBuf,
+        backup_id: String,
+    },
+    Prune(PruneOptions),
+    Schedule {
+        dest: PathBuf,
+        source: String,
+        interval: String,
+    },
+    Diff {
+        dest: PathBuf,
+        id1: String,
+        id2: String,
+    },
+    Info {
+        dest: PathBuf,
+        backup_id: String,
+    },
+    Help,
+}
+
+/// A one-pass reader over one command's arguments.
+///
+/// Every `parse_*_args` function below walks its slice the same way: take an
+/// argument, and if it is a flag that carries a value, take the following one
+/// too. Written by hand that is an index and a counter — `args[i]`, `i += 1` —
+/// and there were forty-five of them across the nine parsers. Each is a panic
+/// if the counter passes the end and an overflow if it wraps, but the real cost
+/// was that every parser re-implemented the advance, so a new option could be
+/// added that stepped the counter in one branch and forgot it in another. That
+/// bug does not announce itself: the parser silently reads a flag's value as
+/// the next flag, and `backup prune --keep-last 5 --dest /d` quietly prunes
+/// somewhere else.
+///
+/// Holding an iterator makes both problems unstatable — there is no index to
+/// run off the end, no counter to increment, and advancing is the only way to
+/// read. [`value`](Self::value) and [`number`](Self::number) additionally put
+/// the "flag requires an argument" wording in one place, so a tenth option
+/// cannot arrive phrased differently from its nine neighbours.
+struct ArgCursor<'a> {
+    rest: std::slice::Iter<'a, String>,
+}
+
+impl<'a> ArgCursor<'a> {
+    fn new(args: &'a [String]) -> Self {
+        Self { rest: args.iter() }
+    }
+
+    /// The next argument, or `None` once they are exhausted.
+    fn next(&mut self) -> Option<&'a str> {
+        self.rest.next().map(String::as_str)
+    }
+
+    /// The next argument, required, because `flag` carries a value.
+    ///
+    /// `what` completes the sentence "`--dest` requires …": pass `"a path"`,
+    /// `"a pattern"`, `"a value"`.
+    fn value(&mut self, flag: &str, what: &str) -> Result<&'a str, String> {
+        self.next().ok_or_else(|| format!("{flag} requires {what}"))
+    }
+
+    /// The next argument parsed as a count, required, because `flag` carries
+    /// one. Kept distinct from [`value`](Self::value) so that the four
+    /// `--keep-*` retention options cannot disagree about how a non-number is
+    /// reported.
+    fn number(&mut self, flag: &str) -> Result<u64, String> {
+        self.value(flag, "a number")?
+            .parse::<u64>()
+            .map_err(|_| format!("{flag} must be a number"))
+    }
+}
+
+fn parse_args() -> Result<Command, String> {
+    let args: Vec<String> = env::args().collect();
+
+    // `split_first` drops argv[0] without naming an index, and its `None` arm
+    // covers the argv[0]-less case that `args[1]` would have panicked on
+    // instead. A process can be spawned with an empty argv; a backup tool that
+    // aborts rather than printing its usage in that case is a worse answer.
+    let Some((_program, rest)) = args.split_first() else {
+        return Ok(Command::Help);
+    };
+    let Some((command, options)) = rest.split_first() else {
+        return Ok(Command::Help);
+    };
+
+    match command.as_str() {
+        "help" | "--help" | "-h" => Ok(Command::Help),
+        "create" => parse_create_args(options),
+        "restore" => parse_restore_args(options),
+        "list" => parse_list_args(options),
+        "verify" => parse_verify_args(options),
+        "prune" => parse_prune_args(options),
+        "schedule" => parse_schedule_args(options),
+        "diff" => parse_diff_args(options),
+        "info" => parse_info_args(options),
+        cmd => Err(format!("unknown command: {cmd}")),
+    }
+}
+
+fn parse_create_args(args: &[String]) -> Result<Command, String> {
+    let mut backup_type = BackupType::Full;
+    let mut source: Option<PathBuf> = None;
+    let mut dest: Option<PathBuf> = None;
+    let mut exclude: Vec<String> = Vec::new();
+    let mut follow_symlinks = false;
+
+    let mut cur = ArgCursor::new(args);
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--full" => backup_type = BackupType::Full,
+            "--incremental" => backup_type = BackupType::Incremental,
+            "--differential" => backup_type = BackupType::Differential,
+            "--follow-symlinks" => follow_symlinks = true,
+            "--source" => source = Some(PathBuf::from(cur.value("--source", "a path")?)),
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--exclude" => exclude.push(cur.value("--exclude", "a pattern")?.to_string()),
+            other => return Err(format!("unknown option for create: {other}")),
+        }
+    }
+
+    let source = source.ok_or("--source is required")?;
+    let dest = dest.ok_or("--dest is required")?;
+
+    Ok(Command::Create(CreateOptions {
+        backup_type,
+        source,
+        dest,
+        exclude,
+        follow_symlinks,
+    }))
+}
+
+fn parse_restore_args(args: &[String]) -> Result<Command, String> {
+    let mut cur = ArgCursor::new(args);
+    let backup_id = cur
+        .next()
+        .ok_or("restore requires a BACKUP_ID")?
+        .to_string();
+
+    let mut backup_dest: Option<PathBuf> = None;
+    let mut restore_dest: Option<PathBuf> = None;
+    let mut file_pattern: Option<String> = None;
+
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => restore_dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--from" => backup_dest = Some(PathBuf::from(cur.value("--from", "a path")?)),
+            "--files" => file_pattern = Some(cur.value("--files", "a pattern")?.to_string()),
+            other => return Err(format!("unknown option for restore: {other}")),
+        }
+    }
+
+    let backup_dest = backup_dest.ok_or("--from is required (backup repository path)")?;
+    let restore_dest = restore_dest.ok_or("--dest is required (restore destination)")?;
+
+    Ok(Command::Restore(RestoreOptions {
+        backup_id,
+        backup_dest,
+        restore_dest,
+        file_pattern,
+    }))
+}
+
+fn parse_list_args(args: &[String]) -> Result<Command, String> {
+    let mut dest: Option<PathBuf> = None;
+    let mut source: Option<String> = None;
+
+    let mut cur = ArgCursor::new(args);
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--source" => source = Some(cur.value("--source", "a path")?.to_string()),
+            // The first bare word is the destination, so `backup list /backups`
+            // works without the flag. A second one is a typo, not a second
+            // destination, and saying so beats silently backing up elsewhere.
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for list: {other}")),
+        }
+    }
+
+    let dest = dest.ok_or("destination path is required")?;
+    Ok(Command::List { dest, source })
+}
+
+fn parse_verify_args(args: &[String]) -> Result<Command, String> {
+    let mut cur = ArgCursor::new(args);
+    let backup_id = cur.next().ok_or("verify requires a BACKUP_ID")?.to_string();
+    let mut dest: Option<PathBuf> = None;
+
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for verify: {other}")),
+        }
+    }
+
+    let dest = dest.ok_or("--dest is required")?;
+    Ok(Command::Verify { dest, backup_id })
+}
+
+fn parse_prune_args(args: &[String]) -> Result<Command, String> {
+    let mut dest: Option<PathBuf> = None;
+    let mut keep_last: Option<u64> = None;
+    let mut keep_daily: Option<u64> = None;
+    let mut keep_weekly: Option<u64> = None;
+    let mut keep_monthly: Option<u64> = None;
+
+    let mut cur = ArgCursor::new(args);
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--keep-last" => keep_last = Some(cur.number("--keep-last")?),
+            "--keep-daily" => keep_daily = Some(cur.number("--keep-daily")?),
+            "--keep-weekly" => keep_weekly = Some(cur.number("--keep-weekly")?),
+            "--keep-monthly" => keep_monthly = Some(cur.number("--keep-monthly")?),
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for prune: {other}")),
+        }
+    }
+
+    let dest = dest.ok_or("--dest is required")?;
+    Ok(Command::Prune(PruneOptions {
+        dest,
+        keep_last,
+        keep_daily,
+        keep_weekly,
+        keep_monthly,
+    }))
+}
+
+fn parse_schedule_args(args: &[String]) -> Result<Command, String> {
+    let mut source: Option<String> = None;
+    let mut dest: Option<PathBuf> = None;
+    let mut interval: Option<String> = None;
+
+    let mut cur = ArgCursor::new(args);
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--source" => source = Some(cur.value("--source", "a path")?.to_string()),
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--interval" => interval = Some(cur.value("--interval", "a value")?.to_string()),
+            other => return Err(format!("unknown option for schedule: {other}")),
+        }
+    }
+
+    let source = source.ok_or("--source is required")?;
+    let dest = dest.ok_or("--dest is required")?;
+    let interval = interval.ok_or("--interval is required")?;
+
+    Ok(Command::Schedule {
+        dest,
+        source,
+        interval,
+    })
+}
+
+fn parse_diff_args(args: &[String]) -> Result<Command, String> {
+    let mut cur = ArgCursor::new(args);
+    let id1 = cur
+        .next()
+        .ok_or("diff requires two BACKUP_IDs")?
+        .to_string();
+    let id2 = cur
+        .next()
+        .ok_or("diff requires two BACKUP_IDs")?
+        .to_string();
+    let mut dest: Option<PathBuf> = None;
+
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for diff: {other}")),
+        }
+    }
+
+    let dest = dest.ok_or("--dest is required")?;
+    Ok(Command::Diff { dest, id1, id2 })
+}
+
+fn parse_info_args(args: &[String]) -> Result<Command, String> {
+    let mut cur = ArgCursor::new(args);
+    let backup_id = cur.next().ok_or("info requires a BACKUP_ID")?.to_string();
+    let mut dest: Option<PathBuf> = None;
+
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for info: {other}")),
+        }
+    }
+
+    let dest = dest.ok_or("--dest is required")?;
+    Ok(Command::Info { dest, backup_id })
+}
+
+// ============================================================================
+// Help Text
+// ============================================================================
+
+fn print_help() {
+    println!("backup — Slate OS snapshot-based backup system");
+    println!();
+    println!("USAGE:");
+    println!("  backup <COMMAND> [OPTIONS]");
+    println!();
+    println!("COMMANDS:");
+    println!("  create     Create a new backup");
+    println!("  restore    Restore files from a backup");
+    println!("  list       List available backups");
+    println!("  verify     Verify backup integrity");
+    println!("  prune      Remove old backups per retention policy");
+    println!("  schedule   Set up a backup schedule");
+    println!("  diff       Compare two backups");
+    println!("  info       Show detailed backup information");
+    println!("  help       Show this help message");
+    println!();
+    println!("CREATE OPTIONS:");
+    println!("  --full             Full backup (default)");
+    println!("  --incremental      Only files changed since last backup");
+    println!("  --differential     Only files changed since last full backup");
+    println!("  --source <PATH>    Source directory to back up (required)");
+    println!("  --dest <PATH>      Destination backup repository (required)");
+    println!("  --exclude <PAT>    Exclude files matching glob pattern (repeatable)");
+    println!("  --follow-symlinks  Follow symbolic links");
+    println!();
+    println!("RESTORE OPTIONS:");
+    println!("  backup restore <BACKUP_ID> --from <REPO> --dest <PATH> [--files <PATTERN>]");
+    println!();
+    println!("PRUNE OPTIONS:");
+    println!("  --keep-last N      Keep the N most recent backups");
+    println!("  --keep-daily N     Keep one backup per day for N days");
+    println!("  --keep-weekly N    Keep one backup per week for N weeks");
+    println!("  --keep-monthly N   Keep one backup per month for N months");
+    println!();
+    println!("EXAMPLES:");
+    println!("  backup create --full --source /home/user --dest /mnt/backup");
+    println!(
+        "  backup create --incremental --source /home/user --dest /mnt/backup --exclude '*.tmp'"
+    );
+    println!("  backup list --dest /mnt/backup");
+    println!("  backup restore 1700000000-full --from /mnt/backup --dest /tmp/restore");
+    println!("  backup verify 1700000000-full --dest /mnt/backup");
+    println!("  backup prune --dest /mnt/backup --keep-last 5 --keep-weekly 4");
+    println!("  backup diff 1700000000-full 1700100000-incremental --dest /mnt/backup");
+    println!("  backup info 1700000000-full --dest /mnt/backup");
+    println!("  backup schedule --source /home/user --dest /mnt/backup --interval daily");
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+fn main() {
+    let cmd = match parse_args() {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            eprintln!("Try 'backup help' for usage information.");
+            process::exit(1);
+        }
+    };
+
+    let result = match cmd {
+        Command::Help => {
+            print_help();
+            Ok(())
+        }
+        Command::Create(opts) => cmd_create(opts),
+        Command::Restore(opts) => cmd_restore(opts),
+        Command::List { dest, source } => cmd_list(&dest, source.as_deref()),
+        Command::Verify { dest, backup_id } => cmd_verify(&dest, &backup_id),
+        Command::Prune(opts) => cmd_prune(opts),
+        Command::Schedule {
+            dest,
+            source,
+            interval,
+        } => cmd_schedule(&dest, &source, &interval),
+        Command::Diff { dest, id1, id2 } => cmd_diff(&dest, &id1, &id2),
+        Command::Info { dest, backup_id } => cmd_info(&dest, &backup_id),
+    };
+
+    if let Err(e) = result {
+        eprintln!("error: {}", e);
+        process::exit(1);
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    // A test that unwraps a failure should fail loudly at the line that did
+    // it — that is the diagnosis. The defensive lints exist to keep panics out
+    // of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic
+    )]
+
+    use super::*;
+    use scratchdir::ScratchDir;
+
+    // --- Write routing (safeio audit counters) ---
+
+    /// Serialises the tests that measure `safeio`'s audit counters.
+    ///
+    /// The counters are process-global, and `cargo test` runs tests in
+    /// parallel, so a delta measured across an unsynchronised span is an
+    /// *upper* bound on the span's own writes rather than an equality. That
+    /// asymmetry points the wrong way: a call site that regressed to
+    /// `fs::write` contributes one fewer write, and a concurrent test can make
+    /// up the difference and hand back a false pass — silently disarming the
+    /// only check that these paths still route through `safeio` at all.
+    /// Holding this across the measured span makes the delta exactly the
+    /// span's own, so the assertions below can be equalities and a single
+    /// regressed call site cannot hide.
+    ///
+    /// A poisoned lock is recovered rather than propagated: the poison means
+    /// some other test panicked, which its own failure already reports, and
+    /// re-panicking here would bury that first failure under a second one.
+    fn audit_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A private temporary directory for one test, removed when the returned
+    /// guard drops.
+    ///
+    /// The name used to carry the system clock in nanoseconds, which is not
+    /// unique. `cargo test` runs a binary's tests as threads of one process,
+    /// and the clock a thread reads is only refreshed on a timer interrupt, so
+    /// every test that starts within the same tick draws the same tag and they
+    /// share one directory. `ScratchDir` names itself from the process id and a
+    /// per-process atomic counter, which is unique by construction.
+    ///
+    /// Bind the guard to a named local, never to `_`: a bare `_` drops it
+    /// immediately and the directory is gone before the test's first line.
+    fn temp_dir(tag: &str) -> ScratchDir {
+        ScratchDir::new(&format!("slate_backup_{tag}"))
+    }
+
+    /// Every file a *command* writes goes through `safeio`, not `fs::write`.
+    ///
+    /// The blob store is covered separately below; this covers the four sites
+    /// the store does not reach, each of which loses different data when a
+    /// truncating write is interrupted:
+    ///
+    /// - `manifest.json` — the list of what is in the backup. Lost, and the
+    ///   blobs are still there but unreachable: bytes with no index.
+    /// - `meta.json` — doubles as the completion marker `list_backups` keys
+    ///   off, so a half-written one can make a *finished* backup unlistable.
+    /// - the restore write — writes *over* a file the user still has, so a
+    ///   truncating write destroys the original and fails to supply the
+    ///   replacement. The one outcome a restore must never produce.
+    /// - `schedules.json` — rewritten whole, so a truncated write does not
+    ///   lose the schedule being added, it loses all of them.
+    ///
+    /// Each is driven end-to-end through the real command rather than through
+    /// an extracted helper, so the test exercises the same call the binary
+    /// makes and cannot drift away from it.
+    #[test]
+    fn command_level_writes_go_through_safeio() {
+        let _guard = audit_lock();
+
+        let root_scratch = temp_dir("cmd_routing");
+        let root = root_scratch.dir().to_path_buf();
+        let source = root.join("src");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("a.txt"), b"alpha").expect("a.txt");
+        fs::write(source.join("b.txt"), b"beta").expect("b.txt");
+        let dest = root.join("backups");
+
+        // -- cmd_create: manifest.json and meta.json ------------------------
+        //
+        // Blobs enter through `copy_atomically`, which increments the *copy*
+        // counter, so the write counter isolates exactly these two files.
+        let before = safeio::writes_performed();
+        cmd_create(CreateOptions {
+            backup_type: BackupType::Full,
+            source: source.clone(),
+            dest: dest.clone(),
+            exclude: Vec::new(),
+            follow_symlinks: false,
+        })
+        .expect("cmd_create");
+        assert_eq!(
+            safeio::writes_performed() - before,
+            2,
+            "cmd_create must write manifest.json and meta.json through safeio"
+        );
+
+        let backups = list_backups(&dest).expect("list_backups");
+        assert_eq!(backups.len(), 1, "one backup was created");
+        let backup_id = backups[0].id.clone();
+
+        // -- cmd_restore: one write per restored file -----------------------
+        let manifest = load_manifest(&dest, &backup_id).expect("load_manifest");
+        let expected = manifest.files.iter().filter(|f| !f.is_symlink).count() as u64;
+        assert!(expected > 0, "the backup has files to restore");
+
+        let restore_dest = root.join("restored");
+        let before = safeio::writes_performed();
+        cmd_restore(RestoreOptions {
+            backup_id: backup_id.clone(),
+            backup_dest: dest.clone(),
+            restore_dest: restore_dest.clone(),
+            file_pattern: None,
+        })
+        .expect("cmd_restore");
+        assert_eq!(
+            safeio::writes_performed() - before,
+            expected,
+            "cmd_restore must write every restored file through safeio -- it \
+             writes over files the user still has"
+        );
+        assert_eq!(
+            fs::read(restore_dest.join("a.txt")).expect("restored a.txt"),
+            b"alpha"
+        );
+
+        // -- cmd_schedule: schedules.json -----------------------------------
+        let before = safeio::writes_performed();
+        cmd_schedule(&dest, &source.to_string_lossy(), "daily").expect("cmd_schedule");
+        assert_eq!(
+            safeio::writes_performed() - before,
+            1,
+            "cmd_schedule must write schedules.json through safeio"
+        );
+        assert!(schedules_path(&dest).exists(), "the schedule was saved");
+    }
+
+    // --- Blob-store write routing ---
+
+    /// The way a blob enters the content-addressed store goes through
+    /// `safeio`, not `fs::copy`.
+    ///
+    /// Singular: this test used to be `both_blob_store_paths_...` and drove
+    /// `store_bytes` as well, which read as twice the coverage it was --
+    /// `store_bytes` had no caller outside this test and has been deleted.
+    ///
+    /// A successful atomic write and a successful truncating one leave
+    /// identical bytes at an identical path; they differ only when the write
+    /// is interrupted, which no portable test can stage. So the routing itself
+    /// is asserted, via `safeio`'s `audit` counters.
+    ///
+    /// This is the case `safeio`'s own docs single out as actively dangerous
+    /// rather than merely bad. A content-addressed store treats a file's
+    /// presence at its hash-derived path as proof that the hash's content is
+    /// there — nothing re-verifies it. One interrupted write therefore leaves a
+    /// truncated blob that every future backup silently deduplicates against,
+    /// handing back short data forever, with no error anywhere. In the one
+    /// application whose entire purpose is that the data survives.
+    ///
+    /// The counters are process-global, so the check compares a before and
+    /// after reading rather than an absolute, under `audit_lock` so that the
+    /// delta is this test's own and the comparison can be an equality.
+    #[test]
+    fn the_blob_store_write_path_goes_through_safeio() {
+        let _guard = audit_lock();
+
+        let scratch = temp_dir("blob_routing");
+        let dir = scratch.dir().to_path_buf();
+        let store = ContentStore::new(&dir);
+
+        // store_file -> safeio::copy_atomically
+        let source = dir.join("source.bin");
+        let body: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        fs::write(&source, &body).expect("write source");
+        let file_hash = sha256_hex(&body);
+        let before = safeio::copies_performed();
+        assert!(store.store_file(&source, &file_hash).expect("store_file"));
+        assert_eq!(
+            safeio::copies_performed() - before,
+            1,
+            "store_file did not go through safeio -- it must not use fs::copy"
+        );
+        assert_eq!(store.read_blob(&file_hash).expect("read back"), body);
+    }
+
+    // --- SHA-256 Tests ---
+
+    #[test]
+    fn test_sha256_empty() {
+        let hash = sha256_hex(b"");
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_sha256_abc() {
+        let hash = sha256_hex(b"abc");
+        assert_eq!(
+            hash,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn test_sha256_longer() {
+        let hash = sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
+        assert_eq!(
+            hash,
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+    }
+
+    #[test]
+    fn test_sha256_multiblock() {
+        // 64 bytes exactly — one full block
+        let data = vec![0x61u8; 64]; // 'a' * 64
+        let hash = sha256_hex(&data);
+        assert_eq!(
+            hash,
+            "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"
+        );
+    }
+
+    /// A file is hashed from an 8 KiB read buffer, so the pieces `sha256_file`
+    /// feeds in have nothing to do with SHA-256's 64-byte blocks. This checks
+    /// every split rather than the three arbitrary ones that were here before:
+    /// a padding bug lives at one specific offset, so a single split tests
+    /// almost nothing.
+    #[test]
+    fn hashing_in_pieces_matches_hashing_all_at_once() {
+        let data = b"The quick brown fox jumps over the lazy dog";
+        let expected = sha256_hex(data);
+        for split in 0..=data.len() {
+            let (head, tail) = data.split_at(split);
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(head);
+            hasher.update(tail);
+            let actual = sha2::hex(&hasher.finalize()).as_str().to_string();
+            assert_eq!(actual, expected, "split at {split}");
+        }
+    }
+
+    // --- Glob Pattern Matching Tests ---
+
+    #[test]
+    fn test_glob_star() {
+        assert!(glob_matches("*.txt", "file.txt"));
+        assert!(glob_matches("*.txt", "long.name.txt"));
+        assert!(!glob_matches("*.txt", "file.rs"));
+        assert!(!glob_matches("*.txt", "dir/file.txt")); // * doesn't cross /
+    }
+
+    #[test]
+    fn test_glob_question() {
+        assert!(glob_matches("file?.txt", "file1.txt"));
+        assert!(glob_matches("file?.txt", "fileA.txt"));
+        assert!(!glob_matches("file?.txt", "file12.txt"));
+        assert!(!glob_matches("file?.txt", "file.txt"));
+    }
+
+    #[test]
+    fn a_question_mark_matches_one_character_not_one_byte() {
+        // `?` is documented as "single char except /". Every one of these is a
+        // single character, and every one of them is more than a single byte.
+        for ch in ["\u{e9}", "\u{65e5}", "\u{03b1}", "\u{0440}", "\u{1f600}"] {
+            assert!(
+                glob_matches("?.txt", &format!("{ch}.txt")),
+                "?.txt should match {ch}.txt"
+            );
+            assert!(
+                glob_matches("file?.txt", &format!("file{ch}.txt")),
+                "file?.txt should match file{ch}.txt"
+            );
+            // ...and still exactly one of them.
+            assert!(
+                !glob_matches("?.txt", &format!("{ch}{ch}.txt")),
+                "?.txt should not match two characters"
+            );
+            assert!(
+                glob_matches("??.txt", &format!("{ch}{ch}.txt")),
+                "??.txt should match two characters"
+            );
+        }
+        // Mixed widths in one name, and `?` against an ASCII character still
+        // consumes exactly one byte.
+        assert!(glob_matches("?x?.txt", "\u{65e5}x\u{672c}.txt"));
+        assert!(glob_matches("a?c", "abc"));
+        assert!(!glob_matches("a?c", "ab"));
+        // `?` must not swallow a separator, whatever its width.
+        assert!(!glob_matches("a?c", "a/c"));
+    }
+
+    #[test]
+    fn a_non_ascii_name_is_matched_and_excluded_consistently() {
+        // The two entry points a pattern actually reaches: whole-path matching
+        // and the filename-only fallback in `is_excluded`.
+        let patterns = vec!["**/?.log".to_string()];
+        assert!(is_excluded(Path::new("var/\u{65e5}.log"), &patterns));
+        assert!(!is_excluded(
+            Path::new("var/\u{65e5}\u{672c}.log"),
+            &patterns
+        ));
+        let patterns = vec!["\u{65e5}*".to_string()];
+        assert!(is_excluded(
+            Path::new("dir/\u{65e5}\u{672c}\u{8a9e}.txt"),
+            &patterns
+        ));
+    }
+
+    #[test]
+    fn a_truncated_utf8_sequence_does_not_run_past_the_end() {
+        // Paths are byte strings and need not be well-formed UTF-8. An
+        // ill-formed sequence falls back to one byte per `?`, so a lead byte
+        // whose continuations are missing is just a byte.
+        assert!(glob_match_recursive(b"?", &[0xE6]));
+        assert!(!glob_match_recursive(b"?", &[0xE6, 0x97]));
+        assert!(glob_match_recursive(b"??", &[0xE6, 0x97]));
+        // A complete sequence is one character.
+        assert!(glob_match_recursive(b"?", &[0xE6, 0x97, 0xA5]));
+        // A stray continuation byte is consumed one byte at a time.
+        assert!(glob_match_recursive(b"?", &[0x97]));
+        assert!(glob_match_recursive(b"??", &[0x97, 0xA5]));
+    }
+
+    #[test]
+    fn a_question_mark_never_crosses_a_separator() {
+        // The invariant that made clamping-to-what-remains the wrong fallback:
+        // a lead byte announcing three bytes, followed by a separator, must not
+        // let `?` consume the separator.
+        // This is the case that actually pins it. A lead byte claiming three
+        // bytes, with only a separator behind it: consuming "what remains"
+        // would swallow the `/` and report a match for a name that contains
+        // one. Validating the continuations rejects it.
+        assert!(!glob_match_recursive(b"?", &[0xE6, b'/']));
+        assert!(!glob_match_recursive(b"?c", &[0xE6, b'/', b'c']));
+        assert!(!glob_match_recursive(b"??c", &[0xE6, b'/', b'c']));
+        // Well-formed input, same rule.
+        assert!(!glob_matches("a?c", "a/c"));
+        assert!(!glob_matches("?", "/"));
+    }
+
+    #[test]
+    fn test_glob_doublestar() {
+        assert!(glob_matches("**/*.txt", "file.txt"));
+        assert!(glob_matches("**/*.txt", "dir/file.txt"));
+        assert!(glob_matches("**/*.txt", "a/b/c/file.txt"));
+        assert!(!glob_matches("**/*.rs", "file.txt"));
+    }
+
+    #[test]
+    fn test_glob_exact() {
+        assert!(glob_matches("Makefile", "Makefile"));
+        assert!(!glob_matches("Makefile", "makefile"));
+        assert!(!glob_matches("Makefile", "dir/Makefile"));
+    }
+
+    #[test]
+    fn test_glob_complex() {
+        assert!(glob_matches("src/**/*.rs", "src/main.rs"));
+        assert!(glob_matches("src/**/*.rs", "src/sub/mod.rs"));
+        assert!(!glob_matches("src/**/*.rs", "lib/main.rs"));
+    }
+
+    #[test]
+    fn test_glob_star_prefix() {
+        assert!(glob_matches("test_*", "test_foo"));
+        assert!(glob_matches("test_*", "test_"));
+        assert!(!glob_matches("test_*", "test"));
+    }
+
+    // --- Change Detection Tests ---
+
+    #[test]
+    fn test_detect_no_changes() {
+        let files = vec![FileEntry {
+            path: PathBuf::from("a.txt"),
+            size: 100,
+            mtime: 1000,
+            hash: "abc123".to_string(),
+            is_symlink: false,
+            link_target: None,
+        }];
+        let manifest = Manifest {
+            files: files.clone(),
+        };
+        let diff = detect_changes(&files, &manifest);
+        assert!(diff.added.is_empty());
+        assert!(diff.modified.is_empty());
+        assert!(diff.deleted.is_empty());
+    }
+
+    #[test]
+    fn test_detect_added() {
+        let prev = Manifest {
+            files: vec![FileEntry {
+                path: PathBuf::from("a.txt"),
+                size: 100,
+                mtime: 1000,
+                hash: "aaa".to_string(),
+                is_symlink: false,
+                link_target: None,
+            }],
+        };
+        let current = vec![
+            FileEntry {
+                path: PathBuf::from("a.txt"),
+                size: 100,
+                mtime: 1000,
+                hash: "aaa".to_string(),
+                is_symlink: false,
+                link_target: None,
+            },
+            FileEntry {
+                path: PathBuf::from("b.txt"),
+                size: 200,
+                mtime: 2000,
+                hash: "bbb".to_string(),
+                is_symlink: false,
+                link_target: None,
+            },
+        ];
+        let diff = detect_changes(&current, &prev);
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.added[0].path, Path::new("b.txt"));
+        assert!(diff.modified.is_empty());
+        assert!(diff.deleted.is_empty());
+    }
+
+    #[test]
+    fn test_detect_modified() {
+        let prev = Manifest {
+            files: vec![FileEntry {
+                path: PathBuf::from("a.txt"),
+                size: 100,
+                mtime: 1000,
+                hash: "old_hash".to_string(),
+                is_symlink: false,
+                link_target: None,
+            }],
+        };
+        let current = vec![FileEntry {
+            path: PathBuf::from("a.txt"),
+            size: 150,
+            mtime: 2000,
+            hash: "new_hash".to_string(),
+            is_symlink: false,
+            link_target: None,
+        }];
+        let diff = detect_changes(&current, &prev);
+        assert!(diff.added.is_empty());
+        assert_eq!(diff.modified.len(), 1);
+        assert_eq!(diff.modified[0].0.hash, "old_hash");
+        assert_eq!(diff.modified[0].1.hash, "new_hash");
+        assert!(diff.deleted.is_empty());
+    }
+
+    #[test]
+    fn test_detect_deleted() {
+        let prev = Manifest {
+            files: vec![
+                FileEntry {
+                    path: PathBuf::from("a.txt"),
+                    size: 100,
+                    mtime: 1000,
+                    hash: "aaa".to_string(),
+                    is_symlink: false,
+                    link_target: None,
+                },
+                FileEntry {
+                    path: PathBuf::from("b.txt"),
+                    size: 200,
+                    mtime: 2000,
+                    hash: "bbb".to_string(),
+                    is_symlink: false,
+                    link_target: None,
+                },
+            ],
+        };
+        let current = vec![FileEntry {
+            path: PathBuf::from("a.txt"),
+            size: 100,
+            mtime: 1000,
+            hash: "aaa".to_string(),
+            is_symlink: false,
+            link_target: None,
+        }];
+        let diff = detect_changes(&current, &prev);
+        assert!(diff.added.is_empty());
+        assert!(diff.modified.is_empty());
+        assert_eq!(diff.deleted.len(), 1);
+        assert_eq!(diff.deleted[0].path, Path::new("b.txt"));
+    }
+
+    // --- Manifest Serialization Tests ---
+
+    #[test]
+    fn test_manifest_roundtrip() {
+        let manifest = Manifest {
+            files: vec![
+                FileEntry {
+                    path: PathBuf::from("src/main.rs"),
+                    size: 1024,
+                    mtime: 1700000000,
+                    hash: "abcdef0123456789".to_string(),
+                    is_symlink: false,
+                    link_target: None,
+                },
+                FileEntry {
+                    path: PathBuf::from("README.md"),
+                    size: 512,
+                    mtime: 1699999000,
+                    hash: "9876543210fedcba".to_string(),
+                    is_symlink: false,
+                    link_target: None,
+                },
+            ],
+        };
+
+        let serialized = manifest.serialize();
+        let deserialized = Manifest::deserialize(&serialized).unwrap();
+
+        // Compared whole rather than field by field. The list this used to be
+        // checked four of the six `FileEntry` fields and one of the two
+        // entries; `mtime` and `is_symlink` went through the disk format
+        // unexamined, so a writer that dropped either would have round-tripped
+        // "successfully". A whole-value comparison has no list to fall behind
+        // the struct — a seventh field is checked the day it is added.
+        assert_eq!(
+            deserialized, manifest,
+            "a manifest did not survive the trip through its own disk format"
+        );
+    }
+
+    #[test]
+    fn test_manifest_with_symlink() {
+        let manifest = Manifest {
+            files: vec![FileEntry {
+                path: PathBuf::from("link"),
+                size: 0,
+                mtime: 0,
+                hash: "linkhash".to_string(),
+                is_symlink: true,
+                link_target: Some(PathBuf::from("/usr/bin/target")),
+            }],
+        };
+
+        let serialized = manifest.serialize();
+        let deserialized = Manifest::deserialize(&serialized).unwrap();
+
+        // The symlink case is separate from `test_manifest_roundtrip` because
+        // `link_target` is the one field whose *key* is conditional — written
+        // only when there is a target — so it is the one that can be dropped
+        // without the object changing shape. Compared whole for the reason
+        // given there.
+        assert_eq!(
+            deserialized, manifest,
+            "a symlink entry did not survive the trip through the disk format"
+        );
+    }
+
+    #[test]
+    fn test_meta_roundtrip() {
+        let meta = BackupMeta {
+            id: "1700000000-full".to_string(),
+            backup_type: BackupType::Full,
+            timestamp: 1700000000,
+            source: "/home/user".to_string(),
+            parent_id: None,
+            file_count: 42,
+            total_size: 1048576,
+            new_blobs: 40,
+            dedup_blobs: 2,
+        };
+
+        let serialized = meta.serialize();
+        let deserialized = BackupMeta::deserialize(&serialized).unwrap();
+
+        // This was a list of six assertions over a nine-field struct, and the
+        // three it left out — `total_size`, `new_blobs`, `dedup_blobs` — are
+        // exactly the ones a reader cannot sanity-check by eye, so a writer
+        // that dropped one would have shown a plausible wrong number and no
+        // failing test. Compared whole, there is no list left to fall behind.
+        assert_eq!(
+            deserialized, meta,
+            "backup metadata did not survive the trip through its own format"
+        );
+    }
+
+    #[test]
+    fn test_meta_with_parent() {
+        let meta = BackupMeta {
+            id: "1700100000-incremental".to_string(),
+            backup_type: BackupType::Incremental,
+            timestamp: 1700100000,
+            source: "/home/user".to_string(),
+            parent_id: Some("1700000000-full".to_string()),
+            file_count: 5,
+            total_size: 4096,
+            new_blobs: 3,
+            dedup_blobs: 2,
+        };
+
+        let serialized = meta.serialize();
+        let deserialized = BackupMeta::deserialize(&serialized).unwrap();
+
+        // Separate from `test_meta_roundtrip` for the same reason the symlink
+        // manifest is separate: `parent_id` is the only `Option` here, so
+        // `Some` and `None` are two different objects on disk and both need
+        // walking. Compared whole either way.
+        assert_eq!(
+            deserialized, meta,
+            "an incremental backup's parent did not survive the disk format"
+        );
+    }
+
+    // --- Pruning Retention Policy Tests ---
+
+    #[test]
+    fn test_prune_keep_last() {
+        let metas = vec![
+            BackupMeta {
+                id: "1".to_string(),
+                backup_type: BackupType::Full,
+                timestamp: 100,
+                source: "/src".to_string(),
+                parent_id: None,
+                file_count: 0,
+                total_size: 0,
+                new_blobs: 0,
+                dedup_blobs: 0,
+            },
+            BackupMeta {
+                id: "2".to_string(),
+                backup_type: BackupType::Full,
+                timestamp: 200,
+                source: "/src".to_string(),
+                parent_id: None,
+                file_count: 0,
+                total_size: 0,
+                new_blobs: 0,
+                dedup_blobs: 0,
+            },
+            BackupMeta {
+                id: "3".to_string(),
+                backup_type: BackupType::Full,
+                timestamp: 300,
+                source: "/src".to_string(),
+                parent_id: None,
+                file_count: 0,
+                total_size: 0,
+                new_blobs: 0,
+                dedup_blobs: 0,
+            },
+        ];
+
+        let opts = PruneOptions {
+            dest: PathBuf::from("/tmp"),
+            keep_last: Some(2),
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+        };
+
+        let keep = compute_retention(&metas, &opts).keep;
+        assert!(!keep.contains("1"));
+        assert!(keep.contains("2"));
+        assert!(keep.contains("3"));
+    }
+
+    #[test]
+    fn test_prune_keep_daily() {
+        let day = 86400u64;
+        let metas = vec![
+            BackupMeta {
+                id: "d1_a".to_string(),
+                backup_type: BackupType::Full,
+                timestamp: day * 10 + 100,
+                source: "/src".to_string(),
+                parent_id: None,
+                file_count: 0,
+                total_size: 0,
+                new_blobs: 0,
+                dedup_blobs: 0,
+            },
+            BackupMeta {
+                id: "d1_b".to_string(),
+                backup_type: BackupType::Incremental,
+                timestamp: day * 10 + 200,
+                source: "/src".to_string(),
+                parent_id: None,
+                file_count: 0,
+                total_size: 0,
+                new_blobs: 0,
+                dedup_blobs: 0,
+            },
+            BackupMeta {
+                id: "d2_a".to_string(),
+                backup_type: BackupType::Full,
+                timestamp: day * 11 + 100,
+                source: "/src".to_string(),
+                parent_id: None,
+                file_count: 0,
+                total_size: 0,
+                new_blobs: 0,
+                dedup_blobs: 0,
+            },
+            BackupMeta {
+                id: "d3_a".to_string(),
+                backup_type: BackupType::Full,
+                timestamp: day * 12 + 100,
+                source: "/src".to_string(),
+                parent_id: None,
+                file_count: 0,
+                total_size: 0,
+                new_blobs: 0,
+                dedup_blobs: 0,
+            },
+        ];
+
+        let opts = PruneOptions {
+            dest: PathBuf::from("/tmp"),
+            keep_last: None,
+            keep_daily: Some(2),
+            keep_weekly: None,
+            keep_monthly: None,
+        };
+
+        let keep = compute_retention(&metas, &opts).keep;
+        // Should keep the most recent backup from the 2 most recent days
+        assert!(keep.contains("d3_a")); // day 12
+        assert!(keep.contains("d2_a")); // day 11
+        // day 10 should not be kept (only 2 days retained)
+        assert!(!keep.contains("d1_a"));
+        assert!(!keep.contains("d1_b"));
+    }
+
+    #[test]
+    fn test_prune_no_policy_keeps_all() {
+        let metas = vec![
+            BackupMeta {
+                id: "1".to_string(),
+                backup_type: BackupType::Full,
+                timestamp: 100,
+                source: "/src".to_string(),
+                parent_id: None,
+                file_count: 0,
+                total_size: 0,
+                new_blobs: 0,
+                dedup_blobs: 0,
+            },
+            BackupMeta {
+                id: "2".to_string(),
+                backup_type: BackupType::Full,
+                timestamp: 200,
+                source: "/src".to_string(),
+                parent_id: None,
+                file_count: 0,
+                total_size: 0,
+                new_blobs: 0,
+                dedup_blobs: 0,
+            },
+        ];
+
+        let opts = PruneOptions {
+            dest: PathBuf::from("/tmp"),
+            keep_last: None,
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+        };
+
+        let keep = compute_retention(&metas, &opts).keep;
+        assert!(keep.contains("1"));
+        assert!(keep.contains("2"));
+    }
+
+    // --- JSON Parser Tests ---
+
+    #[test]
+    fn test_json_parse_string() {
+        let val = json_parse(r#""hello""#).unwrap();
+        assert_eq!(val.as_str(), Some("hello"));
+    }
+
+    /// The strings in a manifest are file paths. A byte-at-a-time `as char`
+    /// read turns every non-ASCII path into one that names no file, so restore
+    /// and verify both report it missing.
+    #[test]
+    fn a_non_ascii_string_survives_the_json_round_trip() {
+        for text in [
+            "写真/2024.jpg",
+            "Musique/Café/piste.flac",
+            "Ωμέγα.txt",
+            "🚀/launch.log",
+            "D:/Δοκιμή/日本語/файл.bin",
+        ] {
+            let encoded = JsonValue::Str(text.to_string()).to_string();
+            let val =
+                json_parse(&encoded).unwrap_or_else(|e| panic!("failed to parse {encoded}: {e}"));
+            assert_eq!(val.as_str(), Some(text), "path changed: {encoded}");
+        }
+    }
+
+    /// A whole manifest, not just one string: this is the path the bug actually
+    /// took, since `Manifest::serialize` is what writes the file on disk.
+    #[test]
+    fn a_manifest_of_non_ascii_paths_round_trips() {
+        let mut manifest = Manifest::new();
+        for path in ["写真/2024.jpg", "Ωμέγα.txt", "plain.txt"] {
+            manifest.files.push(FileEntry {
+                path: PathBuf::from(path),
+                size: 7,
+                mtime: 11,
+                hash: "abc".to_string(),
+                is_symlink: false,
+                link_target: None,
+            });
+        }
+        let serialized = manifest.serialize();
+        let back = Manifest::deserialize(&serialized).expect("manifest should parse");
+        let got: Vec<&Path> = back.files.iter().map(|f| f.path.as_path()).collect();
+        assert_eq!(
+            got,
+            [
+                Path::new("写真/2024.jpg"),
+                Path::new("Ωμέγα.txt"),
+                Path::new("plain.txt")
+            ]
+        );
+    }
+
+    /// The write side. Fixing the manifest *parser* was not enough: the entry
+    /// handed to the writer had already been through `to_string_lossy` in
+    /// `relative_path`, so a byte the filesystem allowed was destroyed before
+    /// the manifest ever saw it, and restore recreated the file under a
+    /// different name.
+    ///
+    /// Asserted on bytes because that is what the manifest stores; on the
+    /// Windows test host an `OsString` cannot hold a non-WTF-8 byte string at
+    /// all, so routing through `PathBuf` would test the host, not the format.
+    #[test]
+    fn a_path_byte_the_filesystem_allows_survives_the_manifest() {
+        let raw = b"photos/caf\xE9.jpg";
+        let encoded = encode_bytes(raw);
+        assert_eq!(encoded, "photos/caf%E9.jpg");
+        assert_eq!(
+            decode_bytes(&encoded),
+            raw,
+            "a lone 0xE9 must come back as 0xE9, not as U+FFFD"
+        );
+    }
+
+    #[test]
+    fn every_byte_value_round_trips_through_the_path_encoding() {
+        let all: Vec<u8> = (0u8..=255).collect();
+        assert_eq!(decode_bytes(&encode_bytes(&all)), all);
+    }
+
+    #[test]
+    fn a_percent_in_a_filename_is_not_mistaken_for_an_escape() {
+        // "100% done.txt" is a legal filename. Round-tripping it must not eat
+        // the "20", and a `%` that is not a valid escape is kept verbatim.
+        let raw = b"100% done.txt";
+        assert_eq!(encode_bytes(raw), "100%25 done.txt");
+        assert_eq!(decode_bytes(&encode_bytes(raw)), raw);
+        assert_eq!(decode_bytes("a%zz"), b"a%zz");
+    }
+
+    /// `relative_path` produces every `FileEntry.path`, so its output is what
+    /// the manifest records. It must strip the base and normalise separators
+    /// without going anywhere near a string conversion.
+    #[test]
+    fn relative_path_strips_the_base_and_joins_with_forward_slashes() {
+        let base = PathBuf::from("/srv/data");
+        assert_eq!(
+            relative_path(Path::new("/srv/data/a/b/c.txt"), &base),
+            PathBuf::from("a/b/c.txt")
+        );
+        // A path that is not under the base is kept whole rather than silently
+        // becoming empty — an empty relative path would collide with every
+        // other such file in the manifest. The root component must survive as a
+        // single leading `/`, not as a doubled or host-flavoured separator.
+        assert_eq!(
+            relative_path(Path::new("/elsewhere/x.txt"), &base),
+            PathBuf::from("/elsewhere/x.txt")
+        );
+        // Host separators are normalised to `/` so the manifest reads the same
+        // whichever machine wrote it.
+        assert_eq!(
+            relative_path(Path::new(r"a\b\c.txt"), Path::new("")),
+            PathBuf::from(if cfg!(windows) {
+                "a/b/c.txt"
+            } else {
+                r"a\b\c.txt"
+            })
+        );
+        // The base itself is relative to nothing.
+        assert_eq!(relative_path(&base, &base), PathBuf::new());
+    }
+
+    /// The defect this whole change exists for, at the point it happened:
+    /// `relative_path` produced the name the manifest recorded, and it went
+    /// through `to_string_lossy`, so a byte the filesystem allowed became
+    /// U+FFFD before anything could escape it.
+    ///
+    /// Unix-only because a Windows `OsString` cannot hold such a path at all —
+    /// and our target is `target-family = ["unix"]`, so this is the platform
+    /// that matters.
+    #[cfg(unix)]
+    #[test]
+    fn relative_path_does_not_mangle_a_non_utf8_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let full = Path::new(std::ffi::OsStr::from_bytes(b"/srv/data/photos/caf\xE9.jpg"));
+        let rel = relative_path(full, Path::new("/srv/data"));
+        assert_eq!(
+            rel.as_os_str().as_bytes(),
+            b"photos/caf\xE9.jpg",
+            "the 0xE9 must reach the manifest writer intact"
+        );
+    }
+
+    /// Version 1 manifests stored paths verbatim. Refusing to read them would
+    /// strand every backup taken before path escaping existed.
+    #[test]
+    fn a_version_1_manifest_is_still_readable() {
+        let legacy = r#"{
+          "files": [
+            {"path": "src/main.rs", "size": 10, "mtime": 1, "hash": "aa", "is_symlink": false},
+            {"path": "50%20off.txt", "size": 20, "mtime": 2, "hash": "bb", "is_symlink": false}
+          ]
+        }"#;
+        let back = Manifest::deserialize(legacy).expect("a v1 manifest should still parse");
+        let got: Vec<&Path> = back.files.iter().map(|f| f.path.as_path()).collect();
+        assert_eq!(
+            got,
+            [Path::new("src/main.rs"), Path::new("50%20off.txt")],
+            "v1 paths are literal: `%20` is part of the name, not an escape"
+        );
+    }
+
+    /// The version marker is what tells the two formats apart, so a manifest we
+    /// write must carry it.
+    #[test]
+    fn a_manifest_we_write_declares_its_version() {
+        let mut manifest = Manifest::new();
+        manifest.files.push(FileEntry {
+            path: PathBuf::from("100% done.txt"),
+            size: 1,
+            mtime: 2,
+            hash: "aa".to_string(),
+            is_symlink: false,
+            link_target: None,
+        });
+        let text = manifest.serialize();
+        let val = json_parse(&text).expect("our own output should parse");
+        assert_eq!(val.get("version").and_then(JsonValue::as_u64), Some(2));
+        // Written escaped, and read back as the original name.
+        assert!(text.contains("100%25 done.txt"), "escaped on disk: {text}");
+        let back = Manifest::deserialize(&text).expect("round trip");
+        assert_eq!(back.files[0].path, PathBuf::from("100% done.txt"));
+    }
+
+    #[test]
+    fn a_symlink_target_is_escaped_like_any_other_path() {
+        let mut manifest = Manifest::new();
+        manifest.files.push(FileEntry {
+            path: PathBuf::from("link"),
+            size: 0,
+            mtime: 0,
+            hash: "aa".to_string(),
+            is_symlink: true,
+            link_target: Some(PathBuf::from("/opt/50% off/bin")),
+        });
+        let back = Manifest::deserialize(&manifest.serialize()).expect("round trip");
+        assert_eq!(
+            back.files[0].link_target.as_deref(),
+            Some(Path::new("/opt/50% off/bin"))
+        );
+    }
+
+    /// `\uXXXX` is what our own writer emits for control characters, and what
+    /// any other JSON writer may emit for anything at all. The old reader
+    /// dropped an astral character silently rather than pairing surrogates.
+    #[test]
+    fn unicode_escapes_including_surrogate_pairs_are_decoded() {
+        for (encoded, want) in [
+            (r#""\u0041""#, "A"),
+            (r#""\u00e9""#, "é"),
+            (r#""\u5199\u771f""#, "写真"),
+            (r#""\ud83d\ude80/launch.log""#, "🚀/launch.log"),
+            (r#""a\u0001b""#, "a\u{01}b"),
+        ] {
+            let val = json_parse(encoded).unwrap_or_else(|e| panic!("{encoded}: {e}"));
+            assert_eq!(val.as_str(), Some(want), "wrong decode of {encoded}");
+        }
+    }
+
+    /// A `\u` whose four bytes ran into a multi-byte character used to be
+    /// sliced blindly, so reading a manifest could panic on a char boundary.
+    #[test]
+    fn a_malformed_unicode_escape_is_an_error_not_a_panic() {
+        for bad in [r#""\u日本""#, r#""\u12""#, r#""\uzzzz""#, r#""\u""#] {
+            assert!(
+                json_parse(bad).is_err(),
+                "{bad} should be rejected, not accepted or panic"
+            );
+        }
+    }
+
+    /// Control: the ASCII path is byte-for-byte what it always was.
+    #[test]
+    fn ascii_json_strings_are_unchanged() {
+        for (encoded, want) in [
+            (r#""hello""#, "hello"),
+            (r#""a\"b""#, "a\"b"),
+            (r#""a\\b""#, "a\\b"),
+            (r#""a\nb\tc\/d""#, "a\nb\tc/d"),
+            (r#""""#, ""),
+        ] {
+            let val = json_parse(encoded).unwrap_or_else(|e| panic!("{encoded}: {e}"));
+            assert_eq!(val.as_str(), Some(want), "wrong parse of {encoded}");
+        }
+    }
+
+    #[test]
+    fn test_json_parse_number() {
+        let val = json_parse("42").unwrap();
+        assert_eq!(val.as_u64(), Some(42));
+    }
+
+    #[test]
+    fn test_json_parse_object() {
+        let val = json_parse(r#"{"key": "value", "num": 123}"#).unwrap();
+        assert_eq!(val.get("key").unwrap().as_str(), Some("value"));
+        assert_eq!(val.get("num").unwrap().as_u64(), Some(123));
+    }
+
+    #[test]
+    fn test_json_parse_array() {
+        let val = json_parse(r"[1, 2, 3]").unwrap();
+        let arr = val.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0].as_u64(), Some(1));
+    }
+
+    #[test]
+    fn test_json_parse_nested() {
+        let val = json_parse(r#"{"files": [{"path": "a.txt", "size": 100}]}"#).unwrap();
+        let files = val.get("files").unwrap().as_array().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].get("path").unwrap().as_str(), Some("a.txt"));
+        assert_eq!(files[0].get("size").unwrap().as_u64(), Some(100));
+    }
+
+    #[test]
+    fn test_json_escape_roundtrip() {
+        let val = JsonValue::Str("hello\nworld\t\"quoted\"".to_string());
+        let serialized = format!("{}", val);
+        let parsed = json_parse(&serialized).unwrap();
+        assert_eq!(parsed.as_str(), Some("hello\nworld\t\"quoted\""));
+    }
+
+    // --- Format/Display Tests ---
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(1536), "1.5 KiB");
+        assert_eq!(format_size(1048576), "1.0 MiB");
+        assert_eq!(format_size(1073741824), "1.0 GiB");
+    }
+
+    /// The whole rendering, not just its first five characters.
+    ///
+    /// This used to assert `starts_with("2023-")` and `contains(":")`, which a
+    /// wrong month and a wrong day both pass — and the month and the day are
+    /// the two fields the calendar arithmetic can actually get wrong. The
+    /// sibling transcription of that arithmetic in the file manager was wrong
+    /// for every date before 2000-03-01 and went unnoticed for exactly this
+    /// reason: every value it produced was in range, so only a second opinion
+    /// could catch it, and no test asked for one.
+    #[test]
+    fn test_format_timestamp() {
+        // 2023-11-14 22:13:20 UTC.
+        assert_eq!(format_timestamp(1_700_000_000), "2023-11-14 22:13:20");
+    }
+
+    /// Dates chosen where a month estimate drifts, plus the epoch itself.
+    ///
+    /// `format_timestamp` reads UTC, so these are fixed points independent of
+    /// any zone the machine is set to.
+    #[test]
+    fn a_timestamp_names_the_day_that_contains_it() {
+        for (ts, want) in [
+            (0_u64, "1970-01-01 00:00:00"),
+            (86_399, "1970-01-01 23:59:59"),
+            (86_400, "1970-01-02 00:00:00"),
+            // 29 February of a leap year that is also a century year — the
+            // case the /4 rule alone gets right and the /100 rule alone does
+            // not.
+            (951_782_400, "2000-02-29 00:00:00"),
+            // The two dates the file manager's copy got wrong, kept by name so
+            // this reads as the regression test for that bug.
+            (489_283_200, "1985-07-04 00:00:00"),
+            (929_404_800, "1999-06-15 00:00:00"),
+            // The last second of a year, where an off-by-one rolls both the
+            // day and the year at once.
+            (1_735_689_599, "2024-12-31 23:59:59"),
+            (1_735_689_600, "2025-01-01 00:00:00"),
+        ] {
+            assert_eq!(format_timestamp(ts), want, "at ts {ts}");
+        }
+    }
+
+    // --- Exclusion Tests ---
+
+    #[test]
+    fn test_is_excluded_simple() {
+        let patterns = vec!["*.tmp".to_string(), "*.log".to_string()];
+        assert!(is_excluded(Path::new("file.tmp"), &patterns));
+        assert!(is_excluded(Path::new("debug.log"), &patterns));
+        assert!(!is_excluded(Path::new("file.txt"), &patterns));
+    }
+
+    #[test]
+    fn test_is_excluded_directory_pattern() {
+        let patterns = vec!["**/node_modules/**".to_string()];
+        assert!(is_excluded(
+            Path::new("project/node_modules/pkg/index.js"),
+            &patterns
+        ));
+    }
+
+    #[test]
+    fn test_is_excluded_filename_fallback() {
+        // Pattern matches just the filename component
+        let patterns = vec![".gitignore".to_string()];
+        assert!(is_excluded(Path::new("project/.gitignore"), &patterns));
+    }
+
+    // ---- Retention and Backup Chains ----
+
+    fn chain_meta(id: &str, parent: Option<&str>, timestamp: u64) -> BackupMeta {
+        BackupMeta {
+            id: id.to_string(),
+            backup_type: if parent.is_some() {
+                BackupType::Incremental
+            } else {
+                BackupType::Full
+            },
+            timestamp,
+            source: "/src".to_string(),
+            parent_id: parent.map(str::to_string),
+            file_count: 0,
+            total_size: 0,
+            new_blobs: 0,
+            dedup_blobs: 0,
+        }
+    }
+
+    /// The ordinary shape of a backup set: one full, then incrementals on top.
+    /// `--keep-last 2` selects the two newest incrementals — and used to delete
+    /// the full backup they are both differences *from*, leaving two backups
+    /// that could not be restored and whose file contents had been
+    /// garbage-collected along with it.
+    #[test]
+    fn pruning_a_chain_keeps_the_full_backup_the_kept_ones_are_built_on() {
+        let metas = vec![
+            chain_meta("full", None, 100),
+            chain_meta("inc1", Some("full"), 200),
+            chain_meta("inc2", Some("inc1"), 300),
+            chain_meta("inc3", Some("inc2"), 400),
+        ];
+        let opts = PruneOptions {
+            dest: PathBuf::from("/tmp"),
+            keep_last: Some(2),
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+        };
+
+        let retention = compute_retention(&metas, &opts);
+
+        for id in ["inc3", "inc2"] {
+            assert!(retention.keep.contains(id), "{id} was selected by policy");
+        }
+        assert!(
+            retention.keep.contains("inc1"),
+            "inc2 is a difference from inc1; deleting inc1 makes inc2 unrestorable"
+        );
+        assert!(
+            retention.keep.contains("full"),
+            "and the whole chain is a difference from the full backup at its root"
+        );
+        assert_eq!(
+            retention.held_by_chain,
+            vec!["full".to_string(), "inc1".to_string()],
+            "the two the policy dropped and the chain reinstated must be reported"
+        );
+    }
+
+    /// Independent full backups have nothing to hold on to, so the policy is
+    /// applied exactly as written — chain-awareness must not make prune a no-op.
+    #[test]
+    fn independent_full_backups_are_pruned_as_the_policy_says() {
+        let metas = vec![
+            chain_meta("f1", None, 100),
+            chain_meta("f2", None, 200),
+            chain_meta("f3", None, 300),
+        ];
+        let opts = PruneOptions {
+            dest: PathBuf::from("/tmp"),
+            keep_last: Some(2),
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+        };
+
+        let retention = compute_retention(&metas, &opts);
+        assert!(!retention.keep.contains("f1"));
+        assert!(retention.keep.contains("f2") && retention.keep.contains("f3"));
+        assert!(retention.held_by_chain.is_empty());
+    }
+
+    /// Two chains, and only one of them has a kept member: the other chain's
+    /// base must still go.
+    #[test]
+    fn an_ancestor_of_nothing_kept_is_still_pruned() {
+        let metas = vec![
+            chain_meta("oldfull", None, 100),
+            chain_meta("oldinc", Some("oldfull"), 150),
+            chain_meta("newfull", None, 300),
+            chain_meta("newinc", Some("newfull"), 400),
+        ];
+        let opts = PruneOptions {
+            dest: PathBuf::from("/tmp"),
+            keep_last: Some(1),
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+        };
+
+        let retention = compute_retention(&metas, &opts);
+        assert!(retention.keep.contains("newinc"));
+        assert!(retention.keep.contains("newfull"), "its chain is held");
+        assert!(!retention.keep.contains("oldfull"), "nothing kept needs it");
+        assert!(!retention.keep.contains("oldinc"));
+    }
+
+    /// Corrupt or hand-edited metadata can name a parent that is itself a
+    /// descendant. Walking that must terminate.
+    #[test]
+    fn a_cycle_in_the_parent_links_does_not_hang_the_prune() {
+        let metas = vec![
+            chain_meta("a", Some("b"), 100),
+            chain_meta("b", Some("a"), 200),
+        ];
+        let opts = PruneOptions {
+            dest: PathBuf::from("/tmp"),
+            keep_last: Some(1),
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+        };
+
+        let retention = compute_retention(&metas, &opts);
+        assert!(retention.keep.contains("a") && retention.keep.contains("b"));
+    }
+
+    /// A `parent_id` naming a backup that no longer exists cannot be reinstated,
+    /// and must not stop the prune either.
+    #[test]
+    fn a_parent_that_is_already_gone_is_not_invented() {
+        let metas = vec![chain_meta("orphan", Some("vanished"), 100)];
+        let opts = PruneOptions {
+            dest: PathBuf::from("/tmp"),
+            keep_last: Some(1),
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+        };
+
+        let retention = compute_retention(&metas, &opts);
+        assert!(retention.keep.contains("orphan"));
+        assert!(
+            !retention.keep.contains("vanished"),
+            "keeping an id that names no backup would report holding data that does not exist"
+        );
+        assert!(retention.held_by_chain.is_empty());
+        assert_eq!(
+            retention.broken_chains,
+            vec![("orphan".to_string(), "vanished".to_string())],
+            "the user has to be told the kept backup is unrestorable"
+        );
+    }
+
+    // ---- Restore Path Containment ----
+
+    #[test]
+    fn an_ordinary_relative_entry_lands_under_the_destination() {
+        let dest = Path::new("/tmp/restore");
+        assert_eq!(
+            restore_path_within(dest, Path::new("docs/notes.txt")),
+            Some(PathBuf::from("/tmp/restore/docs/notes.txt"))
+        );
+        assert_eq!(
+            restore_path_within(dest, Path::new("./a/./b.txt")),
+            Some(PathBuf::from("/tmp/restore/a/b.txt")),
+            "`.` components are noise, not an escape"
+        );
+    }
+
+    /// `Path::join` replaces its base when the argument is absolute, so this
+    /// used to write straight to `/etc/passwd` no matter what destination the
+    /// user gave. `relative_path` emits absolute paths whenever its
+    /// `strip_prefix` fails, so this reaches a manifest without anyone
+    /// tampering with it.
+    #[test]
+    fn an_absolute_entry_is_refused_rather_than_redirecting_the_restore() {
+        let dest = Path::new("/tmp/restore");
+        assert_eq!(restore_path_within(dest, Path::new("/etc/passwd")), None);
+        assert_eq!(restore_path_within(dest, Path::new("/")), None);
+    }
+
+    #[test]
+    fn a_parent_component_cannot_climb_out_of_the_destination() {
+        let dest = Path::new("/tmp/restore");
+        assert_eq!(
+            restore_path_within(dest, Path::new("../../etc/passwd")),
+            None
+        );
+        assert_eq!(
+            restore_path_within(dest, Path::new("docs/../../../etc/passwd")),
+            None
+        );
+        assert_eq!(
+            restore_path_within(dest, Path::new("docs/../notes.txt")),
+            None,
+            "a `..` that happens to stay inside is still refused: resolving it \
+             would mean trusting the manifest to be honest about symlinks"
+        );
+    }
+
+    #[test]
+    fn an_entry_naming_no_file_at_all_is_refused() {
+        let dest = Path::new("/tmp/restore");
+        assert_eq!(restore_path_within(dest, Path::new("")), None);
+        assert_eq!(restore_path_within(dest, Path::new(".")), None);
+    }
+
+    /// Windows drive prefixes are the platform's own way to spell "absolute",
+    /// and a manifest written on Windows records them.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_drive_prefix_is_refused() {
+        let dest = Path::new("C:\\restore");
+        assert_eq!(
+            restore_path_within(
+                dest,
+                Path::new("C:\\Windows\\System32\\drivers\\etc\\hosts")
+            ),
+            None
+        );
+        assert_eq!(
+            restore_path_within(dest, Path::new("\\\\server\\share\\file.txt")),
+            None
+        );
+    }
+
+    // --- Glob matching ---
+
+    /// `glob_match_recursive` and `glob_match_simple` disagreed about which
+    /// `**` was a globstar: `simple` delegated on any `**`, `recursive`
+    /// accepted only a whole path segment and handed anything else straight
+    /// back. Neither consumed a byte, so `--exclude '**a'` recursed until the
+    /// stack ran out and killed the backup mid-run.
+    ///
+    /// Every pattern here reached that loop before the fix. The test asserts
+    /// results rather than merely returning, but the real assertion is that it
+    /// terminates at all — a regression hangs the suite rather than failing it,
+    /// which is the loudest signal available for this shape of bug.
+    #[test]
+    fn a_double_star_that_is_not_a_path_segment_terminates() {
+        // Degraded to a single `*`, per bash's `globstar` and gitignore.
+        assert!(glob_matches("**a", "ba"));
+        assert!(glob_matches("**a", "a"));
+        assert!(!glob_matches("**a", "b"));
+        assert!(glob_matches("**.tmp", "scratch.tmp"));
+        assert!(!glob_matches("**.tmp", "scratch.txt"));
+        // A single `*` does not cross a separator, and the degraded `**`
+        // inherits that.
+        assert!(!glob_matches("**a", "x/a"));
+        assert!(glob_matches("***", "ab"));
+    }
+
+    /// The whole-segment forms must keep their globstar meaning — the fix
+    /// narrowed which `**` is special, so this pins that it did not narrow it
+    /// to nothing.
+    #[test]
+    fn a_double_star_that_is_a_path_segment_still_spans_directories() {
+        assert!(glob_matches("**/*.txt", "a/b/c/note.txt"));
+        assert!(glob_matches("src/**/mod.rs", "src/a/b/mod.rs"));
+        assert!(glob_matches("src/**/mod.rs", "src/mod.rs"));
+        assert!(glob_matches("src/**", "src/a/b"));
+        assert!(!glob_matches("src/**/mod.rs", "lib/a/mod.rs"));
+    }
+
+    // --- JSON pretty-printing ---
+
+    /// The manifest round-trip tests cannot see this: the parser discards
+    /// whitespace, so a printer that lost an indent, doubled a comma or put the
+    /// closing brace in the wrong column would still parse back to an equal
+    /// value. A manifest is a file a person opens when a backup goes wrong, so
+    /// its shape is a feature. Pinned exactly.
+    #[test]
+    fn the_pretty_printer_lays_a_manifest_out_readably() {
+        let value = JsonValue::Object(vec![
+            ("name".to_string(), JsonValue::Str("backup-42".to_string())),
+            (
+                "files".to_string(),
+                JsonValue::Array(vec![
+                    JsonValue::Str("a.txt".to_string()),
+                    JsonValue::Str("b.txt".to_string()),
+                ]),
+            ),
+            ("count".to_string(), JsonValue::Number(2.0)),
+        ]);
+        assert_eq!(
+            json_pretty(&value, 2),
+            "{\n  \"name\": \"backup-42\",\n  \"files\": [\n    \"a.txt\",\n    \"b.txt\"\n  ],\n  \"count\": 2\n}"
+        );
+    }
+
+    /// An empty container has no entries to separate, so it never reaches the
+    /// indenting arms at all — it must still print as valid JSON rather than as
+    /// an open brace waiting for a newline.
+    #[test]
+    fn empty_containers_print_flat() {
+        assert_eq!(json_pretty(&JsonValue::Object(vec![]), 2), "{}");
+        assert_eq!(json_pretty(&JsonValue::Array(vec![]), 2), "[]");
+    }
+
+    /// The byte-offset truncation this replaced would panic here: the twentieth
+    /// byte of the trailing text lands inside a two-byte character.
+    #[test]
+    fn trailing_garbage_is_reported_without_splitting_a_character() {
+        let err = json_parse("{} ééééééééééééééééééé").unwrap_err();
+        assert!(
+            err.starts_with("trailing characters:"),
+            "unexpected message: {err}"
+        );
+    }
+
+    // --- Argument parsing ---
+    //
+    // The nine `parse_*_args` functions had no tests at all, which is how they
+    // came to share forty-five hand-written `args[i]` / `i += 1` pairs: nothing
+    // would have noticed a parser that stepped its counter in one branch and
+    // forgot it in another. `ArgCursor` removed the counter; these pin the
+    // behaviour it replaced, and in particular that a flag's *value* is
+    // consumed rather than re-read as the next flag.
+
+    /// Builds an argument slice the way `parse_args` hands one over — the
+    /// command word already stripped.
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The rejection message from a parse that was supposed to fail.
+    ///
+    /// `Result::unwrap_err` would need `Command: Debug`, and deriving one on
+    /// four production types so that a test can phrase an assertion is the
+    /// tail wagging the dog. This asks the same question without the bound.
+    fn parse_err(result: Result<Command, String>) -> String {
+        match result {
+            Ok(_) => panic!("expected the parse to be rejected, but it succeeded"),
+            Err(message) => message,
+        }
+    }
+
+    #[test]
+    fn create_reads_every_option() {
+        let args = argv(&[
+            "--incremental",
+            "--source",
+            "/home/u",
+            "--dest",
+            "/backups",
+            "--exclude",
+            "*.tmp",
+            "--exclude",
+            "*.log",
+            "--follow-symlinks",
+        ]);
+        let Ok(Command::Create(opts)) = parse_create_args(&args) else {
+            panic!("expected a create command");
+        };
+        assert!(matches!(opts.backup_type, BackupType::Incremental));
+        assert_eq!(opts.source, PathBuf::from("/home/u"));
+        assert_eq!(opts.dest, PathBuf::from("/backups"));
+        assert_eq!(opts.exclude, vec!["*.tmp".to_string(), "*.log".to_string()]);
+        assert!(opts.follow_symlinks);
+    }
+
+    /// The bug the cursor makes unstatable. A parser that consumed `--dest`'s
+    /// value but forgot to step past it would read `/backups` as an option and
+    /// reject it — or worse, read a *later* flag's value as a flag and prune
+    /// somewhere the user never named. Every value-taking option is followed
+    /// here by another option, so a missed advance cannot pass.
+    #[test]
+    fn a_flag_value_is_consumed_not_reparsed_as_a_flag() {
+        let args = argv(&[
+            "--keep-last",
+            "5",
+            "--keep-daily",
+            "7",
+            "--keep-weekly",
+            "4",
+            "--keep-monthly",
+            "12",
+            "--dest",
+            "/backups",
+        ]);
+        let Ok(Command::Prune(opts)) = parse_prune_args(&args) else {
+            panic!("expected a prune command");
+        };
+        assert_eq!(opts.keep_last, Some(5));
+        assert_eq!(opts.keep_daily, Some(7));
+        assert_eq!(opts.keep_weekly, Some(4));
+        assert_eq!(opts.keep_monthly, Some(12));
+        assert_eq!(opts.dest, PathBuf::from("/backups"));
+    }
+
+    #[test]
+    fn a_flag_with_no_value_left_names_itself() {
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--source"]))),
+            "--source requires a path"
+        );
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--exclude"]))),
+            "--exclude requires a pattern"
+        );
+        assert_eq!(
+            parse_err(parse_prune_args(&argv(&["--keep-last"]))),
+            "--keep-last requires a number"
+        );
+        assert_eq!(
+            parse_err(parse_schedule_args(&argv(&["--interval"]))),
+            "--interval requires a value"
+        );
+    }
+
+    #[test]
+    fn a_retention_count_that_is_not_a_number_is_refused() {
+        assert_eq!(
+            parse_err(parse_prune_args(&argv(&["--keep-daily", "weekly"]))),
+            "--keep-daily must be a number"
+        );
+        // Negative counts parse as `u64` failures rather than as flags, which
+        // is the honest answer: "keep the last -1 backups" has no meaning.
+        assert_eq!(
+            parse_err(parse_prune_args(&argv(&["--keep-last", "-1"]))),
+            "--keep-last must be a number"
+        );
+    }
+
+    #[test]
+    fn create_requires_a_source_and_a_destination() {
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--dest", "/backups"]))),
+            "--source is required"
+        );
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--source", "/home/u"]))),
+            "--dest is required"
+        );
+    }
+
+    #[test]
+    fn an_unknown_option_names_the_command_it_was_given_to() {
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--verbose"]))),
+            "unknown option for create: --verbose"
+        );
+        assert_eq!(
+            parse_err(parse_schedule_args(&argv(&["--daily"]))),
+            "unknown option for schedule: --daily"
+        );
+    }
+
+    /// The commands that take an operand must not read the following option as
+    /// one. `restore`, `verify`, `info` take one; `diff` takes two.
+    #[test]
+    fn an_operand_is_read_before_the_options() {
+        let Ok(Command::Restore(opts)) = parse_restore_args(&argv(&[
+            "backup-42",
+            "--from",
+            "/backups",
+            "--dest",
+            "/restore",
+            "--files",
+            "*.txt",
+        ])) else {
+            panic!("expected a restore command");
+        };
+        assert_eq!(opts.backup_id, "backup-42");
+        assert_eq!(opts.backup_dest, PathBuf::from("/backups"));
+        assert_eq!(opts.restore_dest, PathBuf::from("/restore"));
+        assert_eq!(opts.file_pattern, Some("*.txt".to_string()));
+
+        let Ok(Command::Diff { id1, id2, dest }) =
+            parse_diff_args(&argv(&["a", "b", "--dest", "/backups"]))
+        else {
+            panic!("expected a diff command");
+        };
+        assert_eq!(id1, "a");
+        assert_eq!(id2, "b");
+        assert_eq!(dest, PathBuf::from("/backups"));
+    }
+
+    #[test]
+    fn a_missing_operand_says_which_one() {
+        assert_eq!(
+            parse_err(parse_restore_args(&argv(&[]))),
+            "restore requires a BACKUP_ID"
+        );
+        assert_eq!(
+            parse_err(parse_verify_args(&argv(&[]))),
+            "verify requires a BACKUP_ID"
+        );
+        assert_eq!(
+            parse_err(parse_info_args(&argv(&[]))),
+            "info requires a BACKUP_ID"
+        );
+        assert_eq!(
+            parse_err(parse_diff_args(&argv(&["only-one"]))),
+            "diff requires two BACKUP_IDs"
+        );
+    }
+
+    /// `backup list /backups` and `backup list --dest /backups` mean the same
+    /// thing, but a *second* bare word is a typo rather than a second
+    /// destination — silently ignoring it would list the wrong repository.
+    #[test]
+    fn a_bare_word_is_the_destination_but_only_the_first() {
+        let Ok(Command::List { dest, source }) = parse_list_args(&argv(&["/backups"])) else {
+            panic!("expected a list command");
+        };
+        assert_eq!(dest, PathBuf::from("/backups"));
+        assert_eq!(source, None);
+
+        assert_eq!(
+            parse_err(parse_list_args(&argv(&["/backups", "/other"]))),
+            "unknown option for list: /other"
+        );
+    }
+
+    /// `--dest --source` takes `--source` as the destination rather than
+    /// reporting a missing value. That is what the hand-written parsers did and
+    /// what most Unix tools do: an option's value is the next word, whatever it
+    /// looks like, so a path that genuinely begins with `-` stays reachable.
+    /// Pinned because it is a decision, not an accident.
+    #[test]
+    fn a_flags_value_may_itself_look_like_a_flag() {
+        let Ok(Command::Create(opts)) =
+            parse_create_args(&argv(&["--source", "--dest", "--dest", "/backups"]))
+        else {
+            panic!("expected a create command");
+        };
+        assert_eq!(opts.source, PathBuf::from("--dest"));
+        assert_eq!(opts.dest, PathBuf::from("/backups"));
+    }
+}

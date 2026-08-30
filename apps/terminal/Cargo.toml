@@ -1,0 +1,10 @@
+[package]
+name = "terminal"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS Terminal Emulator — graphical VT100/xterm terminal"
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

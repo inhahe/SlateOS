@@ -1,0 +1,24 @@
+# Workspace-wide clippy configuration.
+#
+# `doc-valid-idents` extends (via the `..` entry, which splices in clippy's
+# own default list) the set of identifiers that `clippy::doc_markdown` will
+# not demand backticks around. Without it, every doc comment that names this
+# project or a piece of prior art it cites — "SlateOS", "HarfBuzz",
+# "DejaVu" — is reported as a missing-backticks warning, and the only ways
+# to silence it are to backtick a proper noun in running prose (which reads
+# as though it were a code identifier) or to sprinkle `#[allow]`s. Neither
+# is right: these are words, not items.
+#
+# Keep this list to genuine proper nouns that appear in prose. Anything that
+# really is a type, function or file name should be backticked instead.
+doc-valid-idents = [
+    "SlateOS",
+    "HarfBuzz",
+    "FreeType",
+    "DejaVu",
+    "OpenType",
+    "TrueType",
+    "PostScript",
+    "OpenGL",
+    "..",
+]

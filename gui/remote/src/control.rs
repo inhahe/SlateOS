@@ -1,0 +1,2725 @@
+//! Window-control protocol — the third direction, and the one that lets a
+//! window exist at all.
+//!
+//! [`crate`] carries drawing out ([`encode_frame`](crate::encode_frame)) and
+//! input back ([`input`](crate::input)). Neither can *create* a window, name
+//! it, move it, or ask how big the screen is. Those are requests with replies
+//! rather than a stream of one-way notifications, and they are what this module
+//! encodes.
+//!
+//! Until it existed the gap was filled by `oswindow`, which declared exactly
+//! these messages and then answered them itself — `Connection::send` pushed a
+//! request and immediately called `simulate_response()` to pop it and invent
+//! the reply. That is a convincing-looking client with no compositor behind it,
+//! and window ids came from a process-local counter, so two applications would
+//! have used the same one.
+//!
+//! ## Two magics, not one frame type with a direction byte
+//!
+//! Requests are `b"CREQ"`, responses are `b"CRSP"`. The alternative — one magic
+//! and a direction flag — costs a byte less and detects a wrong-way frame one
+//! field later, after a decoder has already accepted the frame as its own kind.
+//! Since a control channel is duplex by construction, that check is worth its
+//! four bytes; the same reasoning gave `INPT` its own magic rather than a flag
+//! on `ORDR`.
+//!
+//! ## Correlation
+//!
+//! Every [`Request`] and [`Response`] carries a `seq`. A synchronous
+//! simulation never needed one — it had the answer before `send` returned — but
+//! a real channel can deliver a `Resize` reply after a `GetDisplayInfo` reply
+//! that was asked for later, and a client with two requests outstanding
+//! otherwise cannot tell which answer is which. The client owns the numbering;
+//! the compositor only echoes it.
+//!
+//! ## Wire format
+//!
+//! ```text
+//! magic  : [u8;4] = b"CREQ" | b"CRSP"
+//! version: u8     = CONTROL_VERSION
+//! flags  : u8     = 0 (reserved)
+//! n_msgs : u32                        message count, little-endian
+//!   per message:
+//!     seq : u32                       client-assigned correlation id
+//!     tag : u8                        RequestTag / ResponseTag
+//!     body: variable
+//! ```
+//!
+//! Scalars are little-endian, `f32` is the `to_le_bytes` of its IEEE-754 bits,
+//! strings are u32-length-prefixed UTF-8, and a signed integer is the
+//! two's-complement bit pattern of its unsigned counterpart — the same
+//! primitive conventions as every other frame in this crate.
+//!
+//! ## Robustness
+//!
+//! Malformed input is an error, never a panic. Unknown tags, reserved flag
+//! bits, oversized counts and non-UTF-8 strings are all [`DecodeError`]s
+//! naming what was wrong.
+
+use guitk::event::{Key, Modifiers};
+
+use crate::reserve::PanelEdge;
+use crate::zones::SnapSlot;
+use crate::{
+    DecodeError, Reader, capacity_hint, write_bytes, write_f32, write_i32, write_string, write_u32,
+    write_u64,
+};
+
+/// Request-frame magic: `b"CREQ"` (client → compositor).
+pub const REQUEST_MAGIC: [u8; 4] = *b"CREQ";
+
+/// Response-frame magic: `b"CRSP"` (compositor → client).
+pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
+
+/// Control protocol version. Bump on any incompatible layout change; never
+/// reuse a number.
+///
+/// **2** — the request vocabulary gained [`RequestBody::GrabKey`] and
+/// [`RequestBody::UngrabKey`] (tags `0x17`/`0x18`). No existing message moved a
+/// byte, but an unrecognised tag is [`DecodeError::BadTag`] and the decoder
+/// stops there, so a version-1 compositor handed a grab fails the frame rather
+/// than skipping one message in it. As with
+/// [`INPUT_VERSION`](crate::input::INPUT_VERSION) 2, "incompatible" is about
+/// what the other end can read, not only about where the bytes sit.
+///
+/// **3** — [`WindowSpec`] gained
+/// [`input_transparent`](WindowSpec::input_transparent), one byte written
+/// directly after `transparent`. Unlike 2, this one *does* move bytes: every
+/// field after it in a `CreateWindow` message shifts by one, so a version-2
+/// decoder reads the min-size presence flag out of the new byte and
+/// desynchronises for the rest of the message. There is no way to add it that
+/// an older peer could skip — the encoding carries no per-field lengths — which
+/// is what the version number is for.
+///
+/// **4** — [`WindowSpec`] gained [`app_id`](WindowSpec::app_id), a
+/// length-prefixed string written directly after `title`. Moves bytes for the
+/// same reason 3 did, and worse: the new field's own length prefix would be
+/// read by a version-3 decoder as the window's *width*, so the failure is not a
+/// wrong flag but a window several hundred million pixels across.
+pub const CONTROL_VERSION: u8 = 4;
+
+/// Control-frame header: magic + version + flags + message count.
+const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
+
+/// Upper bound on messages in a single control frame, so a hostile sender
+/// cannot make the decoder pre-allocate unboundedly. Control traffic is a
+/// handful of messages at startup and then almost nothing; this is generous by
+/// three orders of magnitude.
+pub const MAX_MESSAGES_PER_FRAME: u32 = 1 << 12;
+
+// ============================================================================
+// Cursor
+// ============================================================================
+
+/// Cursor shape the compositor should display over a window.
+///
+/// This is the one the *wire* uses, and deliberately the only one: the tree
+/// previously had three near-identical cursor enums — `oswindow::CursorShape`,
+/// the compositor's own, and `guitk::style::Cursor` — which is three
+/// translation tables to keep in step and three chances for `Help` and
+/// `NotAllowed` to swap places. `guitk::style::Cursor` survives because it is a
+/// different thing: a *styling* property a widget declares, not a request to
+/// the compositor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CursorShape {
+    /// Default pointer arrow.
+    #[default]
+    Arrow,
+    /// Text insertion beam (I-beam).
+    Text,
+    /// Pointing hand, for something clickable.
+    Hand,
+    /// Vertical resize (north–south).
+    ResizeNS,
+    /// Horizontal resize (east–west).
+    ResizeEW,
+    /// Diagonal resize (north-east–south-west).
+    ResizeNESW,
+    /// Diagonal resize (north-west–south-east).
+    ResizeNWSE,
+    /// Move or drag.
+    Move,
+    /// Busy; the application is not accepting input.
+    Wait,
+    /// Context help.
+    Help,
+    /// Crosshair, for precision selection.
+    Crosshair,
+    /// The drop or action under the pointer is not permitted.
+    NotAllowed,
+    /// No cursor drawn at all.
+    Hidden,
+}
+
+impl CursorShape {
+    const fn to_byte(self) -> u8 {
+        match self {
+            Self::Arrow => 0x01,
+            Self::Text => 0x02,
+            Self::Hand => 0x03,
+            Self::ResizeNS => 0x04,
+            Self::ResizeEW => 0x05,
+            Self::ResizeNESW => 0x06,
+            Self::ResizeNWSE => 0x07,
+            Self::Move => 0x08,
+            Self::Wait => 0x09,
+            Self::Help => 0x0A,
+            Self::Crosshair => 0x0B,
+            Self::NotAllowed => 0x0C,
+            Self::Hidden => 0x0D,
+        }
+    }
+
+    const fn from_byte(b: u8) -> Option<Self> {
+        Some(match b {
+            0x01 => Self::Arrow,
+            0x02 => Self::Text,
+            0x03 => Self::Hand,
+            0x04 => Self::ResizeNS,
+            0x05 => Self::ResizeEW,
+            0x06 => Self::ResizeNESW,
+            0x07 => Self::ResizeNWSE,
+            0x08 => Self::Move,
+            0x09 => Self::Wait,
+            0x0A => Self::Help,
+            0x0B => Self::Crosshair,
+            0x0C => Self::NotAllowed,
+            0x0D => Self::Hidden,
+            _ => return None,
+        })
+    }
+}
+
+// ============================================================================
+// Pixel formats
+// ============================================================================
+
+/// Pixel layout of a block of client-supplied pixels.
+///
+/// This is the one the *wire* uses, and — by the same rule that left
+/// [`CursorShape`] the only cursor enum — deliberately the only one. The
+/// compositor previously declared its own `BufferFormat`, which was fine while
+/// pixels could only be handed over in-process; the moment
+/// [`RequestBody::UploadImage`] let them arrive from another process, two enums
+/// meant two orderings for the byte-per-variant mapping, and nothing to make
+/// them agree beyond a reviewer noticing. Byte `0x01` means `Argb8888` here
+/// because it is written down here, and the compositor imports this type rather
+/// than translating into a copy of it.
+///
+/// Both variants are 32 bits per pixel and little-endian. The compositor works
+/// internally in `0xAARRGGBB`, so an import converts to that.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum BufferFormat {
+    /// 32 bits per pixel with an alpha channel. Memory bytes (low→high) are
+    /// `[B, G, R, A]`, i.e. a little-endian `u32` of `0xAARRGGBB`.
+    #[default]
+    Argb8888,
+    /// Same byte order as [`Argb8888`](BufferFormat::Argb8888) but the high
+    /// byte is ignored and the pixel is treated as fully opaque.
+    Xrgb8888,
+}
+
+impl BufferFormat {
+    /// Bytes occupied by a single pixel in this format.
+    #[must_use]
+    pub const fn bytes_per_pixel(self) -> u32 {
+        match self {
+            Self::Argb8888 | Self::Xrgb8888 => 4,
+        }
+    }
+
+    /// Whether this format carries per-pixel alpha. `Xrgb8888` does not.
+    #[must_use]
+    pub const fn has_alpha(self) -> bool {
+        matches!(self, Self::Argb8888)
+    }
+
+    const fn to_byte(self) -> u8 {
+        match self {
+            Self::Argb8888 => 0x01,
+            Self::Xrgb8888 => 0x02,
+        }
+    }
+
+    const fn from_byte(b: u8) -> Option<Self> {
+        Some(match b {
+            0x01 => Self::Argb8888,
+            0x02 => Self::Xrgb8888,
+            _ => return None,
+        })
+    }
+}
+
+// ============================================================================
+// Window creation parameters
+// ============================================================================
+
+/// Which band of the stacking order a window belongs to.
+///
+/// A desktop needs three kinds of surface that no amount of raising and
+/// lowering can express with one flat stack: a wallpaper that is always behind
+/// everything, ordinary application windows, and shell chrome — a taskbar, a
+/// start menu, a popup — that is always in front. Without this, clicking an
+/// application window raises it over the taskbar, because to the compositor
+/// the taskbar *is* an application window.
+///
+/// The bands are totally ordered and a window never leaves the one it was
+/// created in. Raising, focusing and stacking all happen strictly *within* a
+/// band, so an ordinary window cannot climb above the shell and a wallpaper
+/// cannot climb above anything. That is the whole guarantee — inside a band
+/// the rules are exactly what they were before this type existed.
+///
+/// Deliberately three and not an integer depth: an open-ended depth invites
+/// each surface to pick a number, and the numbers then encode a policy that
+/// nobody wrote down and every new surface has to guess at. Three named roles
+/// are what the shell actually distinguishes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Layer {
+    /// Behind every ordinary window: the wallpaper, the desktop icon surface.
+    Background,
+    /// Ordinary application windows. The default, and where a client that has
+    /// never heard of this type lands.
+    #[default]
+    Normal,
+    /// In front of every ordinary window: taskbar, start menu, popups, OSD.
+    Overlay,
+}
+
+impl Layer {
+    /// The wire byte for this layer.
+    #[must_use]
+    pub const fn as_byte(self) -> u8 {
+        match self {
+            Self::Background => 0,
+            Self::Normal => 1,
+            Self::Overlay => 2,
+        }
+    }
+
+    /// The layer a wire byte names, or `None` if it names none of them.
+    ///
+    /// Returning `None` rather than defaulting to [`Layer::Normal`] is
+    /// deliberate: a byte we do not recognise means the peer is speaking a
+    /// protocol we do not, and silently placing its taskbar in with the
+    /// application windows would be a wrong desktop rather than a refused
+    /// connection.
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Background),
+            1 => Some(Self::Normal),
+            2 => Some(Self::Overlay),
+            _ => None,
+        }
+    }
+}
+
+// ============================================================================
+// Acting on somebody else's window
+// ============================================================================
+
+/// What a shell asks the compositor to do to a window it does not own.
+///
+/// Every other window request in this protocol is resolved against the sending
+/// connection's own windows, which is the whole ownership model: a client
+/// cannot name a window it did not create. A taskbar's entire job is the
+/// opposite — the button exists precisely to act on somebody else's window —
+/// so those verbs cannot be reused, and this is a separate request rather than
+/// a flag on them, so that "names a window I own" stays a property you can read
+/// off the variant.
+///
+/// The actions are the ones a shell surface actually offers: a taskbar button
+/// (activate, minimise), its context menu (maximise, restore, close), an
+/// Alt-Tab switcher (activate), the keyboard shortcuts that tile a window to
+/// one half of the screen (snap left/right), and the zone picker that tiles it
+/// into one cell of a named layout ([`SnapToZone`](Self::SnapToZone)).
+///
+/// Deliberately not move/resize: placing windows is the compositor's, and a
+/// shell that could move any window would be a second window manager — the
+/// duplication this part of the tree exists to remove. **Snap is not an
+/// exception to that rule, it is an instance of it.** Every action here names
+/// an *intent* and lets the compositor work out the rectangle from its own
+/// work area; `Maximize` was always of that shape, and `SnapLeft` is the same
+/// shape with a different fraction. What would break the rule is a
+/// `Move { x, y, w, h }` — a client-supplied rectangle — and that is still
+/// absent, which is the distinction to preserve when adding to this enum: if
+/// the shell has to compute pixels to use a verb, the verb is wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ShellControlAction {
+    /// Un-minimise if minimised, then focus and raise within the window's band.
+    ///
+    /// One action rather than restore-then-focus because the two are not
+    /// independent: the compositor refuses to focus a minimised window, so a
+    /// shell issuing them separately would be relying on the order it happened
+    /// to send them in.
+    Activate,
+    /// Minimise to the taskbar.
+    Minimize,
+    /// Return from minimised or maximised to the previous geometry.
+    Restore,
+    /// Fill the work area.
+    Maximize,
+    /// *Ask* the window to close — the same request its own close button makes.
+    ///
+    /// Not a destroy: the client is told, and an editor with unsaved changes
+    /// gets to put up its dialog. A shell that could destroy a window would be
+    /// able to discard a user's work from a context menu.
+    Close,
+    /// Fill the left half of the work area.
+    ///
+    /// Left and right are separate variants rather than `Snap(Edge)` because
+    /// the wire encoding is one byte per action and a nested payload would make
+    /// this the only action that carries one — every reader and writer of the
+    /// frame would grow a special case for the sake of a two-valued field.
+    SnapLeft,
+    /// Fill the right half of the work area.
+    SnapRight,
+    /// Fill one cell of a named multi-window layout.
+    ///
+    /// `SnapLeft`/`SnapRight` are the two-window case a keyboard shortcut can
+    /// reach; this is what the zone picker offers — thirds, quadrants, a
+    /// six-cell grid. The rule the rest of this enum keeps is kept here too:
+    /// the slot names *which zone of which layout*, never a rectangle. The
+    /// compositor resolves it against its own work area with
+    /// [`SnapSlot::rect`], and it is the only party that could, since the shell
+    /// is never told what the display bounds are.
+    ///
+    /// The payload does not break the one-byte-per-action encoding either. A
+    /// [`SnapSlot`] is one of exactly [`SnapSlot::COUNT`] values, so it is
+    /// folded into the same byte as the action rather than encoded beside it —
+    /// [`as_byte`](Self::as_byte) still determines the whole action, and no
+    /// reader or writer of a frame grows a case for a nested field. That is the
+    /// distinction the `SnapLeft`/`SnapRight` note above is drawing: what was
+    /// rejected there was not a payload as such, it was a *separately encoded*
+    /// one.
+    SnapToZone(SnapSlot),
+}
+
+impl ShellControlAction {
+    /// The first wire byte used by [`SnapToZone`](Self::SnapToZone).
+    ///
+    /// The zoneless actions take 0..=6 and the slots run end to end from here,
+    /// so the whole enum still fits one byte with room to spare. **Wire
+    /// format**: inserting a zoneless action rather than appending one would
+    /// slide every slot onto a different byte.
+    const ZONE_BYTE_BASE: u8 = 7;
+
+    /// Every action that names no zone.
+    ///
+    /// Exists so that the codec tests iterate the actions rather than a
+    /// hand-written list of them: the list they used to hold was the kind that
+    /// goes stale silently, leaving a newly-added action with no test that it
+    /// survives the wire at all. Adding a variant breaks the compile of
+    /// `all_really_is_every_action` until it is named there, and the fixed
+    /// array length breaks it again if it is added here without being counted.
+    ///
+    /// The zone-tiling actions are excluded because there are
+    /// [`SnapSlot::COUNT`] of them and they are *generated* —
+    /// [`SnapSlot::all`] is their list, and listing them again here would be
+    /// the stale hand-written list this array exists to avoid. The tests below
+    /// iterate both together.
+    pub const ZONELESS: [Self; 7] = [
+        Self::Activate,
+        Self::Minimize,
+        Self::Restore,
+        Self::Maximize,
+        Self::Close,
+        Self::SnapLeft,
+        Self::SnapRight,
+    ];
+
+    /// The wire byte for this action.
+    ///
+    /// The `saturating_add` cannot saturate: the largest slot index is
+    /// [`SnapSlot::COUNT`] − 1 = 21, so the largest byte is 28. It is written
+    /// that way so the function stays total and `const` without an unreachable
+    /// panicking branch.
+    #[must_use]
+    pub const fn as_byte(self) -> u8 {
+        match self {
+            Self::Activate => 0,
+            Self::Minimize => 1,
+            Self::Restore => 2,
+            Self::Maximize => 3,
+            Self::Close => 4,
+            Self::SnapLeft => 5,
+            Self::SnapRight => 6,
+            Self::SnapToZone(slot) => Self::ZONE_BYTE_BASE.saturating_add(slot.index()),
+        }
+    }
+
+    /// The action a wire byte names, or `None` if it names none of them.
+    ///
+    /// `None` rather than a default, for [`Layer::from_byte`]'s reason and one
+    /// of its own: the actions are not interchangeable, and guessing would let
+    /// a peer speaking a later protocol have a window minimised when it asked
+    /// for something else. A byte in the zone range but past the last slot is
+    /// refused for the same reason — a peer that knows a layout we do not
+    /// should be told so, not have its window tiled into whichever zone we
+    /// happened to round down to.
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Activate),
+            1 => Some(Self::Minimize),
+            2 => Some(Self::Restore),
+            3 => Some(Self::Maximize),
+            4 => Some(Self::Close),
+            5 => Some(Self::SnapLeft),
+            6 => Some(Self::SnapRight),
+            // Cannot underflow: the arms above cover everything below the base.
+            _ => match SnapSlot::from_index(b.saturating_sub(Self::ZONE_BYTE_BASE)) {
+                Some(slot) => Some(Self::SnapToZone(slot)),
+                None => None,
+            },
+        }
+    }
+}
+
+/// What a client asks for when it creates a window.
+///
+/// Every field is a *request*: the compositor answers with the id it assigned
+/// and is free to have honoured none of the rest. A client that assumes it got
+/// what it asked for will draw at the wrong size on any compositor with a tiling
+/// policy, which is why the size a window is actually given arrives as an
+/// [`Event::Resize`](guitk::event::Event::Resize) rather than being read back
+/// from here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowSpec {
+    /// Title for the decoration bar and the taskbar.
+    pub title: String,
+    /// Which *program* this window belongs to, as the program itself says.
+    ///
+    /// Next to the title because the two are the same kind of thing — text a
+    /// window is identified by — and different in exactly one way that matters:
+    /// the title is what this *document* is called and changes as the user
+    /// works, while this is what the *application* is called and never changes
+    /// for the life of the window. Anything that wants to say "all of Firefox's
+    /// windows" has to key on something that does not move, and before this
+    /// field the only candidate was the pid, which is a number no user can
+    /// type into a rule.
+    ///
+    /// Conventionally the executable's file stem, lower-cased —
+    /// [`oswindow`'s `App::app_id`] defaults to exactly that, so a program gets
+    /// a usable id without writing a line. An empty string is allowed and means
+    /// "this window declines to identify itself"; it matches no rule rather
+    /// than matching every one, since a rule about an unnamed program is a rule
+    /// about all of them.
+    ///
+    /// **Advisory, and never a security claim.** The client sends it, so a
+    /// client may send anything — the compositor cannot tell `terminal` that
+    /// really is the terminal from `terminal` that is not. That is acceptable
+    /// for what it is for (window rules, grouping taskbar buttons, an icon
+    /// lookup), all of which are cosmetic, and it is why the pid is still
+    /// carried separately: [`WindowInfo::pid`] comes from the connection and
+    /// cannot be forged. Never gate a capability on this string.
+    ///
+    /// [`oswindow`'s `App::app_id`]: https://docs.rs/oswindow
+    /// [`WindowInfo::pid`]: crate::window_list::WindowInfo::pid
+    pub app_id: String,
+    /// Requested client-area width in pixels.
+    pub width: u32,
+    /// Requested client-area height in pixels.
+    pub height: u32,
+    /// Requested top-left position, or `None` to let the compositor place it.
+    ///
+    /// `None` rather than `(0, 0)` because they mean different things: a client
+    /// that does not care should not be pinned to the top-left corner, which is
+    /// where every window that does not care would then pile up.
+    pub position: Option<(i32, i32)>,
+    /// Whether the user may resize the window.
+    pub resizable: bool,
+    /// Whether the compositor draws a title bar and borders.
+    pub decorations: bool,
+    /// Whether the window's background may be transparent.
+    pub transparent: bool,
+    /// Whether pointer input passes straight through the window to whatever is
+    /// behind it.
+    ///
+    /// Distinct from [`transparent`](Self::transparent), which is about pixels:
+    /// a window can be see-through and still clickable (a frosted panel), and
+    /// opaque yet click-through (a debug overlay). This flag is about the
+    /// hit test alone — the compositor behaves as though the window were not
+    /// there when deciding where a click, a hover or a scroll lands.
+    ///
+    /// The window can therefore never be focused by clicking it, and gets no
+    /// pointer events at all. It can still be raised, moved and painted by its
+    /// owner, and still receives keyboard input if something else focuses it.
+    ///
+    /// This is what a heads-up overlay needs — a volume OSD covering the middle
+    /// of the screen must not eat the click aimed at the window underneath it.
+    pub input_transparent: bool,
+    /// Smallest client area the window can usefully be shown at.
+    pub min_size: Option<(u32, u32)>,
+    /// Largest client area the window wants to be shown at.
+    pub max_size: Option<(u32, u32)>,
+    /// Which band of the stacking order the window belongs to.
+    ///
+    /// Unlike the rest of this struct this one is not merely advisory: the
+    /// compositor either honours it or refuses the window, because a shell
+    /// panel silently demoted to [`Layer::Normal`] would be worse than no
+    /// panel — it would disappear behind the first window the user opened.
+    pub layer: Layer,
+}
+
+impl WindowSpec {
+    /// A titled window of the given size, with the ordinary defaults:
+    /// resizable, decorated, opaque, clickable, placed by the compositor, and
+    /// declining to name the program it belongs to.
+    ///
+    /// [`app_id`](Self::app_id) is empty rather than derived from the title,
+    /// because a title is a document name and reusing it would give every
+    /// window of the same program a different id — the exact opposite of what
+    /// the field is for. Callers that want one should set it, or go through
+    /// [`oswindow::app`], whose default reads the executable's name.
+    #[must_use]
+    pub fn new(title: impl Into<String>, width: u32, height: u32) -> Self {
+        Self {
+            title: title.into(),
+            app_id: String::new(),
+            width,
+            height,
+            position: None,
+            resizable: true,
+            decorations: true,
+            transparent: false,
+            input_transparent: false,
+            min_size: None,
+            max_size: None,
+            layer: Layer::Normal,
+        }
+    }
+}
+
+/// What the compositor knows about the display a client is being shown on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DisplayInfo {
+    /// Display width in pixels.
+    pub width: u32,
+    /// Display height in pixels.
+    pub height: u32,
+    /// Refresh rate in Hz.
+    pub refresh_rate: u32,
+    /// DPI scale factor: 1.0 is 96 DPI, 2.0 is 192 DPI.
+    pub scale_factor: f32,
+}
+
+// ============================================================================
+// Requests
+// ============================================================================
+
+/// A control request with the correlation id its reply will carry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Request {
+    /// Client-assigned correlation id, echoed in the [`Response`].
+    pub seq: u32,
+    /// What is being asked for.
+    pub body: RequestBody,
+}
+
+impl Request {
+    /// A request with the given correlation id.
+    #[must_use]
+    pub const fn new(seq: u32, body: RequestBody) -> Self {
+        Self { seq, body }
+    }
+}
+
+/// The requests a client can make of the compositor.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RequestBody {
+    /// Create a window. Answered with [`ResponseBody::WindowCreated`].
+    CreateWindow(WindowSpec),
+    /// Destroy a window and release its id.
+    DestroyWindow { window: u64 },
+    /// Change a window's title.
+    SetTitle { window: u64, title: String },
+    /// Move a window's top-left corner.
+    Move { window: u64, x: i32, y: i32 },
+    /// Ask for a different client-area size.
+    Resize {
+        window: u64,
+        width: u32,
+        height: u32,
+    },
+    /// Minimise a window to the taskbar.
+    Minimize { window: u64 },
+    /// Maximise a window to fill the work area.
+    Maximize { window: u64 },
+    /// Return a window from minimised or maximised to its previous geometry.
+    Restore { window: u64 },
+    /// Show or hide a window without destroying it.
+    SetVisible { window: u64, visible: bool },
+    /// Set the cursor drawn while the pointer is over a window.
+    ///
+    /// Carries the window, which the shape-only form this replaced did not: a
+    /// process with two windows had no way to say which one the text cursor
+    /// belonged to.
+    SetCursor { window: u64, shape: CursorShape },
+    /// Enter or leave fullscreen: the window owns the whole display, with no
+    /// decorations, and the compositor may scan it out directly.
+    ///
+    /// Separate from [`Maximize`](Self::Maximize) because they are different
+    /// states with different restore geometry — a maximized window keeps its
+    /// title bar and respects panel reservations, a fullscreen one does not —
+    /// and a client toggling one must not disturb the other.
+    SetFullscreen { window: u64, enable: bool },
+    /// Set whole-window opacity, from 0.0 (invisible) to 1.0 (opaque).
+    ///
+    /// Uniform over the window *including its decorations*, which is what makes
+    /// it different from [`WindowSpec::transparent`]: that one says the client
+    /// paints its own background and the compositor should not undercoat it.
+    SetOpacity { window: u64, opacity: f32 },
+    /// Ask about the display. Answered with [`ResponseBody::DisplayInfo`].
+    GetDisplayInfo,
+    /// Start or stop receiving the desktop's window list.
+    ///
+    /// A shell — a taskbar, a window switcher, an accessibility tool — needs to
+    /// know about windows it did not open, which nothing else in this protocol
+    /// will tell it. While subscribed, the compositor sends a
+    /// [`WLST`](crate::window_list) frame whenever the list it would send
+    /// differs from the one this client last received; see that module for why
+    /// it is a push rather than a query.
+    ///
+    /// Answered with [`ResponseBody::Ok`], and the first list follows
+    /// separately rather than riding in the reply: a `WLST` frame is what
+    /// arrives on every *later* change, so making the first one arrive by a
+    /// different route would give a shell two code paths to the same state.
+    ///
+    /// Subscribing twice is not an error and does not double the traffic. It
+    /// does re-send the list, which is the useful reading of a repeated
+    /// subscribe — "I may have lost track, tell me again".
+    SubscribeWindowList { subscribe: bool },
+    /// Tell the compositor its copy of the user's appearance settings is out
+    /// of date, so that it re-reads `appearance.yaml` and redraws.
+    ///
+    /// **Carries no data, and that is the whole point.** The compositor draws
+    /// every window frame on the desktop, so a request that *set* the
+    /// appearance would let any process able to open this socket restyle the
+    /// entire machine — invisible title-bar text, a close button the same
+    /// colour as the bar behind it. A notification cannot do that: the
+    /// compositor goes and reads the *user's* file, which the sender may well
+    /// have no permission to write. The worst a hostile client achieves is a
+    /// redundant re-read and a repaint of a screen that already looks the way
+    /// it looks.
+    ///
+    /// It is also why this is not `SetAppearance(AppearanceSettings)` even
+    /// though that would save a file read: the settings are one document with
+    /// one owner (`gui/appearance`), and a wire form for them would be a
+    /// second copy of that model, free to drift from the crate that defines it.
+    ///
+    /// Answered with [`ResponseBody::Ok`], including when the file turns out
+    /// not to have changed — "I have re-read it" is the truthful answer either
+    /// way, and a client asking has no business learning what the user's
+    /// settings say from the shape of the reply.
+    ReloadAppearance,
+    /// Act on a window the sender does not own — the request a taskbar, an
+    /// Alt-Tab switcher or a window menu is made of.
+    ///
+    /// The only request in this protocol that names somebody else's window, and
+    /// therefore the only one the compositor does not resolve against the
+    /// sender's own. See [`ShellControlAction`] for why the ordinary verbs
+    /// could not be reused, and `ClientLink::require_shell` in the compositor
+    /// for the still-open question of *who* may send it.
+    ///
+    /// Answered with [`ResponseBody::Ok`], or an error. A shell acting on a
+    /// window that closed a moment ago is an ordinary race rather than a fault
+    /// — the click happens after the list snapshot the button was drawn from —
+    /// so the error is for the shell's log, not for the user.
+    ///
+    /// Unlike the owned-window requests, the error text here *does* distinguish
+    /// "no such window" from "that window refuses this" (a non-resizable window
+    /// cannot be maximised). That would be a way to probe which ids exist, were
+    /// the sender not already entitled to the whole window list by the same
+    /// privilege that let it send this at all.
+    ShellControl {
+        window: u64,
+        action: ShellControlAction,
+    },
+    /// Reserve `size` pixels along one edge of a monitor for a panel, so that
+    /// tiled and maximized windows stop short of it instead of sliding beneath.
+    ///
+    /// The window named is the panel's *own* — a taskbar reserving the strip it
+    /// sits in — and it answers two questions at once that would otherwise need
+    /// asking separately: **which monitor** (the one that window is on, by the
+    /// same largest-overlap rule everything else uses) and **for how long**
+    /// (until that window is destroyed, hidden, or hangs up). Tying the claim to
+    /// a window is what stops a crashed panel carving a permanent strip out of
+    /// the desktop with nothing left on screen to release it.
+    ///
+    /// A `size` of zero releases. A second reservation for the same window
+    /// replaces the first rather than adding to it, so a panel that changes
+    /// height sends the new number and does not have to release the old one.
+    /// Reservations from *different* windows on the same edge do add — see
+    /// [`crate::reserve`] for why that, and not X11's side-by-side spans.
+    ///
+    /// Answered with [`ResponseBody::WorkArea`]: what the caller actually got,
+    /// which need not be what it asked for, because a claim is clamped to
+    /// [`MAX_RESERVED_FRACTION`](crate::reserve::MAX_RESERVED_FRACTION) of the
+    /// monitor. Returning the area rather than `Ok` is deliberate — a panel
+    /// needs the number to place itself, and a client that had to ask again in a
+    /// second request could be told something different by an intervening
+    /// hotplug.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell` in the compositor: this
+    /// request shrinks the tiling of every *other* client on the machine, so an
+    /// unprivileged one could take a third of each edge and make snapping
+    /// useless desktop-wide. See that function for why the gate does not yet
+    /// answer.
+    ReserveEdge {
+        window: u64,
+        edge: PanelEdge,
+        size: u32,
+    },
+    /// Show a different virtual desktop.
+    ///
+    /// The compositor holds each window's desktop number and decides from it
+    /// what is on screen; this is how a shell asks for a different one. One
+    /// request produces one recomposite computed from a consistent picture --
+    /// which is why the alternative design, where the shell hides each of the
+    /// departing windows in turn, was refused: that is N requests arriving one
+    /// at a time, with every intermediate mixture of two desktops visible on
+    /// the glass, and a failure halfway through leaving a permanent one.
+    ///
+    /// **There is no upper bound.** How many desktops there are is a user
+    /// preference and belongs to whatever is offering the user the choice; a
+    /// second copy of the number in the compositor would be a second answer,
+    /// and the two would drift the first time the preference changed. What the
+    /// compositor owns is the part that decides pixels.
+    ///
+    /// Switching to the desktop already showing is not an error and is not a
+    /// repaint.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`: this changes what every
+    /// other client on the machine is showing.
+    ///
+    /// Answered with [`ResponseBody::Ok`].
+    SwitchWorkspace { workspace: u32 },
+    /// File a window on a virtual desktop -- "move that window to desktop 3".
+    ///
+    /// Names somebody else's window, like [`ShellControl`](Self::ShellControl),
+    /// and for the same reason: moving a window between desktops is a shell's
+    /// job, and no client may choose the desktop its own window opens on. A new
+    /// window goes on whichever desktop is showing, because a client that could
+    /// pick would be able to open a window somewhere the user is not looking --
+    /// either a window that seems not to have opened, or a place to hide one.
+    ///
+    /// Aimed at a window outside [`Layer::Normal`], this **succeeds, records
+    /// the number, and changes nothing about what is drawn**. Panels and the
+    /// wallpaper are on every desktop. Refusing would make every shell that
+    /// moves "all of my windows" first work out which of them are furniture,
+    /// pushing the stickiness rule out of the compositor and into every caller.
+    ///
+    /// If this hides the window holding the keyboard, focus goes to the topmost
+    /// window that is still showing, or to nothing at all.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`.
+    ///
+    /// Answered with [`ResponseBody::Ok`], or an error if there is no such
+    /// window -- an ordinary race against a window that closed between the
+    /// snapshot and the click.
+    SetWindowWorkspace { window: u64, workspace: u32 },
+    /// Tell the compositor its copy of the user's input settings is out of
+    /// date, so that it re-reads `input.yaml`.
+    ///
+    /// The exact counterpart of [`ReloadAppearance`](Self::ReloadAppearance),
+    /// carrying no data for the same reason: a request that *set* the input
+    /// settings would let any process able to open this socket swap the
+    /// pointer's buttons or set the double-click window to two seconds. A
+    /// notification cannot, because the compositor goes and reads the *user's*
+    /// file. It is a separate verb rather than a payload on the appearance one
+    /// because they are separate files with separate owners — `input.yaml` is
+    /// `inputsettings`, `appearance.yaml` is `appearance` — and because a
+    /// double-click change should not repaint the screen, nor a colour change
+    /// re-read the pointer configuration.
+    ///
+    /// Answered with [`ResponseBody::Ok`], including when the file turns out
+    /// not to have changed, exactly as for appearance.
+    ReloadInput,
+    /// Hand the compositor a block of pixels and give it a name, so that this
+    /// window's [`RenderCommand::Image`](guitk::render::RenderCommand::Image)
+    /// commands naming that name have something to draw.
+    ///
+    /// **Uploading is a separate request from drawing** because the two have
+    /// opposite frequencies: a file manager's thumbnail is produced once and
+    /// drawn on every frame the folder is on screen, and a protocol that
+    /// carried the pixels alongside the draw would re-send a megabyte sixty
+    /// times a second to show a still picture. It is the same split as a texture
+    /// upload and a textured quad, and for the same reason.
+    ///
+    /// `image_id` is the **client's** to choose and is scoped to this window.
+    /// Two clients may both use id 1 without either seeing the other's pixels,
+    /// and a client with two windows must upload to each separately — an id
+    /// resolved against the window is what makes the previous sentence true.
+    /// Re-uploading an existing id **replaces** it, which is how a picture is
+    /// updated in place (a video frame, a re-rendered chart) without the
+    /// intervening frame where the id names nothing and the image blinks out.
+    ///
+    /// The pixels travel **inline**, not as a shared mapping. That is a real
+    /// cost for a full-resolution photograph and it is what this protocol can
+    /// honestly offer: the transport is a TCP connection
+    /// (`design-decisions.md` §460) whose far end need not be on this machine,
+    /// and a mapping that only works over loopback would be a fast path that
+    /// silently is not there.
+    ///
+    /// Answered with [`ResponseBody::Ok`], or an error — the window is not
+    /// yours, the geometry does not describe the bytes, or you have more pixels
+    /// resident with this compositor than it is willing to hold for one
+    /// connection. A refused upload changes nothing: whatever `image_id` named
+    /// before is still there.
+    UploadImage {
+        window: u64,
+        image_id: u64,
+        width: u32,
+        height: u32,
+        /// Bytes from the start of one row to the start of the next. May exceed
+        /// `width * bytes_per_pixel` — a client cropping a larger picture
+        /// uploads the sub-rectangle's width with the original's stride rather
+        /// than repacking it.
+        stride: u32,
+        format: BufferFormat,
+        bytes: Vec<u8>,
+    },
+    /// Forget one of this window's uploaded images and release its memory.
+    ///
+    /// Commands still naming the id afterwards draw nothing, which is the same
+    /// thing an id that was never uploaded does, and is not an error: a frame
+    /// already in flight when the drop was sent must not be able to fault the
+    /// window that sent it.
+    ///
+    /// Answered with [`ResponseBody::Ok`] whether or not an image was there.
+    /// Reporting "there was nothing to drop" would tell a client something it
+    /// cannot act on and would make the ordinary tidy-up-everything loop noisy.
+    DropImage { window: u64, image_id: u64 },
+    /// Claim one key combination for a window, so that it arrives there
+    /// whatever else has the keyboard.
+    ///
+    /// **This is the only way a desktop-wide shortcut can work.** Without it a
+    /// key event goes to the focused window and nowhere else, which means the
+    /// taskbar's Alt+Tab fires only while the taskbar itself is focused — never,
+    /// in practice, because Alt+Tab exists to be pressed from inside some other
+    /// window. The compositor consults its grab table *before* it looks up the
+    /// focused window, and a grabbed chord is delivered to the grabber **instead
+    /// of**, not as well as, the window the user is typing in.
+    ///
+    /// The window named is the sender's own and is resolved in the ordinary way:
+    /// it is where the [`crate::input::InputEvent`] will be addressed, and it is
+    /// also the grab's *lifetime*. Grabs die when the window is destroyed and
+    /// when the connection hangs up, which is what stops a crashed shell
+    /// swallowing Alt+Tab for the rest of the session with nothing left on
+    /// screen to release it. This is the same lifetime argument as
+    /// [`ReserveEdge`](Self::ReserveEdge).
+    ///
+    /// **First grabber wins.** A second client asking for a chord somebody else
+    /// holds is refused with an error rather than quietly shadowing or replacing
+    /// the first: a grab that silently does nothing is indistinguishable from a
+    /// shortcut nobody has pressed, which is precisely the bug this whole
+    /// mechanism exists to end. Re-grabbing a chord *you already hold* is not an
+    /// error — it is what a shell does when it re-reads its config.
+    ///
+    /// **Both the press and the release** of a grabbed key go to the grabber,
+    /// and the release follows the press even if the modifiers were let go
+    /// first: Alt+Tab held open is a chord whose release is `Tab` with Alt
+    /// already up, and a release delivered to somebody else is a key the grabber
+    /// never sees go up.
+    ///
+    /// A grabbed chord produces **no text**. The dead-key composer is not run
+    /// for it and no character is attached, because a shortcut is not typing.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`: a program that could
+    /// claim Super+L could show a convincing fake lock screen and collect the
+    /// password. See that function for why the gate does not yet answer.
+    ///
+    /// Answered with [`ResponseBody::Ok`], or an error naming the conflict.
+    GrabKey {
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    },
+    /// Release a claim made by [`GrabKey`](Self::GrabKey).
+    ///
+    /// Releasing a chord this window does not hold is **not** an error, for the
+    /// same reason [`DropImage`](Self::DropImage) is not: a client tidying up
+    /// should not have to remember precisely what it took, and the ordinary
+    /// release-everything loop would otherwise be noisy. Releasing one that
+    /// *another* window holds is refused — otherwise any client could strip the
+    /// shell of Alt+Tab without ever holding it.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`, so that the refusal
+    /// above cannot be used as a way to probe which chords are taken.
+    ///
+    /// Answered with [`ResponseBody::Ok`].
+    UngrabKey {
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum RequestTag {
+    CreateWindow = 0x01,
+    DestroyWindow = 0x02,
+    SetTitle = 0x03,
+    Move = 0x04,
+    Resize = 0x05,
+    Minimize = 0x06,
+    Maximize = 0x07,
+    Restore = 0x08,
+    SetVisible = 0x09,
+    SetCursor = 0x0A,
+    GetDisplayInfo = 0x0B,
+    SetFullscreen = 0x0C,
+    SetOpacity = 0x0D,
+    SubscribeWindowList = 0x0E,
+    ReloadAppearance = 0x0F,
+    ShellControl = 0x10,
+    ReserveEdge = 0x11,
+    SwitchWorkspace = 0x12,
+    SetWindowWorkspace = 0x13,
+    ReloadInput = 0x14,
+    UploadImage = 0x15,
+    DropImage = 0x16,
+    GrabKey = 0x17,
+    UngrabKey = 0x18,
+}
+
+impl RequestTag {
+    const fn from_byte(b: u8) -> Option<Self> {
+        Some(match b {
+            0x01 => Self::CreateWindow,
+            0x02 => Self::DestroyWindow,
+            0x03 => Self::SetTitle,
+            0x04 => Self::Move,
+            0x05 => Self::Resize,
+            0x06 => Self::Minimize,
+            0x07 => Self::Maximize,
+            0x08 => Self::Restore,
+            0x09 => Self::SetVisible,
+            0x0A => Self::SetCursor,
+            0x0B => Self::GetDisplayInfo,
+            0x0C => Self::SetFullscreen,
+            0x0D => Self::SetOpacity,
+            0x0E => Self::SubscribeWindowList,
+            0x0F => Self::ReloadAppearance,
+            0x10 => Self::ShellControl,
+            0x11 => Self::ReserveEdge,
+            0x12 => Self::SwitchWorkspace,
+            0x13 => Self::SetWindowWorkspace,
+            0x14 => Self::ReloadInput,
+            0x15 => Self::UploadImage,
+            0x16 => Self::DropImage,
+            0x17 => Self::GrabKey,
+            0x18 => Self::UngrabKey,
+            _ => return None,
+        })
+    }
+}
+
+// ============================================================================
+// Responses
+// ============================================================================
+
+/// A control response, carrying the `seq` of the request it answers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Response {
+    /// The [`Request::seq`] this answers.
+    pub seq: u32,
+    /// The answer.
+    pub body: ResponseBody,
+}
+
+impl Response {
+    /// A response to the request with the given correlation id.
+    #[must_use]
+    pub const fn new(seq: u32, body: ResponseBody) -> Self {
+        Self { seq, body }
+    }
+}
+
+/// The compositor's answers.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResponseBody {
+    /// A window was created, with the id the *compositor* assigned.
+    ///
+    /// The id comes from here and nowhere else. It is the compositor's
+    /// namespace, and a client that mints its own — as the simulation this
+    /// replaced did, from a process-local counter — collides with every other
+    /// client on the machine at window number one.
+    WindowCreated { window: u64 },
+    /// The request succeeded and had nothing to return.
+    Ok,
+    /// The request failed.
+    Error { message: String },
+    /// Answer to [`RequestBody::GetDisplayInfo`].
+    Display(DisplayInfo),
+    /// Answer to [`RequestBody::ReserveEdge`]: the usable rectangle that is left
+    /// on the panel's monitor once every reservation on it has been taken out —
+    /// including, but not only, the caller's own.
+    ///
+    /// In **virtual-desktop coordinates**, not relative to the monitor, so that
+    /// a panel on the second screen gets an origin it can pass straight back to
+    /// [`RequestBody::Move`] rather than one it has to add an offset to that
+    /// this protocol never told it. Signed origin for the same reason: a monitor
+    /// arranged to the left of the primary starts at a negative x.
+    ///
+    /// Whole pixels rather than the `f32` of [`WorkArea`](crate::zones::WorkArea)
+    /// because a window can only be placed at a whole pixel; the fractional form
+    /// exists for the zone arithmetic that divides an area up, which is not what
+    /// a client does with this.
+    WorkArea {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum ResponseTag {
+    WindowCreated = 0x01,
+    Ok = 0x02,
+    Error = 0x03,
+    Display = 0x04,
+    WorkArea = 0x05,
+}
+
+impl ResponseTag {
+    const fn from_byte(b: u8) -> Option<Self> {
+        Some(match b {
+            0x01 => Self::WindowCreated,
+            0x02 => Self::Ok,
+            0x03 => Self::Error,
+            0x04 => Self::Display,
+            0x05 => Self::WorkArea,
+            _ => return None,
+        })
+    }
+}
+
+// ============================================================================
+// Encoding
+// ============================================================================
+
+/// Encode a batch of requests as one `CREQ` frame.
+#[must_use]
+pub fn encode_requests(requests: &[Request]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(capacity_hint(CONTROL_HEADER_LEN, requests.len(), 24));
+    encode_requests_into(&mut out, requests);
+    out
+}
+
+/// Encode requests into a caller-provided buffer, appending to what it holds.
+pub fn encode_requests_into(out: &mut Vec<u8>, requests: &[Request]) {
+    write_header(out, REQUEST_MAGIC, requests.len());
+    for req in requests {
+        write_u32(out, req.seq);
+        encode_request_body(out, &req.body);
+    }
+}
+
+/// Encode a batch of responses as one `CRSP` frame.
+#[must_use]
+pub fn encode_responses(responses: &[Response]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(capacity_hint(CONTROL_HEADER_LEN, responses.len(), 16));
+    encode_responses_into(&mut out, responses);
+    out
+}
+
+/// Encode responses into a caller-provided buffer, appending to what it holds.
+pub fn encode_responses_into(out: &mut Vec<u8>, responses: &[Response]) {
+    write_header(out, RESPONSE_MAGIC, responses.len());
+    for resp in responses {
+        write_u32(out, resp.seq);
+        encode_response_body(out, &resp.body);
+    }
+}
+
+fn write_header(out: &mut Vec<u8>, magic: [u8; 4], count: usize) {
+    out.extend_from_slice(&magic);
+    out.push(CONTROL_VERSION);
+    out.push(0); // flags
+    // Saturating rather than panicking, as elsewhere in this crate: the decoder
+    // rejects anything past MAX_MESSAGES_PER_FRAME regardless, so a caller who
+    // assembled four billion messages gets a rejected frame, not a downed
+    // compositor.
+    write_u32(out, u32::try_from(count).unwrap_or(u32::MAX));
+}
+
+fn write_optional_point(out: &mut Vec<u8>, p: Option<(i32, i32)>) {
+    match p {
+        Some((x, y)) => {
+            out.push(1);
+            write_i32(out, x);
+            write_i32(out, y);
+        }
+        None => out.push(0),
+    }
+}
+
+fn write_optional_size(out: &mut Vec<u8>, s: Option<(u32, u32)>) {
+    match s {
+        Some((w, h)) => {
+            out.push(1);
+            write_u32(out, w);
+            write_u32(out, h);
+        }
+        None => out.push(0),
+    }
+}
+
+fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
+    match body {
+        RequestBody::CreateWindow(spec) => {
+            out.push(RequestTag::CreateWindow as u8);
+            write_string(out, &spec.title);
+            write_string(out, &spec.app_id);
+            write_u32(out, spec.width);
+            write_u32(out, spec.height);
+            write_optional_point(out, spec.position);
+            out.push(u8::from(spec.resizable));
+            out.push(u8::from(spec.decorations));
+            out.push(u8::from(spec.transparent));
+            out.push(u8::from(spec.input_transparent));
+            write_optional_size(out, spec.min_size);
+            write_optional_size(out, spec.max_size);
+            out.push(spec.layer.as_byte());
+        }
+        RequestBody::DestroyWindow { window } => {
+            out.push(RequestTag::DestroyWindow as u8);
+            write_u64(out, *window);
+        }
+        RequestBody::SetTitle { window, title } => {
+            out.push(RequestTag::SetTitle as u8);
+            write_u64(out, *window);
+            write_string(out, title);
+        }
+        RequestBody::Move { window, x, y } => {
+            out.push(RequestTag::Move as u8);
+            write_u64(out, *window);
+            write_i32(out, *x);
+            write_i32(out, *y);
+        }
+        RequestBody::Resize {
+            window,
+            width,
+            height,
+        } => {
+            out.push(RequestTag::Resize as u8);
+            write_u64(out, *window);
+            write_u32(out, *width);
+            write_u32(out, *height);
+        }
+        RequestBody::Minimize { window } => {
+            out.push(RequestTag::Minimize as u8);
+            write_u64(out, *window);
+        }
+        RequestBody::Maximize { window } => {
+            out.push(RequestTag::Maximize as u8);
+            write_u64(out, *window);
+        }
+        RequestBody::Restore { window } => {
+            out.push(RequestTag::Restore as u8);
+            write_u64(out, *window);
+        }
+        RequestBody::SetVisible { window, visible } => {
+            out.push(RequestTag::SetVisible as u8);
+            write_u64(out, *window);
+            out.push(u8::from(*visible));
+        }
+        RequestBody::SetCursor { window, shape } => {
+            out.push(RequestTag::SetCursor as u8);
+            write_u64(out, *window);
+            out.push(shape.to_byte());
+        }
+        RequestBody::SetFullscreen { window, enable } => {
+            out.push(RequestTag::SetFullscreen as u8);
+            write_u64(out, *window);
+            out.push(u8::from(*enable));
+        }
+        RequestBody::SetOpacity { window, opacity } => {
+            out.push(RequestTag::SetOpacity as u8);
+            write_u64(out, *window);
+            write_f32(out, *opacity);
+        }
+        RequestBody::GetDisplayInfo => out.push(RequestTag::GetDisplayInfo as u8),
+        RequestBody::SubscribeWindowList { subscribe } => {
+            out.push(RequestTag::SubscribeWindowList as u8);
+            out.push(u8::from(*subscribe));
+        }
+        RequestBody::ReloadAppearance => out.push(RequestTag::ReloadAppearance as u8),
+        RequestBody::ReloadInput => out.push(RequestTag::ReloadInput as u8),
+        RequestBody::ShellControl { window, action } => {
+            out.push(RequestTag::ShellControl as u8);
+            write_u64(out, *window);
+            out.push(action.as_byte());
+        }
+        RequestBody::ReserveEdge { window, edge, size } => {
+            out.push(RequestTag::ReserveEdge as u8);
+            write_u64(out, *window);
+            out.push(edge.as_byte());
+            write_u32(out, *size);
+        }
+        RequestBody::SwitchWorkspace { workspace } => {
+            out.push(RequestTag::SwitchWorkspace as u8);
+            write_u32(out, *workspace);
+        }
+        RequestBody::SetWindowWorkspace { window, workspace } => {
+            out.push(RequestTag::SetWindowWorkspace as u8);
+            write_u64(out, *window);
+            write_u32(out, *workspace);
+        }
+        RequestBody::UploadImage {
+            window,
+            image_id,
+            width,
+            height,
+            stride,
+            format,
+            bytes,
+        } => {
+            out.push(RequestTag::UploadImage as u8);
+            write_u64(out, *window);
+            write_u64(out, *image_id);
+            write_u32(out, *width);
+            write_u32(out, *height);
+            write_u32(out, *stride);
+            out.push(format.to_byte());
+            // Bytes last, so that everything the receiver needs to decide
+            // whether it wants them has already been read by the time the
+            // length prefix arrives.
+            write_bytes(out, bytes);
+        }
+        RequestBody::DropImage { window, image_id } => {
+            out.push(RequestTag::DropImage as u8);
+            write_u64(out, *window);
+            write_u64(out, *image_id);
+        }
+        // Both grab verbs carry the same three fields in the same order, and
+        // deliberately share the input protocol's key and modifier codecs rather
+        // than spelling a chord out here: one table for the whole crate is what
+        // stops a chord grabbed as `Home` being matched as `End`.
+        RequestBody::GrabKey {
+            window,
+            key,
+            modifiers,
+        } => {
+            out.push(RequestTag::GrabKey as u8);
+            write_u64(out, *window);
+            crate::input::encode_key(out, *key);
+            out.push(crate::input::encode_modifiers(*modifiers));
+        }
+        RequestBody::UngrabKey {
+            window,
+            key,
+            modifiers,
+        } => {
+            out.push(RequestTag::UngrabKey as u8);
+            write_u64(out, *window);
+            crate::input::encode_key(out, *key);
+            out.push(crate::input::encode_modifiers(*modifiers));
+        }
+    }
+}
+
+fn encode_response_body(out: &mut Vec<u8>, body: &ResponseBody) {
+    match body {
+        ResponseBody::WindowCreated { window } => {
+            out.push(ResponseTag::WindowCreated as u8);
+            write_u64(out, *window);
+        }
+        ResponseBody::Ok => out.push(ResponseTag::Ok as u8),
+        ResponseBody::Error { message } => {
+            out.push(ResponseTag::Error as u8);
+            write_string(out, message);
+        }
+        ResponseBody::Display(info) => {
+            out.push(ResponseTag::Display as u8);
+            write_u32(out, info.width);
+            write_u32(out, info.height);
+            write_u32(out, info.refresh_rate);
+            write_f32(out, info.scale_factor);
+        }
+        ResponseBody::WorkArea {
+            x,
+            y,
+            width,
+            height,
+        } => {
+            out.push(ResponseTag::WorkArea as u8);
+            write_i32(out, *x);
+            write_i32(out, *y);
+            write_u32(out, *width);
+            write_u32(out, *height);
+        }
+    }
+}
+
+// ============================================================================
+// Decoding
+// ============================================================================
+
+/// Decode exactly one `CREQ` frame. Returns the requests and bytes consumed.
+pub fn decode_requests(input: &[u8]) -> Result<(Vec<Request>, usize), DecodeError> {
+    let (mut r, n) = read_header(input, REQUEST_MAGIC)?;
+    let mut out = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let seq = r.read_u32()?;
+        out.push(Request {
+            seq,
+            body: decode_request_body(&mut r)?,
+        });
+    }
+    Ok((out, r.position()))
+}
+
+/// Streaming decode of a `CREQ` frame: `Ok(None)` when the buffer holds only
+/// part of one, so a caller reading from a transport can simply read more.
+pub fn try_decode_requests(input: &[u8]) -> Result<Option<(Vec<Request>, usize)>, DecodeError> {
+    match decode_requests(input) {
+        Ok(v) => Ok(Some(v)),
+        Err(DecodeError::UnexpectedEof) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Decode exactly one `CRSP` frame. Returns the responses and bytes consumed.
+pub fn decode_responses(input: &[u8]) -> Result<(Vec<Response>, usize), DecodeError> {
+    let (mut r, n) = read_header(input, RESPONSE_MAGIC)?;
+    let mut out = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let seq = r.read_u32()?;
+        out.push(Response {
+            seq,
+            body: decode_response_body(&mut r)?,
+        });
+    }
+    Ok((out, r.position()))
+}
+
+/// Streaming decode of a `CRSP` frame: `Ok(None)` on a partial frame.
+pub fn try_decode_responses(input: &[u8]) -> Result<Option<(Vec<Response>, usize)>, DecodeError> {
+    match decode_responses(input) {
+        Ok(v) => Ok(Some(v)),
+        Err(DecodeError::UnexpectedEof) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn read_header(input: &[u8], magic: [u8; 4]) -> Result<(Reader<'_>, u32), DecodeError> {
+    let mut r = Reader::new(input);
+    r.need(CONTROL_HEADER_LEN)?;
+    r.expect_magic(magic)?;
+    let ver = r.read_u8()?;
+    if ver != CONTROL_VERSION {
+        return Err(DecodeError::UnsupportedVersion(ver));
+    }
+    let flags = r.read_u8()?;
+    if flags != 0 {
+        return Err(DecodeError::ReservedFlags(flags));
+    }
+    let n = r.read_u32()?;
+    if n > MAX_MESSAGES_PER_FRAME {
+        return Err(DecodeError::TooManyMessages(n));
+    }
+    Ok((r, n))
+}
+
+fn read_bool(r: &mut Reader<'_>) -> Result<bool, DecodeError> {
+    // Any non-zero byte is true rather than an error: this is a boolean, and
+    // there is no encoder in this crate that can produce a 2. Rejecting it
+    // would trade a harmless byte for a dropped connection.
+    Ok(r.read_u8()? != 0)
+}
+
+fn read_optional_point(r: &mut Reader<'_>) -> Result<Option<(i32, i32)>, DecodeError> {
+    if read_bool(r)? {
+        let x = r.read_i32()?;
+        let y = r.read_i32()?;
+        Ok(Some((x, y)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn read_optional_size(r: &mut Reader<'_>) -> Result<Option<(u32, u32)>, DecodeError> {
+    if read_bool(r)? {
+        let w = r.read_u32()?;
+        let h = r.read_u32()?;
+        Ok(Some((w, h)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
+    let tag_byte = r.read_u8()?;
+    let tag = RequestTag::from_byte(tag_byte).ok_or(DecodeError::BadTag(tag_byte))?;
+    Ok(match tag {
+        RequestTag::CreateWindow => {
+            let title = r.read_string()?;
+            let app_id = r.read_string()?;
+            let width = r.read_u32()?;
+            let height = r.read_u32()?;
+            let position = read_optional_point(r)?;
+            let resizable = read_bool(r)?;
+            let decorations = read_bool(r)?;
+            let transparent = read_bool(r)?;
+            let input_transparent = read_bool(r)?;
+            let min_size = read_optional_size(r)?;
+            let max_size = read_optional_size(r)?;
+            let layer_byte = r.read_u8()?;
+            let layer = Layer::from_byte(layer_byte).ok_or(DecodeError::BadTag(layer_byte))?;
+            RequestBody::CreateWindow(WindowSpec {
+                title,
+                app_id,
+                width,
+                height,
+                position,
+                resizable,
+                decorations,
+                transparent,
+                input_transparent,
+                min_size,
+                max_size,
+                layer,
+            })
+        }
+        RequestTag::DestroyWindow => RequestBody::DestroyWindow {
+            window: r.read_u64()?,
+        },
+        RequestTag::SetTitle => {
+            let window = r.read_u64()?;
+            RequestBody::SetTitle {
+                window,
+                title: r.read_string()?,
+            }
+        }
+        RequestTag::Move => {
+            let window = r.read_u64()?;
+            let x = r.read_i32()?;
+            let y = r.read_i32()?;
+            RequestBody::Move { window, x, y }
+        }
+        RequestTag::Resize => {
+            let window = r.read_u64()?;
+            let width = r.read_u32()?;
+            let height = r.read_u32()?;
+            RequestBody::Resize {
+                window,
+                width,
+                height,
+            }
+        }
+        RequestTag::Minimize => RequestBody::Minimize {
+            window: r.read_u64()?,
+        },
+        RequestTag::Maximize => RequestBody::Maximize {
+            window: r.read_u64()?,
+        },
+        RequestTag::Restore => RequestBody::Restore {
+            window: r.read_u64()?,
+        },
+        RequestTag::SetVisible => {
+            let window = r.read_u64()?;
+            RequestBody::SetVisible {
+                window,
+                visible: read_bool(r)?,
+            }
+        }
+        RequestTag::SetCursor => {
+            let window = r.read_u64()?;
+            let b = r.read_u8()?;
+            RequestBody::SetCursor {
+                window,
+                shape: CursorShape::from_byte(b).ok_or(DecodeError::BadCursorShape(b))?,
+            }
+        }
+        RequestTag::SetFullscreen => {
+            let window = r.read_u64()?;
+            RequestBody::SetFullscreen {
+                window,
+                enable: read_bool(r)?,
+            }
+        }
+        RequestTag::SetOpacity => {
+            let window = r.read_u64()?;
+            RequestBody::SetOpacity {
+                window,
+                opacity: r.read_f32()?,
+            }
+        }
+        RequestTag::GetDisplayInfo => RequestBody::GetDisplayInfo,
+        RequestTag::SubscribeWindowList => RequestBody::SubscribeWindowList {
+            subscribe: read_bool(r)?,
+        },
+        RequestTag::ReloadAppearance => RequestBody::ReloadAppearance,
+        RequestTag::ReloadInput => RequestBody::ReloadInput,
+        RequestTag::ShellControl => {
+            let window = r.read_u64()?;
+            let b = r.read_u8()?;
+            RequestBody::ShellControl {
+                window,
+                action: ShellControlAction::from_byte(b).ok_or(DecodeError::BadShellAction(b))?,
+            }
+        }
+        RequestTag::ReserveEdge => {
+            let window = r.read_u64()?;
+            let b = r.read_u8()?;
+            let edge = PanelEdge::from_byte(b).ok_or(DecodeError::BadTag(b))?;
+            RequestBody::ReserveEdge {
+                window,
+                edge,
+                size: r.read_u32()?,
+            }
+        }
+        RequestTag::SwitchWorkspace => RequestBody::SwitchWorkspace {
+            workspace: r.read_u32()?,
+        },
+        RequestTag::SetWindowWorkspace => {
+            let window = r.read_u64()?;
+            RequestBody::SetWindowWorkspace {
+                window,
+                workspace: r.read_u32()?,
+            }
+        }
+        RequestTag::UploadImage => {
+            let window = r.read_u64()?;
+            let image_id = r.read_u64()?;
+            let width = r.read_u32()?;
+            let height = r.read_u32()?;
+            let stride = r.read_u32()?;
+            let b = r.read_u8()?;
+            let format = BufferFormat::from_byte(b).ok_or(DecodeError::BadBufferFormat(b))?;
+            // Nothing is validated against anything else here: whether the
+            // stride covers the width, and whether the bytes cover the rows, is
+            // the compositor's import check, which is where the answer has to
+            // be right anyway. A second copy in the decoder would be a second
+            // place for the arithmetic to be wrong, and only one of them would
+            // be the one a hostile client actually has to get past.
+            let bytes = r.read_bytes()?;
+            RequestBody::UploadImage {
+                window,
+                image_id,
+                width,
+                height,
+                stride,
+                format,
+                bytes,
+            }
+        }
+        RequestTag::DropImage => {
+            let window = r.read_u64()?;
+            RequestBody::DropImage {
+                window,
+                image_id: r.read_u64()?,
+            }
+        }
+        // Read field by field into locals rather than inline in the struct
+        // literal, because the order the fields are *read* is the wire order and
+        // the order they are *written* in the literal is not; a struct literal
+        // that happened to list them differently would decode a chord out of
+        // alignment with what the encoder wrote.
+        RequestTag::GrabKey => {
+            let window = r.read_u64()?;
+            let key = crate::input::decode_key(r)?;
+            let modifiers = crate::input::decode_modifiers(r.read_u8()?)?;
+            RequestBody::GrabKey {
+                window,
+                key,
+                modifiers,
+            }
+        }
+        RequestTag::UngrabKey => {
+            let window = r.read_u64()?;
+            let key = crate::input::decode_key(r)?;
+            let modifiers = crate::input::decode_modifiers(r.read_u8()?)?;
+            RequestBody::UngrabKey {
+                window,
+                key,
+                modifiers,
+            }
+        }
+    })
+}
+
+fn decode_response_body(r: &mut Reader<'_>) -> Result<ResponseBody, DecodeError> {
+    let tag_byte = r.read_u8()?;
+    let tag = ResponseTag::from_byte(tag_byte).ok_or(DecodeError::BadTag(tag_byte))?;
+    Ok(match tag {
+        ResponseTag::WindowCreated => ResponseBody::WindowCreated {
+            window: r.read_u64()?,
+        },
+        ResponseTag::Ok => ResponseBody::Ok,
+        ResponseTag::Error => ResponseBody::Error {
+            message: r.read_string()?,
+        },
+        ResponseTag::Display => {
+            let width = r.read_u32()?;
+            let height = r.read_u32()?;
+            let refresh_rate = r.read_u32()?;
+            let scale_factor = r.read_f32()?;
+            ResponseBody::Display(DisplayInfo {
+                width,
+                height,
+                refresh_rate,
+                scale_factor,
+            })
+        }
+        ResponseTag::WorkArea => {
+            let x = r.read_i32()?;
+            let y = r.read_i32()?;
+            let width = r.read_u32()?;
+            let height = r.read_u32()?;
+            ResponseBody::WorkArea {
+                x,
+                y,
+                width,
+                height,
+            }
+        }
+    })
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    // A test that indexes out of range should fail loudly at the line that did
+    // it. The defensive lints guard code that runs on a user's data, not this.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+
+    use super::*;
+
+    fn spec() -> WindowSpec {
+        WindowSpec {
+            title: "Text Editor — notes.md".to_string(),
+            // Deliberately unlike the title, and not a prefix of it: the two are
+            // adjacent length-prefixed strings, so a codec that wrote one twice
+            // or read them back swapped would still round-trip if they shared
+            // any text.
+            app_id: "notepad".to_string(),
+            width: 900,
+            height: 600,
+            position: Some((-40, 17)),
+            resizable: true,
+            decorations: false,
+            transparent: true,
+            // Opposite to `transparent`, so a codec that confused the two —
+            // wrote one twice, or read the pair back in the wrong order —
+            // fails the round trip instead of passing by coincidence.
+            input_transparent: false,
+            min_size: Some((320, 240)),
+            max_size: Some((3840, 2160)),
+            layer: Layer::Overlay,
+        }
+    }
+
+    fn round_trip_requests(reqs: &[Request]) -> Vec<Request> {
+        let bytes = encode_requests(reqs);
+        let (out, used) = decode_requests(&bytes).expect("decodes");
+        assert_eq!(
+            used,
+            bytes.len(),
+            "the frame must consume exactly its bytes"
+        );
+        out
+    }
+
+    fn round_trip_responses(resps: &[Response]) -> Vec<Response> {
+        let bytes = encode_responses(resps);
+        let (out, used) = decode_responses(&bytes).expect("decodes");
+        assert_eq!(
+            used,
+            bytes.len(),
+            "the frame must consume exactly its bytes"
+        );
+        out
+    }
+
+    #[test]
+    fn every_request_survives_the_wire() {
+        // Listed exhaustively rather than sampled: a field dropped by an
+        // encoder is invisible to a test that never sends that variant.
+        let reqs = vec![
+            Request::new(1, RequestBody::CreateWindow(spec())),
+            Request::new(2, RequestBody::DestroyWindow { window: 7 }),
+            Request::new(
+                3,
+                RequestBody::SetTitle {
+                    window: 7,
+                    title: "renamed".to_string(),
+                },
+            ),
+            Request::new(
+                4,
+                RequestBody::Move {
+                    window: 7,
+                    x: -1920,
+                    y: -1080,
+                },
+            ),
+            Request::new(
+                5,
+                RequestBody::Resize {
+                    window: 7,
+                    width: 1,
+                    height: u32::MAX,
+                },
+            ),
+            Request::new(6, RequestBody::Minimize { window: 7 }),
+            Request::new(7, RequestBody::Maximize { window: 7 }),
+            Request::new(8, RequestBody::Restore { window: 7 }),
+            Request::new(
+                9,
+                RequestBody::SetVisible {
+                    window: 7,
+                    visible: false,
+                },
+            ),
+            Request::new(
+                10,
+                RequestBody::SetCursor {
+                    window: 7,
+                    shape: CursorShape::Text,
+                },
+            ),
+            Request::new(11, RequestBody::GetDisplayInfo),
+            Request::new(
+                12,
+                RequestBody::SetFullscreen {
+                    window: 7,
+                    enable: true,
+                },
+            ),
+            Request::new(
+                13,
+                RequestBody::SetOpacity {
+                    window: 7,
+                    opacity: 0.25,
+                },
+            ),
+            // Both polarities: a codec that wrote a constant byte for the flag
+            // would round-trip one of these and not the other.
+            Request::new(14, RequestBody::SubscribeWindowList { subscribe: true }),
+            Request::new(15, RequestBody::SubscribeWindowList { subscribe: false }),
+            Request::new(16, RequestBody::ReloadAppearance),
+            Request::new(17, RequestBody::ReloadInput),
+            // Both formats, for the same reason both polarities of the flag
+            // above: the format is one byte and a codec that wrote a constant
+            // would round-trip whichever one a sample happened to pick.
+            Request::new(
+                18,
+                RequestBody::UploadImage {
+                    window: 7,
+                    image_id: u64::MAX,
+                    width: 2,
+                    height: 1,
+                    stride: 8,
+                    format: BufferFormat::Argb8888,
+                    bytes: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                },
+            ),
+            Request::new(
+                19,
+                RequestBody::UploadImage {
+                    window: 7,
+                    image_id: 0,
+                    width: 1,
+                    height: 1,
+                    stride: 4,
+                    format: BufferFormat::Xrgb8888,
+                    bytes: vec![9, 9, 9, 9],
+                },
+            ),
+            // An empty payload: the length prefix is what distinguishes "no
+            // bytes" from "the frame ended here", and a codec that omitted the
+            // prefix for an empty slice would decode the next message's tag as
+            // this one's first pixel.
+            Request::new(
+                20,
+                RequestBody::UploadImage {
+                    window: 7,
+                    image_id: 1,
+                    width: 0,
+                    height: 0,
+                    stride: 0,
+                    format: BufferFormat::Argb8888,
+                    bytes: Vec::new(),
+                },
+            ),
+            Request::new(
+                21,
+                RequestBody::DropImage {
+                    window: 7,
+                    image_id: 1,
+                },
+            ),
+        ];
+        assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    #[test]
+    fn an_image_payload_over_the_cap_is_refused_before_it_is_read() {
+        // Hand-built: the encoder cannot produce this, which is the point — the
+        // frame comes from another process and the decoder is what stands
+        // between a four-gigabyte length prefix and a four-gigabyte allocation.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&REQUEST_MAGIC);
+        bytes.push(CONTROL_VERSION);
+        bytes.push(0);
+        write_u32(&mut bytes, 1); // one message
+        write_u32(&mut bytes, 1); // seq
+        bytes.push(RequestTag::UploadImage as u8);
+        write_u64(&mut bytes, 7); // window
+        write_u64(&mut bytes, 1); // image_id
+        write_u32(&mut bytes, 1); // width
+        write_u32(&mut bytes, 1); // height
+        write_u32(&mut bytes, 4); // stride
+        bytes.push(BufferFormat::Argb8888.to_byte());
+        write_u32(&mut bytes, crate::MAX_IMAGE_BYTES.saturating_add(1));
+        // …and nothing behind it. Reporting `UnexpectedEof` here would be the
+        // wrong answer twice over: it is not a truncated frame, and a caller
+        // told so would sit waiting for bytes the sender never intends to send.
+        assert!(matches!(
+            decode_requests(&bytes),
+            Err(DecodeError::ImageTooLarge(_))
+        ));
+    }
+
+    /// A chord has to survive the wire exactly, in both directions, for every
+    /// key and every modifier combination. Encoding `Home` and decoding `End`
+    /// would give the shell a shortcut that fires on the wrong key — and unlike
+    /// most protocol bugs it would look like a *configuration* mistake, which is
+    /// the sort of thing that gets chased for a day in the wrong file.
+    #[test]
+    fn a_grabbed_chord_survives_the_round_trip() {
+        let mut reqs = Vec::new();
+        let mut seq = 0;
+        for key in [
+            Key::Tab,
+            Key::D,
+            Key::VolumeUp,
+            Key::MediaPlayPause,
+            Key::F1,
+            Key::Unknown(0xE0FF),
+        ] {
+            for bits in 0u8..16 {
+                let modifiers = Modifiers {
+                    shift: bits & 1 != 0,
+                    ctrl: bits & 2 != 0,
+                    alt: bits & 4 != 0,
+                    super_key: bits & 8 != 0,
+                };
+                seq += 1;
+                reqs.push(Request::new(
+                    seq,
+                    RequestBody::GrabKey {
+                        window: 3,
+                        key,
+                        modifiers,
+                    },
+                ));
+                seq += 1;
+                reqs.push(Request::new(
+                    seq,
+                    RequestBody::UngrabKey {
+                        window: 3,
+                        key,
+                        modifiers,
+                    },
+                ));
+            }
+        }
+        assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    /// The two verbs carry identical payloads, so a decoder that read one tag
+    /// for the other would round-trip a *grab* into an *ungrab* with every field
+    /// intact — the shortcut would register and then immediately release itself,
+    /// and the shape of the bug would be "the hotkey does nothing", which is
+    /// indistinguishable from having no mechanism at all. Asserted by tag byte
+    /// rather than by round trip, because a round trip cannot see it.
+    #[test]
+    fn grab_and_ungrab_are_not_the_same_tag() {
+        assert_ne!(RequestTag::GrabKey as u8, RequestTag::UngrabKey as u8);
+        let grab = encode_requests(&[Request::new(
+            1,
+            RequestBody::GrabKey {
+                window: 1,
+                key: Key::Tab,
+                modifiers: Modifiers::alt(),
+            },
+        )]);
+        let ungrab = encode_requests(&[Request::new(
+            1,
+            RequestBody::UngrabKey {
+                window: 1,
+                key: Key::Tab,
+                modifiers: Modifiers::alt(),
+            },
+        )]);
+        assert_ne!(grab, ungrab, "the two verbs encode to the same bytes");
+    }
+
+    /// Growing the request vocabulary is a version change even though no
+    /// existing message moved a byte: an unknown tag stops the decoder, so a
+    /// version-1 compositor handed a grab fails the whole frame rather than
+    /// ignoring one message in it. Pinned as "not 1" rather than "at least 2" so
+    /// that a later unrelated bump does not fail this test.
+    #[test]
+    fn the_grab_verbs_moved_the_protocol_version() {
+        assert_ne!(
+            CONTROL_VERSION, 1,
+            "GrabKey/UngrabKey were added in control version 2"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x19),
+            None,
+            "0x19 is the next free tag"
+        );
+    }
+
+    #[test]
+    fn an_unknown_buffer_format_names_itself() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&REQUEST_MAGIC);
+        bytes.push(CONTROL_VERSION);
+        bytes.push(0);
+        write_u32(&mut bytes, 1);
+        write_u32(&mut bytes, 1);
+        bytes.push(RequestTag::UploadImage as u8);
+        write_u64(&mut bytes, 7);
+        write_u64(&mut bytes, 1);
+        write_u32(&mut bytes, 1);
+        write_u32(&mut bytes, 1);
+        write_u32(&mut bytes, 4);
+        bytes.push(0x77); // no such format
+        write_u32(&mut bytes, 0);
+        assert_eq!(
+            decode_requests(&bytes),
+            Err(DecodeError::BadBufferFormat(0x77))
+        );
+    }
+
+    #[test]
+    fn every_byte_of_an_upload_frame_can_be_corrupted_without_a_panic() {
+        // The same sweep `INPT` gets, and for the same reason: this frame
+        // carries a length prefix and a format byte chosen by another process,
+        // and the decoder's whole contract is that it answers a wrong one with
+        // an error rather than a crash. Flipping every bit of every byte in
+        // turn is cheap on a frame this size and covers the lengths, the tag,
+        // the format and the payload alike.
+        let frame = encode_requests(&[Request::new(
+            1,
+            RequestBody::UploadImage {
+                window: 3,
+                image_id: 4,
+                width: 2,
+                height: 2,
+                stride: 8,
+                format: BufferFormat::Argb8888,
+                bytes: vec![0xAB; 16],
+            },
+        )]);
+        for i in 0..frame.len() {
+            for bit in 0..8u32 {
+                let mut corrupt = frame.clone();
+                corrupt[i] ^= 1u8 << bit;
+                // Whatever it decodes to, it must not panic and must not read
+                // past the buffer. Both outcomes are acceptable: a flipped bit
+                // in a payload byte is still a valid frame.
+                let _ = decode_requests(&corrupt);
+            }
+        }
+    }
+
+    /// Every action there is: the seven that name no zone, and one per
+    /// [`SnapSlot`].
+    ///
+    /// A helper rather than a constant because the zone-tiling actions are
+    /// generated from `SnapSlot::all` — a hand-written list of the other 22
+    /// would be exactly the list that goes stale silently, which is what
+    /// `ZONELESS` exists to avoid rather than to duplicate.
+    fn every_action() -> Vec<ShellControlAction> {
+        ShellControlAction::ZONELESS
+            .into_iter()
+            .chain(SnapSlot::all().map(ShellControlAction::SnapToZone))
+            .collect()
+    }
+
+    /// Every action, not a sample: the action is one byte and an encoder that
+    /// wrote a constant would round-trip whichever one the sample happened to
+    /// pick. Listing them also makes adding an eighth action fail here until it
+    /// is added to the list, which is the point of an exhaustive test.
+    /// `every_action` is what every other test here iterates, so it being
+    /// complete is a precondition of all of them rather than a nicety.
+    ///
+    /// The `match` is the mechanism: it is exhaustive, so adding a variant to
+    /// the enum stops this file compiling until the variant is named here, and
+    /// the arm then leads the reader to `ZONELESS`. The length assertion
+    /// catches the other half — a variant named in the match and in `ZONELESS`
+    /// but not counted in its fixed length is a compile error, and one that is
+    /// somehow neither fails here.
+    #[test]
+    fn all_really_is_every_action() {
+        for action in every_action() {
+            match action {
+                ShellControlAction::Activate
+                | ShellControlAction::Minimize
+                | ShellControlAction::Restore
+                | ShellControlAction::Maximize
+                | ShellControlAction::Close
+                | ShellControlAction::SnapLeft
+                | ShellControlAction::SnapRight
+                | ShellControlAction::SnapToZone(_) => {}
+            }
+        }
+
+        // Every byte the decoder accepts names an action the tests above
+        // exercise, and there are exactly as many of them. A variant reachable
+        // from the wire but missing from the list would be one nothing covers.
+        let decodable: Vec<ShellControlAction> = (0..=u8::MAX)
+            .filter_map(ShellControlAction::from_byte)
+            .collect();
+        assert_eq!(decodable.len(), every_action().len());
+        for action in decodable {
+            assert!(
+                every_action().contains(&action),
+                "{action:?} is unreachable"
+            );
+        }
+    }
+
+    #[test]
+    fn every_shell_control_action_survives_the_wire() {
+        let actions = every_action();
+        let reqs: Vec<Request> = actions
+            .iter()
+            .enumerate()
+            .map(|(i, &action)| {
+                Request::new(
+                    u32::try_from(i).expect("small"),
+                    RequestBody::ShellControl { window: 7, action },
+                )
+            })
+            .collect();
+        assert_eq!(round_trip_requests(&reqs), reqs);
+
+        // And the bytes really are distinct, which is what the round trip
+        // above is relying on without saying so.
+        let mut seen: Vec<u8> = actions.iter().map(|a| a.as_byte()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), actions.len(), "two actions share a wire byte");
+    }
+
+    #[test]
+    fn a_zone_tiling_action_still_costs_exactly_one_byte() {
+        // The property the whole `SnapSlot` design exists to preserve. If the
+        // slot were encoded beside the action rather than folded into it, a
+        // zone request would be longer than every other shell-control request
+        // and every reader of the frame would need to know which.
+        let plain = encode_requests(&[Request::new(
+            1,
+            RequestBody::ShellControl {
+                window: 7,
+                action: ShellControlAction::Maximize,
+            },
+        )]);
+        for slot in SnapSlot::all() {
+            let zoned = encode_requests(&[Request::new(
+                1,
+                RequestBody::ShellControl {
+                    window: 7,
+                    action: ShellControlAction::SnapToZone(slot),
+                },
+            )]);
+            assert_eq!(
+                zoned.len(),
+                plain.len(),
+                "{slot:?} encodes to {} bytes where a zoneless action takes {}",
+                zoned.len(),
+                plain.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_byte_past_the_last_zone_is_refused_rather_than_rounded_down() {
+        // A peer that knows a layout we do not must be told so. Silently
+        // decoding its byte as the nearest zone we *do* have would tile the
+        // user's window into a rectangle nobody asked for, which is worse than
+        // the request failing.
+        let last = ShellControlAction::ZONE_BYTE_BASE + SnapSlot::COUNT - 1;
+        assert!(ShellControlAction::from_byte(last).is_some());
+        for b in (last + 1)..=u8::MAX {
+            assert_eq!(
+                ShellControlAction::from_byte(b),
+                None,
+                "byte {b} decoded to something"
+            );
+        }
+    }
+
+    #[test]
+    fn the_zoneless_actions_keep_the_bytes_they_always_had() {
+        // Wire format, and the one thing in this file that a refactor could
+        // change without any other test noticing: renumbering the zoneless
+        // actions to make room for the zone range would leave both ends
+        // self-consistent and silently incompatible with every build before it.
+        assert_eq!(ShellControlAction::Activate.as_byte(), 0);
+        assert_eq!(ShellControlAction::Minimize.as_byte(), 1);
+        assert_eq!(ShellControlAction::Restore.as_byte(), 2);
+        assert_eq!(ShellControlAction::Maximize.as_byte(), 3);
+        assert_eq!(ShellControlAction::Close.as_byte(), 4);
+        assert_eq!(ShellControlAction::SnapLeft.as_byte(), 5);
+        assert_eq!(ShellControlAction::SnapRight.as_byte(), 6);
+    }
+
+    /// An action byte this decoder does not know is refused, not guessed at.
+    /// Silently defaulting would let a peer speaking a later protocol have a
+    /// window minimized when it asked for something the peer had no word for.
+    #[test]
+    fn an_unknown_shell_control_action_is_refused() {
+        let bytes = encode_requests(&[Request::new(
+            1,
+            RequestBody::ShellControl {
+                window: 7,
+                action: ShellControlAction::Close,
+            },
+        )]);
+        // The action byte is the frame's last, after the tag and the u64.
+        let mut corrupt = bytes.clone();
+        let last = corrupt.len() - 1;
+        assert_eq!(corrupt[last], ShellControlAction::Close.as_byte());
+        corrupt[last] = 0xFE;
+        assert!(matches!(
+            decode_requests(&corrupt),
+            Err(DecodeError::BadShellAction(0xFE))
+        ));
+    }
+
+    #[test]
+    fn a_reload_request_carries_nothing_a_client_could_restyle_the_desktop_with() {
+        // The security argument for `ReloadAppearance` is that it is a
+        // notification and not a setter: the compositor re-reads the user's own
+        // file rather than being handed a picture of what to draw. That rests
+        // entirely on the request having no payload, so it is asserted on the
+        // bytes rather than left to the enum's shape — the day someone adds
+        // "just a corner radius, to save a file read" this fails and says why.
+        // Both reload verbs, because the argument is identical for input
+        // settings: a payload there would let a client swap the user's mouse
+        // buttons or make a double click a two-second affair.
+        for body in [RequestBody::ReloadAppearance, RequestBody::ReloadInput] {
+            let bytes = encode_requests(&[Request::new(1, body)]);
+            assert_eq!(
+                bytes.len(),
+                CONTROL_HEADER_LEN + 4 + 1,
+                "a reload request should be a header, a seq and a tag byte — nothing \
+                 else; a payload here is a client dictating how the desktop behaves"
+            );
+        }
+    }
+
+    #[test]
+    fn every_response_survives_the_wire() {
+        let resps = vec![
+            Response::new(1, ResponseBody::WindowCreated { window: u64::MAX }),
+            Response::new(2, ResponseBody::Ok),
+            Response::new(
+                3,
+                ResponseBody::Error {
+                    message: "no such window".to_string(),
+                },
+            ),
+            Response::new(
+                4,
+                ResponseBody::Display(DisplayInfo {
+                    width: 3840,
+                    height: 2160,
+                    refresh_rate: 144,
+                    scale_factor: 1.5,
+                }),
+            ),
+        ];
+        assert_eq!(round_trip_responses(&resps), resps);
+    }
+
+    #[test]
+    fn every_cursor_shape_survives_the_wire() {
+        // The tree had three of these enums; if the byte mapping is wrong,
+        // `Help` arrives as `NotAllowed` and the pointer is silently wrong.
+        const ALL: [CursorShape; 13] = [
+            CursorShape::Arrow,
+            CursorShape::Text,
+            CursorShape::Hand,
+            CursorShape::ResizeNS,
+            CursorShape::ResizeEW,
+            CursorShape::ResizeNESW,
+            CursorShape::ResizeNWSE,
+            CursorShape::Move,
+            CursorShape::Wait,
+            CursorShape::Help,
+            CursorShape::Crosshair,
+            CursorShape::NotAllowed,
+            CursorShape::Hidden,
+        ];
+        for shape in ALL {
+            let req = Request::new(1, RequestBody::SetCursor { window: 1, shape });
+            assert_eq!(round_trip_requests(std::slice::from_ref(&req)), vec![req]);
+        }
+        // Byte codes must be distinct, or two shapes collapse into one.
+        let mut codes: Vec<u8> = ALL.iter().map(|s| s.to_byte()).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), ALL.len());
+    }
+
+    #[test]
+    fn see_through_and_click_through_are_two_different_things() {
+        // All four combinations are meaningful and must survive the wire
+        // independently: a frosted panel is transparent and clickable, a debug
+        // overlay is opaque and click-through. If the codec ever wrote one flag
+        // for both, two of these four would come back wrong.
+        for (transparent, input_transparent) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let mut s = spec();
+            s.transparent = transparent;
+            s.input_transparent = input_transparent;
+            let req = Request::new(1, RequestBody::CreateWindow(s));
+            let back = round_trip_requests(std::slice::from_ref(&req));
+            let RequestBody::CreateWindow(got) = &back[0].body else {
+                panic!("wrong variant back")
+            };
+            assert_eq!(got.transparent, transparent);
+            assert_eq!(got.input_transparent, input_transparent);
+            // The fields written after the new byte must still line up; a
+            // desynchronised reader shows up here first.
+            assert_eq!(got.min_size, Some((320, 240)));
+            assert_eq!(got.layer, Layer::Overlay);
+        }
+    }
+
+    #[test]
+    fn the_program_a_window_belongs_to_survives_the_wire_separately_from_its_title() {
+        // Two length-prefixed strings side by side is the one place this codec
+        // can go wrong invisibly: write either one twice, or read them back
+        // swapped, and every field after them still decodes — the frame is
+        // self-consistent and merely describes the wrong windows. Both cases
+        // are only caught by a pair that disagrees, so the pair below is chosen
+        // to disagree in length as well as in content.
+        for (title, app_id) in [
+            ("Text Editor — notes.md", "notepad"),
+            // Named but untitled, and titled but unnamed. A codec that dropped
+            // one string and duplicated the other passes on two non-empty
+            // strings and fails on these.
+            ("", "notepad"),
+            ("Text Editor — notes.md", ""),
+            ("", ""),
+        ] {
+            let mut s = spec();
+            s.title = title.to_string();
+            s.app_id = app_id.to_string();
+            let req = Request::new(1, RequestBody::CreateWindow(s));
+            let back = round_trip_requests(std::slice::from_ref(&req));
+            let RequestBody::CreateWindow(got) = &back[0].body else {
+                panic!("wrong variant back")
+            };
+            assert_eq!(got.title, title);
+            assert_eq!(got.app_id, app_id);
+            // The fields written after the new string must still line up. A
+            // reader that lost its place in a variable-length field reads the
+            // *next* one as garbage rather than reporting an error, so this is
+            // the assertion that catches a desynchronised decoder — and it has
+            // to be a field whose value is distinctive, not a boolean.
+            assert_eq!(got.width, 900);
+            assert_eq!(got.height, 600);
+            assert_eq!(got.min_size, Some((320, 240)));
+            assert_eq!(got.layer, Layer::Overlay);
+        }
+    }
+
+    #[test]
+    fn a_window_names_no_program_until_it_says_one() {
+        // Empty rather than borrowed from the title. A title is a document
+        // name — it changes when the user saves under another name, and two
+        // windows of the same program have different ones — so deriving the id
+        // from it would give the field the one property it exists not to have.
+        assert!(
+            WindowSpec::new("notes.md — Text Editor", 640, 480)
+                .app_id
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_new_window_is_clickable_until_it_says_otherwise() {
+        // The default matters more than most: a window that silently ignored
+        // every click would look broken in a way that gives no clue why.
+        assert!(!WindowSpec::new("Untitled", 640, 480).input_transparent);
+    }
+
+    #[test]
+    fn an_unplaced_window_stays_unplaced() {
+        // `None` and `Some((0, 0))` must not collapse: one means "put it
+        // somewhere sensible", the other means "the top-left corner", and every
+        // window that did not care would otherwise pile up in that corner.
+        let mut s = spec();
+        s.position = None;
+        s.min_size = None;
+        s.max_size = None;
+        let req = Request::new(1, RequestBody::CreateWindow(s));
+        let back = round_trip_requests(std::slice::from_ref(&req));
+        let RequestBody::CreateWindow(got) = &back[0].body else {
+            panic!("wrong variant back")
+        };
+        assert_eq!(got.position, None);
+
+        let mut s = spec();
+        s.position = Some((0, 0));
+        let req = Request::new(1, RequestBody::CreateWindow(s));
+        let back = round_trip_requests(std::slice::from_ref(&req));
+        let RequestBody::CreateWindow(got) = &back[0].body else {
+            panic!("wrong variant back")
+        };
+        assert_eq!(got.position, Some((0, 0)));
+    }
+
+    #[test]
+    fn a_negative_position_is_not_read_as_a_huge_one() {
+        // A window dragged off the left edge has a negative x. Encoding it
+        // through u32 and back must land on the same negative number.
+        let req = Request::new(
+            1,
+            RequestBody::Move {
+                window: 1,
+                x: i32::MIN,
+                y: -1,
+            },
+        );
+        let back = round_trip_requests(std::slice::from_ref(&req));
+        assert_eq!(back[0].body, req.body);
+    }
+
+    #[test]
+    fn the_correlation_id_comes_back_unchanged() {
+        // The whole point of `seq`: with two requests outstanding, the client
+        // must be able to tell which reply is which.
+        let resps = vec![
+            Response::new(u32::MAX, ResponseBody::Ok),
+            Response::new(0, ResponseBody::WindowCreated { window: 3 }),
+        ];
+        let back = round_trip_responses(&resps);
+        assert_eq!(back[0].seq, u32::MAX);
+        assert_eq!(back[1].seq, 0);
+    }
+
+    #[test]
+    fn a_request_frame_is_not_a_response_frame() {
+        // The reason for two magics. A duplex channel that crossed its
+        // directions must fail on the first four bytes, not decode a `Move`
+        // into a plausible-looking `Display`.
+        let reqs = encode_requests(&[Request::new(1, RequestBody::GetDisplayInfo)]);
+        assert_eq!(decode_responses(&reqs), Err(DecodeError::BadMagic));
+
+        let resps = encode_responses(&[Response::new(1, ResponseBody::Ok)]);
+        assert_eq!(decode_requests(&resps), Err(DecodeError::BadMagic));
+    }
+
+    #[test]
+    fn a_control_frame_is_not_an_input_or_render_frame() {
+        let reqs = encode_requests(&[Request::new(1, RequestBody::GetDisplayInfo)]);
+        assert_eq!(
+            crate::decode_input_frame(&reqs),
+            Err(DecodeError::BadMagic),
+            "an input decoder must reject a control frame"
+        );
+        // `RenderTree` is not `PartialEq`, so this one is matched rather than
+        // compared.
+        assert!(
+            matches!(crate::decode_frame(&reqs), Err(DecodeError::BadMagic)),
+            "a render decoder must reject a control frame"
+        );
+    }
+
+    #[test]
+    fn several_frames_arrive_back_to_back() {
+        let mut buf = encode_requests(&[Request::new(1, RequestBody::GetDisplayInfo)]);
+        let first_len = buf.len();
+        encode_requests_into(
+            &mut buf,
+            &[Request::new(2, RequestBody::Minimize { window: 4 })],
+        );
+
+        let (a, used) = decode_requests(&buf).unwrap();
+        assert_eq!(used, first_len);
+        assert_eq!(a[0].seq, 1);
+        let (b, used_b) = decode_requests(&buf[used..]).unwrap();
+        assert_eq!(used + used_b, buf.len());
+        assert_eq!(b[0].seq, 2);
+    }
+
+    #[test]
+    fn an_empty_frame_is_legal() {
+        assert_eq!(round_trip_requests(&[]), vec![]);
+        assert_eq!(round_trip_responses(&[]), vec![]);
+    }
+
+    #[test]
+    fn every_truncation_reads_as_incomplete_not_corrupt() {
+        // A transport delivers a frame in pieces. Every prefix must be "read
+        // more", never an error the caller would drop the connection over.
+        let full = encode_requests(&[
+            Request::new(1, RequestBody::CreateWindow(spec())),
+            Request::new(
+                2,
+                RequestBody::SetCursor {
+                    window: 9,
+                    shape: CursorShape::Wait,
+                },
+            ),
+        ]);
+        for n in 0..full.len() {
+            assert_eq!(
+                try_decode_requests(&full[..n]),
+                Ok(None),
+                "prefix of {n} bytes must read as incomplete"
+            );
+        }
+        assert!(try_decode_requests(&full).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_bad_version_is_rejected_rather_than_guessed() {
+        let mut bytes = encode_requests(&[Request::new(1, RequestBody::GetDisplayInfo)]);
+        bytes[4] = CONTROL_VERSION.wrapping_add(1);
+        assert_eq!(
+            decode_requests(&bytes),
+            Err(DecodeError::UnsupportedVersion(CONTROL_VERSION + 1))
+        );
+    }
+
+    #[test]
+    fn reserved_flag_bits_are_rejected() {
+        // They are reserved so a later version can mean something by them; a
+        // decoder that ignored them would silently mis-read that version.
+        let mut bytes = encode_requests(&[Request::new(1, RequestBody::GetDisplayInfo)]);
+        bytes[5] = 0x80;
+        assert_eq!(
+            decode_requests(&bytes),
+            Err(DecodeError::ReservedFlags(0x80))
+        );
+    }
+
+    #[test]
+    fn an_unknown_tag_is_rejected() {
+        let mut bytes = encode_requests(&[Request::new(1, RequestBody::GetDisplayInfo)]);
+        let tag_at = CONTROL_HEADER_LEN + 4;
+        bytes[tag_at] = 0xEE;
+        assert_eq!(decode_requests(&bytes), Err(DecodeError::BadTag(0xEE)));
+
+        let mut bytes = encode_responses(&[Response::new(1, ResponseBody::Ok)]);
+        bytes[tag_at] = 0xEE;
+        assert_eq!(decode_responses(&bytes), Err(DecodeError::BadTag(0xEE)));
+    }
+
+    #[test]
+    fn an_unknown_cursor_shape_is_rejected() {
+        let mut bytes = encode_requests(&[Request::new(
+            1,
+            RequestBody::SetCursor {
+                window: 1,
+                shape: CursorShape::Arrow,
+            },
+        )]);
+        let last = bytes.len() - 1;
+        bytes[last] = 0x7F;
+        assert_eq!(
+            decode_requests(&bytes),
+            Err(DecodeError::BadCursorShape(0x7F))
+        );
+    }
+
+    #[test]
+    fn an_absurd_message_count_is_rejected_before_allocating() {
+        // Without the bound, this line is where a hostile sender aims: four
+        // billion messages declared, four billion slots reserved.
+        let mut bytes = encode_requests(&[]);
+        bytes[6..10].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            decode_requests(&bytes),
+            Err(DecodeError::TooManyMessages(u32::MAX))
+        );
+    }
+
+    #[test]
+    fn no_damaged_byte_of_a_control_frame_ever_panics() {
+        // The decoder runs on bytes from another process. Every one of them
+        // being wrong must be an error, and never a downed client.
+        let full = encode_requests(&[Request::new(3, RequestBody::CreateWindow(spec()))]);
+        for i in 0..full.len() {
+            for bit in 0..8u32 {
+                let mut damaged = full.clone();
+                damaged[i] ^= 1u8 << bit;
+                let _ = decode_requests(&damaged);
+                let _ = decode_responses(&damaged);
+            }
+        }
+
+        let full = encode_responses(&[Response::new(
+            3,
+            ResponseBody::Display(DisplayInfo {
+                width: 800,
+                height: 600,
+                refresh_rate: 60,
+                scale_factor: 1.0,
+            }),
+        )]);
+        for i in 0..full.len() {
+            for bit in 0..8u32 {
+                let mut damaged = full.clone();
+                damaged[i] ^= 1u8 << bit;
+                let _ = decode_responses(&damaged);
+                let _ = decode_requests(&damaged);
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_spec_is_the_ordinary_window() {
+        let s = WindowSpec::new("Untitled", 640, 480);
+        assert!(
+            s.resizable,
+            "a window a user cannot resize is the exception"
+        );
+        assert!(s.decorations);
+        assert!(!s.transparent);
+        assert_eq!(s.position, None, "placement is the compositor's job");
+    }
+
+    #[test]
+    fn every_panel_edge_survives_the_wire_with_its_thickness() {
+        let reqs: Vec<Request> = [
+            PanelEdge::Left,
+            PanelEdge::Right,
+            PanelEdge::Top,
+            PanelEdge::Bottom,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, edge)| {
+            Request::new(
+                u32::try_from(i).expect("small"),
+                RequestBody::ReserveEdge {
+                    window: 9,
+                    edge,
+                    size: 40 + u32::try_from(i).expect("small"),
+                },
+            )
+        })
+        .collect();
+        assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    #[test]
+    fn a_release_is_a_reservation_of_zero_and_not_a_second_request() {
+        // The idiom the protocol relies on instead of a `ReleaseEdge` tag: a
+        // client that had to send a different request to release would have a
+        // second code path to the same state, and the compositor a second
+        // place to forget to re-tile.
+        let req = Request::new(
+            3,
+            RequestBody::ReserveEdge {
+                window: 9,
+                edge: PanelEdge::Bottom,
+                size: 0,
+            },
+        );
+        assert_eq!(round_trip_requests(std::slice::from_ref(&req)), vec![req]);
+    }
+
+    #[test]
+    fn a_reserve_reply_carries_a_signed_origin_so_a_left_hand_monitor_survives() {
+        // A monitor arranged to the left of the primary starts at a negative x.
+        // An unsigned origin would decode it as two billion and put the panel
+        // somewhere no display reaches.
+        let resp = Response::new(
+            4,
+            ResponseBody::WorkArea {
+                x: -1920,
+                y: -12,
+                width: 1920,
+                height: 1040,
+            },
+        );
+        assert_eq!(
+            round_trip_responses(std::slice::from_ref(&resp)),
+            vec![resp]
+        );
+    }
+
+    #[test]
+    fn a_reserve_edge_byte_that_names_no_edge_is_rejected_rather_than_defaulted() {
+        // Hand-built because no encoder will produce it: tag, seq, window, a
+        // bad edge byte, size.
+        let mut bytes = encode_requests(&[Request::new(
+            1,
+            RequestBody::ReserveEdge {
+                window: 9,
+                edge: PanelEdge::Bottom,
+                size: 40,
+            },
+        )]);
+        let edge_at = bytes.len() - 5;
+        assert_eq!(bytes[edge_at], PanelEdge::Bottom.as_byte());
+        bytes[edge_at] = 0xFE;
+        assert!(
+            decode_requests(&bytes).is_err(),
+            "an edge byte naming nothing decoded to an edge anyway"
+        );
+    }
+
+    #[test]
+    fn both_workspace_requests_survive_the_wire() {
+        // Two requests one byte apart in tag and both carrying a u32 last: a
+        // decoder that read `SetWindowWorkspace` for `SwitchWorkspace` would
+        // take the desktop number as a window id and move a window nobody
+        // named, so they are round-tripped together rather than separately.
+        let reqs = vec![
+            Request::new(1, RequestBody::SwitchWorkspace { workspace: 3 }),
+            Request::new(
+                2,
+                RequestBody::SetWindowWorkspace {
+                    window: 77,
+                    workspace: 3,
+                },
+            ),
+        ];
+        assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    #[test]
+    fn switching_to_the_last_desktop_a_u32_can_name_is_not_clamped() {
+        // The compositor deliberately holds no idea of how many desktops there
+        // are -- that is the shell's preference -- so the wire must carry the
+        // whole range rather than a small field someone sized by guessing.
+        let req = Request::new(
+            9,
+            RequestBody::SwitchWorkspace {
+                workspace: u32::MAX,
+            },
+        );
+        assert_eq!(round_trip_requests(std::slice::from_ref(&req)), vec![req]);
+    }
+}

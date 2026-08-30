@@ -1,0 +1,850 @@
+//! Scancode → key-name translation, and modifier-state tracking.
+//!
+//! A keyboard reports *which switch closed*, not *which letter it means*: the
+//! same physical key is `A` on a US layout and `Q` on a French one. Something
+//! has to bridge that, and `design-decisions.md` §456 puts it here, in the
+//! compositor, rather than in each client — so that one system keymap governs
+//! every application and a layout change takes effect everywhere at once
+//! instead of app by app as each notices. Clients receive a
+//! [`Key`](guitk::event::Key); the raw scancode is forwarded alongside for the
+//! few that want physical positions (games binding "the key left of S",
+//! remapping utilities) rather than letters.
+//!
+//! ## Scancode convention
+//!
+//! Codes are **scan code set 1**, which is what the PS/2 path produces after
+//! the i8042's set-2→set-1 translation (`kernel/src/keyboard.rs`) and what the
+//! USB HID path is translated into (`HID_TO_SCANCODE`). Extended keys — the
+//! ones the hardware prefixes with `0xE0` — are represented with that prefix in
+//! the high byte: `0xE04B` is Left arrow, while a bare `0x4B` is keypad 4. They
+//! must stay distinguishable, because they are different keys with the same low
+//! byte, and the arrows are precisely the keys a text editor cares about most.
+//!
+//! ## The physical table and the layout
+//!
+//! [`key_for_scancode`] is the *physical* table: it answers with what is
+//! printed on a US board, and it is the whole answer for every key that no
+//! layout moves — Enter, F5, the arrows, the keypad. The alphanumeric block
+//! *is* movable, and what each of its keys produces is a property of the
+//! user's chosen layout, which lives in the [`keylayout`] crate and is named
+//! in `input.yaml`.
+//!
+//! [`key_for_layout`] puts the two together: it asks the layout first and
+//! falls back to the physical table. The fallback is what makes a partial
+//! answer safe — a German board's `ü` key has no [`Key`] variant to name it,
+//! so it arrives as the physical `LeftBracket` with the character `ü`
+//! travelling beside it, rather than as nothing at all.
+//!
+//! ## What this module deliberately is not
+//!
+//! A pure function of one keystroke. Dead keys (`´` then `e` → `é`) need state
+//! carried between two key events, so they live next door in
+//! [`deadkey`](crate::deadkey) rather than here, and the split is the point:
+//! `key_for_layout` stays a lookup that can be tested one code at a time.
+//!
+//! ## What is still missing
+//!
+//! Compose sequences (`Compose`, `o`, `c` → `©`), which are a *sequence* of
+//! arbitrary length rather than the one-character memory a dead key needs, and
+//! the numeric keypad, which cannot type digits until something tracks Num
+//! Lock. See `known-issues.md` →
+//! `TD-C-THE-NUMERIC-KEYPAD-TYPES-NOTHING-BECAUSE-NOTHING-TRACKS-NUM-LOCK`.
+
+use guitk::event::{Key, Modifiers};
+use keylayout::{KeyDef, Layout, Level};
+
+/// Translate a scan-code-set-1 code to a key name.
+///
+/// Returns [`Key::Unknown`] carrying the raw code rather than dropping it: a
+/// key this table does not know about should still reach the client as *a* key
+/// press, so that a client which does understand it (a remapper, a game reading
+/// physical positions) is not blocked by a gap in the compositor's table.
+#[must_use]
+pub const fn key_for_scancode(scancode: u32) -> Key {
+    match scancode {
+        // --- Row 1: escape and the number row ---
+        0x01 => Key::Escape,
+        0x02 => Key::Num1,
+        0x03 => Key::Num2,
+        0x04 => Key::Num3,
+        0x05 => Key::Num4,
+        0x06 => Key::Num5,
+        0x07 => Key::Num6,
+        0x08 => Key::Num7,
+        0x09 => Key::Num8,
+        0x0A => Key::Num9,
+        0x0B => Key::Num0,
+        0x0C => Key::Minus,
+        0x0D => Key::Equals,
+        0x0E => Key::Backspace,
+
+        // --- Row 2 ---
+        0x0F => Key::Tab,
+        0x10 => Key::Q,
+        0x11 => Key::W,
+        0x12 => Key::E,
+        0x13 => Key::R,
+        0x14 => Key::T,
+        0x15 => Key::Y,
+        0x16 => Key::U,
+        0x17 => Key::I,
+        0x18 => Key::O,
+        0x19 => Key::P,
+        0x1A => Key::LeftBracket,
+        0x1B => Key::RightBracket,
+        0x1C => Key::Enter,
+
+        // --- Row 3 ---
+        0x1D => Key::LeftCtrl,
+        0x1E => Key::A,
+        0x1F => Key::S,
+        0x20 => Key::D,
+        0x21 => Key::F,
+        0x22 => Key::G,
+        0x23 => Key::H,
+        0x24 => Key::J,
+        0x25 => Key::K,
+        0x26 => Key::L,
+        0x27 => Key::Semicolon,
+        0x28 => Key::Apostrophe,
+        0x29 => Key::Grave,
+
+        // --- Row 4 ---
+        0x2A => Key::LeftShift,
+        0x2B => Key::Backslash,
+        0x2C => Key::Z,
+        0x2D => Key::X,
+        0x2E => Key::C,
+        0x2F => Key::V,
+        0x30 => Key::B,
+        0x31 => Key::N,
+        0x32 => Key::M,
+        0x33 => Key::Comma,
+        0x34 => Key::Period,
+        0x35 => Key::Slash,
+        0x36 => Key::RightShift,
+
+        // --- Row 5 ---
+        0x38 => Key::LeftAlt,
+        0x39 => Key::Space,
+        0x3A => Key::CapsLock,
+
+        // --- Function keys. F11/F12 sit at 0x57/0x58, well away from F1-F10,
+        //     because they were added to the PC keyboard years later. ---
+        0x3B => Key::F1,
+        0x3C => Key::F2,
+        0x3D => Key::F3,
+        0x3E => Key::F4,
+        0x3F => Key::F5,
+        0x40 => Key::F6,
+        0x41 => Key::F7,
+        0x42 => Key::F8,
+        0x43 => Key::F9,
+        0x44 => Key::F10,
+        0x57 => Key::F11,
+        0x58 => Key::F12,
+
+        0x45 => Key::NumLock,
+        0x46 => Key::ScrollLock,
+
+        // --- Extended (0xE0-prefixed) keys. The navigation cluster and the
+        //     right-hand modifiers, all of which share a low byte with a keypad
+        //     key and so must keep the prefix. ---
+        //
+        // The keypad duplicates (0x47-0x53 unprefixed) are deliberately absent:
+        // `Key` has no `Numpad7` to map them to, so they arrive as
+        // `Key::Unknown` with their code intact rather than being silently
+        // conflated with the navigation keys that share their numbers. Merging
+        // them would make Home and keypad-7 indistinguishable to every client.
+        0xE048 => Key::Up,
+        0xE050 => Key::Down,
+        0xE04B => Key::Left,
+        0xE04D => Key::Right,
+        0xE047 => Key::Home,
+        0xE04F => Key::End,
+        0xE049 => Key::PageUp,
+        0xE051 => Key::PageDown,
+        0xE052 => Key::Insert,
+        0xE053 => Key::Delete,
+        0xE01C => Key::Enter, // keypad Enter — the same key name, correctly
+        0xE01D => Key::RightCtrl,
+        0xE038 => Key::RightAlt,
+        0xE05B => Key::LeftSuper,
+        0xE05C => Key::RightSuper,
+        0xE037 => Key::PrintScreen,
+
+        // --- The multimedia block. ---
+        //
+        // Present on most keyboards made since about 2000, and reaching us
+        // unchanged: `kernel/src/keyboard.rs` folds *any* 0xE0-prefixed code
+        // into `0xE000 | code` without a table of its own, so these arrive
+        // whether or not anything downstream knows them. Before this they
+        // arrived as `Key::Unknown` and the shell's binding table looked for
+        // Windows virtual key codes (0xAF, 0xAE, 0xAD) that this system never
+        // emits, so pressing volume-up did nothing anywhere.
+        //
+        // Brightness is absent because it is not a key: a laptop's brightness
+        // pair is an Fn combination the firmware answers over ACPI or a vendor
+        // WMI interface, and no scancode is generated for this table to
+        // translate. See known-issues.md → `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
+        0xE020 => Key::VolumeMute,
+        0xE02E => Key::VolumeDown,
+        0xE030 => Key::VolumeUp,
+        0xE022 => Key::MediaPlayPause,
+        0xE019 => Key::MediaNextTrack,
+        0xE010 => Key::MediaPrevTrack,
+        0xE024 => Key::MediaStop,
+
+        // Pause is the one genuinely irregular key: the hardware sends a
+        // six-byte sequence beginning 0xE1, which the driver collapses to this.
+        0xE11D => Key::Pause,
+
+        other => Key::Unknown(other),
+    }
+}
+
+/// The [`Key`] a character names, for the characters `Key` can name.
+///
+/// The bridge between [`keylayout`], which speaks in characters because that
+/// is what a layout is, and [`Key`], which is what clients match on. Only the
+/// ASCII repertoire `Key` actually has variants for: `ü`, `é` and `§` answer
+/// `None`, which is not a gap to be filled by inventing variants — a `Key` per
+/// character in every European layout would be a keysym table, and the
+/// character itself already travels beside the key in
+/// [`EventNotification::KeyEvent`](crate::EventNotification::KeyEvent).
+///
+/// Case is folded: a layout's *plain* face is the one that names the key, and
+/// asking for `'A'` and `'a'` to name different keys would make Shift change
+/// which key was pressed.
+#[must_use]
+pub const fn key_for_char(character: char) -> Option<Key> {
+    Some(match character.to_ascii_lowercase() {
+        'a' => Key::A,
+        'b' => Key::B,
+        'c' => Key::C,
+        'd' => Key::D,
+        'e' => Key::E,
+        'f' => Key::F,
+        'g' => Key::G,
+        'h' => Key::H,
+        'i' => Key::I,
+        'j' => Key::J,
+        'k' => Key::K,
+        'l' => Key::L,
+        'm' => Key::M,
+        'n' => Key::N,
+        'o' => Key::O,
+        'p' => Key::P,
+        'q' => Key::Q,
+        'r' => Key::R,
+        's' => Key::S,
+        't' => Key::T,
+        'u' => Key::U,
+        'v' => Key::V,
+        'w' => Key::W,
+        'x' => Key::X,
+        'y' => Key::Y,
+        'z' => Key::Z,
+        '0' => Key::Num0,
+        '1' => Key::Num1,
+        '2' => Key::Num2,
+        '3' => Key::Num3,
+        '4' => Key::Num4,
+        '5' => Key::Num5,
+        '6' => Key::Num6,
+        '7' => Key::Num7,
+        '8' => Key::Num8,
+        '9' => Key::Num9,
+        ',' => Key::Comma,
+        '.' => Key::Period,
+        ';' => Key::Semicolon,
+        ':' => Key::Colon,
+        '/' => Key::Slash,
+        '\\' => Key::Backslash,
+        '[' => Key::LeftBracket,
+        ']' => Key::RightBracket,
+        '-' => Key::Minus,
+        '=' => Key::Equals,
+        '\'' => Key::Apostrophe,
+        '`' => Key::Grave,
+        ' ' => Key::Space,
+        _ => return None,
+    })
+}
+
+/// Translate a scancode through the user's layout, falling back to the
+/// physical table.
+///
+/// Two answers, because a keystroke means two things and clients need both:
+///
+/// * the [`Key`], which is what a shortcut matches on — `Ctrl+S` must be the
+///   key that types `s`, wherever the layout put it;
+/// * the character to insert, which is what a text field appends, and which
+///   depends on Shift, Caps Lock and AltGr.
+///
+/// The character is `None` for a key that produces no text (Enter, F5) and for
+/// a level the layout leaves empty (AltGr on a US board).
+///
+/// The `Key` falls back to [`key_for_scancode`] when the layout's character
+/// has no [`Key`] to name it. That is the German `ü` case, and the fallback is
+/// deliberate: a key that arrived as nothing would be a key the user cannot
+/// bind, cannot see in a shortcut editor, and cannot use to close a dialog.
+/// The physical identity is the only meaning left once the character has no
+/// name, and it is a true one — that switch really is where `[` is on a US
+/// board.
+#[must_use]
+pub fn key_for_layout(layout: &Layout, scancode: u32, level: Level) -> (Key, Option<char>) {
+    let Some(def) = layout.key(scancode) else {
+        return (key_for_scancode(scancode), text_outside_the_block(scancode));
+    };
+    let key = key_for_char(def.plain).unwrap_or_else(|| key_for_scancode(scancode));
+    (key, def.character(level))
+}
+
+/// The character a key types that no layout describes.
+///
+/// A [`Layout`] is the *alphanumeric block* and nothing else, deliberately: it
+/// is the part a layout rearranges, and Enter is Enter on every keyboard ever
+/// made. But "no layout describes it" is not the same as "it types nothing",
+/// and space is the case that proves it — [`key_for_layout`] answered `None`
+/// for `0x39`, so on the path where the compositor does its own translation
+/// (the evdev backend, which is every real SlateOS machine) the space bar typed
+/// no text at all, and no text field could contain a space. The host backend
+/// hid this completely: Windows hands us its own character and that branch
+/// wins, so every test and every developer run typed spaces perfectly well.
+///
+/// Space is the whole list, and the omissions are on purpose:
+///
+/// * **Tab, Enter and Backspace** are control characters, which
+///   [`KeyEvent::typed`](guitk::event::KeyEvent::typed) filters out. Widgets
+///   match them as a [`Key`] instead, which is where a newline-or-submit
+///   decision belongs.
+/// * **The numeric keypad** would need Num Lock, which nothing here tracks. The
+///   keypad reports the same scancodes whichever way the latch is set, so
+///   putting digits here unconditionally would type `4` every time a user
+///   pressed keypad-Left — a worse bug than the one being fixed. Recorded in
+///   `known-issues.md` rather than guessed at.
+const fn text_outside_the_block(scancode: u32) -> Option<char> {
+    match scancode {
+        0x39 => Some(' '),
+        _ => None,
+    }
+}
+
+/// Whether this keystroke resolved through the layout's AltGr level.
+///
+/// Distinct from "AltGr was held": on a US layout AltGr is held and nothing
+/// comes of it, and the keystroke is an ordinary Alt chord that a menu should
+/// still see. It is only when the layout actually *puts a character there*
+/// that the right-hand Alt key stops being a modifier and becomes a level
+/// shift — which is the difference between a German user typing `@` and a
+/// German user opening the File menu every time they write an email address.
+#[must_use]
+pub fn resolves_through_alt_gr(layout: &Layout, scancode: u32, level: Level) -> bool {
+    level.alt_gr
+        && layout
+            .key(scancode)
+            .is_some_and(|def: &KeyDef| def.altgr.is_some())
+}
+
+/// Whether a scancode names a key whose *state* is a modifier.
+///
+/// Used to keep [`ModifierState`] in step; kept next to the table it reads so
+/// the two cannot drift.
+const fn modifier_of(scancode: u32) -> Option<ModifierBit> {
+    match scancode {
+        0x2A | 0x36 => Some(ModifierBit::Shift),
+        0x1D | 0xE01D => Some(ModifierBit::Ctrl),
+        0x38 | 0xE038 => Some(ModifierBit::Alt),
+        0xE05B | 0xE05C => Some(ModifierBit::Super),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModifierBit {
+    Shift,
+    Ctrl,
+    Alt,
+    Super,
+}
+
+/// Which modifier keys are currently held.
+///
+/// Tracked per physical side rather than as four booleans, because releasing
+/// one Shift while the other is still down must not clear the modifier —
+/// the naive single-flag version drops the shift halfway through a
+/// two-handed capital, which is a bug the user experiences as random
+/// lowercase letters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModifierState {
+    left_shift: bool,
+    right_shift: bool,
+    left_ctrl: bool,
+    right_ctrl: bool,
+    left_alt: bool,
+    right_alt: bool,
+    left_super: bool,
+    right_super: bool,
+    /// Caps Lock is a *latch*, not a held key: it toggles on press and is
+    /// unaffected by release.
+    caps_lock: bool,
+}
+
+impl ModifierState {
+    /// A fresh state with nothing held.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            left_shift: false,
+            right_shift: false,
+            left_ctrl: false,
+            right_ctrl: false,
+            left_alt: false,
+            right_alt: false,
+            left_super: false,
+            right_super: false,
+            caps_lock: false,
+        }
+    }
+
+    /// Fold a key event into the state. Call this for *every* key event, before
+    /// reading [`Self::modifiers`], so that the modifiers reported with a
+    /// chord include the modifier that was pressed to form it.
+    pub const fn update(&mut self, scancode: u32, pressed: bool) {
+        if scancode == 0x3A {
+            // Toggle on the press edge only. Toggling on release too would
+            // return it to where it started, so Caps Lock would do nothing —
+            // which is exactly the bug that makes a latch look like a held key.
+            if pressed {
+                self.caps_lock = !self.caps_lock;
+            }
+            return;
+        }
+        match scancode {
+            0x2A => self.left_shift = pressed,
+            0x36 => self.right_shift = pressed,
+            0x1D => self.left_ctrl = pressed,
+            0xE01D => self.right_ctrl = pressed,
+            0x38 => self.left_alt = pressed,
+            0xE038 => self.right_alt = pressed,
+            0xE05B => self.left_super = pressed,
+            0xE05C => self.right_super = pressed,
+            _ => {}
+        }
+    }
+
+    /// The state as clients see it — sides collapsed, because a widget asking
+    /// "was Ctrl held?" does not care which one.
+    #[must_use]
+    pub const fn modifiers(self) -> Modifiers {
+        Modifiers {
+            shift: self.left_shift || self.right_shift,
+            ctrl: self.left_ctrl || self.right_ctrl,
+            alt: self.left_alt || self.right_alt,
+            super_key: self.left_super || self.right_super,
+        }
+    }
+
+    /// Whether Caps Lock is latched on.
+    #[must_use]
+    pub const fn caps_lock(self) -> bool {
+        self.caps_lock
+    }
+
+    /// Whether the right-hand Alt key — AltGr on a European board — is held.
+    ///
+    /// Reported separately from [`Self::modifiers`], which collapses the two
+    /// sides, because this is the one place where the sides do not mean the
+    /// same thing: on a layout that uses it, AltGr selects a third character
+    /// on the key rather than modifying a command.
+    #[must_use]
+    pub const fn alt_gr(self) -> bool {
+        self.right_alt
+    }
+
+    /// Whether the left-hand Alt key is held.
+    ///
+    /// The modifier that stays a modifier on every layout. Used to answer
+    /// "was this an Alt chord?" for a keystroke that resolved through AltGr,
+    /// where the right-hand side has already been spent as a level shift.
+    #[must_use]
+    pub const fn left_alt(self) -> bool {
+        self.left_alt
+    }
+
+    /// Which level of the key the current modifiers select.
+    ///
+    /// The bridge to [`keylayout`]: it holds the table, this holds the state,
+    /// and neither should have to know the other's shape.
+    #[must_use]
+    pub const fn level(self) -> Level {
+        Level {
+            shift: self.left_shift || self.right_shift,
+            caps: self.caps_lock,
+            alt_gr: self.right_alt,
+        }
+    }
+
+    /// Whether letters should currently come out capitalised.
+    ///
+    /// Caps Lock and Shift *cancel* rather than combine: with the latch on,
+    /// holding Shift gives lowercase. Every mainstream keyboard behaves this
+    /// way, and it is an exclusive-or rather than an or.
+    #[must_use]
+    pub const fn upper_case(self) -> bool {
+        (self.left_shift || self.right_shift) != self.caps_lock
+    }
+
+    /// The scancodes of the modifier keys currently held that contribute to
+    /// `wanted` — the physical keys that formed a chord.
+    ///
+    /// [`modifiers`](Self::modifiers) collapses the two sides into four
+    /// booleans, which is the right answer for a client asking "was Ctrl
+    /// held?" and the wrong one here: what a caller wants is the *key* whose
+    /// release will end the gesture, and "Alt" is two keys. Both are returned
+    /// when both are down, because the user who is holding both has not
+    /// finished until they let go of both.
+    ///
+    /// Returned as a fixed array rather than a `Vec` because this runs on the
+    /// keystroke path; the caller flattens away the `None`s.
+    #[must_use]
+    pub const fn held_keys_for(self, wanted: Modifiers) -> [Option<u32>; 8] {
+        const fn pick(held: bool, wanted: bool, scancode: u32) -> Option<u32> {
+            if held && wanted { Some(scancode) } else { None }
+        }
+        [
+            pick(self.left_shift, wanted.shift, 0x2A),
+            pick(self.right_shift, wanted.shift, 0x36),
+            pick(self.left_ctrl, wanted.ctrl, 0x1D),
+            pick(self.right_ctrl, wanted.ctrl, 0xE01D),
+            pick(self.left_alt, wanted.alt, 0x38),
+            pick(self.right_alt, wanted.alt, 0xE038),
+            pick(self.left_super, wanted.super_key, 0xE05B),
+            pick(self.right_super, wanted.super_key, 0xE05C),
+        ]
+    }
+
+    /// Release everything held.
+    ///
+    /// Called when the compositor loses the input device or the session is
+    /// switched away: without it, a modifier held at the moment focus left
+    /// stays held forever, and every subsequent keystroke arrives as a chord —
+    /// the classic "stuck Ctrl" that makes a desktop appear to have crashed.
+    pub const fn release_all(&mut self) {
+        let caps = self.caps_lock;
+        *self = Self::new();
+        // The latch survives: it is a setting, not a key that is down.
+        self.caps_lock = caps;
+    }
+
+    /// Whether this scancode is a modifier key at all.
+    #[must_use]
+    pub const fn is_modifier(scancode: u32) -> bool {
+        modifier_of(scancode).is_some() || scancode == 0x3A
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+
+    use super::*;
+
+    /// The `0xE0` prefix, in the high byte of an extended key's code. The table
+    /// above spells its codes out literally — `0xE04B` reads as one key, where
+    /// `EXTENDED | 0x4B` cannot even be written as a match pattern — so this
+    /// lives here, where the sweep over every code needs it.
+    const EXTENDED: u32 = 0xE000;
+
+    #[test]
+    fn the_home_row_maps_to_its_letters() {
+        // Anchored against kernel/src/keyboard.rs's set-1 table, which is the
+        // authority for what these codes mean on the way in.
+        assert_eq!(key_for_scancode(0x1E), Key::A);
+        assert_eq!(key_for_scancode(0x1F), Key::S);
+        assert_eq!(key_for_scancode(0x20), Key::D);
+        assert_eq!(key_for_scancode(0x21), Key::F);
+        assert_eq!(key_for_scancode(0x26), Key::L);
+    }
+
+    #[test]
+    fn every_letter_and_digit_is_mapped_exactly_once() {
+        // A table where two codes both produce `K` types a doubled letter and
+        // loses another one entirely; counting catches that where spot checks
+        // do not.
+        let letters = [
+            Key::A,
+            Key::B,
+            Key::C,
+            Key::D,
+            Key::E,
+            Key::F,
+            Key::G,
+            Key::H,
+            Key::I,
+            Key::J,
+            Key::K,
+            Key::L,
+            Key::M,
+            Key::N,
+            Key::O,
+            Key::P,
+            Key::Q,
+            Key::R,
+            Key::S,
+            Key::T,
+            Key::U,
+            Key::V,
+            Key::W,
+            Key::X,
+            Key::Y,
+            Key::Z,
+            Key::Num0,
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Num4,
+            Key::Num5,
+            Key::Num6,
+            Key::Num7,
+            Key::Num8,
+            Key::Num9,
+        ];
+        for expected in letters {
+            let hits: Vec<u32> = (0..0x100u32)
+                .filter(|&c| key_for_scancode(c) == expected)
+                .collect();
+            assert_eq!(hits.len(), 1, "{expected:?} matched codes {hits:?}");
+        }
+    }
+
+    #[test]
+    fn the_arrow_keys_need_their_extended_prefix() {
+        // The whole reason the prefix is kept. Without it, Left arrow and
+        // keypad 4 are the same code, and a text editor's most-used key
+        // becomes ambiguous.
+        assert_eq!(key_for_scancode(0xE04B), Key::Left);
+        assert_eq!(key_for_scancode(0xE04D), Key::Right);
+        assert_eq!(key_for_scancode(0xE048), Key::Up);
+        assert_eq!(key_for_scancode(0xE050), Key::Down);
+        assert_eq!(key_for_scancode(0x4B), Key::Unknown(0x4B));
+    }
+
+    #[test]
+    fn the_navigation_cluster_is_not_conflated_with_the_keypad() {
+        for (extended, bare) in [
+            (0xE047u32, 0x47u32),
+            (0xE04F, 0x4F),
+            (0xE049, 0x49),
+            (0xE051, 0x51),
+            (0xE052, 0x52),
+            (0xE053, 0x53),
+        ] {
+            assert_ne!(
+                key_for_scancode(extended),
+                key_for_scancode(bare),
+                "code {extended:#x} and {bare:#x} must stay distinct"
+            );
+            assert_eq!(key_for_scancode(bare), Key::Unknown(bare));
+        }
+    }
+
+    #[test]
+    fn the_media_keys_have_names_rather_than_raw_codes() {
+        for (code, expected) in [
+            (0xE020u32, Key::VolumeMute),
+            (0xE02E, Key::VolumeDown),
+            (0xE030, Key::VolumeUp),
+            (0xE022, Key::MediaPlayPause),
+            (0xE019, Key::MediaNextTrack),
+            (0xE010, Key::MediaPrevTrack),
+            (0xE024, Key::MediaStop),
+        ] {
+            assert_eq!(key_for_scancode(code), expected, "code {code:#x}");
+        }
+    }
+
+    /// The media block shares low bytes with the alphanumeric block, and the
+    /// prefix is the only thing separating them: `0x10` is `Q`, `0x19` is `P`,
+    /// `0x20` is `D`, `0x22` is `G`, `0x24` is `J`, `0x2E` is `C`, `0x30` is
+    /// `B`. Dropping the prefix anywhere on this path would make previous-track
+    /// type a Q.
+    #[test]
+    fn a_media_key_is_not_the_letter_that_shares_its_low_byte() {
+        for (extended, bare, letter) in [
+            (0xE010u32, 0x10u32, Key::Q),
+            (0xE019, 0x19, Key::P),
+            (0xE020, 0x20, Key::D),
+            (0xE022, 0x22, Key::G),
+            (0xE024, 0x24, Key::J),
+            (0xE02E, 0x2E, Key::C),
+            (0xE030, 0x30, Key::B),
+        ] {
+            assert_eq!(key_for_scancode(bare), letter, "bare {bare:#x}");
+            assert_ne!(
+                key_for_scancode(extended),
+                letter,
+                "code {extended:#x} must not be the letter {bare:#x} names"
+            );
+        }
+    }
+
+    /// A volume key held down should ramp, so it must not be excluded from
+    /// auto-repeat the way the modifiers and the latches are. Stated here
+    /// rather than in `present::evdev` because it is a property of the *name*:
+    /// `repeats` derives its answer from this table, so a media key added
+    /// without thinking about repeat would inherit whatever the table said.
+    #[test]
+    fn the_volume_keys_are_not_latches() {
+        for code in [0xE020u32, 0xE02E, 0xE030] {
+            assert!(
+                !matches!(
+                    key_for_scancode(code),
+                    Key::CapsLock | Key::NumLock | Key::ScrollLock
+                ),
+                "code {code:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unmapped_code_keeps_its_value() {
+        assert_eq!(key_for_scancode(0x7F), Key::Unknown(0x7F));
+        assert_eq!(key_for_scancode(0xFFFF), Key::Unknown(0xFFFF));
+    }
+
+    #[test]
+    fn both_sides_of_a_modifier_produce_the_same_flag() {
+        for (left, right) in [(0x2Au32, 0x36u32), (0x1D, 0xE01D), (0x38, 0xE038)] {
+            let mut a = ModifierState::new();
+            a.update(left, true);
+            let mut b = ModifierState::new();
+            b.update(right, true);
+            assert_eq!(a.modifiers(), b.modifiers(), "{left:#x} vs {right:#x}");
+        }
+    }
+
+    #[test]
+    fn releasing_one_shift_does_not_clear_the_other() {
+        // The bug this design exists to prevent: a two-handed capital where the
+        // user lets go of the first Shift a moment early.
+        let mut m = ModifierState::new();
+        m.update(0x2A, true); // left shift down
+        m.update(0x36, true); // right shift down
+        m.update(0x2A, false); // left shift up
+        assert!(
+            m.modifiers().shift,
+            "shift must survive while one side is held"
+        );
+        m.update(0x36, false);
+        assert!(!m.modifiers().shift);
+    }
+
+    #[test]
+    fn caps_lock_toggles_on_press_and_ignores_release() {
+        let mut m = ModifierState::new();
+        assert!(!m.caps_lock());
+        m.update(0x3A, true);
+        assert!(m.caps_lock());
+        m.update(0x3A, false); // release must not toggle back
+        assert!(m.caps_lock());
+        m.update(0x3A, true);
+        assert!(!m.caps_lock());
+    }
+
+    #[test]
+    fn caps_lock_and_shift_cancel_rather_than_combine() {
+        let mut m = ModifierState::new();
+        m.update(0x3A, true); // caps on
+        assert!(m.upper_case());
+        m.update(0x2A, true); // shift down as well
+        assert!(!m.upper_case(), "shift with caps on gives lowercase");
+    }
+
+    #[test]
+    fn releasing_everything_clears_held_keys_but_keeps_the_latch() {
+        let mut m = ModifierState::new();
+        m.update(0x1D, true);
+        m.update(0x2A, true);
+        m.update(0x3A, true);
+        m.release_all();
+        assert_eq!(m.modifiers(), Modifiers::NONE, "no key may stay stuck down");
+        assert!(m.caps_lock(), "the latch is a setting, not a held key");
+    }
+
+    #[test]
+    fn a_modifier_is_recognised_as_one() {
+        for code in [
+            0x2Au32, 0x36, 0x1D, 0xE01D, 0x38, 0xE038, 0xE05B, 0xE05C, 0x3A,
+        ] {
+            assert!(ModifierState::is_modifier(code), "{code:#x}");
+        }
+        for code in [0x1Eu32, 0xE04B, 0x39] {
+            assert!(!ModifierState::is_modifier(code), "{code:#x}");
+        }
+    }
+
+    #[test]
+    fn the_space_bar_types_a_space_even_though_no_layout_describes_it() {
+        // The bug this catches: a `Layout` covers the alphanumeric block only,
+        // so `layout.key(0x39)` is `None` and the fallback used to answer
+        // `None` for the character too. On the evdev backend — every real
+        // SlateOS machine — that meant the space bar typed nothing at all and
+        // no text field could hold a space. The host backend supplies its own
+        // character and so never showed it.
+        for layout in keylayout::builtins() {
+            for level in [Level::PLAIN, Level::shift(), Level::alt_gr()] {
+                assert_eq!(
+                    key_for_layout(layout, 0x39, level),
+                    (Key::Space, Some(' ')),
+                    "{} types no space",
+                    layout.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_keys_outside_the_block_that_type_no_text_still_type_none() {
+        // The other half of the same fallback, stated so that widening it is a
+        // deliberate act. Tab, Enter and Backspace are control characters that
+        // `KeyEvent::typed` filters out anyway, and the keypad cannot be
+        // decided without a Num Lock latch that nothing tracks yet.
+        for code in [0x0F, 0x1C, 0x0E, 0x01, 0x3B, 0x4B, 0x4F, 0xE04B] {
+            assert_eq!(
+                key_for_layout(keylayout::default_layout(), code, Level::PLAIN).1,
+                None,
+                "{code:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_modifier_table_and_the_update_arms_agree() {
+        // `modifier_of` and `update` are two lists of the same codes; if one
+        // gains a key the other must too, or a modifier is reported as held by
+        // one and not the other.
+        for code in 0..0x100u32 {
+            for prefixed in [code, EXTENDED | code] {
+                let claimed = modifier_of(prefixed).is_some();
+                let mut m = ModifierState::new();
+                m.update(prefixed, true);
+                let observed = m.modifiers() != Modifiers::NONE;
+                assert_eq!(claimed, observed, "code {prefixed:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_scancode_ever_panics() {
+        // The compositor takes these from a driver; a table that panics on an
+        // unexpected code takes the whole desktop down with it.
+        for code in 0..0x1_0000u32 {
+            let _ = key_for_scancode(code);
+            let mut m = ModifierState::new();
+            m.update(code, true);
+            m.update(code, false);
+        }
+    }
+}

@@ -1,0 +1,502 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+    "apps/*",
+    "gui/*",
+    "init/*",
+    "net/*",
+    "userspace/*",
+    # Bare-metal x86_64-unknown-none targets (no build-std, same target
+    # as the kernel). They live inside this workspace so they share
+    # target/, but their per-crate .cargo/config.toml stays in place to
+    # control linker flags.
+    "posix",
+    "toolchain/stubs",
+    # Shared no_std format-preserving YAML editor. `design.txt` mandates YAML
+    # for configuration "processed with a library that preserves comments and
+    # formatting", and every settings consumer (desktop appearance, the
+    # settings app, the package manager, the installer) needs the same one.
+    # A workspace *member* rather than an `exclude` entry so it inherits
+    # `[lints] workspace = true`; kept out of `default-members` because the
+    # workspace-root target is x86_64-unknown-none and there is no reason to
+    # rebuild it on every kernel build.
+    "yamldoc",
+    # Shared no_std escaping/parsing for the line-oriented text formats the
+    # system reads and writes (CSV, XML/JSON, `key = value` config). It lived
+    # in `gui/toolkit` until the headless components that need it most — the
+    # indexer, the backup tool, the installer — turned out to be exactly the
+    # ones that must not depend on a widget library, and had each grown their
+    # own subtly-wrong copy. Same member-not-exclude rationale as `yamldoc`.
+    "textfmt",
+    # Shared no_std substring search that reports offsets into the string the
+    # caller searched, rather than into a lowercased copy of it. Eight
+    # applications plus two widgets in the toolkit had each written the same
+    # search and made the same three mistakes with the offsets. Same
+    # member-not-exclude rationale as `yamldoc`; unlike `textfmt` it does not
+    # even need `alloc`, since it only ever returns byte ranges.
+    "textfind",
+    # Shared no_std reading of fixed-width fields out of a byte slice, where
+    # the bound is stated at the read rather than twenty lines above it. Every
+    # binary-format parser in the tree had written the same `if len < N` /
+    # `data[k]` pair by hand — the BMP decoders in `explorer` and `paint`, the
+    # MP4/Matroska/AVI parsers in `imageviewer` — which between them made over
+    # a hundred separate unchecked claims about offsets read out of the file
+    # being parsed. Same member-not-exclude rationale as `yamldoc`; like
+    # `textfind` it needs no `alloc`, since every function returns a scalar or
+    # borrows from the caller's slice.
+    "byteread",
+    # Shared no_std pseudo-random source whose reductions into a range use the
+    # bits that are actually random. Twenty-seven applications had copy-pasted
+    # the same LCG and the same `state % bound`, which on a power-of-two modulus
+    # returns the low bits — and the low bits of such a generator are a counter,
+    # so every draw from a power-of-two-sized set was a fixed short cycle.
+    # `apps/simon` dealt the same four colours in the same order in every game.
+    # Same member-not-exclude rationale as `yamldoc`; like `textfind` it needs no
+    # `alloc`, since everything returns a scalar or shuffles the caller's slice.
+    "randrange",
+    # Shared no_std SHA-256. Twenty-six files in this tree had grown their own
+    # copy — the same round constants, the same eight initial words, the same
+    # message schedule, pasted twenty-six times across all three lanes. Every
+    # copy is correct today, which is twenty-six pieces of luck rather than one
+    # piece of design: a SHA-256 with one wrong constant still returns
+    # thirty-two plausible-looking bytes, so the failure mode is silent, and it
+    # is silent in exactly the places that matter (password verifiers, backup
+    # manifests, the package store's content addresses). Same
+    # member-not-exclude rationale as `yamldoc`; needs no `alloc` at all, which
+    # matters more here than for the others because the kernel,
+    # `kernel/build.rs` and the bare-metal services are among the callers.
+    "sha2",
+    # Password-to-key derivation: the salt, the stretching, and the stored
+    # verifier. Separate from `sha2` rather than inside it because it needs
+    # `alloc` and it needs `randrange` for fresh salts, while `sha2`'s callers
+    # include the kernel and `userspace/sha256sum`, which have no business
+    # linking an RNG. Extracted when `gui/credentials` (salted and stretched,
+    # design-decisions §464) and `apps/lockscreen` (a bare unsalted
+    # `SHA-256(password)`) turned out to have *incompatible* verifier formats
+    # while still being unwired to each other -- the only moment at which
+    # making them agree is free, rather than a temptation to weaken the store
+    # to match the screen.
+    "pwkdf",
+    # SHA-1 and MD5, alongside `sha2` and for a different reason. Nothing in
+    # this tree needs either for security — both are broken for that — but a
+    # disk imager needs them to compare an image against the checksum its
+    # publisher printed, and publishers still print both. `apps/diskimager`
+    # previously "supported" all three by seeding each one's real initial
+    # values and then computing `state[i % 8] = state[i % 8] * 31 + byte` for
+    # all of them, so the algorithm you chose changed the length of the output
+    # string and nothing else (known-issues.md →
+    # C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256).
+    "sha1",
+    "md5",
+    # The buffering all three share. Their compression functions are
+    # transcriptions of published tables, where a mistake fails the first
+    # known-answer vector; the partial-block and padding logic is the opposite
+    # — its bugs live in the seam between two `update` calls, so an
+    # implementation can pass every published vector (all of which arrive in
+    # one call) and still be wrong for an input that ends 55 bytes into a
+    # block. That is the part worth having exactly one copy of.
+    "blockbuf",
+    # CRC-32 (ISO 3309 / IEEE 802.3) — gzip, ZIP, PNG, RAR, 7-Zip, F2FS. It
+    # lived in the kernel's `crypto` module, whose own comment recorded that
+    # four private copies of the polynomial had already been consolidated onto
+    # it. The consolidation could not reach past the kernel's edge, because a
+    # module of a *binary* crate cannot be depended on: `deflate` needs it for
+    # the gzip trailer and `gui/imagecodec` needs it for PNG chunk CRCs, and
+    # neither can name `crate::crypto`.
+    "crc32",
+    # DEFLATE (RFC 1951) with its gzip (RFC 1952) and zlib (RFC 1950)
+    # wrappers, promoted out of `kernel/src/fs/compress.rs` for the same
+    # reason and at lane C's request (`requests/c-a-two-inflates.md`): a PNG
+    # cannot be decoded without an inflater, so lane C had written a second
+    # one rather than reach into the kernel. Two implementations of a
+    # decompressor is not two of an ordinary function -- it is two parsers of
+    # untrusted input, each its own attack surface, and a bug fixed in one is
+    # not fixed in the other.
+    "deflate",
+    # ZIP (APPNOTE 6.3.x) with Zip64, promoted out of `kernel/src/fs/zip.rs`
+    # at lane C's request (`requests/c-a-zip-is-trapped-in-the-kernel-binary.md`)
+    # -- the third time this same pattern has come up.
+    # `apps/archivemanager` could list an archive's entries but could not open
+    # one, because the only ZIP reader in the tree sat behind the kernel's
+    # edge. The fix that does not end in a second parser of untrusted input is
+    # the one that moves the first parser somewhere both callers can name it.
+    "ziparchive",
+]
+# Default members: only the crates that build under the workspace-root
+# target (x86_64-unknown-none). A plain `cargo build` from the project
+# root inherits the root .cargo/config.toml's
+# `target = "x86_64-unknown-none"` setting; building any userspace
+# crate (apps/*, gui/*, init/*, net/*, userspace/*) against that
+# triple fails because those crates need std and use the x86_64-slateos
+# target via their zone .cargo/config.toml.
+#
+# Without this filter, `cargo build` from the workspace root tries to
+# compile every userspace crate for x86_64-unknown-none and fails with
+# thousands of "cannot find type `Vec`" errors. `boot-test.sh` runs
+# exactly that command and was broken until this change (see todo.txt's
+# guitk-doesn't-build-for-unknown-none entry).
+#
+# Userspace crates remain in `members` so they share the workspace
+# target/ directory and so `cargo build -p <crate>` continues to work
+# from anywhere; building them explicitly (or from inside a zone)
+# still picks up the zone's x86_64-slateos target.
+default-members = [
+    "kernel",
+    "posix",
+    "toolchain/stubs",
+]
+exclude = [
+    # Bare-metal services (target = x86_64-unknown-none). Living in
+    # `services/` keeps them outside the `userspace/.cargo/config.toml`
+    # build-std blast radius. Each services/* crate is built
+    # independently with its own per-crate .cargo/config.toml.
+    "services",
+    # Shared no_std protocol crate (Ethernet/ARP/IPv4/ICMP parsers +
+    # RFC 1071 checksum) used by the userspace netstack daemon and,
+    # later, the kernel stack. Built for x86_64-unknown-none as a
+    # dependency of services/netstack; host-testable with an explicit
+    # `--target`. Excluded so the workspace-root target doesn't try to
+    # build it as a std crate.
+    "netproto",
+    # Shared no_std IPC schema (kernel<->netstack control messages). Same
+    # rationale as netproto: linked into both the bare-metal daemon and the
+    # kernel; excluded so the workspace-root target doesn't build it as std.
+    "netipc",
+    # Shared no_std POSIX TZ-string engine. Linked into the libc (posix,
+    # x86_64-unknown-none) *and* into std userspace (userspace/oils,
+    # x86_64-slateos), so the shell and every C program on the machine agree
+    # on what local time is. Excluded for netproto's reason; host-testable
+    # with an explicit --target.
+    "tzrules",
+    # Shared no_std atomic SPSC ring driver over the netipc::ring ABI. Adds
+    # the *unsafe* Acquire/Release atomic index accesses that netipc
+    # (#![forbid(unsafe_code)]) can't host. Linked into both the bare-metal
+    # daemon and the kernel; excluded so the workspace-root target doesn't
+    # build it as std.
+    "netring",
+    # Empty directory (incomplete crate); skip until populated.
+    "userspace/cylance-cli",
+    # nushell is a self-contained upstream workspace with its own member
+    # list and lockfile. Keep it out of our workspace — build via
+    # `cd nushell && cargo build`.
+    "nushell",
+    # Zone-level cargo config directories — caught by the `*` globs in
+    # `members` above; explicitly exclude them so cargo doesn't try to
+    # read them as crates.
+    "apps/.cargo",
+    "gui/.cargo",
+    "init/.cargo",
+    "net/.cargo",
+    "userspace/.cargo",
+]
+
+[workspace.lints.rust]
+# `kasan_instrumented` is set by `scripts/kasan-build.sh` (design-decisions.md
+# §107), not by a Cargo feature: it has to arrive at the same moment as the
+# `-Zsanitizer=kernel-address` rustflags it belongs with, and a Cargo feature
+# could be switched on independently of them — which would apply
+# `#[sanitize(...)]` attributes in a build whose toolchain does not even have
+# that feature. Declaring the name here keeps ordinary `cargo build` free of
+# `unexpected_cfgs` warnings. It lives at workspace scope because a crate that
+# sets `lints.workspace = true` may not also define its own `[lints.rust]`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kasan_instrumented)'] }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Correctness-relevant lints stay at warn (per CLAUDE.md): they flag
+# real panic/overflow risks the AI author may have missed, but they're
+# pervasive in low-level code and would block the build at deny level.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+arithmetic_side_effects = "warn"
+
+# Pure-style pedantic lints relaxed to allow with documented rationale.
+# Each of these triggers thousands of times across the kernel + posix
+# layer and produces no correctness benefit — the work-to-value ratio
+# doesn't justify enforcing them.  Per CLAUDE.md, individual lints may
+# be suppressed with a comment explaining why; we apply that rule at
+# workspace scope here so the discipline is centralised and reviewable.
+
+# doc_markdown: ~3600 hits.  Demands backticks around every identifier
+# in doc comments (`Vec`, `Result`, etc.).  Pure cosmetic; missing
+# backticks never caused a bug.  Re-enable per-crate if a crate's docs
+# are user-facing and need pristine markdown rendering.
+doc_markdown = "allow"
+
+# format_push_string: ~2900 hits.  Suggests rewriting
+# `s.push_str(&format!("..."))` as `write!(s, "...").unwrap()`.  The
+# clippy form requires the writer to be in scope and adds an unwrap;
+# the readability win is negligible.
+format_push_string = "allow"
+
+# uninlined_format_args: ~2200 hits.  Suggests `format!("{x}")` over
+# `format!("{}", x)`.  Style preference; the explicit form is clearer
+# when arguments are non-trivial expressions and trivially auto-fixable
+# when they're plain bindings, so the lint catches no real bugs.
+uninlined_format_args = "allow"
+
+# single_match_else: ~850 hits.  Suggests `if let ... else { ... }` over
+# `match x { Some(y) => ..., None => ... }`.  Either form is fine; we
+# don't enforce a preference.
+single_match_else = "allow"
+
+# collapsible_if: ~440 hits.  Suggests folding nested `if`s into `&&`.
+# Nested form is often clearer when the inner predicate has a separate
+# logical meaning from the outer guard.
+collapsible_if = "allow"
+
+# unreadable_literal: ~380 hits.  Demands `_` separators in long
+# literals.  Hardware register addresses and bitmasks read fine without
+# them; enforcing this across kernel constants is busywork.
+unreadable_literal = "allow"
+
+# manual_let_else: ~370 hits.  Suggests `let Some(x) = ... else { ... }`
+# over `match`/`if let`-with-return.  Cosmetic; the explicit form is
+# fine.
+manual_let_else = "allow"
+
+# similar_names: ~140 hits.  Triggers on hardware-register pairs like
+# `pm1a`/`pm1b`, `nam_base`/`nabm_base`, `cmd_reg`/`ctl_reg`.  These
+# names mirror the hardware spec; renaming them just to satisfy clippy
+# obscures the mapping.
+similar_names = "allow"
+
+# items_after_statements: ~120 hits.  Suggests moving fn/const decls
+# above all `let`s.  Often the function is logically local to a block
+# and reads naturally where it's defined.
+items_after_statements = "allow"
+
+# match_same_arms: ~170 hits.  Suggests merging arms with identical
+# bodies.  Frequently the arms enumerate distinct cases for
+# documentation/exhaustiveness even when the action is the same;
+# merging loses that meaning.
+match_same_arms = "allow"
+
+# missing_errors_doc / missing_panics_doc / must_use_candidate /
+# missing_const_for_fn: prolific in kernel code, more useful for
+# library APIs than internal kernel modules.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
+# module_name_repetitions: complains about `mm::MmError`,
+# `fs::FsError`.  The repetition is intentional — types are imported
+# unqualified and the module prefix in the type name disambiguates.
+module_name_repetitions = "allow"
+
+# struct_excessive_bools / fn_params_excessive_bools: arbitrary
+# threshold flags; kernel state structs legitimately have many bools.
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+
+# too_many_lines / too_many_arguments: thresholds that don't reflect
+# real complexity; long match-based dispatchers in syscall handlers
+# trip these without being unclear.
+too_many_lines = "allow"
+too_many_arguments = "allow"
+
+# cast_possible_truncation / cast_sign_loss / cast_precision_loss /
+# cast_possible_wrap: ~2000 combined hits.  In low-level code, casts
+# are usually deliberate (the author knows the value fits).  Enforcing
+# `TryFrom`/`checked_*` everywhere produces unwrap-laden boilerplate
+# that's worse than the cast.  Leave to manual review.
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+
+# verbose_bit_mask / verbose_file_reads: stylistic preferences.
+verbose_bit_mask = "allow"
+
+# redundant_closure_for_method_calls: occasionally suggests less clear
+# code (`.map(Foo::bar)` vs `.map(|x| x.bar())` when the closure form
+# documents intent).
+redundant_closure_for_method_calls = "allow"
+
+# wildcard_imports: kernel modules use prelude-style wildcard imports
+# (`use super::*;` in inner modules, `use registers::*;` for hardware
+# register names) that this lint flags spuriously.
+wildcard_imports = "allow"
+
+# inline_always: kernel hot paths (atomic ops, port I/O, MSR access)
+# legitimately need `#[inline(always)]` for performance.
+inline_always = "allow"
+
+# return_self_not_must_use: builder-pattern noise; not all builders
+# need #[must_use].
+return_self_not_must_use = "allow"
+
+# needless_pass_by_value: often the right call is to take ownership
+# even when the body doesn't move; clippy can't tell the difference.
+needless_pass_by_value = "allow"
+
+# manual_checked_ops: ~150 hits.  Clippy 1.95 lint flagging the
+# pattern `if x > 0 { a / x } else { 0 }` with a suggestion to use
+# `a.checked_div(x).unwrap_or(0)`.  Functionally identical; the
+# if-guard form makes the check explicit and reads naturally in
+# percentage/rate calculations across the kernel.  Style preference
+# only.
+manual_checked_ops = "allow"
+
+# decimal_bitwise_operands: ~3000+ hits.  Clippy 1.95 lint demanding
+# binary/hex/octal literals for any literal used in a bitwise operation,
+# e.g. `AUDIT_ARCH_ARM = 40 | AUDIT_ARCH_LE`.  Our syscall/ABI constant
+# tables (linux_audit_arch_types.rs, linux_efi.rs, the linux_* families)
+# mirror the upstream Linux kernel headers *verbatim* so they can be
+# diffed against the source of truth: the `40` there IS the canonical
+# `EM_ARM` machine number from elf.h, and rewriting it as `0x28` would
+# obscure that correspondence rather than improve readability.  Same
+# rationale as `unreadable_literal`/`similar_names` above — the literals
+# mirror an external spec and should not be reformatted to satisfy a
+# cosmetic lint.  Pure style; never caused a bug.
+decimal_bitwise_operands = "allow"
+
+# declare_interior_mutable_const: ~70 hits.  All flag the canonical
+# array-init idiom:
+#     static T: [AtomicU64; N] = { const Z: AtomicU64 = AtomicU64::new(0); [Z; N] };
+# This pattern is required because `[AtomicU64::new(0); N]` doesn't
+# compile (AtomicU64 isn't Copy).  The const value is *consumed* by
+# the array-repeat, not borrowed — each array slot ends up with its
+# own fresh atomic, which is exactly the intended behaviour.  The
+# companion lint `borrow_interior_mutable_const` stays enabled and
+# catches the real bug (taking `&FOO` to such a const).
+declare_interior_mutable_const = "allow"
+
+# cast_lossless: ~800 hits.  `x as u64` vs `u64::from(x)` for a widening
+# cast.  Both are equivalent and bug-free; the `as` form is shorter and
+# reads naturally next to other casts.  Pure style.
+cast_lossless = "allow"
+
+# map_unwrap_or: ~150 hits.  `.map(f).unwrap_or(d)` vs `.map_or(d, f)`.
+# Either form is fine; the chained form sometimes reads more naturally
+# when the closure body is non-trivial.  Pure style.
+map_unwrap_or = "allow"
+
+# explicit_iter_loop: ~100 hits.  `for x in v.iter()` vs `for x in &v`.
+# The explicit form is fine and arguably clearer when scanning code.
+# Pure style.
+explicit_iter_loop = "allow"
+
+# manual_range_contains: ~85 hits.  `a <= x && x <= b` vs `(a..=b).contains(&x)`.
+# The chained-comparison form reads naturally and avoids the
+# `&`-borrow on `x`.  Pure style.
+manual_range_contains = "allow"
+
+# borrow_as_ptr / ref_as_ptr: ~130 combined hits.  Suggests
+# `&raw const x` / `&raw mut x` over `&x as *const _` / `&x as *mut _`.
+# The `as` form is widely understood; `&raw` syntax is newer and not
+# universally familiar.  Pure style.
+borrow_as_ptr = "allow"
+ref_as_ptr = "allow"
+
+# ptr_as_ptr: ~135 hits.  Suggests `.cast::<T>()` over `as *const T`.
+# Functionally identical; the `as` form is fine and matches surrounding
+# pointer-arithmetic style in driver/MMIO code.  Pure style.
+ptr_as_ptr = "allow"
+
+# trivially_copy_pass_by_ref: ~55 hits.  Suggests passing small Copy
+# types by value instead of by reference.  In kernel code we often
+# pass by reference for API stability (so adding fields later doesn't
+# silently change the calling convention).  Style preference.
+trivially_copy_pass_by_ref = "allow"
+
+# unnested_or_patterns: ~55 hits.  Suggests `A(_) | B(_)` → `(A | B)(_)`.
+# Both forms are equivalent; the unnested form is often clearer when
+# the variants carry data that's about to be matched.  Pure style.
+unnested_or_patterns = "allow"
+
+# collapsible_match: ~55 hits.  Suggests folding nested `match`/`if let`
+# into a single pattern with `|` or `..`.  The nested form is often
+# clearer when each level has a distinct logical purpose.  Pure style.
+collapsible_match = "allow"
+
+# struct_field_names: ~50 hits.  Flags structs whose field names share
+# a common prefix or suffix.  In low-level code the prefix usually
+# mirrors a hardware spec (`pm1a_*`, `cpu_*`) and removing it loses
+# the mapping.  Pure style.
+struct_field_names = "allow"
+
+# if_not_else: ~50 hits.  Suggests inverting `if !cond { ... } else { ... }`.
+# The negated form is often natural when the "negative" branch is the
+# main path (e.g., `if !ready { return Poll::Pending } else { ... }`).
+# Pure style.
+if_not_else = "allow"
+
+# bool_to_int_with_if: ~40 hits.  Suggests `usize::from(cond)` over
+# `if cond { 1 } else { 0 }`.  The explicit if/else is fine and often
+# clearer next to other branchy code.  Pure style.
+bool_to_int_with_if = "allow"
+
+# many_single_char_names: ~30 hits.  Single-letter names match math
+# notation in checksum/compression/crypto code (`a`, `b`, `c`, `d` for
+# CRC state; `x`, `y` for coordinates).  Pure style.
+many_single_char_names = "allow"
+
+# assigning_clones: ~25 hits.  Suggests `.clone_into(&mut dst)` over
+# `dst = src.clone()`.  The latter is universally understood; the
+# former is an unstable-feel API choice for a marginal perf win on
+# already-allocated buffers.  Pure style.
+assigning_clones = "allow"
+
+# unused_self / used_underscore_binding / used_underscore_items:
+# ~50 combined hits.  These flag intentional API stability patterns
+# (methods that don't use &self today but might tomorrow; underscore
+# bindings used in #[cfg(debug)] paths).  Pure style.
+unused_self = "allow"
+used_underscore_binding = "allow"
+used_underscore_items = "allow"
+
+# case_sensitive_file_extension_comparisons: ~35 hits.  Suggests
+# `.to_lowercase()`-style comparisons.  Our spec mandates a
+# case-sensitive filesystem (CLAUDE.md), so case-exact extension
+# matching is intentional, not a bug.
+case_sensitive_file_extension_comparisons = "allow"
+
+# needless_range_loop: ~130 hits.  `for i in 0..n` is often the
+# clearest way to express bounded iteration; rewriting to
+# `.iter().enumerate()` doesn't always help readability, especially
+# when the body indexes multiple parallel arrays.  Pure style.
+needless_range_loop = "allow"
+
+# Userspace defaults: size-optimised, abort on panic, stripped.
+[profile.release]
+opt-level = "s"
+lto = false
+panic = "abort"
+strip = "symbols"
+codegen-units = 16
+
+[profile.dev]
+panic = "abort"
+
+# Kernel-specific overrides. cargo does not allow `lto` or `panic` in
+# per-package profile sections (those are workspace-wide), but
+# `opt-level`, `codegen-units`, and `strip` are allowed.
+[profile.release.package.kernel]
+opt-level = 3
+codegen-units = 1
+strip = "none"
+
+# The shell is the one userspace binary whose *speed* is worth more than its
+# size. `opt-level = "s"` is right for sixty coreutils that each run once and
+# are all embedded in the kernel image; osh is a single binary that interprets
+# every line of every script, so the size is paid once and the speed is paid
+# per loop iteration. Measured over twelve constructs (300k-iteration loops of
+# `for (( ))`, `while [ ]`, `+=`, `${v#h}`, `[[ =~ ]]`, function calls, array
+# and associative-array fills, `case`, `printf`), `-O3` is 1.10x–1.37x faster
+# than `-Os`, geometric mean ~1.27x, with no construct slower. That moves osh
+# from ~1.5-1.8x bash 5.2 to ~1.0-1.4x.
+#
+# `codegen-units = 1` comes along because here it is free twice over: it is as
+# fast as 16 units and produces a *smaller* binary (3.22 MB against 3.68 MB),
+# since one unit lets LLVM share code instead of duplicating inlined copies
+# across units. Net cost against `-Os`: +884 KB (2.33 -> 3.22 MB) and ~20 s of
+# build time. See design-decisions.md 100.
+[profile.release.package.oils]
+opt-level = 3
+codegen-units = 1
+

@@ -1,0 +1,13 @@
+[package]
+name = "towers"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+# The window. Without it `main` built a `TowersOfHanoi`, dropped it and exited:
+# no peg ever reached a screen and no key or click ever arrived.
+oswindow = { path = "../../gui/window" }
+
+[lints]
+workspace = true

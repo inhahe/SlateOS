@@ -1,0 +1,14 @@
+[package]
+name = "pipes"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+# The window. Without it `main` built a `PipesApp`, dropped it and exited: no
+# pipe ever reached a screen, and no key or click ever arrived — which is how
+# the generator could go its whole life never once dealing a solvable board.
+oswindow = { path = "../../gui/window" }
+
+[lints]
+workspace = true

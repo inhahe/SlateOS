@@ -1,0 +1,9 @@
+[package]
+name = "updatedb"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS updatedb utility"
+[dependencies]
+
+[build-dependencies]
+embed-manifest = "1.5.0"

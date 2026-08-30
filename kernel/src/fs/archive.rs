@@ -1,0 +1,1214 @@
+//! Unified archive manager.
+//!
+//! Provides a single API for listing, extracting, and creating archives
+//! across all supported formats: ZIP, TAR, CPIO, AR, RAR5, and 7z.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! archive::detect(data)   → ArchiveFormat
+//! archive::list(data)     → Vec<ArchiveEntry>
+//! archive::extract_all(data, "/dest")  → ExtractResult
+//! archive::create(Zip, entries)        → Vec<u8>
+//! ```
+//!
+//! Format detection uses magic bytes from the first few bytes of the
+//! archive data.  All format-specific parsing is delegated to the
+//! individual modules (zip, tar, cpio, ar, rar, sevenz).
+
+#![allow(dead_code)]
+
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use crate::error::{KernelError, KernelResult};
+use crate::fs::Vfs;
+use crate::fs::path::{Path, PathBuf};
+use crate::fs::pathutil::confine_under;
+use crate::serial_println;
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/// Supported archive formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveFormat {
+    Zip,
+    Tar,
+    Cpio,
+    Ar,
+    Rar,
+    SevenZ,
+}
+
+impl ArchiveFormat {
+    /// Human-readable label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Zip => "ZIP",
+            Self::Tar => "TAR",
+            Self::Cpio => "CPIO",
+            Self::Ar => "AR",
+            Self::Rar => "RAR5",
+            Self::SevenZ => "7z",
+        }
+    }
+
+    /// Common file extensions.
+    pub fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::Zip => &[".zip"],
+            Self::Tar => &[
+                ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.lz4", ".tar.zst",
+            ],
+            Self::Cpio => &[".cpio"],
+            Self::Ar => &[".a", ".ar", ".deb"],
+            Self::Rar => &[".rar"],
+            Self::SevenZ => &[".7z"],
+        }
+    }
+
+    /// Whether this format supports creating archives.
+    pub fn supports_create(self) -> bool {
+        matches!(self, Self::Zip | Self::Tar | Self::Cpio | Self::Ar)
+    }
+}
+
+/// Entry kind within an archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+/// Unified archive entry metadata.
+#[derive(Debug, Clone)]
+pub struct ArchiveEntry {
+    /// Name/path within the archive.
+    ///
+    /// Archive member names are byte strings, like every other path.  Formats
+    /// that still model their own names as `String` (zip, ar, rar, 7z) widen
+    /// into this losslessly; tar and cpio carry raw bytes end to end.
+    pub name: PathBuf,
+    /// Uncompressed file size.
+    pub size: u64,
+    /// Entry kind.
+    pub kind: EntryKind,
+    /// Modification time (Unix timestamp, seconds).
+    pub mtime: u64,
+    /// Unix permissions (0 if not available).
+    pub mode: u32,
+    /// UID (0 if not available).
+    pub uid: u32,
+    /// GID (0 if not available).
+    pub gid: u32,
+    /// Symlink target (empty if not a symlink).
+    pub link_target: PathBuf,
+}
+
+/// Entry for creating an archive.
+#[derive(Debug, Clone)]
+pub struct CreateEntry {
+    /// Name/path within the archive.
+    pub name: PathBuf,
+    /// File content (empty for directories).
+    pub data: Vec<u8>,
+    /// Entry kind.
+    pub kind: EntryKind,
+    /// Last-modification time, nanoseconds since the Unix epoch, with `0`
+    /// meaning "not available" — the same convention as `FileMeta::modified_ns`,
+    /// which is where callers get it.
+    ///
+    /// Every writer below records this, but they do not agree on what `0`
+    /// means, and the difference is not cosmetic. ZIP stores a packed MS-DOS
+    /// pair in which `0` is day 0 of month 0 — a date no calendar can name, so
+    /// a reader shows a blank and is telling the truth. tar, cpio and ar store
+    /// plain Unix seconds, where `0` is as valid as any other value and reads
+    /// as **1970-01-01 00:00:00**. The same zero is an honest "unknown" in one
+    /// format and a fabricated date in the other three.
+    ///
+    /// That asymmetry is tolerable only because `0` should not arise in
+    /// practice: a caller has to read a file to archive it, so it can stat it
+    /// too, and `metadata_now_ns` yields `0` only before the RTC is up — a
+    /// state in which every timestamp in the system is `0`, so 1970 is
+    /// systemically consistent rather than a false claim about this one file.
+    /// A caller that genuinely cannot supply a time and needs the distinction
+    /// preserved must choose ZIP, the only one of the four that can express it.
+    pub modified_ns: crate::fs::vfs::Timestamp,
+}
+
+/// Result of extracting an archive.
+#[derive(Debug, Clone, Default)]
+pub struct ExtractResult {
+    /// Files extracted.
+    pub files_extracted: u64,
+    /// Directories created.
+    pub dirs_created: u64,
+    /// Bytes written.
+    pub bytes_written: u64,
+    /// Non-fatal errors.
+    pub errors: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Global stats
+// ---------------------------------------------------------------------------
+
+static LISTS: AtomicU64 = AtomicU64::new(0);
+static EXTRACTS: AtomicU64 = AtomicU64::new(0);
+static CREATES: AtomicU64 = AtomicU64::new(0);
+
+/// Get counters: (lists, extracts, creates).
+pub fn stats() -> (u64, u64, u64) {
+    (
+        LISTS.load(Ordering::Relaxed),
+        EXTRACTS.load(Ordering::Relaxed),
+        CREATES.load(Ordering::Relaxed),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Format detection
+// ---------------------------------------------------------------------------
+
+/// Detect archive format from data content using magic bytes.
+pub fn detect(data: &[u8]) -> Option<ArchiveFormat> {
+    if data.len() < 4 {
+        return None;
+    }
+
+    // ZIP: PK\x03\x04 (local file header) or PK\x05\x06 (empty archive).
+    if data.len() >= 4
+        && data[0] == b'P'
+        && data[1] == b'K'
+        && (data[2] == 3 || data[2] == 5)
+        && (data[3] == 4 || data[3] == 6)
+    {
+        return Some(ArchiveFormat::Zip);
+    }
+
+    // RAR5: Rar!\x1a\x07\x01\x00
+    if data.len() >= 8
+        && data[0] == b'R'
+        && data[1] == b'a'
+        && data[2] == b'r'
+        && data[3] == b'!'
+        && data[4] == 0x1a
+        && data[5] == 0x07
+    {
+        return Some(ArchiveFormat::Rar);
+    }
+
+    // 7z: 7z\xbc\xaf\x27\x1c
+    if data.len() >= 6
+        && data[0] == b'7'
+        && data[1] == b'z'
+        && data[2] == 0xbc
+        && data[3] == 0xaf
+        && data[4] == 0x27
+        && data[5] == 0x1c
+    {
+        return Some(ArchiveFormat::SevenZ);
+    }
+
+    // AR: "!<arch>\n"
+    if data.len() >= 8 && &data[..8] == b"!<arch>\n" {
+        return Some(ArchiveFormat::Ar);
+    }
+
+    // CPIO: "070701" or "070702" (SVR4 newc).
+    if data.len() >= 6 && (&data[..6] == b"070701" || &data[..6] == b"070702") {
+        return Some(ArchiveFormat::Cpio);
+    }
+
+    // TAR: check for USTAR magic at offset 257.
+    if data.len() >= 263 && &data[257..262] == b"ustar" {
+        return Some(ArchiveFormat::Tar);
+    }
+
+    // TAR fallback: check if first 512 bytes look like a tar header
+    // (null-terminated filename at start, valid checksum).
+    if data.len() >= 512 {
+        // Check for null-terminated name field.
+        let name_end = data[..100].iter().position(|&b| b == 0);
+        if let Some(end) = name_end {
+            if end > 0 && data[..end].iter().all(|&b| b >= 0x20 && b < 0x7f) {
+                // Looks like printable ASCII filename — might be tar.
+                return Some(ArchiveFormat::Tar);
+            }
+        }
+    }
+
+    None
+}
+
+/// Detect format from a file extension.
+///
+/// Takes a path rather than a `&str` (design-decisions.md 261): the name
+/// being classified comes off the filesystem, where any byte but `/` and NUL
+/// is legal, so it cannot be required to be UTF-8.  Only the *suffix* has to
+/// be ASCII, which every one of these extensions is.
+///
+/// Matching is on the whole path, not just the final component: a suffix can
+/// only land mid-path if the caller passed a trailing `/`, and a path with a
+/// trailing `/` names a directory, which is not an archive.
+///
+/// This deliberately does not go through [`Path::extension`], because several
+/// of these are compound suffixes (`.tar.gz`, `.tar.zst`) that a single
+/// extension cannot express.
+pub fn detect_from_extension(name: impl AsRef<Path>) -> Option<ArchiveFormat> {
+    let name = name.as_ref().as_bytes();
+
+    /// Case-insensitive (ASCII) byte suffix test.
+    ///
+    /// Lower-casing the whole name into a fresh allocation just to test a
+    /// handful of suffixes would be wasteful, and on a path is meaningless
+    /// besides — bytes outside ASCII have no case.
+    fn ends_with_ci(name: &[u8], suffix: &[u8]) -> bool {
+        let Some(start) = name.len().checked_sub(suffix.len()) else {
+            return false;
+        };
+        name.get(start..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+    }
+
+    if ends_with_ci(name, b".zip") {
+        Some(ArchiveFormat::Zip)
+    } else if ends_with_ci(name, b".tar")
+        || ends_with_ci(name, b".tgz")
+        || ends_with_ci(name, b".tar.gz")
+        || ends_with_ci(name, b".tar.bz2")
+        || ends_with_ci(name, b".tar.xz")
+        || ends_with_ci(name, b".tar.lz4")
+        || ends_with_ci(name, b".tar.zst")
+    {
+        Some(ArchiveFormat::Tar)
+    } else if ends_with_ci(name, b".cpio") {
+        Some(ArchiveFormat::Cpio)
+    } else if ends_with_ci(name, b".a") || ends_with_ci(name, b".ar") || ends_with_ci(name, b".deb")
+    {
+        Some(ArchiveFormat::Ar)
+    } else if ends_with_ci(name, b".rar") {
+        Some(ArchiveFormat::Rar)
+    } else if ends_with_ci(name, b".7z") {
+        Some(ArchiveFormat::SevenZ)
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Listing
+// ---------------------------------------------------------------------------
+
+/// List entries in an archive (auto-detects format).
+pub fn list(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
+    let fmt = detect(data).ok_or(KernelError::NotSupported)?;
+    list_format(data, fmt)
+}
+
+/// List entries in an archive with a specified format.
+pub fn list_format(data: &[u8], fmt: ArchiveFormat) -> KernelResult<Vec<ArchiveEntry>> {
+    let entries = match fmt {
+        ArchiveFormat::Zip => list_zip(data)?,
+        ArchiveFormat::Tar => list_tar(data)?,
+        ArchiveFormat::Cpio => list_cpio(data)?,
+        ArchiveFormat::Ar => list_ar(data)?,
+        ArchiveFormat::Rar => list_rar(data)?,
+        ArchiveFormat::SevenZ => list_7z(data)?,
+    };
+
+    LISTS.fetch_add(1, Ordering::Relaxed);
+    Ok(entries)
+}
+
+fn list_zip(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
+    let zip_entries = crate::fs::zip::parse(data)?;
+    Ok(zip_entries
+        .iter()
+        .map(|e| ArchiveEntry {
+            // The `zip` crate carries names as raw bytes, because an entry
+            // name out of an untrusted archive is not a path until it has been
+            // confined under a destination (see `extract_all` below).
+            name: PathBuf::from(e.name.clone()),
+            size: e.uncompressed_size,
+            kind: if e.is_dir {
+                EntryKind::Directory
+            } else {
+                EntryKind::File
+            },
+            // ZIP stores a packed DOS date/time pair, not Unix seconds, so
+            // this is the one lister that needs a decoder rather than a
+            // passthrough. `None` covers both the "not recorded" sentinel and
+            // any pair whose fields the calendar cannot name; both collapse to
+            // `0` here only because `ArchiveEntry::mtime` has nowhere to say
+            // "unknown". The `try_from` guards the pre-1970 case that the DOS
+            // range makes impossible today but that a widened decoder would
+            // admit -- a negative second must not wrap into a far-future one.
+            mtime: tzrules::unix_from_dos_datetime(e.dos_datetime)
+                .and_then(|s| u64::try_from(s).ok())
+                .unwrap_or(0),
+            mode: 0,
+            uid: 0,
+            gid: 0,
+            link_target: PathBuf::new(),
+        })
+        .collect())
+}
+
+fn list_tar(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
+    let tar_entries = crate::fs::tar::parse(data)?;
+    Ok(tar_entries
+        .iter()
+        .map(|e| {
+            let kind = match e.kind {
+                crate::fs::tar::EntryKind::File => EntryKind::File,
+                crate::fs::tar::EntryKind::Directory => EntryKind::Directory,
+                crate::fs::tar::EntryKind::Symlink => EntryKind::Symlink,
+                _ => EntryKind::Other,
+            };
+            ArchiveEntry {
+                name: e.name.clone(),
+                size: e.size,
+                kind,
+                mtime: e.mtime,
+                mode: e.mode,
+                uid: e.uid,
+                gid: e.gid,
+                link_target: e.link_target.clone(),
+            }
+        })
+        .collect())
+}
+
+fn list_cpio(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
+    let cpio_entries = crate::fs::cpio::uncpio(data)?;
+    Ok(cpio_entries
+        .iter()
+        .map(|e| {
+            let kind = match e.entry_type {
+                crate::fs::cpio::CpioEntryType::File => EntryKind::File,
+                crate::fs::cpio::CpioEntryType::Directory => EntryKind::Directory,
+                crate::fs::cpio::CpioEntryType::Symlink => EntryKind::Symlink,
+                _ => EntryKind::Other,
+            };
+            ArchiveEntry {
+                name: e.name.clone(),
+                size: e.data.len() as u64,
+                kind,
+                mtime: e.mtime as u64,
+                mode: e.mode,
+                uid: e.uid,
+                gid: e.gid,
+                link_target: e.link_target.clone(),
+            }
+        })
+        .collect())
+}
+
+fn list_ar(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
+    let ar_entries = crate::fs::ar::unar(data)?;
+    Ok(ar_entries
+        .iter()
+        .map(|e| ArchiveEntry {
+            name: e.name.clone(),
+            size: e.data.len() as u64,
+            kind: EntryKind::File, // AR only has files.
+            mtime: e.mtime,
+            mode: e.mode,
+            uid: e.uid,
+            gid: e.gid,
+            link_target: PathBuf::new(),
+        })
+        .collect())
+}
+
+fn list_rar(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
+    let rar_entries = crate::fs::rar::parse(data)?;
+    Ok(rar_entries
+        .iter()
+        .map(|e| ArchiveEntry {
+            name: e.name.clone(),
+            size: e.unpacked_size,
+            kind: if e.is_dir {
+                EntryKind::Directory
+            } else {
+                EntryKind::File
+            },
+            mtime: e.mtime as u64,
+            mode: 0,
+            uid: 0,
+            gid: 0,
+            link_target: PathBuf::new(),
+        })
+        .collect())
+}
+
+fn list_7z(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
+    let entries = crate::fs::sevenz::un7z(data)?;
+    Ok(entries
+        .iter()
+        .map(|e| ArchiveEntry {
+            name: e.name.clone(),
+            size: e.data.len() as u64,
+            kind: if e.is_dir {
+                EntryKind::Directory
+            } else {
+                EntryKind::File
+            },
+            mtime: 0,
+            mode: 0,
+            uid: 0,
+            gid: 0,
+            link_target: PathBuf::new(),
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Extraction
+// ---------------------------------------------------------------------------
+
+/// Extract a single entry from an archive by name.
+///
+/// # Errors
+/// [`KernelError::NotSupported`] if the format cannot be detected, plus
+/// whatever [`extract_one_format`] reports.
+pub fn extract_one<N: AsRef<Path> + ?Sized>(data: &[u8], name: &N) -> KernelResult<Vec<u8>> {
+    let fmt = detect(data).ok_or(KernelError::NotSupported)?;
+    extract_one_format(data, name.as_ref(), fmt)
+}
+
+/// Extract a single entry with specified format.
+///
+/// # Errors
+/// [`KernelError::NotFound`] if no member carries that exact name, plus
+/// whatever the format's own parser reports.
+pub fn extract_one_format<N: AsRef<Path> + ?Sized>(
+    data: &[u8],
+    name: &N,
+    fmt: ArchiveFormat,
+) -> KernelResult<Vec<u8>> {
+    let name = name.as_ref();
+    match fmt {
+        ArchiveFormat::Zip => {
+            let entries = crate::fs::zip::parse(data)?;
+            let entry = entries
+                .iter()
+                .find(|e| Path::new(&e.name) == name)
+                .ok_or(KernelError::NotFound)?;
+            crate::fs::zip::extract_entry(data, entry)
+        }
+        ArchiveFormat::Tar => {
+            let entries = crate::fs::tar::parse(data)?;
+            let entry = entries
+                .iter()
+                .find(|e| e.name.as_path() == name)
+                .ok_or(KernelError::NotFound)?;
+            crate::fs::tar::entry_data(data, entry).map(<[u8]>::to_vec)
+        }
+        ArchiveFormat::Cpio => {
+            let entries = crate::fs::cpio::uncpio(data)?;
+            let entry = entries
+                .iter()
+                .find(|e| e.name.as_path() == name)
+                .ok_or(KernelError::NotFound)?;
+            Ok(entry.data.clone())
+        }
+        ArchiveFormat::Ar => {
+            let entries = crate::fs::ar::unar(data)?;
+            let entry = entries
+                .iter()
+                .find(|e| e.name.as_path() == name)
+                .ok_or(KernelError::NotFound)?;
+            Ok(entry.data.clone())
+        }
+        ArchiveFormat::Rar => {
+            let entries = crate::fs::rar::parse(data)?;
+            let entry = entries
+                .iter()
+                .find(|e| e.name.as_path() == name)
+                .ok_or(KernelError::NotFound)?;
+            crate::fs::rar::entry_data(data, entry).map(<[u8]>::to_vec)
+        }
+        ArchiveFormat::SevenZ => {
+            let entries = crate::fs::sevenz::un7z(data)?;
+            let entry = entries
+                .iter()
+                .find(|e| e.name.as_path() == name)
+                .ok_or(KernelError::NotFound)?;
+            Ok(entry.data.clone())
+        }
+    }
+}
+
+/// Extract all entries from an archive into the directory `dest`.
+///
+/// # Errors
+/// [`KernelError::NotSupported`] if the format cannot be detected, plus
+/// whatever [`extract_all_format`] reports.
+pub fn extract_all<D: AsRef<Path> + ?Sized>(data: &[u8], dest: &D) -> KernelResult<ExtractResult> {
+    let fmt = detect(data).ok_or(KernelError::NotSupported)?;
+    extract_all_format(data, dest.as_ref(), fmt)
+}
+
+/// Extract all entries with specified format.
+///
+/// Every member name is joined onto `dest` with [`confine_under`], so a
+/// member named `../../etc/passwd` (the "Zip Slip" bug class) is refused
+/// rather than escaping the destination directory.  A refused member is
+/// recorded in [`ExtractResult::errors`] and extraction continues.
+///
+/// # Errors
+/// Propagates listing failures.  Per-member failures are collected in
+/// [`ExtractResult::errors`] instead of aborting the extraction.
+pub fn extract_all_format<D: AsRef<Path> + ?Sized>(
+    data: &[u8],
+    dest: &D,
+    fmt: ArchiveFormat,
+) -> KernelResult<ExtractResult> {
+    let dest = dest.as_ref();
+    let entries = list_format(data, fmt)?;
+    let mut result = ExtractResult::default();
+
+    // Ensure destination exists.  Already-existing is the normal case, and
+    // a genuine failure surfaces below as a per-member write error.
+    let _ = Vfs::mkdir(dest);
+
+    // Create directories first (sorted so parents precede children).
+    let mut dirs: Vec<&Path> = entries
+        .iter()
+        .filter(|e| e.kind == EntryKind::Directory)
+        .map(|e| e.name.as_path())
+        .collect();
+    dirs.sort_unstable();
+
+    for dir in &dirs {
+        let path = match confine_under(dest, dir) {
+            Ok(p) => p,
+            Err(e) => {
+                result
+                    .errors
+                    .push(alloc::format!("unsafe dir {}: {:?}", dir.display(), e));
+                continue;
+            }
+        };
+        match Vfs::mkdir(&path) {
+            Ok(()) => result.dirs_created = result.dirs_created.saturating_add(1),
+            Err(KernelError::AlreadyExists) => {}
+            Err(e) => result
+                .errors
+                .push(alloc::format!("mkdir {}: {:?}", path.display(), e)),
+        }
+    }
+
+    // Extract files.
+    for entry in &entries {
+        if entry.kind != EntryKind::File {
+            continue;
+        }
+
+        let path = match confine_under(dest, &entry.name) {
+            Ok(p) => p,
+            Err(e) => {
+                result.errors.push(alloc::format!(
+                    "unsafe member {}: {:?}",
+                    entry.name.display(),
+                    e
+                ));
+                continue;
+            }
+        };
+
+        // Ensure the parent directory exists.  An archive need not carry
+        // directory members for the directories its files live in.
+        if let Some(parent) = path.parent() {
+            let _ = Vfs::mkdir(parent);
+        }
+
+        match extract_one_format(data, &entry.name, fmt) {
+            Ok(content) => {
+                let bytes = content.len() as u64;
+                match Vfs::write_file(&path, &content) {
+                    Ok(()) => {
+                        result.files_extracted = result.files_extracted.saturating_add(1);
+                        result.bytes_written = result.bytes_written.saturating_add(bytes);
+                    }
+                    Err(e) => {
+                        result
+                            .errors
+                            .push(alloc::format!("write {}: {:?}", path.display(), e));
+                    }
+                }
+            }
+            Err(e) => {
+                result
+                    .errors
+                    .push(alloc::format!("extract {}: {:?}", entry.name.display(), e));
+            }
+        }
+    }
+
+    EXTRACTS.fetch_add(1, Ordering::Relaxed);
+
+    serial_println!(
+        "[archive] Extract ({}): {} files, {} dirs, {} bytes, {} errors",
+        fmt.label(),
+        result.files_extracted,
+        result.dirs_created,
+        result.bytes_written,
+        result.errors.len(),
+    );
+
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// Creation
+// ---------------------------------------------------------------------------
+
+/// Create an archive from entries.
+///
+/// # Errors
+/// - [`KernelError::NotSupported`] if `fmt` has no writer.
+/// - [`KernelError::InvalidArgument`] if a member name cannot be represented in
+///   the target container — currently only `ar`, which has no escape mechanism
+///   and so rejects an empty name, a name starting with `/`, or one containing
+///   the `/\n` sequence that terminates its long-name table. Every writer takes
+///   byte names, so this is never about UTF-8.
+pub fn create(fmt: ArchiveFormat, entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
+    if !fmt.supports_create() {
+        return Err(KernelError::NotSupported);
+    }
+
+    let data = match fmt {
+        ArchiveFormat::Zip => create_zip(entries),
+        ArchiveFormat::Tar => create_tar(entries),
+        ArchiveFormat::Cpio => create_cpio(entries)?,
+        ArchiveFormat::Ar => create_ar(entries)?,
+        _ => return Err(KernelError::NotSupported),
+    };
+
+    CREATES.fetch_add(1, Ordering::Relaxed);
+
+    serial_println!(
+        "[archive] Create ({}): {} entries, {} bytes",
+        fmt.label(),
+        entries.len(),
+        data.len(),
+    );
+
+    Ok(data)
+}
+
+/// Append the `/` that directory members conventionally carry, when the caller
+/// has not already supplied one.
+///
+/// The marker is a *byte* of the stored name, so the test and the append are
+/// both on bytes — a name need not be UTF-8 for a trailing slash to be
+/// meaningful.
+fn dir_member_name(name: &Path, is_dir: bool) -> PathBuf {
+    let mut out = name.to_path_buf();
+    if is_dir && !out.as_bytes().ends_with(b"/") {
+        out.extend_bytes(b"/");
+    }
+    out
+}
+
+/// Whole seconds since the Unix epoch from a nanosecond VFS timestamp.
+///
+/// Truncating division, so a recorded time is never *later* than the real one —
+/// a file that reads as slightly earlier than it was is a resolution limit,
+/// whereas one that reads later can order it ahead of an event that actually
+/// preceded it. `0` in gives `0` out, preserving the "not available" sentinel.
+///
+/// The `i64` is what the DOS encoder takes; the conversion cannot fail,
+/// because even `u64::MAX` nanoseconds is ~1.8e10 seconds, far inside `i64`.
+fn unix_seconds(modified_ns: crate::fs::vfs::Timestamp) -> i64 {
+    i64::try_from(modified_ns / 1_000_000_000).unwrap_or(0)
+}
+
+/// [`unix_seconds`] in the unsigned 64-bit width tar and `ar` store `mtime` in.
+///
+/// Never actually narrows: the input is a `u64` nanosecond count, so the
+/// seconds are non-negative and bounded by ~1.8e10. The `unwrap_or(0)` is the
+/// unreachable arm, and `0` is the same value the field would carry if the
+/// clock had never been set — so even the impossible case stays consistent
+/// with the "no time available" state rather than inventing an instant.
+fn unix_seconds_u64(modified_ns: crate::fs::vfs::Timestamp) -> u64 {
+    u64::try_from(unix_seconds(modified_ns)).unwrap_or(0)
+}
+
+/// [`unix_seconds`] in the 32-bit width cpio stores `mtime` in.
+///
+/// A newc header holds `mtime` as eight hex digits, so it cannot name an
+/// instant past 2106-02-07 06:28:15. This clamps rather than refusing, which
+/// is the opposite of what `tzrules::dos_datetime_from_unix` does for ZIP
+/// (design-decisions.md §618) — and deliberately so. ZIP can *say* "no time
+/// recorded", so refusing an unrepresentable instant there replaces a wrong
+/// date with an honest blank. cpio has no such encoding: `0` means
+/// 1970-01-01, a date that reads as exactly as real as any other. Refusing
+/// would therefore trade one fabricated date for a further-wrong one.
+/// Saturating keeps the stored time *earlier* than the real one, which is the
+/// same direction the truncating division above errs in, so a member never
+/// reads as later than the instant it describes.
+fn unix_seconds_u32(modified_ns: crate::fs::vfs::Timestamp) -> u32 {
+    u32::try_from(unix_seconds(modified_ns)).unwrap_or(u32::MAX)
+}
+
+fn create_zip(entries: &[CreateEntry]) -> Vec<u8> {
+    use crate::fs::zip::ZipWriteEntry;
+    let mut zip_entries: Vec<ZipWriteEntry> = Vec::with_capacity(entries.len());
+    for e in entries {
+        zip_entries.push(ZipWriteEntry {
+            // The zip writer carries names as bytes end to end, so no UTF-8
+            // narrowing is needed (unlike the `ar` writer below).
+            name: dir_member_name(&e.name, e.kind == EntryKind::Directory).into_vec(),
+            data: e.data.clone(),
+            store_only: false,
+            // ZIP is the one format here that can say "no time recorded", and
+            // `dos_datetime_from_unix` maps an unavailable `0` to it without a
+            // special case: Unix 0 is 1970, which is before the DOS epoch, and
+            // the encoder refuses out-of-range instants rather than clamping
+            // them to 1980-01-01 (design-decisions.md §618, §621).
+            dos_datetime: tzrules::dos_datetime_from_unix(unix_seconds(e.modified_ns)),
+        });
+    }
+    crate::fs::zip::create(&zip_entries)
+}
+
+fn create_tar(entries: &[CreateEntry]) -> Vec<u8> {
+    use crate::fs::tar::{EntryKind as TarKind, TarWriteEntry};
+    let tar_entries: Vec<TarWriteEntry> = entries
+        .iter()
+        .map(|e| TarWriteEntry {
+            name: dir_member_name(&e.name, e.kind == EntryKind::Directory),
+            data: e.data.clone(),
+            kind: match e.kind {
+                EntryKind::File => TarKind::File,
+                EntryKind::Directory => TarKind::Directory,
+                EntryKind::Symlink => TarKind::Symlink,
+                EntryKind::Other => TarKind::Other(0),
+            },
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            // tar's `mtime` is plain Unix seconds with no "unknown" encoding,
+            // so an unavailable `0` here is indistinguishable from a genuine
+            // 1970-01-01 — see the note on `CreateEntry::modified_ns`.
+            mtime: unix_seconds_u64(e.modified_ns),
+            link_target: PathBuf::new(),
+        })
+        .collect();
+    crate::fs::tar::create(&tar_entries)
+}
+
+fn create_cpio(entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
+    use crate::fs::cpio::{CpioEntry, CpioEntryType};
+    let mut cpio_entries: Vec<CpioEntry> = Vec::with_capacity(entries.len());
+    for e in entries {
+        cpio_entries.push(CpioEntry {
+            // The cpio writer carries names as bytes end to end, so no
+            // UTF-8 narrowing is needed (unlike zip/ar below).
+            name: e.name.clone(),
+            data: e.data.clone(),
+            entry_type: match e.kind {
+                EntryKind::File => CpioEntryType::File,
+                EntryKind::Directory => CpioEntryType::Directory,
+                EntryKind::Symlink => CpioEntryType::Symlink,
+                EntryKind::Other => CpioEntryType::Unknown,
+            },
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            mtime: unix_seconds_u32(e.modified_ns),
+            link_target: PathBuf::new(),
+        });
+    }
+    crate::fs::cpio::mkcpio(&cpio_entries)
+}
+
+fn create_ar(entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
+    use crate::fs::ar::ArEntry;
+    let mut ar_entries: Vec<ArEntry> = Vec::new();
+    for e in entries.iter().filter(|e| e.kind == EntryKind::File) {
+        // AR only supports files.
+        ar_entries.push(ArEntry {
+            name: e.name.clone(),
+            data: e.data.clone(),
+            mtime: unix_seconds_u64(e.modified_ns),
+            uid: 0,
+            gid: 0,
+            mode: 0o100644,
+        });
+    }
+    crate::fs::ar::mkar(&ar_entries)
+}
+
+// ---------------------------------------------------------------------------
+// Self-tests
+// ---------------------------------------------------------------------------
+
+pub fn self_test() -> KernelResult<()> {
+    serial_println!("[archive] Running self-test...");
+
+    test_detect_zip();
+    test_detect_tar();
+    test_detect_cpio();
+    test_detect_ar();
+    test_detect_extension();
+    test_zip_roundtrip();
+    test_zip_byte_name_roundtrip();
+    test_tar_roundtrip();
+    test_tar_byte_name_roundtrip();
+    test_extract_rejects_traversal();
+    test_mtime_reaches_every_writer();
+    test_stats();
+
+    serial_println!("[archive] Self-test passed (12 tests).");
+    Ok(())
+}
+
+fn test_detect_zip() {
+    let data = [b'P', b'K', 3, 4, 0, 0, 0, 0];
+    assert_eq!(detect(&data), Some(ArchiveFormat::Zip));
+    serial_println!("[archive]   detect zip: ok");
+}
+
+fn test_detect_tar() {
+    // USTAR magic at offset 257.
+    let mut data = [0u8; 270];
+    data[0] = b't';
+    data[1] = b'e';
+    data[2] = b's';
+    data[3] = b't';
+    data[257] = b'u';
+    data[258] = b's';
+    data[259] = b't';
+    data[260] = b'a';
+    data[261] = b'r';
+    assert_eq!(detect(&data), Some(ArchiveFormat::Tar));
+    serial_println!("[archive]   detect tar: ok");
+}
+
+fn test_detect_cpio() {
+    let data = b"070701001234";
+    assert_eq!(detect(data), Some(ArchiveFormat::Cpio));
+    serial_println!("[archive]   detect cpio: ok");
+}
+
+fn test_detect_ar() {
+    let data = b"!<arch>\ntest";
+    assert_eq!(detect(data), Some(ArchiveFormat::Ar));
+    serial_println!("[archive]   detect ar: ok");
+}
+
+fn test_detect_extension() {
+    assert_eq!(detect_from_extension("file.zip"), Some(ArchiveFormat::Zip));
+    assert_eq!(
+        detect_from_extension("file.tar.gz"),
+        Some(ArchiveFormat::Tar)
+    );
+    assert_eq!(detect_from_extension("pkg.deb"), Some(ArchiveFormat::Ar));
+    assert_eq!(detect_from_extension("data.rar"), Some(ArchiveFormat::Rar));
+    assert_eq!(
+        detect_from_extension("data.7z"),
+        Some(ArchiveFormat::SevenZ)
+    );
+    assert_eq!(detect_from_extension("file.txt"), None);
+
+    // Case-insensitivity is ASCII-only and must not depend on the rest of
+    // the name being text.
+    assert_eq!(detect_from_extension("FILE.ZIP"), Some(ArchiveFormat::Zip));
+    assert_eq!(
+        detect_from_extension("Backup.Tar.Gz"),
+        Some(ArchiveFormat::Tar)
+    );
+
+    // Non-UTF-8 names (design-decisions.md 261).  An archive's name comes
+    // off the filesystem, which permits any byte but `/` and NUL; while this
+    // took a `&str` such a file could not be classified at all, so the
+    // explorer would refuse to open an archive it was perfectly able to read.
+    assert_eq!(
+        detect_from_extension(Path::new(&b"/tmp/ar_\xFFn.zip"[..])),
+        Some(ArchiveFormat::Zip)
+    );
+    assert_eq!(
+        detect_from_extension(Path::new(&b"/tmp/ar_\xFFn.tar.zst"[..])),
+        Some(ArchiveFormat::Tar)
+    );
+    // A non-UTF-8 byte in the suffix position is not one of our extensions.
+    assert_eq!(
+        detect_from_extension(Path::new(&b"/tmp/x.\xFFip"[..])),
+        None
+    );
+    serial_println!("[archive]   detect extension: ok");
+}
+
+fn test_zip_roundtrip() {
+    let entries = alloc::vec![
+        CreateEntry {
+            name: PathBuf::from("hello.txt"),
+            data: b"Hello from archive!".to_vec(),
+            kind: EntryKind::File,
+            modified_ns: 0,
+        },
+        CreateEntry {
+            name: PathBuf::from("sub/"),
+            data: Vec::new(),
+            kind: EntryKind::Directory,
+            modified_ns: 0,
+        },
+    ];
+
+    let archive = create(ArchiveFormat::Zip, &entries).expect("create zip");
+    assert!(!archive.is_empty(), "archive should have data");
+
+    let listed = list(&archive).expect("list zip");
+    assert!(!listed.is_empty(), "should list entries");
+    assert!(
+        listed
+            .iter()
+            .any(|e| e.name.as_path() == Path::new("hello.txt")),
+        "should find hello.txt",
+    );
+
+    let content = extract_one(&archive, "hello.txt").expect("extract");
+    assert_eq!(&content, b"Hello from archive!");
+
+    serial_println!("[archive]   zip roundtrip: ok");
+}
+
+/// A zip member whose name is not valid UTF-8 must survive create → list →
+/// extract byte-for-byte, exactly as the tar one does.
+///
+/// This assertion used to read the other way round — "zip must reject a name it
+/// cannot represent, not corrupt it" — because the zip writer once modelled
+/// names as `String`, and refusal was the only non-corrupting answer available.
+/// The writer was later converted to carry bytes end to end (`zip::create`
+/// writes `entry.name.as_bytes()` verbatim), which turned refusal from the safe
+/// option into a wrong one: there is now nothing it cannot represent.
+///
+/// The stale assertion survived that change because nothing ever ran it. Worth
+/// keeping in mind about the other forty tests wired up alongside this one: an
+/// uncalled test does not merely fail to catch bugs, it also rots silently
+/// against the code it names, so its first run can fail for the *opposite*
+/// reason to the one it was written for. Check which side is stale before
+/// concluding the code is wrong.
+fn test_zip_byte_name_roundtrip() {
+    let odd = PathBuf::from(b"re\xffport.txt".as_slice());
+    let entries = alloc::vec![CreateEntry {
+        name: odd.clone(),
+        data: b"raw bytes".to_vec(),
+        kind: EntryKind::File,
+        modified_ns: 0,
+    }];
+
+    let archive = create(ArchiveFormat::Zip, &entries).expect("create zip");
+    let listed = list(&archive).expect("list zip");
+    assert!(
+        listed.iter().any(|e| e.name == odd),
+        "non-UTF-8 member name must round-trip intact",
+    );
+
+    let content = extract_one(&archive, &odd).expect("extract by byte name");
+    assert_eq!(&content, b"raw bytes");
+
+    serial_println!("[archive]   zip byte name roundtrip: ok");
+}
+
+fn test_tar_roundtrip() {
+    let entries = alloc::vec![CreateEntry {
+        name: PathBuf::from("data.txt"),
+        data: b"TAR content".to_vec(),
+        kind: EntryKind::File,
+        modified_ns: 0,
+    },];
+
+    let archive = create(ArchiveFormat::Tar, &entries).expect("create tar");
+    let listed = list(&archive).expect("list tar");
+    assert!(
+        listed
+            .iter()
+            .any(|e| e.name.as_path() == Path::new("data.txt")),
+        "should find data.txt",
+    );
+
+    let content = extract_one(&archive, "data.txt").expect("extract");
+    assert_eq!(&content, b"TAR content");
+
+    serial_println!("[archive]   tar roundtrip: ok");
+}
+
+/// A tar member whose name is not valid UTF-8 must survive create → list →
+/// extract byte-for-byte.  Before the byte-path conversion the name could not
+/// even be spelled, so such a member was unreachable.
+fn test_tar_byte_name_roundtrip() {
+    let odd = PathBuf::from(b"re\xffport.txt".as_slice());
+    let entries = alloc::vec![CreateEntry {
+        name: odd.clone(),
+        data: b"raw bytes".to_vec(),
+        kind: EntryKind::File,
+        modified_ns: 0,
+    }];
+
+    let archive = create(ArchiveFormat::Tar, &entries).expect("create tar");
+    let listed = list(&archive).expect("list tar");
+    assert!(
+        listed.iter().any(|e| e.name == odd),
+        "non-UTF-8 member name must round-trip intact",
+    );
+
+    let content = extract_one(&archive, &odd).expect("extract by byte name");
+    assert_eq!(&content, b"raw bytes");
+
+    serial_println!("[archive]   tar byte name roundtrip: ok");
+}
+
+/// "Zip Slip": a member named `../../escaped.txt` must not be able to write
+/// outside the destination directory.  The member is skipped and recorded as
+/// an error; the well-behaved member alongside it still extracts.
+fn test_extract_rejects_traversal() {
+    let entries = alloc::vec![
+        CreateEntry {
+            name: PathBuf::from("../../slipped.txt"),
+            data: b"pwned".to_vec(),
+            kind: EntryKind::File,
+            modified_ns: 0,
+        },
+        CreateEntry {
+            name: PathBuf::from("good.txt"),
+            data: b"fine".to_vec(),
+            kind: EntryKind::File,
+            modified_ns: 0,
+        },
+    ];
+
+    let archive = create(ArchiveFormat::Tar, &entries).expect("create tar");
+    let dest = Path::new("/tmp/archive_slip/dest");
+    let _ = Vfs::mkdir("/tmp/archive_slip");
+    let result = extract_all(&archive, dest).expect("extract");
+
+    assert_eq!(
+        result.files_extracted, 1,
+        "only the safe member may be written"
+    );
+    assert!(
+        !result.errors.is_empty(),
+        "the escaping member must be reported"
+    );
+    assert!(
+        Vfs::read_file("/tmp/archive_slip/dest/good.txt").is_ok(),
+        "the safe member should still extract",
+    );
+    assert!(
+        Vfs::read_file("/tmp/slipped.txt").is_err(),
+        "traversal must not write outside the destination",
+    );
+
+    let _ = Vfs::remove("/tmp/archive_slip/dest/good.txt");
+    let _ = Vfs::rmdir("/tmp/archive_slip/dest");
+    let _ = Vfs::rmdir("/tmp/archive_slip");
+
+    serial_println!("[archive]   traversal rejected: ok");
+}
+
+/// Every writer must carry `CreateEntry::modified_ns` into its own `mtime`
+/// field, and each must do so in that format's own units.
+///
+/// This asserts the *encoding*, not merely that something non-zero arrived.
+/// A writer that stored the wrong field, used the wrong epoch, or packed the
+/// ZIP date with its halves swapped would pass a `!= 0` check while producing
+/// an archive no other tool can read, which is the failure this whole change
+/// exists to prevent — `archive create` previously passed a literal `0` to all
+/// four writers, stamping every tar/cpio/ar member 1970-01-01.
+///
+/// The ZIP arm is checked twice over: against `zip::parse` for the exact
+/// packed pair, and against [`list_format`] alongside the other three for the
+/// decoded seconds. The first would pass even if `list_zip` discarded the
+/// value (as it did until `unix_from_dos_datetime` existed) and the second
+/// would pass against an encoder and decoder that were wrong in mirror-image
+/// ways, so neither check subsumes the other.
+fn test_mtime_reaches_every_writer() {
+    // 2020-09-13 12:26:40 UTC, with sub-second slop that must be truncated
+    // away rather than rounded up: a stored time may read earlier than the
+    // real one, never later.
+    const NS: crate::fs::vfs::Timestamp = 1_600_000_000_123_456_789;
+    const SECS: u64 = 1_600_000_000;
+
+    // Computed by hand from the layout, so the assertion does not simply
+    // re-run the encoder it is meant to check:
+    //   date = ((2020-1980) << 9) | (9 << 5) | 13 = 20_781
+    //   time = (12 << 11) | (26 << 5) | (40 / 2)  = 25_428
+    const DOS: u32 = (20_781u32 << 16) | 25_428;
+
+    let entries = alloc::vec![CreateEntry {
+        name: PathBuf::from("stamped.txt"),
+        data: b"when".to_vec(),
+        kind: EntryKind::File,
+        modified_ns: NS,
+    }];
+
+    let zip = create(ArchiveFormat::Zip, &entries).expect("create zip");
+    let parsed = crate::fs::zip::parse(&zip).expect("parse zip");
+    let member = parsed
+        .iter()
+        .find(|m| m.name.as_slice() == b"stamped.txt".as_slice())
+        .expect("zip member");
+    assert_eq!(
+        member.dos_datetime, DOS,
+        "zip must store the packed DOS date/time pair",
+    );
+
+    for (fmt, label) in [
+        (ArchiveFormat::Zip, "zip"),
+        (ArchiveFormat::Tar, "tar"),
+        (ArchiveFormat::Cpio, "cpio"),
+        (ArchiveFormat::Ar, "ar"),
+    ] {
+        let archive = create(fmt, &entries).expect("create");
+        let listed = list_format(&archive, fmt).expect("list");
+        let member = listed
+            .iter()
+            .find(|m| m.name.as_path() == Path::new("stamped.txt"))
+            .unwrap_or_else(|| panic!("{label}: member missing"));
+        assert_eq!(
+            member.mtime, SECS,
+            "{label}: mtime must be whole Unix seconds, truncated",
+        );
+    }
+
+    // The other side of the sentinel: an unavailable time must reach ZIP as
+    // the one value the format cannot otherwise mean (day 0 of month 0), not
+    // as a clamp to the DOS epoch. tar/cpio/ar have no such encoding and are
+    // stuck reading `0` back as a real 1970-01-01 -- documented on
+    // `CreateEntry::modified_ns`, and the reason `0` must stay rare.
+    let unknown = alloc::vec![CreateEntry {
+        name: PathBuf::from("stamped.txt"),
+        data: b"when".to_vec(),
+        kind: EntryKind::File,
+        modified_ns: 0,
+    }];
+    let zip = create(ArchiveFormat::Zip, &unknown).expect("create zip");
+    let parsed = crate::fs::zip::parse(&zip).expect("parse zip");
+    assert_eq!(
+        parsed.first().map(|m| m.dos_datetime),
+        Some(0),
+        "an unavailable time must stay unrepresentable, not clamp to 1980",
+    );
+
+    serial_println!("[archive]   mtime reaches every writer: ok");
+}
+
+fn test_stats() {
+    let (lists, extracts, creates) = stats();
+    assert!(lists > 0, "should have lists");
+    assert!(creates > 0, "should have creates");
+    let _ = extracts;
+
+    serial_println!("[archive]   stats: ok");
+}

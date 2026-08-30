@@ -1,0 +1,24 @@
+[package]
+name = "indexer-app"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS Background File Indexer — builds and maintains a searchable filesystem index"
+
+# `textfmt`, not `guitk`: the indexer is a headless service, and the escaping
+# it needs for `/etc/indexer.conf` is not a reason to link a widget library.
+#
+# `globmatch` for the same reason a second search tool should not hold a second
+# opinion about what `[a-z]` means: this crate and `apps/filesearch` each had
+# their own matcher and their own bugs, and both are user-facing.
+[dependencies]
+globmatch = { path = "../globmatch" }
+textfmt = { path = "../../textfmt" }
+
+# Test fixtures only: a private temp directory per test, removed on drop --
+# named from the process id and a counter, so two tests in one process can
+# never draw the same name the way a clock-tagged name could.
+[dev-dependencies]
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

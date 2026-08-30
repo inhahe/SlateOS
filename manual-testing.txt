@@ -1,0 +1,20 @@
+# Manual Testing Checklist
+#
+# This file tracks features that require human manual testing.
+# AI cannot test subjective visual/UX quality, physical hardware
+# interaction, or anything that requires human judgment.
+#
+# Format: [feature] — what to test — what to look for
+# Mark with [x] when tested and passed.
+
+## Phase 1.1: Boot
+
+[ ] Serial output — boot QEMU with -serial stdio, verify all boot
+    messages appear in order: serial init, boot info, GDT, IDT, BOOT_OK.
+    Look for: clean output with no garbled characters, all [tag] prefixes
+    present, no unexpected EXCEPTION lines.
+
+[ ] QEMU graphical — boot QEMU with default display, verify the VM window
+    appears and doesn't triple-fault (should show a blank screen or Limine
+    text, then kernel takes over).
+    Look for: no instant QEMU window close, no "QEMU: Terminated" error.

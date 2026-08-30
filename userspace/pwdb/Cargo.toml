@@ -1,0 +1,11 @@
+[package]
+name = "pwdb"
+version = "0.1.0"
+edition = "2024"
+description = "Reading /etc/passwd and /etc/group the way glibc reads them, for the twenty-six programs that must agree on who a uid is."
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

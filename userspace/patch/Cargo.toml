@@ -1,0 +1,6 @@
+[package]
+name = "patch"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS patch file applier"
+[dependencies]

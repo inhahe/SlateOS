@@ -1,0 +1,68 @@
+do we have printer drivers in the list of drivers to initially support in roadmap-detailed.md? if not, shouldn't we?
+
+1. no, i hate the centered taskbar, pinned apps are fine, but no recommended anything, and no ai, anywhere. also,
+  we'd be able to drag and drop pinned apps to the right and left to reorder them, or to or from the applications menu,
+   or to or from the desktop. and there'd be a clear distinction between the section of pinned apps that aren't running
+   and the apps that are running, and not 'clicking on some pinned apps makes new instancse and clicking on others only
+   makes one instance' like in KDE. no, no unified search, a user knows what kind of thing they're searching for, so
+  let's not dumb it down. a comprehensive settings app might be good. you mean like how windows has a control panel
+  with a lot of setttings apps underneath it? that's probably best, not trying to put *all* settings literally in one
+  app, but they should be centralized. yes, clipboard history would be good. multi-monitor handling might be good for
+  later down the line, i don't personally care about that, i don't use multiple monitors. i dno't use
+  snap-assist/window tiling, but maybe it's useful. i don't care about virtual desktops, but others might, so that
+  might be a feature for much later. but that reminds me, one thing i hate about windows is there's always a hotkey
+  function for whatever possible key combination you could accidentally press, which does all sorts of annoying things.
+   this will have much fewer app and global hotkeys by default, and have them totally configurable so you can disable
+  whatever app or global hotkey you want. we could just intercept hotkeys maybe rather than modifying every app that
+  supports hotkeys. a task view would be nice, like for processes, that works like, what's it called, that famous one
+  for windows that's very capable. one function of the taskview should be to be able to tell you what process owns a
+  window, and to be able to kill that process, and also to tell you what process is currently locking a file or
+  whatever. for the file manager, i found that i couldn't even view image previews, or i found one that views them but
+  you couldn't make them large enough, and also, it wouldn't browse the directories i wanted to browse, and i don't
+  think it was well integrated with the desktop so i couldn't select a file to use for my desktop background. all that
+  would be improved.
+
+disable sidechannel mitigations in advanced panel. where is that?
+
+would also like to improve the install process to make it more clear what you're doing, what you could do, and how you're supposed to do it. 
+
+-option to autologin on setup -has? let's see if it's enabled.
+-can show password while typing
+-see if we can search for specific settings
+-make come with vmware tools - says it needs internet to install, we have internet
+-and maybe virtualbox tools whatever it's called
+
+ dpkg -l | grep open-vmsudo apt update && sudo apt install open-vm-tools open-vm-tools-desktop -y
+^ have that as a convenience script to run if vmware tools is detected, and give the user a reboot button with instruction to reboot to enable it (reboot might not be necessary)
+
+-make it able to autoreconnect to bluetooth speakers
+-make it show what it's doing as it's starting up rather than a scary black screen for a while and for diagnostics. 
+
+must change the options for language and numbers and dates to things that are actually readable. 
+
+intuitive way to change background color of terminal
+discoverable list of good terminals to install with pros and cons of each, sorted by greatness
+and try to have it detect the monitor's dpi for a good automatic setting.
+have a terminal with ctrl+f for find text
+
+if i'ts allowed, have the os come with chrome installed like it does firefox, and have the annoying wallet popup every time eyou run it disabled or have some easy way or easily seeable instructions to disable it
+
+currently you have to click on + or - in the panel configuration to change the panel size. that's retarded. weshould be able to drag the top edge of the panel up or down to resize. and in the panel configuration if we still have a way to resize it we should have it a slider rather than buttons. 
+
+disable dimming the display automatically after a certain time by default
+i can't even find any option to disable it.
+is there even an automatic power off screen option?
+maybe we should automatically disable power off monitor after x mintues if running in a vm or at least vmware because the only way i could wake it up was to restart it. no reason to power off the monitor under a vm anyway.
+
+come with a utility to power off the screen, a button to run the utility, and an optional hotkey to run it (disabled by default)
+
+dialog for installing basic thinsg like npm, comes up after os install, also include gedit and notepad++ if it will actually install
+
+why do ctrl+c and ctrl+v not work? find out what the hotkeys are for cut and paste, and if none exist, make them ctrl+c and ctrl+v by default. and make it use a clipboard manager by default. 
+
+both konsole instances minimized when i tried to go to settings in one of them.
+
+don't forget to make icons that i drag to the desktop stay where i drop them
+
+in terminal, have the up arrow show a scrollable/clickable popup of recent commands
+

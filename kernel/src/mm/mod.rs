@@ -1,0 +1,589 @@
+//! Memory management subsystem.
+//!
+//! This module will contain:
+//! - Physical frame allocator (buddy allocator with 16 KiB base pages)
+//! - Virtual memory manager (page table operations)
+//! - Kernel heap allocator (geometric size class, per-CPU caches)
+//! - Demand paging and stack growth
+//! - Swap support
+//!
+//! ## Design --- 16 KiB Pages on `x86_64`
+//!
+//! `x86_64` hardware only supports 4 KiB, 2 MiB, and 1 GiB page sizes.
+//! Our design uses 16 KiB as the *allocator* base unit: every physical
+//! frame allocation hands out 4 contiguous 4 KiB hardware pages (16 KiB
+//! total).  Page table entries still point to 4 KiB pages, but they are
+//! always allocated and freed in groups of 4.
+//!
+//! Benefits of 16 KiB base pages (matching ARM64's 16 KiB mode):
+//! - Fewer TLB misses for sequential access patterns
+//! - Simpler buddy allocator (fewer levels, less metadata)
+//! - Better alignment for DMA and I/O buffers
+//! - Reduced page table management overhead
+//!
+//! The downside is slightly higher memory waste for small allocations
+//! (internal fragmentation within a 16 KiB page).  The slab allocator
+//! for kernel heap objects mitigates this for small objects.
+
+pub mod accounting;
+pub mod alloc_checkpoint;
+pub mod alloc_lat;
+pub mod alloc_trace;
+pub mod compact;
+pub mod compress;
+pub mod cow;
+pub mod dma;
+pub mod fault;
+pub mod fault_inject;
+pub mod frag_history;
+pub mod frame;
+pub mod frame_owner;
+pub mod heap;
+pub mod heap_profile;
+pub mod hugepage;
+pub mod integ_test;
+pub mod kasan;
+pub mod kasan_rt;
+pub mod kstack;
+pub mod kswapd;
+pub mod kvspace;
+pub mod mempool;
+pub mod memtype;
+pub mod migrate_type;
+pub mod oom;
+pub mod page_age;
+pub mod page_cache;
+pub mod page_table;
+pub mod pat;
+pub mod pcid;
+pub mod poison;
+pub mod pressure;
+pub mod protect;
+pub mod pt_walk;
+pub mod quarantine;
+pub mod rawmem;
+pub mod rlimits;
+pub mod rmap;
+pub mod scrub;
+pub mod swap;
+pub mod tlb_gather;
+pub mod user;
+pub mod vma;
+pub mod vmalloc;
+pub mod watermark;
+
+// ---------------------------------------------------------------------------
+// Unified memory information (kernel equivalent of /proc/meminfo)
+// ---------------------------------------------------------------------------
+
+/// Comprehensive snapshot of kernel memory state.
+///
+/// Aggregates information from the physical frame allocator, kernel
+/// heap, swap subsystem, and zero-page pool into a single struct.
+/// Used by the `mem` kshell command, future sysinfo syscall, and
+/// process explorer.
+///
+/// All sizes are in bytes unless noted otherwise.
+#[derive(Debug, Clone)]
+pub struct MemoryInfo {
+    // --- Physical memory ---
+    /// Total managed physical memory (frames × 16 KiB).
+    pub total_bytes: usize,
+    /// Free physical memory (unallocated frames × 16 KiB).
+    pub free_bytes: usize,
+    /// Used physical memory (total − free).
+    pub used_bytes: usize,
+    /// Total managed frames.
+    pub total_frames: usize,
+    /// Free frames.
+    pub free_frames: usize,
+
+    // --- Buddy allocator fragmentation ---
+    /// Free blocks per buddy order (order 0..=10).
+    ///
+    /// `order_counts[i]` = number of contiguous 2^i frame blocks on the
+    /// free list.  A healthy allocator has blocks at high orders; many
+    /// small blocks at order 0 with few at high orders indicates
+    /// external fragmentation.
+    pub order_counts: [usize; frame::BUDDY_MAX_ORDER + 1],
+    /// Fragmentation index (0–100).
+    ///
+    /// 0 = all free memory in a single max-order block (no fragmentation).
+    /// 100 = all free memory in order-0 blocks (maximum fragmentation).
+    ///
+    /// Calculated as: `100 − (weighted_avg_order / max_order × 100)`.
+    /// where the weight of each block is its frame count.
+    pub fragmentation_pct: u8,
+
+    // --- Per-CPU frame cache ---
+    /// Allocations served from per-CPU cache (no global lock).
+    pub pcpu_cache_hits: u64,
+    /// Allocations that missed per-CPU cache (needed global lock).
+    pub pcpu_cache_misses: u64,
+    /// Batch refill operations (global → per-CPU).
+    pub pcpu_refill_ops: u64,
+    /// Batch drain operations (per-CPU → global).
+    pub pcpu_drain_ops: u64,
+
+    // --- Zero-page pool ---
+    /// Pre-zeroed frames currently in the pool.
+    pub zero_pool_count: usize,
+    /// Total pool hits since boot.
+    pub zero_pool_hits: u64,
+    /// Total pool misses since boot.
+    pub zero_pool_misses: u64,
+
+    // --- Kernel heap ---
+    /// Total slab (small) allocations since boot.
+    pub heap_slab_allocs: u64,
+    /// Total slab (small) deallocations since boot.
+    pub heap_slab_frees: u64,
+    /// Total large allocations since boot.
+    pub heap_large_allocs: u64,
+    /// Total failed allocations since boot.
+    pub heap_alloc_failures: u64,
+
+    // --- Swap ---
+    /// Total swap capacity (bytes).
+    pub swap_total_bytes: usize,
+    /// Used swap (bytes).
+    pub swap_used_bytes: usize,
+    /// Number of swap devices.
+    pub swap_device_count: usize,
+
+    // --- kswapd (background reclaimer) ---
+    /// Whether the background reclaimer is running.
+    pub kswapd_running: bool,
+    /// Number of reclaim cycles completed since boot.
+    pub kswapd_reclaim_cycles: u64,
+    /// Total pages reclaimed by kswapd since boot.
+    pub kswapd_total_reclaimed: u64,
+
+    // --- OOM handler ---
+    /// Number of OOM events since boot.
+    pub oom_events: u64,
+    /// Number of processes killed by OOM since boot.
+    pub oom_kills: u64,
+
+    // --- Per-process accounting ---
+    /// Number of user-mode address spaces currently tracked.
+    pub tracked_address_spaces: usize,
+}
+
+impl core::fmt::Display for MemoryInfo {
+    /// Format as a multi-line summary similar to `/proc/meminfo`.
+    ///
+    /// Output suitable for serial console and kshell `mem` command.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let total_mb = self.total_bytes / (1024 * 1024);
+        let used_mb = self.used_bytes / (1024 * 1024);
+        let free_mb = self.free_bytes / (1024 * 1024);
+        let swap_total_mb = self.swap_total_bytes / (1024 * 1024);
+        let swap_used_mb = self.swap_used_bytes / (1024 * 1024);
+
+        writeln!(
+            f,
+            "Physical:  {} MiB total, {} MiB used, {} MiB free ({} frames)",
+            total_mb, used_mb, free_mb, self.free_frames
+        )?;
+
+        // Buddy allocator fragmentation.
+        write!(f, "Buddy:     frag={}%  orders=[", self.fragmentation_pct)?;
+        for (i, &count) in self.order_counts.iter().enumerate() {
+            if i > 0 {
+                write!(f, " ")?;
+            }
+            write!(f, "{}", count)?;
+        }
+        writeln!(f, "]")?;
+
+        // Per-CPU frame cache efficiency.
+        let total_allocs = self.pcpu_cache_hits.saturating_add(self.pcpu_cache_misses);
+        let hit_pct = if total_allocs > 0 {
+            self.pcpu_cache_hits.saturating_mul(100) / total_allocs
+        } else {
+            0
+        };
+        writeln!(
+            f,
+            "PCPU:      hit={}% ({}/{})  refills={}  drains={}",
+            hit_pct, self.pcpu_cache_hits, total_allocs, self.pcpu_refill_ops, self.pcpu_drain_ops
+        )?;
+
+        writeln!(
+            f,
+            "Zero pool: {} frames (hits: {}, misses: {})",
+            self.zero_pool_count, self.zero_pool_hits, self.zero_pool_misses
+        )?;
+        writeln!(
+            f,
+            "Heap:      slab={}/{}  large={}  failures={}",
+            self.heap_slab_allocs,
+            self.heap_slab_frees,
+            self.heap_large_allocs,
+            self.heap_alloc_failures
+        )?;
+        writeln!(
+            f,
+            "Swap:      {} MiB / {} MiB ({} device{})",
+            swap_used_mb,
+            swap_total_mb,
+            self.swap_device_count,
+            if self.swap_device_count == 1 { "" } else { "s" }
+        )?;
+        writeln!(
+            f,
+            "kswapd:    {} (cycles: {}, reclaimed: {} pages)",
+            if self.kswapd_running {
+                "running"
+            } else {
+                "stopped"
+            },
+            self.kswapd_reclaim_cycles,
+            self.kswapd_total_reclaimed
+        )?;
+        writeln!(
+            f,
+            "OOM:       {} events, {} kills",
+            self.oom_events, self.oom_kills
+        )?;
+        write!(
+            f,
+            "Tracking:  {} user address space{}",
+            self.tracked_address_spaces,
+            if self.tracked_address_spaces == 1 {
+                ""
+            } else {
+                "s"
+            }
+        )
+    }
+}
+
+/// Collect a snapshot of the current kernel memory state.
+///
+/// This is a lightweight operation (no heap allocation, a few lock
+/// acquisitions for counters).  Safe to call from any context that
+/// can take spinlocks — **but not from an interrupt or softirq**, which is
+/// what [`try_memory_info()`] is for.
+#[must_use]
+pub fn memory_info() -> MemoryInfo {
+    assemble_memory_info(
+        frame::stats(),
+        frame::zero_pool_count(),
+        swap::summary(),
+        accounting::tracked_count(),
+    )
+}
+
+/// Non-blocking variant of [`memory_info()`], for the timer softirq.
+///
+/// Returns `None` if **any** of the three locks it needs is currently held, or
+/// if the frame allocator is not yet initialised.  Callers skip the sample
+/// rather than block.
+///
+/// # Why this exists
+///
+/// `memory_info()` takes ordinary blocking locks.  The periodic metrics
+/// sampler runs in the timer softirq, so if the timer fires on a CPU whose
+/// interrupted code already holds one of them, a blocking acquire waits for a
+/// release that only the suspended code can perform.  That is an unbreakable
+/// self-deadlock, and `sync.rs` panics on it rather than hanging (lane B,
+/// `requests/b-a-kstat-sample-calls-memory-info-from-the-timer-softirq-*`).
+/// SWAP is simply the lock that lost the race first; ZERO_POOL and ALLOCATOR
+/// are reachable by the same path, so fixing only SWAP would have moved the
+/// panic rather than removed it.
+///
+/// # Why the whole body runs with interrupts masked
+///
+/// `try_lock` alone stops us blocking, but it does not stop a *nested*
+/// interrupt landing while we hold one of these locks and re-entering it —
+/// which would deadlock in the ordinary blocking way, one level further in.
+/// Softirq context runs with interrupts enabled, so that window is real.
+/// Masking for the duration closes it; the critical section is a handful of
+/// counter reads, so the added interrupt latency is negligible.  This is the
+/// same construct `frame::stats()` already uses for the same reason.
+#[must_use]
+pub fn try_memory_info() -> Option<MemoryInfo> {
+    crate::cpu::without_interrupts(|| {
+        let frame_stats = frame::try_stats()?;
+        let zero_pool_count = frame::try_zero_pool_count()?;
+        let swap_summary = swap::try_summary()?;
+        let tracked = accounting::try_tracked_count()?;
+        Some(assemble_memory_info(
+            Some(frame_stats),
+            zero_pool_count,
+            swap_summary,
+            tracked,
+        ))
+    })
+}
+
+/// Shared body of [`memory_info()`] and [`try_memory_info()`].
+///
+/// Everything the two acquire differently is passed in; everything read here
+/// is lock-free (relaxed atomic loads and per-CPU counters), so the two paths
+/// can never drift into computing a different `MemoryInfo` from the same
+/// inputs — in particular they share one `compute_fragmentation` call site.
+///
+/// Note that the frame stats are taken **once** and used for both the
+/// free/total figures and the buddy order distribution.  The previous code
+/// called `frame::stats()` twice, which both paid for the ALLOCATOR lock twice
+/// and could report an order histogram from a different instant than the free
+/// count it was displayed beside.
+#[allow(clippy::arithmetic_side_effects)]
+fn assemble_memory_info(
+    frame_stats: Option<frame::FrameAllocStats>,
+    zero_pool_count: usize,
+    swap_summary: (usize, usize, usize),
+    tracked_address_spaces: usize,
+) -> MemoryInfo {
+    // Physical frame allocator.
+    let (total_frames, free_frames, free_bytes) = frame_stats
+        .as_ref()
+        .map_or((0, 0, 0), |s| (s.total_frames, s.free_frames, s.free_bytes));
+    let total_bytes = total_frames * frame::FRAME_SIZE;
+    let used_bytes = total_bytes.saturating_sub(free_bytes);
+
+    // Zero-page pool.
+    let (zero_pool_hits, zero_pool_misses) = frame::zero_pool_stats();
+
+    // Kernel heap (plain atomic counters — no lock).
+    let hs = heap::stats();
+
+    // Swap.
+    let (swap_total, swap_used, swap_devices) = swap_summary;
+
+    // kswapd (background reclaimer) — all three are relaxed atomic loads.
+    let kswapd_running = kswapd::is_running();
+    let kswapd_reclaim_cycles = kswapd::reclaim_cycles();
+    let kswapd_total_reclaimed = kswapd::total_reclaimed();
+
+    // Buddy order distribution and fragmentation index, from the same snapshot.
+    let order_counts = frame_stats.map_or([0usize; frame::BUDDY_MAX_ORDER + 1], |s| s.order_counts);
+    let fragmentation_pct = compute_fragmentation(&order_counts);
+
+    // Per-CPU frame cache diagnostics.
+    let pcpu = frame::pcpu_cache_stats();
+
+    MemoryInfo {
+        total_bytes,
+        free_bytes,
+        used_bytes,
+        total_frames,
+        free_frames,
+        order_counts,
+        fragmentation_pct,
+        pcpu_cache_hits: pcpu.cache_hits,
+        pcpu_cache_misses: pcpu.cache_misses,
+        pcpu_refill_ops: pcpu.refill_ops,
+        pcpu_drain_ops: pcpu.drain_ops,
+        zero_pool_count,
+        zero_pool_hits,
+        zero_pool_misses,
+        heap_slab_allocs: hs.slab_allocs,
+        heap_slab_frees: hs.slab_frees,
+        heap_large_allocs: hs.large_allocs,
+        heap_alloc_failures: hs.alloc_failures,
+        swap_total_bytes: swap_total,
+        swap_used_bytes: swap_used,
+        swap_device_count: swap_devices,
+        kswapd_running,
+        kswapd_reclaim_cycles,
+        kswapd_total_reclaimed,
+        oom_events: oom::oom_event_count(),
+        oom_kills: oom::oom_kill_count(),
+        tracked_address_spaces,
+    }
+}
+
+/// Compute a fragmentation index (0–100) from buddy order counts.
+///
+/// The index is the complement of the weighted average order:
+///   `100 − (weighted_avg_order / max_order × 100)`
+///
+/// Each block of order *i* contributes `2^i` frames as its weight,
+/// so the average naturally reflects where the bulk of free memory
+/// lives in the order spectrum.
+///
+/// - 0: all free memory in max-order blocks (no fragmentation).
+/// - 100: all free memory in order-0 blocks (maximum fragmentation).
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn compute_fragmentation(order_counts: &[usize; frame::BUDDY_MAX_ORDER + 1]) -> u8 {
+    let max_order = frame::BUDDY_MAX_ORDER;
+    let mut total_frames: u64 = 0;
+    let mut weighted_order_sum: u64 = 0;
+
+    for (order, &count) in order_counts.iter().enumerate() {
+        let frames_per_block = 1u64 << order;
+        let frames = (count as u64).saturating_mul(frames_per_block);
+        total_frames = total_frames.saturating_add(frames);
+        // Weight: order × frames-in-this-order.
+        weighted_order_sum =
+            weighted_order_sum.saturating_add((order as u64).saturating_mul(frames));
+    }
+
+    if total_frames == 0 {
+        return 0; // No free memory — nothing to fragment.
+    }
+
+    // weighted_avg_order = weighted_order_sum / total_frames  (scaled ×100).
+    let avg_order_x100 = weighted_order_sum
+        .saturating_mul(100)
+        .checked_div(total_frames)
+        .unwrap_or(0);
+    let max_order_x100 = (max_order as u64).saturating_mul(100);
+
+    // Complement: 100 when avg=0, 0 when avg=max_order.
+    let frag = 100u64.saturating_sub(
+        avg_order_x100
+            .saturating_mul(100)
+            .checked_div(max_order_x100)
+            .unwrap_or(0),
+    );
+
+    // Clamp to u8 (always in 0..=100).
+    frag.min(100) as u8
+}
+
+// ---------------------------------------------------------------------------
+// Memory pressure scoring
+// ---------------------------------------------------------------------------
+
+/// Memory pressure level (severity classification).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PressureLevel {
+    /// Normal operation — plenty of headroom.
+    Low,
+    /// Moderate pressure — allocations still succeeding but headroom shrinking.
+    Moderate,
+    /// High pressure — approaching OOM, kswapd should be active.
+    High,
+    /// Critical — OOM imminent or already occurring.
+    Critical,
+}
+
+/// Aggregated memory pressure assessment.
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryPressure {
+    /// Overall pressure score (0 = idle, 100 = OOM).
+    pub score: u8,
+    /// Classified pressure level.
+    pub level: PressureLevel,
+    /// Component scores (for detailed breakdown):
+    /// - Physical memory usage (0-100).
+    pub phys_score: u8,
+    /// - Fragmentation severity (0-100).
+    pub frag_score: u8,
+    /// - Heap pressure (failures relative to allocs).
+    pub heap_score: u8,
+    /// - Swap usage (0-100, 0 if no swap configured).
+    pub swap_score: u8,
+}
+
+/// Compute the current memory pressure assessment.
+///
+/// Combines multiple signals into a single score:
+/// - Physical memory usage (weight: 40%)
+/// - Fragmentation (weight: 20%)
+/// - Heap OOM failures (weight: 25%)
+/// - Swap usage (weight: 15%)
+///
+/// The score is 0 (no pressure) to 100 (critical/OOM).
+///
+/// Takes blocking locks via [`memory_info()`]; **not** callable from an
+/// interrupt or softirq.  Use [`try_memory_pressure()`] there.
+#[must_use]
+pub fn memory_pressure() -> MemoryPressure {
+    pressure_from_info(&memory_info())
+}
+
+/// Non-blocking variant of [`memory_pressure()`], for the timer softirq.
+///
+/// Returns `None` when [`try_memory_info()`] cannot get a consistent snapshot
+/// without waiting.  See that function for why blocking here is not merely
+/// slow but fatal.
+#[must_use]
+pub fn try_memory_pressure() -> Option<MemoryPressure> {
+    Some(pressure_from_info(&try_memory_info()?))
+}
+
+/// The pressure scoring itself: a pure function of an already-collected
+/// [`MemoryInfo`], so the blocking and non-blocking entry points score
+/// identically by construction rather than by two copies agreeing.
+///
+/// Public because a caller that already holds a snapshot — the metrics
+/// sampler does — should score *that* snapshot rather than take every lock a
+/// second time to collect a second one.  Taking no locks itself, it is safe
+/// from any context.
+#[must_use]
+#[allow(clippy::arithmetic_side_effects)]
+pub fn pressure_from_info(info: &MemoryInfo) -> MemoryPressure {
+    // --- Physical memory usage score (0-100) ---
+    // 0% used → score 0; 100% used → score 100.
+    // Non-linear: >90% used counts heavily.
+    let phys_pct = if info.total_bytes > 0 {
+        (info.used_bytes.saturating_mul(100) / info.total_bytes) as u8
+    } else {
+        0
+    };
+    // Apply non-linear curve: below 70% = mild, 70-90% = moderate, >90% = severe.
+    let phys_score = match phys_pct {
+        0..=70 => phys_pct / 2,              // 0-35 range
+        71..=90 => 35 + (phys_pct - 70) * 2, // 35-75 range
+        _ => 75 + (phys_pct - 90) * 2,       // 75-95+ range
+    };
+    let phys_score = phys_score.min(100);
+
+    // --- Fragmentation score (directly from compute_fragmentation) ---
+    let frag_score = info.fragmentation_pct;
+
+    // --- Heap failure pressure ---
+    // If heap allocation failures are occurring, that's serious pressure.
+    let total_heap_allocs = info.heap_slab_allocs.saturating_add(info.heap_large_allocs);
+    let heap_score = if total_heap_allocs > 0 {
+        // Failure rate: failures / total_allocs × 100.
+        let failure_rate = info
+            .heap_alloc_failures
+            .saturating_mul(1000)
+            .checked_div(total_heap_allocs)
+            .unwrap_or(0);
+        // Even 0.1% failures is serious.
+        (failure_rate.min(100)) as u8
+    } else {
+        0
+    };
+
+    // --- Swap usage score ---
+    let swap_score = if info.swap_total_bytes > 0 {
+        ((info.swap_used_bytes.saturating_mul(100)) / info.swap_total_bytes) as u8
+    } else {
+        0 // No swap configured — don't penalize.
+    };
+
+    // --- Weighted combination ---
+    // Phys: 40%, Frag: 20%, Heap: 25%, Swap: 15%.
+    let weighted = (u16::from(phys_score) * 40
+        + u16::from(frag_score) * 20
+        + u16::from(heap_score) * 25
+        + u16::from(swap_score) * 15)
+        / 100;
+    let score = (weighted as u8).min(100);
+
+    let level = match score {
+        0..=25 => PressureLevel::Low,
+        26..=50 => PressureLevel::Moderate,
+        51..=75 => PressureLevel::High,
+        _ => PressureLevel::Critical,
+    };
+
+    MemoryPressure {
+        score,
+        level,
+        phys_score,
+        frag_score,
+        heap_score,
+        swap_score,
+    }
+}

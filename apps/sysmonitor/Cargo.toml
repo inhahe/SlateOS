@@ -1,0 +1,10 @@
+[package]
+name = "sysmonitor"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS System Monitor — graphical dashboard for CPU, memory, disk, network, and process monitoring"
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

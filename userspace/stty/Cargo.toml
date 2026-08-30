@@ -1,0 +1,9 @@
+[package]
+name = "stty"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS terminal settings utility"
+[dependencies]
+
+[lints]
+workspace = true

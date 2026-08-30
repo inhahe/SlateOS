@@ -1,0 +1,7 @@
+[package]
+name = "cryptsetup-cli"
+version = "0.1.0"
+edition = "2024"
+
+[build-dependencies]
+embed-manifest = "1.5.0"

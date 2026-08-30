@@ -1,0 +1,1395 @@
+should use an actual sophisticated ai planning and execution program for making this, i forget what they're called. ask around what the best such program is for a gigantic project that will take years to complete.
+
+^^ ai says ai frameworks aren't for this purpose. just use an .md roadmap or Github Projects or Linear.
+then it said actually, for an ai making it, all i need is a structured document:
+
+"  1. What to build next (prioritized)
+        2. What's in progress
+        3. What's done
+        4. Dependencies between tasks (can't build the GUI until the compositor works, can't build the compositor until
+        the framebuffer driver works)
+
+        Your `design.txt` is already half of this — it describes *what* to build. What's missing is the *ordering and
+        status tracking*. A simple markdown file or even a section in design.txt that lists phases with checkboxes would
+        serve you fine until the project grows to multiple contributor"
+
+
+
+suggest to the AI (maybe in claude.md) that he review already existing and successful source code for various things to see efficient ways to implement things, and/or use them as the basis and modify them. Maybe specifically tell him that for a few things too.
+The one problem with making the OS with AI is that someone (shamoe) told me that AI isn't particularly good at making performant code. The above mitigation may help that. Another option is to allow a lot of pull requests by people optimizing various things. Probably let the AI review them and test them first. Not all of the OS really needs to be very performant, I'm not sure what % of the OS really does. And maybe that person just didn't tell the AI to optimize the code as much as possible and let it do it incrementally in many passes?
+
+^^
+"Partly true. AI tends to write correct-but-naive code. Mitigations you listed
+are good (review existing code, allow optimization PRs). Additional: write
+benchmarks first, then let AI optimize against them. AI is actually quite good
+at optimization when it has a concrete target to beat.
+"
+
+Make sure none of our design is tainted by standard/popular but outdated practices or tuning values.
+
+Ask Claude what good ideas BeOS and Plan 9 had.
+
+"BeOS good ideas:
+- Pervasive multithreading — every window got its own thread, so one app's
+  heavy computation never froze its UI. Most OSes still don't enforce this.
+- BFS (Be File System) had rich queryable metadata built in — you could search
+  files by any attribute (artist, bitrate, email sender) as fast as a database
+  query. This is the database-as-filesystem idea you mentioned.
+- Real-time media prioritization — audio and video streams got guaranteed
+  scheduling priority, so media playback never stuttered even under load.
+- Very fast boot (under 10 seconds on 1990s hardware).
+- Clean, consistent API — since everything was designed together rather than
+  accumulated over decades, the API was coherent.
+"
+
+"Plan 9 good ideas:
+- "Everything is a file" taken seriously — not just devices, but network
+  connections, process state, window contents, even remote machines are accessed
+  through the filesystem namespace. Makes tooling composable.
+- Per-process namespaces — each process can have its own view of the filesystem.
+  One process sees /net as the local network stack, another sees /net as a remote
+  machine's network. This is the ancestor of Linux namespaces/containers.
+- 9P protocol — a simple protocol for accessing all these "files" that works
+  identically over local access and network. This eliminated the distinction
+  between local and remote resources.
+- Factotum — authentication handled by a single separate process. Programs
+  never touch passwords or keys directly, they delegate to factotum. Much
+  cleaner than every program implementing its own auth.
+- UTF-8 — Plan 9 is where UTF-8 was invented (by Ken Thompson and Rob Pike).
+"
+
+^^ don't make everything a file, pick and choose. "Your IPC design (channels for structured messages,
+        byte streams for actual byte streams) is better than forcing everything through file read/write."
+
+per-process namespaces: " They're complementary — namespaces for coarse isolation (hide entire directories), capabilities for fine-grained
+        access control within what's visible." the namespaces prevent processes from even seeing what exists.
+
+At what point in development should we make the API functions stable/freeze them? It depends on how many users use our OS (and why) among other things.
+
+"Phased approach:
+1. Internal development: API changes freely
+2. Alpha (developers only): API versioned, breaking changes allowed with notice
+3. Beta (early adopters): API v1 declared, breaking changes only in new version
+4. Release: versioned syscall tables, old versions maintained
+"
+
+Microkernal, maybe with some drivers working in the kernel. Some other performance-critical stuff might move into the kernel too, maybe after it's been time-tested. Networking?
+
+^^ don't put networking in the kernel.
+
+Option for drivers to be compiled with ada/spark for proven safety, Rust communicates with them through FFI.
+Sandboxed drivers using IOMMU (available on all modern systems, but sometimes disabled by default in the BIOS) are much faster than userspace drivers, though not as good in some other ways - provide them as an option for when the 5%-15% speedup matters.
+we should probably ask the user to enable IOMMU in their BIOS if we detect that it's disabled (mention that it might not be there if the system is older than XX years), or maybe only do this when the system is set to use an IOMMU driver
+
+SPARK proves the driver logic is correct: no buffer overflows, no integer overflows, no invalid state transitions. The driver code does what its specification says.
+IOMMU sandboxing constrains what the hardware device can do via DMA. Even if the driver is perfectly correct, the hardware itself could be malicious (think a compromised USB device or PCIe card) or have firmware bugs that cause it  to DMA to unexpected addresses. The IOMMU prevents th
+
+Spark and IOMMU can be combined. 
+
+So the layers would be:
+
+  Application
+      ↓ syscall
+  Rust kernel (safe code)
+      ↓ FFI call (near-zero cost)
+  SPARK driver logic (proven correct, runs in kernel space)
+      ↓ programs the device
+  Hardware device
+      ↓ DMA (device accesses RAM)
+  IOMMU (restricts which RAM the device can touch)
+      ↓ allowed DMA only
+  Physical RAM
+
+Should we support the text-based linux driver specification tree or whatever it's called? does that give us easy support for more hardware?
+
+^^" For a desktop OS targeting x86: you don't need DeviceTree. x86 uses ACPI for
+hardware discovery, and PCIe devices self-identify. Supporting ACPI is
+mandatory.
+"
+
+"What would give you easy support for more hardware: reusing existing Linux
+driver code. The Linux kernel has the largest collection of hardware drivers
+ever assembled. Porting individual Linux drivers to your kernel (adapting them
+to your driver API) is the pragmatic path. Some OSes (like Google's Fuchsia)
+have done this selectively.
+"
+
+Many specialized syscalls (Linux has ~450) — each operation gets its own syscall number. Simple to use, but the interface grows over time and accumulates legacy.
+Specialized syscalls are faster than fewer syscalls with more parameters, and most programmers never need to touchsyscalls because they're abstracted away.
+
+io_uring style submission queues — userspace writes requests into a shared ring buffer, kernel drains it. Avoids syscall overhead entirely for batched I/O. 
+Give the programmer the option to use the ring buffer or a normal syscall for most syscalls, some operations, like fork, mmap, and exec may not work well with io_uring.
+The purpose of io_uring seems to be to speed up batch i/o operations.
+
+Make our own API, but make a POSIX layer for compatibility with thousands of applications.
+
+Scheduling:
+
+  - Priority-based with preemption levels (real-time OSes, Windows) — fixed priority levels, highest priority runnable
+  thread always runs. Predictable latency, but priority inversion is a problem.
+
+OR
+
+  - BFS / MuQSS (Con Kolivas's schedulers) — optimized for desktop interactivity over throughput. Simpler, arguably
+  better for < 16 cores.
+
+BFS/MuQ5S also support priority levels, many more than Windows.
+
+Don't use CFS, it was designed for hundreds of CPUs with thousands of threads.
+
+If possible, for the first scheduling option, make it so that the user can change the priority level of a process while it's running, pause it, or resume it.
+Fix the priority inversion problem with priority inheritance.
+
+Per-CPU queueing. 
+
+Would it be possible to abstract out the memory management system so that users can select a workload type for optimization and memory management will still work for all programs?
+
+"
+ANSWER: Yes, but not by recompiling the kernel. The right approach is runtime-
+tunable parameters exposed via sysctl-like interface (files in a /sys-like
+filesystem, or dedicated syscalls). Linux already does this extensively — you
+can tune dozens of memory management parameters without recompiling.
+
+What genuinely requires recompilation: page size, some allocator structural
+choices. Everything else (thresholds, ratios, timing parameters) can be runtime
+tunable.
+
+Workload profiles would just be named presets of these runtime parameters:
+- "Desktop": balanced, favor interactivity
+- "Database": large pages preferred, aggressive readahead, pin hot pages
+- "Development": fast compilation, many short-lived processes
+- "Gaming": minimize latency, favor foreground process heavily
+
+The user selects a profile, the OS applies the preset values, no recompile
+needed. Power users can tune individual parameters.
+"
+
+
+^^ see scheduler.txt. also, 
+
+"
+Also, your document lists these two options as either/or, but they're not
+mutually exclusive:
+- Priority levels: yes, you need these regardless
+- Preemption: yes, you need this regardless
+- The real choice is the fairness algorithm and queue structure
+"
+
+Paging model:
+
+  - 4 KiB pages (standard on x86) — fine granularity, less waste, but huge page tables for large address spaces and TLB
+  pressure.
+  - Transparent huge pages (2 MiB / 1 GiB) — fewer TLB misses, but internal fragmentation and memory compaction
+  overhead.
+  - Variable page sizes — some architectures support this, but it massively complicates the page allocator.
+
+(More said way farther down in 'design decisions.txt')
+
+Linux's Transparent Huge Pages (THP) is essentially variable page sizes bolted onto a fixed-page allocator, and it's
+been a source of performance unpredictability for years — sometimes THP helps enormously, sometimes the background
+compaction work to assemble huge pages causes latency spikes.
+The only major OS using Transparent Huge Pages — the kernel automatically promotes groups of contiguous 4 KiB pages
+into 2 MiB pages in the background, without application involvement. As mentioned earlier, this helps when it works
+but causes latency spikes from the background compaction work.
+
+Our OS should use 16kb pages instead of 4kb. Wastes a trivial amount of ram with a speed tradeoff, 4kb is more legacy. 
+
+Need to define swap tuning parameters
+
+"
+Key swap parameters to expose:
+- Swappiness (how aggressively to swap vs. drop page cache) — Linux default 60
+  is too aggressive for desktop, 10-20 is better for desktop with enough RAM
+- Swap priority (if multiple swap devices)
+- Minimum free memory threshold (when to start swapping)
+- Whether to compress pages in memory before swapping (zswap/zram — highly
+  recommended for desktop, trading CPU for I/O reduction)
+"
+
+Have an alloc function where the program can allocate X amount of memory and it won't fail as long as the user has that much memory plus space on the filesystem, because the OS swaps the rest? (lazily on write)
+
+"
+PUSHBACK: This is what Linux already does by default (overcommit). The problem
+is well-documented: programs allocate more virtual memory than physical RAM +
+swap can back, everything works fine until programs actually use all that
+memory, and then the OOM killer starts killing processes to free memory. The
+promise of "won't fail" is a lie — it fails later, catastrophically, instead of
+failing early, gracefully.
+
+Better approach: let programs request "committed" memory (guaranteed to be
+backed by physical RAM + swap) or "lazy" memory (may fail on access if
+overcommitted). Default to committed for reliability. Programs that know what
+they're doing (like databases that manage their own memory) can opt into lazy.
+"
+
+Also programs can have a stack that won't run out and doesn't have to be given a size limit on startup - because when it runs out, the cpu exception called calls an allocator that gives it more space - option to have the stack even use storage space like the alloc function
+
+"
+PARTIAL PUSHBACK: Automatically growing stacks via page fault handlers is a
+real technique (Go does this, for example). But "won't run out" is dangerous —
+a program with infinite recursion would consume all available memory before
+crashing. You need a configurable maximum (default 8 MiB like Linux, or 64 MiB
+if generous), but allow programs to request more or set no limit if they know
+what they're doing.
+
+The page-fault-based growth mechanism is good — allocate a large virtual address
+range for the stack but only commit physical pages as they're touched. This is
+how Linux already handles stacks. The key detail: you need a guard page at the
+end of the stack that triggers a segfault on access, so stack overflow is a
+clean crash rather than silently corrupting the heap.
+"
+
+Filesystem:
+
+  - Inode-based (ext4, XFS) — separate metadata structure pointing to data blocks. Battle-tested, well understood.
+  - Copy-on-write / B-tree (Btrfs, ZFS) — never overwrites data in place, writes new copies. Gets you snapshots and
+  checksums for free, but fragmentation and complexity.
+  - Log-structured (F2FS, LFS) — all writes are sequential appends. Great for flash storage, but garbage collection is
+  tricky.
+  - Database-as-filesystem (WinFS, never shipped; BeFS was partially this) — rich metadata and queries built into the
+  filesystem.
+
+  Also: do you enforce a filesystem hierarchy (/usr/bin/...) or let it be flat with tags/attributes?
+
+Support Inode-based, support copy-on-write in case the user wants efficient snapshots, support log-structured for flash - F2FS was developde by Samsung and is free, consider developing a database filesystem option
+
+"PUSHBACK on scope: Supporting three filesystem types plus considering a fourth
+is enormous. For initial development, pick ONE primary filesystem. Recommendation:
+use an existing well-tested filesystem (ext4 or XFS via ported code) as the
+default, and add others later.
+
+Don't write your own filesystem from scratch initially — filesystem bugs cause
+data loss, and existing filesystems have decades of battle-testing.
+"
+
+Would be nice to support ext4, NTFS, FAT32, etc. too for reading from and writing to drives from Linux and Windows. FAT16 or FAT32, whichever is the one used for flash drives, is a must. Oh, and we of course have to support ISO for optical discs. 
+
+Reuse ext4 or xfs code for inode-based, btrfs/zfs code for copy-on-write? Support those filesystems exactly, and/or make our own modifications?
+
+Filesystem hierarchy, tags are good for a public library of files, but I don't see a need for them in an OS, though they may be useful for the database-as-filesystem option.
+
+/ used as path splitter
+
+what characters should be allowed for filenames? probably all supported by linux and windows for compatibility
+
+"Allow everything except: / (path separator) and the null byte. That's what
+Linux does. Let the POSIX/Windows compatibility layers enforce additional
+restrictions (Windows disallows \, :, *, ?, ", <, >, |) when interacting with
+those ecosystems.
+"
+
+Case-sensitive or case-insensitive? case-sensitive is less clownish, but case-insensitive makes it easier to type in filenames, and windows users might expect it
+
+"
+RECOMMENDATION: Case-sensitive filesystem, case-insensitive user-facing tools.
+
+Case-sensitive is technically cleaner and simpler to implement (byte-for-byte
+comparison). Case-insensitive is a nightmare with Unicode (Turkish 'i' problem:
+uppercase of 'i' depends on locale).
+
+Make the filesystem case-sensitive (like Linux), but have the shell, file
+picker, and tab-completion do case-insensitive matching by default. Best of
+both worlds — correct semantics underneath, friendly behavior on top. This is
+what macOS effectively does (APFS is case-insensitive by default but supports
+case-sensitive mode).
+
+Actually, scratch that — macOS's case-insensitive APFS causes real problems for
+developers (two files with names differing only in case can't coexist). Go with
+case-sensitive. Users who want to type "downloads" instead of "Downloads" get
+that from the shell's tab completion, not from the filesystem.
+
+"
+
+Files generally have filename extensions but don't have to, filename extension determines what app loads it by default, user can (in an easily discoverable way) change what program loads an extension (select from any installed program that's registered to be able to load that file extension, or select from any installed program, or select a particular executable in the filesystem) and also can provide arguments to program including variables
+When the same application controls multiple file types, it should be allowed to specify different icons for each extension.  I don't know if they currently can do that since they don't seem to do it.  For example, if winamp controls video and audio files, I don't want both video and audio files to have the same icon. 
+if a program that handles a specific file type is uninstalled, switch the program associated with that file type to the previous program that was used for that filetype 
+
+^^ no, don't have file extensions first. claude gave good reasons in design-review.txt.
+
+Make the file type come before the name rather than after??
+example
+
+exec.helloworld
+mod.hunter
+zip.partitionmagic
+
+that way 
+ -the most general information comes first, as with most other protocols (like file paths, url's, namespaces..)
+ -listing files alphabetically automatically groups by file type
+ -a file listing with consecutive filenames of the same type has both the base names and extensions aligned, e.g.     
+    mod.hunter 
+    mod.ele-plan
+    mod.wasted
+  vs
+    hunter.mod
+    ele-plan.mod
+    wasted.mod  
+  the latter being harder to read, as well as less pretty, because the extension can start at any column.
+
+disadvantages:
+  -looks ugly
+  -filenames not cross-compatible - solution: tools to autorename files to one format or the other for downloading/copying to/from other OSs - PITA - other solution: support both  formats, but then our odd format will just never be used except in our OSs own files
+  -filename completion works slightly less good - e.g., many files will start with .zip, so you'll have to type at least .zip. before you can start your filename completion
+
+
+What will our extensions be for static libraries, dynamic link libraries, and executables? not so, lib, dll, or exe since it won't be compatible with those. might need an extension for packages too.
+
+Hooks on various changes to files and directories so that programs can do something whenever there's a change (allowing a program to create a hook on something should probably be a capability - hooks can slow the system down or even make things not work right)
+
+"
+The hook system you've described is very comprehensive, which is good for
+capability, but PUSHBACK on having the kernel implement all of these directly.
+
+Many of these hooks (especially the per-program activity hooks) would be better
+implemented as a debugging/tracing subsystem (like Linux's ftrace/perf/eBPF)
+rather than a general-purpose hook API. Reason: if 10 programs each install
+hooks on file creation, every file creation now triggers 10 callbacks. This
+can severely impact performance for operations that happen thousands of times
+per second.
+
+Recommendation:
+- Filesystem change notifications (inotify equivalent): yes, kernel-level,
+  essential
+- Process/program activity hooks: implement as an optional tracing subsystem
+  that's off by default, enabled per-capability
+- Make hooks asynchronous (notification queue, not synchronous callback) so a
+  slow hook handler can't stall the operation being hooked
+"
+
+"    A few hooks might need to be synchronous — for example, if you want a security tool to be able to *reject* a
+        file creation or *block* a network connection before it happens. Those would be a special "interceptor"
+        capability, more restricted than regular notification hooks, with a strict timeout (if the interceptor doesn't
+        respond within say 100ms, the operation proceeds).
+"
+
+
+journaling? ability of programs to group any writes into an atomic write?
+
+duduplication? as an option?
+
+file/dir metadata:
+  hash? (not on dirs) (useful, but takes time. optional? or should the hashes go on data blocks? could be both - hash of file is just a hash of all its data blocks hashes)
+  time created
+  last time read
+  last time written
+  size
+  directory it belongs to 
+  arbitrary string/comment? what's the max size?
+  required capabilities list (should be enum values)
+  ask claude what else is useful
+  
+"Your list is good. Additions:
+- Owner (user/group) — needed for permissions
+- Capability requirements — you already have this
+- Hash: compute on write, store in metadata, verify on read. Per-block hashing
+  is better (detects which part is corrupt, enables dedup). Per-file hash can
+  be computed from block hashes as you suggested.
+- "last time read" (atime): CAUTION — updating atime on every read is a major
+  performance hit (every read becomes a read + write). Linux defaults to
+  "relatime" (only update atime if it's older than mtime, or once per day).
+  Do the same.
+- Arbitrary string/comment: useful, max size maybe 64 KiB? Stored in extended
+  attributes. But this feature is rarely used in practice — user-facing tagging
+  is better done at the GUI/search-index level, not in filesystem metadata.
+- Consider: immutable flag (file can't be modified or deleted until flag is
+  cleared by a privileged user), append-only flag (for log files).
+"
+
+IPC model:
+
+Don't use file descriptors for sockets, "read/write work, but you also need sendmsg/recvmsg with complex msghdr structures for ancillary data
+  (passing file descriptors, getting sender credentials). The byte stream abstraction leaks everywhere."
+Use channels like Fuschia? (message-passing with capability transfer as the primary IPC)
+Support shared memory too.
+Pipe support (one-way and two-way?)
+
+Yes, use channels. Allow one-way pipes but not two-way, per design-review.txt.
+
+Support an epoll equivalent, let an epoll request provide a list of any type of thing you might want to wait for - including things that are made inside the app, or should we have another abstraction for supporting combining waiting for different things in the same app (for when the app uses external libraries)
+
+or..
+
+the normal poll method passes a pointer to an array of objects to listen for to the os.  the os modifies the array to reflect what's available and what's not.   this is inefficient because 
+
+a) the os has to scan the array to assimilate it internally however it's used
+b) the application has to scan the array searching for sockets with information pending.
+
+how it should be done is that the OS has register and unregister functions for registering and unregistering individual fd's from poll objects, and a function to poll that poll object.
+
+when you register an fd, the os adds a reference to that poll object to whatever info it automatically accesses for that fd when it receives input from the network interface, filesystem or whatever.  it then adds that fd with the appropriate flags to a list it's building for the particular poll object.  i don't know how many it would add before it returns the list, but the same question applies to the poll method.  alternatively it could return only one fd, or the application could pass it a minimum time in addition to the timeout parameter. 
+in case multiple poll objects wait on the same fd, the os could have a list of poll fd's for each fd, instead of just one.  but having multiple poll objects wait on the same fd might be disallowed instead because it doesn't make a lot of sense.
+
+in addition to the fd the register command should accept an arbitrary int, which is included in the return list, so that when the application reads the returned list it doesn't have to look up its relevant info for a given fd with a hashtable.  the int could be a pointer to an object or an index to an array, or eve George Washington's birthday if the programmer wishes. 
+
+**i looked up iocp after writhing this and this seems to be precisely what iocp does, including the arbitrary int feature
+
+"our IOCP-like design (lines 181-193) is correct. You independently reinvented
+IOCP/io_uring's completion-based model, which is the right approach. The
+register/unregister model with an arbitrary user-data integer is exactly what
+epoll (with EPOLL_CTL_ADD/DEL) and IOCP do.
+
+One refinement: don't limit it to file descriptors. Allow waiting on:
+- I/O completion
+- Timers
+- Process/thread exit
+- Signals/events
+- Semaphores/mutexes
+- Channel messages
+"
+
+Some way for programs to easily communicate with each other using names to access them by and some common format for passing information and commands, for example COM and DDE
+
+"
+COM (Component Object Model): A much more sophisticated system. Programs
+expose "objects" with defined interfaces. Other programs can create those
+objects and call methods on them, even across process boundaries or across
+the network (DCOM). It's language-agnostic — a Python program can call methods
+on a C++ COM object.
+
+COM is powerful but notoriously complex (reference counting, apartment threading
+models, registry-based class factories, IDL interface definitions).
+
+For your OS: implement a simpler service discovery + RPC mechanism. Programs
+register named services with defined interfaces (think D-Bus on Linux, but
+better designed). Other programs discover services by name, get a channel
+handle, and make typed RPC calls. Use your channel IPC for transport.
+
+D-Bus is the closest Linux equivalent and is used everywhere (desktop
+environments, system services, applications). Its problems: slow (message
+serialization overhead), XML-based introspection, complex wire protocol. You
+can do better with a simpler binary protocol and tighter integration with your
+channel IPC.
+"
+
+Define a standard for library event loops that allows the programmer to easily combine different event loops. Maybe the above application-level epoll function will supply this.
+
+Ai says this is a good idea, and 
+"The key API: "give me the underlying waitable handle so I can add it to my
+event loop." If every library exposes this, any event loop can drive any
+library."
+
+Find out exactly how IPC works, what the different strategies are, what Windows, macOS and Linux use, what optimizations people have invented, what's fastest and best
+
+Security:
+
+  And what about a combination of DAC and cababilities? It should basically be: There are different users, each with
+  their own capability set, and a user can't create another user with a capability that it itself doesn't have, and
+  user capabilities include access to specific files and directories. But then that means a user has to have thousands
+  of capabilities, one for each file.. but then, we could just have named user capabilities and groups of named
+  capabilities that we can assign to files and directories and a user with the same capability can access that file or
+  directory.
+
+implement this? file:///D:/soundshop/ccs05-cfi.pdf - ask Claude to read it (may have to convert it a text format first?) and tell me if it's a good system, how effective it is, if it's compatible with my OS plan, what limitations it would incur, and what the performance costs would be.
+
+"  ## Should you implement it?
+
+        **Yes, but not the way this paper describes.** This paper is 21 years old. The approach it describes — binary
+        rewriting with software ID checks — has been superseded by much better implementations:
+
+        **Hardware CFI (nearly free performance):**
+        - **Intel CET** (Control-flow Enforcement Technology, available since 11th gen ~2020) — hardware shadow call
+        stack and indirect branch tracking. The CPU itself enforces that returns go to actual call sites and indirect
+        jumps go to valid targets. Overhead: **< 1%**
+        - **ARM BTI + PAC** (Branch Target Identification + Pointer Authentication, available on ARMv8.3+) — landing pad
+        instructions at valid branch targets, cryptographic signing of return addresses. Overhead: **< 2%**
+
+        **Compiler-based CFI (low overhead, no special hardware):**
+        - **LLVM/Clang -fsanitize=cfi** — the compiler inserts the checks at compile time based on type information,
+        much more precise than the binary-rewriting approach in the paper. Overhead: **1-5%** depending on which checks
+        are enabled.
+
+        **What this means for your OS:**
+
+        1. **For your Rust kernel and drivers:** Rust already prevents most of the memory corruption attacks that CFI
+        guards against (buffer overflows, use-after-free, etc.). CFI adds value at the boundaries — `unsafe` Rust code,
+        FFI calls to SPARK drivers, and any C code you port.
+
+        2. **For user applications:** CFI is most valuable for C/C++ programs (including anything ported via your POSIX
+        layer). Enable LLVM CFI in your toolchain as a default compiler flag.
+
+        3. **Hardware CFI support:** Your kernel should enable Intel CET and ARM BTI/PAC when the hardware supports it.
+        This is essentially free and protects all code regardless of language. This is a few hundred lines of kernel
+        code to set up the hardware feature — not a major effort.
+
+        **Concrete recommendation:**
+        - Enable Intel CET (shadow stack + indirect branch tracking) in your kernel on supporting hardware — < 1% cost
+        - Enable LLVM CFI as a default compiler flag for C/C++ code in your toolchain — 1-5% cost
+        - Rust code already gets most of the protection from the language itself
+        - Don't implement the 2005 binary-rewriting approach from this paper — it's obsoleted by the above" 
+
+Users can set capabilities on individual apps and services/executables, too. Obviously, a user can't give a program a capability he himself doesn't have.
+
+Capability-based syscalls for extra protection? They work slightly differently from user/program capabilities, which can have groups, etc., but program capabilities determine the program's syscall capabilities. 
+We should have a way for programs to lack certain capabilitise by default, and be able to ask the user for them when they install or when they run.
+Capability-based users and apps. User capability groups, too, which directories and files can be tagged with.
+Problem: How to give a user or process access to, e.g., the whole filesystem except for specific files/directories that have a higher security rank/key?
+Solution: file/directory capabilities compose via intersection (AND), meaning that if a file or directory specifies more than one capability, all of them are required by a user or porocess to access it.
+capabilities to listen on certain ports or connect to certain domains can also be done this way
+We probably don't need to allow a separate list for files and directories that's OR-composed. 
+If a file or directory has a capability group in its list, do the individual capabilities in the group compose via AND or OR? I think OR is right, that's more in-line with the intention of making the group in the first place and how it's used.
+
+  The interesting question is capability granting. How does a process acquire the system capability? Some options:
+  - Statically at launch time (like Unix setuid — the binary's metadata says "this process starts with system")
+  - Dynamically via a broker (the process asks a privileged service "may I have system?" and gets it if policy allows)
+  - Temporarily scoped (the process gets system for one operation, then it's revoked)
+When the app asks a user to grant it some capability, it should pass a parameter to the request that's passed along to the user security dialog that tells the user what that particular capability is being asked for for
+
+Capabilities: (some of these are high security risks, should be taken seriously)
+ RAM limits HD limits, time limits, CPU limits (% of capacity or CPU-time)?
+ program can install on/affect another user (which users? how do we define that?)
+ any capability group the user defines
+ any capability the user put on files and directories in the filesystem for read, write, change, create
+ capalities to place monitor hooks on various os activities - hooks listed below
+ capabilities to access things about other programs - how do we make them per-program? i guess have the capability requirements attached to the programs too, like with files and dirs
+   read memory 
+   write memory
+   read network traffic to/from
+   change network traffic to/from
+   communicate with  
+     COM-like thing
+     sharing memory
+     IPC
+     signals (unless signals are just COM commands)
+   automate (emulate mouse clicks, keyboard input)
+   hooks on things they do (some of these could seriously slow them down)
+     hooks listed farther down
+     open, close, create, delete, change, read, change metadata of a file or dir
+     create a hook
+     create, delete, modify user
+     load a library
+     new inbound socket
+     new outbound socket
+     write to/read from a socket
+     listen/stop listening on a port
+     launch another program
+     quit
+     restart (by service manager)
+     get priority level changed
+     get blocked (e.g. by a lock placed by another program)
+     get suspended
+     crash
+     lock something/unlock something
+     create/delete process/thread
+     automate another program
+     ipc with another program
+     share memory with another program
+     communicate with a driver 
+     create/delete a pipe
+     get launched (this would actually be a filesystem hook)
+     allocate/deallocate memory
+     call a particular syscall or uring buffer call
+   change global volume 
+   emit sound
+   emit system sound
+   show notification in notifictions pane
+   remove own entry from taskbar
+   show fullscreen
+   show always on top
+   
+"This is extremely comprehensive — almost too comprehensive. PUSHBACK on a few:
+
+- "RAM limits, HD limits, time limits, CPU limits" — Yes, but implement these
+  as cgroup-like resource controls, not as capability checks on every allocation.
+  A capability check on every malloc would be devastating for performance.
+  Instead: set resource limits at process launch, let the kernel enforce them.
+
+- "read memory / write memory" of other programs — This is essentially a
+  debugger API. Implement it as a debugging interface (like Linux's ptrace)
+  with capability requirements, not as a general-purpose IPC mechanism.
+
+- "automate (emulate mouse clicks, keyboard input)" — Accessibility depends on
+  this. Make sure your capability model doesn't make accessibility tools
+  impossible to use. Have a dedicated accessibility capability class.
+
+- "hooks on things they do" — As mentioned above, implement as a tracing
+  subsystem, not synchronous hooks. The list is very thorough (lines 247-271)
+  but if every event triggered synchronous capability-checked hooks, the system
+  would crawl.
+
+- "allocate/deallocate memory" as a hookable event — This happens millions of
+  times per second in a typical program. Even as an async notification, the
+  volume would be unmanageable. This should only be available in a specialized
+  profiling/tracing mode, not as a general hook.
+
+"
+
+Graphics:
+
+  Linux:
+  - Applications can submit GPU command buffers directly (Vulkan/OpenGL talk to the DRM kernel driver, bypassing the
+  compositor for rendering)
+  - The compositor only composites the final output — it takes each application's rendered buffer and combines them onto
+   the screen
+  - Fullscreen games can bypass the compositor entirely (DRM direct scanout — the app's buffer is displayed directly
+  with no compositing step)
+
+  Windows:
+  - Similar model. Applications submit GPU commands directly via the WDDM driver model
+  - DWM composites the final output
+  - Fullscreen "exclusive" mode historically bypassed DWM; modern Windows uses "fullscreen optimizations" that keep DWM
+  in the loop but detect single-app-fullscreen and optimize the composite to a no-op
+
+Probably do it like Linux and Windows.
+
+"Addition: define a standard 2D drawing API in the OS (like Skia/Cairo) so
+application developers don't all have to use raw GPU commands for basic UI.
+Vulkan/OpenGL/GPU compute for programs that need it, but a high-level 2D API
+for normal applications.
+"
+
+"
+        Skia is what Chrome, Android, Flutter, and LibreOffice use. It's the most battle-tested option. The main
+        Rust-native alternative is **tiny-skia** (software-only, simpler) or **vello** (GPU-accelerated, newer, from the
+        same team building Rust GUI toolkits). Worth evaluating vello since it's Rust-native and GPU-first."
+
+Init / service management:
+
+Probably something like systemd, it's necessary for ordering correctly with dependencies while allowing tasks to start up in parallel for faster boot and for monitoring services and restartin them after a crash, but do it better than Linux: text logs instead of binary, modularized--the init manager doesn't do tons of other things.
+
+  For your OS: You'll need a service manager. The core ideas from systemd — dependency-based parallel startup, socket
+  activation, automatic restart, cgroup resource limits — are genuinely good and worth adopting. What you can improve:
+
+Make only one or two ways to load programs on startup, not 5 or 6 and that may be hard to find like on Windows.
+We need two because our service manager is one way, and then we'll have some simple list of apps, etc. to load (with parameters, maybe commands passed to the shell)
+If we allow a shell script to run on startup, that's automatically a third way because it could include loading programs
+But on the other hand, a shell script *could* be our 'simple list of apps, etc. to load"
+should be able to load them with the option to wait till the last one fully loads or to load immediately
+have an os api function to tell the os 'this app is now fully loaded' so we can load apps sequentially, maybe with a fallback of loading next app when no drive activity for X seconds?
+
+ABI stability:
+
+Don't change existing functions, if a function needs fixed in a way that breaks backward compatibility, make a new function, maybe only once the OS is actually out of development stage.
+
+Probably use versioned syscall tables - so after a long time when certain old syscalls are no longer used, we can remove them, but only remove a whole version table of them at a time, makes it simpler which apps are still supported vs which aren't.
+
+Package manager:
+
+Support binary and compile from source, but binary is preferred, binary with source included is even more preferred
+
+Dependencies work like Nix
+
+ Atomic updates and rollback:
+  This is where newer package managers shine. If an update breaks something:
+  - Traditional (apt, pacman) — you're partially updated, rolling back means manually downgrading packages. Messy.
+  - Atomic (Nix, OSTree/Silverblue) — the entire system state is versioned. An update either fully applies or doesn't.
+  Rolling back is switching a pointer to
+
+ Possible middle ground for your OS: Use content-addressed packages for isolation and rollback, but support dynamic
+  linking within a generation. Within one system generation, apps share .so files. A security update rebuilds the shared
+   library and creates a new generation where apps point to the new .so. You get fast security patches (rebuild one
+  library, not every dependent) with atomic rollback (switch generation pointer). The cost: you lose Nix's guarantee
+  that each package is fully self-describing, and you reintroduce the possibility of a shared library update breaking an
+   app (though rollback mitigates that).
+
+Nix has an exception mode where it stores libraries in the standard accepted directories, specifically for binary program installations, so security fixes can be done for those too
+
+Whenever Nix updates a library by making a whole new instance, it has to go through every program that uses it and change the source and recompile it. There must be a better way: have a middleman somewhere that the source can refer to and the middleman points to the latest update (I guess this change means we have to use dynamic link libraries?). But how is either way different from just replacing the entire library in place anyway? There's something I'm missing. Ask Claude.
+
+"How is this different from replacing the library in place? It's not,
+functionally. The Nix model's advantage is that the old version still exists on
+disk, so you can atomically switch the symlink back if the update breaks
+something. In-place replacement destroys the old version.
+
+Your proposed middle ground (content-addressed packages with shared dynamic
+libraries within a generation) is the right answer."
+
+How about a central repository for curated and tested apps, support for random user repos, and support for regular commercial/free applications from anyone
+or we could auto-curate using ratings and popularity, but that won't guarantee app safety, though the capabilities system might go far for that
+
+" Show the user what
+capabilities a package requests before installation (like Android app
+permissions).
+"
+
+Window manager/gui shell features:
+
+light and dark mode, maybe a few other color schemes available, maybe some alternative styles available
+gui api functions to retrieve current theme colors - should we define theme colors for things that only apply to the designs of apps, not to os functions, for apps to read with the api?
+can pin apps to taskbar on the left, all launched applications go to the right of those, with a small space and a divider between the two sections
+option to show app name along with app icon in taskbar
+taskbar and/or window titlebars support blurry transparency like the Windows aero theme
+optional icons on taskbar like Windows: clock, wifi, emoji input, keyboard layout, date and time, icons that TrayStatus Pro has plus icons for network drives and GPU usage, volume, can open sound mixer that includes volume for any running program (shows programs currently playing sound first)
+can drag and drop icons anywhere on the desktop (two options for desktop icon placement: snap to grid, or place freely), anywhere between pinned apps, desktop, and start menu entries
+can drag and reorder icons in pinned section and currently running apps section
+a system tray like on Windows
+  can drag and drop icons into and out of the system tray
+  apps have the option of starting in system tray or minimizing to system tray
+  can override any app to always start in system tray or in taskbar (or neither?) - have to have some way of distinguishing between the terminal program the program was launched from that it's attached to and the gui window that the program loads 
+a notification pane like on Windows - option for any notification to not show notifications from that application again
+support widgets? why not?
+ctrl+r to run a program, like on windows, supports dropdown with completion like on windows, but also shows most recent commands in dropdown.
+start menu, contains applications tree, settings icon, terminal, power off, logout, reboot, hibernate?, sleep, reboot in safe mode, reboot the OS but without rebooting the PC?, input field for finding and running apps
+should we allow programs to add context menu items? on windows, that makes loading the context menu really slow, but that's probably not necessary. but also, tons of programs add them and then the context menu gets all cluttured. at the very least, don't allow them to add them without asking the user.
+
+"ANSWER: Allow it, but with controls:
+- Programs must request a capability to add context menu items
+- Items load lazily (don't load the program's DLL just to show the menu)
+- Provide a settings page where users can see and disable individual context
+  menu extensions
+- Rate limit: if a context menu handler takes >200ms, skip it and show a
+  "loading..." entry
+"
+
+must have a model for dragging and dropping various objects from/to apps, from/to file explorer, etc. - windows' is called something like OBE, ask claude what it does
+
+"
+You're thinking of OLE (Object Linking and Embedding) drag and drop. It works
+by having a standard data transfer interface — the source provides data in
+multiple formats (text, HTML, file path, image, custom), the target picks the
+format it understands. Your OS needs a clipboard/drag-and-drop system that
+supports multiple data formats per operation.
+"
+
+need a better way to drag a file into a file explorer window than windows has, if you drag it onto a file row it opens it in the file, and there isn't necessarily any room anywhere else to drag it to
+
+"ANSWER: Use drop zones. When dragging a file over a file explorer window:
+- Dropping on empty space in the file list → copy/move to this directory
+- Dropping on a folder → copy/move into that folder
+- Dropping on a file → offer to open the file with that program (if it's an
+  executable) or do nothing
+- Show a clear visual indicator (highlighted drop zone) so the user knows what
+  will happen
+"
+
+windows directory drag and drop copy function works well, maybe make ours like that, though with an easier way to tell it "name this file foo (2)", and also a way to skip files that couldn't be copied, same for directory delete
+  make it atomic - can undo the whole copy or move or delete before it's finished - if copy/move is interrupted somehow (other than deliberately by the user) - such as computer shut down, log off, etc. - give the user the option to abort or resume it when they come back
+command-line functions to copy or move a directory but using the same mechanism as file explorer drag drop. command-line options to automatically merge subdirectories, automatically create foo (2)/overwrite foo when foo exists
+dual/multiple monitor support?
+api feature to define that something is a username or password field - so the OS can autopopulate it with the user's username and password for that program if the user opted to store it the first time he/she entered it - 
+api call to verify a user's identity by having them type in their OS user password - with optional debouncer in case the user already entered it recently
+strongly encourage app designers to set a hover tooltip for any menu option or button that's currently disabled, explaining why it's disabled/how to enable it. < - ai says don't enforce this, but strongly encouraging it is fine.
+how about let's have all the good features from Qt, must explore what they all are
+signals and slots - ai likes this idea and says, "In Rust, this maps naturally to channels or callback registration."
+css styles applied to various things like with Qt, but no annoying css overrides unlike Qt
+"Recommendation: use a styling system, but don't use CSS. CSS was designed for
+documents, not applications — it has bizarre specificity rules, cascade
+complications, and poor support for application layout patterns. Design a
+simpler, purpose-built styling language for application widgets.
+"RECOMMENDATION: Study Flexbox and CSS Grid (from the web) for layout
+algorithms, but implement them as native layout engines, not through CSS
+parsing. Flexbox's model (main axis, cross axis, flex-grow, flex-shrink,
+alignment) covers 90% of application layout needs elegantly."
+Or: use a subset of CSS (just the properties that make sense for widgets:
+colors, borders, padding, margins, fonts, border-radius) without the cascade
+complexity. Qt's stylesheet system is a reasonable starting point for what
+works and what doesn't.
+"
+color picker like what's in qtpyrc (have one just like qtpyrc's)
+treeview
+tristate checkbox treeview - good for selecting files and directories, have function to populate it with a directory
+tristate checkboxes - good for yes/no/default, 'default' is useful for cascading option overrides
+radio buttons (put them in a logical group to ensure that only one is selected)
+  allow a way for the user to go back to having no radio button selected? can't think of a good way to do that, other than clicking again on the currently selected one, which isn't a very good way.
+tabs view
+minimize to tray / startup in tray - should there be a way to have no taskbar entry for the program *and* no system tray entry? a system tray entry is unobtrusive and makes it easier to discover or close what programs you're running 
+can do fullscreen mode
+can start minimized 
+can be always on top (if the program has the capability key)
+menus, text buttons, graphic buttons, labels  
+grid view
+other layout options
+layout capabilities (should study existing layout systems): - make them just like Qt? Make them just like the web? a hybrid of both? Use text-based layout descriptions like on the web?
+  align elements with each other vertically, horizontally
+  left, right, middle/up, down, middle justify 
+  size item to content
+  size field/button/label to length of a given piece of text
+  can dynamically size an item/section according to what's in it/how much room there is outside of it, vertically and/or horizontally
+  set margin (including color), padding, outline (including edge curvature, thickness, color) on all sides or individual sides
+  can automatically scale an image according to OS dpi/scale factor
+  can scale an image to max size that fits in a given space, optionally with no upscaling (in which case we need left/right/middle, top/bottom/middle justify settings), can also scale to fit into a 
+  can read size of a given item/section
+  can have sections within sections
+  horizontal/vertical rules 
+  area outline with curved edges
+particular length oc height, the first option on this line is actually just specifying both length and height constraints
+support for transparency
+set/unset focus on app, input field, etc.
+modular and non-modular dialogs
+simple alert popup with icon?
+text windows - support all web formatting, spans - need a simpler variety too for any reason? - unlike Qt, allow a text window to display an emoji without displaying it oversized and resizing the whole line
+"CAUTION: "All web formatting" means implementing an HTML/CSS rendering engine,
+which is one of the most complex pieces of software ever written. Instead:
+- Simple text view: plain text, single font, ANSI colors. For terminals and
+  logs.
+- Rich text view: formatted text with fonts, sizes, colors, inline images.
+  NOT HTML — a simpler markup model.
+- Web view: embedded browser engine for actual HTML content. Phase 2 feature."
+text window without word wrap - or is this a web formatting option?
+vertical/horizontal scroll bars with option to automatically hide when nothing to scroll
+tooltips
+support for web apps - like electron apps but provide the framework so every web app doesn't have to come with 100MB of electron
+good way to snap scrollbar of text view to bottom or even stay scrolled down when new text is added, unlike Qt
+copy/paste text with ctrl+c/ctrl+v or right click context menu
+api function to disable or enable a menu item/button/input field/checkbox/radio buttons/checkbox treeview, greys or ungreys it out and sets or unsets a tooltip
+input text fields - one line or multiline - word wrap or no word wrap - can have that thing where it shows text inside saying what the input field is for whenever there's no content in it
+have input field that supports clipboard pastes with formatting and images and optionally has widgets for all formatting options and image insertion?
+SVG support
+support for LaTeX/mathML/similar things? i recently heard of another one that's supposed to be just as good as or better than LaTeX
+"Probably a library rather than built into the OS, but worth including. Typst
+is the modern alternative to LaTeX you may be thinking of — simpler syntax,
+faster compilation, similar output quality."
+no separate "app" type of application like what Windows has from their store
+probably shouldn't support other window managers that aren't API compatible with our own, will create a hell of different programs supporting different window managers
+
+----------------
+
+Included in the OS:
+
+fast find file function - compatible with linux find
+grep - use my python grep? 
+"
+For the system utility, use a Rust implementation (ripgrep is excellent and
+open source). Python grep would be too slow for large-scale searching. Your
+Python grep could be included additionally as a tool.
+"
+let's make a rust implementation but with my python grep's unique features (plus normal grep features it doesn't support)
+a bunch of other stardard linux utilities, like curl
+that utility that sanitizes filenames
+something exactly like Windows' robocopy? - "rsync is the Unix equivalent and more capable. Include rsync."
+something that does everything DesktopReminder 3 does. And see if we want lakitu's scheduling program?
+utility to shut off the monitor like 'nircmd monitor off' does
+what else can nircmd do that we want?
+good process explorer 
+  can identify the process associated with a clicked on window, and can kill it
+  can find process by name
+  can pause, resume, kill, change priority, restart 
+  can show all libraries loaded by a process
+  can show all subprocesses and threads
+  can show capabilities of a process, what user it's being run by (or should only one user be allowed to use the system at a time?), priority levels, name of application it belongs to, what launched 
+  see what else process explorer for windows does
+it, is it a service, what's currently blocking it if anything, what other process is waiting on a lock it currently has, whether it's running or paused, company it's signed by?, full path to executable or library
+  can switch to any window a process currently owns or terminal it's attached to
+"Your feature list (lines 439-444) is thorough. One addition: a system-wide
+resource monitor view (CPU/RAM/disk/network graphs over time, like Windows Task
+Manager's Performance tab or htop)."
+something like tmux? i don't even know what tmux is. something having to do with terminal attachment and unattachment?
+"ANSWER: tmux is a terminal multiplexer. It lets you:
+- Split one terminal into multiple panes (side by side, top/bottom)
+- Create multiple terminal "tabs" (called windows) within one session
+- Detach from a session (it keeps running in the background) and reattach
+  later — even from a different SSH connection or after logging out and back in
+
+The detach/reattach feature is why tmux is essential for server work — start a
+long compilation, detach, go home, SSH back in, reattach, check progress.
+
+For your OS: include tmux or build the multiplexing features into your terminal
+emulator. The detach/reattach feature belongs in the terminal emulator itself
+or as a session management service.
+"
+browser - prefer chrome, but none of that 'chrome needs to access your wallet/whatever' popup on every start
+"Chromium (the open-source base of Chrome) or Firefox. Don't include proprietary
+Chrome — you can't distribute it, and the "wallet popup" issue you mention is
+part of Google's proprietary layer. Chromium doesn't have that."
+terminal - make it nice. persistent input history (searchable?), arrow keys and insert work in input, tab autocomplete for file/directory names, find text in backscroll, configurable colors and font, ability to log everything it outputs?, unicode and ansi support of course, resizable, ability to remember last size and location, how about a word wrap option - if no word wrap, you can scroll to the right as far as the longest line of text in the backscroll
+comprehensive settings and configuration UI  
+comprehensive system information explorer (for hardware) - look at that popular hardware information program i have for inspiration - also includes a page about the OS - name, version, web link, maybe certain options, especially ones that require recompilation like paging model/params, scheduling model/parems, filesystem params, and memeory management model/params, maybe mounted drives and network drives and show capacity and free space for each partition/filesystem
+shell - powershell has a good scheme for piping data between programs
+  what will our shell syntax look like? should it be like bash, powershell or some other popular shell? we have to actually study various 
+shells. using bash would let people use their linux bash scripts and knowledge, only if we have all the standard linux utilities too, but bash is kinda lame, for example, only 1d arrays. a lot of people know powershell, too, but as for existing scripts, i think actual powershell scripts are more rare than bash scripts.
+"Recommendation: Include bash for compatibility (people will expect it via POSIX
+layer). Also develop or adopt a modern shell as the default:
+- Nushell (Rust, structured data piping like PowerShell, much cleaner syntax)
+- Oil shell / Oils (designed as a bash replacement, compatible but cleaner)
+- Fish (user-friendly, good defaults, but not POSIX-compatible)"
+leaning toward Nushell.
+ssh
+telnet (maybe?)
+Python - our compiler and also CPython (latest version)
+a number of notification sounds for apps to use
+text editor - notepad++? gedit? our own?
+file explorer 
+  can type in path (absolute or relative) with autocomplete
+  can show thumbnails for kind of image or video, and maybe some other things like PDFs
+
+Support detail columns related to all intrinsically supported file types, and (according to user option) in the detail folder view use the subset of possible columns which is the union of the columns relevant to each file in the given folder.   I.e., if the folder has 10 mp3's and one jpg.  the columns displayed will be size, date, length, bitrate, title, author, width, and height
+
+or possible more columns, because there are many more possible columns that could be displayed, for example
+
+--
+whether it's stereo, mono, or joint stereo
+whether it's variable bitrate
+khz
+each tag field in id3v1, id3v2, etc.
+
+time of last access
+time of last modification
+time of file creation
+permissions attributes
+
+each feature in the exif metadata
+--
+
+Therefore the user should be able to choose default columns for individual file types, and then the columns displayed in detail view will be the union of the default columns selected for each file type that occurs in the given folder.
+
+Applications that handle specific filetypes should be able to add their own detail columns (and their file decoders) to the available options.
+
+  used as a file save or file(s) load dialog for applications
+  view options - list, thumbnails (any size), select fields for column view, order by any column, can order some other way if using thumbnail view
+photo & video viewer
+keynote NF
+music player (foobar2000 with my milkdrop2 plugin?)
+drivers, at least for things the user will likely need them for
+network drive support
+WINE-like support for Windows programs
+"
+   The chain would be:
+
+        ```
+        Windows app
+            ↓ calls Windows API (CreateFile, etc.)
+        WINE (translates to POSIX/Linux calls)
+            ↓ calls Linux syscalls (open, read, etc.)
+        Your Linux syscall translation layer
+            ↓ translates to your OS's native syscalls
+        Your kernel
+        ```
+
+        So you wouldn't be "porting WINE" in the sense of rewriting it. You'd be making your Linux compatibility layer
+        good enough that WINE runs unmodified (or with minimal patches).
+
+        The challenge is that "good enough" is a high bar. WINE uses a lot of Linux-specific features beyond basic
+        POSIX:
+
+        - epoll, eventfd, signalfd
+        - /proc filesystem (WINE reads /proc/self/maps, /proc/cpuinfo, etc.)
+        - Linux-specific ioctls for graphics (DRM/KMS for GPU access)
+        - Linux threading model details (clone, futex)
+        - Linux-specific socket options
+        - Sound subsystem (ALSA/PulseAudio)
+
+        The basic POSIX layer gets you maybe 60% of the way. The remaining 40% is Linux-specific interfaces that WINE
+        depends on. But you'd be implementing those in your compatibility layer anyway if you want to run other Linux
+        software, so WINE support comes as a side effect of having a thorough Linux compatibility layer rather than
+        being a separate project."
+WSL-like support for Linux?
+clipboard with history view and select - supports utf-8, images, some sort of structured text like on Windows (so you could e.g. copy text from a website to a word processor with all formatting) - on windows, this is problematic, some formatting code is sometimes carried over that doesn't work as well on the target, can make text invisible, make cursor behave wierdly, can make uneditable objects, etc. - we can either fix these problems if possible or limit what formatting gets carried over. - option to paste as plain text
+cmake, gcc and such? (seems obvious to include them, but for some reason linux distros don't)
+"Linux distros don't include them by default to keep the base installation
+small. Desktop users (majority) don't need a compiler. Your OS could include
+them since you need gcc/Rust anyway for kernel recompilation, or make them a
+one-click install from the package manager.
+docker? kubernetes?
+"Docker: yes, eventually — it needs container primitives (namespaces, cgroups
+equivalent). Plan for these in your kernel design.
+Kubernetes: only relevant for server use, not for desktop. Skip for now."
+an IDE?
+"you: regarding including an IDE, i meant porting an ide
+claude: Fair enough — porting VS Code specifically would be the obvious choice since it's the most popular, open source
+        (MIT license), and runs on Electron (Chromium + Node.js).
+
+        But that brings you back to the web app framework problem. To run VS Code you need Node.js and Chromium, which
+        means porting Chromium, which is ~35 million lines of C++. That's one of the largest software projects in
+        existence. It's a massive porting effort, but it's also the same effort that gives you your system browser, your
+        web app framework, and VS Code all at once.
+
+        Alternatively, port a native IDE or editor that doesn't depend on a browser engine:
+        - **Neovim** — small, fast, huge plugin ecosystem, easy to port (mostly just needs POSIX)
+        - **Kate/KDevelop** — depends on Qt, so you'd need Qt ported first, but if you're already porting Qt for your
+        GUI toolkit that's less extra work
+        - **Helix** — written in Rust, terminal-based, modern design, probably the easiest to port to your OS given your
+        Rust kernel
+
+        Realistically: include Neovim or Helix early on (trivial to port), get Chromium ported when you can (huge effort
+        but unlocks VS Code, browser, and web apps all at once), and don't try to build your own IDE."
+Rust - necessary for recompiling the kernel and maybe other parts of the OS
+zip file suport, 7-zip file support?, rar support?, tar/gz/tar.gz support.
+osi file support (can navigate it, not just extract it)
+backup program? we should include our own that has all the features I have listed for a backup program, plus typical backup types that i don't have in that list.
+background indexer for fast search of all files in configured file/directory list with configured extensions/filespecs. useful defaults, but indexer does not run by default.
+POP3/IMAP email program? ported thunderbird?
+ability to use cellphone as a camera (like Windows does as of recently)
+should probably be able to use it as a microphone, too
+would be nice to have a cellphone-computer integration app like Windows does.
+include uncommon but highly optimized keyboard layouts like.. what were those two i had?
+make a snapshot or restore from snapshot feature, with branching like a VM does? options for what to include in the snapshot? (files and directories, programs, program data, program settings)
+"This ties into your package manager (Nix-style generations) and your filesystem
+choice. If you support Btrfs/ZFS, filesystem snapshots are built in. System
+snapshots would combine: filesystem snapshot + list of installed packages +
+configuration. The restore operation: roll back filesystem, reinstall package
+generation, done."
+advanced undelete utility?
+photoprism? add ocr to it? make our own similar program? (exception to "no AI")
+
+allow programs to put hooks on various things (if the have the capabilities - they can ask the user), but what?
+  filesystem changes (can only hook changes on files and directories their capabilities give them access to)
+    rename file or dir
+    create file or dir
+    mount or unmount drive 
+    create, resize, delete partition
+    delete file or dir
+    change file or dir
+    read file or dir
+    read or write error on file or dir 
+      file or dir is corrupted
+      file or dir is locked
+      file or dir not found
+      out of space
+    capabilities changed on file or dir
+    other metadata changed on file or dir
+    program launched    
+  we need a way to not only hook filesystem changes while the program is running, but to detect if there were any filesystem changes (on the specified files/dirs of the specified types) since it last called some api function, even if the program was closed and reopen since then or the os rebooted, etc. useful for a backup program, for example.
+  program launching?
+  library loading?
+  library update?
+  snapshot created or rolled back to snapshot?
+  user created or deleted?
+  user capabilities changed?
+  system going to sleep? (might sleep before it could do anything, or we could wait for the program, but then it might wait too long)
+  os errors
+    out of memory
+    i/o error
+  system shut down? (will shutdown every program first anyway)
+  network activity (what capabilities will define what programs a program has the ability to read internet activity to/from?)
+  system dpi/scaling factor changed - or should this be an event in the GUI event loop? or not even that, since we'll just redraw the app?
+  ask claude what else might be useful. 
+bootup shows everything it's doing in a list of tasks (could make this an option)
+try to make bootup as fast as possible - Windows achieved this somehow
+
+"""
+Make the kernal as small as possible, at least to the point of still being usable.  Let the user start using the computer as soon as the microkernal is loaded (or as soon as the gui or command prompt shell are also loaded), but make functions or app loading wait until any dependencies (libraries and/or services) are also loaded.  In the meanwhile, be loading common services and libraries, although many services could be made only to load on-demand instead.  Not that they can't be loaded on-demand when they're already prescheduled to be loaded; the OS simply inserts them into the beginning of the schedule. 
+
+The loading of these services and libraries can be put on low-priority harddrive access, except for on-demand loading, so that they don't obstruct the user's trying to do stuff that he actually wants to do at the moment.  This low prioritization would also include the auto-loading of applications, such as Trillian, a web server, folding@home, and so on. 
+"""
+
+If possible, don't allow swapping to tie up the system.  Throttle the I/O or put it in a user process or give it a lower priority (as in 'Priority HD access') or whatever has to be done so that other apps can be used while one is swapping into/out of memory. 
+
+something pretty much exactly like Chrome Remote Desktop would be nice. but that works through google's servers, we couldn't have a bunch of free servers for users because it's not a commercial OS. but I guess it could easily work over the LAN or over the internet if the host has a domain name or dyndns. 
+"    " i much prefer it to be efficient
+claude: Then RDP is the right choice. It sends drawing commands and compressed deltas rather than raw pixels, so it uses
+        far less bandwidth and feels more responsive, especially over the internet.
+
+        But you don't have to implement Microsoft's RDP protocol from scratch. Options:
+
+        - **FreeRDP** — open source (Apache 2.0), mature, implements the full RDP protocol. It's primarily a client but
+        has server-side components. Port it rather than reimplementing.
+        - **Waypipe** — if your compositor is Wayland-based, Waypipe forwards Wayland protocol over a network
+        connection. Efficient because it sends compositor commands, not pixels. But it's Linux/Wayland specific and
+        would need adaptation.
+        - **Your own protocol** — since you control the compositor, you could build remote desktop into the compositor
+        itself. The compositor already knows what regions changed, what draw commands were issued, and what the damage
+        rectangles are. Exposing that over a network connection with compression is the most efficient possible approach
+        because there's no translation layer — the compositor streams its own operations directly.
+
+        The third option is the most work upfront but gives the best result. Chrome Remote Desktop feels fast because
+        it's tightly integrated with Chrome's rendering pipeline rather than capturing pixels from outside. Same
+        principle — if your compositor natively supports a remote output, it can be extremely efficient.
+
+        For phasing: port FreeRDP early to have something working, then build native compositor-level remote support
+        later as a polish feature.
+[turn done -- success -- ctx~114932 tok -- 18.0s]
+> " Chrome Remote Desktop feels fast because
+          it's tightly integrated with Chrome's rendering pipeline rather than capturing pixels from outside." but chro
+  me remote desktop sends the entire desktop graphics, not just whatever's showing in the remote browser.
+you: " Chrome Remote Desktop feels fast because
+             it's tightly integrated with Chrome's rendering pipeline rather than capturing pixels from outside." but
+     chrome remote desktop sends the entire desktop graphics, not just whatever's showing in the remote browser.
+claude: You're right, I was wrong about that. Chrome Remote Desktop captures the full desktop framebuffer just like VNC
+        does — it uses platform screen capture APIs (like the Desktop Duplication API on Windows), not Chrome's
+        rendering pipeline. It feels fast because of good video encoding (VP8/VP9/H.264) and Google's relay
+        infrastructure, not because of any special integration with the compositor.
+
+        So the reason RDP is more efficient than Chrome Remote Desktop isn't encoding quality — it's architectural. RDP
+        knows what changed at the draw-command level (this text was drawn here, this rectangle moved there), while
+        screen-capture approaches like Chrome Remote Desktop and VNC can only see "these pixels changed" and have to
+        compress the diff as a video frame.
+
+        For your OS, the options in order of efficiency:
+
+        1. **Native compositor streaming** (best) — compositor knows exactly what draw commands apps issued, sends those
+        over the network, remote side replays them. Minimal bandwidth, perfect quality.
+        2. **RDP / FreeRDP** (good) — similar principle but using an existing protocol.
+        3. **Video-encoded screen capture** (decent) — capture framebuffer, encode with H.264/VP9, send stream. High
+        bandwidth but works for everything including games.
+
+        You'd probably want both option 1 for normal desktop use (crisp text, low bandwidth) and option 3 as a fallback
+        for fullscreen games or video playback where draw-command forwarding doesn't apply."
+signals - tell a program to cleanly shut down, etc. - what are the Linux signals? - our COM or whatever should include commands to programs anyway, should signals just be done  - ai agrees that shutdown shoudl be done through ipc rather than linux signals
+through that instead? ask claude, and ask it whatr COM and DDE actually do.
+configuration files will be yaml, processed with ruamel.yaml to preserve user formatting and comments.
+recycle bin - can automatically keep items forever until the system needs more free storage space, then delete items as necessary starting with the oldest first, maybe free space reporting should not include recycle bin items in taken-space calculations in that case - can delete files skipping the recycle bin - can move files to recycle bin even when they're deleted from the command line or by other programs - can optionally prune it  more lazily/slowly when it exceeds a certain size and/or files are older than a certain age. this way it doesn't thrash the filesystem suddenly having to prune a bunch of recycle bin files when it runs out of space and you're trying to write a lot of new data. though it may not really take that much longer anyway, deleting a file should be must faster than writing one. in any case, an optimization could be that it looks for much larger files that aren't much newer than the oldest files first to delete rather than deleting thousands of tiny files or something.
+^^ ai says this is sound, and also notes that recycle bins should be per-drive rather than copying things to one central recycle bin (which  is what i was already planning)
+"CAUTION: This means intercepting all delete operations system-wide. This would
+be a significant performance overhead for programs that create and delete many
+temporary files (compilers, builds). Solution: have a "trash-capable delete"
+syscall that moves to recycle bin, and a "permanent delete" syscall that
+bypasses it. Make the file explorer and shell use trash-capable by default.
+Programs that know they want permanent delete (temp file cleanup) use the
+direct syscall. Maybe require the "bypass recycle bin" capability for non-temp
+directories."
+purposely no AI shit in the OS, and of course no ads.
+can always view a history of which programs recently either played a system sound or emitted any sound, with a button to go directly to settings/capabilities for that program for sound
+can do speech input, speech output (exceptions to "no AI")
+try to allow hot reloads of OS updates like security fixes so that the user doesn't have to reboot all the time - !important, this is a fundamental architectural issue
+"PUSHBACK on feasibility: Hot-reloading kernel code is extremely difficult and
+risky. Linux has kpatch/livepatch for this, and it's limited to small,
+carefully constructed patches. You can't hot-reload a new scheduler or a new
+memory manager.
+What you CAN hot-reload:
+- Userspace services (restart the network service, the compositor, etc.)
+- Kernel modules/drivers (unload old, load new)
+- Shared libraries (with a generation-based package manager, update the library
+  and restart affected services)
+
+What you CANNOT safely hot-reload:
+- Core kernel code (scheduler, memory manager, syscall dispatch)
+- Anything that changes kernel data structures"
+allow the user to rollback any os update and permanently disable it (or try again in the future if the user wants)
+
+"""
+inhahe: and when the service gets a valid message from a trusted source, it launches an application associated with that message, or sensd a message to the app if it's already open 
+inhahe: applications, usually when you install them, can register with windows to be notified of messages of their type
+
+"The push notification problem is solved today by WebSocket connections and
+  push notification services. Your OS should provide:
+  1. A notification daemon that programs can send notifications to (like D-Bus
+     notifications on Linux)
+  2. A standard API for long-lived server connections (WebSocket or similar)
+  3. Programs register to receive notifications, the daemon routes them"
+
+"The security concerns you raised are real but the solutions are much simpler
+  with your capability model: a program needs the "receive push notifications"
+  capability, the notification daemon only accepts connections from registered
+  services, done."
+
+" Skip the binary XML. Use a simple binary protocol (MessagePack, FlatBuffers,
+  or your own simple TLV format). Or just use your channel IPC — it already
+  handles structured messages."
+
+err, actually, just gzip it instead?
+also, give option to send the xml as plain text or binary.
+the daemon should convert gzip'd xml to text before sending to the app, but
+then, why should the daemon care what format the information is in?  just
+have it pass an arbitrary string along to the application?
+either a function name and its parameters, or this specification shoould
+define a mandatory function name that accepts specific parameters, like
+the message and where it came from.
+
+another idea:
+allow it to store messages and then send them to the app the next time it's
+launched, when it's not set to be launched automatically?
+"""
+
+"""
+Always give the user an error message when something fails, and don't give a simple generic error message.  Give a traceback and each level of the traceback should have a string error message associated with it.  That means lots of "try" clauses, and maybe "throw" statements, with strings attached.   This could also be used to try fault-tolerant programming, though.  When something fails, just escape the nearest try clause and continue. 
+
+problem: always giving traceback requires debug build, which is slower
+"ANSWER: Not necessarily. Modern compilers can emit frame pointers or DWARF
+unwind info with minimal performance impact (<2%). Rust already emits unwind
+tables in release builds by default for panic backtraces.
+
+The approach: include unwind information in release builds (small binary size
+increase), strip detailed debug symbols (no line numbers or variable names
+in the binary), but include them in a separate debug symbol file that can be
+loaded on demand. When a crash happens, capture the backtrace with addresses,
+then symbolize it from the debug file. This is what most production systems do.
+"
+is there some way to have the benefits of tracebacks without making the app slower? probably. would have to study how debug mode works and what the difference is.
+
+CPU exceptions, such as pagefault and divide by zero, should be easily catchable by the application as any other exception.
+"Good idea but with caveats. Some CPU exceptions (like page faults) are handled
+by the kernel and should NOT be exposed to the application (they're part of
+normal virtual memory operation). Others (divide by zero, illegal instruction,
+segfault from genuine invalid access) should be catchable.
+
+Unix does this via signals (SIGFPE, SIGILL, SIGSEGV), which are notoriously
+difficult to handle correctly. A better model: convert hardware exceptions into
+language-level exceptions that unwind normally. Windows does this with
+Structured Exception Handling (SEH). It's much more ergonomic."
+When something doesn't work for a reason that's not a bug, per se, still give a meaningful error message -- it just won't be in the form of traceback strings.  Give tips on why that might happen, etc. 
+"""
+"""
+Don't let the computer become unusable while there's a lot of harddrive activity; let small HD operations pass through without having to wait for larger operations to complete, sort of like the '10 items or less' line in a store.
+"The "10 items or less" metaphor is too simplistic, but the principle is right.
+Modern approach: I/O scheduler with multiple priority levels:
+- Realtime (for audio/video playback)
+- Best-effort with priority levels (for normal applications)
+- Idle (for background tasks: indexing, backup, dedup)"
+"Linux's BFQ (Budget Fair Queueing) I/O scheduler does this well. Small reads
+from interactive applications get low latency even during heavy background I/O.
+Study BFQ's design.
+
+On SSDs, the I/O scheduling problem is less severe (no seek penalty), but
+bandwidth prioritization still matters."
+for when multiple applications are accessing the harddrive at one time, have an option to manage it so that only one file/directory/application is accessing it at once, so that it doesn't have to do lots of seeks. but have a maximum value so that an app can't tie up the harddrive alone for too long.  also allow the user to set priorities on applications, at least a low vs. high priority, both in the registry and while the application is running, to make sure certain applications get first dibs, or certain applications use the hd in the background.  applications can set their own priorities, too (maybe with the right capability (which tehy may ask the user for), but the user can override them
+"Yes, but have the OS verify against the capability model. Don't let any
+application claim realtime I/O priority without the right capability.
+"
+"""
+inherent support for microthreads (like in stackless python)?, so that a microthread can call a blocking operation - whether it's blocked by another thread or waiting for i/o - and automatically be resumed as soon as the block is finished.  the idea isn't to make the multitasking of the OS itself cooperative, but to provide OS-level support for tasklets that belong to a particular normal process. how about greenlets too?
+"This is better implemented in userspace runtimes (like Go's goroutines, Rust's
+async tasks, Python's asyncio) than in the kernel. The kernel should provide
+efficient primitives that make userspace green threads work well:
+- Fast context switching (for user-level thread libraries)
+- io_uring (so green threads can do async I/O without kernel threads)
+- Futexes (so green thread synchronization can avoid syscalls in the
+  uncontended case)
+
+Don't put a green thread scheduler in the kernel — it would impose one
+concurrency model on all programs. Instead, make the kernel primitives
+efficient enough that any userspace runtime can build its own."
+make the OS be friendly to being run under a VM
+"This means: include virtio drivers (for disk, network, GPU under KVM/QEMU),
+VMware tools equivalent, support for paravirtualized hardware. Important for
+development and testing of the OS itself."
+Settings and configuration:
+
+look at Windows settings for inspiration
+grub settings (should we use grub? probably. we also need to play nicely with systems that already have it installed.) - is it possible to allow our os to modify grub settings when grub was installed by a linux insallation?
+"For x86 UEFI: consider systemd-boot (simpler than GRUB) or write your own
+minimal UEFI bootloader. GRUB is complex and over-featured for a single-OS
+system. For dual-boot, GRUB is the standard and you should play nicely with it
+(install your OS as a GRUB menu entry rather than replacing GRUB)."
+"Yes, by writing to /etc/grub.d/ or /boot/grub/grub.cfg on the Linux partition.
+Most Linux distros use os-prober to auto-detect other OSes and add GRUB
+entries. You can also add your own entry file."
+desktop background image - can set animated background? - not just a video, but a program constantly changing it, with various input events such as anything that's happening on the desktop - when setting a background image/video that doesn't fit the desktop's dimensions, give the user the choice of fitting with empty space on the top and bottom or left and right or fitting the other way - filling all space right/left and up/down but having unshown space at the top and bottom or right and left. in the latter case, let the user scroll the image up/down or right/left to center it on the desktop how they want.
+Let the user opt to choose a random desktop background each boot-up, to add variety (or perhaps a different one every day).  But let them exclude certain desktops if they want, or all animated, non-animated, dynamic, etc.
+login screen background image - easy way to make the two the same
+desktop style if we have style choices
+desktop theme - light, dark, anything else
+individual desktop colors? (make your own theme)
+maybe an option to list everything it's doing on bootup
+change size of swap file (if we're not using a swap partition instead)
+screen resolution - automatically revert if user doesn't verify that it works in N seconds?
+network settings
+  ethernet, wifi
+  wifi selection
+  password - with option to show password
+  dns servers or auto
+  dhcp or auto
+  ipv4
+  ipv6
+  other advanced network options - what does Windows have?
+  firewall
+  port range passthroughs in router via UPnP or NATPMP, whatever's detected 
+  can we detect what ip the router is at have a button to load that ip in the browser? - "Yes, the default gateway IP (from DHCP or route table) is almost always the
+router. Easy to detect and show."
+  LAN IP address
+  show internet IP addresses (ipv4, ipv6)
+  VPN - OpenVPN settings, show if currently using a VPN, including any by any third-party app and what the app is and button to launch the app's interface
+mouse pointer
+mouse pointer speed
+keyboard repeat speed
+capability groups
+capabilities for users and programs, capability requirements for files and directories
+users
+memory management model/tuning parameters - may require recompiling, may require rebooting - can select workload type to populate model/tuning parameter fields to default values for that workload type - (tentative) workload type list farther down
+scheduling model/tuning parameters - may require recompiling, may require rebooting
+paging model/tuning parameters? - may require recompiling, may require rebooting
+show advantages and disadvantages of each model/param profile for paging, scheduling, memory management, and filesystem in 'design decisions.txt' is something about one process scheduling model helping enormously but also creating pauses
+filesystem tuning parameters? (obviously, would have to change every file and directory in the partition, but we could also set these for a filesystem not yet put onto a partition)
+filesystem deduplication
+partition manager? (include a warning that the user could lose all their data using that)
+reset the OS, like on Windows?
+"""
+Perhaps there can be a way to separate the settings and files needed for apps, or needed for most apps, from the ones that could be hijacking the OS, and then you can do a reinstallation or a repair and restore the OS to its initial state but import as many applications as possible. (option to have a warning or auto-exclude for re-importing apps that use the dangerous settings level)  Also many OS settings could be re-imported (ask the user about whole re-importing whole categories of os settings somehow).  Have rollback options. The user should be able to do this without having to copy/rename/remove any directories or having to install a newer or equal version of the OS.
+"""
+create SSL certificate? (letsencrypt)
+programs
+  set priority
+  set capabilities
+  uninstall 
+    keep program files?
+    keep program settings? - would require a standard way for programs to store their settings, and I think I prefer local storage to a Windows-like registry, but we should probably 
+  recompile with specified parameters - detect if any changes to source since last compile
+  set notifications - set sound (dropdown of sounds from OS sounds directory, previewable, includes (no sound)), whether to show in notifications pane, maybe have applications register different notifications so that the user can modify or disable them individually
+encourage a specific subdirectory under the program's directory to store settings under
+  wipe program data? - would require a standard way for programs to store their data, we should probably encourage this, just a specific subdirectory under the program's directory
+  take a snapshot of program or rollback? (option to save only program data and program settings)
+snapshots - view, create, delete - snapshot tree like in VMs - select what to include in the snapshot 
+recompile kernel or os component with specified parameters??? - detect if any changes to source since last compile
+can help the user setup a dyndns through an existing dyndns service - preferring the free ones, especially dynu.net (or is there a better free one?)
+power options
+  action on power button press
+  action on close laptop
+  turn off screen after N minutes (disablable) - Can wake up as soon as it detects enough change via the webcam or enough sound (or change in sound, or voice) from the mic? So in most cases you could just step into the room and the computer could wake up.
+  put computer to sleep after N minutes (disablable)`
+  action on battery level too low (select minutes left threshold or battery percentage threshold - but these may have to be different for 
+"PUSHBACK: This requires the webcam and microphone to be always on, which is a
+privacy concern and power drain. Make this opt-in with a clear privacy warning.
+The standard approach (wake on keyboard/mouse/touchpad input) is sufficient for
+most users."
+shutdown vs sleep vs run a program vs hibernate)
+    run a particular command/program/script (then shutdown, sleep or hibernate)
+    shutdown
+    sleep (shutdown or sleep is the default)
+    hibernate 
+hotkeys 
+  set a hotkey - capture from keyboard (shows you the function that's already taken by that if any and lets you modify/delete its hotkey), select function to apply it to, can search for functions, shows you any hotkeys already applied to that function and lets you modify/delete them, can also run an arbitrary command for a hotkey
+  modify or delete a hotkey from the list - change key combination and/or change what it does
+  purposely comes with very few (or possibly no) hotkeys enabled by default. having hotkeys everywhere is a fucking pain in the ass.
+  functions to assign to hotkeys include "put monitor to sleep" and maybe some other things that nircmd.exe can do, minimize all windows (like Windowskey+m on Windows), change desktops (if we allow more than one desktop), logoff, 
+"PUSHBACK: Some hotkeys are expected by all users:
+- Alt+F4 to close window
+- Alt+Tab to switch windows
+- Ctrl+C/V/X for copy/paste/cut (in the GUI, not terminal)
+- Ctrl+Z for undo
+- Print Screen for screenshot
+These should be enabled by default. The complaint about "hotkeys everywhere"
+"
+arbitralily rearrange keyboard layout (starting with the current keyboard layout, the keyboard's actual layout, or any other layout the os has or that we've saved), for example disabling or moving capslock, can save it as a named layout
+something like ActiveScript? - can register a scripting language with the OS so that any application that emplo
+"The concept: register scripting languages with the OS so any application can
+embed scripting via a common API. Windows has this (VBScript, JScript, later
+PowerShell). The modern equivalent: embed Lua or a WASM runtime as a standard
+extension mechanism. Lua is tiny, fast, designed for embedding. WASM is
+sandboxed and language-agnostic. Probably offer both."
+Installation wizard:
+keyboard/layout selection
+automatically detect monitor DPI and set default font, etc. scaling according to that, but also show typical results to the user and let him change scaling. 
+easy installation, or
+manual installation - select hard drive, partition, partition manager, size of boot partition, size of swap partition or include swap file in the main partition, delete partition, make partition, resize partition? (warn that it will take a long time, and that if it gets interrupted it could result in data loss, or is there a way around that? our code would also have to be 100% correct so we don't mess up their partition. we could just port a utility for doing this stuff or reuse the code.)
+to make sure the user selects the right hard drive and partition, show device name, the usual information, size, filesystem, free space, maybe allow them to navigate and view files
+obviously warn about whatever the operation is going to erase, and confirm
+have a sanity check for sizes of partitions selected for os, boot, swap
+is there really any reason to have a swap partition instead of just a swap file?
+"Swap partitions are marginally faster (no filesystem overhead, contiguous on
+disk). Swap files are much more convenient (resize without repartitioning).
+On SSDs, the performance difference is negligible. Use a swap file as default."
+workload type? database, server, game dev, gaming, dev, desktop (claude has a different list, only four, it's in design decisions.txt) - will determine memory management, process scheduling, maybe memory paging, filesystem - show notice that these things can be changed later - show memory, process, filesystem settings that were selected by the workload type and let the use change them - do a perform sanity check on user's settings (may be some arbitrarily settable tuning parameters, or some settings may not work well with other settings)
+
+after reboot:
+
+audio device - ask user which one to use if they have more than one 
+timezone (try to detect by gps)
+username, password - option to show password - allow user to leave password blank?
+autologin option
+choice of browser? (all will probably be installed, but the selected one one will be the default for launching links and html, etc. files)
+theme selection
+style selection if any other styles available
+wifi selection and password (option to show password) or ethernet
+
+option of unattended installation - some way of specifying all configuration options beforehand - using OS defaults, answering all questions in the beginning, passing a yaml file, any combination of the above using fallbacks per setting
+
+"NVIDIA's Linux driver situation is complicated:
+
+        **NVIDIA has two Linux drivers:**
+
+        - **Proprietary driver** — the good one that everyone uses. High performance, full feature support. But it's a
+        closed-source binary blob that's tightly coupled to the Linux kernel. You can't port it — you don't have the
+        source code, and it depends on Linux kernel internals that change every release. NVIDIA would have to port it to
+        your OS themselves, which they won't do for a new OS.
+
+        - **Nouveau** (open source, reverse-engineered) — historically terrible performance because NVIDIA didn't
+        release documentation or firmware. However, this is changing: NVIDIA has been releasing open-source kernel
+        modules since 2022 (for Turing and newer GPUs, GTX 1600+/RTX 2000+). The open-source driver is improving but
+        still significantly behind the proprietary one, especially for gaming and compute.
+
+        **AMD is much easier:**
+
+        AMD's Linux GPU driver (AMDGPU) is fully open source, included in the Linux kernel, and well-documented. It
+        supports all modern AMD GPUs with good performance. This is why most new OS projects, Linux distros, and even
+        the Steam Deck chose AMD.
+
+        **What to do:**
+
+        1. **Start with AMD** — port the AMDGPU driver. Open source, well-documented, good performance, covers a large
+        chunk of desktop users.
+        2. **Intel integrated graphics** — also fully open source (i915/xe driver). Covers most laptops and desktops
+        that don't have a discrete GPU.
+        3. **NVIDIA later** — wait for their open-source driver to mature, then port that. Or hope that your Linux
+        syscall compatibility layer eventually becomes good enough to run their proprietary driver's userspace
+        components against your kernel's DRM/KMS implementation. That's how FreeBSD handles NVIDIA — their Linux
+        compatibility layer runs the Linux NVIDIA driver.
+
+        The FreeBSD approach is actually the most promising path for NVIDIA support on your OS."

@@ -1,0 +1,75 @@
+# Strings that exercise the Thai private-use fallback, for a sweep against the
+# faces `gen_thai_legacy.py` builds:
+#
+#   python gui/font/tools/gen_thai_legacy.py --out /tmp/thai-legacy
+#   python gui/font/tools/harfbuzz_sweep.py --fonts /tmp/thai-legacy \
+#       --corpus gui/font/tools/thai-pua-corpus.txt
+#
+# Every line names one edge of the two state machines in `thai::pua_shape`.
+# The escapes are the built-in corpus's.
+
+# --- the above-base machine ---
+# Plain consonant, tone mark: nothing is above KO KAI, so the mark shifts down.
+\u0e01\u0e48
+# Ascending consonant (PO PLA), tone mark: down and left, clear of the ascender.
+\u0e1b\u0e48
+# Ascending consonant, above-base vowel: left only.
+\u0e1b\u0e34
+# Ascending consonant, vowel, tone: the vowel shifts left, then the tone shifts
+# left onto it -- the state the `AscenderAndMark` arm exists for.
+\u0e1b\u0e34\u0e48
+# Plain consonant, vowel, tone: neither shifts. The control for the two above.
+\u0e01\u0e34\u0e48
+# The other two ascending consonants, which must behave as PO PLA does.
+\u0e1d\u0e49
+\u0e1f\u0e4a
+# LO CHULA, which looks ascending and is deliberately *not* treated as such --
+# HarfBuzz has it commented out, so this pins the exclusion rather than the
+# rule.
+\u0e2c\u0e48
+# Every tone mark and thanthakhat over an ascender, since each has its own
+# private-use form and the table is hand-transcribed hex.
+\u0e1b\u0e48\u0020\u0e1b\u0e49\u0020\u0e1b\u0e4a\u0020\u0e1b\u0e4b\u0020\u0e1b\u0e4c
+# Every above-base vowel over an ascender, same reason.
+\u0e1b\u0e31\u0020\u0e1b\u0e34\u0020\u0e1b\u0e35\u0020\u0e1b\u0e36\u0020\u0e1b\u0e37\u0020\u0e1b\u0e47
+
+# --- the below-base machine ---
+# YO YING, a removable descender, with a below-base vowel: the *consonant*
+# changes, not the vowel.
+\u0e0d\u0e38
+# THO THAN, the other removable descender.
+\u0e10\u0e39
+# DO CHADA and TO PATAK, whose descenders stay: the vowel shifts down instead.
+\u0e0e\u0e38
+\u0e0f\u0e39
+# Plain consonant, below-base vowel: nothing shifts.
+\u0e01\u0e38
+# Phinthu, which is a below-base mark with a shifted form but no reordering.
+\u0e0e\u0e3a
+
+# --- both machines at once ---
+# YO YING with a below-base vowel and a tone mark above: the consonant loses
+# its tail and the tone drops onto it.
+\u0e0d\u0e38\u0e48
+# PO PLA with a below-base vowel and a tone mark: above and below disagree
+# about what to do, and the above machine wins.
+\u0e1b\u0e38\u0e48
+
+# --- with SARA AM, so the two passes are tested in sequence ---
+# The nikhahit SARA AM leaves above PO PLA has to clear the ascender.
+\u0e1b\u0e33
+# And the same with a tone mark, which is the reordering case as well.
+\u0e1b\u0e48\u0e33
+\u0e01\u0e48\u0e33
+
+# --- controls ---
+# A real Thai word, so a systematic breakage shows up as more than an edge case.
+\u0e17\u0e35\u0e48\u0e19\u0e35\u0e48
+\u0e40\u0e01\u0e34\u0e14
+\u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35
+# Lao, which shares the reordering pass and must *not* reach the private-use
+# one. These faces have no Lao glyphs, so both engines answer with boxes and
+# the check is that they answer with the same number of them.
+\u0ea5\u0ec8\u0eb3
+# Latin, which reaches neither pass.
+abc

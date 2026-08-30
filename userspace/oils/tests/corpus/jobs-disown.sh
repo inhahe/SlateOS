@@ -1,0 +1,67 @@
+# `disown` forgets jobs. Each of its operands is resolved and acted on before
+# the next one is looked at, which is what makes the order-dependent cases below
+# come out the way they do. Every job outlives the `disown` that names it, so
+# only one line here turns on timing at all — the `-r` one, which needs one job
+# finished and one still running at the same moment, and says so where it is.
+
+echo "=== with no operand it forgets the current job, not the last row"
+sleep 0.7 & sleep 0.8 & disown; jobs
+wait
+
+echo "=== -a takes every job, -r only the ones still running"
+sleep 0.7 & sleep 0.8 & disown -a; jobs; echo "rc=$?"
+wait
+# `-r` has to look while job 1 is already finished and job 2 is not, so the two
+# deadlines are read against the same foreground wait. One direction is safe by
+# construction: job 1 is forked first and sleeps less, so it cannot outlast a
+# wait that was forked after it. The other is a margin, and it has to be a wide
+# one — the wait is a process spawn, and on a machine loaded enough to make
+# spawning slow the second job spent its whole life inside it. At `sleep 0.7`
+# the margin was 0.3 s and a full-corpus sweep ate it: bash found both jobs
+# finished, disowned neither, and listed the second one too.
+sleep 0.05 & sleep 5 & sleep 0.4; disown -r; jobs
+wait
+
+echo "=== an operand names a job; -h keeps it in the table"
+sleep 0.7 & sleep 0.8 & disown %1; jobs
+wait
+sleep 0.7 & disown -h %1; jobs
+wait
+# …so with `-h` the same job can be named twice; without it the second attempt
+# has nothing left to find.
+sleep 0.7 & disown -h %1 %1; echo "rc=$?"; jobs
+wait
+sleep 0.7 & sleep 0.8 & disown %2 %2; echo "rc=$?"; jobs
+wait
+
+echo "=== the markers move as it goes, so %+ can name a second job"
+# Forgetting job 2 makes job 1 the current job, which is what `%+` then finds.
+sleep 0.7 & sleep 0.8 & disown %2 %+; echo "rc=$?"; jobs
+wait
+
+echo "=== a bad operand is reported and skipped, not fatal"
+sleep 0.7 & sleep 0.8 & disown %nosuch %1; echo "rc=$?"; jobs
+wait
+sleep 0.7 & sleep 0.8 & disown %1 %nosuch; echo "rc=$?"; jobs
+wait
+
+echo "=== an unknown option is rejected with the usage line"
+sleep 0.7 & disown -z; echo "rc=$?"
+wait
+
+echo "=== a forgotten job's status still answers to its pid"
+# Dropping the row remembers the pid, so `wait PID` is not told it is a
+# stranger. A finished job answers with what it exited with…
+( exit 5 ) & p=$!
+sleep 0.3
+disown %1
+wait $p; echo "rc=$?"
+# …and one forgotten while it was still running answers 0, at once: the shell
+# has let go of the child, so there is nothing left to wait on.
+( sleep 0.4; exit 6 ) & q=$!
+disown %1
+wait $q; echo "rc=$?"
+# `-h` keeps the row, so that job is waited on for real.
+( exit 4 ) & r=$!
+disown -h %1
+wait $r; echo "rc=$?"

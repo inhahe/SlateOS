@@ -1,0 +1,748 @@
+//! Capability system — unforgeable handles to kernel objects.
+//!
+//! Every kernel object is accessed via capability handles stored in a
+//! per-task (eventually per-process) capability table.  No ambient
+//! authority — if a task doesn't hold a capability, it can't access
+//! the resource.
+//!
+//! ## Design
+//!
+//! Modeled after Fuchsia handles and seL4 capabilities:
+//!
+//! - A **capability** is a (`resource_type`, `resource_id`, `rights`)
+//!   triple stored in a kernel-managed table.
+//! - A **capability handle** (`CapHandle`) is an opaque index into the
+//!   table.  The handle value itself conveys no information — it's just
+//!   a per-task integer.
+//! - **Rights** are a bitfield specifying what operations the holder
+//!   can perform (read, write, create, delete, etc.).
+//! - **Delegation**: a task can grant a subset of its rights to another
+//!   task.  You can't create capabilities you don't have.
+//! - **Revocation**: the kernel can revoke a capability at any time
+//!   (e.g., when a resource is destroyed).
+//!
+//! ## Capability Types (namespaces)
+//!
+//! - `fs.*`       — filesystem (read, write, create, delete, execute, metadata)
+//! - `net.*`      — networking (connect, listen, `socket_rw`)
+//! - `proc.*`     — process management (launch, threads, priority, signal)
+//! - `ipc.*`      — IPC (channels, shared memory, pipes, driver comm)
+//! - `audio.*`    — audio (play, system sounds, volume)
+//! - `ui.*`       — window/display (notifications, fullscreen, always-on-top)
+//! - `access.*`   — automation/accessibility (input emulation, screen read)
+//! - `resource.*` — resource limits (RAM, CPU, disk, I/O priority)
+//! - `admin.*`    — system administration (users, caps, cross-user)
+//! - `lib.*`      — library/plugin loading
+//! - `push.*`     — push notification registration
+//! - `hook.*`     — event hooks (filesystem, process, network, etc.)
+//! - `debug.*`    — debugging (attach, memory R/W, breakpoints, tracing)
+//!
+//! ## Current Scope
+//!
+//! This module implements the core infrastructure:
+//! - Capability handle type and rights bitfield.
+//! - Per-task capability table (global for now, per-process later).
+//! - Grant, revoke, and check operations.
+//! - Self-tests verifying the basic flow.
+//!
+//! Typed capabilities for each namespace (fs, net, proc, etc.) will
+//! be added as those subsystems are implemented.
+//!
+//! ## `resource_id == 0` means *the class*, never *an instance*
+//!
+//! This is an ABI promise, not an accident of the current call sites, and it
+//! is load-bearing for anyone deciding what a capability actually authorises.
+//! Read it as: **a capability whose `resource_id` is 0 names no particular
+//! object — it is authority over the resource type as a whole. A non-zero id
+//! names exactly one object and nothing else.**
+//!
+//! The distinction is invisible while nothing looks at the id, and every
+//! `has_capability_type` check ignores it. It stops being invisible the
+//! moment a *predicate* is written on top: `posix`'s `CAP_KILL` projection
+//! wanted "may signal any process", and the only thing separating that from
+//! "may signal pid 4271" is this field. Both `fork` (step 8) and `spawn`
+//! (step 5b) hand every parent a `(Process, <child pid>, SIGNAL)` capability,
+//! so a rule that ignored the id would report universal kill authority for
+//! any process that had ever forked. See
+//! `requests/b-a-does-resource-id-zero-mean-the-class-or-just-an-unknown-pid.md`.
+//!
+//! Two properties make 0 safe to use as that sentinel, and both are enforced
+//! rather than assumed:
+//!
+//! * **0 is not a reachable instance id for the types that have one.** PIDs
+//!   are allocated from 1 upward (`pcb::NEXT_PID`; 0 is the kernel, which has
+//!   implicit authority and is never granted a capability), and the same
+//!   holds for thread ids and every handle-shaped id. So a class-wide entry
+//!   can never be mistaken for an instance one, in either direction.
+//! * **0 is chosen, not defaulted.** `SpawnOptions.capabilities` carries the
+//!   id as an explicit field of every triple, so a grant site that writes 0
+//!   is stating "the class", not omitting a value it did not have yet. The
+//!   automatic parent grants above pass a real pid precisely because they
+//!   *do* mean one instance.
+//!
+//! `verify_resource_id_zero_is_class_wide` in this module is the test that
+//! keeps the first property true.
+//!
+//! ## Lock Ordering
+//!
+//! `CAP_TABLE` does not call into the scheduler or other IPC locks.
+
+pub mod audit;
+pub mod file_tags;
+pub mod groups;
+#[allow(dead_code)] // API functions for future syscall interface and timer expiry.
+pub mod request;
+pub mod rights;
+pub mod table;
+
+pub use rights::Rights;
+pub use table::CapTable;
+
+use crate::error::{KernelError, KernelResult};
+use crate::serial_println;
+
+// ---------------------------------------------------------------------------
+// Resource types
+// ---------------------------------------------------------------------------
+
+/// The type of kernel resource a capability refers to.
+///
+/// Each variant corresponds to a class of kernel objects.  New
+/// variants are added as subsystems are implemented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum ResourceType {
+    /// An IPC channel endpoint.
+    Channel = 1,
+    /// A pipe (read or write end).
+    Pipe = 2,
+    /// A shared memory region.
+    SharedMemory = 3,
+    /// An eventfd counter.
+    EventFd = 4,
+    /// A completion port.
+    CompletionPort = 5,
+    /// A process (for kill, wait, inspect operations).
+    ///
+    /// `resource_id` is the target PID, or **0 for authority over processes
+    /// as a class** — see the module-level "`resource_id == 0` means *the
+    /// class*" section, which this type is the reason for. PIDs start at 1,
+    /// so the two readings cannot collide.
+    ///
+    /// The per-child `SIGNAL` capability every parent receives from `fork`
+    /// and `spawn` carries the child's PID, so it is an *instance* grant and
+    /// must not be read as "may signal anything".
+    Process = 6,
+    /// A thread (for suspend, resume, priority change).
+    ///
+    /// `resource_id` is the target thread id, or 0 for the class. Thread ids
+    /// likewise start at 1.
+    Thread = 7,
+    /// I/O port access (for userspace drivers).
+    ///
+    /// `resource_id` is the port number for fine-grained control,
+    /// or checked via `has_capability_type` for "any port" access.
+    PortIo = 8,
+    /// Device IRQ line ownership (for userspace drivers).
+    ///
+    /// `resource_id` is the IRQ number for fine-grained control,
+    /// or checked via `has_capability_type` for "any IRQ" access.
+    DeviceIrq = 9,
+    /// Filesystem access.
+    ///
+    /// `resource_id` is reserved for future per-file handles.
+    /// Currently checked via `has_capability_type` for general FS
+    /// access (any File cap with appropriate rights grants access).
+    File = 10,
+    /// Network socket access.
+    ///
+    /// `resource_id` is reserved for future per-socket handles.
+    /// Currently checked via `has_capability_type` for general
+    /// network access.
+    Socket = 11,
+    /// Timer resource.
+    Timer = 12,
+    /// I/O scheduler privilege (for realtime I/O priority class).
+    ///
+    /// A process needs this resource type with `Rights::IO_REALTIME`
+    /// to submit I/O requests at the Realtime priority class.
+    /// Without it, Realtime requests are downgraded to BestEffort.
+    IoScheduler = 13,
+    /// Service registry access.
+    ///
+    /// Required to register named services (prevents name squatting
+    /// by untrusted processes).  Connecting to services does NOT
+    /// require this capability — any process can connect.
+    ///
+    /// `resource_id` is reserved (currently 0).
+    /// Rights: WRITE = can register services.
+    Service = 14,
+    /// Namespace management.
+    ///
+    /// Required to create namespaces or attach processes to them.
+    /// Without this, a process can only operate within its inherited
+    /// namespace.
+    ///
+    /// Rights: WRITE = create/modify/attach namespaces.
+    Namespace = 15,
+    /// A stream socket endpoint (one end of a `socketpair`).
+    ///
+    /// A bidirectional, byte-stream IPC object.  Like `Pipe`, no
+    /// capability is required to create one — the handle itself is the
+    /// authority.  Tracked per-process so the endpoint is closed when an
+    /// owning process dies.
+    StreamSocket = 16,
+    /// An anonymous in-memory file (memfd).
+    ///
+    /// Created via `memfd_create(2)` on the Linux ABI.  The handle is a
+    /// refcounted reference into [`crate::ipc::memfd`]; no capability is
+    /// required to create one — the handle itself is the authority.
+    /// Tracked per-process so the memfd is released when an owning
+    /// process dies, and so `fork()` knows to bump the refcount in the
+    /// child.
+    MemFd = 17,
+    /// An epoll instance (Linux `epoll_create`/`epoll_create1`).
+    ///
+    /// A refcounted reference into [`crate::ipc::epoll`] holding an
+    /// interest set; no capability is required to create one — the handle
+    /// itself is the authority.  Tracked per-process so the instance is
+    /// released when an owning process dies, and so `fork()` knows to bump
+    /// the refcount in the child.
+    Epoll = 18,
+    /// A signalfd instance (Linux `signalfd`/`signalfd4`).
+    ///
+    /// A refcounted reference into [`crate::ipc::signalfd`] holding a
+    /// signal mask; no capability is required to create one — the handle
+    /// itself is the authority.  Tracked per-process so the instance is
+    /// released when an owning process dies, and so `fork()` knows to bump
+    /// the refcount in the child.
+    SignalFd = 19,
+    /// A timerfd instance (Linux `timerfd_create`/`settime`/`gettime`).
+    ///
+    /// A refcounted reference into [`crate::ipc::timerfd`] holding an armed
+    /// timer (clock id, next expiry, interval); no capability is required to
+    /// create one — the handle itself is the authority.  Tracked per-process
+    /// so the instance is released when an owning process dies, and so
+    /// `fork()` knows to bump the refcount in the child.
+    Timerfd = 20,
+    /// An inotify instance (Linux `inotify_init`/`inotify_init1`).
+    ///
+    /// A refcounted reference into [`crate::ipc::inotify`] holding a table of
+    /// filesystem watches; no capability is required to create one — the
+    /// handle itself is the authority.  Tracked per-process so the instance
+    /// (and every native watch it owns) is released when an owning process
+    /// dies, and so `fork()` knows to bump the refcount in the child.
+    Inotify = 21,
+    /// An ALSA PCM substream instance (Linux `/dev/snd/pcmC0D0p`).
+    ///
+    /// A refcounted reference into [`crate::ipc::alsa_pcm`] holding one open
+    /// PCM substream's state-machine state and the software-mixer slot it
+    /// feeds; no capability is required to create one — the handle itself is
+    /// the authority.  Tracked per-process so the instance (and its mixer
+    /// slot) is released when an owning process dies, and so `fork()` knows to
+    /// bump the refcount in the child.
+    AlsaPcm = 22,
+    /// A DRM card / render-node client instance (Linux `/dev/dri/card0`,
+    /// `/dev/dri/renderD128`).
+    ///
+    /// A refcounted reference into [`crate::drm::card_fd`] holding one open
+    /// DRM client's per-fd state (target device, render-node flag, and the
+    /// `DRM_CLIENT_CAP_*` opt-ins); no capability is required to create one —
+    /// the handle itself is the authority.  Tracked per-process so the
+    /// instance is released when an owning process dies, and so `fork()` knows
+    /// to bump the refcount in the child.
+    Drm = 23,
+    /// Raw layer-2 network access to the physical NIC (for the userspace
+    /// `netstack` daemon — see design-decisions.md §63).
+    ///
+    /// Grants unfiltered Ethernet frame send/receive, bypassing the entire
+    /// protocol stack and firewall, so it is strictly more privileged than an
+    /// ordinary [`ResourceType::Socket`].  A process needs this type with
+    /// `Rights::WRITE` to open a raw NIC handle (`SYS_NET_RAW_OPEN`).
+    ///
+    /// `resource_id` is reserved for future per-interface handles; currently
+    /// checked via `has_capability_type` for "any NIC" access.
+    NetRaw = 24,
+    /// An AF_INET/AF_INET6 `SOCK_STREAM` socket backed by the userspace
+    /// `net.stack` daemon (Path B userspace-netstack cutover — see
+    /// design-decisions.md §63/§66).
+    ///
+    /// A refcounted reference into [`crate::net::socket`] holding one daemon
+    /// connection (SHM ring + daemon TCP session); no capability is required to
+    /// create one — the handle itself is the authority (the [`Socket`]
+    /// capability gates *creating* an AF_INET socket, this type tracks the
+    /// per-open resource).  Tracked per-process so the connection is torn down
+    /// when an owning process dies, and so `fork()` knows to bump the refcount
+    /// in the child.
+    ///
+    /// [`Socket`]: ResourceType::Socket
+    NetSocket = 25,
+    /// One end of a pseudo-terminal (`SYS_PTY_CREATE`).
+    ///
+    /// A refcounted reference into [`crate::tty::pty`]; no capability is
+    /// required to create a pty — creating one grants authority over nothing
+    /// that existed before it, as with [`Pipe`] and [`StreamSocket`].  Tracked
+    /// per-process so the end is closed when an owning process dies, which is
+    /// what hangs up a shell whose terminal emulator was killed, and so
+    /// `fork()` knows to bump the refcount in the child.
+    ///
+    /// **Unlike the other handle types here, ownership is actually checked.**
+    /// The raw value is `(tty_id << 1) | end`, so it is enumerable, and a
+    /// master handle is the authority to *type* into whatever shell is on the
+    /// other end — a shell prompt with attacker-chosen input, not a data leak.
+    /// Every pty syscall therefore consults
+    /// [`crate::proc::pcb::owns_ipc_handle`]; see its doc comment.
+    ///
+    /// [`Pipe`]: ResourceType::Pipe
+    /// [`StreamSocket`]: ResourceType::StreamSocket
+    Pty = 26,
+
+    /// The system clock, as an object.
+    ///
+    /// There is exactly one, so `resource_id` is reserved and is 0.  A process
+    /// needs this type with `Rights::WRITE` to set the absolute time
+    /// (`clock_settime`, `settimeofday`) or to slew it (`adjtimex`).  Reading
+    /// the clock needs nothing and never will.
+    ///
+    /// Unlike most types here this names no per-open instance: it exists so
+    /// that "may set the time" is derived from a held object rather than
+    /// asserted.  §312 projects `CAP_SYS_TIME` from it; see design-decisions.md
+    /// §269 (*three capability types for clock, ports and rlimits* — not the
+    /// hrtimer §269) for why this is its own type, and §350 for the projection
+    /// (lane B's request `b-a-three-resource-types-for-clock-ports-and-rlimits`).
+    SystemClock = 27,
+
+    /// Authority to bind a local port that the system reserves.
+    ///
+    /// `resource_id` is a specific port number, or **0 for the class** — the
+    /// `resource_id == 0` convention this file documents for
+    /// [`Process`](ResourceType::Process)/[`Thread`](ResourceType::Thread).
+    /// Port 0 is "pick one for me" in the sockets API and is never a bindable
+    /// address, so the two readings cannot collide, exactly as PIDs starting
+    /// at 1 keeps `Process` unambiguous.
+    ///
+    /// The per-port form is what makes this worth having over a boolean — a
+    /// web server should hold port 80 and not port 22 — even though the class
+    /// grant is what `init` uses today, because a daemon that reads its port
+    /// from a config file does not know it at spawn time.  Keeping
+    /// `resource_id` *meaning* the port from the start makes the fine-grained
+    /// form a grant change later rather than an ABI change.  §312 projects
+    /// `CAP_NET_BIND_SERVICE` from it.
+    PrivilegedPort = 28,
+
+    /// A process's own resource limits.
+    ///
+    /// `resource_id` is the target PID, or 0 for the class.  Needed with
+    /// `Rights::WRITE` to raise a *hard* limit; lowering a soft limit is
+    /// unprivileged and is not gated.  With
+    /// [`Rights::MEMORY_LOCK`](crate::cap::Rights::MEMORY_LOCK) it is also the
+    /// preimage of `CAP_IPC_LOCK` — locking memory past the per-process quota,
+    /// which is not a write to anything and so does not fit `WRITE`.  §312
+    /// projects `CAP_SYS_RESOURCE` and `CAP_IPC_LOCK` from it.
+    ResourceLimit = 29,
+
+    /// An open input device (`/dev/input/eventN`) — keyboard or pointer.
+    ///
+    /// `resource_id` is the `evdev_fd::EvdevHandle` raw value of one open, so
+    /// this is an *instance* type like [`Drm`](ResourceType::Drm): it exists so
+    /// process-exit cleanup and `fork` sharing can find the per-open cursor
+    /// object, and so that "may read the keyboard" is derived from a held
+    /// object rather than from being able to name a path.
+    ///
+    /// Deliberately **not** folded into [`Drm`](ResourceType::Drm).  An fd on
+    /// the GPU and an fd on the keyboard are different authorities: the first
+    /// can scan out pixels, the second is a keylogger — it sees every
+    /// keystroke typed into every application, including passwords, regardless
+    /// of which window has focus.  X11 handing exactly this to every client is
+    /// the canonical example of the mistake, and withholding it was the change
+    /// Wayland was built around.  A compositor legitimately needs both, but
+    /// nothing should acquire the second by holding the first.
+    InputDevice = 30,
+
+    /// Raw byte access to a whole storage device (`/dev/vda`, `/dev/nvme0n1`).
+    ///
+    /// `resource_id` is reserved for a future per-device grant and is 0 today;
+    /// the class grant is what `init` hands a disk imager. `Rights::READ` is
+    /// the authority to read sectors, `Rights::WRITE` the authority to write
+    /// them, and [`crate::fs::devfs`] checks each separately — an imager that
+    /// only ever captures an image should not be able to destroy one.
+    ///
+    /// Deliberately **not** folded into [`File`](ResourceType::File), for the
+    /// same reason [`NetRaw`](ResourceType::NetRaw) is not folded into
+    /// [`Socket`](ResourceType::Socket): it is the same resource reached
+    /// underneath every check that makes the ordinary type safe. A `File`
+    /// write goes through path resolution, the mount's read-only flag, the
+    /// file's own permission bits and its owning user; a write here goes to
+    /// the sectors those things are *stored in*, so it can rewrite any file on
+    /// the disk — including the ones the caller was denied — or destroy the
+    /// filesystem entirely. Reading is not much weaker: raw sectors include
+    /// every file the caller cannot open and every file that was deleted but
+    /// not overwritten. If holding `File` implied holding this, then every
+    /// program that can write its own config file could erase the disk, which
+    /// is precisely the ambient authority this whole subsystem exists to
+    /// refuse.
+    ///
+    /// *Enumerating* devices needs nothing: `readdir`/`stat` on `/dev` and the
+    /// `/sys` block listing are ungated, because showing a user which disks
+    /// exist is not destructive and a program that had to hold the right to
+    /// erase every disk in the machine before it could draw its sidebar is one
+    /// that must be launched over-privileged.
+    BlockDevice = 31,
+}
+
+impl ResourceType {
+    /// The highest discriminant in use.
+    ///
+    /// Discriminants are contiguous from `Channel = 1`, so this doubles as the
+    /// variant count. Consumers that need "every type" iterate `1..=LAST`
+    /// rather than keeping their own list — see
+    /// [`groups::test_admin_grants_every_resource_type`](crate::cap::groups).
+    pub const LAST: u16 = Self::BlockDevice as u16;
+
+    /// This type's wire discriminant, as sent to userspace.
+    ///
+    /// Written as an exhaustive match rather than `self as u16` — which would
+    /// be one line and generate identical code — so that it doubles as a
+    /// **compile-time tripwire**: adding a variant makes this fail to compile,
+    /// which lands whoever added it *here*, reading the list below. Two other
+    /// exhaustive matches (`ipc::cleanup_handles`, `proc::fork::dup_one`) would
+    /// also break, but neither of them can tell you about the four items below,
+    /// and a compile error that only says "handle this in fork" invites
+    /// handling it in fork and stopping.
+    ///
+    /// **When this breaks, update — in this order:**
+    ///
+    /// 1. [`Self::LAST`], above. Everything that iterates the types reads it.
+    /// 2. `cap::groups::init`'s `admin_grants` list. The `admin` group is
+    ///    documented to grant *every* type and is boot-tested against
+    ///    `1..=LAST`, so omitting it turns a green boot red — which is the
+    ///    intended outcome, not an inconvenience: it forces the "should admin
+    ///    have this?" question to be answered rather than defaulted.
+    /// 3. `test_cap_entry_info_abi`'s `ResourceType::LAST` pin. Doing step 1
+    ///    turns the boot red until you do this one — deliberately, because
+    ///    step 4 is the one with no compiler behind it at all and this is the
+    ///    last place that can make you stop and read it.
+    /// 4. Lane B's mirrored copy in `posix/src/sys_capability.rs`, which no
+    ///    compiler here can see. File a request; do not assume they will
+    ///    notice.
+    /// 5. [`Self::from_raw`], below — the inverse. It is a `match` on a `u16`,
+    ///    so the compiler cannot check it; `test_resource_type_from_raw` walks
+    ///    `1..=LAST` and turns the boot red instead.
+    ///
+    /// The single or-pattern arm is deliberate — per-variant arms would invite
+    /// someone to give the new one a body and consider the matter closed.
+    #[must_use]
+    pub const fn discriminant(self) -> u16 {
+        match self {
+            Self::Channel
+            | Self::Pipe
+            | Self::SharedMemory
+            | Self::EventFd
+            | Self::CompletionPort
+            | Self::Process
+            | Self::Thread
+            | Self::PortIo
+            | Self::DeviceIrq
+            | Self::File
+            | Self::Socket
+            | Self::Timer
+            | Self::IoScheduler
+            | Self::Service
+            | Self::Namespace
+            | Self::StreamSocket
+            | Self::MemFd
+            | Self::Epoll
+            | Self::SignalFd
+            | Self::Timerfd
+            | Self::Inotify
+            | Self::AlsaPcm
+            | Self::Drm
+            | Self::NetRaw
+            | Self::NetSocket
+            | Self::Pty
+            | Self::SystemClock
+            | Self::PrivilegedPort
+            | Self::ResourceLimit
+            | Self::InputDevice
+            | Self::BlockDevice => self as u16,
+        }
+    }
+
+    /// The inverse of [`Self::discriminant`]: a wire value from userspace back
+    /// into a type, or `None` if it names no type.
+    ///
+    /// # Why this exists in `cap` rather than at each call site
+    ///
+    /// It did not, and the cost was already paid. `sys_cap_request` carried its
+    /// own copy of this table written out by hand, and that copy **stopped at
+    /// 15** — `Namespace`. Fifteen types have been added since, so a process
+    /// asking the human to grant it `Drm`, `NetRaw`, `Pty`, `InputDevice`,
+    /// `PrivilegedPort` or any of the other ten got `InvalidArgument`, as
+    /// though it had passed garbage. Nothing failed to compile, no test went
+    /// red, and the checklist on `discriminant` above could not mention a list
+    /// it did not know about.
+    ///
+    /// That is the tree's recurring lesson in its cheapest form: **when one
+    /// operation has two implementations, the invariant is that they agree, and
+    /// nothing in the type system checks it.** The same shape produced
+    /// `fork_create` vs `spawn_process` (capability cloning) and `symbolize.py`
+    /// vs `boot-test.sh` (address → symbol). One table, one place.
+    ///
+    /// # Why a `match` and not `transmute`
+    ///
+    /// `transmute` would accept any `u16` past [`Self::LAST`] and produce a
+    /// `ResourceType` that is not
+    /// any variant — instant UB, from a value userspace chooses. The match is
+    /// the validation, which is the entire job.
+    ///
+    /// The compiler cannot check a `match` on a `u16` for exhaustiveness, so
+    /// `groups::test_resource_type_from_raw` walks `1..=LAST` at boot and fails
+    /// if any discriminant is unmapped or fails to round-trip.
+    #[must_use]
+    pub const fn from_raw(raw: u16) -> Option<Self> {
+        let ty = match raw {
+            1 => Self::Channel,
+            2 => Self::Pipe,
+            3 => Self::SharedMemory,
+            4 => Self::EventFd,
+            5 => Self::CompletionPort,
+            6 => Self::Process,
+            7 => Self::Thread,
+            8 => Self::PortIo,
+            9 => Self::DeviceIrq,
+            10 => Self::File,
+            11 => Self::Socket,
+            12 => Self::Timer,
+            13 => Self::IoScheduler,
+            14 => Self::Service,
+            15 => Self::Namespace,
+            16 => Self::StreamSocket,
+            17 => Self::MemFd,
+            18 => Self::Epoll,
+            19 => Self::SignalFd,
+            20 => Self::Timerfd,
+            21 => Self::Inotify,
+            22 => Self::AlsaPcm,
+            23 => Self::Drm,
+            24 => Self::NetRaw,
+            25 => Self::NetSocket,
+            26 => Self::Pty,
+            27 => Self::SystemClock,
+            28 => Self::PrivilegedPort,
+            29 => Self::ResourceLimit,
+            30 => Self::InputDevice,
+            31 => Self::BlockDevice,
+            _ => return None,
+        };
+        Some(ty)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Enumeration ABI
+// ---------------------------------------------------------------------------
+
+/// One capability as reported to userspace by `SYS_CAP_QUERY`.
+///
+/// Layout must match the userspace definition exactly (24 bytes, C ABI,
+/// 8-aligned).  The explicit `_reserved` array is what makes that true: it
+/// fills what would otherwise be implicit padding after `resource_type`, so
+/// every byte the kernel copies out is a byte the kernel wrote.
+///
+/// # What is deliberately absent
+///
+/// The **handle value**.  Lane B, the requesting consumer, asked not to
+/// receive it, and the reasoning generalises: an enumeration answers *what
+/// authority exists*, not *which slot holds it*.  A handle is a token that can
+/// be used, so putting one into an informational list invites someone to use
+/// it — and a list is exactly where a stale one survives longest.
+///
+/// # What is present beyond the request
+///
+/// `resource_id`.  The request asked only for type and rights, but the id
+/// names the *object* (which channel, which process), not the slot, so it
+/// leaks nothing the handle exclusion was protecting.  It is included now
+/// because widening a `#[repr(C)]` struct later is an ABI break for every
+/// caller, and eight bytes is a cheap premium against one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct CapEntryInfo {
+    /// [`ResourceType`] discriminant (the enum is `#[repr(u16)]`).
+    pub resource_type: u16,
+    /// Reserved; always written as zero.
+    pub _reserved: [u16; 3],
+    /// [`Rights`] bits, as `Rights::raw()`.
+    ///
+    /// A `u64`, not a `u32`: `Rights` is a `u64` bitmask.  Twelve bits are
+    /// defined today, which is exactly why a caller must not infer the
+    /// narrower type — the width is the ABI, not the current occupancy.
+    pub rights: u64,
+    /// Kernel-internal identifier of the resource (channel id, pid, ...).
+    ///
+    /// Meaningful only together with `resource_type`, and not usable as a
+    /// handle: it names the object, not the caller's access to it.
+    pub resource_id: u64,
+}
+
+impl CapEntryInfo {
+    /// Project a stored [`table::CapEntry`] onto the user-visible form.
+    ///
+    /// Deliberately not `From`: the conversion is lossy on purpose (the handle
+    /// is dropped) and a named constructor keeps that visible at the call
+    /// site.
+    #[must_use]
+    pub fn from_entry(entry: &table::CapEntry) -> Self {
+        Self {
+            resource_type: entry.resource_type.discriminant(),
+            _reserved: [0; 3],
+            rights: entry.rights.raw(),
+            resource_id: entry.resource_id,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Run capability system self-tests.
+pub fn self_test() -> KernelResult<()> {
+    serial_println!("[cap] Running capability system self-test...");
+
+    table::self_test()?;
+    test_cap_entry_info_abi()?;
+    verify_resource_id_zero_is_class_wide()?;
+
+    serial_println!("[cap] Capability system self-test PASSED");
+    Ok(())
+}
+
+/// Keep `resource_id == 0` usable as the "names the class" sentinel by
+/// proving nothing can ever be allocated *at* 0.
+///
+/// The convention documented at the top of this module is only sound while
+/// no real instance id is 0. That is true today because PIDs and thread ids
+/// are allocated from 1 upward — but "allocated from 1" is one line in
+/// another module, and a future change to make ids start at 0 (or to hash
+/// them, or to reuse a slot index) would silently turn a class-wide grant
+/// into a grant over process 0 and back again, in a predicate that no longer
+/// mentions this file.
+///
+/// So the property is checked rather than commented. A single PID allocation
+/// is enough: the counter is monotonic, so if the *first* id it can still
+/// hand out is non-zero, no later one can be 0 either.
+///
+/// This intentionally does not assert anything about which grant sites use
+/// 0 — that is a policy each call site owns. It asserts only the thing they
+/// all depend on and none of them can check.
+fn verify_resource_id_zero_is_class_wide() -> KernelResult<()> {
+    let pid = crate::proc::pcb::peek_next_pid();
+    if pid == 0 {
+        serial_println!(
+            "[cap]   FAIL: the next PID is 0, so a (Process, 0) capability can no longer be \
+             told apart from authority over one real process — see the module docs on \
+             resource_id == 0"
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[cap]   resource_id 0 is unreachable as an instance id (next PID {pid}): OK");
+    Ok(())
+}
+
+/// The `SYS_CAP_QUERY` record layout is an ABI, so pin it with a check.
+///
+/// Userspace (Lane B's POSIX layer) declares this struct independently; nothing
+/// in the compiler ties the two declarations together.  A silent change here —
+/// adding a field, widening `rights`, letting the compiler insert padding —
+/// would not fail to build on either side, it would simply make one side read
+/// the other's bytes at the wrong offsets and report authority the process does
+/// not hold.  So the sizes and offsets are asserted, not assumed.
+fn test_cap_entry_info_abi() -> KernelResult<()> {
+    use core::mem::{align_of, size_of};
+
+    if size_of::<CapEntryInfo>() != 24 || align_of::<CapEntryInfo>() != 8 {
+        serial_println!(
+            "[cap]   FAIL: CapEntryInfo is {} bytes / align {}, ABI says 24 / 8",
+            size_of::<CapEntryInfo>(),
+            align_of::<CapEntryInfo>()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Round-trip a known entry: every field must survive the projection, and
+    // the reserved bytes must be zero rather than whatever was on the stack.
+    let entry = table::CapEntry {
+        resource_type: ResourceType::Channel,
+        resource_id: 0xDEAD_BEEF_0000_0001,
+        rights: Rights::READ_WRITE,
+        valid: true,
+    };
+    let info = CapEntryInfo::from_entry(&entry);
+    if info.resource_type != ResourceType::Channel as u16
+        || info.resource_id != 0xDEAD_BEEF_0000_0001
+        || info.rights != Rights::READ_WRITE.raw()
+        || info._reserved != [0; 3]
+    {
+        serial_println!("[cap]   FAIL: CapEntryInfo::from_entry lost or dirtied a field");
+        return Err(KernelError::InternalError);
+    }
+
+    // The discriminant is the wire value, and lane B mirrors these numbers by
+    // hand in `posix/src/sys_capability.rs`, where no compiler here can see
+    // them.  Two *different* mistakes have to be caught, and it is worth being
+    // precise about which pin catches which — an earlier version of this
+    // comment claimed the `ResourceLimit` pin caught an append, which it does
+    // not: appending a variant leaves `ResourceLimit` at 29 and this check
+    // passes unchanged.
+    //
+    // 1. **Renumbering or insertion** — someone slots a variant into the middle
+    //    of the enum, shifting every later discriminant and silently repointing
+    //    lane B's decode table by one.  Caught by the four value pins below:
+    //    the first variant, two interior anchors, and the last.
+    if ResourceType::Channel as u16 != 1
+        || ResourceType::NetSocket as u16 != 25
+        || ResourceType::SystemClock as u16 != 27
+        || ResourceType::ResourceLimit as u16 != 29
+    {
+        serial_println!(
+            "[cap]   FAIL: ResourceType discriminants moved — a variant was inserted \
+             rather than appended, so every later wire value shifted. Lane B's \
+             hand-mirrored table in posix/src/sys_capability.rs is now off by one \
+             and must be corrected; file a request."
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 2. **Appending** — a genuinely new type at the end.  None of the pins
+    //    above move, so they cannot see it.  `LAST` can: `ResourceType::
+    //    discriminant()`'s exhaustive match is a compile error on append, and
+    //    it directs whoever hit it to bump `LAST` first (see its doc comment,
+    //    step 1).  Pinning `LAST` here catches the case where they satisfied
+    //    that compile error by adding the variant to the or-pattern and stopped
+    //    — which compiles clean, and leaves `LAST` naming the second-to-last
+    //    type.
+    //
+    //    It is runtime rather than a `const` assert to match the four checks
+    //    around it, all of which are equally const-foldable and all of which
+    //    are runtime on purpose: this function's output line is the boot log's
+    //    *evidence* that the wire ABI was verified on this build, and an
+    //    assertion that fires at compile time leaves no such record.
+    //
+    //    It restates a constant, which is normally the wrong shape for a test.
+    //    It earns the exception because the value is not ours — it is the
+    //    wire's, and the other copy of it lives in a tree this build cannot
+    //    compile, so there is nothing to derive it from.
+    if ResourceType::LAST != 31 {
+        serial_println!(
+            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 31 — a new resource type \
+             was appended. That is fine, but the wire ABI just grew: bump the pin here, \
+             and file a request so lane B adds it to posix/src/sys_capability.rs. Until \
+             they do, userspace decodes the new type as unknown.",
+            ResourceType::LAST
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[cap]   CapEntryInfo ABI: OK");
+    Ok(())
+}

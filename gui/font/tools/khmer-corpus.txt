@@ -1,0 +1,117 @@
+# Corpus for `KhmerProbe.ttf` (see `gen_khmer_probe.py`), swept with
+#
+#     python gui/font/tools/harfbuzz_sweep.py \
+#         --fonts gui/font/tools/khmer-probe --corpus gui/font/tools/khmer-corpus.txt
+#
+# One string per edge of the Khmer shaper rather than sampled text: the probe
+# face's whole purpose is to reach the edges real text reaches rarely, and on
+# a face where every feature announces itself the interesting question is
+# *which* features reached *which* glyph, not whether a word looks right.
+#
+# The escapes are `harfbuzz_sweep.py`'s, the same ones `shape_dump.rs` reads.
+
+# --- the ordinary syllable, and the masks every glyph in one gets ---
+# ក KA alone: one glyph, first in its syllable, so it takes neither `blwf` nor
+# `abvf` nor `pstf`. The control for every string below.
+\u1780
+# ក ្ ខ — KA, COENG, KHA. The subscript and the coeng are both after the first
+# glyph, so both take `blwf|abvf|pstf` and neither takes `pref`.
+\u1780\u17d2\u1781
+
+# --- the COENG+RO move, and `cfar`, which nothing installed can test ---
+# ង ្ រ — NGO, COENG, RO with nothing after it. The pair moves to the front
+# and takes `pref`; there is nothing left for `cfar` to mark.
+\u1784\u17d2\u179a
+# ង ្ រ ្ គ — HarfBuzz's own pair from `reorder_consonant_syllable`. COENG+RO
+# fronts, and the COENG+KO it jumped over is what `cfar` is for. This is the
+# string no installed face can answer: not one has a `cfar` lookup.
+\u1784\u17d2\u179a\u17d2\u1782
+# ង ្ គ ្ រ — the same five characters with the subscripts swapped, so the RO
+# is not the first coeng's target and nothing fronts. Telling this apart from
+# the line above is the entire point of the feature.
+\u1784\u17d2\u1782\u17d2\u179a
+# A third coeng after a fronted pair: the scan stops counting at two, so the
+# last one must not front as well.
+\u1784\u17d2\u179a\u17d2\u1782\u17d2\u1798
+# A COENG+RO that is not first: the pair still fronts, over the subscript
+# already there, and `cfar` marks what is left behind.
+\u1784\u17d2\u1782\u17d2\u179a\u17d2\u1798
+
+# --- the pre-base vowel move ---
+# ក ែ — KA and vowel sign E. The vowel moves to the head of the syllable, so
+# it becomes the syllable's first glyph and stops taking `blwf|abvf|pstf`.
+\u1780\u17c2
+# ខ ្ ម ែ រ — `khmae`, the word "Khmer": a subscript and a left vowel at once,
+# which is the ordinary case and the one that breaks most visibly.
+\u1781\u17d2\u1798\u17c2\u179a
+# A left vowel *and* a fronted COENG+RO. Both move to the front, and which
+# ends up first is the ordering this string exists to pin: the scan meets the
+# coeng before the vowel, and the vowel's move then puts it ahead of the pair.
+\u1784\u17d2\u179a\u17c2
+\u1784\u17c2\u17d2\u179a
+
+# --- the split vowels, which Unicode gives no decomposition ---
+# Each becomes U+17C1 plus its own second half, and the first half is a
+# pre-base vowel, so each of these also exercises the move above.
+\u1780\u17be
+\u1780\u17bf
+\u1780\u17c0
+\u1780\u17c4
+\u1780\u17c5
+# A split vowel over a subscripted consonant: the split runs before the
+# syllable is cut, so the halves have to land in the same syllable.
+\u1781\u17d2\u1798\u17be
+
+# --- the marks the grammar gives their own categories ---
+# ៌ robat, the only mark allowed before the first coeng.
+\u1780\u17cc
+\u1780\u17cc\u17d2\u1781
+# ៉ ៊ the two register shifters, which the grammar files with the robat.
+\u1780\u17c9
+\u1780\u17ca
+# ំ nikahit, which may repeat between the vowels, and ះ reahmuk, which trails.
+\u1780\u17c6
+\u1780\u17c7
+\u1780\u17c6\u17c7
+\u1780\u17b7\u17c6\u17c7
+# A vowel above and a vowel below on one consonant.
+\u1780\u17b7
+\u1780\u17bb
+\u1780\u17bb\u17c6
+
+# --- broken clusters, which earn a dotted circle ---
+# A coeng with nothing to subscript. The circle is inserted first and then
+# reordered *as* the syllable's consonant, so it must take the head's masks
+# and the coeng after it must take `blwf|abvf|pstf`.
+\u17d2\u1780
+# A bare coeng, a bare vowel sign, and a bare above-mark.
+\u17d2
+\u17b7
+\u17c6
+# A left vowel with nothing to sit in front of: broken, and the circle it is
+# given is what it moves in front of.
+\u17c2
+# A bare COENG+RO: broken, and it still fronts once the circle is there.
+\u17d2\u179a
+
+# --- the joiners, which the grammar names and the mask logic must not skip ---
+\u1780\u17d2\u200d\u1781
+\u1780\u17d2\u200c\u1781
+
+# --- independent vowels, which the grammar treats exactly as consonants ---
+\u17a5
+\u17a5\u17d2\u1780
+# អ QA, which is named like an independent vowel and filed as a consonant.
+\u17a2\u17d2\u1780
+
+# --- things that reach no syllable rule, and are the control ---
+# Khmer digits, a lek attak, and the symbols block.
+\u17e1\u17e2\u17e3
+\u17f0\u17f1
+\u19e0\u19e1
+# Latin, which is a non-Khmer syllable and must be left entirely alone. The
+# probe face does not cover it, so a marker here would be a mask that escaped.
+A
+# Two syllables in a row, so a mask set for one cannot bleed into the next.
+\u1780\u17d2\u1781\u1780\u17d2\u1781
+\u1784\u17d2\u179a\u17d2\u1782\u0020\u1784\u17d2\u179a\u17d2\u1782

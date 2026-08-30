@@ -1,0 +1,24 @@
+[package]
+name = "deflate"
+version = "0.1.0"
+edition = "2024"
+description = "DEFLATE (RFC 1951) with its gzip (RFC 1952) and zlib (RFC 1950) wrappers, written once."
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` + `alloc`, unlike `sha2`/`sha1`/`md5`/`crc32`, which need no
+# allocator at all. A decompressor cannot be allocation-free: the output size
+# is not known until the stream ends, and the Huffman tables are built per
+# block from lengths read out of the stream. `alloc` alone (no `std`) is what
+# lets the kernel link this, and the kernel is the caller that constrains the
+# dependency list.
+[dependencies]
+# The gzip trailer's checksum. This is the reflected-IEEE CRC-32, *not* the
+# CRC32C the kernel uses for ext4; getting the two the wrong way round
+# produces a checksum that verifies against nothing, and a failure that looks
+# like data corruption rather than like a bug.
+crc32 = { path = "../crc32" }
+
+[lints]
+workspace = true

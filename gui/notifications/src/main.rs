@@ -1,0 +1,2967 @@
+//! Slate OS Notification Daemon
+//!
+//! Manages system and application notifications with toast display,
+//! a notification center UI, and Do Not Disturb scheduling. Communicates
+//! with applications via the notification service protocol (IPC channels).
+//!
+//! # Architecture
+//!
+//! ```text
+//! Applications ──(IPC)──► NotificationDaemon
+//!                              │
+//!                    ┌─────────┼─────────┐
+//!                    ▼         ▼         ▼
+//!              Toast Overlay  History  DND Engine
+//!                    │         │
+//!                    └────┬────┘
+//!                         ▼
+//!                   RenderTree → Compositor
+//! ```
+
+#[allow(unused_imports)]
+use guitk::event::{EventResult, Modifiers, MouseEventKind};
+#[allow(unused_imports)]
+use guitk::render::{FontWeightHint, TextOverflow};
+#[allow(unused_imports)]
+use guitk::style::CornerRadii;
+use guitk::text;
+use guitk::wheel;
+#[allow(unused_imports)]
+use guitk::{Color, Event, KeyEvent, MouseButton, MouseEvent, RenderCommand, RenderTree};
+
+use oswindow::app::Response;
+
+use std::collections::HashMap;
+use std::process::ExitCode;
+use std::time::Duration;
+
+// ---------------------------------------------------------------------------
+// Catppuccin Mocha theme colors
+// ---------------------------------------------------------------------------
+
+const BASE: Color = Color::from_hex(0x1E1E2E);
+const MANTLE: Color = Color::from_hex(0x181825);
+const CRUST: Color = Color::from_hex(0x11111B);
+const SURFACE0: Color = Color::from_hex(0x313244);
+const SURFACE1: Color = Color::from_hex(0x45475A);
+const SURFACE2: Color = Color::from_hex(0x585B70);
+const TEXT: Color = Color::from_hex(0xCDD6F4);
+const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
+const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
+const BLUE: Color = Color::from_hex(0x89B4FA);
+#[allow(dead_code)]
+const GREEN: Color = Color::from_hex(0xA6E3A1);
+const YELLOW: Color = Color::from_hex(0xF9E2AF);
+const RED: Color = Color::from_hex(0xF38BA8);
+const MAUVE: Color = Color::from_hex(0xCBA6F7);
+#[allow(dead_code)]
+const PEACH: Color = Color::from_hex(0xFAB387);
+const OVERLAY0: Color = Color::from_hex(0x6C7086);
+
+// ---------------------------------------------------------------------------
+// Layout constants
+// ---------------------------------------------------------------------------
+
+const TOAST_WIDTH: f32 = 360.0;
+const TOAST_MIN_HEIGHT: f32 = 80.0;
+const TOAST_PADDING: f32 = 16.0;
+const TOAST_MARGIN: f32 = 8.0;
+const TOAST_CORNER_RADIUS: f32 = 12.0;
+const TOAST_SHADOW_BLUR: f32 = 12.0;
+const TOAST_RIGHT_MARGIN: f32 = 16.0;
+const TOAST_TOP_MARGIN: f32 = 48.0;
+const MAX_VISIBLE_TOASTS: usize = 4;
+/// Font size of a toast's body text.
+const TOAST_BODY_FONT_SIZE: f32 = 12.0;
+/// Baseline-to-baseline spacing of the toast body, in pixels.
+///
+/// Named because `toast_height` and the per-line draw both depend on it; as
+/// two separate literals they could disagree and clip the last line.
+const TOAST_BODY_LINE_HEIGHT: f32 = 16.0;
+/// Most body lines a toast will show before eliding.
+const TOAST_BODY_MAX_LINES: usize = 3;
+const CLOSE_BTN_SIZE: f32 = 20.0;
+const PROGRESS_BAR_HEIGHT: f32 = 4.0;
+const ACTION_BTN_HEIGHT: f32 = 28.0;
+const ACTION_BTN_PADDING: f32 = 12.0;
+
+/// Height (and minimum width) of the unread-count pill.
+const BADGE_HEIGHT: f32 = 22.0;
+
+const CENTER_WIDTH: f32 = 400.0;
+const CENTER_HEADER_HEIGHT: f32 = 48.0;
+const CENTER_ITEM_HEIGHT: f32 = 72.0;
+const CENTER_GROUP_HEADER_HEIGHT: f32 = 36.0;
+
+const ANIMATION_DURATION_MS: u64 = 250;
+
+// ---------------------------------------------------------------------------
+// Notification types
+// ---------------------------------------------------------------------------
+
+/// Priority level determines auto-dismiss timing and DND bypass behavior.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NotificationPriority {
+    Low,
+    Normal,
+    High,
+    Critical,
+}
+
+impl NotificationPriority {
+    /// Auto-dismiss timeout in milliseconds. `None` means never auto-dismiss.
+    fn timeout_ms(self) -> Option<u64> {
+        match self {
+            Self::Low => Some(3_000),
+            Self::Normal => Some(5_000),
+            Self::High => Some(10_000),
+            Self::Critical => None,
+        }
+    }
+
+    fn accent_color(self) -> Color {
+        match self {
+            Self::Low => SUBTEXT0,
+            Self::Normal => BLUE,
+            Self::High => YELLOW,
+            Self::Critical => RED,
+        }
+    }
+}
+
+/// Notification category for grouping and filtering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Category {
+    System,
+    App,
+    Message,
+    Email,
+    Download,
+    Update,
+    Error,
+    Reminder,
+}
+
+impl Category {
+    fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::App => "App",
+            Self::Message => "Message",
+            Self::Email => "Email",
+            Self::Download => "Download",
+            Self::Update => "Update",
+            Self::Error => "Error",
+            Self::Reminder => "Reminder",
+        }
+    }
+}
+
+/// An action button displayed on a notification.
+#[derive(Clone, Debug)]
+pub struct NotificationAction {
+    pub id: String,
+    pub label: String,
+}
+
+/// A single notification entry.
+#[derive(Clone, Debug)]
+pub struct Notification {
+    pub id: u64,
+    pub app_name: String,
+    pub title: String,
+    pub body: String,
+    pub priority: NotificationPriority,
+    pub icon_id: Option<u64>,
+    pub timestamp_ms: u64,
+    pub actions: Vec<NotificationAction>,
+    pub category: Category,
+    pub progress: Option<u8>,
+    pub persistent: bool,
+    pub group_key: Option<String>,
+    pub read: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Toast animation state
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct ToastState {
+    notification_id: u64,
+    /// Milliseconds since toast was shown.
+    age_ms: u64,
+    /// Slide-in offset (starts at TOAST_WIDTH, animates to 0).
+    slide_offset: f32,
+    /// Whether the toast is in the exit animation.
+    dismissing: bool,
+    /// If dismissing, how many ms into the exit animation.
+    dismiss_age_ms: u64,
+}
+
+impl ToastState {
+    fn new(notification_id: u64) -> Self {
+        Self {
+            notification_id,
+            age_ms: 0,
+            slide_offset: TOAST_WIDTH + TOAST_RIGHT_MARGIN,
+            dismissing: false,
+            dismiss_age_ms: 0,
+        }
+    }
+
+    fn enter_progress(&self) -> f32 {
+        let t = (self.age_ms as f32) / (ANIMATION_DURATION_MS as f32);
+        t.clamp(0.0, 1.0)
+    }
+
+    fn exit_progress(&self) -> f32 {
+        let t = (self.dismiss_age_ms as f32) / (ANIMATION_DURATION_MS as f32);
+        t.clamp(0.0, 1.0)
+    }
+
+    fn current_offset(&self) -> f32 {
+        if self.dismissing {
+            let p = ease_out_cubic(self.exit_progress());
+            // Slide back out to the right.
+            (TOAST_WIDTH + TOAST_RIGHT_MARGIN) * p
+        } else {
+            let p = ease_out_cubic(self.enter_progress());
+            self.slide_offset * (1.0 - p)
+        }
+    }
+}
+
+fn ease_out_cubic(t: f32) -> f32 {
+    let inv = 1.0 - t;
+    1.0 - inv * inv * inv
+}
+
+// ---------------------------------------------------------------------------
+// Do Not Disturb
+// ---------------------------------------------------------------------------
+
+/// Minutes in a day. A time-of-day is always in `0..MINUTES_PER_DAY`.
+const MINUTES_PER_DAY: u16 = 24 * 60;
+
+/// A "quiet hours" window on the 24-hour clock.
+///
+/// The two endpoints are stored as minutes from midnight rather than as an
+/// hour/minute pair, and are only constructible through [`DndSchedule::new`],
+/// which rejects times that are not on the clock. The previous shape kept four
+/// public `u8`s and converted on every call, which meant `start_hour: 25` was
+/// accepted in silence: it produced a start of 1500, past the largest possible
+/// time-of-day, so the window compared as overnight and then never opened. A
+/// schedule that is quietly never active is worse than one that is refused,
+/// because nothing ever reports it — the user just stops getting quiet hours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DndSchedule {
+    /// Minutes from midnight, `< MINUTES_PER_DAY`.
+    start: u16,
+    /// Minutes from midnight, `< MINUTES_PER_DAY`.
+    end: u16,
+}
+
+impl DndSchedule {
+    /// Build a schedule from wall-clock times, or `None` if either is not a
+    /// real time of day.
+    ///
+    /// `start == end` is accepted and means an empty window, matching the
+    /// `start <= end` branch of [`Self::is_active`]; it is a degenerate
+    /// schedule, not an invalid one.
+    pub fn new(start_hour: u8, start_minute: u8, end_hour: u8, end_minute: u8) -> Option<Self> {
+        Some(Self {
+            start: Self::minutes_from_midnight(start_hour, start_minute)?,
+            end: Self::minutes_from_midnight(end_hour, end_minute)?,
+        })
+    }
+
+    /// `hour:minute` as minutes from midnight, or `None` if it is not a time.
+    ///
+    /// The multiplication cannot overflow once the hour is known to be under
+    /// 24 — the largest value is 23 * 60 + 59 = 1439 — but it is written with
+    /// `checked_*` anyway so that the bound is enforced by the code rather
+    /// than by this comment.
+    fn minutes_from_midnight(hour: u8, minute: u8) -> Option<u16> {
+        if hour >= 24 || minute >= 60 {
+            return None;
+        }
+        u16::from(hour)
+            .checked_mul(60)?
+            .checked_add(u16::from(minute))
+            .filter(|m| *m < MINUTES_PER_DAY)
+    }
+
+    /// Check if a given time-of-day (in minutes from midnight) falls within
+    /// the DND window.
+    fn is_active(&self, minutes_from_midnight: u16) -> bool {
+        if self.start <= self.end {
+            // Same-day window (e.g. 08:00 - 17:00)
+            minutes_from_midnight >= self.start && minutes_from_midnight < self.end
+        } else {
+            // Overnight window (e.g. 22:00 - 07:00)
+            minutes_from_midnight >= self.start || minutes_from_midnight < self.end
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DndState {
+    pub enabled: bool,
+    pub schedule: Option<DndSchedule>,
+    /// Critical notifications always bypass DND.
+    pub bypass_critical: bool,
+}
+
+impl Default for DndState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            schedule: None,
+            bypass_critical: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-app notification settings
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct AppSettings {
+    pub enabled: bool,
+    pub min_priority: NotificationPriority,
+    pub sound_enabled: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_priority: NotificationPriority::Low,
+            sound_enabled: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Service protocol — request / response
+// ---------------------------------------------------------------------------
+
+/// Requests that applications can send to the notification daemon.
+#[derive(Clone, Debug)]
+pub enum NotificationRequest {
+    Send(Notification),
+    Update {
+        id: u64,
+        title: Option<String>,
+        body: Option<String>,
+        progress: Option<u8>,
+    },
+    Dismiss {
+        id: u64,
+    },
+    DismissAll {
+        app_name: String,
+    },
+    GetActive,
+    GetHistory {
+        limit: usize,
+    },
+    SetDnd {
+        enabled: bool,
+    },
+    SetAppSettings {
+        app_name: String,
+        settings: AppSettings,
+    },
+}
+
+/// Responses returned to applications.
+#[derive(Clone, Debug)]
+pub enum NotificationResponse {
+    /// A notification was created; returns its ID.
+    Created { id: u64 },
+    /// Operation succeeded with no additional data.
+    Ok,
+    /// List of active (visible) toast notification IDs.
+    ActiveList(Vec<u64>),
+    /// History entries.
+    HistoryList(Vec<Notification>),
+    /// An error occurred.
+    Error(String),
+}
+
+// ---------------------------------------------------------------------------
+// Notification Center state
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct CenterState {
+    visible: bool,
+    scroll_offset: f32,
+    /// Which app groups are collapsed (by app_name).
+    collapsed_groups: Vec<String>,
+}
+
+impl Default for CenterState {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            scroll_offset: 0.0,
+            collapsed_groups: Vec::new(),
+        }
+    }
+}
+
+/// One row of the notification centre's scrollable list, in draw order.
+///
+/// See [`NotificationDaemon::center_rows`] for why the list is described once
+/// as data rather than walked separately by each of the three things that
+/// needs its geometry.
+enum CenterRow<'a> {
+    /// A group's header line: the app it groups, how many it holds, and
+    /// whether its items are hidden.
+    GroupHeader {
+        app_name: String,
+        count: usize,
+        collapsed: bool,
+    },
+    /// One notification within a group.
+    Item(&'a Notification),
+}
+
+impl CenterRow<'_> {
+    /// How tall this row is drawn.
+    const fn height(&self) -> f32 {
+        match self {
+            Self::GroupHeader { .. } => CENTER_GROUP_HEADER_HEIGHT,
+            Self::Item(_) => CENTER_ITEM_HEIGHT,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main daemon struct
+// ---------------------------------------------------------------------------
+
+/// The notification daemon: manages active toasts, history, DND state,
+/// and per-app settings.
+pub struct NotificationDaemon {
+    /// Active toast overlays (newest first).
+    toasts: Vec<ToastState>,
+    /// Full notification history (newest first, capped at `max_history`).
+    history: Vec<Notification>,
+    /// Per-app notification settings.
+    app_settings: HashMap<String, AppSettings>,
+    /// Do Not Disturb state.
+    dnd: DndState,
+    /// Notification center panel state.
+    center: CenterState,
+    /// Next notification ID.
+    next_id: u64,
+    /// Maximum history entries.
+    max_history: usize,
+    /// Current time-of-day in minutes from midnight (updated externally).
+    current_minutes: u16,
+    /// Current timestamp in ms (monotonic, for timeout tracking).
+    current_time_ms: u64,
+    /// Viewport width (for positioning toasts in top-right).
+    viewport_width: f32,
+    /// Viewport height.
+    viewport_height: f32,
+}
+
+impl NotificationDaemon {
+    pub fn new(viewport_width: f32, viewport_height: f32) -> Self {
+        Self {
+            toasts: Vec::new(),
+            history: Vec::new(),
+            app_settings: HashMap::new(),
+            dnd: DndState::default(),
+            center: CenterState::default(),
+            next_id: 1,
+            max_history: 100,
+            current_minutes: 0,
+            current_time_ms: 0,
+            viewport_width,
+            viewport_height,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Public service API
+    // -----------------------------------------------------------------------
+
+    /// Handle a service request and return a response.
+    pub fn handle_request(&mut self, request: NotificationRequest) -> NotificationResponse {
+        match request {
+            NotificationRequest::Send(mut notif) => {
+                notif.id = self.next_id;
+                self.next_id = self.next_id.wrapping_add(1);
+                let id = notif.id;
+                self.add_notification(notif);
+                NotificationResponse::Created { id }
+            }
+            NotificationRequest::Update {
+                id,
+                title,
+                body,
+                progress,
+            } => {
+                self.update_notification(id, title, body, progress);
+                NotificationResponse::Ok
+            }
+            NotificationRequest::Dismiss { id } => {
+                self.dismiss(id);
+                NotificationResponse::Ok
+            }
+            NotificationRequest::DismissAll { ref app_name } => {
+                self.dismiss_all_for_app(app_name);
+                NotificationResponse::Ok
+            }
+            NotificationRequest::GetActive => {
+                let ids: Vec<u64> = self.toasts.iter().map(|t| t.notification_id).collect();
+                NotificationResponse::ActiveList(ids)
+            }
+            NotificationRequest::GetHistory { limit } => {
+                let entries: Vec<Notification> = self.history.iter().take(limit).cloned().collect();
+                NotificationResponse::HistoryList(entries)
+            }
+            NotificationRequest::SetDnd { enabled } => {
+                self.dnd.enabled = enabled;
+                NotificationResponse::Ok
+            }
+            NotificationRequest::SetAppSettings { app_name, settings } => {
+                self.app_settings.insert(app_name, settings);
+                NotificationResponse::Ok
+            }
+        }
+    }
+
+    /// Toggle the notification center visibility.
+    pub fn toggle_center(&mut self) {
+        self.center.visible = !self.center.visible;
+    }
+
+    /// Set the current time of day (for DND scheduling).
+    pub fn set_time_of_day(&mut self, minutes_from_midnight: u16) {
+        self.current_minutes = minutes_from_midnight;
+    }
+
+    /// Set the quiet-hours clock from a Unix instant.
+    ///
+    /// This is the pure half of the clock: it is handed the instant rather
+    /// than reading one, so a test can assert what a given moment means to
+    /// the schedule. [`Self::refresh_clock`] is the impure half.
+    ///
+    /// # Why the daemon needs a clock at all
+    ///
+    /// [`Self::set_time_of_day`] existed, was correct, and had no caller
+    /// anywhere in the tree, so `current_minutes` stayed at its initial `0` —
+    /// midnight — for the life of the process. `main` installs a 22:00–07:00
+    /// quiet-hours window, and midnight is inside it, so
+    /// [`Self::is_dnd_active`] answered `true` forever and
+    /// `should_show_toast` refused every notification that was not Critical.
+    /// A notification daemon that shows no notifications is a daemon that
+    /// looks like it is working: the messages are all in the history, the
+    /// tests all pass, and nothing ever appears on screen.
+    ///
+    /// # The zone
+    ///
+    /// UTC, named explicitly rather than assumed, so that `rg 'Tz::utc'`
+    /// finds every surface that renders an instant when the system gains a
+    /// per-process zone. Going through `lookup(t).gmtoff` rather than
+    /// `secs % 86_400` is what keeps this correct the day that stops being
+    /// UTC — the taskbar clock shipped the latter and read five hours out.
+    pub fn set_time_from_utc(&mut self, utc_secs: i64) {
+        let zone = tzrules::Tz::utc();
+        let local = utc_secs.saturating_add(i64::from(zone.lookup(utc_secs).gmtoff));
+        // `rem_euclid`, not `%`: a pre-1970 instant with `%` gives a negative
+        // remainder, which is not a time of day at all.
+        let minutes_into_day = local.rem_euclid(86_400) / 60;
+        // In `0..=1439` by construction, so the fallback is unreachable; it is
+        // written rather than unwrapped because an unreachable panic in a
+        // daemon is still a panic in a daemon.
+        self.set_time_of_day(u16::try_from(minutes_into_day).unwrap_or(0));
+    }
+
+    /// Read the wall clock and set the quiet-hours time of day from it.
+    ///
+    /// The impure half of the clock. Called on every tick, and once before
+    /// the first frame so the daemon does not spend its first second
+    /// believing it is midnight.
+    pub fn refresh_clock(&mut self) {
+        if let Ok(since_epoch) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        {
+            self.set_time_from_utc(i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX));
+        }
+    }
+
+    /// Update viewport dimensions (e.g., on resize).
+    pub fn set_viewport(&mut self, width: f32, height: f32) {
+        self.viewport_width = width;
+        self.viewport_height = height;
+        // A taller panel shows more of the list, which lowers the scroll bound.
+        self.clamp_center_scroll();
+    }
+
+    // -----------------------------------------------------------------------
+    // Core logic
+    // -----------------------------------------------------------------------
+
+    fn add_notification(&mut self, notif: Notification) {
+        // Check per-app settings.
+        if let Some(settings) = self.app_settings.get(&notif.app_name) {
+            if !settings.enabled {
+                // Still add to history but don't show toast.
+                self.push_history(notif);
+                return;
+            }
+            if notif.priority < settings.min_priority {
+                self.push_history(notif);
+                return;
+            }
+        }
+
+        // Check for group_key replacement (progress updates, etc.)
+        if let Some(ref key) = notif.group_key {
+            // Replace existing toast with same group_key.
+            if let Some(existing) = self.find_history_by_group_key(key) {
+                let existing_id = existing;
+                self.dismiss(existing_id);
+            }
+        }
+
+        let should_show_toast = self.should_show_toast(&notif);
+        let notif_id = notif.id;
+        self.push_history(notif);
+
+        if should_show_toast {
+            // Cap the number of non-dismissing toasts. Toasts already in the
+            // dismissing state still occupy `self.toasts` until the exit
+            // animation completes, so they don't count toward the visible cap.
+            //
+            // We need at most MAX_VISIBLE_TOASTS - 1 non-dismissing toasts
+            // before inserting the new one, so the post-insert count stays
+            // within the cap. Mark the oldest non-dismissing toasts (last in
+            // the Vec; newest is at index 0) as dismissing until we're under.
+            //
+            // Computed rather than counted down in a loop. The loop this
+            // replaces decremented a counter it had already used to decide to
+            // enter, and needed a `break` arm for the case where the counter
+            // and the Vec disagreed — a shape that cannot be read without
+            // checking that the two stay in step. `excess` is the number to
+            // mark, so `take` enforces it and a short iterator is simply a
+            // shorter one.
+            let live = self.toasts.iter().filter(|t| !t.dismissing).count();
+            let excess = live.saturating_sub(MAX_VISIBLE_TOASTS.saturating_sub(1));
+            for toast in self
+                .toasts
+                .iter_mut()
+                .rev()
+                .filter(|t| !t.dismissing)
+                .take(excess)
+            {
+                toast.dismissing = true;
+            }
+            self.toasts.insert(0, ToastState::new(notif_id));
+        }
+    }
+
+    fn should_show_toast(&self, notif: &Notification) -> bool {
+        // DND check.
+        if self.is_dnd_active() {
+            // Critical bypasses DND if configured.
+            if self.dnd.bypass_critical && notif.priority == NotificationPriority::Critical {
+                return true;
+            }
+            return false;
+        }
+        true
+    }
+
+    fn update_notification(
+        &mut self,
+        id: u64,
+        title: Option<String>,
+        body: Option<String>,
+        progress: Option<u8>,
+    ) {
+        if let Some(notif) = self.history.iter_mut().find(|n| n.id == id) {
+            if let Some(t) = title {
+                notif.title = t;
+            }
+            if let Some(b) = body {
+                notif.body = b;
+            }
+            if let Some(p) = progress {
+                notif.progress = Some(p.min(100));
+            }
+        }
+    }
+
+    fn dismiss(&mut self, id: u64) {
+        if let Some(toast) = self.toasts.iter_mut().find(|t| t.notification_id == id) {
+            toast.dismissing = true;
+            toast.dismiss_age_ms = 0;
+        }
+    }
+
+    fn dismiss_all_for_app(&mut self, app_name: &str) {
+        let ids_to_dismiss: Vec<u64> = self
+            .history
+            .iter()
+            .filter(|n| n.app_name == app_name)
+            .map(|n| n.id)
+            .collect();
+        for id in ids_to_dismiss {
+            self.dismiss(id);
+        }
+    }
+
+    /// Clear all notifications in the center for a specific app.
+    pub fn clear_app_history(&mut self, app_name: &str) {
+        self.history.retain(|n| n.app_name != app_name);
+        self.clamp_center_scroll();
+    }
+
+    /// Clear all notifications.
+    pub fn clear_all_history(&mut self) {
+        self.history.clear();
+        self.clamp_center_scroll();
+    }
+
+    /// Mark a notification as read.
+    pub fn mark_read(&mut self, id: u64) {
+        if let Some(notif) = self.history.iter_mut().find(|n| n.id == id) {
+            notif.read = true;
+        }
+    }
+
+    /// Mark a notification as unread.
+    pub fn mark_unread(&mut self, id: u64) {
+        if let Some(notif) = self.history.iter_mut().find(|n| n.id == id) {
+            notif.read = false;
+        }
+    }
+
+    fn push_history(&mut self, notif: Notification) {
+        self.history.insert(0, notif);
+        if self.history.len() > self.max_history {
+            self.history.truncate(self.max_history);
+        }
+    }
+
+    fn find_history_by_group_key(&self, key: &str) -> Option<u64> {
+        self.history
+            .iter()
+            .find(|n| n.group_key.as_deref() == Some(key))
+            .map(|n| n.id)
+    }
+
+    fn get_notification(&self, id: u64) -> Option<&Notification> {
+        self.history.iter().find(|n| n.id == id)
+    }
+
+    /// The body text, broken into the lines the toast will draw.
+    ///
+    /// `RenderCommand::Text` does not wrap — the compositor clips at
+    /// `max_width` — so a body sent as one command showed only its first
+    /// line's worth of characters, silently and with nothing to mark that the
+    /// rest had been dropped. `toast_height` grows from this same list, so a
+    /// two-line body cannot overlap the toast stacked beneath it.
+    ///
+    /// Capped at [`TOAST_BODY_MAX_LINES`]: a toast is a glance, not a reader,
+    /// and an unbounded one would push the rest of the stack off screen. The
+    /// last kept line is elided so the cut is visible rather than reading as
+    /// the end of the sentence.
+    fn body_lines(&self, notif: &Notification) -> Vec<String> {
+        let max_width = TOAST_WIDTH - TOAST_PADDING * 2.0 - 16.0;
+        let mut lines = text::wrap(
+            &notif.body,
+            max_width,
+            TOAST_BODY_FONT_SIZE,
+            FontWeightHint::Regular,
+        );
+        if lines.len() > TOAST_BODY_MAX_LINES {
+            lines.truncate(TOAST_BODY_MAX_LINES);
+            if let Some(last) = lines.last_mut() {
+                *last = text::elide(
+                    &format!("{last}…"),
+                    max_width,
+                    "…",
+                    TOAST_BODY_FONT_SIZE,
+                    FontWeightHint::Regular,
+                );
+            }
+        }
+        lines
+    }
+
+    fn toast_height(&self, notif: &Notification) -> f32 {
+        let mut h = TOAST_MIN_HEIGHT;
+        // `TOAST_MIN_HEIGHT` already has room for one body line; each further
+        // line makes the toast taller rather than spilling out of it.
+        let extra_lines = self.body_lines(notif).len().saturating_sub(1);
+        h += extra_lines as f32 * TOAST_BODY_LINE_HEIGHT;
+        if !notif.actions.is_empty() {
+            h += ACTION_BTN_HEIGHT + 8.0;
+        }
+        if notif.progress.is_some() {
+            h += PROGRESS_BAR_HEIGHT + 8.0;
+        }
+        h
+    }
+
+    // -----------------------------------------------------------------------
+    // Tick — advance animations and timeouts
+    // -----------------------------------------------------------------------
+
+    /// Advance the daemon state by `delta_ms` milliseconds.
+    pub fn tick(&mut self, delta_ms: u64) {
+        self.current_time_ms = self.current_time_ms.wrapping_add(delta_ms);
+
+        // Advance toast animations and check timeouts.
+        for toast in &mut self.toasts {
+            if toast.dismissing {
+                toast.dismiss_age_ms = toast.dismiss_age_ms.saturating_add(delta_ms);
+            } else {
+                toast.age_ms = toast.age_ms.saturating_add(delta_ms);
+            }
+        }
+
+        // Auto-dismiss expired toasts.
+        for toast in &mut self.toasts {
+            if toast.dismissing {
+                continue;
+            }
+            if let Some(notif) = self.history.iter().find(|n| n.id == toast.notification_id) {
+                if notif.persistent {
+                    continue;
+                }
+                if let Some(timeout) = notif.priority.timeout_ms()
+                    && toast.age_ms >= timeout
+                {
+                    toast.dismissing = true;
+                    toast.dismiss_age_ms = 0;
+                }
+            }
+        }
+
+        // Remove toasts that have finished exit animation.
+        self.toasts.retain(|t| {
+            if t.dismissing && t.dismiss_age_ms >= ANIMATION_DURATION_MS {
+                return false;
+            }
+            true
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Event handling
+    // -----------------------------------------------------------------------
+
+    /// Handle an input event. Returns the action triggered (if any).
+    pub fn handle_event(&mut self, event: &Event) -> Option<DaemonAction> {
+        match event {
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Key(key) => self.handle_key(key),
+            Event::Resize { width, height } => {
+                self.set_viewport(*width as f32, *height as f32);
+                None
+            }
+            // Toasts age out and animate on the clock, and this was falling
+            // into the `_ => None` arm below, so `tick` -- correct, and with
+            // tests -- was reached from nothing but those tests.  A toast
+            // that never ages is a toast that never leaves the screen; see
+            // known-issues.md lesson 45.
+            //
+            // No `DaemonAction`: expiry is the daemon's own business, unlike
+            // a click, which the caller may need to act on.
+            Event::Tick { elapsed_ms } => {
+                self.tick(*elapsed_ms);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> Option<DaemonAction> {
+        match &mouse.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                // Check toast close buttons and bodies.
+                if let Some(action) = self.hit_test_toasts(mouse.x, mouse.y) {
+                    return Some(action);
+                }
+                // Check notification center interactions.
+                if self.center.visible {
+                    return self.hit_test_center(mouse.x, mouse.y);
+                }
+                None
+            }
+            MouseEventKind::Scroll { dy, .. } => {
+                if self.center.visible {
+                    // `dy` is in notches, not pixels. Subtracting it from a
+                    // pixel offset moved the list by *one pixel* per detent —
+                    // a seventy-second of an item, so spinning the wheel looked
+                    // like nothing was happening. A notch is three rows, and a
+                    // row here is a notification. No accumulator: the offset is
+                    // an `f32` and holds a trackpad's fraction directly.
+                    self.scroll_center_by(wheel::pixels(*dy, CENTER_ITEM_HEIGHT));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_key(&mut self, key: &KeyEvent) -> Option<DaemonAction> {
+        if !key.pressed {
+            return None;
+        }
+        // Ctrl+Shift+N toggles notification center.
+        if key.modifiers.ctrl && key.modifiers.shift && key.key == guitk::event::Key::N {
+            self.toggle_center();
+            return Some(DaemonAction::CenterToggled(self.center.visible));
+        }
+        // Escape closes notification center.
+        if key.key == guitk::event::Key::Escape && self.center.visible {
+            self.center.visible = false;
+            return Some(DaemonAction::CenterToggled(false));
+        }
+        None
+    }
+
+    fn hit_test_toasts(&mut self, mx: f32, my: f32) -> Option<DaemonAction> {
+        let base_x = self.viewport_width - TOAST_WIDTH - TOAST_RIGHT_MARGIN;
+        let mut y = TOAST_TOP_MARGIN;
+
+        // Iterate over visible (non-dismissing) toasts.
+        for toast in &self.toasts {
+            if toast.dismissing {
+                continue;
+            }
+            let offset = toast.current_offset();
+            let toast_x = base_x + offset;
+            let notif = match self.get_notification(toast.notification_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            let h = self.toast_height(notif);
+
+            // Is the click within this toast's bounds?
+            if mx >= toast_x && mx <= toast_x + TOAST_WIDTH && my >= y && my <= y + h {
+                // Check close button (top-right corner of toast).
+                let close_x = toast_x + TOAST_WIDTH - TOAST_PADDING - CLOSE_BTN_SIZE;
+                let close_y = y + TOAST_PADDING;
+                if mx >= close_x
+                    && mx <= close_x + CLOSE_BTN_SIZE
+                    && my >= close_y
+                    && my <= close_y + CLOSE_BTN_SIZE
+                {
+                    let id = toast.notification_id;
+                    self.dismiss(id);
+                    return Some(DaemonAction::Dismissed(id));
+                }
+
+                // Click on notification body → primary action.
+                let id = toast.notification_id;
+                let primary_action = notif.actions.first().map(|a| a.id.clone());
+                self.dismiss(id);
+                self.mark_read(id);
+                return Some(DaemonAction::ActionInvoked {
+                    notification_id: id,
+                    action_id: primary_action,
+                });
+            }
+
+            y += h + TOAST_MARGIN;
+        }
+        None
+    }
+
+    fn hit_test_center(&mut self, mx: f32, my: f32) -> Option<DaemonAction> {
+        let center_x = self.viewport_width - CENTER_WIDTH;
+        let center_y = 0.0_f32;
+
+        // Not within center panel bounds.
+        if mx < center_x || mx > self.viewport_width {
+            return None;
+        }
+
+        // "Clear all" button in header.
+        let clear_all_x = center_x + CENTER_WIDTH - 80.0;
+        let clear_all_y = center_y + 8.0;
+        if mx >= clear_all_x
+            && mx <= clear_all_x + 72.0
+            && my >= clear_all_y
+            && my <= clear_all_y + 32.0
+        {
+            self.clear_all_history();
+            return Some(DaemonAction::AllCleared);
+        }
+
+        // Items in the scrollable area. The renderer clips to below the header
+        // and translates by the scroll offset; both are applied here so a row
+        // that has been scrolled *under* the header — drawn nowhere — cannot be
+        // clicked. It could be before: the walk ignored the clip entirely, so a
+        // click in the header of a scrolled list opened whatever invisible row
+        // happened to lie beneath it.
+        let list_top = center_y + CENTER_HEADER_HEIGHT;
+        let content_y = center_y - self.center.scroll_offset;
+
+        // Pre-collect collapsed state: the walk below borrows `self`, so the
+        // mutations it decides on have to wait until the borrow ends.
+        let collapsed: Vec<String> = self.center.collapsed_groups.clone();
+
+        // First pass: find what was clicked without mutating self.
+        let mut toggle_group: Option<String> = None;
+        let mut click_notif: Option<(u64, Option<String>)> = None;
+
+        if my >= list_top {
+            for (top, row) in self.center_rows() {
+                let y = content_y + top;
+                if my < y || my >= y + row.height() {
+                    continue;
+                }
+                match row {
+                    CenterRow::GroupHeader { app_name, .. } => toggle_group = Some(app_name),
+                    CenterRow::Item(notif) => {
+                        click_notif = Some((notif.id, notif.actions.first().map(|a| a.id.clone())));
+                    }
+                }
+                break;
+            }
+        }
+
+        // Now apply mutations based on what was found.
+        if let Some(name) = toggle_group {
+            if collapsed.contains(&name) {
+                self.center.collapsed_groups.retain(|g| g != &name);
+            } else {
+                self.center.collapsed_groups.push(name.clone());
+            }
+            // Collapsing a group hides its items, which shortens the list.
+            self.clamp_center_scroll();
+            return Some(DaemonAction::GroupToggled(name));
+        }
+
+        if let Some((id, primary_action)) = click_notif {
+            self.mark_read(id);
+            return Some(DaemonAction::ActionInvoked {
+                notification_id: id,
+                action_id: primary_action,
+            });
+        }
+
+        None
+    }
+
+    fn grouped_history(&self) -> Vec<(String, Vec<&Notification>)> {
+        let mut groups: Vec<(String, Vec<&Notification>)> = Vec::new();
+        for notif in &self.history {
+            if let Some(group) = groups.iter_mut().find(|(name, _)| *name == notif.app_name) {
+                group.1.push(notif);
+            } else {
+                groups.push((notif.app_name.clone(), vec![notif]));
+            }
+        }
+        groups
+    }
+
+    /// The rows of the notification centre's scrollable list, each paired with
+    /// the top edge it is drawn at — in *content* coordinates, before the
+    /// scroll offset is subtracted.
+    ///
+    /// The renderer, the click hit test and the scroll bound all read this one
+    /// walk. They used to each repeat the arithmetic, and the same arithmetic
+    /// written three times is three things that drift: the notification *shade*
+    /// had exactly this shape and its two copies ended up 76 px apart, so every
+    /// click there landed on the card above the one under the pointer.
+    fn center_rows(&self) -> Vec<(f32, CenterRow<'_>)> {
+        let mut rows = Vec::new();
+        let mut y = CENTER_HEADER_HEIGHT;
+        for (app_name, notifications) in self.grouped_history() {
+            let collapsed = self.center.collapsed_groups.contains(&app_name);
+            let count = notifications.len();
+            rows.push((
+                y,
+                CenterRow::GroupHeader {
+                    app_name,
+                    count,
+                    collapsed,
+                },
+            ));
+            y += CENTER_GROUP_HEADER_HEIGHT;
+            if collapsed {
+                continue;
+            }
+            for notif in notifications {
+                rows.push((y, CenterRow::Item(notif)));
+                y += CENTER_ITEM_HEIGHT;
+            }
+        }
+        rows
+    }
+
+    /// The bottom edge of the last row, or the top of the list when empty.
+    fn center_content_height(&self) -> f32 {
+        self.center_rows()
+            .last()
+            .map_or(CENTER_HEADER_HEIGHT, |(top, row)| top + row.height())
+    }
+
+    /// The furthest the centre list can scroll: zero when it fits.
+    ///
+    /// This could not exist before, because nothing in the state knew how tall
+    /// the panel was — so the wheel handler clamped one end with `.max(0.0)`
+    /// and left the other open, and the list could be scrolled off the top of
+    /// the panel indefinitely with no way back but scrolling all the way up.
+    /// `viewport_height` arrives on `Event::Resize`, which is what makes the
+    /// bound derivable at all.
+    pub fn max_center_scroll(&self) -> f32 {
+        (self.center_content_height() - self.viewport_height).max(0.0)
+    }
+
+    /// Pull the centre's offset back inside the list.
+    ///
+    /// Anything that makes the list shorter or the panel taller — clearing a
+    /// group, collapsing one, a resize — can strand the offset past the new
+    /// end, leaving the panel showing blank space with nothing to scroll back
+    /// to but the top.
+    fn clamp_center_scroll(&mut self) {
+        self.center.scroll_offset = self
+            .center
+            .scroll_offset
+            .clamp(0.0, self.max_center_scroll());
+    }
+
+    /// Move the centre list by `delta` pixels, staying inside it.
+    fn scroll_center_by(&mut self, delta: f32) {
+        if !delta.is_finite() {
+            return;
+        }
+        self.center.scroll_offset += delta;
+        self.clamp_center_scroll();
+    }
+
+    // -----------------------------------------------------------------------
+    // Rendering — Toast Overlay
+    // -----------------------------------------------------------------------
+
+    /// Render the toast overlay (always-on-top layer).
+    pub fn render_toasts(&self) -> Vec<RenderCommand> {
+        let mut cmds = Vec::new();
+        let base_x = self.viewport_width - TOAST_WIDTH - TOAST_RIGHT_MARGIN;
+        let mut y = TOAST_TOP_MARGIN;
+
+        let visible_count = self
+            .toasts
+            .iter()
+            .filter(|t| !t.dismissing || t.exit_progress() < 1.0)
+            .count()
+            .min(MAX_VISIBLE_TOASTS);
+
+        for toast in self.toasts.iter().take(visible_count) {
+            let notif = match self.get_notification(toast.notification_id) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            let offset = toast.current_offset();
+            let toast_x = base_x + offset;
+            let h = self.toast_height(notif);
+            let radii = CornerRadii::all(TOAST_CORNER_RADIUS);
+
+            // Shadow.
+            cmds.push(RenderCommand::BoxShadow {
+                x: toast_x,
+                y,
+                width: TOAST_WIDTH,
+                height: h,
+                offset_x: 0.0,
+                offset_y: 4.0,
+                blur: TOAST_SHADOW_BLUR,
+                spread: 0.0,
+                color: Color::rgba(0, 0, 0, 80),
+                corner_radii: radii,
+            });
+
+            // Background.
+            cmds.push(RenderCommand::FillRect {
+                x: toast_x,
+                y,
+                width: TOAST_WIDTH,
+                height: h,
+                color: SURFACE0,
+                corner_radii: radii,
+            });
+
+            // Priority accent stripe (left edge).
+            cmds.push(RenderCommand::FillRect {
+                x: toast_x,
+                y,
+                width: 4.0,
+                height: h,
+                color: notif.priority.accent_color(),
+                corner_radii: CornerRadii {
+                    top_left: TOAST_CORNER_RADIUS,
+                    bottom_left: TOAST_CORNER_RADIUS,
+                    top_right: 0.0,
+                    bottom_right: 0.0,
+                },
+            });
+
+            // App name (small, dimmed).
+            cmds.push(RenderCommand::Text {
+                x: toast_x + TOAST_PADDING + 8.0,
+                y: y + TOAST_PADDING,
+                text: notif.app_name.clone(),
+                color: SUBTEXT0,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(TOAST_WIDTH - TOAST_PADDING * 2.0 - CLOSE_BTN_SIZE - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+
+            // Title (bold).
+            cmds.push(RenderCommand::Text {
+                x: toast_x + TOAST_PADDING + 8.0,
+                y: y + TOAST_PADDING + 16.0,
+                text: notif.title.clone(),
+                color: TEXT,
+                font_size: 14.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(TOAST_WIDTH - TOAST_PADDING * 2.0 - CLOSE_BTN_SIZE - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+
+            // Body text, one command per wrapped line.
+            for (n, line) in self.body_lines(notif).iter().enumerate() {
+                cmds.push(RenderCommand::Text {
+                    x: toast_x + TOAST_PADDING + 8.0,
+                    y: y + TOAST_PADDING + 34.0 + n as f32 * TOAST_BODY_LINE_HEIGHT,
+                    text: line.clone(),
+                    color: SUBTEXT1,
+                    font_size: TOAST_BODY_FONT_SIZE,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(TOAST_WIDTH - TOAST_PADDING * 2.0 - 16.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+
+            // Close button (X).
+            let close_x = toast_x + TOAST_WIDTH - TOAST_PADDING - CLOSE_BTN_SIZE;
+            let close_y = y + TOAST_PADDING;
+            cmds.push(RenderCommand::FillRect {
+                x: close_x,
+                y: close_y,
+                width: CLOSE_BTN_SIZE,
+                height: CLOSE_BTN_SIZE,
+                color: SURFACE1,
+                corner_radii: CornerRadii::all(CLOSE_BTN_SIZE / 2.0),
+            });
+            cmds.push(RenderCommand::Text {
+                x: close_x + 5.0,
+                y: close_y + 3.0,
+                text: String::from("x"),
+                color: SUBTEXT0,
+                font_size: 12.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+
+            // Progress bar (if set).
+            let mut extra_y = y + TOAST_PADDING + 52.0;
+            if let Some(progress) = notif.progress {
+                let bar_y = extra_y;
+                let bar_width = TOAST_WIDTH - TOAST_PADDING * 2.0 - 16.0;
+                // Background track.
+                cmds.push(RenderCommand::FillRect {
+                    x: toast_x + TOAST_PADDING + 8.0,
+                    y: bar_y,
+                    width: bar_width,
+                    height: PROGRESS_BAR_HEIGHT,
+                    color: SURFACE2,
+                    corner_radii: CornerRadii::all(2.0),
+                });
+                // Filled portion.
+                let fill_width = bar_width * (progress as f32 / 100.0);
+                cmds.push(RenderCommand::FillRect {
+                    x: toast_x + TOAST_PADDING + 8.0,
+                    y: bar_y,
+                    width: fill_width,
+                    height: PROGRESS_BAR_HEIGHT,
+                    color: BLUE,
+                    corner_radii: CornerRadii::all(2.0),
+                });
+                extra_y += PROGRESS_BAR_HEIGHT + 8.0;
+            }
+
+            // Action buttons.
+            if !notif.actions.is_empty() {
+                let mut btn_x = toast_x + TOAST_PADDING + 8.0;
+                for action in &notif.actions {
+                    let btn_width = text::padded_width(
+                        &action.label,
+                        ACTION_BTN_PADDING,
+                        12.0,
+                        FontWeightHint::Regular,
+                    );
+                    cmds.push(RenderCommand::FillRect {
+                        x: btn_x,
+                        y: extra_y,
+                        width: btn_width,
+                        height: ACTION_BTN_HEIGHT,
+                        color: SURFACE1,
+                        corner_radii: CornerRadii::all(6.0),
+                    });
+                    cmds.push(RenderCommand::Text {
+                        x: btn_x + ACTION_BTN_PADDING,
+                        y: extra_y + 7.0,
+                        text: action.label.clone(),
+                        color: BLUE,
+                        font_size: 12.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: None,
+                        overflow: TextOverflow::Clip,
+                    });
+                    btn_x += btn_width + 8.0;
+                }
+            }
+
+            y += h + TOAST_MARGIN;
+        }
+
+        cmds
+    }
+
+    // -----------------------------------------------------------------------
+    // Rendering — Notification Center
+    // -----------------------------------------------------------------------
+
+    /// Render the notification center panel (right-side slide-out).
+    pub fn render_center(&self) -> Vec<RenderCommand> {
+        if !self.center.visible {
+            return Vec::new();
+        }
+
+        let mut cmds = Vec::new();
+        let center_x = self.viewport_width - CENTER_WIDTH;
+
+        // Background overlay (semi-transparent backdrop for the panel area).
+        cmds.push(RenderCommand::FillRect {
+            x: center_x,
+            y: 0.0,
+            width: CENTER_WIDTH,
+            height: self.viewport_height,
+            color: MANTLE,
+            corner_radii: CornerRadii::ZERO,
+        });
+
+        // Header.
+        cmds.push(RenderCommand::FillRect {
+            x: center_x,
+            y: 0.0,
+            width: CENTER_WIDTH,
+            height: CENTER_HEADER_HEIGHT,
+            color: CRUST,
+            corner_radii: CornerRadii::ZERO,
+        });
+
+        cmds.push(RenderCommand::Text {
+            x: center_x + 16.0,
+            y: 14.0,
+            text: String::from("Notifications"),
+            color: TEXT,
+            font_size: 16.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+
+        // Unread count badge.
+        let unread_count = self.history.iter().filter(|n| !n.read).count();
+        if unread_count > 0 {
+            let badge_text = format!("{unread_count}");
+            // A count badge is a pill, and a pill holding one digit should be
+            // round rather than a squashed oval — so the measured width is
+            // floored at the badge's own height.
+            let badge_width =
+                text::padded_width(&badge_text, 6.0, 11.0, FontWeightHint::Bold).max(BADGE_HEIGHT);
+            cmds.push(RenderCommand::FillRect {
+                x: center_x + 140.0,
+                y: 12.0,
+                width: badge_width,
+                height: BADGE_HEIGHT,
+                color: MAUVE,
+                corner_radii: CornerRadii::all(11.0),
+            });
+            cmds.push(RenderCommand::Text {
+                x: text::center_x(
+                    &badge_text,
+                    center_x + 140.0 + badge_width / 2.0,
+                    11.0,
+                    FontWeightHint::Bold,
+                ),
+                y: 15.0,
+                text: badge_text,
+                color: CRUST,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+        }
+
+        // "Clear all" button.
+        let clear_x = center_x + CENTER_WIDTH - 80.0;
+        cmds.push(RenderCommand::FillRect {
+            x: clear_x,
+            y: 8.0,
+            width: 72.0,
+            height: 32.0,
+            color: SURFACE0,
+            corner_radii: CornerRadii::all(6.0),
+        });
+        cmds.push(RenderCommand::Text {
+            x: clear_x + 10.0,
+            y: 16.0,
+            text: String::from("Clear all"),
+            color: SUBTEXT0,
+            font_size: 12.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+
+        // Clip scrollable area.
+        cmds.push(RenderCommand::PushClip {
+            x: center_x,
+            y: CENTER_HEADER_HEIGHT,
+            width: CENTER_WIDTH,
+            height: self.viewport_height - CENTER_HEADER_HEIGHT,
+        });
+        cmds.push(RenderCommand::PushTranslate {
+            dx: 0.0,
+            dy: -self.center.scroll_offset,
+        });
+
+        // Render grouped notifications. `center_rows` is the one description of
+        // where each row goes; the hit test reads the same one.
+        let rows = self.center_rows();
+
+        if rows.is_empty() {
+            // Empty state.
+            cmds.push(RenderCommand::Text {
+                x: center_x + CENTER_WIDTH / 2.0 - 60.0,
+                y: CENTER_HEADER_HEIGHT + 40.0,
+                text: String::from("No notifications"),
+                color: OVERLAY0,
+                font_size: 14.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+        }
+
+        for (item_y, row) in &rows {
+            let item_y = *item_y;
+            match row {
+                CenterRow::GroupHeader {
+                    app_name,
+                    count,
+                    collapsed,
+                } => {
+                    cmds.push(RenderCommand::FillRect {
+                        x: center_x,
+                        y: item_y,
+                        width: CENTER_WIDTH,
+                        height: CENTER_GROUP_HEADER_HEIGHT,
+                        color: SURFACE0,
+                        corner_radii: CornerRadii::ZERO,
+                    });
+
+                    let collapse_indicator = if *collapsed { ">" } else { "v" };
+                    cmds.push(RenderCommand::Text {
+                        x: center_x + 12.0,
+                        y: item_y + 10.0,
+                        text: format!("{collapse_indicator} {app_name}"),
+                        color: TEXT,
+                        font_size: 13.0,
+                        font_weight: FontWeightHint::Bold,
+                        max_width: None,
+                        overflow: TextOverflow::Clip,
+                    });
+
+                    // Group notification count.
+                    cmds.push(RenderCommand::Text {
+                        x: center_x + CENTER_WIDTH - 40.0,
+                        y: item_y + 10.0,
+                        text: format!("{count}"),
+                        color: OVERLAY0,
+                        font_size: 12.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: None,
+                        overflow: TextOverflow::Clip,
+                    });
+                }
+                CenterRow::Item(notif) => {
+                    self.render_center_item(&mut cmds, center_x, item_y, notif);
+                }
+            }
+        }
+
+        cmds.push(RenderCommand::PopTranslate);
+        cmds.push(RenderCommand::PopClip);
+
+        cmds
+    }
+
+    fn render_center_item(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        center_x: f32,
+        y: f32,
+        notif: &Notification,
+    ) {
+        // Item background (slightly different for unread).
+        let bg_color = if notif.read { MANTLE } else { BASE };
+        cmds.push(RenderCommand::FillRect {
+            x: center_x,
+            y,
+            width: CENTER_WIDTH,
+            height: CENTER_ITEM_HEIGHT,
+            color: bg_color,
+            corner_radii: CornerRadii::ZERO,
+        });
+
+        // Unread indicator dot.
+        if !notif.read {
+            cmds.push(RenderCommand::FillRect {
+                x: center_x + 6.0,
+                y: y + CENTER_ITEM_HEIGHT / 2.0 - 3.0,
+                width: 6.0,
+                height: 6.0,
+                color: BLUE,
+                corner_radii: CornerRadii::all(3.0),
+            });
+        }
+
+        // Category/priority accent.
+        cmds.push(RenderCommand::FillRect {
+            x: center_x,
+            y,
+            width: 3.0,
+            height: CENTER_ITEM_HEIGHT,
+            color: notif.priority.accent_color(),
+            corner_radii: CornerRadii::ZERO,
+        });
+
+        // Title.
+        cmds.push(RenderCommand::Text {
+            x: center_x + 20.0,
+            y: y + 10.0,
+            text: notif.title.clone(),
+            color: TEXT,
+            font_size: 13.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(CENTER_WIDTH - 100.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        // Body (truncated).
+        let body_display = if notif.body.len() > 60 {
+            let truncated: String = notif.body.chars().take(57).collect();
+            format!("{truncated}...")
+        } else {
+            notif.body.clone()
+        };
+        cmds.push(RenderCommand::Text {
+            x: center_x + 20.0,
+            y: y + 28.0,
+            text: body_display,
+            color: SUBTEXT0,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(CENTER_WIDTH - 40.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        // Relative timestamp.
+        let time_text = self.format_relative_time(notif.timestamp_ms);
+        cmds.push(RenderCommand::Text {
+            x: center_x + CENTER_WIDTH - 80.0,
+            y: y + 10.0,
+            text: time_text,
+            color: OVERLAY0,
+            font_size: 10.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+
+        // Category label.
+        cmds.push(RenderCommand::Text {
+            x: center_x + 20.0,
+            y: y + CENTER_ITEM_HEIGHT - 18.0,
+            text: String::from(notif.category.label()),
+            color: OVERLAY0,
+            font_size: 10.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+
+        // Separator line.
+        cmds.push(RenderCommand::Line {
+            x1: center_x + 16.0,
+            y1: y + CENTER_ITEM_HEIGHT - 1.0,
+            x2: center_x + CENTER_WIDTH - 16.0,
+            y2: y + CENTER_ITEM_HEIGHT - 1.0,
+            color: SURFACE0,
+            width: 1.0,
+        });
+    }
+
+    /// How long ago `timestamp_ms` was, as a label.
+    ///
+    /// The notification centre and the desktop's notification pane
+    /// (`desktop::notif_pane`) display the same notifications, and used to
+    /// word their ages differently: this one spelled the units out
+    /// (`"3 min ago"`, `"2 hours ago"`, `"Yesterday"`), the pane abbreviated
+    /// them (`"3m ago"`, `"2h ago"`, `"yesterday"`). Both now use
+    /// `guitk::duration::relative`, whose abbreviations are what fits a
+    /// notification row, and which does not run out at days — this ladder
+    /// reported a month-old notification as `"31 days ago"`.
+    ///
+    /// A timestamp ahead of the clock is an age of zero, not a separate
+    /// state, so it reads `"just now"` like every other age of zero rather
+    /// than the bare `"now"` it used to get.
+    fn format_relative_time(&self, timestamp_ms: u64) -> String {
+        let elapsed_ms = self.current_time_ms.saturating_sub(timestamp_ms);
+        guitk::duration::relative(elapsed_ms / 1000)
+    }
+
+    // -----------------------------------------------------------------------
+    // Combined rendering
+    // -----------------------------------------------------------------------
+
+    /// Produce the full render tree for the notification overlay.
+    /// The compositor should draw this on top of all other windows.
+    pub fn render(&self) -> RenderTree {
+        let mut tree = RenderTree::new();
+
+        // Toast overlay (always rendered).
+        for cmd in self.render_toasts() {
+            tree.push(cmd);
+        }
+
+        // Notification center (rendered when visible).
+        for cmd in self.render_center() {
+            tree.push(cmd);
+        }
+
+        tree
+    }
+
+    // -----------------------------------------------------------------------
+    // DND convenience methods
+    // -----------------------------------------------------------------------
+
+    /// Set a DND schedule, returning `false` if either endpoint is not a real
+    /// time of day.
+    ///
+    /// A rejected schedule leaves the previous one in place rather than
+    /// clearing it: the caller asked for a window that does not exist, and
+    /// silently turning quiet hours *off* is not a closer approximation of
+    /// that request than leaving them as they were.
+    pub fn set_dnd_schedule(
+        &mut self,
+        start_hour: u8,
+        start_minute: u8,
+        end_hour: u8,
+        end_minute: u8,
+    ) -> bool {
+        match DndSchedule::new(start_hour, start_minute, end_hour, end_minute) {
+            Some(schedule) => {
+                self.dnd.schedule = Some(schedule);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Clear the DND schedule.
+    pub fn clear_dnd_schedule(&mut self) {
+        self.dnd.schedule = None;
+    }
+
+    /// Check whether DND is currently effective.
+    pub fn is_dnd_active(&self) -> bool {
+        if self.dnd.enabled {
+            return true;
+        }
+        if let Some(ref schedule) = self.dnd.schedule {
+            return schedule.is_active(self.current_minutes);
+        }
+        false
+    }
+
+    /// Get the number of unread notifications.
+    pub fn unread_count(&self) -> usize {
+        self.history.iter().filter(|n| !n.read).count()
+    }
+
+    /// Whether the notification center is currently visible.
+    pub fn is_center_visible(&self) -> bool {
+        self.center.visible
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Actions emitted by the daemon in response to user interaction
+// ---------------------------------------------------------------------------
+
+/// Actions emitted when the user interacts with notifications.
+///
+/// `PartialEq` is derived so a test can name the exact action a click must
+/// produce — "*that* notification", not "some notification" — which is what
+/// makes renderer-versus-hit-test agreement assertable at all.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DaemonAction {
+    /// A notification was dismissed (by close button or auto-timeout).
+    Dismissed(u64),
+    /// A notification action was invoked (click on body or action button).
+    ActionInvoked {
+        notification_id: u64,
+        action_id: Option<String>,
+    },
+    /// The notification center was toggled.
+    CenterToggled(bool),
+    /// A group was collapsed/expanded.
+    GroupToggled(String),
+    /// All notifications were cleared.
+    AllCleared,
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+/// One animation frame. Toasts slide in, fade out and age against this.
+const ANIMATION_TICK: Duration = Duration::from_millis(16);
+
+/// The idle cadence. One second, not one minute, even though the only thing
+/// it advances is a clock read in whole minutes: a one-minute timer started at
+/// an arbitrary moment turns the minute over up to 59 seconds late, so quiet
+/// hours would begin somewhere in the minute after 22:00 rather than at it.
+const CLOCK_TICK: Duration = Duration::from_secs(1);
+
+/// The size the overlay asks for when the compositor has no opinion.
+///
+/// It is a full-screen overlay, so this is a screen; the real size arrives as
+/// the `width`/`height` handed to [`oswindow::app::App::render`], which is
+/// what the daemon actually places from.
+const DEFAULT_VIEWPORT: (u32, u32) = (1920, 1080);
+
+impl oswindow::app::App for NotificationDaemon {
+    fn title(&self) -> String {
+        String::from("Notifications")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        DEFAULT_VIEWPORT
+    }
+
+    /// Never `None`.
+    ///
+    /// Two independent things here move on the clock and on nothing else: a
+    /// toast ages towards its timeout and animates while it does, and the
+    /// quiet-hours window opens and closes at wall-clock times. A daemon that
+    /// stopped ticking once its last toast left would never notice 22:00
+    /// arriving, and would then never tick again because no event would wake
+    /// it. See known-issues.md lesson 47 and `scripts/check-tick-wiring.py`.
+    fn tick_interval(&self) -> Option<Duration> {
+        if self.toasts.is_empty() {
+            Some(CLOCK_TICK)
+        } else {
+            Some(ANIMATION_TICK)
+        }
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::Tick { .. }) {
+            self.refresh_clock();
+        }
+        // Decided *before* the event is handled, because two of these
+        // conditions are about the state the event is going to change: the
+        // tick that removes the last toast changes the display and then
+        // leaves `toasts` empty.
+        //
+        // Three things move the display without producing a `DaemonAction`:
+        // a tick (toasts age and animate, and the centre's "2 minutes ago"
+        // labels move with `current_time_ms`), a resize (everything is placed
+        // from the viewport), and a scroll of the centre. Every other user
+        // action that changes the display returns an action. What is left --
+        // a mouse move, a key the daemon does not bind, a focus change --
+        // leaves the tree byte-identical, and asking for a frame for those
+        // would be asking the compositor to redraw the same pixels sixty
+        // times a second while the pointer crosses the screen.
+        let moves_the_display = match event {
+            Event::Tick { .. } => !self.toasts.is_empty() || self.center.visible,
+            Event::Resize { .. } => true,
+            Event::Mouse(mouse) => {
+                matches!(mouse.kind, MouseEventKind::Scroll { .. }) && self.center.visible
+            }
+            _ => false,
+        };
+        let action = self.handle_event(event);
+        if action.is_some() || moves_the_display {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The granted size, not the requested one. The first frame goes out
+        // before any `Event::Resize`, and the hit-tests read the same
+        // viewport fields the renderer places from, so a daemon that drew its
+        // toasts against 1920 on an 800-wide screen would also mis-locate
+        // every close button.
+        self.set_viewport(width, height);
+        NotificationDaemon::render(self)
+    }
+}
+
+fn main() -> ExitCode {
+    let mut daemon = NotificationDaemon::new(
+        f32::from(u16::try_from(DEFAULT_VIEWPORT.0).unwrap_or(u16::MAX)),
+        f32::from(u16::try_from(DEFAULT_VIEWPORT.1).unwrap_or(u16::MAX)),
+    );
+
+    // Default quiet hours, 22:00-07:00. This is only safe to install because
+    // the daemon now has a clock; before `refresh_clock` existed it meant
+    // "suppress everything, forever". See `set_time_from_utc`.
+    daemon.set_dnd_schedule(22, 0, 7, 0);
+
+    // Before the first frame, and before the first notification can arrive,
+    // so the daemon never answers a quiet-hours question from the midnight
+    // `NotificationDaemon::new` seeds it with.
+    daemon.refresh_clock();
+
+    oswindow::app::launch("notifications", &mut daemon)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+    // The scrolling tests assert a float equals the exact literal the code
+    // under test was handed. That is the assertion meant: a tolerance would let
+    // a value that has drifted pass as one that has not.
+    #![allow(clippy::float_cmp)]
+
+    use super::*;
+
+    // --- text measurement ---
+
+    #[test]
+    fn an_action_button_fits_its_label() {
+        // Action labels come from whatever application posted the notification,
+        // so they are arbitrary user-visible text in whatever language that
+        // application speaks. Sized at seven pixels a byte, any of them with an
+        // accent in it overflowed its button.
+        for label in ["Reply", "Mark as read", "Snooze", "Répondre", "既読にする"] {
+            let w = text::padded_width(label, ACTION_BTN_PADDING, 12.0, FontWeightHint::Regular);
+            let drawn = text::measure(label, 12.0, FontWeightHint::Regular);
+            assert!(
+                drawn + ACTION_BTN_PADDING * 2.0 <= w + 0.01,
+                "{label:?} overflows its action button"
+            );
+        }
+    }
+
+    #[test]
+    fn a_one_digit_unread_badge_is_round() {
+        // The pill is drawn with a radius of half its height, so a width below
+        // that height renders as a squashed oval rather than a circle.
+        let w = text::padded_width("3", 6.0, 11.0, FontWeightHint::Bold).max(BADGE_HEIGHT);
+        assert!(
+            (w - BADGE_HEIGHT).abs() < 0.01,
+            "one-digit badge is {w} wide"
+        );
+    }
+
+    #[test]
+    fn a_many_digit_unread_badge_grows_to_fit() {
+        let one = text::padded_width("3", 6.0, 11.0, FontWeightHint::Bold).max(BADGE_HEIGHT);
+        let many = text::padded_width("128", 6.0, 11.0, FontWeightHint::Bold).max(BADGE_HEIGHT);
+        assert!(
+            many > one,
+            "a three-digit badge is no wider than a one-digit one"
+        );
+        assert!(text::measure("128", 11.0, FontWeightHint::Bold) + 12.0 <= many + 0.01);
+    }
+
+    fn make_test_notification(id_hint: u64, priority: NotificationPriority) -> Notification {
+        Notification {
+            id: id_hint,
+            app_name: String::from("TestApp"),
+            title: String::from("Test Title"),
+            body: String::from("Test body content"),
+            priority,
+            icon_id: None,
+            timestamp_ms: 1000,
+            actions: vec![],
+            category: Category::App,
+            progress: None,
+            persistent: false,
+            group_key: None,
+            read: false,
+        }
+    }
+
+    // ========================================================================
+    // Notification centre: layout, hit testing and scrolling
+    // ========================================================================
+
+    /// The panel is only 400 px tall here so a list of twenty genuinely
+    /// overflows it; on the 1080 the other tests use, nothing would scroll.
+    const TEST_VIEWPORT_H: f32 = 400.0;
+    const TEST_VIEWPORT_W: f32 = 1920.0;
+
+    /// A daemon with its centre open on `n` notifications from one app — one
+    /// group header, so the arithmetic below stays legible.
+    fn center_with(n: u64) -> NotificationDaemon {
+        let mut daemon = NotificationDaemon::new(TEST_VIEWPORT_W, TEST_VIEWPORT_H);
+        for id in 0..n {
+            let mut notif = make_test_notification(id, NotificationPriority::Normal);
+            notif.title = format!("N{id}");
+            daemon.push_history(notif);
+        }
+        daemon.center.visible = true;
+        daemon
+    }
+
+    fn wheel_over_center(daemon: &mut NotificationDaemon, dy: f32) {
+        daemon.handle_event(&Event::Mouse(MouseEvent {
+            x: TEST_VIEWPORT_W - 100.0,
+            y: 200.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        }));
+    }
+
+    /// Clicking where a row is drawn must select *that* row.
+    ///
+    /// The renderer and the hit test each walked the group list themselves,
+    /// with their own copy of the same arithmetic. Two copies of a layout are
+    /// two things that drift — the notification *shade* had exactly this shape
+    /// and its copies ended up 76 px apart, so every click there landed on the
+    /// card above the one under the pointer.
+    #[test]
+    fn clicking_a_row_where_it_is_drawn_selects_that_row() {
+        let mut daemon = center_with(6);
+        let rows: Vec<(f32, u64)> = daemon
+            .center_rows()
+            .iter()
+            .filter_map(|(top, row)| match row {
+                CenterRow::Item(notif) => Some((*top, notif.id)),
+                CenterRow::GroupHeader { .. } => None,
+            })
+            .collect();
+        assert_eq!(rows.len(), 6);
+
+        for (top, id) in rows {
+            // The middle of the row, positioned exactly as the renderer does.
+            let y = top + CENTER_ITEM_HEIGHT / 2.0 - daemon.center.scroll_offset;
+            assert_eq!(
+                daemon.hit_test_center(TEST_VIEWPORT_W - 100.0, y),
+                Some(DaemonAction::ActionInvoked {
+                    notification_id: id,
+                    action_id: None,
+                }),
+                "click at y={y} should select notification {id}"
+            );
+        }
+    }
+
+    /// The group header is a row too, and comes out of the same walk.
+    #[test]
+    fn clicking_a_group_header_where_it_is_drawn_collapses_that_group() {
+        let mut daemon = center_with(3);
+        let (top, name) = match &daemon.center_rows()[0] {
+            (top, CenterRow::GroupHeader { app_name, .. }) => (*top, app_name.clone()),
+            (_, CenterRow::Item(_)) => panic!("the first row of a centre is a group header"),
+        };
+        let y = top + CENTER_GROUP_HEADER_HEIGHT / 2.0;
+        assert_eq!(
+            daemon.hit_test_center(TEST_VIEWPORT_W - 100.0, y),
+            Some(DaemonAction::GroupToggled(name))
+        );
+    }
+
+    /// The renderer clips the list to below the header. The hit test did not,
+    /// so once the list was scrolled, a click on the header opened whichever
+    /// invisible row happened to have slid under it.
+    #[test]
+    fn a_row_scrolled_under_the_header_cannot_be_clicked() {
+        let mut daemon = center_with(20);
+        wheel_over_center(&mut daemon, -1.0);
+        assert!(daemon.center.scroll_offset > 0.0);
+        // Inside the panel header, left of the "Clear all" button.
+        let y = CENTER_HEADER_HEIGHT / 2.0;
+        let x = TEST_VIEWPORT_W - CENTER_WIDTH + 10.0;
+        assert_eq!(daemon.hit_test_center(x, y), None);
+    }
+
+    /// `dy` is in notches. This handler subtracted it from a pixel offset, so a
+    /// full detent moved the list by one pixel — a seventy-second of an item,
+    /// indistinguishable from the list not moving at all.
+    #[test]
+    fn one_wheel_notch_moves_three_notifications() {
+        let mut daemon = center_with(20);
+        // Negative `dy` is towards the user, which moves towards the end.
+        wheel_over_center(&mut daemon, -1.0);
+        assert_eq!(daemon.center.scroll_offset, 3.0 * CENTER_ITEM_HEIGHT);
+        wheel_over_center(&mut daemon, 1.0);
+        assert_eq!(daemon.center.scroll_offset, 0.0);
+    }
+
+    /// `.max(0.0)` clamps one end only, so the wheel walked the list off the
+    /// top of the panel indefinitely and left it blank, with no way back but
+    /// scrolling all the way up again.
+    #[test]
+    fn the_wheel_stops_with_the_last_row_on_screen() {
+        let mut daemon = center_with(20);
+        for _ in 0..200 {
+            wheel_over_center(&mut daemon, -1.0);
+        }
+        assert!(
+            daemon.max_center_scroll() > 0.0,
+            "the fixture must overflow"
+        );
+        assert_eq!(daemon.center.scroll_offset, daemon.max_center_scroll());
+        // The last row's bottom sits exactly at the bottom of the panel.
+        assert_eq!(
+            daemon.center_content_height() - daemon.center.scroll_offset,
+            TEST_VIEWPORT_H
+        );
+    }
+
+    /// A list shorter than the panel cannot scroll at all.
+    #[test]
+    fn a_list_shorter_than_the_panel_does_not_scroll() {
+        let mut daemon = center_with(1);
+        assert_eq!(daemon.max_center_scroll(), 0.0);
+        wheel_over_center(&mut daemon, -5.0);
+        assert_eq!(daemon.center.scroll_offset, 0.0);
+    }
+
+    /// The offset is an `f32`, so a trackpad's fraction of a notch moves the
+    /// list now rather than being rounded away or banked for later.
+    #[test]
+    fn a_fraction_of_a_notch_moves_the_center_now() {
+        let mut daemon = center_with(20);
+        wheel_over_center(&mut daemon, -0.5);
+        assert_eq!(daemon.center.scroll_offset, 1.5 * CENTER_ITEM_HEIGHT);
+    }
+
+    /// A hidden centre has nothing to scroll.
+    #[test]
+    fn the_wheel_does_nothing_while_the_center_is_hidden() {
+        let mut daemon = center_with(20);
+        daemon.center.visible = false;
+        wheel_over_center(&mut daemon, -1.0);
+        assert_eq!(daemon.center.scroll_offset, 0.0);
+    }
+
+    /// Collapsing a group hides its items, which shortens the list and can
+    /// strand the offset past the new end — leaving the panel showing blank
+    /// space that cannot be scrolled away from.
+    ///
+    /// Two groups, because collapsing the only one leaves nothing above the
+    /// header to have been scrolled in the first place.
+    #[test]
+    fn collapsing_a_group_pulls_the_view_back_inside() {
+        let mut daemon = NotificationDaemon::new(TEST_VIEWPORT_W, TEST_VIEWPORT_H);
+        for (app, base) in [("AppA", 0_u64), ("AppB", 100_u64)] {
+            for id in 0..20 {
+                let mut notif = make_test_notification(base + id, NotificationPriority::Normal);
+                notif.app_name = String::from(app);
+                daemon.push_history(notif);
+            }
+        }
+        daemon.center.visible = true;
+
+        // Scroll until AppB's header is on screen but the list is still well
+        // short of its end, so there is a real offset to be stranded.
+        // History is newest-first, so which app leads depends on push order;
+        // take the *second* header whatever it is called.
+        let (b_top, b_name) = daemon
+            .center_rows()
+            .iter()
+            .filter_map(|(top, row)| match row {
+                CenterRow::GroupHeader { app_name, .. } => Some((*top, app_name.clone())),
+                CenterRow::Item(_) => None,
+            })
+            .nth(1)
+            .expect("two apps make two headers");
+        daemon.scroll_center_by(b_top - CENTER_HEADER_HEIGHT);
+        let stranded = daemon.center.scroll_offset;
+        assert!(stranded > 0.0);
+        assert!(stranded < daemon.max_center_scroll());
+
+        // Click the header exactly where it is drawn.
+        let y = b_top - stranded + CENTER_GROUP_HEADER_HEIGHT / 2.0;
+        assert_eq!(
+            daemon.hit_test_center(TEST_VIEWPORT_W - 100.0, y),
+            Some(DaemonAction::GroupToggled(b_name))
+        );
+        assert!(
+            daemon.center.scroll_offset < stranded,
+            "the list got shorter, so the view must come back inside it"
+        );
+        assert_eq!(daemon.center.scroll_offset, daemon.max_center_scroll());
+    }
+
+    /// Clearing the history empties the list entirely.
+    #[test]
+    fn clearing_the_history_pulls_the_view_back_inside() {
+        let mut daemon = center_with(20);
+        for _ in 0..200 {
+            wheel_over_center(&mut daemon, -1.0);
+        }
+        assert!(daemon.center.scroll_offset > 0.0);
+        daemon.clear_all_history();
+        assert_eq!(daemon.center.scroll_offset, 0.0);
+    }
+
+    /// A taller panel shows more of the list, which lowers the scroll bound.
+    #[test]
+    fn a_taller_panel_pulls_a_scrolled_list_back_inside_it() {
+        let mut daemon = center_with(20);
+        for _ in 0..200 {
+            wheel_over_center(&mut daemon, -1.0);
+        }
+        let short = daemon.center.scroll_offset;
+        daemon.set_viewport(TEST_VIEWPORT_W, TEST_VIEWPORT_H * 2.0);
+        assert!(daemon.center.scroll_offset < short);
+        assert_eq!(daemon.center.scroll_offset, daemon.max_center_scroll());
+    }
+
+    /// Input events come from outside the process, and an infinity stored in
+    /// the offset would blank the panel for the rest of the run.
+    #[test]
+    fn a_nonfinite_delta_does_not_freeze_the_center() {
+        let mut daemon = center_with(20);
+        wheel_over_center(&mut daemon, f32::NAN);
+        wheel_over_center(&mut daemon, f32::INFINITY);
+        assert_eq!(daemon.center.scroll_offset, 0.0);
+        wheel_over_center(&mut daemon, -1.0);
+        assert_eq!(daemon.center.scroll_offset, 3.0 * CENTER_ITEM_HEIGHT);
+    }
+
+    /// A daemon showing one notification whose body is `body`.
+    fn daemon_with_body(body: &str) -> NotificationDaemon {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let mut notif = make_test_notification(0, NotificationPriority::Normal);
+        notif.body = String::from(body);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        daemon
+    }
+
+    /// Every body line the toast drew, as (y, text), in draw order.
+    fn drawn_body_lines(daemon: &NotificationDaemon) -> Vec<(f32, String)> {
+        daemon
+            .render_toasts()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    text,
+                    font_size,
+                    color,
+                    ..
+                } if (font_size - TOAST_BODY_FONT_SIZE).abs() < 0.01 && color == SUBTEXT1 => {
+                    Some((y, text))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_toast_body_is_wrapped_not_clipped() {
+        // `RenderCommand::Text` clips at `max_width` rather than wrapping, so a
+        // body sent as one command showed only its first line.
+        let body = "The backup finished but three files were skipped because \
+                    they were open in another program.";
+        let daemon = daemon_with_body(body);
+        let lines = drawn_body_lines(&daemon);
+
+        assert!(lines.len() > 1, "drawn as {} line(s)", lines.len());
+        assert_eq!(
+            lines
+                .iter()
+                .flat_map(|(_, l)| l.split_whitespace())
+                .collect::<Vec<_>>(),
+            body.split_whitespace().collect::<Vec<_>>(),
+            "the drawn lines are not the body"
+        );
+    }
+
+    #[test]
+    fn a_taller_toast_does_not_overlap_the_one_below_it() {
+        // The stacking offset comes from `toast_height`, so a body that wraps
+        // has to make the toast taller or it draws over its neighbour.
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        for body in ["Short.", "Short."] {
+            let mut notif = make_test_notification(0, NotificationPriority::Normal);
+            notif.body = String::from(body);
+            daemon.handle_request(NotificationRequest::Send(notif));
+        }
+        let one_line = daemon.toast_height(&daemon.history[0]);
+
+        let wrapped = daemon_with_body(
+            "The backup finished but three files were skipped because they \
+             were open in another program at the time.",
+        );
+        let many_lines = wrapped.toast_height(&wrapped.history[0]);
+        assert!(
+            many_lines > one_line,
+            "a wrapped body ({many_lines}) got no more room than a short one ({one_line})"
+        );
+
+        // And the last line stays inside the box the toast was given.
+        let lines = drawn_body_lines(&wrapped);
+        let last_y = lines.iter().map(|&(y, _)| y).fold(f32::MIN, f32::max);
+        assert!(
+            last_y + TOAST_BODY_LINE_HEIGHT <= TOAST_TOP_MARGIN + many_lines,
+            "the last line at {last_y} falls outside a toast {many_lines} tall"
+        );
+    }
+
+    #[test]
+    fn an_endless_toast_body_is_capped_and_marked_as_cut() {
+        // A toast is a glance, not a reader: an unbounded one would push the
+        // rest of the stack off screen. The cut has to be visible, or a
+        // truncated sentence reads as the whole one.
+        let daemon = daemon_with_body(&"word ".repeat(400));
+        let lines = drawn_body_lines(&daemon);
+
+        assert_eq!(lines.len(), TOAST_BODY_MAX_LINES);
+        let last = &lines[TOAST_BODY_MAX_LINES - 1].1;
+        assert!(
+            last.ends_with('…'),
+            "{last:?} does not show that it was cut"
+        );
+        assert!(
+            text::measure(last, TOAST_BODY_FONT_SIZE, FontWeightHint::Regular)
+                <= TOAST_WIDTH - TOAST_PADDING * 2.0 - 16.0,
+            "the elided line {last:?} is wider than the toast"
+        );
+    }
+
+    #[test]
+    fn test_send_notification_creates_toast() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let notif = make_test_notification(0, NotificationPriority::Normal);
+        let resp = daemon.handle_request(NotificationRequest::Send(notif));
+        match resp {
+            NotificationResponse::Created { id } => assert_eq!(id, 1),
+            _ => panic!("Expected Created response"),
+        }
+        assert_eq!(daemon.toasts.len(), 1);
+        assert_eq!(daemon.history.len(), 1);
+    }
+
+    #[test]
+    fn test_dismiss_notification() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let notif = make_test_notification(0, NotificationPriority::Normal);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        daemon.handle_request(NotificationRequest::Dismiss { id: 1 });
+        assert!(daemon.toasts[0].dismissing);
+    }
+
+    #[test]
+    fn test_auto_dismiss_on_timeout() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let notif = make_test_notification(0, NotificationPriority::Low);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        // Low priority = 3000ms timeout.
+        daemon.tick(3001);
+        assert!(daemon.toasts[0].dismissing);
+    }
+
+    /// A real `Event::Tick` reaches the toast clock.
+    ///
+    /// Through `handle_event`, not `tick`: `tick` was correct and tested
+    /// while `handle_event` dropped the event into its `_ => None` arm, so a
+    /// test that calls `tick` directly cannot tell a daemon whose toasts
+    /// expire from one whose toasts stay on screen forever.  Falsified by
+    /// deleting the `Event::Tick` arm and confirming this test, and only it,
+    /// fails.
+    #[test]
+    fn a_tick_event_expires_a_toast() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let notif = make_test_notification(0, NotificationPriority::Low);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        // Low priority = 3000ms timeout.
+        daemon.handle_event(&Event::Tick { elapsed_ms: 3001 });
+        assert!(
+            daemon.toasts[0].dismissing,
+            "Event::Tick did not reach the toast clock"
+        );
+    }
+
+    #[test]
+    fn test_critical_never_auto_dismisses() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let notif = make_test_notification(0, NotificationPriority::Critical);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        daemon.tick(100_000);
+        assert!(!daemon.toasts[0].dismissing);
+    }
+
+    #[test]
+    fn test_dnd_suppresses_toast() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        daemon.dnd.enabled = true;
+        let notif = make_test_notification(0, NotificationPriority::Normal);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        // Should be in history but no toast.
+        assert_eq!(daemon.toasts.len(), 0);
+        assert_eq!(daemon.history.len(), 1);
+    }
+
+    #[test]
+    fn test_dnd_critical_bypass() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        daemon.dnd.enabled = true;
+        daemon.dnd.bypass_critical = true;
+        let notif = make_test_notification(0, NotificationPriority::Critical);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        // Critical should bypass DND.
+        assert_eq!(daemon.toasts.len(), 1);
+    }
+
+    #[test]
+    fn test_dnd_schedule_overnight() {
+        let schedule = DndSchedule::new(22, 0, 7, 0).expect("22:00-07:00 is a real window");
+        // 23:00 = 1380 minutes -> should be active.
+        assert!(schedule.is_active(1380));
+        // 02:00 = 120 minutes -> should be active.
+        assert!(schedule.is_active(120));
+        // 12:00 = 720 minutes -> should NOT be active.
+        assert!(!schedule.is_active(720));
+    }
+
+    /// The bug the type change closes: `start_hour: 25` used to be accepted,
+    /// yielding a start of 1500 — past the largest time-of-day — so the window
+    /// compared as overnight and then never opened. Quiet hours silently
+    /// stopped working and nothing reported it.
+    #[test]
+    fn a_time_that_is_not_on_the_clock_is_refused() {
+        for (sh, sm, eh, em) in [
+            (25, 0, 7, 0),   // hour past midnight
+            (24, 0, 7, 0),   // 24:00 is tomorrow's 00:00, not a time today
+            (22, 60, 7, 0),  // minute past the hour
+            (22, 0, 7, 99),  // ditto, on the far endpoint
+            (22, 0, 255, 0), // the largest u8
+        ] {
+            assert!(
+                DndSchedule::new(sh, sm, eh, em).is_none(),
+                "{sh}:{sm}-{eh}:{em} should not be a schedule"
+            );
+        }
+        // The boundary on the accepted side.
+        assert!(DndSchedule::new(23, 59, 0, 0).is_some());
+    }
+
+    /// A refused schedule must not clear the one already set — silently
+    /// turning quiet hours off is not a closer reading of the request than
+    /// leaving them alone.
+    #[test]
+    fn a_refused_schedule_leaves_the_previous_one_alone() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        assert!(daemon.set_dnd_schedule(22, 0, 7, 0));
+        let good = daemon.dnd.schedule;
+        assert!(good.is_some());
+
+        assert!(!daemon.set_dnd_schedule(25, 0, 7, 0));
+        assert_eq!(daemon.dnd.schedule, good);
+    }
+
+    /// Every minute of the day belongs to exactly one side of a window, and
+    /// the two branches of `is_active` must agree on that. A same-day window
+    /// and its complement should partition the day.
+    #[test]
+    fn a_window_and_its_reverse_partition_the_day() {
+        let day = DndSchedule::new(8, 0, 17, 0).expect("08:00-17:00");
+        let night = DndSchedule::new(17, 0, 8, 0).expect("17:00-08:00");
+        for minute in 0..24 * 60 {
+            assert_ne!(
+                day.is_active(minute),
+                night.is_active(minute),
+                "minute {minute} is in both windows or neither"
+            );
+        }
+    }
+
+    #[test]
+    fn test_max_visible_toasts() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        for _ in 0..6 {
+            let notif = make_test_notification(0, NotificationPriority::Normal);
+            daemon.handle_request(NotificationRequest::Send(notif));
+        }
+        // Should trigger dismissal of oldest when over MAX_VISIBLE_TOASTS.
+        let non_dismissing = daemon.toasts.iter().filter(|t| !t.dismissing).count();
+        assert!(non_dismissing <= MAX_VISIBLE_TOASTS);
+    }
+
+    #[test]
+    fn test_group_key_replacement() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let mut notif1 = make_test_notification(0, NotificationPriority::Normal);
+        notif1.group_key = Some(String::from("download-1"));
+        notif1.progress = Some(50);
+        daemon.handle_request(NotificationRequest::Send(notif1));
+
+        let mut notif2 = make_test_notification(0, NotificationPriority::Normal);
+        notif2.group_key = Some(String::from("download-1"));
+        notif2.progress = Some(75);
+        daemon.handle_request(NotificationRequest::Send(notif2));
+
+        // First toast should be dismissing (replaced by second).
+        let dismissing_count = daemon.toasts.iter().filter(|t| t.dismissing).count();
+        assert!(dismissing_count >= 1);
+    }
+
+    #[test]
+    fn test_update_notification_progress() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let mut notif = make_test_notification(0, NotificationPriority::Normal);
+        notif.progress = Some(10);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        daemon.handle_request(NotificationRequest::Update {
+            id: 1,
+            title: None,
+            body: None,
+            progress: Some(90),
+        });
+        assert_eq!(daemon.history[0].progress, Some(90));
+    }
+
+    #[test]
+    fn test_app_settings_filter() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        daemon.handle_request(NotificationRequest::SetAppSettings {
+            app_name: String::from("TestApp"),
+            settings: AppSettings {
+                enabled: true,
+                min_priority: NotificationPriority::High,
+                sound_enabled: false,
+            },
+        });
+        // Normal priority should be filtered.
+        let notif = make_test_notification(0, NotificationPriority::Normal);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        assert_eq!(daemon.toasts.len(), 0);
+        assert_eq!(daemon.history.len(), 1);
+    }
+
+    #[test]
+    fn test_app_settings_disabled() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        daemon.handle_request(NotificationRequest::SetAppSettings {
+            app_name: String::from("TestApp"),
+            settings: AppSettings {
+                enabled: false,
+                min_priority: NotificationPriority::Low,
+                sound_enabled: true,
+            },
+        });
+        let notif = make_test_notification(0, NotificationPriority::Critical);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        // Disabled app: no toast, but still in history.
+        assert_eq!(daemon.toasts.len(), 0);
+        assert_eq!(daemon.history.len(), 1);
+    }
+
+    #[test]
+    fn test_toggle_center() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        assert!(!daemon.is_center_visible());
+        daemon.toggle_center();
+        assert!(daemon.is_center_visible());
+        daemon.toggle_center();
+        assert!(!daemon.is_center_visible());
+    }
+
+    #[test]
+    fn test_clear_all_history() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        for _ in 0..5 {
+            let notif = make_test_notification(0, NotificationPriority::Normal);
+            daemon.handle_request(NotificationRequest::Send(notif));
+        }
+        daemon.clear_all_history();
+        assert_eq!(daemon.history.len(), 0);
+    }
+
+    #[test]
+    fn test_mark_read_unread() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let notif = make_test_notification(0, NotificationPriority::Normal);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        assert!(!daemon.history[0].read);
+        daemon.mark_read(1);
+        assert!(daemon.history[0].read);
+        daemon.mark_unread(1);
+        assert!(!daemon.history[0].read);
+    }
+
+    #[test]
+    fn test_history_max_capacity() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        daemon.max_history = 10;
+        for _ in 0..15 {
+            let notif = make_test_notification(0, NotificationPriority::Normal);
+            daemon.handle_request(NotificationRequest::Send(notif));
+        }
+        assert_eq!(daemon.history.len(), 10);
+    }
+
+    #[test]
+    fn test_relative_time_formatting() {
+        let daemon = NotificationDaemon::new(1920.0, 1080.0);
+        // Age zero, and a timestamp ahead of the clock, which is also an age
+        // of zero rather than a state of its own.
+        let mut d = daemon;
+        d.current_time_ms = 10_000;
+        assert_eq!(d.format_relative_time(10_000), "just now");
+        assert_eq!(d.format_relative_time(9_500), "just now");
+        assert_eq!(d.format_relative_time(20_000), "just now");
+        // Abbreviated now, matching the desktop's notification pane, which
+        // shows the same notifications: was "3 min ago", "2 hours ago",
+        // "1 hour ago", "Yesterday".
+        d.current_time_ms = 180_000;
+        assert_eq!(d.format_relative_time(0), "3m ago");
+        d.current_time_ms = 7_200_000;
+        assert_eq!(d.format_relative_time(0), "2h ago");
+        d.current_time_ms = 3_600_000;
+        assert_eq!(d.format_relative_time(0), "1h ago");
+        d.current_time_ms = 86_400_000 + 1000;
+        assert_eq!(d.format_relative_time(0), "yesterday");
+        // Was "31 days ago": the ladder used to run out at days.
+        d.current_time_ms = 31 * 86_400_000;
+        assert_eq!(d.format_relative_time(0), "1mo ago");
+    }
+
+    #[test]
+    fn test_render_toasts_produces_commands() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let notif = make_test_notification(0, NotificationPriority::Normal);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        let cmds = daemon.render_toasts();
+        // Should produce at least shadow + bg + accent + app_name + title + body + close.
+        assert!(cmds.len() >= 7);
+    }
+
+    #[test]
+    fn test_render_center_empty() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        daemon.center.visible = true;
+        let cmds = daemon.render_center();
+        // Should have header + empty state text at minimum.
+        assert!(!cmds.is_empty());
+    }
+
+    #[test]
+    fn test_dismiss_all_for_app() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        for _ in 0..3 {
+            let notif = make_test_notification(0, NotificationPriority::Normal);
+            daemon.handle_request(NotificationRequest::Send(notif));
+        }
+        daemon.handle_request(NotificationRequest::DismissAll {
+            app_name: String::from("TestApp"),
+        });
+        let all_dismissing = daemon.toasts.iter().all(|t| t.dismissing);
+        assert!(all_dismissing);
+    }
+
+    #[test]
+    fn test_animation_easing() {
+        // ease_out_cubic(0) = 0, ease_out_cubic(1) = 1.
+        assert!((ease_out_cubic(0.0) - 0.0).abs() < f32::EPSILON);
+        assert!((ease_out_cubic(1.0) - 1.0).abs() < f32::EPSILON);
+        // Monotonically increasing.
+        assert!(ease_out_cubic(0.5) > ease_out_cubic(0.25));
+    }
+
+    #[test]
+    fn test_toast_removal_after_exit_animation() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let notif = make_test_notification(0, NotificationPriority::Normal);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        daemon.dismiss(1);
+        // Advance past animation duration.
+        daemon.tick(ANIMATION_DURATION_MS + 1);
+        assert_eq!(daemon.toasts.len(), 0);
+    }
+
+    #[test]
+    fn test_persistent_notification_no_auto_dismiss() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let mut notif = make_test_notification(0, NotificationPriority::Low);
+        notif.persistent = true;
+        daemon.handle_request(NotificationRequest::Send(notif));
+        daemon.tick(100_000);
+        assert!(!daemon.toasts[0].dismissing);
+    }
+
+    #[test]
+    fn test_get_active_returns_ids() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let notif = make_test_notification(0, NotificationPriority::Normal);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        let resp = daemon.handle_request(NotificationRequest::GetActive);
+        match resp {
+            NotificationResponse::ActiveList(ids) => {
+                assert_eq!(ids, vec![1]);
+            }
+            _ => panic!("Expected ActiveList"),
+        }
+    }
+
+    #[test]
+    fn test_get_history_with_limit() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        for _ in 0..10 {
+            let notif = make_test_notification(0, NotificationPriority::Normal);
+            daemon.handle_request(NotificationRequest::Send(notif));
+        }
+        let resp = daemon.handle_request(NotificationRequest::GetHistory { limit: 3 });
+        match resp {
+            NotificationResponse::HistoryList(entries) => {
+                assert_eq!(entries.len(), 3);
+            }
+            _ => panic!("Expected HistoryList"),
+        }
+    }
+
+    // ========================================================================
+    // The quiet-hours clock
+    //
+    // `set_time_of_day` had no caller in the whole tree, so `current_minutes`
+    // was 0 -- midnight -- for the life of the process, and the 22:00-07:00
+    // schedule `main` installs contains midnight. Everything below exists
+    // because that made the daemon suppress every non-critical notification
+    // it was ever sent, silently, with all of its tests passing.
+    // ========================================================================
+
+    /// The daemon exactly as `main` builds it.
+    fn daemon_as_main_builds_it() -> NotificationDaemon {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        assert!(
+            daemon.set_dnd_schedule(22, 0, 7, 0),
+            "22:00-07:00 is a real window"
+        );
+        daemon
+    }
+
+    /// Noon UTC, as an instant: `1787745600 % 86400 == 43200`.
+    ///
+    /// The one time of day no plausible quiet-hours window contains, which is
+    /// what makes it the right instant to pin a clock to in a test that is not
+    /// about quiet hours.
+    const MIDDAY_UTC: i64 = 1_787_745_600;
+
+    /// Put one toast on screen, with the quiet-hours clock pinned to midday.
+    ///
+    /// The pin is not decoration. `on_event` refreshes that clock from the
+    /// *host* on every tick — deliberately, and
+    /// `a_tick_advances_the_quiet_hours_clock_through_the_event_loop` is the
+    /// test of it — so a test that delivers a tick before it sends has had its
+    /// clock replaced by whatever time it happens to be on the machine
+    /// running it. With `daemon_as_main_builds_it`'s 22:00–07:00 schedule
+    /// that is a test which passes by day and fails at night, and it did:
+    /// `a_tick_asks_for_a_frame_only_when_something_is_moving` failed on an
+    /// evening run with the daemon correctly suppressing the toast.
+    ///
+    /// The length assertion is here rather than at the call sites so that a
+    /// suppressed toast reports itself instead of surfacing as whatever
+    /// unrelated thing the caller went on to assert.
+    fn send_one_toast(daemon: &mut NotificationDaemon) {
+        daemon.set_time_from_utc(MIDDAY_UTC);
+        daemon.handle_request(NotificationRequest::Send(make_test_notification(
+            0,
+            NotificationPriority::Normal,
+        )));
+        assert_eq!(
+            daemon.toasts.len(),
+            1,
+            "quiet hours suppressed the toast this test needs on screen"
+        );
+    }
+
+    /// Minutes from midnight, computed here rather than by the code under
+    /// test, so the two can disagree.
+    fn wall_clock_minutes() -> u16 {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the host clock is after 1970")
+            .as_secs();
+        u16::try_from((secs % 86_400) / 60).expect("under 1440")
+    }
+
+    #[test]
+    fn the_quiet_hours_clock_reads_the_instant_it_is_given() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        // 2026-08-26 13:45:07 UTC.
+        daemon.set_time_from_utc(1_787_751_907);
+        assert_eq!(daemon.current_minutes, 13 * 60 + 45);
+    }
+
+    #[test]
+    fn the_clock_reads_midnight_as_midnight_not_as_the_end_of_the_day() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        // 2026-01-01 00:00:00 UTC.
+        daemon.set_time_from_utc(1_767_225_600);
+        assert_eq!(daemon.current_minutes, 0);
+    }
+
+    #[test]
+    fn a_pre_epoch_instant_is_still_a_time_of_day() {
+        // 1969-12-31 23:59:59 UTC. With `%` instead of `rem_euclid` this is a
+        // negative number of seconds into the day, which is not a time at all
+        // and would clamp to midnight -- putting the daemon back inside quiet
+        // hours, which is the failure this whole section is about.
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        daemon.set_time_from_utc(-1);
+        assert_eq!(daemon.current_minutes, 23 * 60 + 59);
+    }
+
+    #[test]
+    fn the_default_quiet_hours_do_not_suppress_a_midday_notification() {
+        // The regression test for the shipped bug. Before the daemon had a
+        // clock this failed: `current_minutes` was 0, 0 is inside
+        // 22:00-07:00, and `should_show_toast` returned false.
+        let mut daemon = daemon_as_main_builds_it();
+        daemon.set_time_from_utc(1_787_745_600); // 2026-08-26 12:00:00 UTC
+        assert!(!daemon.is_dnd_active(), "noon is not inside 22:00-07:00");
+
+        daemon.handle_request(NotificationRequest::Send(make_test_notification(
+            0,
+            NotificationPriority::Normal,
+        )));
+        assert_eq!(
+            daemon.toasts.len(),
+            1,
+            "a midday notification produced no toast"
+        );
+    }
+
+    #[test]
+    fn the_default_quiet_hours_still_suppress_a_night_notification() {
+        // The other half: the fix must not have turned quiet hours off, only
+        // made them depend on the time.
+        let mut daemon = daemon_as_main_builds_it();
+        daemon.set_time_from_utc(1_787_785_200); // 2026-08-26 23:00:00 UTC
+        assert!(daemon.is_dnd_active(), "23:00 is inside 22:00-07:00");
+
+        daemon.handle_request(NotificationRequest::Send(make_test_notification(
+            0,
+            NotificationPriority::Normal,
+        )));
+        assert!(daemon.toasts.is_empty(), "quiet hours showed a toast");
+        assert_eq!(
+            daemon.history.len(),
+            1,
+            "a suppressed notification must still be in the history"
+        );
+    }
+
+    #[test]
+    fn the_wall_clock_read_moves_the_daemon_off_its_seeded_midnight() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        assert_eq!(daemon.current_minutes, 0, "seeded at midnight");
+        let before = wall_clock_minutes();
+        daemon.refresh_clock();
+        let after = wall_clock_minutes();
+        // A range, because the minute can turn over between the two reads.
+        assert!(
+            daemon.current_minutes == before || daemon.current_minutes == after,
+            "clock read {} but the wall clock says {before}..={after}",
+            daemon.current_minutes
+        );
+    }
+
+    // ========================================================================
+    // The window: `impl oswindow::app::App`
+    // ========================================================================
+
+    #[test]
+    fn a_daemon_that_shows_a_clock_never_stops_ticking() {
+        // Quiet hours open and close on wall-clock times and on nothing else.
+        // A daemon that returned `None` here once its last toast left would
+        // never see 22:00 arrive, and -- having asked for no more ticks --
+        // would never get another chance to.
+        let mut daemon = daemon_as_main_builds_it();
+        assert!(daemon.toasts.is_empty());
+        assert_eq!(
+            oswindow::app::App::tick_interval(&daemon),
+            Some(CLOCK_TICK),
+            "an idle daemon stopped ticking"
+        );
+
+        send_one_toast(&mut daemon);
+        assert_eq!(
+            oswindow::app::App::tick_interval(&daemon),
+            Some(ANIMATION_TICK),
+            "a live toast must animate at frame rate"
+        );
+    }
+
+    #[test]
+    fn render_believes_the_size_it_is_given_not_the_one_it_asked_for() {
+        let mut daemon = daemon_as_main_builds_it();
+        send_one_toast(&mut daemon);
+
+        // Past the slide-in: a toast that has just arrived is deliberately
+        // still off the right edge, so measuring one mid-animation would
+        // measure the animation rather than the placement.
+        daemon.tick(ANIMATION_DURATION_MS + 1);
+
+        // Not `daemon.render()`: the inherent one takes no size, so this has
+        // to name the trait to reach the method that does.
+        let tree = oswindow::app::App::render(&mut daemon, 800.0, 600.0);
+        assert_eq!(daemon.viewport_width, 800.0);
+        assert_eq!(daemon.viewport_height, 600.0);
+
+        // Toasts are placed against the right edge, so a daemon that kept
+        // believing in 1920 would draw them ~1120 pixels off the side of an
+        // 800-wide screen -- and would hit-test their close buttons there too.
+        let mut right_edge = f32::MIN;
+        for cmd in &tree.commands {
+            if let RenderCommand::FillRect { x, width, .. } = cmd {
+                right_edge = right_edge.max(x + width);
+            }
+        }
+        assert!(
+            right_edge > f32::MIN && right_edge <= 800.0,
+            "the toast reaches x={right_edge} on an 800-wide screen"
+        );
+    }
+
+    #[test]
+    fn an_event_the_daemon_ignores_does_not_ask_for_a_frame() {
+        let mut daemon = daemon_as_main_builds_it();
+        daemon.set_time_from_utc(1_787_745_600);
+
+        // A mouse move crosses the screen sixty times a second and changes
+        // nothing the daemon draws.
+        let moved = Event::Mouse(MouseEvent {
+            x: 100.0,
+            y: 100.0,
+            kind: MouseEventKind::Move,
+        });
+        assert_eq!(
+            oswindow::app::App::on_event(&mut daemon, &moved),
+            Response::Idle
+        );
+
+        // A resize replaces every coordinate in the tree.
+        let resized = Event::Resize {
+            width: 1280,
+            height: 720,
+        };
+        assert_eq!(
+            oswindow::app::App::on_event(&mut daemon, &resized),
+            Response::Redraw
+        );
+    }
+
+    #[test]
+    fn a_tick_asks_for_a_frame_only_when_something_is_moving() {
+        let mut daemon = daemon_as_main_builds_it();
+        daemon.set_time_from_utc(MIDDAY_UTC);
+
+        let tick = Event::Tick { elapsed_ms: 16 };
+        assert_eq!(
+            oswindow::app::App::on_event(&mut daemon, &tick),
+            Response::Idle,
+            "an idle daemon redrew an empty overlay"
+        );
+
+        // After that tick the clock is the host's, so the toast has to be sent
+        // through the helper that pins it back.
+        send_one_toast(&mut daemon);
+        assert_eq!(
+            oswindow::app::App::on_event(&mut daemon, &tick),
+            Response::Redraw,
+            "an ageing toast did not ask to be redrawn"
+        );
+    }
+
+    #[test]
+    fn a_tick_that_removes_the_last_toast_still_asks_for_a_frame() {
+        // The reason `moves_the_display` is sampled before the event is
+        // handled: after this tick there are no toasts left, but the frame
+        // that erases the last one still has to be drawn.
+        let mut daemon = daemon_as_main_builds_it();
+        send_one_toast(&mut daemon);
+
+        // Expiry takes two ticks: the first marks the toast dismissing, the
+        // second finishes its exit animation and drops it.
+        daemon.tick(100_000);
+        assert!(daemon.toasts[0].dismissing);
+
+        let response = oswindow::app::App::on_event(
+            &mut daemon,
+            &Event::Tick {
+                elapsed_ms: ANIMATION_DURATION_MS + 1,
+            },
+        );
+        assert!(daemon.toasts.is_empty(), "the toast should have expired");
+        assert_eq!(response, Response::Redraw);
+    }
+
+    #[test]
+    fn a_tick_advances_the_quiet_hours_clock_through_the_event_loop() {
+        // `refresh_clock` is only correct if something calls it. The lock
+        // screen and five other apps shipped a frozen clock because the
+        // method existed and the tick arm did not call it.
+        let mut daemon = daemon_as_main_builds_it();
+        daemon.set_time_from_utc(1_767_225_600); // midnight, deliberately wrong
+        assert_eq!(daemon.current_minutes, 0);
+
+        let before = wall_clock_minutes();
+        let _ = oswindow::app::App::on_event(&mut daemon, &Event::Tick { elapsed_ms: 16 });
+        let after = wall_clock_minutes();
+        assert!(
+            daemon.current_minutes == before || daemon.current_minutes == after,
+            "the tick left the clock at {}, wall clock {before}..={after}",
+            daemon.current_minutes
+        );
+    }
+}

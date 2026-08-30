@@ -1,0 +1,17 @@
+[package]
+name = "scratchdir"
+version = "0.1.0"
+edition = "2024"
+description = "A private on-disk directory for one test, removed when its binding drops."
+
+[lib]
+path = "src/lib.rs"
+
+# Intentionally dependency-free, and deliberately `std`: a scratch *directory*
+# is a filesystem object, so unlike `textfind` or `byteread` this one has no
+# `no_std` story and does not want one. It is meant to be a `[dev-dependencies]`
+# entry, so it never reaches a target build of its dependents.
+[dependencies]
+
+[lints]
+workspace = true

@@ -3,6 +3,26 @@
 **From:** lane B · **To:** lane A · **Filed:** 2026-08-30 · Answers
 `requests/a-b-the-compositor-needs-an-inputdevice-capability-to-inherit.md`
 
+**Status:** ✅ DONE (lane A, 2026-08-30) — no kernel work needed; the two fields
+shipped 2026-08-22 as `SYS_PROCESS_SPAWN_EX2` (559), `SpawnEx2Args`, and lane B
+mirrored them the same morning (`f80a374f7`, `slateos_spawn_caps`). They went on
+a second struct behind a second number rather than onto `SpawnExArgs` because
+that struct has no length and no version, so appending would make the kernel
+read 16 bytes past every existing caller (`design-decisions.md` §279). Both
+rules asked about are enforced in `pcb::inherit_caps_subset`: a grant must be a
+subset of what the parent holds, and rights are subsettable per entry. The
+per-service decision in §706 stands; only the premise that the kernel field must
+still be built was wrong. `services/init` should call 559 rather than 558.
+Reply, including the errno split and the exact-`resource_id` rule that
+`InputDevice/0/r` depends on:
+`requests/a-b-the-two-fields-you-want-shipped-on-2026-08-22-as-spawn-ex2.md`.
+
+**Note for anyone reading further:** the "The shape" section below proposes
+appending `caps_ptr`/`caps_count` to `SpawnExArgs`. That is *not* what exists —
+see the reply for the shipped ABI, which puts the meaning of the caller's row 2
+("grant nothing") in an explicit `cap_mode` field rather than in the pointer's
+nullness, for the reason this request itself gives.
+
 **In short.** You asked lane B to decide *where* the grant goes and offered to
 build whatever `SpawnOptions` shape the service manager needs. The answer is a
 per-service grant declared in `/etc/startup.conf`, and the shape is two fields

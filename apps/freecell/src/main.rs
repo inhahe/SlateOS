@@ -3746,6 +3746,96 @@ mod tests {
     }
 
     #[test]
+    fn the_bands_stay_inside_the_window_at_every_size() {
+        // What this replaces filled a hardcoded 900x800 whatever it was given.
+        for (w, h) in SIZES {
+            let l = Layout::new(w, h);
+            for (name, r) in [("header", l.header), ("body", l.body), ("footer", l.footer)] {
+                assert!(
+                    r.x >= -0.01 && r.y >= -0.01,
+                    "the {name} at {w}x{h} starts at {r:?}, outside the window"
+                );
+                assert!(
+                    r.right() <= w + 0.01 && r.bottom() <= h + 0.01,
+                    "the {name} at {w}x{h} ends at {r:?}, past {w}x{h}"
+                );
+                assert!(
+                    r.w >= 0.0 && r.h >= 0.0,
+                    "the {name} at {w}x{h} is {r:?}, which draws inside out"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_bands_run_down_the_window_in_order_and_do_not_overlap() {
+        for (w, h) in SIZES {
+            let l = Layout::new(w, h);
+            assert!(
+                l.header.bottom() <= l.body.y + 0.01,
+                "at {w}x{h} the header reaches into the body"
+            );
+            assert!(
+                l.body.bottom() <= l.footer.y + 0.01,
+                "at {w}x{h} the body reaches into the footer"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bands_are_shares_of_the_height_not_the_width() {
+        // A band cut from the width grows when the window is only made wider,
+        // which is the wrong axis: the header holds one line of text whatever
+        // shape the window is. Widening does trim it a little, because the
+        // padding round it is a share of the shorter side -- so the rule is
+        // that widening never makes a band taller.
+        let narrow = Layout::new(400.0, 900.0);
+        let wide = Layout::new(1600.0, 900.0);
+        assert!(
+            wide.header.h <= narrow.header.h + 0.01,
+            "the header grew when only the width did"
+        );
+        assert!(
+            wide.footer.h <= narrow.footer.h + 0.01,
+            "the footer grew when only the width did"
+        );
+        let short = Layout::new(900.0, 300.0);
+        let tall = Layout::new(900.0, 900.0);
+        assert!(
+            short.header.h < tall.header.h,
+            "the header did not shrink with the window's height"
+        );
+        assert!(
+            short.footer.h < tall.footer.h,
+            "the footer did not shrink with the window's height"
+        );
+    }
+
+    #[test]
+    fn the_type_sizes_come_from_the_window_and_stay_legible() {
+        for (w, h) in SIZES {
+            let l = Layout::new(w, h);
+            for (name, size) in [
+                ("head", l.head),
+                ("font", l.font),
+                ("title", l.title),
+                ("small", l.small),
+            ] {
+                assert!(
+                    size >= 7.0,
+                    "the {name} type is {size} at {w}x{h}, below anything readable"
+                );
+            }
+            assert!(l.title > l.font, "the title is not the largest reading");
+            assert!(l.small < l.font, "the small type is not the smallest");
+        }
+        assert!(
+            Layout::new(900.0, 2160.0).title > Layout::new(900.0, 400.0).title,
+            "the title did not grow with the window"
+        );
+    }
+
+    #[test]
     fn a_deeper_column_is_never_drawn_looser_than_a_shallow_one() {
         // The fan tightens as the column deepens, and never the other way: a
         // board that spread its cards further apart the more of them there were

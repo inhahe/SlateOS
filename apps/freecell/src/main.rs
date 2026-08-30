@@ -3366,17 +3366,37 @@ mod tests {
         ] {
             let mut state = empty_game();
             state.focus = start;
+            // Every slot is visited once, not merely the same slot arrived back
+            // at: a cursor that never moves at all also ends where it began, so
+            // "came back round" on its own is satisfied by standing still.
+            let mut forward = Vec::new();
             for _ in 0..len {
                 state.navigate_right();
+                forward.push(state.focus);
             }
             assert_eq!(state.focus, start, "{start:?} did not come back round");
+
+            let mut backward = Vec::new();
             for _ in 0..len {
                 state.navigate_left();
+                backward.push(state.focus);
             }
             assert_eq!(
                 state.focus, start,
                 "{start:?} did not come back the other way"
             );
+
+            for (name, mut seen) in [("right", forward), ("left", backward)] {
+                let visited = seen.len();
+                seen.sort_by_key(|f| format!("{f:?}"));
+                seen.dedup();
+                assert_eq!(
+                    seen.len(),
+                    visited,
+                    "walking {name} from {start:?} stood still on some slot"
+                );
+                assert_eq!(seen.len(), len, "walking {name} from {start:?} skipped one");
+            }
         }
     }
 
@@ -3449,6 +3469,29 @@ mod tests {
     }
 
     #[test]
+    fn a_card_that_cannot_go_home_stays_where_it_is() {
+        // The card is really there and is really refused: the Five of Hearts
+        // has no Ace under it on the foundation. What is being pinned down is
+        // the *order* of the two -- a version that lifts the card off the board
+        // before finding out whether it has anywhere to go loses it entirely,
+        // and an empty column cannot show that, because there is nothing there
+        // to lose.
+        let mut state = empty_game();
+        let five = card(Suit::Hearts, Rank::Five);
+        if let Some(col) = state.tableau.get_mut(0) {
+            col.push(five);
+        }
+        assert!(!state.send_home(MoveLocation::Tableau(0), five, true));
+        assert_eq!(
+            state.tableau.first().map(Vec::len),
+            Some(1),
+            "the card was taken off the board and never put back"
+        );
+        assert_eq!(state.foundation_total(), 0, "it went home regardless");
+        assert!(state.undo_stack.is_empty(), "a step was recorded anyway");
+    }
+
+    #[test]
     fn a_column_the_board_does_not_have_sends_nothing_home() {
         let mut state = empty_game();
         let ace = card(Suit::Hearts, Rank::Ace);
@@ -3512,15 +3555,18 @@ mod tests {
     fn the_footer_reports_how_much_room_is_left() {
         // The number a freecell player plans against -- it caps how long a run
         // can be shifted -- and it is on screen nowhere else.
+        //
+        // One cell of four is occupied, deliberately not two: with two, the
+        // count of free cells and the count of full ones are both 2, and a
+        // reading that reports the wrong one of them reads the same.
         let mut state = empty_game();
         state.free_cells[0] = Some(card(Suit::Spades, Rank::King));
-        state.free_cells[1] = Some(card(Suit::Hearts, Rank::King));
         state.tableau[0].push(card(Suit::Clubs, Rank::King));
         let app = app_with(state);
 
         let text = drawn_text(&app, FreeCell::SIZE);
         assert!(
-            text.iter().any(|t| t == "2 cells   7 columns"),
+            text.iter().any(|t| t == "3 cells   7 columns"),
             "the room reading is not what the board says: {text:?}"
         );
     }
@@ -3698,6 +3744,30 @@ mod tests {
                     t.step
                 );
             }
+            // Evenly spaced is not enough on its own: a step of exactly one
+            // card width is even too, and draws eight columns edge to edge.
+            if t.card_w > 0.0 {
+                assert!(
+                    t.step > t.card_w,
+                    "at {w}x{h} the columns are drawn with no gap between them"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_table_is_centred_in_whatever_it_was_given() {
+        // The leftover width is margin on both sides, rather than a band of
+        // nothing down one of them.
+        for (w, h) in SIZES {
+            let body = Layout::new(w, h).body;
+            let t = Table::new(body, 7);
+            let left = t.slot_x(0) - body.x;
+            let right = body.right() - (t.slot_x(TABLEAU_COLS - 1) + t.card_w);
+            assert!(
+                (left - right).abs() < 0.01,
+                "at {w}x{h} the table sits {left} from the left and {right} from the right"
+            );
         }
     }
 
@@ -3716,6 +3786,14 @@ mod tests {
                     "at {w}x{h} column {col} sat at {below} under a slot at {above}"
                 );
             }
+            // Under, not over. Sharing a column of x tells you nothing about
+            // which of the two rows is drawn on top of the other.
+            assert!(
+                t.tableau_y >= t.top_slot(0).bottom() - 0.01,
+                "at {w}x{h} the tableau starts at {} inside a top row ending at {}",
+                t.tableau_y,
+                t.top_slot(0).bottom()
+            );
         }
     }
 
@@ -3850,6 +3928,81 @@ mod tests {
             );
             last = cascade;
         }
+    }
+
+    #[test]
+    fn a_column_of_one_card_is_fitted_as_if_nothing_hung_below_it() {
+        // The deepest column has `deepest - 1` cards fanned below its first, not
+        // `deepest`. Counting one step too many makes the board solve for a
+        // height it does not need, and every card comes out smaller than the
+        // space allows.
+        let area = Rect::new(0.0, 0.0, 900.0, 200.0);
+        let none = Table::new(area, 0);
+        let one = Table::new(area, 1);
+        assert!(
+            one.card_w < area.w / 9.0,
+            "the area is not height-bound, so this proves nothing"
+        );
+        assert!(
+            (none.card_w - one.card_w).abs() < 0.01,
+            "a single card was fitted as {} where nothing at all was fitted as {}",
+            one.card_w,
+            none.card_w
+        );
+        assert!(
+            Table::new(area, 2).card_w < one.card_w,
+            "a second card cost the board no height at all"
+        );
+    }
+
+    #[test]
+    fn a_column_can_be_clicked_below_its_last_card() {
+        // A column's reachable box runs to the table floor, not to the bottom of
+        // the cards in it. Otherwise a short column -- and an empty one, which is
+        // the only kind you can move a king to -- has almost nothing to aim at.
+        let mut state = empty_game();
+        state.tableau[0].push(card(Suit::Spades, Rank::King));
+        let mut app = app_with(state);
+
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let card_rect = f.rect_of(|t| matches!(t, Target::Card(0, _))).unwrap();
+        let body = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT).body;
+        let below = card_rect.bottom() + (body.bottom() - card_rect.bottom()) / 2.0;
+        assert!(
+            below > card_rect.bottom(),
+            "there is no empty space under the card to click"
+        );
+
+        assert_eq!(
+            app.click(card_rect.centre().0, below, MouseButton::Left),
+            EventResult::Consumed,
+            "the space under the column reached nothing"
+        );
+        assert_eq!(
+            app.state.selection,
+            Some(Selection::Tableau(0)),
+            "a click under the column did not pick its card up"
+        );
+    }
+
+    #[test]
+    fn an_empty_column_can_still_be_clicked() {
+        let mut state = empty_game();
+        state.tableau[0].push(card(Suit::Spades, Rank::King));
+        let mut app = app_with(state);
+        app.state.focus = FocusArea::Tableau(0);
+        app.state.activate();
+        assert_eq!(app.state.selection, Some(Selection::Tableau(0)));
+
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let (x, y) = f.rect_of(|t| *t == Target::Column(3)).unwrap().centre();
+        app.click(x, y, MouseButton::Left);
+
+        assert_eq!(
+            app.state.tableau[3],
+            vec![card(Suit::Spades, Rank::King)],
+            "the king could not be moved to the empty column"
+        );
     }
 
     // ── Edge case tests ────────────────────────────────────────────
@@ -4108,6 +4261,18 @@ mod tests {
         let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
         let rect = f.rect_of(|t| matches!(t, Target::Card(0, _))).unwrap();
         let (x, y) = rect.centre();
+        // The sheet is guarded twice over, and this is the first of the two:
+        // it records a hit box across the whole window, so what a click at the
+        // card's own position *finds* is the sheet, not the card. The second
+        // guard -- the `won` branch in `click` -- catches anything that gets
+        // past this one. Either alone stops the board being played; asserting
+        // only the outcome would therefore pass with either one deleted, so
+        // the covering hit box is asserted here in its own right.
+        assert_eq!(
+            f.hit_test(x, y),
+            Some(Target::Overlay),
+            "the sheet left the card underneath it reachable"
+        );
         assert_eq!(
             app.click(x, y, MouseButton::Left),
             EventResult::Consumed,
@@ -4116,6 +4281,24 @@ mod tests {
         assert!(
             app.state.selection.is_none(),
             "a card under the sheet was picked up"
+        );
+        // Not picking it up is not enough on its own: the card left under the
+        // sheet is a King with its Queen already home, so a click that reaches
+        // the board sends it straight to the foundation without ever becoming
+        // a selection. What the sheet has to stop is the board changing at all.
+        assert_eq!(
+            app.state.tableau.first().map(Vec::len),
+            Some(1),
+            "the card under the sheet was played"
+        );
+        assert_eq!(
+            app.state.foundation_total(),
+            51,
+            "a card reached the foundation through the sheet"
+        );
+        assert_eq!(
+            app.state.move_count, 0,
+            "a move was counted through the sheet"
         );
     }
 
@@ -4186,11 +4369,23 @@ mod tests {
         );
         by_key.key_at(&probe::press(Key::F), FreeCell::SIZE);
 
+        // That the two agree is only half of it: a button and a key that both
+        // do nothing agree perfectly. The card has to have actually moved.
+        assert_eq!(
+            by_key.state.free_cells[0],
+            Some(card(Suit::Spades, Rank::Nine)),
+            "the key parked nothing"
+        );
+        assert!(
+            by_key.state.tableau[0].is_empty(),
+            "the card was left behind"
+        );
         assert_eq!(
             by_click.state.free_cells, by_key.state.free_cells,
             "the button and the key parked different cards"
         );
         assert_eq!(by_click.state.move_count, by_key.state.move_count);
+        assert_eq!(by_click.state.move_count, 1, "no move was counted");
     }
 
     #[test]
@@ -4275,10 +4470,24 @@ mod tests {
 
     #[test]
     fn f_is_refused_on_a_won_board() {
-        let mut app = app_with(won_board());
+        // The board is marked won but still has a card in a column with the
+        // cursor on it, so `F` would have something to do if the win guard let
+        // it through. A board with nothing left in any column cannot tell a
+        // refused press from a press with no work to do.
+        let mut state = won_board();
+        state.foundations[0].pop();
+        state.tableau[0].push(card(Suit::Hearts, Rank::King));
+        state.focus = FocusArea::Tableau(0);
+        let mut app = app_with(state);
         app.key_at(&probe::press(Key::F), FreeCell::SIZE);
         assert!(app.state.won, "the win was played out of");
         assert_eq!(app.state.free_cells, [None; FREE_CELL_COUNT]);
+        assert_eq!(
+            app.state.tableau.first().map(Vec::len),
+            Some(1),
+            "the card was played off a won board"
+        );
+        assert_eq!(app.state.move_count, 0, "a move was counted on a won board");
     }
 
     #[test]
@@ -4343,6 +4552,24 @@ mod tests {
                     "{target:?} was recorded at {rect:?}, outside a {w}x{h} window"
                 );
             }
+            // A hit box is recorded whether or not it would survive the clip,
+            // so the rects above cannot see a missing clip at all -- only the
+            // commands can. The outermost one is the window, and it is what
+            // keeps a caption too wide for the frame off the desktop beside it.
+            let outer = f.commands().iter().find_map(|c| match c {
+                RenderCommand::PushClip {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => Some((*x, *y, *width, *height)),
+                _ => None,
+            });
+            assert_eq!(
+                outer,
+                Some((0.0, 0.0, w, h)),
+                "a {w}x{h} window was not clipped to itself"
+            );
         }
     }
 
@@ -4545,6 +4772,33 @@ mod tests {
         assert_eq!(state.foundation_total(), 0);
         assert!(
             state.free_cells[0].is_some(),
+            "the undo ran past the run and took back the move before it"
+        );
+    }
+
+    #[test]
+    fn a_run_that_empties_a_free_cell_is_the_player_s_move_too() {
+        // Same rule as the test above, on the other of the two loops the run is
+        // made of. The run walks the columns and then the cells, and each loop
+        // decides for itself whether the step it is making is the player's --
+        // so a cell loop that always answers "not the player's" leaves a run
+        // the player asked for with no step of their own, and the next undo
+        // runs straight past it into the move before.
+        let mut state = empty_game();
+        state.free_cells[0] = Some(card(Suit::Hearts, Rank::Ace));
+        state.tableau[0].push(card(Suit::Spades, Rank::Two));
+
+        assert!(state.try_tableau_to_freecell(0));
+        assert_eq!(state.move_count, 1);
+
+        assert_eq!(state.auto_move_to_foundations(AutoRun::Asked), 1);
+        assert_eq!(state.move_count, 2);
+
+        state.undo();
+        assert_eq!(state.move_count, 1);
+        assert_eq!(state.foundation_total(), 0);
+        assert!(
+            state.free_cells[1].is_some(),
             "the undo ran past the run and took back the move before it"
         );
     }

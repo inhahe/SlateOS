@@ -21200,8 +21200,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     serial_println!(
         "  kshell::self_test 107: `touch -d' accepts the space-separated datetime \
-         its own usage line prints, stamps the file with the exact instant asked \
-         for, and refuses an unreadable time instead of taking it as the path"
+         its own usage line prints, stamps the exact instant asked for on a file \
+         it creates as well as on one that exists, and refuses an unreadable \
+         time instead of taking it as the path"
     );
     {
         // Rung 107 -- the defect batch 41 surfaced while fixing
@@ -21234,6 +21235,24 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "the file carries the instant asked for, to the second"
             ),
             Err(e) => panic!("touch -d did not create /tmp/zz_touchdt.txt: {:?}", e),
+        }
+
+        // The same command against a file that already exists. `touch` has two
+        // arms -- create and update -- and only the update one ever applied
+        // the requested stamp; the create arm computed it and dropped it,
+        // reporting `created` and exiting 0 with the file carrying the current
+        // time. Both arms are asserted here so the two cannot drift apart
+        // again, and so a fix that moved the bug from one to the other fails.
+        const ZZ_TOUCH_NS2: u64 = 1_788_093_060_000_000_000; // one minute later
+        let out = capture_command("touch -d \"2026-08-30 12:31:00\" /tmp/zz_touchdt.txt");
+        assert_eq!(last_exit(), 0, "re-stamping an existing file succeeds");
+        assert_output_contains("and says it updated it", &out, b"timestamps updated");
+        match crate::fs::Vfs::metadata(crate::fs::path::Path::new("/tmp/zz_touchdt.txt")) {
+            Ok(meta) => assert_eq!(
+                meta.modified_ns, ZZ_TOUCH_NS2,
+                "an existing file takes the new instant, by the same rule as a new one"
+            ),
+            Err(e) => panic!("/tmp/zz_touchdt.txt vanished: {:?}", e),
         }
 
         // The same line with an unreadable minute. This is the assertion that
@@ -23984,11 +24003,15 @@ fn cmd_touch(args: &str) {
 
     let path = resolve_path(file_path);
 
-    // Determine the timestamp to use.
-    let timestamp = if let Some(ds) = date_str {
+    // The timestamp the operator *asked for*, as distinct from the one the
+    // file would get anyway. `None` means "no -d and no -r", and the
+    // difference matters on the creating path below: a stamp that was
+    // requested must be applied and its failure reported, where the ambient
+    // creation time needs neither.
+    let requested = if let Some(ds) = date_str {
         // Parse the date string.
         match parse_datetime_to_ns(ds) {
-            Some(ns) => ns,
+            Some(ns) => Some(ns),
             None => {
                 shell_println!(
                     "touch: invalid date '{}' (use YYYY-MM-DD or YYYY-MM-DD HH:MM:SS or epoch secs)",
@@ -24002,7 +24025,7 @@ fn cmd_touch(args: &str) {
         // Copy timestamp from reference file.
         let ref_path = resolve_path(rf);
         match crate::fs::Vfs::metadata(&ref_path) {
-            Ok(meta) => meta.modified_ns,
+            Ok(meta) => Some(meta.modified_ns),
             Err(e) => {
                 shell_println!("touch: {}: {:?}", ref_path.display(), e);
                 set_exit(1);
@@ -24010,13 +24033,14 @@ fn cmd_touch(args: &str) {
             }
         }
     } else {
-        crate::hpet::elapsed_ns()
+        None
     };
 
     // Check if file exists.
     match crate::fs::Vfs::stat(&path) {
         Ok(_) => {
             // File exists — update timestamps.
+            let timestamp = requested.unwrap_or_else(crate::hpet::elapsed_ns);
             match crate::fs::Vfs::set_times(&path, timestamp, timestamp) {
                 Ok(()) => {
                     shell_println!("{}: timestamps updated", path.display());
@@ -24029,8 +24053,33 @@ fn cmd_touch(args: &str) {
         }
         Err(_) => {
             // File doesn't exist — create empty file.
+            //
+            // The requested time has to be applied here as a second step.
+            // `write_file` stamps the file with the current time, and this arm
+            // used to stop there — so `touch -d <when> <newfile>` computed the
+            // instant asked for, created the file, and threw the instant away.
+            // It reported `created` and exited 0, which is the worst shape of
+            // this defect: the operator is told the operation succeeded, and
+            // the only way to discover that `-d` did nothing is to stat the
+            // file. It bit exactly the case `-d` is most often used for, since
+            // a file you are back-dating is usually one you are also creating.
             match crate::fs::Vfs::write_file(&path, &[]) {
                 Ok(()) => {
+                    if let Some(timestamp) = requested {
+                        // A stamp that was asked for and could not be applied
+                        // is a failure of the command, not a detail: the file
+                        // now exists carrying the wrong time. Say so, and do
+                        // not also print `created` — one outcome per run.
+                        if let Err(e) = crate::fs::Vfs::set_times(&path, timestamp, timestamp) {
+                            shell_println!(
+                                "touch: {}: created, but its timestamp could not be set: {:?}",
+                                path.display(),
+                                e
+                            );
+                            set_exit(1);
+                            return;
+                        }
+                    }
                     shell_println!("{}: created", path.display());
                 }
                 Err(e) => {

@@ -84478,7 +84478,38 @@ also asserts that a mistyped minute is refused *as a date*, which is what
 proves the time fields are now reached at all, and that nothing is created
 under the name `12:3o:00`.
 
-**Not a regression.** True since `cmd_touch` was written.
+**And there was a third defect under the second one, found by that rung on
+its first real boot.** With the quoting fixed and the time fields parsing,
+`touch -d '2026-08-30 12:30:00' /tmp/new.txt` still stamped the file with
+*the current time*. `cmd_touch` has two arms — update an existing file, or
+create a missing one — and only the update arm ever applied the timestamp.
+The create arm computed the instant, called `Vfs::write_file` (which stamps
+now), printed `created` and exited **0**. The value was worked out correctly
+and then dropped on the floor.
+
+That is the worst shape this family takes. A guessed value is wrong; a
+*discarded* value is wrong **and reports success**, so there is no diagnostic
+to notice and the only way to discover that `-d` did nothing is to `stat` the
+file afterwards. And it bit precisely the case `-d` exists for: a file you are
+back-dating is usually one you are also creating, so the broken arm was the
+common one and the working arm was the rare one. `requested` is now an
+`Option<u64>` — `None` meaning "no `-d`, no `-r`" — and the create arm applies
+it as an explicit second step, reporting a failure to set it rather than
+printing `created`.
+
+**Three defects in one command, each hidden by the one above it**, is the
+lesson worth keeping from this entry: the quoting bug made the time fields
+unreachable, which kept the guessed-value bug dormant, which meant nothing
+ever exercised the create-with-`-d` path far enough to notice the timestamp
+was being thrown away. Fixing the outermost one is what made the next one
+observable, twice in a row. **A rung that asserts an exact value is what
+converts "the fix compiles" into "the fix works"** — this one was written
+against the create path, failed on its first boot with `left:
+1788119411893528376` (a wall clock) against `right: 1788093000000000000`,
+and named the bug outright. Rung 107 now asserts both arms, so a future
+change that moves the defect from one to the other fails.
+
+**Not a regression.** All three were true since `cmd_touch` was written.
 
 ---
 

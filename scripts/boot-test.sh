@@ -3131,6 +3131,60 @@ check_selftest_rung_numbers() {
 
 check_selftest_rung_numbers
 
+# A diagnostic that names the wrong command is caught by nothing else.
+#
+# The operand helpers are handed their command's name as a bare string literal:
+# `required_num::<u32>(&parts, 1, "epollstat", sub, "pid")`.  Copy that block
+# into another function -- which is exactly what a whole-file search-and-replace
+# during a burn-down pass does -- and the recipient starts announcing itself as
+# the donor.  It compiles, it formats, and the option-refusal gate scores the
+# site as fixed, because by its own measure it is.  The only evidence is in the
+# text of a message no test reads, and its effect is to send whoever reads it to
+# another command's source.
+#
+# The shell's own dispatch table settles what each function may legitimately
+# call itself, aliases included, so this is decidable rather than a heuristic.
+check_shell_message_names() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Shell message-name check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the message-name gate against its fixture ==="
+    if ! "$py" "$PROJECT_ROOT/scripts/check-shell-message-names.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The message-name gate no longer agrees" >&2
+        echo "with its own fixture, so its verdict means nothing -- it reports a" >&2
+        echo "clean tree and a collapsed analysis in the same words." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that each shell diagnostic names its own command ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-shell-message-names.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A shell diagnostic names a command it did" >&2
+    echo "not come from." >&2
+    echo "" >&2
+    echo "Almost always this is a block copied between two cmd_ functions with" >&2
+    echo "the donor's name still in it.  Fix the literal, not the dispatch arm:" >&2
+    echo "the arm is what the user actually types, and is the authority here." >&2
+    echo "" >&2
+    echo "If a function legitimately has no dispatch arm, it is not a command" >&2
+    echo "and should not be printing a command name -- pass the name down from" >&2
+    echo "the caller that does have one." >&2
+    exit 1
+}
+
+check_shell_message_names
+
 # A hand-written "every variant" list cannot go stale loudly.
 #
 # `const ALL: [Foo; N] = [...]` claims to name every variant of `Foo`, and the

@@ -1379,6 +1379,31 @@ impl core::fmt::Display for AddrDesc {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// Take the site-capture probe lock, from a frame of this test's own.
+///
+/// `#[inline(never)]` is the whole point of the function existing, and it is
+/// load-bearing in exactly one build. Test 9b checks that [`caller_ips`] walks
+/// to `lock_acquire`'s *caller*, and identifies that caller by symbol name. In
+/// a debug build the caller is [`self_test`] and the check passed. In a
+/// **release** build the optimiser inlined `self_test` into `kernel_main`, so
+/// the recorded return address genuinely belonged to `kernel_main` — the frame
+/// walk was right and the assertion still fired, because the function it named
+/// had ceased to exist. The boot panicked at `lockdep.rs` on every release
+/// build while every debug boot passed, which is why it went unnoticed: the
+/// boot test runs debug.
+///
+/// Keeping the acquire behind an un-inlinable frame makes the property the
+/// test is actually asserting — that the walk lands one frame up, not two —
+/// true of any optimisation level, rather than true of `-O0` and vacuous
+/// above it.
+///
+/// Do not merge this back into the block that calls it, however tempting; it
+/// is one line and the reason it is not inline is three paragraphs long.
+#[inline(never)]
+fn site_probe_acquire(probe: usize) {
+    lock_acquire(probe, b"site-probe", Acquire::Blocking);
+}
+
 /// Boot-time self-test of the lock order validator.
 ///
 /// Tests:
@@ -1629,7 +1654,7 @@ pub fn self_test() {
     // whatever an off-by-one frame walk would produce.
     {
         const SITE_PROBE: usize = 0xdead_5117;
-        lock_acquire(SITE_PROBE, b"site-probe", Acquire::Blocking);
+        site_probe_acquire(SITE_PROBE);
         let idx = find_or_register_class(SITE_PROBE, b"site-probe")
             .expect("site probe class must be registered");
         let site = class_site(idx).expect("acquiring a lock must record where from");
@@ -1638,15 +1663,24 @@ pub fn self_test() {
             "recorded site {site:#x} is not a kernel text address — the frame walk in \
              caller_ips() is off by a frame, or a frame pointer was omitted"
         );
-        // The site must resolve to *this* function: `caller_ips` walks to
-        // `lock_acquire`'s caller, and that caller is the self-test. A name
+        // The site must resolve to `site_probe_acquire`: `caller_ips` walks to
+        // `lock_acquire`'s caller, and that caller is that function. A name
         // from anywhere else means the walk depth is wrong. `resolve_static`
         // yields nothing before ksyms has loaded, which is not a failure —
         // the address check above still holds.
+        //
+        // The expected name is asked of `resolve_static` rather than written
+        // here as a literal, because the two answers have to come from the
+        // same table for the comparison to mean anything: a hardcoded name
+        // tests the symboliser's *spelling* as much as the frame walk, and
+        // mangling is not this test's subject.
         if let Some((name, _)) = crate::ksyms::resolve_static(site as u64) {
+            let expected =
+                crate::ksyms::resolve_static(site_probe_acquire as usize as u64).map(|(n, _)| n);
             assert!(
-                name.contains("lockdep"),
-                "recorded site resolved to {name}, which is not the calling self-test"
+                Some(name) == expected,
+                "recorded site resolved to {name}, not to the function that took the \
+                 lock ({expected:?}) — caller_ips() walked to the wrong frame"
             );
         }
         // The second frame is what makes a real report readable: the immediate

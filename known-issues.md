@@ -97465,3 +97465,80 @@ each length exactly.
 | The stored-block split | `deflate/src/lib.rs`, `deflate_stored` |
 | Tests | `incompressible_input_is_never_inflated`, `lz77_never_loses_to_plain_huffman`, `stored_blocks_split_above_the_sixteen_bit_length`, `levels_are_distinguishable_and_monotonic_in_ratio` |
 | Downstream | `ziparchive`, `kernel/src/fs/compress.rs`, `gzip`/`zlib_deflate` — all get the ratio for free, no call-site change |
+
+---
+
+## `A-LOCKDEP-SELF-TEST-PANICS-ON-EVERY-RELEASE-BUILD` (lane A, 2026-08-30) — **fixed 2026-08-30**
+
+**Status:** FIXED 2026-08-30.
+
+**In short:** the kernel would not finish booting when built with optimisations
+on. It panicked partway through startup, inside a self-test belonging to the
+lock-order checker — not because anything about locking was wrong, but because
+the test identified a function by name and the optimiser had folded that
+function into another one, so the name it expected was gone. Every debug boot
+passed; every release boot died. The boot test builds debug, so nothing said so.
+
+**What happened.** `lockdep`'s test 9b checks that `caller_ips()` walks exactly
+one frame up from `lock_acquire`, landing on the caller. It identified that
+caller by symbolising the recorded return address and asserting the name
+`contains("lockdep")`:
+
+```rust
+lock_acquire(SITE_PROBE, b"site-probe", Acquire::Blocking);
+…
+if let Some((name, _)) = crate::ksyms::resolve_static(site as u64) {
+    assert!(name.contains("lockdep"), "recorded site resolved to {name} …");
+}
+```
+
+In a debug build the caller is `lockdep::self_test` and the substring matches.
+In release, LLVM inlined `self_test` into `kernel_main`, so the recorded address
+genuinely *is* inside `kernel_main` — the frame walk was correct and the
+assertion fired anyway:
+
+```
+!!! KERNEL PANIC !!!
+panicked at kernel\src\lockdep.rs:1647:13:
+recorded site resolved to kernel_main, which is not the calling self-test
+```
+
+**The test was asserting a property of the build, not of the code under test.**
+After inlining there is no `self_test` frame to walk to, because there is no
+`self_test`. A test whose premise the optimiser is free to delete is a test that
+only runs at `-O0`.
+
+**How it stayed hidden — and this is the transferable part.** `scripts/boot-test.sh`
+builds debug. `--bench` builds release, and `--bench` had not been run since
+before this test was written. So the failing configuration was one flag away and
+nothing in between exercised it. **A self-test that reasons about symbol names,
+frame layout, or inlining is release-sensitive by construction, and the routine
+gate does not cover it.** The other place this class lives is `caller_ips()`
+itself, whose own `#[inline(never)]` doc comment says the attribute is
+load-bearing — the same hazard, correctly handled one function away.
+
+**The fix.** Move the probe's acquire into a dedicated `#[inline(never)] fn
+site_probe_acquire(probe: usize)`, so a frame with a stable symbol exists in
+every build, and compare against the name `resolve_static` gives for that
+function's *own address* rather than a hardcoded substring:
+
+```rust
+let expected = crate::ksyms::resolve_static(site_probe_acquire as usize as u64).map(|(n, _)| n);
+assert!(Some(name) == expected, …);
+```
+
+Asking the same table for both sides is deliberate: a literal would test the
+symboliser's spelling and mangling as much as the frame walk, and neither is
+this test's subject. The assertion is now stronger than the substring it
+replaced — `contains("lockdep")` would also have accepted a walk that landed on
+any other function in this file.
+
+**Not a regression in lockdep.** `caller_ips` was right in both builds
+throughout; only the test's way of naming its own caller was wrong.
+
+| | |
+|---|---|
+| The panic | `kernel/src/lockdep.rs`, test 9b in `self_test` |
+| The fix | `kernel/src/lockdep.rs::site_probe_acquire` |
+| How to reproduce (before the fix) | `./scripts/boot-test.sh --bench` — release build, panics before the bench task runs |
+| The gate that missed it | `scripts/boot-test.sh` without `--bench` builds debug |

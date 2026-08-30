@@ -58,6 +58,24 @@
 
 set -u
 
+# Reached through the trampoline .git/hooks/pre-push installs, or as a copy?
+#
+# A copy is how this used to be installed, and it fails toward silence: an edit
+# to this file did nothing until someone remembered to re-run install-hooks.sh,
+# and a run that never reached a gate looks exactly like a gate that found
+# nothing. That is not hypothetical — a gate added on 2026-08-30 was committed,
+# pushed, and did not run, and the push output gave no sign of it.
+#
+# A warning rather than a refusal, because the case it catches is a hook copied
+# into place by hand: the tree is still checked, just possibly by an older
+# revision of these gates than the one checked out. See scripts/install-hooks.sh.
+if [ "${SLATEOS_HOOK_TRAMPOLINE:-}" != "1" ]; then
+    echo "pre-push: WARNING — this hook was installed as a copy, not as the" >&2
+    echo "  trampoline .git/hooks/pre-push should be. The gates that run are" >&2
+    echo "  whichever ones were current when it was copied, which may be older" >&2
+    echo "  than the ones in this checkout. Fix with: ./scripts/install-hooks.sh" >&2
+fi
+
 # Paths that must never leave this machine. Matched exactly against the paths
 # git reports, so these are repo-root-relative with no leading slash.
 GUARDED="todo2.txt"

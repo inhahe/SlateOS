@@ -2369,15 +2369,23 @@ mod tests {
         // runs on its own thread, so a limit set here cannot leak into a
         // sibling test.
 
+        // Seeded directly rather than through `setrlimit`, which refuses it:
+        // RLIMIT_RTPRIO starts at {0, 0} and the kernel rejects every
+        // hard-limit raise, for every resource and every caller, so there is
+        // no supported call sequence that lifts this ceiling.  That is a real
+        // gap — it leaves CAP_SYS_NICE as the only route to an RT policy on
+        // the target, which is the capability-only behaviour these very tests
+        // were written to prove we had moved past — and it is filed as
+        // `requests/b-a-a-hard-limit-that-starts-at-zero-can-never-rise.md`.
+        // The tests go on covering the consumer while that is open; see
+        // `resource::seed_rlimit_for_test`.
         fn set_rtprio_limit(v: u64) {
-            let rl = crate::resource::Rlimit {
-                rlim_cur: v,
-                rlim_max: v,
-            };
-            assert_eq!(
-                crate::resource::setrlimit(crate::resource::RLIMIT_RTPRIO, &raw const rl),
-                0,
-                "setrlimit(RLIMIT_RTPRIO) must succeed with default caps",
+            crate::resource::seed_rlimit_for_test(
+                crate::resource::RLIMIT_RTPRIO,
+                crate::resource::Rlimit {
+                    rlim_cur: v,
+                    rlim_max: v,
+                },
             );
         }
 

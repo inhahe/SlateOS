@@ -18682,7 +18682,7 @@ sites). Fixing it surfaced a separate divergence, logged next.
 
 ---
 
-### TD-POSIX-RLIMITS-ARE-A-SHADOW-OF-THE-KERNEL'S. libc keeps its own rlimit table instead of asking the kernel, so the two can disagree silently — 🔴 **OPEN** — 2026-08-16
+### TD-POSIX-RLIMITS-ARE-A-SHADOW-OF-THE-KERNEL'S. libc keeps its own rlimit table instead of asking the kernel, so the two can disagree silently — ✅ **RESOLVED 2026-08-29** — 2026-08-16
 
 **In short.** Every process has a set of "resource limits" — ceilings on things
 like stack size, open files, or how much priority it may ask for. Our kernel
@@ -18781,6 +18781,41 @@ authoritative beyond what `can_nice()` / `current_rtprio_limit()` /
 `check_mlock_caps()` already do. Copying the kernel's three values across as an
 interim fix is explicitly **not** wanted — it restores the appearance of
 agreement, which is what stopped anyone checking for five days.
+
+**Resolution 2026-08-29.** Lane A landed `SYS_RLIMIT_GET` / `SYS_RLIMIT_SET`
+at 557/558 (`requests/a-b-native-rlimit-syscalls-landed.md`), and
+`posix/src/resource.rs` now calls through on every `getrlimit`, `setrlimit` and
+`prlimit`. `limit_store` was **deleted on the target**, not merely left unread
+— the module and `RlimitTable` are `#[cfg(not(target_os = "none"))]`, so the
+`static mut RLIMITS` does not exist in the shipped binary and no future edit
+can start consulting it. The host arm keeps the `thread_local!` as the test
+double the entry above asked for, but its *policy* was rewritten to be the
+kernel's: the blanket no-raise rule with no privileged escape, replacing libc's
+self-asserted `CAP_SYS_RESOURCE` gate. Four Phase-179 tests that asserted the
+capability permits a hard raise were inverted and renamed to match, with a
+companion test (`..._sentinel_lowering_still_works`) added so the inversion
+could not be satisfied by a `setrlimit` that simply always fails. No cache was
+built, per the instruction above. 20562 host tests pass; bare-metal `cargo
+check` and lib clippy are clean. Rationale, alternatives and the reversal
+procedure: `design-decisions.md` §707.
+
+Three loose ends the rewiring produced, all tracked elsewhere rather than here:
+
+- A **third** copy of the defaults turned up in `posix/src/linux_rlimit.rs`
+  (`RLIMIT_NOFILE_DEFAULT` = 1024, `RLIMIT_NOFILE_HARD_DEFAULT` = 4096 — the
+  kernel's *superseded* pair, disagreeing with both the kernel and
+  `resource.rs`). Nothing outside that file's own unit test read them. Deleted,
+  along with the test, which asserted a literal restated twenty lines above it
+  and an inequality that held while both numbers were wrong.
+- `prlimit` was routing through `getrlimit`/`setrlimit`, which hard-code pid 0
+  — so its `pid` argument was silently discarded. It now calls the store
+  helpers directly. This was a live bug, not tech debt, and it is fixed.
+- `RLIMIT_NICE` and `RLIMIT_RTPRIO` default to `{0, 0}` and the kernel refuses
+  every hard raise, so **no supported call sequence** can lift either ceiling —
+  making the rlimit-instead-of-capability path unreachable on the target and
+  forcing two `#[cfg(test)]` seeding doors into libc. Filed as
+  `requests/b-a-a-hard-limit-that-starts-at-zero-can-never-rise.md`; delete
+  both doors when it is answered.
 
 **Found** 2026-08-16 by lane B while fixing
 TD-POSIX-CAP-GATES-OMIT-LINUX-S-NON-CAPABILITY-ALTERNATIVE, on discovering

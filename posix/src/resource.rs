@@ -120,30 +120,44 @@ pub const RUSAGE_THREAD: i32 = 1;
 // ---------------------------------------------------------------------------
 
 /// The process's resource-limit table.
+#[cfg(not(target_os = "none"))]
 pub(crate) type RlimitTable = [Rlimit; RLIMIT_NLIMITS];
 
-/// Storage for the process-local resource limits and nice value.
+/// Host-only storage for the resource limits and nice value.
 ///
-/// The limits are initialized to sensible defaults; `setrlimit` can update
-/// them.  Neither is enforced by the kernel — both are advisory, for
-/// programs that query their own limits or priority.
+/// **On the target this does not exist**, and that is the whole point of the
+/// module being gated rather than merely unused there.  It used to be a
+/// process-global `static mut` — a second copy of a table the kernel is
+/// authoritative for, which had already drifted from the kernel's on three of
+/// its sixteen rows before anyone noticed.  `SYS_RLIMIT_GET`/`SYS_RLIMIT_SET`
+/// (557/558) made the kernel reachable from the native ABI, so the copy is
+/// gone rather than merely unread: a table that still compiled would be a
+/// table someone could start reading again.
 ///
-/// Process-global on the target, where that is what POSIX specifies and
-/// what a SlateOS process is.  Per-*thread* on host builds: `cargo test`
-/// runs every test on its own thread in one process, and this table was a
-/// confirmed source of flakes — `test_setrlimit_phase179_eperm_does_not_
-/// mutate_state`, `test_setpriority_phase169_workflow_raise_drop_cap_raise_
-/// lower`, and `mman`'s `test_mlock2_phase171_rlim_zero_no_cap_eperm`, all
-/// of which assert that a *rejected* call left the stored value alone while
-/// another test was legitimately changing it.  See design-decisions.md §110
-/// for the rule and the alternatives considered.
+/// The host has no kernel to ask, so this stands in for one, and it is
+/// per-*thread* rather than per-process.  `cargo test` runs every test on its
+/// own thread in one process, and a shared table was a confirmed source of
+/// flakes — `test_setrlimit_phase179_eperm_does_not_mutate_state`,
+/// `test_setpriority_phase169_workflow_raise_drop_cap_raise_lower`, and
+/// `mman`'s `test_mlock2_phase171_rlim_zero_no_cap_eperm`, all of which
+/// assert that a *rejected* call left the stored value alone, while another
+/// test was legitimately changing it.  See design-decisions.md §110 for the
+/// rule and the alternatives considered, and §707 for the kernel handover.
+#[cfg(not(target_os = "none"))]
 mod limit_store {
     use super::{
         RLIM_INFINITY, RLIMIT_CORE, RLIMIT_NICE, RLIMIT_NLIMITS, RLIMIT_NOFILE, RLIMIT_RTPRIO,
         RLIMIT_STACK, Rlimit, RlimitTable,
     };
 
-    /// Cold-start limits, stated once for both builds.
+    /// Cold-start limits for the host build.
+    ///
+    /// This table no longer has a bare-metal counterpart to agree with — there
+    /// the kernel seeds the limits and libc never sees a default at all.  It
+    /// remains written to *match* the kernel's `DEFAULT_RLIMITS` so that a
+    /// host test and a target run answer the same question the same way, but
+    /// it is a mirror, not a second authority: where the two disagree, the
+    /// kernel is right and this is a bug.
     // Clippy's indexing_slicing lint fires in const context where .get_mut()
     // is unavailable.  These indices are all compile-time constants into a
     // fixed-size array, so the bounds are statically known to be safe.
@@ -205,18 +219,9 @@ mod limit_store {
         limits
     };
 
-    // The nice value lives here only on host builds: on the target the
-    // kernel is the authoritative store (see `kernel_get_nice`).
-    #[cfg(target_os = "none")]
-    mod imp {
-        use super::{RLIMITS_INIT, RlimitTable};
-        static mut RLIMITS: RlimitTable = RLIMITS_INIT;
-        pub(super) fn rlimits() -> *mut RlimitTable {
-            &raw mut RLIMITS
-        }
-    }
-
-    #[cfg(not(target_os = "none"))]
+    // The whole module is host-only now, so `imp` no longer has a target
+    // arm to be chosen against — the `static mut RLIMITS` that used to sit
+    // here is what routing through the kernel deleted.
     mod imp {
         use super::{RLIMITS_INIT, RlimitTable};
         use core::cell::{Cell, UnsafeCell};
@@ -250,16 +255,45 @@ mod limit_store {
         imp::rlimits()
     }
 
-    /// The calling context's nice value.  Host-only; see `imp`.
-    #[cfg(not(target_os = "none"))]
+    // These two carried their own `#[cfg(not(target_os = "none"))]` back when
+    // the module compiled on both, to mark the halves the target did not use.
+    // The module itself is now the gate, so repeating it here would say
+    // nothing.
+
+    /// The calling context's nice value.
     pub(crate) fn nice() -> i32 {
         imp::nice()
     }
 
-    /// Set the calling context's nice value.  Host-only; see `imp`.
-    #[cfg(not(target_os = "none"))]
+    /// Set the calling context's nice value.
     pub(crate) fn set_nice(v: i32) {
         imp::set_nice(v);
+    }
+
+    /// Write one row directly, bypassing `setrlimit`'s policy.  Test-only.
+    ///
+    /// Needed because the two ceilings whose *consumers* most need testing —
+    /// `RLIMIT_NICE` and `RLIMIT_RTPRIO` — both start at `(0, 0)`, and the
+    /// kernel refuses every hard-limit raise, so there is no supported call
+    /// sequence that lifts either one.  A test of `can_nice()`'s rlimit
+    /// branch would therefore be a test of nothing: it could only ever seed
+    /// the ceiling it already had.
+    ///
+    /// That is a real gap in the system, not just in the tests — see
+    /// `requests/b-a-a-hard-limit-that-starts-at-zero-can-never-rise.md`.
+    /// This door exists so the consumer logic stays covered while the gap is
+    /// open, and it is `#[cfg(test)]` so it cannot become the way production
+    /// code sidesteps the policy.  When the kernel grows a raise permission,
+    /// prefer moving these tests back onto `setrlimit`.
+    #[cfg(test)]
+    pub(crate) fn seed(resource: i32, value: Rlimit) {
+        // SAFETY: the table is per-thread on host builds (the only builds
+        // that compile this), so this touches nothing another test can see.
+        unsafe {
+            if let Some(slot) = (*imp::rlimits()).get_mut(resource as usize) {
+                *slot = value;
+            }
+        }
     }
 
     /// Restore both to their cold-start values.  Test-only.
@@ -271,6 +305,203 @@ mod limit_store {
             *imp::rlimits() = RLIMITS_INIT;
         }
         set_nice(0);
+    }
+}
+
+/// Test-only: write one limit row directly, bypassing `setrlimit`'s policy.
+///
+/// The crate-visible spelling of [`limit_store::seed`] — see there for why a
+/// door around the policy has to exist at all.  `sched.rs`'s `RLIMIT_RTPRIO`
+/// tests need it for the same reason this file's `RLIMIT_NICE` tests do: the
+/// ceiling starts at zero and nothing may raise it, so the only way to test a
+/// consumer of a *non-zero* ceiling is to install one out of band.
+#[cfg(test)]
+pub(crate) fn seed_rlimit_for_test(resource: i32, value: Rlimit) {
+    limit_store::seed(resource, value);
+}
+
+// ---------------------------------------------------------------------------
+// The authoritative limit table
+// ---------------------------------------------------------------------------
+
+/// Map an error code from `SYS_RLIMIT_GET`/`SYS_RLIMIT_SET` onto an errno.
+///
+/// **Deliberately not `errno::translate`.**  That function maps
+/// `PERMISSION_DENIED` → `EACCES`, which is the right default for the
+/// filesystem-shaped calls that make up most of its callers, but it is the
+/// wrong answer here: POSIX gives `setrlimit`/`prlimit` `EPERM` for "you may
+/// not raise that", and `EACCES` is not in either call's documented errno
+/// set.  A caller checking `errno == EPERM` — which is the only check the
+/// standard invites them to write — would see the raise refused and read the
+/// refusal as an unrelated failure.
+///
+/// The four codes below are exactly the ones
+/// `requests/a-b-native-rlimit-syscalls-landed.md` documents the pair as
+/// producing.  Anything else falls through to the general table, so a kernel
+/// error we did not anticipate still arrives as something meaningful rather
+/// than a blanket `EINVAL`.
+///
+/// Target-only: the host arms of [`store_get`]/[`store_set`] are the store,
+/// so they produce errnos directly and never have a kernel code to map.
+#[cfg(target_os = "none")]
+fn rlimit_errno(rc: i64) -> i32 {
+    match rc {
+        errno::native::INVALID_ARGUMENT => errno::EINVAL,
+        errno::native::PERMISSION_DENIED => errno::EPERM,
+        errno::native::NO_SUCH_PROCESS => errno::ESRCH,
+        errno::native::INVALID_ADDRESS => errno::EFAULT,
+        _ => {
+            // `translate` sets errno as a side effect and returns -1; read
+            // the value back rather than restating its thirty rows here.
+            // The -1 is what it always returns for a negative input and
+            // carries no information.
+            let _ = errno::translate(rc);
+            errno::get_errno()
+        }
+    }
+}
+
+/// Does `pid` name the calling process?
+///
+/// `0` means self by definition; the caller's own pid means self too, because
+/// `prlimit(getpid(), ...)` is how a great deal of real software spells
+/// "myself" and refusing it would be gratuitous.  Every other value is
+/// somebody else.  Host-only: on the target the kernel answers this itself,
+/// and its answer is the one that counts.
+#[cfg(not(target_os = "none"))]
+fn pid_is_self(pid: i32) -> bool {
+    pid == 0 || pid == crate::process::getpid()
+}
+
+/// Read one row of the authoritative limit table into `out`.
+///
+/// `resource` must already be range-checked and `out` must already be
+/// null-checked; both callers do that first so that the errno *ordering* they
+/// document stays theirs to decide (see `getrlimit`, which owes `EINVAL`
+/// before `EFAULT`, and `setrlimit`, which owes the reverse).
+///
+/// On the target this is `SYS_RLIMIT_GET`, and `out` is handed to the kernel
+/// as-is rather than being dereferenced here.  That is the point of routing
+/// through the syscall: a bad-but-not-null pointer comes back as a real
+/// `EFAULT` instead of faulting inside libc.
+fn store_get(pid: i32, resource: i32, out: *mut Rlimit) -> Result<(), i32> {
+    #[cfg(target_os = "none")]
+    {
+        // Both values are non-negative here (the callers checked), so
+        // widening to u64 is exact.
+        #[allow(clippy::cast_sign_loss)]
+        let rc = crate::syscall::syscall3(
+            crate::syscall::SYS_RLIMIT_GET,
+            pid as u32 as u64,
+            resource as u32 as u64,
+            out as u64,
+        );
+        if rc < 0 { Err(rlimit_errno(rc)) } else { Ok(()) }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        if !pid_is_self(pid) {
+            // The kernel answers `PermissionDenied` for every foreign pid,
+            // live or dead, on purpose — see `store_set`.
+            return Err(errno::EPERM);
+        }
+        // SAFETY: `limit_store::rlimits` is non-null and aligned, and points
+        // at storage reachable only from this thread on host builds; no other
+        // reference to the table is live across this borrow.
+        let Some(limits) = (unsafe { limit_store::rlimits().as_ref() }) else {
+            return Err(errno::EINVAL);
+        };
+        let Some(limit) = limits.get(resource as usize) else {
+            return Err(errno::EINVAL);
+        };
+        // SAFETY: caller guarantees `out` is valid and non-null.
+        unsafe {
+            *out = *limit;
+        }
+        Ok(())
+    }
+}
+
+/// Write one row of the authoritative limit table from `new_limit`.
+///
+/// Same contract as [`store_get`]: `resource` range-checked and `new_limit`
+/// null-checked by the caller, pointer passed through un-dereferenced on the
+/// target.
+///
+/// ## Who decides policy
+///
+/// Exactly one authority per build, which is the whole reason this function
+/// exists.  On the target the kernel owns every rule — `rlim_cur > rlim_max`,
+/// the `RLIMIT_NOFILE` ceiling, and whether a hard-limit raise is allowed at
+/// all — and libc restates none of them.  Restating them is what produced the
+/// tech debt this change pays off: two tables that had already drifted apart
+/// on three of their sixteen rows.
+///
+/// On the host there is no kernel, so this arm *is* the authority, and it
+/// implements the same rules the kernel does so that a host test describes the
+/// system that actually ships.
+fn store_set(pid: i32, resource: i32, new_limit: *const Rlimit) -> Result<(), i32> {
+    #[cfg(target_os = "none")]
+    {
+        #[allow(clippy::cast_sign_loss)]
+        let rc = crate::syscall::syscall3(
+            crate::syscall::SYS_RLIMIT_SET,
+            pid as u32 as u64,
+            resource as u32 as u64,
+            new_limit as u64,
+        );
+        if rc < 0 { Err(rlimit_errno(rc)) } else { Ok(()) }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        if !pid_is_self(pid) {
+            return Err(errno::EPERM);
+        }
+
+        // SAFETY: caller guarantees `new_limit` is valid and non-null.
+        let new_limit = unsafe { *new_limit };
+
+        if new_limit.rlim_cur > new_limit.rlim_max {
+            return Err(errno::EINVAL);
+        }
+
+        // SAFETY: as in `store_get` above.
+        let Some(limits) = (unsafe { limit_store::rlimits().as_mut() }) else {
+            return Err(errno::EINVAL);
+        };
+        let Some(slot) = limits.get_mut(resource as usize) else {
+            return Err(errno::EINVAL);
+        };
+        let old = *slot;
+
+        // The `RLIMIT_NOFILE` ceiling is absolute and checked separately from
+        // the raise rule below, because the two stop being the same test the
+        // moment the raise rule is relaxed: every other resource becomes
+        // honestly raisable and this one still must not be.  Note that this
+        // refuses `RLIM_INFINITY` too — the fd-install path reads infinity as
+        // "skip the check", so accepting it would disable the only thing
+        // standing between a program and an `EMFILE` it had been told could
+        // not happen.
+        if resource == RLIMIT_NOFILE && new_limit.rlim_max > crate::fdtable::MAX_FDS as u64 {
+            return Err(errno::EPERM);
+        }
+
+        // Raising a hard limit is refused outright, for every resource and
+        // every caller.  This is the kernel's rule as of
+        // `requests/a-b-native-rlimit-syscalls-landed.md` §2, not Linux's —
+        // Linux gates the raise on `CAP_SYS_RESOURCE`, and so did this
+        // function until the native syscalls landed.  The capability is not
+        // consulted here because the kernel does not consult it: the
+        // `ResourceLimit` resource type exists but nothing projects it into a
+        // raise permission yet.  When that lands it lands in
+        // `pcb::set_rlimit`, which both ABIs funnel through, and this arm must
+        // be brought back in step with it — see design-decisions.md §707.
+        if new_limit.rlim_max > old.rlim_max {
+            return Err(errno::EPERM);
+        }
+
+        *slot = new_limit;
+        Ok(())
     }
 }
 
@@ -307,29 +538,21 @@ pub extern "C" fn getrlimit(resource: i32, rlp: *mut Rlimit) -> i32 {
         return -1;
     }
 
+    // The null check stays here rather than being left to the kernel, which
+    // answers `InvalidArgument` for a null buffer.  POSIX owes `EFAULT` for a
+    // bad pointer, so libc must catch null itself; the kernel's code is right
+    // for the native ABI and wrong for this one.
     if rlp.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
 
-    // SAFETY: `limit_store::rlimits` is non-null and aligned, and points
-    // at storage reachable only from this thread on host builds; no other
-    // reference to the table is live across this borrow.
-    let limits = unsafe { limit_store::rlimits().as_ref() };
-    let Some(limits) = limits else {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    };
-
-    if let Some(limit) = limits.get(resource as usize) {
-        // SAFETY: Caller guarantees rlp is valid.
-        unsafe {
-            *rlp = *limit;
+    match store_get(0, resource, rlp) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
         }
-        0
-    } else {
-        errno::set_errno(errno::EINVAL);
-        -1
     }
 }
 
@@ -337,34 +560,34 @@ pub extern "C" fn getrlimit(resource: i32, rlp: *mut Rlimit) -> i32 {
 ///
 /// Updates the soft and hard limits for `resource`.  The new soft
 /// limit must not exceed the hard limit.
-///
-/// Note: limits are stored but not enforced by the kernel.
 /// Returns 0 on success, -1 on error.
 ///
-/// ## Capability and ceiling checks (Phase 179)
+/// `RLIMIT_NOFILE` is enforced for real — the kernel's fd-install path
+/// refuses a descriptor at or above the soft limit, so lowering it lowers
+/// what `open` will hand out.  The other fifteen are bookkeeping today.
 ///
-/// Linux's `kernel/sys.c::do_prlimit` enforces two post-validation
-/// guards:
+/// ## Ceiling and raise rules
 ///
-/// ```text
-/// if (resource == RLIMIT_NOFILE && new_rlim->rlim_max > sysctl_nr_open)
-///     retval = -EPERM;
-/// else if (new_rlim->rlim_max > old_rlim->rlim_max &&
-///          !capable(CAP_SYS_RESOURCE))
-///     retval = -EPERM;
-/// ```
+/// Two guards, both the kernel's (this function only reports them; see
+/// [`store_set`] for where they live and why libc does not restate them on
+/// the target):
 ///
-/// - The **`RLIMIT_NOFILE` ceiling** is absolute: even with
-///   `CAP_SYS_RESOURCE`, you cannot raise the hard fd cap above the
-///   kernel-wide upper bound (our `fdtable::MAX_FDS`).  This protects
-///   the fd table from a privileged process asking for a value it
-///   could never actually use.
-/// - **Raising any other resource's hard limit** above its current
-///   value requires `CAP_SYS_RESOURCE`.  Lowering the hard limit, or
-///   leaving it unchanged while editing the soft limit, is always
-///   permitted.  Pre-Phase-179 we silently accepted hard-limit raises
-///   from any caller, which let unprivileged code claim impossible
-///   resources and broke `prlimit`-based privilege separation.
+/// - The **`RLIMIT_NOFILE` ceiling** is absolute.  No caller, however
+///   privileged, can raise the hard fd cap above the kernel-wide bound,
+///   because a value above the fd table's size is one the process could
+///   never actually use.  `RLIM_INFINITY` is refused here specifically:
+///   the fd-install path reads infinity as "skip the check", so accepting
+///   it would remove the enforcement rather than raise it.  Daemons that
+///   lift their own `NOFILE` to infinity at startup — several do — must
+///   handle the refusal instead of assuming it worked.
+/// - **Raising any hard limit is refused outright**, for every resource
+///   and every caller.  This differs from Linux, which permits the raise
+///   with `CAP_SYS_RESOURCE`, and it differed from this function's own
+///   behaviour until the native syscalls landed.  The capability is not
+///   consulted because the kernel does not consult it; when that changes
+///   it changes in `pcb::set_rlimit`, which both ABIs funnel through.
+///   Lowering a hard limit, holding it equal, or editing only the soft
+///   limit is always permitted.  See design-decisions.md §707.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
     if rlp.is_null() {
@@ -377,50 +600,13 @@ pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
         return -1;
     }
 
-    // SAFETY: Caller guarantees rlp is valid.
-    let new_limit = unsafe { *rlp };
-
-    // Soft must not exceed hard.
-    if new_limit.rlim_cur > new_limit.rlim_max {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+    match store_set(0, resource, rlp) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
     }
-
-    // SAFETY: as in `getrlimit` above.
-    let limits = unsafe { limit_store::rlimits().as_mut() };
-    let Some(limits) = limits else {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    };
-
-    let Some(slot) = limits.get_mut(resource as usize) else {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    };
-
-    let old = *slot;
-
-    // Phase 179: RLIMIT_NOFILE absolute ceiling.  Linux's
-    // `do_prlimit` rejects any rlim_max above sysctl_nr_open
-    // unconditionally — CAP_SYS_RESOURCE does NOT lift this cap.
-    // Our equivalent of sysctl_nr_open is `fdtable::MAX_FDS`.
-    if resource == RLIMIT_NOFILE && new_limit.rlim_max > crate::fdtable::MAX_FDS as u64 {
-        errno::set_errno(errno::EPERM);
-        return -1;
-    }
-
-    // Phase 179: raising rlim_max above its current value requires
-    // CAP_SYS_RESOURCE (matches Linux's `do_prlimit`).  Lowering or
-    // holding equal — and any soft-only change — is always allowed.
-    if new_limit.rlim_max > old.rlim_max
-        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_RESOURCE)
-    {
-        errno::set_errno(errno::EPERM);
-        return -1;
-    }
-
-    *slot = new_limit;
-    0
 }
 
 // ---------------------------------------------------------------------------
@@ -759,32 +945,35 @@ pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
 ///     Linux's `do_prlimit`, which validates the resource ordinal
 ///     before doing any pointer work — a bare `prlimit(0, 9999, NULL,
 ///     NULL)` is a malformed call and must report it.
-///   - If `new_limit` is non-NULL: `setrlimit` enforces `rlim_cur <=
-///     rlim_max` and returns `EINVAL` on violation.
+///   - If `new_limit` is non-NULL: `rlim_cur <= rlim_max` is enforced and
+///     violation is `EINVAL`.
 ///
-/// Valid requests delegate to this file's `getrlimit`/`setrlimit`, so
-/// `pid` is accepted and then ignored — every caller gets the calling
-/// context's limits.
+/// ## `pid` is honoured now
 ///
-/// This used to be justified by "our kernel doesn't track per-process
-/// resource limits."  That has not been true since the kernel grew
-/// `Process::rlimits` (`kernel/src/proc/pcb.rs`): it keeps a real
-/// per-process table, seeded from `DEFAULT_RLIMITS`, inherited across
-/// `fork` and edited by the Linux-ABI `prlimit64`.  What is still true
-/// is that the table is unreachable from here — it is exposed only
-/// through the Linux compatibility layer's syscall numbers, and this
-/// libc is the native ABI.  So `mod limit_store` (top of this file) is
-/// a *second* copy of a table the kernel is authoritative for, and the
-/// two have already drifted apart on three of their sixteen rows —
-/// `RLIMIT_NOFILE`, `RLIMIT_SIGPENDING` and `RLIMIT_MSGQUEUE`.
+/// It used to be accepted and then thrown away — every caller got the
+/// calling context's limits whoever they named — because the kernel's real
+/// per-process table (`Process::rlimits`, `kernel/src/proc/pcb.rs`) was
+/// reachable only through the Linux compatibility layer's syscall numbers,
+/// and this libc is the native ABI.  `mod limit_store` above was therefore a
+/// *second* copy of a table the kernel owned, and the two had drifted apart
+/// on three of their sixteen rows.
 ///
-/// `requests/b-a-native-rlimit-syscalls.md` asks lane A for the native
-/// `SYS_RLIMIT_GET`/`SYS_RLIMIT_SET` pair that would let `limit_store`
-/// be deleted and `pid` be honoured for real.  Until it lands, do not
-/// add libc logic that treats the local table as authoritative beyond
-/// what `can_nice()` / `current_rtprio_limit()` / `check_mlock_caps()`
-/// already do.  See `known-issues.md`
-/// → TD-POSIX-RLIMITS-ARE-A-SHADOW-OF-THE-KERNEL'S.
+/// `SYS_RLIMIT_GET`/`SYS_RLIMIT_SET` (557/558) closed that.  On the target
+/// this call now reaches the kernel's table, and `pid` selects a process for
+/// real.
+///
+/// **A foreign pid is `EPERM`, including one that does not exist.**  Not
+/// `ESRCH`.  This is the native ABI's deliberate choice and not an oversight
+/// to be smoothed over here: answering `ESRCH` for a dead pid and `EPERM` for
+/// a live one would make `prlimit` a process-existence oracle that any
+/// process could call in a loop.  `ESRCH` is kept for the one case that leaks
+/// nothing — the caller named *itself* and its own record is gone — and for
+/// the negative-pid domain error above, which names no process at all.
+///
+/// Linux's `prlimit64` does distinguish the two, and
+/// `crate::linux_rlimit`'s shim goes on doing so, because reproducing
+/// Linux's observable behaviour is that layer's entire job.  This one is not
+/// obliged to inherit the leak.  See design-decisions.md §707.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn prlimit(
     pid: i32,
@@ -806,17 +995,23 @@ pub extern "C" fn prlimit(
         return -1;
     }
 
-    // Get old limit first (if requested).
+    // Get old limit first (if requested).  Note this goes to `store_get`
+    // rather than to `getrlimit`, which would hard-code pid 0 and throw the
+    // caller's choice away — that discard is exactly what this call stopped
+    // doing.
     if !old_limit.is_null() {
-        let ret = getrlimit(resource, old_limit);
-        if ret != 0 {
-            return ret;
+        if let Err(e) = store_get(pid, resource, old_limit) {
+            errno::set_errno(e);
+            return -1;
         }
     }
 
     // Set new limit (if requested).
     if !new_limit.is_null() {
-        return setrlimit(resource, new_limit);
+        if let Err(e) = store_set(pid, resource, new_limit) {
+            errno::set_errno(e);
+            return -1;
+        }
     }
 
     0
@@ -1584,10 +1779,12 @@ mod tests {
         };
         assert_eq!(setrlimit(RLIMIT_FSIZE, &init), 0);
 
-        // prlimit: get old, set new.
+        // prlimit: get old, set new.  The new hard limit must be at or below
+        // the old one — no caller may raise a hard limit — so this walks the
+        // pair down rather than up.
         let new = Rlimit {
-            rlim_cur: 30,
-            rlim_max: 40,
+            rlim_cur: 5,
+            rlim_max: 15,
         };
         let mut old = Rlimit {
             rlim_cur: 0,
@@ -1606,8 +1803,8 @@ mod tests {
             rlim_max: 0,
         };
         assert_eq!(getrlimit(RLIMIT_FSIZE, &mut readback), 0);
-        assert_eq!(readback.rlim_cur, 30);
-        assert_eq!(readback.rlim_max, 40);
+        assert_eq!(readback.rlim_cur, 5);
+        assert_eq!(readback.rlim_max, 15);
     }
 
     // -----------------------------------------------------------------------
@@ -1646,10 +1843,11 @@ mod tests {
         };
         assert_eq!(setrlimit(RLIMIT_FSIZE, &init), 0);
 
-        // Use prlimit64 to get old and set new.
+        // Use prlimit64 to get old and set new.  Downward, as in
+        // `prlimit_get_and_set`: a hard limit never rises.
         let new = Rlimit {
-            rlim_cur: 300,
-            rlim_max: 400,
+            rlim_cur: 30,
+            rlim_max: 40,
         };
         let mut old = Rlimit {
             rlim_cur: 0,
@@ -1668,8 +1866,8 @@ mod tests {
             rlim_max: 0,
         };
         assert_eq!(getrlimit(RLIMIT_FSIZE, &mut readback), 0);
-        assert_eq!(readback.rlim_cur, 300);
-        assert_eq!(readback.rlim_max, 400);
+        assert_eq!(readback.rlim_cur, 30);
+        assert_eq!(readback.rlim_max, 40);
     }
 
     #[test]
@@ -1732,17 +1930,59 @@ mod tests {
     }
 
     #[test]
-    fn test_prlimit_phase86_positive_pid_accepted() {
-        // We don't track other processes, so a positive pid behaves like
-        // self.  Just verify it doesn't fall into the ESRCH path.
+    fn test_prlimit_phase86_foreign_pid_is_eperm_not_esrch() {
+        // `pid` used to be accepted and discarded — every caller got its own
+        // limits whoever it named — because libc kept a private table with no
+        // notion of other processes.  Since `SYS_RLIMIT_GET`/`SET`, `pid`
+        // selects for real, and a pid that is not us is refused.
+        //
+        // EPERM rather than ESRCH, and the same EPERM whether the process
+        // exists or not: distinguishing the two would turn this call into a
+        // process-existence oracle callable in a loop by anyone.  1234 is a
+        // pid we cannot be (the assertion below pins that), so it stands for
+        // both cases at once.
         reset_global_state();
+        assert_ne!(crate::process::getpid(), 1234, "1234 must be a foreign pid");
         let mut old = Rlimit {
             rlim_cur: 0,
             rlim_max: 0,
         };
         errno::set_errno(0);
         let ret = prlimit(1234, RLIMIT_CPU, core::ptr::null(), &mut old);
-        assert_eq!(ret, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    /// The caller's own pid names the caller, so `prlimit(getpid(), ...)` —
+    /// which is how a great deal of real software spells "myself" — works
+    /// exactly like `prlimit(0, ...)`.
+    #[test]
+    fn test_prlimit_own_pid_is_self() {
+        reset_global_state();
+        let mut via_zero = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        let mut via_pid = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        errno::set_errno(0);
+        assert_eq!(
+            prlimit(0, RLIMIT_CPU, core::ptr::null(), &mut via_zero),
+            0
+        );
+        assert_eq!(
+            prlimit(
+                crate::process::getpid(),
+                RLIMIT_CPU,
+                core::ptr::null(),
+                &mut via_pid
+            ),
+            0
+        );
+        assert_eq!(via_zero.rlim_cur, via_pid.rlim_cur);
+        assert_eq!(via_zero.rlim_max, via_pid.rlim_max);
     }
 
     #[test]
@@ -2508,11 +2748,17 @@ mod tests {
             reset_global_state();
             // Linux's encoding is inverted: rlim_cur = 20 - lowest allowed
             // nice.  21 therefore allows nice -1 and nothing lower.
-            let rl = Rlimit {
-                rlim_cur: 21,
-                rlim_max: 21,
-            };
-            assert_eq!(setrlimit(RLIMIT_NICE, &rl), 0, "setrlimit must succeed");
+            //
+            // Seeded directly rather than through `setrlimit`, which would
+            // refuse it: RLIMIT_NICE starts at (0, 0) and no caller may raise
+            // a hard limit.  See `limit_store::seed`.
+            limit_store::seed(
+                RLIMIT_NICE,
+                Rlimit {
+                    rlim_cur: 21,
+                    rlim_max: 21,
+                },
+            );
             drop_cap_sys_nice();
             errno::set_errno(0);
             assert_eq!(
@@ -2536,11 +2782,14 @@ mod tests {
         fn test_nice_raise_beyond_the_rlimit_is_still_eperm() {
             let _g = CapGuard::snapshot();
             reset_global_state();
-            let rl = Rlimit {
-                rlim_cur: 21,
-                rlim_max: 21,
-            };
-            assert_eq!(setrlimit(RLIMIT_NICE, &rl), 0);
+            // Seeded directly; see `limit_store::seed`.
+            limit_store::seed(
+                RLIMIT_NICE,
+                Rlimit {
+                    rlim_cur: 21,
+                    rlim_max: 21,
+                },
+            );
             drop_cap_sys_nice();
             errno::set_errno(0);
             assert_eq!(nice(-2), -1);
@@ -2906,12 +3155,15 @@ mod tests {
         fn test_setpriority_raise_permitted_by_rlimit_without_the_capability() {
             let _g = CapGuard::snapshot();
             reset_global_state();
-            // rlim_cur = 25 allows nice down to -5.
-            let rl = Rlimit {
-                rlim_cur: 25,
-                rlim_max: 25,
-            };
-            assert_eq!(setrlimit(RLIMIT_NICE, &rl), 0);
+            // rlim_cur = 25 allows nice down to -5.  Seeded directly; see
+            // `limit_store::seed`.
+            limit_store::seed(
+                RLIMIT_NICE,
+                Rlimit {
+                    rlim_cur: 25,
+                    rlim_max: 25,
+                },
+            );
             drop_cap_sys_nice();
             errno::set_errno(0);
             assert_eq!(
@@ -2929,11 +3181,14 @@ mod tests {
         fn test_setpriority_raise_beyond_the_rlimit_is_still_eacces() {
             let _g = CapGuard::snapshot();
             reset_global_state();
-            let rl = Rlimit {
-                rlim_cur: 25,
-                rlim_max: 25,
-            };
-            assert_eq!(setrlimit(RLIMIT_NICE, &rl), 0);
+            // Seeded directly; see `limit_store::seed`.
+            limit_store::seed(
+                RLIMIT_NICE,
+                Rlimit {
+                    rlim_cur: 25,
+                    rlim_max: 25,
+                },
+            );
             drop_cap_sys_nice();
             errno::set_errno(0);
             assert_eq!(setpriority(PRIO_PROCESS, 0, -6), -1);
@@ -3039,16 +3294,23 @@ mod tests {
         /// Helper: seed a known starting hard limit on a resource so
         /// tests can then attempt to raise it.  Runs under default
         /// caps so the seed itself isn't blocked.
+        /// Establish a starting limit for a test.
+        ///
+        /// Writes the row directly rather than going through `setrlimit`.  A
+        /// seed is a precondition, not a case under test, and routing it
+        /// through the policy makes it one: it used to work only because most
+        /// resources start at `RLIM_INFINITY`, so every seed happened to be a
+        /// *lowering*.  Any test wanting to start above its default — or
+        /// wanting `RLIMIT_NICE`/`RLIMIT_RTPRIO`, which start at zero — got a
+        /// failed assertion inside the setup, reported against a line that is
+        /// not what the test is about.  See `limit_store::seed`.
         fn seed_limit(res: i32, cur: u64, max: u64) {
-            let rl = Rlimit {
-                rlim_cur: cur,
-                rlim_max: max,
-            };
-            assert_eq!(
-                setrlimit(res, &rl),
-                0,
-                "seed setrlimit for resource {res} must succeed under \
-                 default caps"
+            limit_store::seed(
+                res,
+                Rlimit {
+                    rlim_cur: cur,
+                    rlim_max: max,
+                },
             );
         }
 
@@ -3236,13 +3498,18 @@ mod tests {
 
         // -- Workflow -----------------------------------------------------
 
-        /// Privilege-separation workflow: a daemon starts with all
-        /// caps, sets RLIMIT_CPU=(100,200), drops CAP_SYS_RESOURCE,
-        /// then a child or post-init code path tries to raise the
-        /// hard limit — must be EPERM.  After re-acquiring caps (via
-        /// the CapGuard's drop or explicit restore) the raise works.
+        /// Privilege-separation workflow: a daemon starts with all caps and
+        /// `RLIMIT_CPU = (100, 200)`, drops `CAP_SYS_RESOURCE`, then a child
+        /// or post-init code path tries to raise the hard limit — `EPERM`.
+        /// Re-acquiring every capability does not change that, because the
+        /// hard limit is a one-way door regardless of who is pushing on it.
+        ///
+        /// The workflow is the point rather than either assertion on its own:
+        /// this is the sequence real service managers perform, and what it
+        /// establishes is that a lowered `RLIMIT_CPU` cannot be undone by
+        /// anything short of a fresh process.
         #[test]
-        fn test_setrlimit_phase179_workflow_seed_drop_raise_then_restore() {
+        fn test_setrlimit_phase179_workflow_lowered_limit_is_a_one_way_door() {
             let _g = CapGuard::snapshot();
             reset_global_state();
             seed_limit(RLIMIT_CPU, 100, 200);
@@ -3273,10 +3540,21 @@ mod tests {
             ];
             assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             errno::set_errno(0);
-            assert_eq!(setrlimit(RLIMIT_CPU, &raise), 0);
+            assert_eq!(
+                setrlimit(RLIMIT_CPU, &raise),
+                -1,
+                "re-acquiring every capability must not reopen the door"
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            let mut rb = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
+            assert_eq!(rb.rlim_max, 200, "the limit is still where it was set");
         }
 
-        /// prlimit delegates to setrlimit: a raise via prlimit
+        /// prlimit shares the store with setrlimit: a raise via prlimit
         /// without cap must also EPERM.
         #[test]
         fn test_setrlimit_phase179_workflow_prlimit_raise_no_cap_eperm() {
@@ -3330,11 +3608,21 @@ mod tests {
 
         // -- Recovery -----------------------------------------------------
 
-        /// After an EPERM rejection, restoring CAP_SYS_RESOURCE lets
-        /// the same call succeed.  Confirms dynamic cap evaluation
-        /// (not cached).
+        /// Restoring `CAP_SYS_RESOURCE` does **not** let the refused raise
+        /// through.  The capability is irrelevant to a hard-limit raise: the
+        /// kernel refuses every one, for every resource and every caller, so
+        /// there is no cap state in which the second call behaves differently
+        /// from the first.
+        ///
+        /// This test used to assert the opposite, and was right to, back when
+        /// libc kept its own table and could apply Linux's `do_prlimit` rule
+        /// itself.  Routing through `SYS_RLIMIT_SET` made the kernel the
+        /// authority and the kernel does not implement that rule yet.  Keeping
+        /// the old assertion would have meant a green host test describing a
+        /// permission model the shipping build does not have — see
+        /// design-decisions.md §707.
         #[test]
-        fn test_setrlimit_phase179_recovery_restore_cap_lets_raise() {
+        fn test_setrlimit_phase179_restoring_the_cap_still_does_not_permit_a_raise() {
             let _g = CapGuard::snapshot();
             reset_global_state();
             seed_limit(RLIMIT_CPU, 0, 50);
@@ -3365,7 +3653,20 @@ mod tests {
             ];
             assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             errno::set_errno(0);
-            assert_eq!(setrlimit(RLIMIT_CPU, &raise), 0);
+            assert_eq!(
+                setrlimit(RLIMIT_CPU, &raise),
+                -1,
+                "the raise is refused for the resource, not for the caller — \
+                 holding every capability changes nothing"
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // And the limit is still where the seed put it.
+            let mut rb = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
+            assert_eq!(rb.rlim_max, 50);
         }
 
         // -- No-side-effect ----------------------------------------------
@@ -3421,10 +3722,17 @@ mod tests {
 
         // -- Sentinel -----------------------------------------------------
 
-        /// With CAP_SYS_RESOURCE held (default), raising the hard
-        /// limit works — confirms the privileged path is unbroken.
+        /// A hard-limit raise is refused even with `CAP_SYS_RESOURCE` held,
+        /// and the refusal leaves the stored value alone.
+        ///
+        /// The sentinel this replaces asserted the opposite — that the
+        /// privileged path worked — because libc used to own the table and
+        /// implement Linux's rule on it.  What the assertion is *for* is
+        /// unchanged: it pins the direction of the one-way door, so that a
+        /// future relaxation is a deliberate edit here rather than something
+        /// that slips in unnoticed.
         #[test]
-        fn test_setrlimit_phase179_sentinel_with_cap_raise_succeeds() {
+        fn test_setrlimit_phase179_sentinel_raise_refused_even_with_cap() {
             let _g = CapGuard::snapshot();
             reset_global_state();
             seed_limit(RLIMIT_CPU, 0, 100);
@@ -3436,13 +3744,38 @@ mod tests {
                 rlim_cur: 0,
                 rlim_max: 1000,
             };
+            assert_eq!(setrlimit(RLIMIT_CPU, &new), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            let mut rb = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
+            assert_eq!(rb.rlim_max, 100, "the refused raise must not have stuck");
+        }
+
+        /// Lowering still works with the capability held, so the refusal
+        /// above is about the *direction* of the change and not a blanket
+        /// "setrlimit no longer works".  Without this, inverting the sentinel
+        /// could have been satisfied by a `setrlimit` that simply always
+        /// failed.
+        #[test]
+        fn test_setrlimit_phase179_sentinel_lowering_still_works() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_CPU, 0, 100);
+            errno::set_errno(0);
+            let new = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 40,
+            };
             assert_eq!(setrlimit(RLIMIT_CPU, &new), 0);
             let mut rb = Rlimit {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
             assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
-            assert_eq!(rb.rlim_max, 1000);
+            assert_eq!(rb.rlim_max, 40);
         }
 
         // -- Cross-checks -------------------------------------------------
@@ -3469,21 +3802,37 @@ mod tests {
             ));
         }
 
-        /// Raising a non-NOFILE resource above MAX_FDS is fine — the
-        /// MAX_FDS ceiling is RLIMIT_NOFILE-only.  Sentinel against
-        /// the NOFILE branch accidentally applying to other
-        /// resources.
+        /// A non-NOFILE resource may sit above `MAX_FDS` — that ceiling is
+        /// `RLIMIT_NOFILE`-only.  Sentinel against the NOFILE branch
+        /// accidentally applying to other resources.
+        ///
+        /// Arrives at the above-`MAX_FDS` value by *lowering* into it, since
+        /// no hard limit may be raised.  The seed is a hundred times
+        /// `MAX_FDS` and the call sets ten times it: still far above the fd
+        /// ceiling, which is the only property this test is about, and a
+        /// downward move, which is the only kind permitted.
         #[test]
-        fn test_setrlimit_phase179_non_nofile_above_max_fds_ok_with_cap() {
+        fn test_setrlimit_phase179_non_nofile_may_exceed_max_fds() {
             let _g = CapGuard::snapshot();
             reset_global_state();
-            seed_limit(RLIMIT_CPU, 0, 100);
+            seed_limit(RLIMIT_CPU, 0, crate::fdtable::MAX_FDS as u64 * 100);
             errno::set_errno(0);
             let new = Rlimit {
                 rlim_cur: 0,
                 rlim_max: crate::fdtable::MAX_FDS as u64 * 10,
             };
             assert_eq!(setrlimit(RLIMIT_CPU, &new), 0);
+            let mut rb = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
+            assert!(
+                rb.rlim_max > crate::fdtable::MAX_FDS as u64,
+                "a non-NOFILE hard limit above the fd ceiling must be allowed \
+                 to stand; got {}",
+                rb.rlim_max
+            );
         }
 
         /// prlimit's get-old + set-new path: when the set fails with

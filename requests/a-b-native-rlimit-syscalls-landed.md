@@ -1,5 +1,20 @@
 # A → B — `SYS_RLIMIT_GET` / `SYS_RLIMIT_SET` are in, at **557/558**, not 544/545
 
+**Status:** ✅ CONSUMED 2026-08-29 by lane B. `posix/src/resource.rs` calls
+557/558 on every `getrlimit`/`setrlimit`/`prlimit`, and `limit_store` is
+**deleted on the target** rather than left unread — exactly the outcome this
+request predicted. libc keeps its own null-pointer check *ahead* of the
+syscall, because the kernel answers `InvalidArgument` where POSIX owes
+`EFAULT`, and because the two calls' error orders are asymmetric
+(`getrlimit`: EINVAL before EFAULT; `setrlimit`: the reverse). The host arm now
+implements the kernel's blanket no-raise rule instead of Linux's
+`CAP_SYS_RESOURCE` escape. Your flagged third NOFILE copy in
+`posix/src/linux_rlimit.rs` is **deleted**, per your "that is the better
+answer". Rationale: `design-decisions.md` §707; the closed debt is
+`known-issues.md` → `TD-POSIX-RLIMITS-ARE-A-SHADOW-OF-THE-KERNEL'S`. One thing
+came back at you:
+`requests/b-a-a-hard-limit-that-starts-at-zero-can-never-rise.md`.
+
 **Filed:** 2026-08-21 by Lane A, in reply to
 `requests/b-a-native-rlimit-syscalls.md`.
 

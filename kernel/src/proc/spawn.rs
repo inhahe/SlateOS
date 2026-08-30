@@ -3537,7 +3537,12 @@ pub fn self_test_openat2_beneath() -> KernelResult<()> {
     //    so an unenforced check returns 0xCA rather than ENOENT.
     check(
         "dirfd + \"../slateos-b2-outside.txt\" (escapes)",
-        run(BASE_NUL, b"../slateos-b2-outside.txt\0", RESOLVE_BENEATH, None),
+        run(
+            BASE_NUL,
+            b"../slateos-b2-outside.txt\0",
+            RESOLVE_BENEATH,
+            None,
+        ),
         EXDEV,
         "0xCA = containment not enforced; the escape target was really opened",
     );
@@ -3546,7 +3551,12 @@ pub fn self_test_openat2_beneath() -> KernelResult<()> {
     //    the base — being inside it would not save it.
     check(
         "dirfd + absolute \"/slateos-b2-outside.txt\"",
-        run(BASE_NUL, b"/slateos-b2-outside.txt\0", RESOLVE_BENEATH, None),
+        run(
+            BASE_NUL,
+            b"/slateos-b2-outside.txt\0",
+            RESOLVE_BENEATH,
+            None,
+        ),
         EXDEV,
         "0xCA = an absolute path was quietly reinterpreted or allowed",
     );

@@ -40,6 +40,23 @@ import tempfile
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOOT_TEST = os.path.join(REPO_ROOT, "scripts", "boot-test.sh")
 
+sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+import gitenv  # noqa: E402
+
+# The fixtures below are throwaway repositories picked with `-C` and `cwd=`.
+# Neither beats an inherited `GIT_DIR`, which git exports into hooks,
+# `git bisect run` and `git rebase --exec` -- so under any of those this suite
+# would build its fixtures inside the real repository and commit to it. On
+# 2026-08-29 the equivalent bug in `check-requests-not-deleted.py --selftest`
+# did exactly that and published two commits deleting the whole tree; see
+# `scripts/gitenv.py`.
+#
+# Scrubbing the process environment rather than passing `env=` per call matters
+# more here than anywhere: this suite runs `bash`, and the bash runs git. A
+# per-call `env=` on the Python side would not reach that git at all, because
+# the variable would arrive through bash's own inherited environment.
+gitenv.scrub_environ()
+
 _FAILURES = []
 
 

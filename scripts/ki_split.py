@@ -65,6 +65,49 @@ HEDGED = re.compile(
     re.IGNORECASE,
 )
 
+# The leading token of a heading, past any `[A]` lane tag, bold markers or
+# backticks. Used only to ask whether the heading opens with an entry *id*.
+_LEAD_TOKEN = re.compile(r"^[\s*`\[]*(?:\[?[A-C]\]\s*)?[\s*`]*([A-Za-z0-9][A-Za-z0-9-]*)")
+
+
+def opens_with_entry_id(title: str) -> bool:
+    """Whether a heading opens with an entry id rather than prose.
+
+    This is the only thing that separates an *entry* from a *subsection* at
+    `###` and deeper, and it cannot be done by heading level: both files mix
+    `###` entries (lane B's `TD-OILS-*`, and everything archived under the
+    older `F19`/`W2`/`B-CWD1` numbering) with `###` subsections *inside* `##`
+    entries -- and the subsection headings are ordinary prose, so titles like
+    "Test", "The shape of the fix" and "Why this one and not the other three"
+    recur across dozens of unrelated entries. Treating those as entry titles is
+    what made `ki_dupes.py` report `### Test` as an entry living in both files.
+
+    Two id shapes, because the numbering scheme changed and the archive keeps
+    both:
+
+    * hyphen-joined and predominantly upper-case -- `B-MOUNT-ACCEPTS-…`,
+      `TD-OILS-…`, `TOOLING-BASH-5.2.37-SOURCE`. The upper-vs-lower count, not
+      a strict `[A-Z-]+` match, is what admits `B-VFS-…-IS-12x-OVER-TARGET`
+      while still rejecting prose like "Follow-up 2026-08-16:".
+    * a short letter-and-digit tag -- `F19`, `W2`, `B-COMPACT1`.
+
+    Prose headings fail both: they are either single words with no hyphen and
+    no digit ("Test", "clipmanager"), or hyphenated but mostly lower-case
+    ("Follow-up …").
+    """
+    m = _LEAD_TOKEN.match(title)
+    if not m:
+        return False
+    # A trailing hyphen is the `…-ITS-OWN---HELP` case, where the run of hyphens
+    # ends the token rather than joining another segment.
+    token = m.group(1).rstrip("-")
+    if "-" in token:
+        upper = sum(c.isupper() for c in token)
+        lower = sum(c.islower() for c in token)
+        if upper > lower:
+            return True
+    return bool(re.fullmatch(r"[A-Z]{1,3}[0-9]+", token))
+
 
 @dataclass
 class Entry:
@@ -90,6 +133,19 @@ class Entry:
         title = re.sub(r"^\[[A-C]\]\s*", "", self.title)
         m = re.match(r"([A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)", title)
         return m.group(1) if m else ""
+
+    @property
+    def is_entry(self) -> bool:
+        """Whether this heading starts an issue entry, not a subsection of one.
+
+        `##` always counts. A handful of `##` headings are section headers that
+        merely organise entries rather than being one, but they are not
+        excluded here: they are few, they are unique to the file they sit in,
+        and admitting them costs nothing, whereas the id test below would
+        wrongly reject the many `##` entries whose titles are plain prose
+        (e.g. "`cargo test -p indexer` tests lane B's crate, not lane C's").
+        """
+        return self.level == 2 or opens_with_entry_id(self.title)
 
     @property
     def lane_b(self) -> bool:

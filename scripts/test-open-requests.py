@@ -357,6 +357,203 @@ def test_unrecognised_wording_is_open_and_says_so(mod):
 
 
 # --------------------------------------------------------------------------
+# Where in the file the classifier looks
+# --------------------------------------------------------------------------
+#
+# The three tests below are one regression with three faces. A request is a
+# header, then an essay, then (sometimes) a reply; status lives in the first and
+# last of those and must not be read from the middle. The code used to
+# approximate "the reply" as the last 25 lines, which is right only while
+# replies are short. `b-a-raw-nic-claim-tests-race-...` answers the request at
+# line 123 of 178 -- a 55-line reply -- so the answer sat outside the window and
+# the request was reported open for six days after it was resolved. Twenty-five
+# files in the dropbox had a resolution heading the old window could not see.
+
+def _classify_text(mod, text):
+    """`classify()` on a throwaway file, as `(is_open, reason)`."""
+    import pathlib
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = pathlib.Path(d) / "b-a-fixture.md"
+        p.write_text(text, encoding="utf-8")
+        is_open, reason, _title = mod.classify(p)
+    return is_open, reason
+
+
+def _padding(n, word="filler"):
+    """`n` lines of body prose, to push a reply out of any fixed-size tail."""
+    return "\n".join(f"{word} line {i}" for i in range(n))
+
+
+def test_a_long_reply_section_is_read_however_long_it_is(mod):
+    """The reply window must be bounded by the reply, not by a constant.
+
+    The reply here is far longer than TAIL_LINES, so a fixed tail sees only its
+    last lines and misses the heading that resolves the request -- which is
+    exactly how a resolved request stayed on the queue.
+    """
+    reply_len = mod.TAIL_LINES * 3
+    text = (
+        "# B -> A -- something raced\n\n"
+        "**Status:** found by a script; baselined, not fixed.\n\n"
+        + _padding(60, "essay")
+        + "\n\n## Lane A's answer -- RESOLVED (2026-08-23)\n\n"
+        + _padding(reply_len, "reply")
+        + "\n"
+    )
+    is_open, reason = _classify_text(mod, text)
+    check("a reply longer than the tail window is still seen", is_open, False)
+    check("and it is the reply heading that says so",
+          "lane a's answer" in reason.lower(), True)
+
+
+def test_the_essay_body_is_not_read_as_this_requests_status(mod):
+    """Between header and reply is prose, and prose is not a status.
+
+    Widening the window to the whole file is the obvious way to fix the test
+    above, and it is wrong: eight files in the dropbox discuss `**Status:**`
+    markers in running text, because several of the requests are *about* the
+    status protocol. Reading the body classifies a request on a sentence
+    describing a different one.
+    """
+    text = (
+        "# A -> B -- a request\n\n"
+        "**Status:** LANDED 2026-08-21 by lane B.\n\n"
+        + _padding(30, "essay")
+        + "\n\nThe twelve files still say `**Status:** unknown` and therefore\n"
+          "show up as open in `scripts/open-requests.py --lane b`.\n\n"
+        + _padding(30, "essay")
+        + "\n"
+    )
+    is_open, _reason = _classify_text(mod, text)
+    check("prose about a status marker does not reopen a landed request",
+          is_open, False)
+
+
+def test_a_heading_inside_a_code_fence_is_not_a_heading(mod):
+    """`#` inside a fence is a shell comment, not markdown.
+
+    The dropbox carries ~1700 fenced lines, much of it commented bash. No line
+    in it reads `# resolved ...` today, which is precisely why this is a test
+    and not a bug report -- the same mistake has already been made once in this
+    repo, against `known-issues.md`, where `#` comments inside fences were
+    parsed as entry headings and tore entries in half.
+
+    Deliberately no `**Status:**` line: a recognised status word is decisive and
+    would return before any heading is looked at, so a fixture carrying one
+    cannot tell whether fences are handled at all. This one reaches the heading
+    search, which is the code under test.
+    """
+    text = (
+        "# B -> A -- still broken\n\n"
+        "Here is what I ran:\n\n"
+        "```bash\n"
+        "# resolved the race by moving the tests\n"
+        "## Landed -- lane A, 2026-08-29\n"
+        "git commit -m 'fixed'\n"
+        "```\n\n"
+        "Still fails.\n"
+    )
+    is_open, reason = _classify_text(mod, text)
+    check("a fenced '# resolved' comment does not close a request",
+          is_open, True)
+    check("and the file reads as unstamped rather than resolved",
+          reason, "no status marker")
+
+
+def test_fenced_headings_do_not_move_the_reply_window(mod):
+    """A fence deep in the body must not be mistaken for the reply's start.
+
+    If it were, the window would swallow the essay and this test would fail the
+    same way `test_the_essay_body_is_not_read...` does -- but via the window
+    rather than via a whole-file read, which is a separate way in.
+    """
+    # The geometry is the test, so it is asserted rather than assumed: the fence
+    # must sit past the head, the prose after it, and the tail floor after that.
+    # If the fence were taken as the reply's start the window would open at the
+    # fence and swallow the prose; with fences blanked it opens at the floor and
+    # does not.
+    text = (
+        "# A -> B -- a request\n\n"
+        "**Status:** LANDED 2026-08-21 by lane B.\n\n"
+        + _padding(mod.HEAD_LINES + 5, "essay")
+        + "\n\n```console\n$ git log\n## Landed\n```\n\n"
+        + "The remaining files say `**Status:** open` and are lane C's.\n\n"
+        + _padding(mod.TAIL_LINES + 15, "essay")
+        + "\n"
+    )
+    lines = text.splitlines()
+    fence_at = next(i for i, l in enumerate(lines) if l.startswith("```"))
+    prose_at = next(i for i, l in enumerate(lines) if "remaining files" in l)
+    floor = len(lines) - mod.TAIL_LINES
+    check("fixture geometry: the fence is past the head",
+          fence_at >= mod.HEAD_LINES, True)
+    check("fixture geometry: the prose is past the head and before the floor",
+          mod.HEAD_LINES <= prose_at < floor, True)
+
+    is_open, _reason = _classify_text(mod, text)
+    check("a fenced heading does not drag the window over the essay",
+          is_open, False)
+
+
+def test_a_reply_heading_outranks_an_unreadable_status(mod):
+    """An unclassifiable header must not short-circuit past the reply.
+
+    This is the caller-side half of the bug. `status_verdict` correctly reported
+    "I found a status and could not read it", and `classify` returned that
+    without ever consulting the reply headings -- a *less*-informative signal
+    beating a more-informative one. `**Status:** baselined, not fixed` is
+    negator-guarded away from done and contains no open word, so it landed in
+    exactly that branch.
+    """
+    text = (
+        "# B -> A -- something raced\n\n"
+        "**Status:** found by `scripts/raced-globals.py`; baselined, not fixed.\n\n"
+        "Body.\n\n"
+        "## Lane A's answer -- RESOLVED (2026-08-23)\n\nDone.\n"
+    )
+    is_open, reason = _classify_text(mod, text)
+    check("an answered request is not held open by an unreadable header",
+          is_open, False)
+    check("and the reason names the heading, not the header",
+          reason.lower().startswith("## lane a's answer"), True)
+
+
+def test_an_open_status_still_outranks_a_reply_heading(mod):
+    """Precedence: a *recognised* status word wins over any heading.
+
+    The fix above must not become "a reply heading closes anything". A lane that
+    writes `**Status:** OPEN` under its own reply heading is telling us the
+    request is live, and that sentence outranks the section it sits in.
+    """
+    text = (
+        "# B -> A -- something raced\n\n"
+        "Body.\n\n"
+        "## Lane A's answer\n\n"
+        "**Status:** OPEN -- I could not reproduce it; over to you.\n"
+    )
+    is_open, _reason = _classify_text(mod, text)
+    check("an explicit OPEN under a reply heading keeps the request open",
+          is_open, True)
+
+
+def test_status_verdict_says_whether_it_recognised_the_wording(mod):
+    """The third element is what lets `classify` order the two signals.
+
+    Both branches report open, so the flag cannot be inferred from the verdict;
+    without it the caller cannot tell "this status means open" from "I could not
+    read this status", and only the second should defer to a heading.
+    """
+    recognised = mod.status_verdict("**Status:** OPEN, still working")
+    unreadable = mod.status_verdict("**Status:** who can say, really")
+    done = mod.status_verdict("**Status:** LANDED 2026-08-21")
+    check("a recognised OPEN is decisive", recognised[2], True)
+    check("a recognised DONE is decisive", done[2], True)
+    check("an unrecognised status is not decisive", unreadable[2], False)
+    check("but an unrecognised status is still open", unreadable[0], True)
+
+
+# --------------------------------------------------------------------------
 # Against the real corpus
 # --------------------------------------------------------------------------
 

@@ -21,6 +21,30 @@ strict about *what counts as done*, and the failure mode is biased the safe way:
 anything it cannot classify is reported as open, because a false "you have work"
 costs one file read and a false "you are clear" costs a missed request.
 
+Where it looks, and the third failure
+-------------------------------------
+The two failures above were hand-rolling; the third was this script, and it
+failed in the *other* direction -- reporting work that was finished, five
+requests' worth. Two independent causes, both about where the classifier looked
+rather than what it matched:
+
+* **The reply was outside the window.** The tail was a flat 25 lines, on the
+  reasonable-sounding grounds that a reply lives at the end of a file. It does,
+  but a reply is as long as it needs to be; 25 files had a resolution heading
+  further from the end than that. `reply_start` now takes the heading's own
+  position as the boundary, so the window fits the reply.
+* **An unreadable status short-circuited the reply.** `**Status:** baselined,
+  not fixed` matches neither vocabulary, and `classify` returned that "I cannot
+  read this" verdict without going on to look at the `## Lane A's answer --
+  RESOLVED` heading below it. A less-informative signal outranked a more-
+  informative one; `status_verdict`'s third return value now distinguishes them.
+
+The bias is not symmetric here and should not be made so. Both fixes only ever
+widen what is read -- they cannot narrow it -- and the window deliberately still
+excludes the essay between header and reply, because in this dropbox that essay
+is often prose *about* status markers and would classify a request on a sentence
+describing a different one.
+
 Usage
 -----
     python scripts/open-requests.py            # your lane, from CLAUDE_CONFIG_DIR
@@ -47,11 +71,39 @@ REQUESTS_DIR = REPO_ROOT / "requests"
 # `<from>-<to>-<slug>.md`, both lane letters single characters.
 NAME_RE = re.compile(r"^([a-z])-([a-z])-(.+)\.md$")
 
-# How much of a file to read when looking for a status marker. Every marker in
-# the dropbox today is in the first few lines (a header) or the last few (a
-# reply section); reading both ends beats reading whole 200-line design essays.
+# How much of a file to read when looking for a status marker. A request has two
+# status-bearing regions -- a header stamp at the top and a reply section at the
+# bottom -- and the essay between them must NOT be read: it is prose *about* the
+# work, and in this dropbox it is frequently prose about the status protocol
+# itself. Eight files discuss `**Status:**` markers in running text ("replace the
+# `**Status:** unknown` block with the real outcome", "would show up as open in
+# `open-requests.py`"), and reading the body would classify a finished request on
+# the strength of a sentence describing someone else's.
+#
+# So the window stays, and only its lower edge is computed rather than guessed --
+# see `reply_start`. `TAIL_LINES` is now just the floor for that edge, used when
+# a file has no reply heading at all.
 HEAD_LINES = 25
 TAIL_LINES = 25
+
+# A fence's contents are not markdown, and `#` inside one is a shell comment, not
+# a heading. The dropbox carries 1691 fenced lines, a great many of them commented
+# bash, so `^# resolved the race by ...` in an example block is one word away from
+# being read as a `## Resolved` section. No such line exists today; the guard is
+# here because the identical mistake has already been made once in this repo, on
+# `known-issues.md`, and cost a re-parse of the whole file (see `ki_split.py`).
+FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+# The headings that open a reply section, which is the region a *reply* occupies:
+# from the heading to end of file. This is deliberately wider than
+# DONE_HEADING_PATTERNS -- it locates the section, it does not judge it. A reply
+# headed `## Update` still has its `**Status:**` read; it just is not counted as
+# done for having a heading.
+REPLY_SECTION_RE = re.compile(
+    r"^#{1,4}\s+(?:lane [a-z]'s\b"
+    r"|(?:resolved|answered|answer|done|fixed|landed|reply|response|update|outcome)\b)",
+    re.IGNORECASE,
+)
 
 # A status marker is a *paragraph*, not a line: everything from `**Status:**` to
 # the next blank line.
@@ -85,12 +137,17 @@ STATUS_BLOCK_RE = re.compile(
 # characters in -- searching the whole block reported that finished request as
 # open, on the strength of a word about a different one.
 #
-# 120 measured against the dropbox as it stands (191 files): the count of open
-# files is flat from 80 to 240 (38, 37, 36, 38, 40) and bottoms at 120. Below
+# 120 measured against the dropbox as it stands (192 files): the count of open
+# files is flat from 80 to 240 (32, 32, 31, 33, 35) and bottoms at 120. Below
 # it, done words that wrap fall outside and their files read as unclassifiable;
 # above it, prose about neighbouring requests starts being read as this one's
 # status. Both tails fail toward "open", which is why the curve is shallow and
 # why picking the minimum is safe rather than clever.
+#
+# Re-measured 2026-08-29, after the read window changed from a flat 25-line tail
+# to the reply section proper (see `reply_start`). The minimum did not move; the
+# whole curve dropped by ~6 because resolutions that had been outside the window
+# are now inside it.
 STATUS_WINDOW = 120
 
 # Words that mean "finished", and words that mean "still work".
@@ -148,30 +205,41 @@ DONE_HEADING_PATTERNS = [
 ]
 
 
-def status_verdict(text: str) -> tuple[bool, str] | None:
-    """``(is_open, matched_text)`` from the `**Status:**` blocks, or None.
+def status_verdict(text: str) -> tuple[bool, str, bool] | None:
+    """``(is_open, matched_text, decisive)`` from the `**Status:**` blocks, or None.
 
     Every block is considered, not just the first: a file that carries a header
     stamp and an appended reply section has two, and the reader wants the answer
     that accounts for both. Open wins over done for the reason in NEGATOR_RE.
+
+    `decisive` says whether a vocabulary word was actually matched, as opposed
+    to the fallback below where a `**Status:**` block exists but says nothing
+    this function recognises. Both cases report open, so the flag makes no
+    difference to *this* function's answer -- it exists so `classify()` can tell
+    "I read a status and it means open" from "I found a status and could not
+    read it", and consult the reply headings before settling for the latter.
+    Without the distinction, `b-a-raw-nic-claim-tests-race-....md` -- header
+    stamped "baselined, not fixed", then answered in August under
+    `## Lane A's answer -- RESOLVED` -- was reported open for six days: the
+    unreadable header short-circuited before the heading was ever looked at.
     """
     blocks = [m.group(1)[:STATUS_WINDOW] for m in STATUS_BLOCK_RE.finditer(text)]
     done_hit: str | None = None
     for block in blocks:
         if OPEN_WORD_RE.search(block):
-            return (True, f"**Status:**{block}".strip()[:80])
+            return (True, f"**Status:**{block}".strip()[:80], True)
         for m in DONE_WORD_RE.finditer(block):
             if not NEGATOR_RE.search(block[: m.start()]):
                 done_hit = done_hit or f"**Status:**{block}".strip()[:80]
     if done_hit is not None:
-        return (False, done_hit)
+        return (False, done_hit, True)
     if blocks:
         # A `**Status:**` line whose wording matches neither vocabulary. It is
         # open, because an unclassifiable status is not evidence of completion,
         # but say so differently from "no status marker at all" -- the two call
         # for different fixes, and telling them apart is what stops a reader
         # concluding the tool is simply noisy.
-        return (True, f"unrecognised status: {blocks[0].strip()[:60]}")
+        return (True, f"unrecognised status: {blocks[0].strip()[:60]}", False)
     return None
 
 LANE_BY_CONFIG_DIR = {
@@ -189,17 +257,62 @@ def detect_lane() -> str | None:
     return LANE_BY_CONFIG_DIR.get(key)
 
 
+def blank_fences(lines: list[str]) -> list[str]:
+    """The same lines with every fenced region (and its fences) blanked out.
+
+    Blanked rather than dropped so line numbers still line up with the file, and
+    because a blank line terminates a `**Status:**` block, which is the correct
+    thing for a fence to do to one anyway.
+    """
+    out: list[str] = []
+    fence: str | None = None
+    for line in lines:
+        m = FENCE_RE.match(line)
+        if m:
+            tok = m.group(1)[0] * 3
+            # A closing fence must be the same character as the opening one, so
+            # a ``` inside a ~~~ block does not end it.
+            fence = tok if fence is None else (None if tok == fence else fence)
+            out.append("")
+            continue
+        out.append("" if fence is not None else line)
+    return out
+
+
+def reply_start(lines: list[str]) -> int:
+    """Index of the last reply-section heading, or ``len(lines) - TAIL_LINES``.
+
+    The tail used to be a flat "last 25 lines", on the stated grounds that a
+    reply lives at the end of the file. It does -- but a reply is as long as it
+    needs to be, and 25 lines stopped covering them. In today's dropbox 25 files
+    carry a resolution heading that a 25-line tail cannot see;
+    `b-a-raw-nic-claim-tests-race-...` answers the request at line 123 of 178 and
+    was reported open for six days because of it.
+
+    Taking the heading's own position as the boundary makes the window fit the
+    reply instead of hoping a constant does. The floor keeps the old behaviour
+    for files that have no reply heading, and `min` means this can only ever
+    widen the window, never narrow it below what was read before.
+    """
+    floor = max(0, len(lines) - TAIL_LINES)
+    for i in range(len(lines) - 1, -1, -1):
+        if REPLY_SECTION_RE.match(lines[i]):
+            return min(i, floor)
+    return floor
+
+
 def head_and_tail(path: Path) -> tuple[str, str]:
-    """Return the first and last chunk of a file as two strings.
+    """Return the header region and the reply region of a file as two strings.
 
     Read as UTF-8 with replacement rather than strictly: a request that someone
     pasted a stray byte into should still be classified, not crash the report.
     """
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:  # unreadable file -> treat as open, and say why
         return (f"<<unreadable: {exc}>>", "")
-    return ("\n".join(lines[:HEAD_LINES]), "\n".join(lines[-TAIL_LINES:]))
+    lines = blank_fences(raw)
+    return ("\n".join(lines[:HEAD_LINES]), "\n".join(lines[reply_start(lines) :]))
 
 
 def title_of(head: str, path: Path) -> str:
@@ -226,11 +339,23 @@ def classify(path: Path) -> tuple[bool, str, str]:
     # A blank line between the two halves, so a `**Status:**` at the very end of
     # the head cannot run into the first line of the tail and read as one block.
     both = head + "\n\n" + tail
-    if (verdict := status_verdict(both)) is not None:
+    # Precedence, strongest first: a recognised status word, then a reply
+    # heading, then an unreadable status, then nothing. The middle two used to
+    # be the other way round -- any `**Status:**` block at all returned here,
+    # even one whose wording meant nothing to us -- and that is a
+    # *less*-informative signal outranking a more-informative one. A heading
+    # reading `## Lane A's answer -- RESOLVED` is an unambiguous statement that
+    # the request was answered; "baselined, not fixed" in a header is a
+    # sentence we failed to parse. Preferring the latter is how an answered
+    # request stayed on the queue.
+    verdict = status_verdict(both)
+    if verdict is not None and verdict[2]:
         return (verdict[0], verdict[1], title)
     for pat in DONE_HEADING_PATTERNS:
         if m := pat.search(both):
             return (False, m.group(0).strip(), title)
+    if verdict is not None:
+        return (verdict[0], verdict[1], title)
     return (True, "no status marker", title)
 
 

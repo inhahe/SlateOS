@@ -95753,6 +95753,185 @@ Self-test rung 104 asserts the corrected case in the serial log as well
 (`filelock pid 1O` must name `filelock` and must not contain `epollstat`), so
 the invariant is pinned both statically and at runtime.
 
+---
+
+## `A-A-PUSH-GATE-DELETED-THE-REPOSITORY-IT-WAS-GATING` (lane A, 2026-08-29) — **FIXED 2026-08-29**, published damage
+
+**Status:** FIXED 2026-08-29 (`f0534726e` repair, `31eb8c6bd` root cause,
+`93fb3227b` the same latent bug in two more suites, and a later config repair
+-- see "The residue" below, which is the part that was still broken after this
+entry first said FIXED)
+
+**In short:** a safety check that runs just before `git push` built itself a
+scratch repository to test itself against. It did not get a scratch
+repository — it got *this* one, and its scratch commits landed on `lane-a`
+and were published to `origin/main`. The commit it wrote has a tree
+consisting of one `requests/` directory: as far as those two commits are
+concerned, the entire operating system was deleted. The gate reported
+success throughout, because it had genuinely verified a fixture and the
+fixture was the repository.
+
+### What actually happened
+
+`pre-push` gate 9 runs `check-requests-not-deleted.py --selftest` before
+trusting the checker. The self-test builds a fixture with `git init` /
+`git add -A` / `git commit` in a `tempfile.TemporaryDirectory`, each call
+passing `cwd=<tmp>`.
+
+**`GIT_DIR` outranks both `cwd=` and `git -C`.** And git *exports* `GIT_DIR`
+— along with `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_WORK_TREE`,
+`GIT_QUARANTINE_PATH` and the `GIT_CONFIG_*` family — into the environment of
+every hook. So on the first real invocation, every fixture command operated
+on the repository being pushed:
+
+| Fixture command | What it did to this repository |
+|---|---|
+| `git init` | re-initialised it and set `core.bare=true` on the shared config, which made the `os` integration worktree unusable — `git status` there answered "this operation must be run in a work tree" |
+| `git add -A` | replaced the index with the fixture's three files |
+| `git commit` | wrote `7f6a6b446` ("base") and `71f164f7e` ("delete one, sweep another") onto `lane-a` |
+
+The commit *messages* are what identified it: "base" and "delete one, sweep
+another" are the fixture's own strings, appearing in the history of an OS
+kernel. `git ls-tree 71f164f7e` confirmed it — a single `requests` entry.
+
+Both commits were then pushed to `origin/lane-a` and `origin/main`, because
+the gate passed.
+
+### The repair, and why it is a merge and not a force-push
+
+Force-pushing is forbidden outright here, and the bad tip was already
+published. The fix was to make a commit whose *content* is correct but whose
+first parent is the bad tip, so both refs fast-forward onto it:
+
+```
+git commit-tree "79abf2546^{tree}" -p 71f164f7e -p 79abf2546   # -> f0534726e
+```
+
+Verified with `git diff --stat 79abf2546 f0534726e` (empty — the tree is
+exactly the good one) and `git merge-base --is-ancestor 71f164f7e f0534726e`
+(true — so it fast-forwards). Then a single push updated both refs
+`71f164f7e..f0534726e`. `core.bare` was set back to `false` in `os`.
+
+**The two junk commits remain in `main`'s ancestry, permanently.** They are
+ancestry, not content: no file in the tree reflects them. Removing them would
+require rewriting published history, which needs a force-push. That is the
+price of the no-force-push rule and it is the right trade — but it means a
+`git log` of this repository will always show two commits that appear to
+delete everything, and this entry is the explanation a future reader will
+need.
+
+### Root cause fix
+
+`scripts/gitenv.py` is now the single place that knows which variables bind a
+repository. `clean_env()` for a subprocess that should choose its repository
+by `cwd`/`-C`; `scrub_environ()` for a test harness that should never touch
+the ambient repository at all. It deliberately does **not** drop every
+`GIT_*` — `GIT_EXEC_PATH` is on some installs the only thing telling git
+where its own subcommands live, so a blanket denylist would break git rather
+than redirect it.
+
+### Why the self-test could not have caught this, and what does
+
+A self-test cannot detect that it corrupted the repository it runs from: its
+verdict is a statement about the fixture, and here the fixture *was* the
+repository. Every assertion it made was true. The regression test therefore
+had to be an **outside observer** —
+`scripts/test-check-requests-not-deleted.py` snapshots a sacrificial repo
+(HEAD, branch, refs, `core.bare`, index, log, status), runs the checker
+against it under three hook environments, and diffs the snapshots.
+
+Two things about that test are load-bearing and easy to get wrong:
+
+- **`GIT_DIR` alone is the shape that matters**, because it is what `git
+  push` actually sets, and it is the shape that fails *quietly* — the fixture
+  succeeds and writes commits. Adding `GIT_INDEX_FILE` makes git crash early,
+  so the run is caught by exit code. A test that only covered the loud shape
+  would have proved the least.
+- **The probes must not raise.** The first version called `git` and let
+  failures propagate; against a repository the mutant had just made bare, the
+  snapshot threw and killed the harness with a traceback, losing the other
+  two environments. `_probe()` now returns a sentinel string, so a repository
+  too broken to answer still produces a *diff* rather than a crash.
+
+Every fix was mutation-tested by reverting it individually. Two mutants
+initially escaped, and each escape was a real weakness in the test rather
+than a nuisance: the snapshot-crash above, and an assertion that checked only
+for `"OK"` in the output, which a *foreign* repository satisfies just as well
+— now replaced by comparing the computed merge-base sha in both directions.
+
+### The generalisation, which is the part worth keeping
+
+Two other suites (`test-src-digest.py`, `test-boot-test.py`) build fixture
+repositories the same way. Neither is reachable from a hook today, so neither
+had fired — but "not currently reachable from a hook" is not a property
+either file states, nor one a reviewer can check, and `git bisect run`,
+`git rebase --exec`, `git filter-branch` callbacks and `git submodule
+foreach` export the same variables. Both were fixed anyway, via the shared
+module rather than three copies of a twenty-name denylist.
+
+**The check that would have caught this within seconds:** `git rev-parse
+lane-a` immediately after a push, compared against what was pushed. A push
+gate is the one program guaranteed to run with a repository named in its
+environment, and it is also the one nobody watches.
+
+### The residue: closing the leak did not undo what it had already written
+
+Found later the same day, by running exactly the post-push check recommended
+just above. It printed `core.bare: true` for a repository that is not bare.
+
+The fixture does three things before it commits anything, and through the
+leaked `GIT_DIR` all three landed in the *real* shared config at
+`os/.git/config` rather than in its temporary directory:
+
+| Fixture line | What it wrote into the real config | Effect |
+|---|---|---|
+| `run(tmp, "init", ...)` | `core.bare = true` | the `os` integration worktree stopped being a worktree |
+| `run(tmp, "config", "user.email"/"user.name", ...)` | `[user] selftest <selftest@example.invalid>` | the commit identity of **all three lanes** |
+| `run(tmp, "config", "diff.renames", "false")` | `[diff] renames = false` | rename detection off in every diff and log, everywhere |
+
+Worktrees share one config, so none of this was confined to lane A.
+
+`core.bare` was the loud one: `git status` in `os` answered `fatal: this
+operation must be run in a work tree` and `git worktree list` reported the
+tree as `(bare)`. Nothing was lost -- all 107 top-level entries were present
+and `HEAD` still named `refs/heads/main` -- but `os` is the tree the
+"merge your lane up to `main`" step is performed in, so that step had been
+quietly impossible since the incident.
+
+`user.email` was the quiet one, and therefore the expensive one. **33 commits
+are permanently authored `selftest <selftest@example.invalid>`** -- 16
+reachable from `lane-a`, 9 from `lane-b`, 3 from `lane-c`, 5 from `main`, all
+pushed. The oldest is the fixture's own `base` commit at 22:43:17; every
+commit any lane made afterwards inherited it, including the commits that
+fixed the incident. They cannot be repaired: changing an author rewrites the
+commit, which requires a force-push to published branches. That is the same
+decision already queued for the operator over the two junk commits, and it is
+recorded there rather than duplicated here.
+
+`diff.renames = false` deserves its own note, because the gate's own source
+comment names it as the configuration that "would otherwise turn every sweep
+into a refused push" -- the fixture set the hostile condition it was written
+to simulate, on the real repository, and then the gate went on passing.
+
+Repaired by unsetting the three; the operator's identity resolves again in all
+four worktrees and `os` is a checkout of `main` once more. **The leak itself
+was verified closed rather than assumed:** the self-test was re-run with
+`GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` all pointed at the real
+repository -- the precise conditions of the incident -- and the config hash,
+the ref hashes and `HEAD` were byte-identical afterwards.
+
+**The lesson, which is not the same as the one above.** That one was about a
+check that could not observe its own damage. This one is about what happens
+*after* a fix: closing a leak does not undo what leaked through it. The
+commits were found immediately because a tree with the whole OS missing is
+impossible to miss; the config was not found for another hour because a
+config setting makes no noise at all. So when a bug is found to have written
+to shared persistent state, the fix is only half the work -- the other half is
+diffing that state against what it should be, and *the quiet damage is the
+part that is still there*.
+
+---
+
 ## `B-tar-EVERY-ARCHIVE-RECORDED-THE-OWNER-AS-A-BARE-NUMBER` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** a tar archive records who owns each file twice -- once as a

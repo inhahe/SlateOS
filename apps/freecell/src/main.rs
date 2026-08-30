@@ -2,19 +2,46 @@
 //!
 //! Standard 52-card deck dealt across 8 tableau columns (7,7,7,7,6,6,6,6).
 //! Four free cells for temporary single-card storage, four foundation piles
-//! that build up by suit from Ace to King. Keyboard-driven with Tab/arrow
-//! navigation, Enter/Space to select/place, Z for undo, N for new game.
-//! Catppuccin Mocha themed.
+//! that build up by suit from Ace to King. Every card is dealt face up, so the
+//! whole game is on the table and nothing is hidden from the player.
+//!
+//! Played with either hand: Tab and the arrows move a cursor, Enter or Space
+//! picks a card up and puts it down, Z undoes, N deals a new game, A sends home
+//! every card that is safe to send. A click does the same as moving the cursor
+//! there and pressing Enter, and the controls named along the bottom are
+//! buttons rather than a caption.
+//!
+//! ## What this program was
+//!
+//! `main` was `let _app = FreeCell::new();`. It dealt fifty-two cards across
+//! eight columns and dropped the lot, so no card reached a screen and no key
+//! arrived. The drawing pass took no size and filled a hardcoded 900x800: the
+//! three header readings sat at bare `x` of 200, 340 and 520, the win banner's
+//! three lines were hand-centred at 280, 300 and 270, and a column deeper than
+//! about twenty-six cards ran off the bottom with nothing to tighten it. There
+//! was no pointer handling at all, under a help line advertising six controls.
+//! Twelve blanket `#![allow(...)]` at the top of the file -- `dead_code` among
+//! them -- are what kept a compiler from saying so.
+//!
+//! It now opens a real window, solves the table from the size that window
+//! reports each frame, records a hit box for everything it draws, and answers
+//! keys and clicks through one body the tests drive too.
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{
+    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
 const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
 const SURFACE0: Color = Color::from_hex(0x313244);
 const SURFACE1: Color = Color::from_hex(0x45475A);
 const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
@@ -23,35 +50,53 @@ const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
 const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 const TEAL: Color = Color::from_hex(0x94E2D5);
 const MAUVE: Color = Color::from_hex(0xCBA6F7);
 
 // ── Card display colors ─────────────────────────────────────────────
-const CARD_BG: Color = Color::from_hex(0xCDD6F4);
-const CARD_RED: Color = Color::from_hex(0xF38BA8);
-const CARD_BLACK: Color = Color::from_hex(0x1E1E2E);
-const SELECTED_HIGHLIGHT: Color = Color::from_hex(0x89B4FA);
-const CURSOR_HIGHLIGHT: Color = Color::from_hex(0xF9E2AF);
-const EMPTY_PILE: Color = Color::from_hex(0x313244);
+//
+// Each of these names a *role* -- what the colour is for -- and takes its value
+// from the palette above rather than repeating the hex. Six of the seven were
+// second copies of a palette entry written out again by hand, which is a colour
+// that can drift: retheme the palette and the cards keep the old scheme, with
+// nothing to say they had ever agreed.
+const CARD_BG: Color = TEXT_COLOR;
+const CARD_RED: Color = RED;
+const CARD_BLACK: Color = BASE;
+const SELECTED_HIGHLIGHT: Color = BLUE;
+const CURSOR_HIGHLIGHT: Color = YELLOW;
+const EMPTY_PILE: Color = SURFACE0;
 
-// ── Layout constants ────────────────────────────────────────────────
-const CARD_WIDTH: f32 = 70.0;
-const CARD_HEIGHT: f32 = 100.0;
-const CARD_CORNER: f32 = 6.0;
-const CARD_GAP_X: f32 = 10.0;
-const CASCADE_OFFSET: f32 = 24.0;
-const PADDING: f32 = 16.0;
-const TOP_ROW_Y: f32 = 50.0;
-const TABLEAU_Y: f32 = 175.0;
-const TITLE_FONT_SIZE: f32 = 22.0;
-const CARD_FONT_SIZE: f32 = 16.0;
-const CARD_SUIT_FONT_SIZE: f32 = 20.0;
-const INFO_FONT_SIZE: f32 = 14.0;
-const STATUS_FONT_SIZE: f32 = 16.0;
-const OVERLAY_FONT_SIZE: f32 = 28.0;
+// ── The shape of a card ─────────────────────────────────────────────
+//
+// These are the only fixed numbers left, and none of them is a pixel: they are
+// the *proportions* a card and a table keep at whatever size the window gives
+// them. Everything drawn is one of these times a card width solved from the
+// live window, so widening the window cannot move two things by different
+// amounts. What was here before was fourteen pixel counts -- a 70x100 card at
+// x = 16, a top row at y = 50, a tableau at y = 175 -- which is a picture that
+// fits one window and no other.
+
+/// A card is ten tall for every seven wide, which is close to a real one.
+const CARD_ASPECT: f32 = 10.0 / 7.0;
+/// The gap between two columns, as a share of a card's width.
+const COLUMN_GAP: f32 = 1.0 / 7.0;
+/// A card's corner rounding, as a share of its width.
+const CARD_CORNER: f32 = 6.0 / 70.0;
+/// How far down a card sits from the one it covers, as a share of card height.
+const CASCADE_SHARE: f32 = 0.24;
+/// The tightest that fan may become before the cards are shrunk instead. Below
+/// this the rank in a card's top-left corner is covered by the card over it,
+/// and a cascade whose ranks cannot be read is a cascade that cannot be played.
+const CASCADE_FLOOR: f32 = 0.13;
+/// The strip above the top row that names its two halves, as a share of height.
+const ROW_LABEL_SHARE: f32 = 0.20;
+/// The strip under the foundations holding each pile's count.
+const PILE_COUNT_SHARE: f32 = 0.18;
+/// The gap between the top row and the tableau.
+const ROW_GAP_SHARE: f32 = 0.30;
 
 /// Number of tableau columns.
 const TABLEAU_COLS: usize = 8;
@@ -62,6 +107,450 @@ const DEEP_COLUMNS: usize = 4;
 const FREE_CELL_COUNT: usize = 4;
 /// Number of foundation piles.
 const FOUNDATION_COUNT: usize = 4;
+/// The highest free cell index, for clamping a cursor into that row.
+const LAST_FREE_CELL: usize = FREE_CELL_COUNT.saturating_sub(1);
+/// The highest tableau column index, for clamping a cursor into that row.
+const LAST_TABLEAU_COL: usize = TABLEAU_COLS.saturating_sub(1);
+
+/// The window the game asks for. Nine card widths across is the table itself,
+/// and the height is what a seven-card cascade needs under the top row.
+const WINDOW_WIDTH: f32 = 900.0;
+const WINDOW_HEIGHT: f32 = 800.0;
+
+// ── What the window can be asked about ──────────────────────────────
+
+/// Everything the drawing pass records a hit box for.
+///
+/// The same list serves the player and the tests: a click is answered by
+/// looking up what was drawn under it, so a thing a test can find is a thing a
+/// player can reach, and a thing with no hit box is a thing neither can.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// The strip along the top holding the title and the two readings.
+    Header,
+    Title,
+    Moves,
+    Progress,
+    /// The table between the header and the footer.
+    Board,
+    /// The caption over the free cells.
+    FreeCellLabel,
+    /// The caption over the foundations.
+    FoundationLabel,
+    /// A free cell, by index, whether or not it holds a card.
+    FreeCell(u8),
+    /// A foundation pile, by suit index, whether or not it holds a card.
+    Foundation(u8),
+    /// The count under a foundation.
+    PileCount(u8),
+    /// A tableau column's whole reachable area, including the empty space
+    /// below its cards -- an empty column has to be clickable to be played to.
+    Column(u8),
+    /// One card of a tableau column, by column and by depth from the bottom.
+    Card(u8, u8),
+    /// The strip along the bottom holding the controls.
+    Footer,
+    /// One control on that strip, by its index in [`Control::ALL`].
+    Control(u8),
+    /// The reading of how many cells and columns are still empty.
+    Room,
+    /// The sheet over the table when the game is won.
+    Overlay,
+    OverlayTitle,
+    OverlayMoves,
+    /// The line of the sheet that says a new game can be dealt.
+    NewGame,
+}
+
+/// A control named along the bottom of the window.
+///
+/// One list, walked by the drawing pass and by the click handler alike. The
+/// help line it replaces was a caption -- it named six controls and none of
+/// them could be clicked, because there was no pointer handling at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Control {
+    Free,
+    Undo,
+    Auto,
+    NewGame,
+}
+
+impl Control {
+    /// Every control, in the order they are drawn.
+    const ALL: [Self; 4] = [Self::Free, Self::Undo, Self::Auto, Self::NewGame];
+
+    /// What the strip says this control does.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Free => "F  Free",
+            Self::Undo => "Z  Undo",
+            Self::Auto => "A  Auto",
+            Self::NewGame => "N  New",
+        }
+    }
+
+    /// The key this control names.
+    ///
+    /// A click runs the key, rather than calling the same method the key calls.
+    /// A button cannot then do something its own caption does not say, and
+    /// cannot get past a rule the key obeys -- a won board refuses undo from
+    /// either side because there is only one place the refusal lives.
+    const fn key(self) -> Key {
+        match self {
+            Self::Free => Key::F,
+            Self::Undo => Key::Z,
+            Self::Auto => Key::A,
+            Self::NewGame => Key::N,
+        }
+    }
+}
+
+// ── Layout ──────────────────────────────────────────────────────────
+
+/// The bands a window is divided into, solved from the size it reports.
+///
+/// Every number here is a share of the live window. What it replaces placed the
+/// header's three readings at bare `x` of 200, 340 and 520 -- which is where
+/// they do not overlap only at one window width and one font size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Layout {
+    /// The whole window.
+    window: Rect,
+    /// The title and the readings along the top.
+    header: Rect,
+    /// What is left for the table.
+    body: Rect,
+    /// The controls along the bottom.
+    footer: Rect,
+    /// Font size for a header reading.
+    head: f32,
+    /// Font size for a footer control and a sheet's body line.
+    font: f32,
+    /// Font size for a sheet's title.
+    title: f32,
+    /// Font size for a caption or a pile count.
+    small: f32,
+    /// The gap between bands, and the margin at the window's edge.
+    pad: f32,
+}
+
+impl Layout {
+    /// Solve the bands for a window of this size.
+    #[must_use]
+    pub fn new(w: f32, h: f32) -> Self {
+        let w = w.max(0.0);
+        let h = h.max(0.0);
+        // Held to half the shorter side as well as to the clamp: a floor of two
+        // pixels put the bands' left edge at x = 2 in a window one pixel wide,
+        // which is a band starting outside the window it is in.
+        let pad = (w.min(h) * 0.014).clamp(2.0, 14.0).min(w.min(h) / 2.0);
+        let head = (h / 40.0).clamp(9.0, 22.0);
+        let font = (h / 50.0).clamp(8.0, 16.0);
+        let title = (h / 22.0).clamp(14.0, 40.0);
+        let small = (h / 64.0).clamp(7.0, 13.0);
+
+        // Shares of `h`, each held to what there is: a band taller than the
+        // window would leave the next one a negative height, and a rectangle of
+        // negative height draws inside out.
+        let header_h = (h * 0.06).clamp(20.0, 54.0).min(h);
+        let footer_h = (h * 0.045).clamp(14.0, 36.0).min(h);
+        let header = Rect::new(
+            pad,
+            pad,
+            (w - pad * 2.0).max(0.0),
+            (header_h - pad).max(0.0),
+        );
+        let body_y = (header.bottom() + pad).min(h);
+        let footer_y = (h - footer_h).max(body_y);
+        Self {
+            window: Rect::new(0.0, 0.0, w, h),
+            header,
+            body: Rect::new(
+                pad,
+                body_y,
+                (w - pad * 2.0).max(0.0),
+                (footer_y - body_y - pad).max(0.0),
+            ),
+            footer: Rect::new(
+                pad,
+                footer_y,
+                (w - pad * 2.0).max(0.0),
+                (h - footer_y - pad).max(0.0),
+            ),
+            head,
+            font,
+            title,
+            small,
+            pad,
+        }
+    }
+}
+
+/// Where the eight columns go, and how large a card is drawn.
+///
+/// One number is solved -- `card_w` -- and every position, gap and fan step
+/// follows from it, so the drawing pass and the hit test cannot disagree about
+/// where a card is. Eight columns and seven gaps of a seventh of a card come to
+/// exactly nine card widths, which is what fixes `card_w` from the width.
+///
+/// The height matters too, and used not to: a column deeper than about
+/// twenty-six cards ran off the bottom of the fixed 800-tall board with nothing
+/// to tighten it, and the cards below the fold could be neither seen nor
+/// reached. The fan is tightened first, down to [`CASCADE_FLOOR`], and only
+/// then is the card itself made smaller -- shrinking the card costs every
+/// column, tightening the fan costs only the deep ones.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Table {
+    /// The area the table was fitted into.
+    area: Rect,
+    /// A card's width.
+    card_w: f32,
+    /// A card's height.
+    card_h: f32,
+    /// Left edge to left edge between neighbouring columns.
+    step: f32,
+    /// Left edge of column zero.
+    left: f32,
+    /// Top of the free cells and the foundations.
+    top_row_y: f32,
+    /// Top of the tableau's first card.
+    tableau_y: f32,
+    /// How far down each further card of a cascade sits.
+    cascade: f32,
+}
+
+impl Table {
+    /// Fit a table `deepest` cards deep into `area`.
+    #[must_use]
+    pub fn new(area: Rect, deepest: usize) -> Self {
+        // A backwards area is not reachable through `Layout`, which clamps its
+        // bands, but `Table::new` is callable on its own and documents no
+        // precondition, so a caller that hands it one gets an empty table
+        // rather than a table drawn inside out.
+        let aw = area.w.max(0.0);
+        let ah = area.h.max(0.0);
+
+        // Everything but the fan, measured in card *heights*, so the two bounds
+        // can be compared in one unit.
+        let fixed = ROW_LABEL_SHARE + 1.0 + PILE_COUNT_SHARE + ROW_GAP_SHARE + 1.0;
+        // The deepest column has `deepest - 1` cards fanned below its first.
+        let steps = f32_from_usize(deepest.saturating_sub(1));
+        let tallest = fixed + CASCADE_FLOOR * steps;
+
+        // The width bound, and the height bound at the tightest legible fan.
+        let by_width = aw / 9.0;
+        let by_height = ah / (CARD_ASPECT * tallest);
+        let card_w = by_width.min(by_height).max(0.0);
+        let card_h = card_w * CARD_ASPECT;
+
+        // Spend whatever height is left over on loosening the fan back towards
+        // its natural step -- when the board is width-bound, which is the usual
+        // case, this puts it straight back at `CASCADE_SHARE`.
+        let used = card_h * fixed;
+        let spare = (ah - used).max(0.0);
+        let natural = card_h * CASCADE_SHARE;
+        let cascade = if steps > 0.0 {
+            (spare / steps).min(natural)
+        } else {
+            natural
+        };
+
+        let gap = card_w * COLUMN_GAP;
+        let step = card_w + gap;
+        // Centred in whatever it was given: the leftover is margin on both
+        // sides rather than a band of nothing down one.
+        let left = area.x + (aw - card_w * 9.0).max(0.0) / 2.0;
+        let top_row_y = area.y + card_h * ROW_LABEL_SHARE;
+        let tableau_y = top_row_y + card_h * (1.0 + PILE_COUNT_SHARE + ROW_GAP_SHARE);
+        Self {
+            area,
+            card_w,
+            card_h,
+            step,
+            left,
+            top_row_y,
+            tableau_y,
+            cascade,
+        }
+    }
+
+    /// The left edge of the slot in position `slot` of a row of eight.
+    fn slot_x(&self, slot: usize) -> f32 {
+        self.left + f32_from_usize(slot) * self.step
+    }
+
+    /// The box a free cell or a foundation occupies.
+    fn top_slot(&self, slot: usize) -> Rect {
+        Rect::new(self.slot_x(slot), self.top_row_y, self.card_w, self.card_h)
+    }
+
+    /// The box the `depth`-th card of column `col` occupies.
+    fn card_at(&self, col: usize, depth: usize) -> Rect {
+        Rect::new(
+            self.slot_x(col),
+            self.tableau_y + f32_from_usize(depth) * self.cascade,
+            self.card_w,
+            self.card_h,
+        )
+    }
+
+    /// The whole reachable area of column `col`: its cards and the empty space
+    /// under them, down to the bottom of the table.
+    ///
+    /// The empty part matters -- a click below the last card of a column is a
+    /// click on that column, and an empty column is only playable to because
+    /// its box is still there when it holds nothing.
+    fn column(&self, col: usize) -> Rect {
+        Rect::new(
+            self.slot_x(col),
+            self.tableau_y,
+            self.card_w,
+            (self.area.bottom() - self.tableau_y).max(self.card_h),
+        )
+    }
+
+    /// The corner rounding a card of this size gets.
+    fn corner(&self) -> f32 {
+        self.card_w * CARD_CORNER
+    }
+}
+
+// ── Cursor helpers ──────────────────────────────────────────────────
+
+/// The index before `i` in a ring of `len`, wrapping round at the start.
+///
+/// `checked_sub` rather than `if i > 0 { i - 1 } else { len - 1 }`, which the
+/// three zones each wrote out for themselves: three copies of one rule, and
+/// the `len - 1` in each of them underflows on a zone of length zero.
+fn wrap_back(i: usize, len: usize) -> usize {
+    i.checked_sub(1).unwrap_or_else(|| len.saturating_sub(1))
+}
+
+/// The index after `i` in a ring of `len`, wrapping round at the end.
+fn wrap_forward(i: usize, len: usize) -> usize {
+    let next = i.saturating_add(1);
+    if next >= len { 0 } else { next }
+}
+
+// ── Drawing helpers ─────────────────────────────────────────────────
+
+/// A count as a float, for the arithmetic that places things.
+///
+/// Eight columns and fifty-two cards are far inside the range an `f32` holds
+/// exactly, and the cast is named here so the one `expect` covers every use.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a column index and a card depth are small"
+)]
+fn f32_from_usize(v: usize) -> f32 {
+    v as f32
+}
+
+/// The same for a window size handed over as a whole number of pixels.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a window is not millions of pixels across"
+)]
+fn f32_from_u32(v: u32) -> f32 {
+    v as f32
+}
+
+/// A small index as a byte, for naming a hit box.
+///
+/// Saturating rather than wrapping: eight columns and thirteen cards cannot
+/// reach 255, but a `Card(0, 0)` invented by an overflow would be a hit box
+/// claiming to be a card that is somewhere else.
+fn byte(v: usize) -> u8 {
+    u8::try_from(v).unwrap_or(u8::MAX)
+}
+
+/// Fill a rectangle, if there is one to fill.
+///
+/// A rectangle of zero or negative size is not a small picture but a backwards
+/// one, and the renderer would draw it inside out. Windows this program can be
+/// given -- one pixel tall, or nothing at all while a resize is in flight --
+/// produce them, so the guard is on the one place that emits fills rather than
+/// repeated at each of the thirty call sites.
+fn fill(f: &mut Frame<Target>, r: Rect, color: Color, corner_radii: CornerRadii) {
+    if r.w <= 0.0 || r.h <= 0.0 {
+        return;
+    }
+    f.push(RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii,
+    });
+}
+
+/// Outline a rectangle, under the same guard as [`fill`].
+fn stroke(
+    f: &mut Frame<Target>,
+    r: Rect,
+    color: Color,
+    line_width: f32,
+    corner_radii: CornerRadii,
+) {
+    if r.w <= 0.0 || r.h <= 0.0 {
+        return;
+    }
+    f.push(RenderCommand::StrokeRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        line_width,
+        corner_radii,
+    });
+}
+
+/// Draw a line of text with its left edge at `x`, and answer the box it fills.
+///
+/// The box is measured, not guessed, so a hit box taken from it is the width of
+/// the words that were actually drawn.
+fn label(
+    f: &mut Frame<Target>,
+    x: f32,
+    y: f32,
+    s: &str,
+    color: Color,
+    size: f32,
+    weight: FontWeightHint,
+) -> Rect {
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: s.to_string(),
+        color,
+        font_size: size,
+        font_weight: weight,
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+    Rect::new(
+        x,
+        y,
+        text::measure(s, size, weight),
+        text::line_height(size, weight),
+    )
+}
+
+/// The same, centred on `cx` by measuring the string.
+fn centred(
+    f: &mut Frame<Target>,
+    cx: f32,
+    y: f32,
+    s: &str,
+    color: Color,
+    size: f32,
+    weight: FontWeightHint,
+) -> Rect {
+    let w = text::measure(s, size, weight);
+    label(f, cx - w / 2.0, y, s, color, size, weight)
+}
 
 // ── Randomness ──────────────────────────────────────────────────
 //
@@ -86,7 +575,7 @@ const FOUNDATION_COUNT: usize = 4;
 //
 // The shuffle itself was already the correct downward Fisher-Yates. Only the
 // reduction was wrong.
-use randrange::{RandomSource, SeededRng};
+use randrange::{RandomSource, SeededRng, seed_from_system};
 
 // ── Card types ──────────────────────────────────────────────────────
 
@@ -193,26 +682,6 @@ impl Rank {
     fn value(self) -> u8 {
         self as u8
     }
-
-    /// Build a Rank from a numeric value (1..=13).
-    fn from_value(v: u8) -> Option<Rank> {
-        match v {
-            1 => Some(Self::Ace),
-            2 => Some(Self::Two),
-            3 => Some(Self::Three),
-            4 => Some(Self::Four),
-            5 => Some(Self::Five),
-            6 => Some(Self::Six),
-            7 => Some(Self::Seven),
-            8 => Some(Self::Eight),
-            9 => Some(Self::Nine),
-            10 => Some(Self::Ten),
-            11 => Some(Self::Jack),
-            12 => Some(Self::Queen),
-            13 => Some(Self::King),
-            _ => None,
-        }
-    }
 }
 
 /// A playing card with suit and rank.
@@ -230,13 +699,19 @@ impl Card {
     /// Whether this card can stack on top of `below` in a tableau column.
     /// Must be opposite color and one rank lower.
     fn can_stack_on_tableau(self, below: Card) -> bool {
-        self.suit.is_red() != below.suit.is_red() && self.rank.value() + 1 == below.rank.value()
+        self.suit.is_red() != below.suit.is_red()
+            && self.rank.value().checked_add(1) == Some(below.rank.value())
     }
 
     /// Whether this card can be placed on a foundation pile whose
     /// current top card has value `foundation_top_value` (0 if empty).
+    ///
+    /// The successor is taken with `checked_add` and compared as an `Option`
+    /// rather than `== top + 1`. `top` is a `u8` that the caller supplies; the
+    /// bare form wraps 255 to 0 and would call an Ace placeable on it, which is
+    /// the shape of bug that only shows up on input the tests do not deal.
     fn can_place_on_foundation(self, foundation_top_value: u8) -> bool {
-        self.rank.value() == foundation_top_value + 1
+        foundation_top_value.checked_add(1) == Some(self.rank.value())
     }
 }
 
@@ -438,6 +913,17 @@ impl GameState {
         self.tableau.get(col).and_then(|t| t.last().copied())
     }
 
+    /// Record that one move happened.
+    ///
+    /// Every move path counts through here rather than writing `move_count +=
+    /// 1` for itself, so "what counts as a move" is one decision in one place
+    /// instead of eight copies free to disagree. Saturating, because the
+    /// counter is a reading on the header: a game long enough to overflow a
+    /// `u32` should show a stuck number, not panic.
+    fn count_move(&mut self) {
+        self.move_count = self.move_count.saturating_add(1);
+    }
+
     /// Count empty free cells.
     fn empty_free_cell_count(&self) -> usize {
         self.free_cells.iter().filter(|c| c.is_none()).count()
@@ -508,7 +994,7 @@ impl GameState {
             to: MoveLocation::Tableau(col),
             player: true,
         });
-        self.move_count += 1;
+        self.count_move();
         true
     }
 
@@ -533,7 +1019,7 @@ impl GameState {
             to: MoveLocation::Foundation(fidx),
             player: true,
         });
-        self.move_count += 1;
+        self.count_move();
         self.check_win();
         true
     }
@@ -562,7 +1048,7 @@ impl GameState {
             to: MoveLocation::FreeCell(fc_idx),
             player: true,
         });
-        self.move_count += 1;
+        self.count_move();
         true
     }
 
@@ -589,7 +1075,7 @@ impl GameState {
             to: MoveLocation::FreeCell(fc_idx),
             player: true,
         });
-        self.move_count += 1;
+        self.count_move();
         true
     }
 
@@ -615,7 +1101,7 @@ impl GameState {
             to: MoveLocation::Foundation(fidx),
             player: true,
         });
-        self.move_count += 1;
+        self.count_move();
         self.check_win();
         true
     }
@@ -646,7 +1132,7 @@ impl GameState {
             to: MoveLocation::Tableau(to_col),
             player: true,
         });
-        self.move_count += 1;
+        self.count_move();
         true
     }
 
@@ -676,7 +1162,7 @@ impl GameState {
             to: MoveLocation::FreeCell(to),
             player: true,
         });
-        self.move_count += 1;
+        self.count_move();
         true
     }
 
@@ -695,13 +1181,39 @@ impl GameState {
         }
         // The card is safe if both opposite-color suits have at least (rank - 1)
         // on their foundations.
-        let needed = card.rank.value() - 1;
+        let needed = card.rank.value().saturating_sub(1);
         let is_red = card.suit.is_red();
         for &s in &Suit::ALL {
             if s.is_red() != is_red && self.foundation_top_value(s.index()) < needed {
                 return false;
             }
         }
+        true
+    }
+
+    /// Send `card` home from `from`, if it belongs there and is safe to send.
+    ///
+    /// `player` says whether this step is one the player pressed for; undo
+    /// stops on those and walks past the rest.
+    ///
+    /// The auto-run's two loops used to write this out twice, each with four
+    /// bare index expressions -- and in each copy the card left its pile on the
+    /// line *before* the foundation was reached, so an index the arrays did not
+    /// have would have taken the card off the board and not put it anywhere.
+    /// Here the destination is confirmed first, and both loops share the one
+    /// copy, so the rule for what may go home is stated once.
+    fn send_home(&mut self, from: MoveLocation, card: Card, player: bool) -> bool {
+        let fidx = card.suit.index();
+        if !card.can_place_on_foundation(self.foundation_top_value(fidx))
+            || !self.is_safe_to_auto_move(card)
+            || self.foundations.get(fidx).is_none()
+            || self.take_card_from(from).is_none()
+        {
+            return false;
+        }
+        let to = MoveLocation::Foundation(fidx);
+        self.put_card_at(to, card);
+        self.undo_stack.push(UndoStep { from, to, player });
         true
     }
 
@@ -712,51 +1224,37 @@ impl GameState {
     /// and not something this can work out for itself, because the run looks
     /// identical either way -- the difference is only in what the player pressed.
     fn auto_move_to_foundations(&mut self, run: AutoRun) -> usize {
-        let mut total = 0;
+        let mut total: usize = 0;
         loop {
             let mut moved_any = false;
 
             // Check free cells.
             for fc_idx in 0..FREE_CELL_COUNT {
-                if let Some(card) = self.free_cells[fc_idx] {
-                    let fidx = card.suit.index();
-                    if card.can_place_on_foundation(self.foundation_top_value(fidx))
-                        && self.is_safe_to_auto_move(card)
-                    {
-                        self.free_cells[fc_idx] = None;
-                        self.foundations[fidx].push(card);
-                        self.undo_stack.push(UndoStep {
-                            from: MoveLocation::FreeCell(fc_idx),
-                            to: MoveLocation::Foundation(fidx),
-                            // Only the first card of a run the player asked for
-                            // is the player's step; everything after it -- and
-                            // every card of a run that merely followed a
-                            // placement -- came free with that one press.
-                            player: run == AutoRun::Asked && total == 0,
-                        });
-                        total += 1;
-                        moved_any = true;
-                    }
+                let Some(card) = self.free_cell(fc_idx) else {
+                    continue;
+                };
+                if self.send_home(
+                    MoveLocation::FreeCell(fc_idx),
+                    card,
+                    run == AutoRun::Asked && total == 0,
+                ) {
+                    total = total.saturating_add(1);
+                    moved_any = true;
                 }
             }
 
             // Check tableau tops.
             for col in 0..TABLEAU_COLS {
-                if let Some(card) = self.tableau_top(col) {
-                    let fidx = card.suit.index();
-                    if card.can_place_on_foundation(self.foundation_top_value(fidx))
-                        && self.is_safe_to_auto_move(card)
-                    {
-                        self.tableau[col].pop();
-                        self.foundations[fidx].push(card);
-                        self.undo_stack.push(UndoStep {
-                            from: MoveLocation::Tableau(col),
-                            to: MoveLocation::Foundation(fidx),
-                            player: run == AutoRun::Asked && total == 0,
-                        });
-                        total += 1;
-                        moved_any = true;
-                    }
+                let Some(card) = self.tableau_top(col) else {
+                    continue;
+                };
+                if self.send_home(
+                    MoveLocation::Tableau(col),
+                    card,
+                    run == AutoRun::Asked && total == 0,
+                ) {
+                    total = total.saturating_add(1);
+                    moved_any = true;
                 }
             }
 
@@ -769,7 +1267,7 @@ impl GameState {
             // home, which is the same rule every other press follows. A run that
             // followed a placement is already counted by that placement.
             if run == AutoRun::Asked {
-                self.move_count += 1;
+                self.count_move();
             }
             self.check_win();
         }
@@ -854,13 +1352,44 @@ impl GameState {
 
     // ── Input handling ──────────────────────────────────────────────
 
-    /// Handle a key event.
-    fn handle_key(&mut self, key: Key, _modifiers: Modifiers) {
+    /// Handle a key press, and say whether the game did anything with it.
+    ///
+    /// The answer is the whole point of the return value: the window redraws on
+    /// `Consumed` and stays still on `Ignored`, so a key this does not know
+    /// costs nothing. It used to return `()`, which meant every keystroke that
+    /// reached the program looked exactly like every one that did not.
+    /// Park the top card of the focused column in the first free cell.
+    ///
+    /// `try_tableau_to_freecell` was written, tested and reachable by nothing:
+    /// no key ran it and there was no pointer handling at all, so the one move
+    /// freecell is named after could only be made the long way, by selecting a
+    /// card and then selecting a cell. A move the game implements and the
+    /// player cannot make is the same as a move the game does not have.
+    ///
+    /// The cursor has to be on a column for this to mean anything -- a free
+    /// cell or a foundation has no card to send to a cell -- so from either of
+    /// those the press does nothing rather than guessing a column.
+    fn park_focused_column(&mut self) {
+        if let FocusArea::Tableau(col) = self.focus {
+            // `try_tableau_to_freecell` counts the move itself, as every
+            // `try_*` does; counting it again here would make one press read
+            // as two.
+            if self.try_tableau_to_freecell(col) {
+                self.selection = None;
+                self.auto_move_to_foundations(AutoRun::Followed);
+            }
+        }
+    }
+
+    fn handle_key(&mut self, key: Key, _modifiers: Modifiers) -> EventResult {
+        // A won board takes only a new game. Every other key is still answered
+        // -- the sheet is up, and a key that does nothing is not a key that
+        // should fall through to the board underneath it.
         if self.won {
             if key == Key::N {
-                self.new_game()
+                self.new_game();
             }
-            return;
+            return EventResult::Consumed;
         }
 
         match key {
@@ -878,8 +1407,21 @@ impl GameState {
             Key::A => {
                 self.auto_move_to_foundations(AutoRun::Asked);
             }
-            _ => {}
+            Key::F => self.park_focused_column(),
+            _ => return EventResult::Ignored,
         }
+        EventResult::Consumed
+    }
+
+    /// Move the cursor to `focus` and press Enter there.
+    ///
+    /// What a click does, expressed as what the keyboard already does. A click
+    /// that reached into the move functions directly would be a second set of
+    /// rules for the same move, and the two would drift.
+    fn focus_and_act(&mut self, focus: FocusArea) -> EventResult {
+        self.focus = focus;
+        self.activate();
+        EventResult::Consumed
     }
 
     /// Cycle focus between zones: free cells -> foundations -> tableau.
@@ -891,54 +1433,42 @@ impl GameState {
         };
     }
 
-    /// Navigate left within the current zone.
+    /// Navigate left within the current zone, wrapping round.
     fn navigate_left(&mut self) {
         self.focus = match self.focus {
-            FocusArea::FreeCell(i) => {
-                if i > 0 {
-                    FocusArea::FreeCell(i - 1)
-                } else {
-                    FocusArea::FreeCell(FREE_CELL_COUNT - 1)
-                }
-            }
-            FocusArea::Foundation(i) => {
-                if i > 0 {
-                    FocusArea::Foundation(i - 1)
-                } else {
-                    FocusArea::Foundation(FOUNDATION_COUNT - 1)
-                }
-            }
-            FocusArea::Tableau(i) => {
-                if i > 0 {
-                    FocusArea::Tableau(i - 1)
-                } else {
-                    FocusArea::Tableau(TABLEAU_COLS - 1)
-                }
-            }
+            FocusArea::FreeCell(i) => FocusArea::FreeCell(wrap_back(i, FREE_CELL_COUNT)),
+            FocusArea::Foundation(i) => FocusArea::Foundation(wrap_back(i, FOUNDATION_COUNT)),
+            FocusArea::Tableau(i) => FocusArea::Tableau(wrap_back(i, TABLEAU_COLS)),
         };
     }
 
-    /// Navigate right within the current zone.
+    /// Navigate right within the current zone, wrapping round.
     fn navigate_right(&mut self) {
         self.focus = match self.focus {
-            FocusArea::FreeCell(i) => FocusArea::FreeCell((i + 1) % FREE_CELL_COUNT),
-            FocusArea::Foundation(i) => FocusArea::Foundation((i + 1) % FOUNDATION_COUNT),
-            FocusArea::Tableau(i) => FocusArea::Tableau((i + 1) % TABLEAU_COLS),
+            FocusArea::FreeCell(i) => FocusArea::FreeCell(wrap_forward(i, FREE_CELL_COUNT)),
+            FocusArea::Foundation(i) => FocusArea::Foundation(wrap_forward(i, FOUNDATION_COUNT)),
+            FocusArea::Tableau(i) => FocusArea::Tableau(wrap_forward(i, TABLEAU_COLS)),
         };
     }
 
     /// Navigate up to the top row from tableau.
+    ///
+    /// The top row is the free cells followed by the foundations, so the column
+    /// a cursor rises into is a free cell while its index is below the number of
+    /// free cells and a foundation after that. Both places used to say `4`,
+    /// which is that count written as a literal: change `FREE_CELL_COUNT` and
+    /// the cursor would have gone to the wrong half of a row it still drew
+    /// correctly.
     fn navigate_up(&mut self) {
         self.focus = match self.focus {
             FocusArea::Tableau(i) => {
-                // Top row: left 4 = free cells, right 4 = foundations.
-                if i < 4 {
+                if i < FREE_CELL_COUNT {
                     FocusArea::FreeCell(i)
                 } else {
-                    FocusArea::Foundation(i - 4)
+                    FocusArea::Foundation(i.saturating_sub(FREE_CELL_COUNT))
                 }
             }
-            FocusArea::Foundation(i) => FocusArea::FreeCell(i.min(FREE_CELL_COUNT - 1)),
+            FocusArea::Foundation(i) => FocusArea::FreeCell(i.min(LAST_FREE_CELL)),
             // Named rather than `other => other`: a wildcard here matches any
             // zone added to `FocusArea` later, so a new zone would silently
             // have no `Up` at all instead of failing to compile.
@@ -949,8 +1479,10 @@ impl GameState {
     /// Navigate down to tableau from the top row.
     fn navigate_down(&mut self) {
         self.focus = match self.focus {
-            FocusArea::FreeCell(i) => FocusArea::Tableau(i.min(TABLEAU_COLS - 1)),
-            FocusArea::Foundation(i) => FocusArea::Tableau((i + 4).min(TABLEAU_COLS - 1)),
+            FocusArea::FreeCell(i) => FocusArea::Tableau(i.min(LAST_TABLEAU_COL)),
+            FocusArea::Foundation(i) => {
+                FocusArea::Tableau(i.saturating_add(FREE_CELL_COUNT).min(LAST_TABLEAU_COL))
+            }
             FocusArea::Tableau(i) => FocusArea::Tableau(i),
         };
     }
@@ -1020,416 +1552,617 @@ impl GameState {
 
     // ── Rendering ───────────────────────────────────────────────────
 
-    /// Calculate the x position of a column for the top row (free cells + foundations).
-    fn top_row_x(slot: usize) -> f32 {
-        PADDING + slot as f32 * (CARD_WIDTH + CARD_GAP_X)
+    /// Draw one frame at the size the window reports, recording where each
+    /// thing landed.
+    ///
+    /// Everything is solved from `w` and `h` on the way through, so nothing
+    /// here remembers where it put something last frame and there is no second
+    /// copy of the layout for a hit test to disagree with. What it replaces
+    /// took no size at all and filled a fixed 900x800.
+    fn frame(&self, w: f32, h: f32) -> Frame<Target> {
+        let l = Layout::new(w, h);
+        let t = Table::new(l.body, self.deepest_column());
+        let mut f = Frame::new(w, h);
+
+        // Everything is drawn inside the window. Without this a reading too
+        // wide for a narrow window spilled past the edge, and a zero-sized
+        // window still recorded a clickable `Press N` at its centre -- a
+        // control in a window with no pixels to show it.
+        f.clip(l.window);
+        fill(&mut f, l.window, BASE, CornerRadii::ZERO);
+        self.draw_header(&mut f, &l);
+
+        // The table's own box goes down before anything on it, so a card drawn
+        // over it answers a hit test first.
+        f.hit(Target::Board, l.body);
+        f.clip(l.body);
+        self.draw_top_row(&mut f, &l, &t);
+        self.draw_tableau(&mut f, &t);
+        f.unclip();
+
+        self.draw_footer(&mut f, &l);
+        if self.won {
+            self.draw_win_sheet(&mut f, &l);
+        }
+        f.unclip();
+        f
     }
 
-    /// Calculate the x position of a tableau column.
-    fn tableau_col_x(col: usize) -> f32 {
-        PADDING + col as f32 * (CARD_WIDTH + CARD_GAP_X)
+    /// The title and the two readings along the top, each placed by measuring
+    /// it rather than by a hardcoded `x` of 200, 340 and 520.
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.header, MANTLE, CornerRadii::all(l.pad * 0.5));
+        f.hit(Target::Header, l.header);
+        if l.header.is_empty() {
+            return;
+        }
+        // A reading too wide for the band is cut off at the band rather than
+        // written across the table below it.
+        f.clip(l.header);
+        let inner = l.pad.max(2.0);
+        let bold = FontWeightHint::Bold;
+        let regular = FontWeightHint::Regular;
+        let y = l.header.y + (l.header.h - text::line_height(l.head, bold)) / 2.0;
+
+        let r = label(f, l.header.x + inner, y, "FreeCell", LAVENDER, l.head, bold);
+        f.hit(Target::Title, r);
+
+        let moves = format!("Moves: {}", self.move_count);
+        let r = centred(f, l.header.centre().0, y, &moves, SUBTEXT0, l.head, regular);
+        f.hit(Target::Moves, r);
+
+        // Right-aligned by measuring the string, so it stays against the right
+        // edge when the count reaches two digits and when the window is resized.
+        let done = format!("Foundations: {}/52", self.foundation_total());
+        let width = text::measure(&done, l.head, regular);
+        let r = label(
+            f,
+            l.header.right() - inner - width,
+            y,
+            &done,
+            if self.foundation_total() == 52 {
+                GREEN
+            } else {
+                TEAL
+            },
+            l.head,
+            regular,
+        );
+        f.hit(Target::Progress, r);
+        f.unclip();
     }
 
-    /// Render the complete game.
-    fn render(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::with_capacity(256);
+    /// The four free cells and the four foundations, with the caption over each
+    /// half and a count under each pile.
+    fn draw_top_row(&self, f: &mut Frame<Target>, l: &Layout, t: &Table) {
+        let regular = FontWeightHint::Regular;
+        // The caption sits in the strip above the row, its bottom edge on the
+        // row's top edge, so it cannot overlap the cards however tall the font.
+        let cap_y = (t.top_row_y - text::line_height(l.small, regular)).max(t.area.y);
+        let r = label(
+            f,
+            t.slot_x(0),
+            cap_y,
+            "Free Cells",
+            SUBTEXT0,
+            l.small,
+            regular,
+        );
+        f.hit(Target::FreeCellLabel, r);
+        let r = label(
+            f,
+            t.slot_x(FREE_CELL_COUNT),
+            cap_y,
+            "Foundations",
+            SUBTEXT0,
+            l.small,
+            regular,
+        );
+        f.hit(Target::FoundationLabel, r);
 
-        // Background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: 900.0,
-            height: 800.0,
-            color: BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
+        for idx in 0..FREE_CELL_COUNT {
+            let rect = t.top_slot(idx);
+            f.hit(Target::FreeCell(byte(idx)), rect);
+            let focused = self.focus == FocusArea::FreeCell(idx);
+            let selected = self.selection == Some(Selection::FreeCell(idx));
+            match self.free_cell(idx) {
+                Some(card) => self.draw_card(f, card, rect, t, focused, selected),
+                None => draw_empty(f, rect, t, focused),
+            }
+        }
 
-        // Title.
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: 10.0,
-            text: String::from("FreeCell"),
-            color: LAVENDER,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        for idx in 0..FOUNDATION_COUNT {
+            let rect = t.top_slot(idx.saturating_add(FREE_CELL_COUNT));
+            f.hit(Target::Foundation(byte(idx)), rect);
+            let focused = self.focus == FocusArea::Foundation(idx);
+            match self.foundation_top(idx) {
+                Some(card) => self.draw_card(f, card, rect, t, focused, false),
+                None => {
+                    draw_empty(f, rect, t, focused);
+                    // The suit a pile is waiting for, ghosted on the empty slot.
+                    if let Some(suit) = Suit::ALL.get(idx) {
+                        let (cx, cy) = rect.centre();
+                        centred(
+                            f,
+                            cx,
+                            cy - text::line_height(t.card_w * 0.29, regular) / 2.0,
+                            suit.symbol(),
+                            OVERLAY0,
+                            t.card_w * 0.29,
+                            regular,
+                        );
+                    }
+                }
+            }
+            let count = format!("{}/13", self.foundations.get(idx).map_or(0, Vec::len));
+            let r = centred(
+                f,
+                rect.centre().0,
+                rect.bottom() + t.card_h * PILE_COUNT_SHARE * 0.1,
+                &count,
+                SUBTEXT0,
+                l.small,
+                regular,
+            );
+            f.hit(Target::PileCount(byte(idx)), r);
+        }
 
-        // Move counter.
-        cmds.push(RenderCommand::Text {
-            x: 200.0,
-            y: 14.0,
-            text: format!("Moves: {}", self.move_count),
-            color: SUBTEXT0,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Foundation total.
-        cmds.push(RenderCommand::Text {
-            x: 340.0,
-            y: 14.0,
-            text: format!("Foundation: {}/52", self.foundation_total()),
-            color: SUBTEXT0,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Help text.
-        cmds.push(RenderCommand::Text {
-            x: 520.0,
-            y: 14.0,
-            text: String::from("Tab:zone  Arrows:nav  Enter:act  Z:undo  N:new  A:auto"),
-            color: OVERLAY0,
-            font_size: INFO_FONT_SIZE - 2.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Top row labels.
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: TOP_ROW_Y - 14.0,
-            text: String::from("Free Cells"),
-            color: SUBTEXT0,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        cmds.push(RenderCommand::Text {
-            x: Self::top_row_x(4),
-            y: TOP_ROW_Y - 14.0,
-            text: String::from("Foundations"),
-            color: SUBTEXT0,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Separator line between top row and tableau.
-        cmds.push(RenderCommand::Line {
-            x1: PADDING,
-            y1: TABLEAU_Y - 12.0,
-            x2: Self::tableau_col_x(TABLEAU_COLS - 1) + CARD_WIDTH,
-            y2: TABLEAU_Y - 12.0,
+        // The rule that separates the two rows, drawn across the table's own
+        // width rather than to a column position that assumes eight of them.
+        let rule_y = (t.top_row_y + t.card_h * (1.0 + PILE_COUNT_SHARE + ROW_GAP_SHARE * 0.5))
+            .min(t.area.bottom());
+        f.push(RenderCommand::Line {
+            x1: t.slot_x(0),
+            y1: rule_y,
+            x2: t.slot_x(TABLEAU_COLS - 1) + t.card_w,
+            y2: rule_y,
             color: SURFACE1,
             width: 1.0,
         });
+    }
 
-        // Render free cells.
-        for i in 0..FREE_CELL_COUNT {
-            let x = Self::top_row_x(i);
-            self.render_free_cell(&mut cmds, i, x, TOP_ROW_Y);
-        }
-
-        // Render foundations.
-        for i in 0..FOUNDATION_COUNT {
-            let x = Self::top_row_x(i + 4);
-            self.render_foundation(&mut cmds, i, x, TOP_ROW_Y);
-        }
-
-        // Render tableau.
+    /// The eight columns.
+    fn draw_tableau(&self, f: &mut Frame<Target>, t: &Table) {
         for col in 0..TABLEAU_COLS {
-            self.render_tableau_col(&mut cmds, col);
-        }
-
-        // Win overlay.
-        if self.won {
-            self.render_win_overlay(&mut cmds);
-        }
-
-        cmds
-    }
-
-    /// Render a free cell.
-    fn render_free_cell(&self, cmds: &mut Vec<RenderCommand>, idx: usize, x: f32, y: f32) {
-        let is_focused = self.focus == FocusArea::FreeCell(idx);
-        let is_selected = self.selection == Some(Selection::FreeCell(idx));
-
-        match self.free_cells[idx] {
-            Some(card) => {
-                self.render_card_face(cmds, card, x, y, is_focused, is_selected);
+            // The column's whole strip goes down first, so a click in the empty
+            // space under its cards still reaches the column -- which is the
+            // only way an empty column can be played to at all.
+            f.hit(Target::Column(byte(col)), t.column(col));
+            let focused = self.focus == FocusArea::Tableau(col);
+            let selected = self.selection == Some(Selection::Tableau(col));
+            let Some(pile) = self.tableau.get(col) else {
+                continue;
+            };
+            if pile.is_empty() {
+                draw_empty(f, t.card_at(col, 0), t, focused);
+                continue;
             }
-            None => {
-                self.render_empty_pile(cmds, x, y, is_focused);
+            let last = pile.len().saturating_sub(1);
+            for (depth, &card) in pile.iter().enumerate() {
+                let top = depth == last;
+                let rect = t.card_at(col, depth);
+                self.draw_card(f, card, rect, t, top && focused, top && selected);
+                f.hit(Target::Card(byte(col), byte(depth)), rect);
             }
         }
     }
 
-    /// Render a foundation pile.
-    fn render_foundation(&self, cmds: &mut Vec<RenderCommand>, idx: usize, x: f32, y: f32) {
-        let is_focused = self.focus == FocusArea::Foundation(idx);
-
-        match self.foundation_top(idx) {
-            Some(card) => {
-                self.render_card_face(cmds, card, x, y, is_focused, false);
-                // Show count.
-                cmds.push(RenderCommand::Text {
-                    x: x + 2.0,
-                    y: y + CARD_HEIGHT + 2.0,
-                    text: format!("{}/13", self.foundations[idx].len()),
-                    color: SUBTEXT0,
-                    font_size: INFO_FONT_SIZE - 2.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
-            None => {
-                self.render_empty_pile(cmds, x, y, is_focused);
-                // Show suit target.
-                let suit = Suit::ALL[idx];
-                cmds.push(RenderCommand::Text {
-                    x: x + CARD_WIDTH / 2.0 - 8.0,
-                    y: y + CARD_HEIGHT / 2.0 - 10.0,
-                    text: String::from(suit.symbol()),
-                    color: OVERLAY0,
-                    font_size: CARD_SUIT_FONT_SIZE,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
-        }
-    }
-
-    /// Render a single tableau column.
-    fn render_tableau_col(&self, cmds: &mut Vec<RenderCommand>, col: usize) {
-        let x = Self::tableau_col_x(col);
-        let pile = &self.tableau[col];
-
-        if pile.is_empty() {
-            let is_focused = self.focus == FocusArea::Tableau(col);
-            self.render_empty_pile(cmds, x, TABLEAU_Y, is_focused);
-            return;
-        }
-
-        let last_idx = pile.len() - 1;
-        for (i, &card) in pile.iter().enumerate() {
-            let y = TABLEAU_Y + i as f32 * CASCADE_OFFSET;
-            let is_top = i == last_idx;
-            let is_focused = is_top && self.focus == FocusArea::Tableau(col);
-            let is_selected = is_top && self.selection == Some(Selection::Tableau(col));
-            self.render_card_face(cmds, card, x, y, is_focused, is_selected);
-        }
-    }
-
-    /// Render an empty pile placeholder.
-    fn render_empty_pile(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, focused: bool) {
-        let border_color = if focused { CURSOR_HIGHLIGHT } else { OVERLAY0 };
-        cmds.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: CARD_WIDTH,
-            height: CARD_HEIGHT,
-            color: border_color,
-            line_width: if focused { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(CARD_CORNER),
-        });
-        cmds.push(RenderCommand::FillRect {
-            x: x + 1.0,
-            y: y + 1.0,
-            width: CARD_WIDTH - 2.0,
-            height: CARD_HEIGHT - 2.0,
-            color: EMPTY_PILE,
-            corner_radii: CornerRadii::all(CARD_CORNER),
-        });
-    }
-
-    /// Render a face-up card.
-    fn render_card_face(
+    /// One face-up card.
+    ///
+    /// Every offset inside it is a share of the card, so the four corner
+    /// readings stay in their corners at any size. They used to be nudged by
+    /// a bare `-22`, `-38`, `-8` and `-10`, which put them where they belong
+    /// only on a 70x100 card in a 16-point font.
+    fn draw_card(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        f: &mut Frame<Target>,
         card: Card,
-        x: f32,
-        y: f32,
+        r: Rect,
+        t: &Table,
         focused: bool,
         selected: bool,
     ) {
-        // Selection highlight.
+        let corner = t.corner();
         if selected {
-            cmds.push(RenderCommand::StrokeRect {
-                x: x - 2.0,
-                y: y - 2.0,
-                width: CARD_WIDTH + 4.0,
-                height: CARD_HEIGHT + 4.0,
-                color: SELECTED_HIGHLIGHT,
-                line_width: 2.5,
-                corner_radii: CornerRadii::all(CARD_CORNER + 2.0),
-            });
+            let g = t.card_w * 0.03;
+            stroke(
+                f,
+                Rect::new(r.x - g, r.y - g, r.w + g * 2.0, r.h + g * 2.0),
+                SELECTED_HIGHLIGHT,
+                (t.card_w * 0.036).max(1.0),
+                CornerRadii::all(corner + g),
+            );
         } else if focused {
-            cmds.push(RenderCommand::StrokeRect {
-                x: x - 1.0,
-                y: y - 1.0,
-                width: CARD_WIDTH + 2.0,
-                height: CARD_HEIGHT + 2.0,
-                color: CURSOR_HIGHLIGHT,
-                line_width: 2.0,
-                corner_radii: CornerRadii::all(CARD_CORNER + 1.0),
-            });
+            let g = t.card_w * 0.015;
+            stroke(
+                f,
+                Rect::new(r.x - g, r.y - g, r.w + g * 2.0, r.h + g * 2.0),
+                CURSOR_HIGHLIGHT,
+                (t.card_w * 0.029).max(1.0),
+                CornerRadii::all(corner + g),
+            );
+        }
+        fill(f, r, CARD_BG, CornerRadii::all(corner));
+        if r.is_empty() {
+            return;
         }
 
-        // Card body.
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: CARD_WIDTH,
-            height: CARD_HEIGHT,
-            color: CARD_BG,
-            corner_radii: CornerRadii::all(CARD_CORNER),
-        });
+        let color = card.suit.color();
+        let bold = FontWeightHint::Bold;
+        let regular = FontWeightHint::Regular;
+        let pip = t.card_w * 0.23;
+        let big = t.card_w * 0.29;
+        let inset = t.card_w * 0.07;
 
-        let text_color = card.suit.color();
+        label(
+            f,
+            r.x + inset,
+            r.y + inset * 0.6,
+            card.rank.label(),
+            color,
+            pip,
+            bold,
+        );
+        label(
+            f,
+            r.x + inset,
+            r.y + inset * 0.6 + text::line_height(pip, bold),
+            card.suit.symbol(),
+            color,
+            pip,
+            regular,
+        );
+        let (cx, cy) = r.centre();
+        centred(
+            f,
+            cx,
+            cy - text::line_height(big, regular) / 2.0,
+            card.suit.symbol(),
+            color,
+            big,
+            regular,
+        );
 
-        // Top-left rank.
-        cmds.push(RenderCommand::Text {
-            x: x + 5.0,
-            y: y + 4.0,
-            text: String::from(card.rank.label()),
-            color: text_color,
-            font_size: CARD_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Top-left suit.
-        cmds.push(RenderCommand::Text {
-            x: x + 5.0,
-            y: y + 20.0,
-            text: String::from(card.suit.symbol()),
-            color: text_color,
-            font_size: CARD_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Center suit (larger).
-        cmds.push(RenderCommand::Text {
-            x: x + CARD_WIDTH / 2.0 - 8.0,
-            y: y + CARD_HEIGHT / 2.0 - 10.0,
-            text: String::from(card.suit.symbol()),
-            color: text_color,
-            font_size: CARD_SUIT_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Bottom-right rank.
-        cmds.push(RenderCommand::Text {
-            x: x + CARD_WIDTH - 22.0,
-            y: y + CARD_HEIGHT - 22.0,
-            text: String::from(card.rank.label()),
-            color: text_color,
-            font_size: CARD_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Bottom-right suit.
-        cmds.push(RenderCommand::Text {
-            x: x + CARD_WIDTH - 22.0,
-            y: y + CARD_HEIGHT - 38.0,
-            text: String::from(card.suit.symbol()),
-            color: text_color,
-            font_size: CARD_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        // The bottom pair is right-aligned by measuring, not by stepping a
+        // fixed 22 pixels in from the right edge -- which is where a one-glyph
+        // rank ends and a two-glyph one ("10") does not.
+        let rank = card.rank.label();
+        let suit = card.suit.symbol();
+        let widest = text::measure(rank, pip, bold).max(text::measure(suit, pip, regular));
+        let right = r.right() - inset - widest;
+        let bottom = r.bottom() - inset * 0.6 - text::line_height(pip, bold);
+        label(f, right, bottom, rank, color, pip, bold);
+        label(
+            f,
+            right,
+            bottom - text::line_height(pip, regular),
+            suit,
+            color,
+            pip,
+            regular,
+        );
     }
 
-    /// Render win overlay.
-    fn render_win_overlay(&self, cmds: &mut Vec<RenderCommand>) {
-        // Semi-transparent overlay.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: 900.0,
-            height: 800.0,
-            color: Color::rgba(17, 17, 27, 180),
-            corner_radii: CornerRadii::ZERO,
-        });
+    /// The controls along the bottom.
+    ///
+    /// Buttons, not a caption. What was here was a help line naming six
+    /// controls in a program with no pointer handling at all, so every one of
+    /// the six was a promise only the keyboard could keep.
+    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.footer, MANTLE, CornerRadii::all(l.pad * 0.5));
+        f.hit(Target::Footer, l.footer);
+        if l.footer.is_empty() {
+            return;
+        }
+        f.clip(l.footer);
+        let regular = FontWeightHint::Regular;
+        let inner = l.pad.max(2.0);
+        let text_y = l.footer.y + (l.footer.h - text::line_height(l.font, regular)) / 2.0;
+        let mut x = l.footer.x + inner;
+        for (i, control) in Control::ALL.into_iter().enumerate() {
+            let w = text::measure(control.label(), l.font, regular) + inner * 2.0;
+            let button = Rect::new(l.footer.x.max(x), l.footer.y, w, l.footer.h);
+            fill(f, button, SURFACE0, CornerRadii::all(l.pad * 0.4));
+            label(
+                f,
+                button.x + inner,
+                text_y,
+                control.label(),
+                TEXT_COLOR,
+                l.font,
+                regular,
+            );
+            f.hit(Target::Control(byte(i)), button);
+            x = button.right() + inner;
+        }
 
-        cmds.push(RenderCommand::Text {
-            x: 280.0,
-            y: 300.0,
-            text: String::from("You Win!"),
-            color: GREEN,
-            font_size: OVERLAY_FONT_SIZE + 12.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        // How much room there is left to manoeuvre in. This is the number a
+        // freecell player plans against -- it is what caps the length of a run
+        // that can be shifted -- and it appears nowhere else on screen, so it
+        // is the *last* thing dropped as the window narrows.
+        let room = format!(
+            "{} cells   {} columns",
+            self.empty_free_cell_count(),
+            self.empty_tableau_count()
+        );
+        let room_w = text::measure(&room, l.font, regular);
+        let room_x = l.footer.right() - inner - room_w;
+        if room_x < x {
+            f.unclip();
+            return;
+        }
+        let drawn = label(f, room_x, text_y, &room, SUBTEXT0, l.font, regular);
+        f.hit(Target::Room, drawn);
 
-        cmds.push(RenderCommand::Text {
-            x: 300.0,
-            y: 350.0,
-            text: format!("Moves: {}", self.move_count),
-            color: SUBTEXT0,
-            font_size: STATUS_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: 270.0,
-            y: 390.0,
-            text: String::from("Press N for a new game"),
-            color: OVERLAY0,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        // What the keyboard can do that the buttons do not. A reminder, not a
+        // fact about this board, so this is the caption that goes first when
+        // there is not width for both it and the reading.
+        let hint = "Tab/Arrows move   Enter picks up and puts down   Esc drops";
+        let hint_w = text::measure(hint, l.font, regular);
+        let hint_x = room_x - inner * 2.0 - hint_w;
+        if hint_x >= x {
+            label(f, hint_x, text_y, hint, OVERLAY0, l.font, regular);
+        }
+        f.unclip();
     }
+
+    /// The sheet over the table when the game is won.
+    ///
+    /// Centred on the window it is in. Its three lines used to be placed at a
+    /// hardcoded x of 280, 300 and 270 and a y of 300, 350 and 390 -- three
+    /// separate guesses at the middle of one fixed 900x800 board.
+    fn draw_win_sheet(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.window, Color::rgba(17, 17, 27, 200), CornerRadii::ZERO);
+        f.hit(Target::Overlay, l.window);
+        if l.window.is_empty() {
+            return;
+        }
+        let regular = FontWeightHint::Regular;
+        let bold = FontWeightHint::Bold;
+        let (cx, cy) = l.window.centre();
+        let gap = l.pad;
+
+        let title_h = text::line_height(l.title, bold);
+        let line_h = text::line_height(l.font, regular);
+        // The block is measured, then centred as a block: three lines each
+        // centred on their own guess is three lines that do not line up.
+        let block = title_h + line_h * 2.0 + gap * 2.0;
+        let mut y = cy - block / 2.0;
+
+        let r = centred(f, cx, y, "You Win!", GREEN, l.title, bold);
+        f.hit(Target::OverlayTitle, r);
+        y += title_h + gap;
+
+        let moves = format!("Moves: {}", self.move_count);
+        let r = centred(f, cx, y, &moves, SUBTEXT0, l.font, regular);
+        f.hit(Target::OverlayMoves, r);
+        y += line_h + gap;
+
+        let r = centred(f, cx, y, "Press N for a new game", MAUVE, l.font, regular);
+        f.hit(Target::NewGame, r);
+    }
+}
+
+/// An empty slot: a free cell with nothing in it, a foundation not started, or
+/// a column played out.
+///
+/// A free function rather than a method: it reads no game state, and a slot
+/// that looked at the board to decide how to draw itself would be a second
+/// place for the board to be misread.
+fn draw_empty(f: &mut Frame<Target>, r: Rect, t: &Table, focused: bool) {
+    let corner = t.corner();
+    fill(f, r, EMPTY_PILE, CornerRadii::all(corner));
+    stroke(
+        f,
+        r,
+        if focused { CURSOR_HIGHLIGHT } else { OVERLAY0 },
+        if focused {
+            (t.card_w * 0.029).max(1.0)
+        } else {
+            1.0
+        },
+        CornerRadii::all(corner),
+    );
 }
 
 // ── Application wrapper ─────────────────────────────────────────────
 
-/// The FreeCell application.
+/// The FreeCell application: a game, and the size the window last reported.
 struct FreeCell {
     state: GameState,
+    /// The size the last frame was drawn at, and so the size the next click is
+    /// read against. A click has to be measured against the picture the player
+    /// was looking at, which is the one the last `render` drew.
+    size: (f32, f32),
 }
 
 impl FreeCell {
+    /// A game dealt from the system's randomness, so two players -- and two
+    /// launches -- do not get the same board. It used to be `GameState::new(42)`
+    /// for every launch on every machine for ever.
     fn new() -> Self {
+        Self::with_seed(seed_from_system(0x4652_4545_4345_4C4C))
+    }
+
+    /// The same, from a seed the caller chooses. This is what the tests use:
+    /// a game whose deal is a fact rather than a draw.
+    fn with_seed(seed: u64) -> Self {
         Self {
-            state: GameState::new(42),
+            state: GameState::new(seed),
+            size: (WINDOW_WIDTH, WINDOW_HEIGHT),
         }
     }
 
-    fn handle_event(&mut self, event: Event) {
-        if let Event::Key(KeyEvent {
+    /// The size the next frame will be drawn at, and the next click read
+    /// against.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.size = (width.max(0.0), height.max(0.0));
+    }
+
+    /// The size the last frame was drawn at.
+    const fn size(&self) -> (f32, f32) {
+        self.size
+    }
+
+    /// Draw one frame at this size.
+    fn frame(&self, w: f32, h: f32) -> Frame<Target> {
+        self.state.frame(w, h)
+    }
+
+    /// Act on a click at window coordinates, by asking the frame what was drawn
+    /// there.
+    ///
+    /// There is one picture and one answer: the boxes a click is tested against
+    /// are the ones the drawing pass recorded, so a control that moved cannot
+    /// leave its hit box behind.
+    fn click(&mut self, x: f32, y: f32, button: MouseButton) -> EventResult {
+        if button != MouseButton::Left {
+            return EventResult::Ignored;
+        }
+        let (w, h) = self.size();
+        let Some(target) = self.frame(w, h).hit_test(x, y) else {
+            return EventResult::Ignored;
+        };
+        // While the sheet is up the board behind it is not reachable: a click
+        // that falls on the sheet stops there rather than moving a card the
+        // player cannot see.
+        if self.state.won {
+            return match target {
+                Target::NewGame => {
+                    self.state.handle_key(Key::N, Modifiers::default());
+                    EventResult::Consumed
+                }
+                _ => EventResult::Consumed,
+            };
+        }
+        match target {
+            Target::FreeCell(i) => self
+                .state
+                .focus_and_act(FocusArea::FreeCell(usize::from(i))),
+            Target::Foundation(i) | Target::PileCount(i) => self
+                .state
+                .focus_and_act(FocusArea::Foundation(usize::from(i))),
+            Target::Column(c) | Target::Card(c, _) => {
+                self.state.focus_and_act(FocusArea::Tableau(usize::from(c)))
+            }
+            Target::Control(i) => {
+                let Some(control) = Control::ALL.get(usize::from(i)) else {
+                    return EventResult::Ignored;
+                };
+                self.state.handle_key(control.key(), Modifiers::default())
+            }
+            // The chrome. A click here is answered -- it does nothing, but it
+            // does not fall through to whatever is behind it either.
+            Target::Header
+            | Target::Title
+            | Target::Moves
+            | Target::Progress
+            | Target::Board
+            | Target::FreeCellLabel
+            | Target::FoundationLabel
+            | Target::Footer
+            | Target::Room
+            | Target::Overlay
+            | Target::OverlayTitle
+            | Target::OverlayMoves
+            | Target::NewGame => EventResult::Consumed,
+        }
+    }
+}
+
+/// The one body every event goes through, whichever side it arrives from.
+///
+/// The window calls it and the tests call it, so a key the tests prove works is
+/// the same key the window delivers.
+fn handle_event(app: &mut FreeCell, event: &Event) -> EventResult {
+    match event {
+        Event::Key(KeyEvent {
             key,
             modifiers,
             pressed: true,
             ..
-        }) = event
-        {
-            self.state.handle_key(key, modifiers);
+        }) => app.state.handle_key(*key, *modifiers),
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }) => app.click(*x, *y, *button),
+        Event::Resize { width, height } => {
+            app.resize(f32_from_u32(*width), f32_from_u32(*height));
+            EventResult::Consumed
         }
-    }
-
-    fn render(&self) -> Vec<RenderCommand> {
-        self.state.render()
+        _ => EventResult::Ignored,
     }
 }
 
-fn main() {
-    let _app = FreeCell::new();
+impl App for FreeCell {
+    fn title(&self) -> String {
+        "FreeCell".to_string()
+    }
+
+    fn app_id(&self) -> String {
+        "freecell".to_string()
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the natural size is two small positive whole numbers"
+    )]
+    fn initial_size(&self) -> (u32, u32) {
+        // Converted from the float pair rather than written out again: two
+        // spellings of one size are two things that can drift apart.
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against, which is the only reason it is stored at all.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for FreeCell {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
+    }
+}
+
+fn main() -> ExitCode {
+    let mut game = FreeCell::new();
+    app::launch("freecell", &mut game)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -1445,10 +2178,31 @@ mod tests {
         clippy::panic,
         clippy::float_cmp,
         clippy::arithmetic_side_effects,
-        clippy::cast_precision_loss
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation
     )]
 
+    use guitk::probe;
+
     use super::*;
+
+    /// The window sizes every layout claim is checked at.
+    ///
+    /// The natural size, the extremes a compositor can hand a program mid-drag,
+    /// and a few shapes in between. A layout that is only right at one size is
+    /// the fault this program was rewritten to fix, so one size is not a test.
+    const SIZES: [(f32, f32); 10] = [
+        (WINDOW_WIDTH, WINDOW_HEIGHT),
+        (0.0, 0.0),
+        (1.0, 1.0),
+        (320.0, 240.0),
+        (640.0, 480.0),
+        (900.0, 400.0),
+        (400.0, 900.0),
+        (1280.0, 1024.0),
+        (1920.0, 1080.0),
+        (3840.0, 2160.0),
+    ];
 
     // ── Helpers ─────────────────────────────────────────────────────
 
@@ -1563,12 +2317,10 @@ mod tests {
     }
 
     #[test]
-    fn test_rank_from_value() {
-        for r in &Rank::ALL {
-            assert_eq!(Rank::from_value(r.value()), Some(*r));
+    fn the_numeric_value_of_a_rank_is_its_position_in_the_order() {
+        for (i, r) in Rank::ALL.iter().enumerate() {
+            assert_eq!(usize::from(r.value()), i + 1, "{r:?} is out of order");
         }
-        assert_eq!(Rank::from_value(0), None);
-        assert_eq!(Rank::from_value(14), None);
     }
 
     #[test]
@@ -1712,7 +2464,7 @@ mod tests {
     fn test_no_empty_free_cell() {
         let mut state = empty_game();
         for i in 0..4 {
-            state.free_cells[i] = Some(card(Suit::Hearts, Rank::from_value(i as u8 + 1).unwrap()));
+            state.free_cells[i] = Some(card(Suit::Hearts, Rank::ALL[i]));
         }
         assert_eq!(state.first_empty_free_cell(), None);
         assert_eq!(state.empty_free_cell_count(), 0);
@@ -1733,7 +2485,7 @@ mod tests {
     fn test_tableau_to_freecell_full() {
         let mut state = empty_game();
         for i in 0..4 {
-            state.free_cells[i] = Some(card(Suit::Hearts, Rank::from_value(i as u8 + 1).unwrap()));
+            state.free_cells[i] = Some(card(Suit::Hearts, Rank::ALL[i]));
         }
         state.tableau[0].push(card(Suit::Spades, Rank::King));
         assert!(!state.try_tableau_to_freecell(0));
@@ -2573,15 +3325,20 @@ mod tests {
 
     // ── Rendering tests ────────────────────────────────────────────
 
-    #[test]
-    fn test_render_not_empty() {
-        let state = new_game();
-        let cmds = state.render();
-        assert!(!cmds.is_empty());
+    /// The window wrapped around a game whose deal is a fact, not a draw.
+    fn app() -> FreeCell {
+        FreeCell::with_seed(42)
     }
 
-    #[test]
-    fn test_render_win_overlay() {
+    /// The same window around a board a test built by hand.
+    fn app_with(state: GameState) -> FreeCell {
+        let mut a = FreeCell::with_seed(42);
+        a.state = state;
+        a
+    }
+
+    /// A won board: every card home.
+    fn won_board() -> GameState {
         let mut state = empty_game();
         for &suit in &Suit::ALL {
             for &rank in &Rank::ALL {
@@ -2589,93 +3346,188 @@ mod tests {
             }
         }
         state.won = true;
-        let cmds = state.render();
-        // Should contain "You Win!" somewhere in text commands.
-        let has_win = cmds.iter().any(|cmd| {
-            if let RenderCommand::Text { text, .. } = cmd {
-                text.contains("You Win!")
-            } else {
-                false
-            }
-        });
-        assert!(has_win);
+        state
+    }
+
+    /// Every string the frame draws, in paint order.
+    fn drawn_text(app: &FreeCell, size: (f32, f32)) -> Vec<String> {
+        app.frame(size.0, size.1)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
-    fn test_render_includes_title() {
-        let state = new_game();
-        let cmds = state.render();
-        let has_title = cmds.iter().any(|cmd| {
-            if let RenderCommand::Text { text, .. } = cmd {
-                text.contains("FreeCell")
-            } else {
-                false
-            }
-        });
-        assert!(has_title);
+    fn the_frame_draws_something() {
+        assert!(
+            !app()
+                .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands()
+                .is_empty()
+        );
+        let empty = app_with(empty_game());
+        assert!(
+            !empty
+                .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands()
+                .is_empty(),
+            "a board with no cards on it drew nothing at all"
+        );
     }
 
     #[test]
-    fn test_render_includes_move_count() {
-        let state = new_game();
-        let cmds = state.render();
-        let has_moves = cmds.iter().any(|cmd| {
-            if let RenderCommand::Text { text, .. } = cmd {
-                text.contains("Moves:")
-            } else {
-                false
-            }
-        });
-        assert!(has_moves);
+    fn the_header_names_the_game_and_reports_both_numbers() {
+        let text = drawn_text(&app(), (WINDOW_WIDTH, WINDOW_HEIGHT));
+        assert!(text.iter().any(|t| t == "FreeCell"), "no title: {text:?}");
+        assert!(
+            text.iter().any(|t| t.starts_with("Moves: ")),
+            "no move count: {text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t.starts_with("Foundations: ")),
+            "no progress reading: {text:?}"
+        );
     }
 
     #[test]
-    fn test_render_empty_game() {
-        let state = empty_game();
-        let cmds = state.render();
-        assert!(!cmds.is_empty());
+    fn the_win_sheet_says_so_and_offers_a_new_game() {
+        let app = app_with(won_board());
+        let text = drawn_text(&app, (WINDOW_WIDTH, WINDOW_HEIGHT));
+        assert!(text.iter().any(|t| t == "You Win!"), "no banner: {text:?}");
+        for target in [
+            Target::Overlay,
+            Target::OverlayTitle,
+            Target::OverlayMoves,
+            Target::NewGame,
+        ] {
+            assert!(
+                probe::is_visible(&app, target),
+                "{target:?} is missing from the win sheet"
+            );
+        }
     }
 
     #[test]
-    fn test_render_with_selection() {
-        let mut state = new_game();
+    fn the_win_sheet_is_only_there_once_the_game_is_won() {
+        assert!(
+            !probe::is_visible(&app(), Target::Overlay),
+            "the win sheet covered a game still being played"
+        );
+    }
+
+    #[test]
+    fn the_cursor_and_the_selection_are_both_drawn() {
+        // Two separate marks with two separate colours: the cursor says where
+        // the next press lands, the selection says which card is in hand. A
+        // frame that showed only one of them would leave the player guessing
+        // which column they had picked up from.
+        let mut state = empty_game();
+        state.tableau[0].push(card(Suit::Hearts, Rank::Ace));
         state.selection = Some(Selection::Tableau(0));
-        let cmds = state.render();
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_with_freecell_focus() {
-        let mut state = new_game();
-        state.focus = FocusArea::FreeCell(0);
-        let cmds = state.render();
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_with_foundation_focus() {
-        let mut state = new_game();
-        state.focus = FocusArea::Foundation(0);
-        let cmds = state.render();
-        assert!(!cmds.is_empty());
+        state.focus = FocusArea::Tableau(3);
+        let app = app_with(state);
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let strokes: Vec<Color> = f
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            strokes.contains(&SELECTED_HIGHLIGHT),
+            "the card in hand was not marked"
+        );
+        assert!(
+            strokes.contains(&CURSOR_HIGHLIGHT),
+            "the cursor was not marked"
+        );
     }
 
     // ── Layout position tests ──────────────────────────────────────
 
     #[test]
-    fn test_top_row_x_positions() {
-        let x0 = GameState::top_row_x(0);
-        let x1 = GameState::top_row_x(1);
-        assert!(x1 > x0);
-        assert!((x1 - x0 - (CARD_WIDTH + CARD_GAP_X)).abs() < 0.01);
+    fn the_columns_are_evenly_spaced_at_every_size() {
+        for (w, h) in SIZES {
+            let t = Table::new(Layout::new(w, h).body, 7);
+            let steps: Vec<f32> = (1..TABLEAU_COLS)
+                .map(|c| t.slot_x(c) - t.slot_x(c - 1))
+                .collect();
+            for (i, step) in steps.iter().enumerate() {
+                assert!(
+                    (step - t.step).abs() < 0.01,
+                    "at {w}x{h} column {} sat {step} from its neighbour, not {}",
+                    i + 1,
+                    t.step
+                );
+            }
+        }
     }
 
     #[test]
-    fn test_tableau_col_x_positions() {
-        let x0 = GameState::tableau_col_x(0);
-        let x1 = GameState::tableau_col_x(1);
-        assert!(x1 > x0);
-        assert!((x1 - x0 - (CARD_WIDTH + CARD_GAP_X)).abs() < 0.01);
+    fn the_top_row_and_the_tableau_stand_on_one_grid() {
+        // Eight slots above and eight columns below. They used to be placed by
+        // two functions that happened to compute the same thing, which is two
+        // places for one grid to be described and one of them to drift.
+        for (w, h) in SIZES {
+            let t = Table::new(Layout::new(w, h).body, 7);
+            for col in 0..TABLEAU_COLS {
+                let above = t.top_slot(col).x;
+                let below = t.card_at(col, 0).x;
+                assert!(
+                    (above - below).abs() < 0.01,
+                    "at {w}x{h} column {col} sat at {below} under a slot at {above}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_whole_table_fits_the_space_it_was_given() {
+        // Nine card widths across, and a deepest column that ends inside the
+        // area rather than off the bottom of it. A column deeper than about
+        // twenty-six cards used to run off a fixed 800-tall board with nothing
+        // to tighten it, so its lowest cards could be neither seen nor reached.
+        for (w, h) in SIZES {
+            for deepest in [0_usize, 1, 7, 19, 26, 40, 52] {
+                let body = Layout::new(w, h).body;
+                let t = Table::new(body, deepest);
+                let right = t.slot_x(TABLEAU_COLS - 1) + t.card_w;
+                assert!(
+                    right <= body.right() + 0.01,
+                    "at {w}x{h} the table ended at {right}, past {}",
+                    body.right()
+                );
+                let bottom = t.card_at(0, deepest.saturating_sub(1)).bottom();
+                assert!(
+                    bottom <= body.bottom() + 0.01,
+                    "at {w}x{h} a {deepest}-card column ended at {bottom}, past {}",
+                    body.bottom()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_deeper_column_is_never_drawn_looser_than_a_shallow_one() {
+        // The fan tightens as the column deepens, and never the other way: a
+        // board that spread its cards further apart the more of them there were
+        // would run off the bottom faster the more it needed not to.
+        let body = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT).body;
+        let mut last = f32::INFINITY;
+        for deepest in 1..=52 {
+            let cascade = Table::new(body, deepest).cascade;
+            assert!(
+                cascade <= last + 0.01,
+                "a {deepest}-card column fanned by {cascade}, wider than {last}"
+            );
+            last = cascade;
+        }
     }
 
     // ── Edge case tests ────────────────────────────────────────────
@@ -2778,52 +3630,256 @@ mod tests {
     // ── App wrapper tests ──────────────────────────────────────────
 
     #[test]
-    fn test_app_new() {
-        let app = FreeCell::new();
+    fn a_new_game_starts_at_nothing_played_and_nothing_won() {
+        let app = app();
         assert_eq!(app.state.move_count, 0);
         assert!(!app.state.won);
+        assert_eq!(app.size(), (WINDOW_WIDTH, WINDOW_HEIGHT));
     }
 
     #[test]
-    fn test_app_render() {
-        let app = FreeCell::new();
-        let cmds = app.render();
-        assert!(!cmds.is_empty());
+    fn a_launch_does_not_deal_the_one_board_that_was_hardcoded() {
+        // The deal used to be `GameState::new(42)`, so every launch on every
+        // machine got one board for ever -- a fifty-two card game with one
+        // layout in it.
+        //
+        // Two `new()` games cannot be compared with each other here: off
+        // Slate OS there is no kernel randomness to open, so `seed_from_system`
+        // answers with its fallback and the two would agree for a reason that
+        // has nothing to do with this program. What can be checked is that the
+        // seed is no longer the literal 42.
+        let dealt = FreeCell::new();
+        let old = FreeCell::with_seed(42);
+        let differs = (0..TABLEAU_COLS).any(|c| dealt.state.tableau[c] != old.state.tableau[c]);
+        assert!(differs, "a fresh game still deals the hardcoded board");
     }
 
     #[test]
-    fn test_app_handle_event() {
-        let mut app = FreeCell::new();
-        app.handle_event(Event::Key(KeyEvent {
-            key: Key::Right,
-            modifiers: Modifiers {
-                shift: false,
-                ctrl: false,
-                alt: false,
-                super_key: false,
-            },
-            pressed: true,
-            text: String::new(),
-        }));
+    fn a_key_press_reaches_the_game_and_a_release_does_not() {
+        // A release that moved the cursor would move it twice for every press,
+        // because a key that goes down also comes back up.
+        let mut app = app();
+        assert_eq!(
+            app.key_at(&probe::press(Key::Right), FreeCell::SIZE),
+            EventResult::Consumed,
+            "the arrow key was not acted on"
+        );
+        assert_eq!(app.state.focus, FocusArea::Tableau(1));
+        assert_eq!(
+            app.key_at(&probe::release(Key::Right), FreeCell::SIZE),
+            EventResult::Ignored,
+            "the key coming back up was acted on too"
+        );
         assert_eq!(app.state.focus, FocusArea::Tableau(1));
     }
 
     #[test]
-    fn test_app_handle_event_not_pressed() {
-        let mut app = FreeCell::new();
-        // Key release events should be ignored.
-        app.handle_event(Event::Key(KeyEvent {
-            key: Key::Right,
-            modifiers: Modifiers {
-                shift: false,
-                ctrl: false,
-                alt: false,
-                super_key: false,
+    fn a_key_the_game_does_not_know_is_answered_as_ignored() {
+        // `Ignored` is what stops the window redrawing for a keystroke that
+        // changed nothing. Every key used to look the same, because the handler
+        // returned nothing at all.
+        let mut app = app();
+        assert_eq!(
+            app.key_at(&probe::press(Key::F1), FreeCell::SIZE),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn a_click_picks_a_card_up_and_puts_it_down() {
+        // The whole pointer half of the program: there was none at all before,
+        // under a help line advertising six controls.
+        let mut state = empty_game();
+        state.tableau[0].push(card(Suit::Spades, Rank::Seven));
+        let mut app = app_with(state);
+
+        assert_eq!(
+            probe::click(&mut app, Target::Card(0, 0)),
+            EventResult::Consumed,
+            "the card was not clickable"
+        );
+        assert_eq!(app.state.selection, Some(Selection::Tableau(0)));
+
+        assert_eq!(
+            probe::click(&mut app, Target::Column(3)),
+            EventResult::Consumed,
+            "the empty column was not clickable"
+        );
+        assert!(app.state.tableau[0].is_empty(), "the card did not leave");
+        assert_eq!(app.state.tableau[3].len(), 1, "the card did not arrive");
+    }
+
+    #[test]
+    fn a_click_on_a_free_cell_puts_a_card_there() {
+        // A seven rather than an ace: an ace parked in a free cell is safe to
+        // send home, so the cascade would empty the cell again in the same
+        // press and the test would be reading a board it never meant to make.
+        let mut state = empty_game();
+        state.tableau[0].push(card(Suit::Clubs, Rank::Seven));
+        let mut app = app_with(state);
+        probe::click(&mut app, Target::Card(0, 0));
+        probe::click(&mut app, Target::FreeCell(2));
+        assert_eq!(
+            app.state.free_cells[2],
+            Some(card(Suit::Clubs, Rank::Seven)),
+            "the free cell stayed empty"
+        );
+        assert!(app.state.tableau[0].is_empty(), "the card did not leave");
+    }
+
+    #[test]
+    fn a_click_on_a_foundation_sends_a_card_home() {
+        let mut state = empty_game();
+        state.free_cells[1] = Some(card(Suit::Clubs, Rank::Ace));
+        let mut app = app_with(state);
+        probe::click(&mut app, Target::FreeCell(1));
+        assert_eq!(app.state.selection, Some(Selection::FreeCell(1)));
+        probe::click(&mut app, Target::Foundation(byte(Suit::Clubs.index())));
+        assert_eq!(
+            app.state.foundations[Suit::Clubs.index()].len(),
+            1,
+            "the ace did not reach its foundation"
+        );
+    }
+
+    #[test]
+    fn every_control_on_the_strip_does_what_its_caption_says() {
+        // The strip is walked from `Control::ALL`, so a control that is drawn is
+        // a control that is wired. This checks the wiring end: each button runs
+        // the key it names.
+        for (i, control) in Control::ALL.into_iter().enumerate() {
+            let mut by_click = app();
+            let mut by_key = app();
+            assert_eq!(
+                probe::click(&mut by_click, Target::Control(byte(i))),
+                EventResult::Consumed,
+                "{control:?} was not clickable"
+            );
+            by_key.key_at(&probe::press(control.key()), FreeCell::SIZE);
+            assert_eq!(
+                by_click.state.move_count, by_key.state.move_count,
+                "{control:?} and its key left different move counts"
+            );
+        }
+    }
+
+    #[test]
+    fn the_undo_button_is_refused_on_a_won_board_just_as_the_key_is() {
+        // The button runs the key rather than the method the key calls, which is
+        // what makes one refusal cover both ways in.
+        let mut app = app_with(won_board());
+        probe::click(&mut app, Target::Control(0));
+        assert!(app.state.won, "the win was undone from the sheet");
+    }
+
+    #[test]
+    fn a_click_on_the_win_sheet_does_not_reach_the_board_behind_it() {
+        let mut state = won_board();
+        state.foundations[0].pop();
+        state.tableau[0].push(card(Suit::Hearts, Rank::King));
+        state.won = true;
+        let mut app = app_with(state);
+        // Where the first column's card is, under the sheet.
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let rect = f.rect_of(|t| matches!(t, Target::Card(0, _))).unwrap();
+        let (x, y) = rect.centre();
+        assert_eq!(
+            app.click(x, y, MouseButton::Left),
+            EventResult::Consumed,
+            "the click fell through the sheet"
+        );
+        assert!(
+            app.state.selection.is_none(),
+            "a card under the sheet was picked up"
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_new_game_line_deals_a_new_board() {
+        let mut app = app_with(won_board());
+        assert_eq!(
+            probe::click(&mut app, Target::NewGame),
+            EventResult::Consumed
+        );
+        assert!(!app.state.won, "the sheet stayed up");
+        assert_eq!(app.state.foundation_total(), 0, "the old board was kept");
+    }
+
+    #[test]
+    fn a_click_on_a_button_that_is_not_the_left_one_does_nothing() {
+        let mut app = app();
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let (x, y) = f
+            .rect_of(|t| matches!(t, Target::Card(0, _)))
+            .unwrap()
+            .centre();
+        assert_eq!(app.click(x, y, MouseButton::Right), EventResult::Ignored);
+        assert!(app.state.selection.is_none());
+    }
+
+    #[test]
+    fn a_click_outside_everything_drawn_is_ignored() {
+        let mut app = app();
+        assert_eq!(
+            app.click(-10.0, -10.0, MouseButton::Left),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn a_resize_is_what_the_next_click_is_read_against() {
+        // A click has to be measured against the picture the player was looking
+        // at. If the size were not carried, a window resized to twice its width
+        // would still answer clicks against the old one.
+        let mut app = app();
+        handle_event(
+            &mut app,
+            &Event::Resize {
+                width: 1400,
+                height: 1000,
             },
-            pressed: false,
-            text: String::new(),
-        }));
-        assert_eq!(app.state.focus, FocusArea::Tableau(0));
+        );
+        assert_eq!(app.size(), (1400.0, 1000.0));
+        let f = app.frame(1400.0, 1000.0);
+        let (x, y) = f
+            .rect_of(|t| matches!(t, Target::Card(0, _)))
+            .unwrap()
+            .centre();
+        assert_eq!(app.click(x, y, MouseButton::Left), EventResult::Consumed);
+        assert_eq!(app.state.selection, Some(Selection::Tableau(0)));
+    }
+
+    #[test]
+    fn the_frame_is_balanced_at_every_size_and_in_both_states() {
+        // Every clip and translate is undone. A frame that ends unbalanced is a
+        // frame whose next drawing is clipped to whatever the last one forgot to
+        // put back.
+        for (w, h) in SIZES {
+            for state in [empty_game(), GameState::new(42), won_board()] {
+                let app = app_with(state);
+                assert!(
+                    app.frame(w, h).is_balanced(),
+                    "the frame was left unbalanced at {w}x{h}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_drawn_outside_the_window() {
+        // The clip is the guard: a reading too wide for a narrow window used to
+        // spill past the edge, and a zero-sized window still recorded a
+        // clickable line at its centre -- a control in a window with no pixels.
+        for (w, h) in SIZES {
+            let app = app();
+            let f = app.frame(w, h);
+            for (target, rect) in f.hits() {
+                assert!(
+                    rect.x < w + 0.01 && rect.y < h + 0.01,
+                    "{target:?} was recorded at {rect:?}, outside a {w}x{h} window"
+                );
+            }
+        }
     }
 
     // ── Full flow tests ────────────────────────────────────────────

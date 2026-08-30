@@ -46,6 +46,51 @@ const TYPEFLAG_REGULAR: u8 = b'0';
 const TYPEFLAG_DIRECTORY: u8 = b'5';
 const TYPEFLAG_SYMLINK: u8 = b'2';
 
+/// A *contiguous* file: a regular file that some historic filesystems could
+/// promise was laid out in consecutive blocks.
+///
+/// No filesystem we target makes that promise, but the flag is not a problem —
+/// the header is an ordinary regular-file header and the data blocks are
+/// ordinary data, so the bytes extract correctly with the guarantee simply
+/// dropped. GNU says exactly that, once per run rather than once per member,
+/// and exits 0. Measured on an archive with two members patched to `7`:
+///
+/// ```text
+/// tar: Extracting contiguous files as regular files
+/// ```
+///
+/// It has its own constant because it is the one flag that is neither handled
+/// specially nor unknown: it takes the plain-file path but must not draw the
+/// `Unknown file type` warning, which would be wrong — `7` is defined, and we
+/// do the defined thing with it.
+const TYPEFLAG_CONTIGUOUS: u8 = b'7';
+
+/// Type flags that mean something specific which this tar does not yet do.
+///
+/// The distinction from a flag that is simply *unknown* decides what happens to
+/// the member's bytes, so it is a list and not a fallthrough. An unknown flag
+/// carries a plain file that some other tar labelled oddly, and GNU recovers it
+/// (see the extract loop). These, by contrast, are defined:
+///
+/// | Flag | Means | Why extracting it as a file would be wrong |
+/// |---|---|---|
+/// | `1` | hard link | the data is in the link target; the header's size is 0 |
+/// | `3` `4` | character / block device | there is no data, only a device number |
+/// | `6` | FIFO | likewise |
+/// | `x` `g` | pax extended header | metadata *about the next member* |
+/// | `L` `K` | GNU long name / long link | the name *of the next member* |
+///
+/// Writing any of these out under its own name would produce a file that the
+/// archive does not describe — `PaxHeaders/0/src/top.txt` holding a keyword
+/// list, or `././@LongLink` holding a path. Skipping is wrong too, but it is
+/// wrong in the direction that leaves no debris; each is tracked in
+/// `known-issues.md`.
+///
+/// `7` is deliberately *not* in this list even though we do not implement
+/// contiguous allocation: see `TYPEFLAG_CONTIGUOUS`. Its payload really is the
+/// file's data, so extracting it loses a guarantee rather than the contents.
+const TYPEFLAG_DEFINED_UNSUPPORTED: &[u8] = b"1346xgLK";
+
 // ============================================================================
 // Tar header (512 bytes, ustar format)
 // ============================================================================
@@ -1375,8 +1420,12 @@ fn print_json_entry(entry: &TarEntry) {
         s.replace('\\', "\\\\").replace('"', "\\\"")
     }
 
+    // `\0` is the historic regular-file marker that predates the ustar type
+    // field, and `7` is a regular file with an allocation hint we drop; both
+    // extract as ordinary files, so reporting them as "other" would make the
+    // JSON disagree with what `-x` actually produces.
     let type_str = match entry.typeflag {
-        TYPEFLAG_REGULAR => "file",
+        TYPEFLAG_REGULAR | b'\0' | TYPEFLAG_CONTIGUOUS => "file",
         TYPEFLAG_DIRECTORY => "directory",
         TYPEFLAG_SYMLINK => "symlink",
         _ => "other",
@@ -1462,6 +1511,8 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
     let mut block = [0u8; BLOCK_SIZE];
     // GNU says this once per archive, not once per member.
     let mut warned_absolute = false;
+    // Likewise — see `TYPEFLAG_CONTIGUOUS`.
+    let mut contiguous_warned = false;
 
     loop {
         if let Err(e) = read_exact(&mut reader, &mut block) {
@@ -1570,6 +1621,44 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
             .filter(|p| !p.is_empty())
             .unwrap_or(named);
 
+        // A flag that is neither one we handle nor one of the defined ones we
+        // do not marks a *plain file* that some other tar labelled oddly, and
+        // its bytes are recoverable — so recover them, which is what GNU does.
+        // Measured on an archive with the flag patched to 'Q':
+        //
+        //     tar: src/top.txt: Unknown file type 'Q', extracted as normal file
+        //
+        // The file appears and tar exits 0: this is a warning, not an error, so
+        // it does not join `errors`. We used to print "unsupported type flag,
+        // skipping" and drop the data, which is the worst of the three options
+        // available — the user is told something went wrong but not that their
+        // file is gone, and the exit status says the extraction succeeded.
+        if !matches!(
+            entry.typeflag,
+            TYPEFLAG_REGULAR | b'\0' | TYPEFLAG_DIRECTORY | TYPEFLAG_SYMLINK | TYPEFLAG_CONTIGUOUS
+        ) && !TYPEFLAG_DEFINED_UNSUPPORTED.contains(&entry.typeflag)
+        {
+            eprintln!(
+                "tar: {}: Unknown file type {}, extracted as normal file",
+                escape_os(named),
+                // The byte, not `as char`: `u8 as char` is a Latin-1 widening,
+                // so a crafted flag of 0xE9 would be reported as an accented
+                // letter that cannot fit in the one byte the field holds.
+                quoteaf(&[entry.typeflag])
+            );
+        }
+
+        // Once per run, not once per member, and it names no member — measured
+        // on an archive with two contiguous members, which produced exactly one
+        // line. That is the opposite of the warning above, which repeats per
+        // member because it names one; the difference is worth preserving
+        // because a big archive of contiguous members would otherwise bury the
+        // real diagnostics under thousands of identical lines.
+        if entry.typeflag == TYPEFLAG_CONTIGUOUS && !contiguous_warned {
+            contiguous_warned = true;
+            eprintln!("tar: Extracting contiguous files as regular files");
+        }
+
         match entry.typeflag {
             TYPEFLAG_DIRECTORY => {
                 if let Err(e) = fs::create_dir_all(&dest) {
@@ -1579,44 +1668,6 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
                     && let Err(e) = set_permissions(&dest, entry.mode)
                 {
                     report(cannot_chmod(named, entry.mode, &e), &mut errors);
-                }
-            }
-            TYPEFLAG_REGULAR | b'\0' => {
-                // Ensure parent directory exists.
-                if let Some(parent) = dest.parent()
-                    && !parent.exists()
-                    && let Err(e) = fs::create_dir_all(parent)
-                {
-                    report(cannot(named_parent, "mkdir", &e), &mut errors);
-                    skip_data(&mut reader, entry.size)?;
-                    continue;
-                }
-
-                // `-k` refusing a member is a *failure*, not a note: GNU says
-                // "tar: src/top.txt: Cannot open: File exists" and exits 2. We
-                // used to print "already exists, skipping" and exit 0, so a
-                // script could not tell a `-k` run that extracted everything
-                // from one that extracted nothing.
-                if opts.keep_old_files && dest.exists() {
-                    let exists = io::Error::from(io::ErrorKind::AlreadyExists);
-                    report(cannot(named, "open", &exists), &mut errors);
-                    skip_data(&mut reader, entry.size)?;
-                    continue;
-                }
-
-                match extract_file_data(&mut reader, &dest, named, entry.size) {
-                    Ok(()) => {
-                        if opts.preserve_permissions
-                            && let Err(e) = set_permissions(&dest, entry.mode)
-                        {
-                            report(cannot_chmod(named, entry.mode, &e), &mut errors);
-                        }
-                    }
-                    // A failed write to the destination is about this member
-                    // and the next one may still succeed; a failed read of the
-                    // archive means there is no next one.
-                    Err(Fail::Member(msg)) => report(msg, &mut errors),
-                    Err(Fail::Fatal(msg)) => return Err(msg),
                 }
             }
             TYPEFLAG_SYMLINK => {
@@ -1656,17 +1707,65 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
                 }
                 skip_data(&mut reader, entry.size)?;
             }
-            _ => {
+            // These flags *are* defined, we just do not implement them — and
+            // that is exactly why they must not fall through to the plain-file
+            // arm below. Their payloads are not file contents: `x`/`g` carry
+            // pax attribute records and `L`/`K` carry a long name, so writing
+            // them out would litter the destination with `PaxHeaders/0/…` and
+            // `././@LongLink` files whose contents are metadata, not the user's
+            // data. Skipping is a known gap tracked in `known-issues.md`; the
+            // wording is ours because GNU does not have this case.
+            flag if TYPEFLAG_DEFINED_UNSUPPORTED.contains(&flag) => {
                 eprintln!(
                     "tar: {}: unsupported type flag {}, skipping",
-                    escape_os(&entry.path),
+                    escape_os(named),
                     // The byte, not `as char`: `u8 as char` is a Latin-1
                     // widening, so a crafted type flag of 0xE9 would be
                     // reported as an accented letter that cannot fit in the
                     // one byte the field actually holds.
-                    quoteaf(&[entry.typeflag])
+                    quoteaf(&[flag])
                 );
                 skip_data(&mut reader, entry.size)?;
+            }
+            // Everything left is a plain file: `0`, the historical NUL, and the
+            // unknown flags the warning above has already announced.
+            _ => {
+                // Ensure parent directory exists.
+                if let Some(parent) = dest.parent()
+                    && !parent.exists()
+                    && let Err(e) = fs::create_dir_all(parent)
+                {
+                    report(cannot(named_parent, "mkdir", &e), &mut errors);
+                    skip_data(&mut reader, entry.size)?;
+                    continue;
+                }
+
+                // `-k` refusing a member is a *failure*, not a note: GNU says
+                // "tar: src/top.txt: Cannot open: File exists" and exits 2. We
+                // used to print "already exists, skipping" and exit 0, so a
+                // script could not tell a `-k` run that extracted everything
+                // from one that extracted nothing.
+                if opts.keep_old_files && dest.exists() {
+                    let exists = io::Error::from(io::ErrorKind::AlreadyExists);
+                    report(cannot(named, "open", &exists), &mut errors);
+                    skip_data(&mut reader, entry.size)?;
+                    continue;
+                }
+
+                match extract_file_data(&mut reader, &dest, named, entry.size) {
+                    Ok(()) => {
+                        if opts.preserve_permissions
+                            && let Err(e) = set_permissions(&dest, entry.mode)
+                        {
+                            report(cannot_chmod(named, entry.mode, &e), &mut errors);
+                        }
+                    }
+                    // A failed write to the destination is about this member
+                    // and the next one may still succeed; a failed read of the
+                    // archive means there is no next one.
+                    Err(Fail::Member(msg)) => report(msg, &mut errors),
+                    Err(Fail::Fatal(msg)) => return Err(msg),
+                }
             }
         }
     }

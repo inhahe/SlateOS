@@ -3,23 +3,43 @@
 //! A typing practice application with multiple lesson types, WPM tracking,
 //! accuracy statistics, and progressive difficulty levels.
 
-#![allow(dead_code)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-
 use guitk::color::Color;
-#[allow(unused_imports)]
-use guitk::event::{Event, Key, KeyEvent, Modifiers};
-use guitk::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
+
+/// The size the window opens at, and the size the tests measure against.
+const WINDOW_WIDTH: f32 = 620.0;
+const WINDOW_HEIGHT: f32 = 560.0;
+
+/// Everything in this program a click can land on.
+///
+/// Naming the controls is what lets a test say "click Start" rather than
+/// "click at (247, 133)" — and it is also the whole of the app's mouse
+/// support, which before this did not exist: `handle_event` matched `Key` and
+/// `Tick` and nothing else, so every button drawn on all four views was a
+/// picture of a button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    /// A row of the lesson list, by its index into `lessons` — not into the
+    /// filtered view, because a filter that changes under a stored index is
+    /// exactly the bug this app already had.
+    Lesson(usize),
+    /// The category filter chip: cycles to the next category.
+    Filter,
+    /// Opens the statistics view.
+    Stats,
+    /// Leaves the current view for the lesson list.
+    Back,
+    /// Starts the selected lesson again from the beginning.
+    Retry,
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -251,16 +271,20 @@ impl TypingSession {
 
         self.total_keystrokes = self.total_keystrokes.saturating_add(1);
 
-        let expected = self.text[self.cursor];
-        if ch == expected {
-            self.statuses[self.cursor] = CharStatus::Correct;
+        let Some(&expected) = self.text.get(self.cursor) else {
+            return;
+        };
+        let status = if ch == expected {
             self.correct_keystrokes = self.correct_keystrokes.saturating_add(1);
-            self.cursor += 1;
+            CharStatus::Correct
         } else {
-            self.statuses[self.cursor] = CharStatus::Incorrect;
             self.incorrect_keystrokes = self.incorrect_keystrokes.saturating_add(1);
-            self.cursor += 1;
+            CharStatus::Incorrect
+        };
+        if let Some(slot) = self.statuses.get_mut(self.cursor) {
+            *slot = status;
         }
+        self.cursor = self.cursor.saturating_add(1);
 
         // Check completion
         if self.cursor >= self.text.len() {
@@ -273,8 +297,10 @@ impl TypingSession {
         if self.finished || self.cursor == 0 {
             return;
         }
-        self.cursor -= 1;
-        self.statuses[self.cursor] = CharStatus::Pending;
+        self.cursor = self.cursor.saturating_sub(1);
+        if let Some(slot) = self.statuses.get_mut(self.cursor) {
+            *slot = CharStatus::Pending;
+        }
     }
 
     fn accuracy(&self) -> f64 {
@@ -356,18 +382,203 @@ enum AppView {
 }
 
 // ---------------------------------------------------------------------------
+// Layout
+// ---------------------------------------------------------------------------
+
+/// What the window is worth in pixels, solved once per frame.
+///
+/// Every coordinate in this program used to be a literal: the three views that
+/// took a `_width` threw it away, none of them was given the height at all, and
+/// the lesson list stepped 50 px per row from y=120 whatever the window did.
+/// A window shorter than the list drew rows below its own bottom edge, and
+/// there was no scrolling to reach them — `scroll_offset` was declared, reset
+/// in two places and read nowhere.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Layout {
+    window: Rect,
+    /// The view's name, and on the lesson list the category filter.
+    header: Rect,
+    /// One line of key reminders under the header.
+    subhead: Rect,
+    /// The list, the typing panel, the cards -- whatever the view is about.
+    body: Rect,
+    /// The bottom line of key reminders.
+    footer: Rect,
+    /// The height of one lesson row, and of one row of the results table.
+    row: f32,
+    /// How many cards fit across `body`, and how big one is.
+    cards_across: usize,
+    card: (f32, f32),
+    /// The gap between cards, and the general padding.
+    pad: f32,
+    big: f32,
+    font: f32,
+    small: f32,
+    tiny: f32,
+}
+
+impl Layout {
+    /// Solve the layout for a window of the given size.
+    #[must_use]
+    fn solve(width: f32, height: f32) -> Self {
+        let w = width.max(1.0);
+        let h = height.max(1.0);
+
+        // Type sizes come from the height, because that is what runs out
+        // first: the views are lists and stacks of bands, not columns.
+        let font = (h / 34.0).clamp(9.0, 17.0);
+        let big = (font * 2.1).clamp(15.0, 36.0);
+        let small = (font - 3.0).max(7.0);
+        let tiny = (font - 5.0).max(6.0);
+        let pad = (w.min(h) * 0.025).clamp(3.0, 15.0);
+
+        // The three bands of chrome, in the order they are given up when the
+        // window cannot pay for them. The subhead goes first: it is a
+        // reminder of keys that still work when it is not on screen. The
+        // header goes last, because a view with no title is a view the user
+        // cannot name.
+        let mut wants = [
+            (h * 0.14).clamp(24.0, 74.0), // header
+            (h * 0.06).clamp(14.0, 30.0), // subhead
+            (h * 0.06).clamp(14.0, 30.0), // footer
+        ];
+        // What is left once the body has its guaranteed share. Charging the
+        // padding to the chrome rather than the body is what keeps a squeezed
+        // window's list showing rows rather than showing only its own title.
+        let budget = (h - h * 0.45 - pad * 2.0).max(0.0);
+        for &i in &[1usize, 2, 0] {
+            if wants.iter().sum::<f32>() <= budget {
+                break;
+            }
+            if let Some(band) = wants.get_mut(i) {
+                *band = 0.0;
+            }
+        }
+        let [hdr_h, sub_h, ftr_h] = wants;
+
+        // A dropped band is a full-width strip nought pixels tall rather than
+        // `Rect::EMPTY`: `is_empty` already answers "no" to the only question
+        // the drawing code asks, and the strip form puts the body's edges
+        // where they belong for free (lesson 51, recorded for sokoban).
+        let header = Rect::new(0.0, 0.0, w, hdr_h);
+        let subhead = Rect::new(0.0, hdr_h, w, sub_h);
+        let footer = Rect::new(0.0, h - ftr_h, w, ftr_h);
+        let body = Rect::new(
+            pad,
+            subhead.bottom() + pad,
+            (w - pad * 2.0).max(0.0),
+            (footer.y - subhead.bottom() - pad * 2.0).max(0.0),
+        );
+
+        // A row holds a title over a subtitle, so it is sized from the two
+        // type sizes it must fit rather than from a share of the body: a body
+        // twice as tall should show twice as many lessons, not two lessons
+        // twice the size.
+        let row = (font + small + pad * 1.6).max(1.0);
+
+        // Cards wrap to as many columns as fit, down to one. The old code
+        // wrote three across at a fixed 180 px pitch, which is 570 px of
+        // content poured into whatever width the window happened to have.
+        let card_w_min = (font * 9.0).max(1.0);
+        let across = ((body.w + pad) / (card_w_min + pad)).floor();
+        let cards_across = if across.is_finite() && across >= 1.0 {
+            (across as usize).min(3)
+        } else {
+            1
+        };
+        let card_w = ((body.w - pad * (cards_across as f32 - 1.0)) / cards_across as f32).max(0.0);
+        let card_h = (font * 2.0 + small + pad * 2.0).max(0.0);
+
+        Self {
+            window: Rect::new(0.0, 0.0, w, h),
+            header,
+            subhead,
+            body,
+            footer,
+            row,
+            cards_across,
+            card: (card_w, card_h),
+            pad,
+            big,
+            font,
+            small,
+            tiny,
+        }
+    }
+
+    /// How many list rows the body can show at once.
+    ///
+    /// Zero when the body is too short for even one — the caller must not
+    /// treat that as "show one anyway", because a row drawn in a body that
+    /// cannot hold it is a row drawn over the footer.
+    #[must_use]
+    fn rows_visible(&self) -> usize {
+        if self.row <= 0.0 || self.body.h < self.row {
+            return 0;
+        }
+        (self.body.h / self.row).floor() as usize
+    }
+
+    /// The box of the `i`th visible list row.
+    #[must_use]
+    fn row_rect(&self, i: usize) -> Rect {
+        Rect::new(
+            self.body.x,
+            self.body.y + i as f32 * self.row,
+            self.body.w,
+            (self.row - self.pad * 0.4).max(0.0),
+        )
+    }
+
+    /// The box of the `i`th card, wrapping at [`Self::cards_across`].
+    #[must_use]
+    fn card_rect(&self, i: usize) -> Rect {
+        let (cw, ch) = self.card;
+        // `max(1)` twice over: `cards_across` is never zero, and a divisor that
+        // is only *believed* non-zero is a division that panics the day the
+        // belief stops holding.
+        let across = self.cards_across.max(1);
+        let col = i.checked_rem(across).unwrap_or(0);
+        let rowi = i.checked_div(across).unwrap_or(0);
+        Rect::new(
+            self.body.x + col as f32 * (cw + self.pad),
+            self.body.y + rowi as f32 * (ch + self.pad),
+            cw,
+            ch,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main app
 // ---------------------------------------------------------------------------
 
 struct TypingTutorApp {
     lessons: Vec<Lesson>,
+    /// Which lesson the cursor is on, as an index into `lessons`.
+    ///
+    /// Into `lessons`, not into the filtered view of it. The two used to be
+    /// the same field holding whichever the last writer meant: the arrow keys
+    /// bounds-checked it against `filtered_lessons().len()` while
+    /// `start_lesson` stored the unfiltered index into it. Finish a lesson
+    /// with a category filter on and the highlight landed on some other row —
+    /// and if the unfiltered index was past the end of the filtered list,
+    /// Down was refused and Up walked back from a row that was not there.
     selected_lesson: usize,
     view: AppView,
     session: Option<TypingSession>,
     current_time_ms: u64,
     results: Vec<SessionResult>,
     category_filter: Option<LessonCategory>,
+    /// The first lesson row on screen. Read by the drawing pass, which is new:
+    /// this field existed, was reset in two places, and was read nowhere, so
+    /// the list could not scroll and every lesson past the window's bottom
+    /// edge was unreachable by mouse or key.
     scroll_offset: usize,
+    /// The size the last frame was drawn at, which is the size the next click
+    /// is read against.
+    width: f32,
+    height: f32,
 }
 
 impl TypingTutorApp {
@@ -381,7 +592,32 @@ impl TypingTutorApp {
             results: Vec::new(),
             category_filter: None,
             scroll_offset: 0,
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
         }
+    }
+
+    /// Remember the size the window is now, so the next click is read against
+    /// the picture the user actually clicked on.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.width = width.max(1.0);
+        self.height = height.max(1.0);
+    }
+
+    /// The layout of the window as it stands.
+    fn layout(&self) -> Layout {
+        Layout::solve(self.width, self.height)
+    }
+
+    /// Where the cursor sits in the filtered list, if it is in it at all.
+    ///
+    /// `None` when the selected lesson is filtered out — which is a state the
+    /// user can reach by pressing C, and which the arrow keys have to handle
+    /// rather than index past.
+    fn cursor_position(&self) -> Option<usize> {
+        self.filtered_lessons()
+            .iter()
+            .position(|&i| i == self.selected_lesson)
     }
 
     fn filtered_lessons(&self) -> Vec<usize> {
@@ -396,8 +632,8 @@ impl TypingTutorApp {
     }
 
     fn start_lesson(&mut self, lesson_idx: usize) {
-        if lesson_idx < self.lessons.len() {
-            self.session = Some(TypingSession::new(&self.lessons[lesson_idx].text));
+        if let Some(lesson) = self.lessons.get(lesson_idx) {
+            self.session = Some(TypingSession::new(&lesson.text));
             self.selected_lesson = lesson_idx;
             self.view = AppView::Typing;
         }
@@ -406,12 +642,13 @@ impl TypingTutorApp {
     fn finish_lesson(&mut self) {
         if let Some(ref session) = self.session
             && session.finished
+            && let Some(lesson) = self.lessons.get(self.selected_lesson)
         {
             let wpm = session.wpm(self.current_time_ms);
             let acc = session.accuracy();
             let dur = session.elapsed_ms(self.current_time_ms);
-            let title = self.lessons[self.selected_lesson].title.clone();
-            let cat = self.lessons[self.selected_lesson].category;
+            let title = lesson.title.clone();
+            let cat = lesson.category;
             let tlen = session.text.len();
             self.results.push(SessionResult {
                 lesson_title: title,
@@ -428,17 +665,21 @@ impl TypingTutorApp {
     fn cycle_category_filter(&mut self) {
         let cats = LessonCategory::all();
         match self.category_filter {
-            None => self.category_filter = Some(cats[0]),
+            None => self.category_filter = cats.first().copied(),
             Some(current) => {
                 let idx = cats.iter().position(|c| *c == current).unwrap_or(0);
-                if idx + 1 < cats.len() {
-                    self.category_filter = Some(cats[idx + 1]);
-                } else {
-                    self.category_filter = None;
-                }
+                // `None` off the end of the list is the wrap back to "all
+                // categories", so a `get` that misses is the answer and not a
+                // failure to look.
+                self.category_filter = cats.get(idx.saturating_add(1)).copied();
             }
         }
-        self.selected_lesson = 0;
+        // Put the cursor on the first lesson the new filter admits, rather
+        // than on lesson zero. `selected_lesson` indexes `lessons`, and
+        // lesson zero is in the list only when the filter happens to admit
+        // its category; setting it blind is what used to leave the cursor on
+        // a row that was not drawn.
+        self.selected_lesson = self.filtered_lessons().first().copied().unwrap_or(0);
         self.scroll_offset = 0;
     }
 
@@ -466,9 +707,12 @@ impl TypingTutorApp {
         self.results.iter().map(|r| r.text_length).sum()
     }
 
-    fn handle_key(&mut self, event: &KeyEvent) {
+    /// A key release is not a key press: handling both would type every
+    /// character twice and count twice the keystrokes the typist made, which
+    /// is an accuracy figure they could not explain.
+    fn handle_key(&mut self, event: &KeyEvent) -> EventResult {
         if !event.pressed {
-            return;
+            return EventResult::Ignored;
         }
 
         match self.view {
@@ -479,45 +723,106 @@ impl TypingTutorApp {
         }
     }
 
-    fn handle_lesson_select(&mut self, event: &KeyEvent) {
+    fn handle_lesson_select(&mut self, event: &KeyEvent) -> EventResult {
         let filtered = self.filtered_lessons();
+        // Where the cursor is *in the list being drawn*. Every arrow decision
+        // below is made here and then translated back into an index into
+        // `lessons`, which is the one place the two numberings meet.
+        let here = self.cursor_position();
         match event.key {
-            Key::Up if self.selected_lesson > 0 => {
-                self.selected_lesson -= 1;
+            Key::Up => {
+                let next = match here {
+                    Some(0) | None => return EventResult::Ignored,
+                    Some(i) => i.saturating_sub(1),
+                };
+                let Some(&idx) = filtered.get(next) else {
+                    return EventResult::Ignored;
+                };
+                self.selected_lesson = idx;
             }
-            Key::Down if self.selected_lesson + 1 < filtered.len() => {
-                self.selected_lesson += 1;
+            Key::Down => {
+                let next = match here {
+                    // A cursor that the filter has excluded is put back on the
+                    // list rather than left off it: Down from nowhere lands on
+                    // the first row, which is the only answer that leaves the
+                    // user able to see where they are.
+                    None => 0,
+                    Some(i) => i.saturating_add(1),
+                };
+                let Some(&idx) = filtered.get(next) else {
+                    return EventResult::Ignored;
+                };
+                self.selected_lesson = idx;
+            }
+            Key::Home => {
+                let Some(&idx) = filtered.first() else {
+                    return EventResult::Ignored;
+                };
+                self.selected_lesson = idx;
+            }
+            Key::End => {
+                let Some(&idx) = filtered.last() else {
+                    return EventResult::Ignored;
+                };
+                self.selected_lesson = idx;
             }
             Key::Enter => {
-                if let Some(&idx) = filtered.get(self.selected_lesson) {
-                    self.start_lesson(idx);
+                if here.is_none() {
+                    return EventResult::Ignored;
                 }
+                self.start_lesson(self.selected_lesson);
             }
-            Key::C => {
-                self.cycle_category_filter();
-            }
-            Key::S => {
-                self.view = AppView::Statistics;
-            }
-            Key::Escape => {
-                // no-op at top level
-            }
-            _ => {}
+            Key::C => self.cycle_category_filter(),
+            Key::S => self.view = AppView::Statistics,
+            // Escape is not this view's to take. Swallowing it here told the
+            // window manager the key had been dealt with when nothing had
+            // happened at all.
+            _ => return EventResult::Ignored,
         }
+        self.scroll_cursor_into_view();
+        EventResult::Consumed
     }
 
-    fn handle_typing(&mut self, event: &KeyEvent) {
+    /// Move the window of drawn rows the least distance that puts the cursor
+    /// back inside it.
+    ///
+    /// The least distance, in both directions: a cursor that walked one row
+    /// off the bottom brings the list up by one and leaves the page the user
+    /// has just read on screen, where anchoring the cursor at the top would
+    /// throw that page away (known-issues.md lesson 70, recorded for
+    /// snippets).
+    fn scroll_cursor_into_view(&mut self) {
+        let capacity = self.layout().rows_visible();
+        if capacity == 0 {
+            return;
+        }
+        let Some(here) = self.cursor_position() else {
+            return;
+        };
+        if here < self.scroll_offset {
+            self.scroll_offset = here;
+        } else if here >= self.scroll_offset.saturating_add(capacity) {
+            self.scroll_offset = here.saturating_sub(capacity.saturating_sub(1));
+        }
+        // A list that has shrunk under a scrolled window leaves blank rows
+        // where lessons used to be, so the offset is pulled back to the last
+        // page rather than left where the old, longer list put it.
+        let max_offset = self.filtered_lessons().len().saturating_sub(capacity);
+        self.scroll_offset = self.scroll_offset.min(max_offset);
+    }
+
+    fn handle_typing(&mut self, event: &KeyEvent) -> EventResult {
         if event.key == Key::Escape {
             self.view = AppView::LessonSelect;
             self.session = None;
-            return;
+            return EventResult::Consumed;
         }
 
         if event.key == Key::Backspace {
             if let Some(ref mut session) = self.session {
                 session.backspace();
             }
-            return;
+            return EventResult::Consumed;
         }
 
         // Type the character.
@@ -526,47 +831,148 @@ impl TypingTutorApp {
         // layouts, and a lesson that scored those would count a carriage
         // return the user never saw as a mistyped letter — and then report an
         // accuracy the typist has no way to explain.
+        let mut typed_any = false;
         if let Some(ref mut session) = self.session {
             for ch in event.typed() {
                 session.type_char(ch, self.current_time_ms);
+                typed_any = true;
             }
             if session.finished {
                 self.finish_lesson();
             }
         }
+        // A key that produced no character -- a function key, a bare modifier
+        // -- was not this view's to take. Reporting it consumed asks for a
+        // repaint of a picture that has not changed, on every such key.
+        if typed_any {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
     }
 
-    fn handle_results(&mut self, event: &KeyEvent) {
+    fn handle_results(&mut self, event: &KeyEvent) -> EventResult {
         match event.key {
-            Key::Enter | Key::Space => {
+            Key::Enter | Key::Space | Key::Escape => {
                 self.view = AppView::LessonSelect;
                 self.session = None;
             }
             Key::R => {
-                // Retry same lesson
+                // Retry the same lesson. `selected_lesson` indexes `lessons`,
+                // which is why this is right whether or not a filter is on.
                 self.start_lesson(self.selected_lesson);
             }
-            _ => {}
+            _ => return EventResult::Ignored,
         }
+        EventResult::Consumed
     }
 
-    fn handle_statistics(&mut self, event: &KeyEvent) {
+    fn handle_statistics(&mut self, event: &KeyEvent) -> EventResult {
         if event.key == Key::Escape || event.key == Key::Enter {
             self.view = AppView::LessonSelect;
+            return EventResult::Consumed;
         }
+        EventResult::Ignored
     }
 
-    fn handle_event(&mut self, event: &Event) {
+    /// Act on a click that has already been resolved to a named control.
+    ///
+    /// Named, not measured: the drawing pass records the boxes, so a control
+    /// that moves because the window changed size cannot drift away from the
+    /// clicks meant for it.
+    fn activate(&mut self, target: Target) -> EventResult {
+        match target {
+            Target::Lesson(idx) => {
+                // First click selects, second starts -- the same two-step the
+                // arrow keys and Enter give, so the mouse cannot start a
+                // lesson the user has not seen highlighted.
+                if self.selected_lesson == idx && self.view == AppView::LessonSelect {
+                    self.start_lesson(idx);
+                } else {
+                    self.selected_lesson = idx;
+                    self.scroll_cursor_into_view();
+                }
+            }
+            Target::Filter => self.cycle_category_filter(),
+            Target::Stats => self.view = AppView::Statistics,
+            Target::Back => {
+                self.view = AppView::LessonSelect;
+                self.session = None;
+            }
+            Target::Retry => self.start_lesson(self.selected_lesson),
+        }
+        EventResult::Consumed
+    }
+
+    fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::Key(ke) => self.handle_key(ke),
+            // The mouse arm that did not exist. Every button this app drew on
+            // all four views was a picture of a button: `handle_event` matched
+            // `Key` and `Tick`, so a click reached nothing anywhere in the
+            // program.
+            Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }) => {
+                let frame = self.frame(self.width, self.height);
+                match frame.hit_test(*x, *y) {
+                    Some(target) => self.activate(target),
+                    None => EventResult::Ignored,
+                }
+            }
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Scroll { dy, .. },
+                ..
+            }) if self.view == AppView::LessonSelect => self.scroll_by(*dy),
             // Without this the clock stood at zero, so every WPM figure the
             // app showed was zero and every duration read 0:00 -- on the
             // live screen, on the results screen, and in the history it
             // saved.  `advance_time` and everything above it were correct
             // and tested; nothing called them.  known-issues.md lesson 45.
-            Event::Tick { elapsed_ms } => self.advance_time(*elapsed_ms),
-            _ => {}
+            Event::Tick { elapsed_ms } => {
+                self.advance_time(*elapsed_ms);
+                // Only the typing view shows a clock. Asking for a repaint on
+                // every tick of the lesson list would redraw a still picture
+                // sixty times a second.
+                if self.view == AppView::Typing {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            _ => EventResult::Ignored,
         }
+    }
+
+    /// Scroll the lesson list by a wheel notch.
+    ///
+    /// Positive `dy` is away from the user, which walks the list *up* towards
+    /// its first row -- the direction the wheel moves the page, not the
+    /// direction it moves the index.
+    fn scroll_by(&mut self, dy: f32) -> EventResult {
+        let capacity = self.layout().rows_visible();
+        let len = self.filtered_lessons().len();
+        if capacity == 0 || len <= capacity {
+            return EventResult::Ignored;
+        }
+        let max_offset = len.saturating_sub(capacity);
+        let step = 3usize;
+        let next = if dy > 0.0 {
+            self.scroll_offset.saturating_sub(step)
+        } else if dy < 0.0 {
+            self.scroll_offset.saturating_add(step).min(max_offset)
+        } else {
+            return EventResult::Ignored;
+        };
+        if next == self.scroll_offset {
+            // A wheel notch at the end of the list changed nothing, and
+            // saying otherwise asks for a repaint of an identical picture.
+            return EventResult::Ignored;
+        }
+        self.scroll_offset = next;
+        EventResult::Consumed
     }
 
     /// Move the app's clock forward by `delta_ms`.
@@ -583,345 +989,290 @@ impl TypingTutorApp {
     // Rendering
     // -----------------------------------------------------------------------
 
-    fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+    // -----------------------------------------------------------------------
+    // Drawing
+    // -----------------------------------------------------------------------
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height,
-            color: Color::from_hex(COL_BASE),
-            corner_radii: CornerRadii::ZERO,
-        });
-
+    /// Draw the whole window, recording a hit box for everything clickable.
+    ///
+    /// One frame, not a `Vec<RenderCommand>`: the boxes and the paint come out
+    /// of the same pass, so a control cannot be drawn in one place and clicked
+    /// in another.
+    fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let l = Layout::solve(width, height);
+        let mut f = Frame::new(width, height);
+        fill(&mut f, l.window, hex(COL_BASE), CornerRadii::ZERO);
         match self.view {
-            AppView::LessonSelect => self.render_lesson_select(&mut cmds, width),
-            AppView::Typing => self.render_typing(&mut cmds, width),
-            AppView::Results => self.render_results(&mut cmds, width),
-            AppView::Statistics => self.render_statistics(&mut cmds, width),
+            AppView::LessonSelect => self.draw_lesson_select(&mut f, &l),
+            AppView::Typing => self.draw_typing(&mut f, &l),
+            AppView::Results => self.draw_results(&mut f, &l),
+            AppView::Statistics => self.draw_statistics(&mut f, &l),
         }
-
-        cmds
+        f
     }
 
-    fn render_lesson_select(&self, cmds: &mut Vec<RenderCommand>, _width: f32) {
-        // Header
-        cmds.push(RenderCommand::Text {
-            x: 30.0,
-            y: 20.0,
-            text: String::from("Typing Tutor"),
-            color: Color::from_hex(COL_BLUE),
-            font_size: 36.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Category filter
+    fn draw_lesson_select(&self, f: &mut Frame<Target>, l: &Layout) {
+        // Right to left, so that what is measured from the right edge is taken
+        // out of the row before the title is asked what it can have.
+        let mut bar = inset_x(l.header, l.pad);
+        chip(f, l, &mut bar, "Stats", Target::Stats);
         let filter_text = match self.category_filter {
             None => String::from("All Categories"),
             Some(cat) => format!("Category: {}", cat.name()),
         };
-        cmds.push(RenderCommand::Text {
-            x: 30.0,
-            y: 65.0,
-            text: filter_text,
-            color: Color::from_hex(COL_SUBTEXT0),
-            font_size: 16.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        chip(f, l, &mut bar, &filter_text, Target::Filter);
+        label_left(
+            f,
+            &Label {
+                text: "Typing Tutor",
+                size: l.big,
+                weight: FontWeightHint::Bold,
+                color: hex(COL_BLUE),
+            },
+            bar,
+        );
 
-        // Controls
-        cmds.push(RenderCommand::Text {
-            x: 30.0,
-            y: 88.0,
-            text: String::from("↑/↓: Select  |  Enter: Start  |  C: Category  |  S: Stats"),
-            color: Color::from_hex(COL_OVERLAY0),
-            font_size: 13.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        label_left(
+            f,
+            &Label {
+                text: "Up/Down: Select  |  Enter: Start  |  C: Category  |  S: Stats",
+                size: l.small,
+                weight: FontWeightHint::Regular,
+                color: hex(COL_OVERLAY0),
+            },
+            inset_x(l.subhead, l.pad),
+        );
 
-        // Lesson list
         let filtered = self.filtered_lessons();
-        let list_y = 120.0;
-        for (display_idx, &lesson_idx) in filtered.iter().enumerate() {
-            let y = list_y + display_idx as f32 * 50.0;
-            let lesson = &self.lessons[lesson_idx];
-            let is_selected = display_idx == self.selected_lesson;
-
-            // Row background
-            let bg_color = if is_selected {
-                Color::from_hex(COL_SURFACE0)
-            } else {
-                Color::from_hex(COL_BASE)
+        let capacity = l.rows_visible();
+        f.clip(l.body);
+        for (i, &lesson_idx) in filtered
+            .iter()
+            .skip(self.scroll_offset)
+            .take(capacity)
+            .enumerate()
+        {
+            let Some(lesson) = self.lessons.get(lesson_idx) else {
+                continue;
             };
-            cmds.push(RenderCommand::FillRect {
-                x: 20.0,
-                y,
-                width: 560.0,
-                height: 44.0,
-                color: bg_color,
-                corner_radii: CornerRadii::all(6.0),
-            });
+            let r = l.row_rect(i);
+            let selected = lesson_idx == self.selected_lesson;
+            // An unselected row is drawn a shade off the background rather than
+            // in it. The program this replaces filled it with `COL_BASE` --
+            // the background -- so the whole list was a single flat field and
+            // the only visible row boundary was the one the cursor was on.
+            fill(
+                f,
+                r,
+                hex(if selected { COL_SURFACE0 } else { COL_MANTLE }),
+                CornerRadii::all(l.pad * 0.4),
+            );
+            let stripe = Rect::new(
+                r.x + l.pad * 0.5,
+                r.y + l.pad * 0.3,
+                (l.pad * 0.3).max(2.0),
+                (r.h - l.pad * 0.6).max(0.0),
+            );
+            fill(f, stripe, lesson.category.color(), CornerRadii::all(1.0));
 
-            // Category indicator
-            cmds.push(RenderCommand::FillRect {
-                x: 26.0,
-                y: y + 10.0,
-                width: 4.0,
-                height: 24.0,
-                color: lesson.category.color(),
-                corner_radii: CornerRadii::all(2.0),
-            });
-
-            // Title
-            cmds.push(RenderCommand::Text {
-                x: 40.0,
-                y: y + 6.0,
-                text: lesson.title.clone(),
-                color: if is_selected {
-                    Color::from_hex(COL_TEXT)
-                } else {
-                    Color::from_hex(COL_SUBTEXT1)
+            let text_x = stripe.right() + l.pad * 0.6;
+            let text_w = (r.right() - l.pad * 0.5 - text_x).max(0.0);
+            push_text(
+                f,
+                &Label {
+                    text: &lesson.title,
+                    size: l.font,
+                    weight: if selected {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    color: hex(if selected { COL_TEXT } else { COL_SUBTEXT1 }),
                 },
-                font_size: 17.0,
-                font_weight: if is_selected {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
+                text_x,
+                r.y + l.pad * 0.3,
+                text_w,
+            );
+            // `chars().count()`, not `len()`. The subtitle says "chars" and the
+            // program counted bytes, so every lesson containing a character
+            // outside ASCII advertised more characters than it has -- and this
+            // app's own lesson list has them.
+            let sub = format!(
+                "{} - {} chars",
+                lesson.category.name(),
+                lesson.text.chars().count()
+            );
+            push_text(
+                f,
+                &Label {
+                    text: &sub,
+                    size: l.small,
+                    weight: FontWeightHint::Regular,
+                    color: hex(COL_OVERLAY0),
                 },
-                max_width: Some(400.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+                text_x,
+                r.y + l.pad * 0.3 + l.font + l.pad * 0.2,
+                text_w,
+            );
+            f.hit(Target::Lesson(lesson_idx), r);
+        }
+        f.unclip();
 
-            // Category label
-            cmds.push(RenderCommand::Text {
-                x: 40.0,
-                y: y + 26.0,
-                text: format!("{} · {} chars", lesson.category.name(), lesson.text.len()),
-                color: Color::from_hex(COL_OVERLAY0),
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+        // The footer says what is off screen. A list that scrolls silently is a
+        // list the user believes they have seen all of.
+        let shown = filtered
+            .len()
+            .min(self.scroll_offset.saturating_add(capacity));
+        let hidden = filtered.len().saturating_sub(shown);
+        let mut ftr = inset_x(l.footer, l.pad);
+        if hidden > 0 {
+            let more = format!("{hidden} more below");
+            let w = text::measure(&more, l.small, FontWeightHint::Regular).min(ftr.w);
+            let r = take_right(&mut ftr, w, l.pad);
+            label_left(
+                f,
+                &Label {
+                    text: &more,
+                    size: l.small,
+                    weight: FontWeightHint::Regular,
+                    color: hex(COL_YELLOW),
+                },
+                r,
+            );
+        }
+        let count = format!("{} lessons", filtered.len());
+        label_left(
+            f,
+            &Label {
+                text: &count,
+                size: l.small,
+                weight: FontWeightHint::Regular,
+                color: hex(COL_OVERLAY0),
+            },
+            ftr,
+        );
+    }
+
+    fn draw_typing(&self, f: &mut Frame<Target>, l: &Layout) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let Some(lesson) = self.lessons.get(self.selected_lesson) else {
+            return;
+        };
+
+        let mut bar = inset_x(l.header, l.pad);
+        chip(f, l, &mut bar, "Esc", Target::Back);
+        label_left(
+            f,
+            &Label {
+                text: &lesson.title,
+                size: l.big,
+                weight: FontWeightHint::Bold,
+                color: hex(COL_BLUE),
+            },
+            bar,
+        );
+
+        let secs = session.elapsed_ms(self.current_time_ms) / 1000;
+        // `chars_remaining` is on the bar because it is the one number a typist
+        // in the middle of a lesson actually wants: how much is left. It
+        // existed, was tested, and was drawn nowhere.
+        let stats = format!(
+            "WPM: {:.0}  |  Accuracy: {:.1}%  |  Time: {}:{:02}  |  {} left",
+            session.wpm(self.current_time_ms),
+            session.accuracy(),
+            secs / 60,
+            secs % 60,
+            session.chars_remaining()
+        );
+        label_left(
+            f,
+            &Label {
+                text: &stats,
+                size: l.small,
+                weight: FontWeightHint::Regular,
+                color: hex(COL_SUBTEXT0),
+            },
+            inset_x(l.subhead, l.pad),
+        );
+
+        let mut area = l.body;
+        let bar_h = (l.pad * 0.5).max(3.0);
+        let track = take_top(&mut area, bar_h, l.pad * 0.6);
+        fill(f, track, hex(COL_SURFACE0), CornerRadii::all(bar_h / 2.0));
+        let progress = (session.progress_percent() / 100.0).clamp(0.0, 1.0) as f32;
+        fill(
+            f,
+            Rect::new(track.x, track.y, track.w * progress, track.h),
+            hex(COL_GREEN),
+            CornerRadii::all(bar_h / 2.0),
+        );
+
+        fill(f, area, hex(COL_MANTLE), CornerRadii::all(l.pad * 0.5));
+        draw_lesson_text(f, l, session, shrink(area, l.pad));
+
+        // The next keystroke, named. It used to be drawn at a fixed y = 320,
+        // which is inside the typing panel on a short window and in the middle
+        // of nothing on a tall one.
+        let hint = match session.text.get(session.cursor) {
+            Some(&' ') => Some(String::from("Space")),
+            Some(&ch) => Some(format!("Type: '{ch}'")),
+            None => None,
+        };
+        if let Some(hint) = hint {
+            label_left(
+                f,
+                &Label {
+                    text: &hint,
+                    size: l.font,
+                    weight: FontWeightHint::Bold,
+                    color: hex(COL_YELLOW),
+                },
+                inset_x(l.footer, l.pad),
+            );
         }
     }
 
-    fn render_typing(&self, cmds: &mut Vec<RenderCommand>, width: f32) {
-        let session = match &self.session {
-            Some(s) => s,
-            None => return,
+    fn draw_results(&self, f: &mut Frame<Target>, l: &Layout) {
+        let Some(session) = self.session.as_ref() else {
+            return;
         };
-        let lesson = &self.lessons[self.selected_lesson];
 
-        // Header
-        cmds.push(RenderCommand::Text {
-            x: 30.0,
-            y: 20.0,
-            text: lesson.title.clone(),
-            color: Color::from_hex(COL_BLUE),
-            font_size: 24.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        let mut bar = inset_x(l.header, l.pad);
+        chip(f, l, &mut bar, "Retry", Target::Retry);
+        chip(f, l, &mut bar, "Lessons", Target::Back);
+        label_left(
+            f,
+            &Label {
+                text: "Lesson Complete!",
+                size: l.big,
+                weight: FontWeightHint::Bold,
+                color: hex(COL_GREEN),
+            },
+            bar,
+        );
 
-        // Stats bar
+        let title = self
+            .lessons
+            .get(self.selected_lesson)
+            .map_or("", |x| x.title.as_str());
+        label_left(
+            f,
+            &Label {
+                text: title,
+                size: l.font,
+                weight: FontWeightHint::Regular,
+                color: hex(COL_TEXT),
+            },
+            inset_x(l.subhead, l.pad),
+        );
+
         let wpm = session.wpm(self.current_time_ms);
-        let acc = session.accuracy();
-        let elapsed = session.elapsed_ms(self.current_time_ms);
-        let secs = elapsed / 1000;
-        cmds.push(RenderCommand::Text {
-            x: 30.0,
-            y: 55.0,
-            text: format!(
-                "WPM: {:.0}  |  Accuracy: {:.1}%  |  Time: {}:{:02}  |  Esc: quit",
-                wpm,
-                acc,
-                secs / 60,
-                secs % 60
-            ),
-            color: Color::from_hex(COL_SUBTEXT0),
-            font_size: 14.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Progress bar
-        let progress = session.progress_percent() as f32 / 100.0;
-        let bar_w = width - 60.0;
-        cmds.push(RenderCommand::FillRect {
-            x: 30.0,
-            y: 80.0,
-            width: bar_w,
-            height: 6.0,
-            color: Color::from_hex(COL_SURFACE0),
-            corner_radii: CornerRadii::all(3.0),
-        });
-        cmds.push(RenderCommand::FillRect {
-            x: 30.0,
-            y: 80.0,
-            width: bar_w * progress,
-            height: 6.0,
-            color: Color::from_hex(COL_GREEN),
-            corner_radii: CornerRadii::all(3.0),
-        });
-
-        // Typing area background
-        cmds.push(RenderCommand::FillRect {
-            x: 20.0,
-            y: 100.0,
-            width: width - 40.0,
-            height: 200.0,
-            color: Color::from_hex(COL_MANTLE),
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        // Render the text with colour-coded characters.
-        //
-        // Each character is a separate `Text` command because each one carries
-        // its own colour, which means this loop, and not the renderer, owns the
-        // pen. It used to advance the pen by a hardcoded 13.2 px — "approximate
-        // monospace character width" — while drawing in the *proportional* UI
-        // face, so nothing lined up: an `i` left a gap two thirds of a cell
-        // wide and an `M` ran into its neighbour, and the cursor's highlight
-        // box, also 13.2 px, sat over the wrong part of the glyph it marked.
-        // Wrapping was computed from the same guess, so a lesson of wide
-        // characters ran past the right edge of the panel it is drawn in.
-        //
-        // Both are fixed by asking the same question the renderer will:
-        // `PushFont` puts the monospace family in force (which is what a typing
-        // tutor wants — a character-per-cell grid is what makes per-character
-        // colouring legible), and each advance is measured in that family. A
-        // wide character then takes the two cells it is drawn in rather than
-        // the one a cell count would have given it.
-        let font_size = 22.0;
-        let weight = FontWeightHint::Regular;
-        let text_left = 35.0;
-        // The typing panel spans x=20 to x=width-20; the text is inset 15 px on
-        // the left, so it wraps 15 px short of the right edge.
-        let wrap_at = (width - 35.0).max(text_left);
-        let mut x = text_left;
-        let mut y = 120.0;
-        let line_height = 32.0;
-
-        cmds.push(RenderCommand::PushFont {
-            family: FontFamily::Mono,
-        });
-        for (i, &ch) in session.text.iter().enumerate() {
-            let mut buf = [0u8; 4];
-            let glyph: &str = ch.encode_utf8(&mut buf);
-            let advance = text::measure_in(glyph, font_size, weight, FontFamily::Mono);
-
-            // Break before a character that would cross the right edge, not
-            // after a count of them. The `x > text_left` guard keeps a single
-            // character wider than the whole panel from looping forever.
-            if x > text_left && x + advance > wrap_at {
-                x = text_left;
-                y += line_height;
-            }
-
-            let color = if i == session.cursor {
-                // Current cursor position — highlight background
-                cmds.push(RenderCommand::FillRect {
-                    x: x - 1.0,
-                    y: y - 2.0,
-                    width: advance + 2.0,
-                    height: font_size + 4.0,
-                    color: Color::from_hex(COL_SURFACE1),
-                    corner_radii: CornerRadii::all(2.0),
-                });
-                Color::from_hex(COL_TEXT)
-            } else {
-                match session.statuses[i] {
-                    CharStatus::Pending => Color::from_hex(COL_SURFACE2),
-                    CharStatus::Correct => Color::from_hex(COL_GREEN),
-                    CharStatus::Incorrect => Color::from_hex(COL_RED),
-                }
-            };
-
-            cmds.push(RenderCommand::Text {
-                x,
-                y,
-                text: String::from(ch),
-                color,
-                font_size,
-                font_weight: weight,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            x += advance;
-        }
-        cmds.push(RenderCommand::PopFont);
-
-        // Keyboard hint for current character
-        if session.cursor < session.text.len() {
-            let next_char = session.text[session.cursor];
-            let hint = if next_char == ' ' {
-                String::from("Space")
-            } else {
-                format!("Type: '{next_char}'")
-            };
-            cmds.push(RenderCommand::Text {
-                x: 30.0,
-                y: 320.0,
-                text: hint,
-                color: Color::from_hex(COL_YELLOW),
-                font_size: 18.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
-    }
-
-    fn render_results(&self, cmds: &mut Vec<RenderCommand>, _width: f32) {
-        let session = match &self.session {
-            Some(s) => s,
-            None => return,
-        };
-        let lesson = &self.lessons[self.selected_lesson];
-
-        cmds.push(RenderCommand::Text {
-            x: 30.0,
-            y: 30.0,
-            text: String::from("Lesson Complete!"),
-            color: Color::from_hex(COL_GREEN),
-            font_size: 36.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: 30.0,
-            y: 80.0,
-            text: lesson.title.clone(),
-            color: Color::from_hex(COL_TEXT),
-            font_size: 20.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Stats cards
-        let wpm = session.wpm(self.current_time_ms);
-        let acc = session.accuracy();
-        let elapsed = session.elapsed_ms(self.current_time_ms);
-        let secs = elapsed / 1000;
-
-        let stats = [
+        let secs = session.elapsed_ms(self.current_time_ms) / 1000;
+        let cards = [
             ("WPM", format!("{wpm:.0}"), COL_BLUE),
-            ("Accuracy", format!("{acc:.1}%"), COL_GREEN),
+            ("Accuracy", format!("{:.1}%", session.accuracy()), COL_GREEN),
             ("Time", format!("{}:{:02}", secs / 60, secs % 60), COL_PEACH),
             (
                 "Keystrokes",
@@ -931,107 +1282,85 @@ impl TypingTutorApp {
             ("Correct", session.correct_keystrokes.to_string(), COL_TEAL),
             ("Errors", session.incorrect_keystrokes.to_string(), COL_RED),
         ];
+        f.clip(l.body);
+        let bottom = draw_cards(f, l, &cards);
+        let rating = format!("Rating: {}", wpm_rating(wpm));
+        push_text(
+            f,
+            &Label {
+                text: &rating,
+                size: l.font,
+                weight: FontWeightHint::Bold,
+                color: hex(COL_MAUVE),
+            },
+            l.body.x,
+            bottom + l.pad,
+            l.body.w,
+        );
 
-        for (i, (label, value, col)) in stats.iter().enumerate() {
-            let col_idx = i % 3;
-            let row_idx = i / 3;
-            let sx = 30.0 + col_idx as f32 * 180.0;
-            let sy = 120.0 + row_idx as f32 * 90.0;
+        // Characters, not keystrokes. The cards above count every key pressed;
+        // this counts how the text ended up, so a typist who made a mistake and
+        // corrected it can see that the two are not the same number.
+        // `correct_count` and `incorrect_count` computed exactly this, were
+        // tested, and were shown nowhere.
+        let settled = format!(
+            "{} characters right, {} left wrong",
+            session.correct_count(),
+            session.incorrect_count()
+        );
+        push_text(
+            f,
+            &Label {
+                text: &settled,
+                size: l.small,
+                weight: FontWeightHint::Regular,
+                color: hex(COL_SUBTEXT0),
+            },
+            l.body.x,
+            bottom + l.pad + l.font * 1.4,
+            l.body.w,
+        );
+        f.unclip();
 
-            cmds.push(RenderCommand::FillRect {
-                x: sx,
-                y: sy,
-                width: 160.0,
-                height: 75.0,
-                color: Color::from_hex(COL_SURFACE0),
-                corner_radii: CornerRadii::all(8.0),
-            });
-
-            cmds.push(RenderCommand::Text {
-                x: sx + 15.0,
-                y: sy + 10.0,
-                text: String::from(*label),
-                color: Color::from_hex(COL_SUBTEXT0),
-                font_size: 13.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            cmds.push(RenderCommand::Text {
-                x: sx + 15.0,
-                y: sy + 32.0,
-                text: value.clone(),
-                color: Color::from_hex(*col),
-                font_size: 28.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
-
-        // WPM rating
-        let rating = if wpm >= 80.0 {
-            "Expert!"
-        } else if wpm >= 60.0 {
-            "Advanced"
-        } else if wpm >= 40.0 {
-            "Intermediate"
-        } else if wpm >= 20.0 {
-            "Beginner"
-        } else {
-            "Keep Practicing!"
-        };
-
-        cmds.push(RenderCommand::Text {
-            x: 30.0,
-            y: 320.0,
-            text: format!("Rating: {rating}"),
-            color: Color::from_hex(COL_MAUVE),
-            font_size: 22.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: 30.0,
-            y: 360.0,
-            text: String::from("Enter: Lesson List  |  R: Retry"),
-            color: Color::from_hex(COL_OVERLAY0),
-            font_size: 14.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        label_left(
+            f,
+            &Label {
+                text: "Enter: Lesson List  |  R: Retry",
+                size: l.small,
+                weight: FontWeightHint::Regular,
+                color: hex(COL_OVERLAY0),
+            },
+            inset_x(l.footer, l.pad),
+        );
     }
 
-    fn render_statistics(&self, cmds: &mut Vec<RenderCommand>, _width: f32) {
-        cmds.push(RenderCommand::Text {
-            x: 30.0,
-            y: 20.0,
-            text: String::from("Statistics"),
-            color: Color::from_hex(COL_LAVENDER),
-            font_size: 32.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+    fn draw_statistics(&self, f: &mut Frame<Target>, l: &Layout) {
+        let mut bar = inset_x(l.header, l.pad);
+        chip(f, l, &mut bar, "Lessons", Target::Back);
+        label_left(
+            f,
+            &Label {
+                text: "Statistics",
+                size: l.big,
+                weight: FontWeightHint::Bold,
+                color: hex(COL_LAVENDER),
+            },
+            bar,
+        );
 
         if self.results.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: 30.0,
-                y: 80.0,
-                text: String::from("No lessons completed yet. Start typing!"),
-                color: Color::from_hex(COL_SUBTEXT0),
-                font_size: 18.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            label_left(
+                f,
+                &Label {
+                    text: "No lessons completed yet. Start typing!",
+                    size: l.font,
+                    weight: FontWeightHint::Regular,
+                    color: hex(COL_SUBTEXT0),
+                },
+                inset_x(l.subhead, l.pad),
+            );
         } else {
-            // Summary cards
-            let summary = [
+            let cards = [
                 ("Lessons", self.results.len().to_string(), COL_BLUE),
                 ("Avg WPM", format!("{:.0}", self.average_wpm()), COL_GREEN),
                 ("Best WPM", format!("{:.0}", self.best_wpm()), COL_YELLOW),
@@ -1046,137 +1375,495 @@ impl TypingTutorApp {
                     COL_PEACH,
                 ),
             ];
-
-            for (i, (label, value, col)) in summary.iter().enumerate() {
-                let sx = 30.0 + (i % 3) as f32 * 180.0;
-                let sy = 70.0 + (i / 3) as f32 * 80.0;
-
-                cmds.push(RenderCommand::FillRect {
-                    x: sx,
-                    y: sy,
-                    width: 160.0,
-                    height: 65.0,
-                    color: Color::from_hex(COL_SURFACE0),
-                    corner_radii: CornerRadii::all(6.0),
-                });
-                cmds.push(RenderCommand::Text {
-                    x: sx + 10.0,
-                    y: sy + 8.0,
-                    text: String::from(*label),
-                    color: Color::from_hex(COL_SUBTEXT0),
-                    font_size: 12.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                cmds.push(RenderCommand::Text {
-                    x: sx + 10.0,
-                    y: sy + 28.0,
-                    text: value.clone(),
-                    color: Color::from_hex(*col),
-                    font_size: 24.0,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
-
-            // Recent results table
-            let table_y = 240.0;
-            cmds.push(RenderCommand::Text {
-                x: 30.0,
-                y: table_y,
-                text: String::from("Recent Results"),
-                color: Color::from_hex(COL_TEXT),
-                font_size: 18.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            let headers = ["Lesson", "WPM", "Accuracy", "Time"];
-            let col_xs = [30.0, 250.0, 340.0, 440.0];
-            for (i, header) in headers.iter().enumerate() {
-                cmds.push(RenderCommand::Text {
-                    x: col_xs[i],
-                    y: table_y + 30.0,
-                    text: String::from(*header),
-                    color: Color::from_hex(COL_SUBTEXT0),
-                    font_size: 13.0,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
-
-            // Show last 8 results (newest first)
-            let start = if self.results.len() > 8 {
-                self.results.len() - 8
-            } else {
-                0
-            };
-            for (row_idx, result) in self.results[start..].iter().rev().enumerate() {
-                let ry = table_y + 52.0 + row_idx as f32 * 26.0;
-                let secs = result.duration_ms / 1000;
-
-                cmds.push(RenderCommand::Text {
-                    x: col_xs[0],
-                    y: ry,
-                    text: result.lesson_title.clone(),
-                    color: Color::from_hex(COL_TEXT),
-                    font_size: 14.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(200.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cmds.push(RenderCommand::Text {
-                    x: col_xs[1],
-                    y: ry,
-                    text: format!("{:.0}", result.wpm),
-                    color: Color::from_hex(COL_GREEN),
-                    font_size: 14.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                cmds.push(RenderCommand::Text {
-                    x: col_xs[2],
-                    y: ry,
-                    text: format!("{:.1}%", result.accuracy),
-                    color: Color::from_hex(COL_TEAL),
-                    font_size: 14.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                cmds.push(RenderCommand::Text {
-                    x: col_xs[3],
-                    y: ry,
-                    text: format!("{}:{:02}", secs / 60, secs % 60),
-                    color: Color::from_hex(COL_PEACH),
-                    font_size: 14.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
+            f.clip(l.body);
+            let bottom = draw_cards(f, l, &cards);
+            let table = Rect::new(
+                l.body.x,
+                bottom + l.pad,
+                l.body.w,
+                (l.body.bottom() - bottom - l.pad).max(0.0),
+            );
+            self.draw_recent_table(f, l, table);
+            f.unclip();
         }
 
-        cmds.push(RenderCommand::Text {
-            x: 30.0,
-            y: 500.0,
-            text: String::from("Esc/Enter: Back to lessons"),
-            color: Color::from_hex(COL_OVERLAY0),
-            font_size: 13.0,
-            font_weight: FontWeightHint::Regular,
+        label_left(
+            f,
+            &Label {
+                text: "Esc/Enter: Back to lessons",
+                size: l.small,
+                weight: FontWeightHint::Regular,
+                color: hex(COL_OVERLAY0),
+            },
+            inset_x(l.footer, l.pad),
+        );
+    }
+
+    /// The last few finished lessons, newest first, in as many rows as `area`
+    /// can hold.
+    fn draw_recent_table(&self, f: &mut Frame<Target>, l: &Layout, area: Rect) {
+        if area.is_empty() {
+            return;
+        }
+        let row_h = (text::line_height(l.small, FontWeightHint::Regular) + l.pad * 0.4).max(1.0);
+        let head_h = row_h * 2.0;
+        if area.h < head_h + row_h {
+            // No room for the title, the column heads and one row. Drawing the
+            // heads alone would be a table promising rows it has nowhere to
+            // put.
+            return;
+        }
+        push_text(
+            f,
+            &Label {
+                text: "Recent Results",
+                size: l.font,
+                weight: FontWeightHint::Bold,
+                color: hex(COL_TEXT),
+            },
+            area.x,
+            area.y,
+            area.w,
+        );
+
+        // Columns as shares of the width they are given, so a narrower window
+        // narrows the lesson-name column rather than pushing the time column
+        // off the right-hand edge -- which is what four constants at x = 30,
+        // 250, 340 and 440 did in any window under 480 px wide.
+        const SHARES: [f32; 4] = [0.0, 0.52, 0.70, 0.86];
+        let headers = ["Lesson", "WPM", "Accuracy", "Time"];
+        let col_x = |i: usize| area.x + area.w * SHARES.get(i).copied().unwrap_or(0.0);
+        let col_w = |i: usize| {
+            let here = SHARES.get(i).copied().unwrap_or(0.0);
+            let next = SHARES.get(i.saturating_add(1)).copied().unwrap_or(1.0);
+            (area.w * (next - here) - l.pad * 0.5).max(0.0)
+        };
+        // A band behind the column heads, so the heads read as a heading rather
+        // than as a first row that happens to be in bold.
+        fill(
+            f,
+            Rect::new(area.x, area.y + row_h, area.w, row_h),
+            hex(COL_CRUST),
+            CornerRadii::all(l.pad * 0.3),
+        );
+        for (i, head) in headers.iter().enumerate() {
+            push_text(
+                f,
+                &Label {
+                    text: head,
+                    size: l.tiny,
+                    weight: FontWeightHint::Bold,
+                    color: hex(COL_SUBTEXT0),
+                },
+                col_x(i),
+                area.y + row_h,
+                col_w(i),
+            );
+        }
+
+        let capacity = ((area.h - head_h) / row_h).floor().max(0.0) as usize;
+        for (n, result) in self.results.iter().rev().take(capacity.min(8)).enumerate() {
+            let y = area.y + head_h + n as f32 * row_h;
+            let secs = result.duration_ms / 1000;
+            let cells = [
+                // The lesson's name in its category's colour, which is what the
+                // list it came from used. `SessionResult::category` was stored
+                // on every finished lesson and read by nothing at all, so the
+                // history could not say what kind of practice any row was.
+                (result.lesson_title.clone(), result.category.color()),
+                (format!("{:.0}", result.wpm), hex(COL_GREEN)),
+                (format!("{:.1}%", result.accuracy), hex(COL_TEAL)),
+                (format!("{}:{:02}", secs / 60, secs % 60), hex(COL_PEACH)),
+            ];
+            for (i, (body, color)) in cells.iter().enumerate() {
+                push_text(
+                    f,
+                    &Label {
+                        text: body,
+                        size: l.small,
+                        weight: FontWeightHint::Regular,
+                        color: *color,
+                    },
+                    col_x(i),
+                    y,
+                    col_w(i),
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drawing helpers
+// ---------------------------------------------------------------------------
+
+/// The palette is a wall of `u32` literals, and every use of one needs this.
+fn hex(c: u32) -> Color {
+    Color::from_hex(c)
+}
+
+fn fill(f: &mut Frame<Target>, r: Rect, color: Color, corner_radii: CornerRadii) {
+    if r.is_empty() {
+        return;
+    }
+    f.push(RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii,
+    });
+}
+
+/// One string and everything about how it looks, minus where it goes.
+struct Label<'a> {
+    text: &'a str,
+    size: f32,
+    weight: FontWeightHint,
+    color: Color,
+}
+
+/// The one place a `Text` command is built.
+///
+/// `limit` is passed through as `max_width`, so a caller that worked out a
+/// width limit gets one the renderer will actually stop at. The program this
+/// replaces wrote `max_width: Some(400.0)` and `Some(200.0)` beside strings in
+/// a layout that was itself made of constants.
+fn push_text(f: &mut Frame<Target>, l: &Label, x: f32, y: f32, limit: f32) {
+    if l.text.is_empty() || limit <= 0.0 {
+        return;
+    }
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: l.text.to_string(),
+        color: l.color,
+        font_size: l.size,
+        font_weight: l.weight,
+        max_width: Some(limit),
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+/// Against the left edge of `r`, centred down it.
+fn label_left(f: &mut Frame<Target>, l: &Label, r: Rect) {
+    if r.is_empty() {
+        return;
+    }
+    let lh = text::line_height(l.size, l.weight);
+    push_text(f, l, r.x, r.y + (r.h - lh) / 2.0, r.w);
+}
+
+/// Centred in `r` -- across from the measured width, down from the line height
+/// -- and limited to `r`, so the width that decides the centre is the width the
+/// renderer is told to stop at and the two cannot disagree.
+fn label_centred(f: &mut Frame<Target>, l: &Label, r: Rect) {
+    if r.is_empty() {
+        return;
+    }
+    let w = text::measure(l.text, l.size, l.weight).min(r.w);
+    let lh = text::line_height(l.size, l.weight);
+    push_text(f, l, r.x + (r.w - w) / 2.0, r.y + (r.h - lh) / 2.0, w);
+}
+
+/// Take `h` off the top of `area`, leaving `gap` between what was taken and
+/// what is left. Returns [`Rect::EMPTY`] and takes nothing if there is no room.
+fn take_top(area: &mut Rect, h: f32, gap: f32) -> Rect {
+    if h <= 0.0 || area.h < h {
+        return Rect::EMPTY;
+    }
+    let taken = Rect::new(area.x, area.y, area.w, h);
+    area.y += h + gap;
+    area.h = (area.h - h - gap).max(0.0);
+    taken
+}
+
+/// Take `w` off the right-hand end of `area`. See [`take_top`].
+fn take_right(area: &mut Rect, w: f32, gap: f32) -> Rect {
+    if w <= 0.0 || area.w < w {
+        return Rect::EMPTY;
+    }
+    let taken = Rect::new(area.right() - w, area.y, w, area.h);
+    area.w = (area.w - w - gap).max(0.0);
+    taken
+}
+
+/// `r` with `dx` taken off each of its left and right edges.
+fn inset_x(r: Rect, dx: f32) -> Rect {
+    Rect::new(r.x + dx, r.y, (r.w - dx * 2.0).max(0.0), r.h)
+}
+
+/// `r` with `dy` taken off each of its top and bottom edges.
+fn inset_y(r: Rect, dy: f32) -> Rect {
+    Rect::new(r.x, r.y + dy, r.w, (r.h - dy * 2.0).max(0.0))
+}
+
+/// `r` with `d` taken off all four edges.
+fn shrink(r: Rect, d: f32) -> Rect {
+    inset_y(inset_x(r, d), d)
+}
+
+/// A labelled button against the right end of `bar`, with a hit box on it.
+///
+/// The box is measured from its own label rather than given a width, because a
+/// chip narrower than its text is a button whose name the user cannot read. If
+/// the row has no room the chip is dropped entirely -- no paint and no hit box,
+/// so a test asking for its rectangle is told `None` rather than being handed
+/// an empty one it could mistake for a control.
+fn chip(f: &mut Frame<Target>, l: &Layout, bar: &mut Rect, body: &str, t: Target) {
+    let w = text::measure(body, l.small, FontWeightHint::Bold) + l.pad * 2.0;
+    let r = take_right(bar, w, l.pad);
+    if r.is_empty() {
+        return;
+    }
+    let inner_h = text::line_height(l.small, FontWeightHint::Bold) + l.pad;
+    let box_r = inset_y(r, ((r.h - inner_h) / 2.0).max(0.0));
+    fill(f, box_r, hex(COL_SURFACE0), CornerRadii::all(l.pad * 0.4));
+    label_centred(
+        f,
+        &Label {
+            text: body,
+            size: l.small,
+            weight: FontWeightHint::Bold,
+            color: hex(COL_TEXT),
+        },
+        box_r,
+    );
+    f.hit(t, box_r);
+}
+
+/// A grid of `(name, value, colour)` cards across the body, wrapping at
+/// [`Layout::cards_across`].
+///
+/// Returns the y the grid ended at, so whatever comes after it starts below it
+/// rather than at a constant chosen by eye -- which is what `table_y = 240.0`
+/// was, and it overlapped the cards on any window where they wrapped to a
+/// third row.
+fn draw_cards(f: &mut Frame<Target>, l: &Layout, cards: &[(&str, String, u32)]) -> f32 {
+    let mut bottom = l.body.y;
+    for (i, (name, value, col)) in cards.iter().enumerate() {
+        let r = l.card_rect(i);
+        if r.bottom() > l.body.bottom() {
+            // Out of body. Wrapping on rather than drawing over the footer.
+            break;
+        }
+        fill(f, r, hex(COL_SURFACE0), CornerRadii::all(l.pad * 0.4));
+        let inner = shrink(r, l.pad * 0.5);
+        push_text(
+            f,
+            &Label {
+                text: name,
+                size: l.small,
+                weight: FontWeightHint::Regular,
+                color: hex(COL_SUBTEXT0),
+            },
+            inner.x,
+            inner.y,
+            inner.w,
+        );
+        push_text(
+            f,
+            &Label {
+                text: value,
+                size: l.font * 1.4,
+                weight: FontWeightHint::Bold,
+                color: hex(*col),
+            },
+            inner.x,
+            inner.y + l.small + l.pad * 0.3,
+            inner.w,
+        );
+        bottom = bottom.max(r.bottom());
+    }
+    bottom
+}
+
+/// What to call a typing speed.
+///
+/// A free function so the boundaries can be tested without drawing anything;
+/// they used to be an `if` chain buried in the middle of the results view.
+fn wpm_rating(wpm: f64) -> &'static str {
+    if wpm >= 80.0 {
+        "Expert!"
+    } else if wpm >= 60.0 {
+        "Advanced"
+    } else if wpm >= 40.0 {
+        "Intermediate"
+    } else if wpm >= 20.0 {
+        "Beginner"
+    } else {
+        "Keep Practicing!"
+    }
+}
+
+/// The lesson's text, coloured a character at a time, scrolled so the cursor is
+/// always on screen.
+///
+/// Each character is a separate `Text` command because each carries its own
+/// colour, which means this function, and not the renderer, owns the pen. It
+/// used to advance the pen by a hardcoded 13.2 px -- "approximate monospace
+/// character width" -- while drawing in the *proportional* UI face, so nothing
+/// lined up: an `i` left a gap two thirds of a cell wide, an `M` ran into its
+/// neighbour, and the cursor's highlight box, also 13.2 px, sat over the wrong
+/// part of the glyph it marked. Every advance is measured in the family it is
+/// drawn in now.
+fn draw_lesson_text(f: &mut Frame<Target>, l: &Layout, session: &TypingSession, area: Rect) {
+    if area.is_empty() || session.text.is_empty() {
+        return;
+    }
+    let size = (l.font * 1.25).max(8.0);
+    let weight = FontWeightHint::Regular;
+    let line_h = (text::line_height(size, weight) * 1.25).max(1.0);
+
+    // Pass one: where every character goes, in lines from the top of the text
+    // rather than pixels from the top of the panel -- because the panel may not
+    // be showing the top of the text.
+    let mut places: Vec<(usize, f32, f32)> = Vec::with_capacity(session.text.len());
+    let mut x = 0.0f32;
+    let mut line = 0usize;
+    for &ch in &session.text {
+        let mut buf = [0u8; 4];
+        let glyph: &str = ch.encode_utf8(&mut buf);
+        let advance = text::measure_in(glyph, size, weight, FontFamily::Mono);
+        // Break before a character that would cross the right edge, not after a
+        // count of them. The `x > 0.0` guard keeps a character wider than the
+        // whole panel from looping forever.
+        if x > 0.0 && x + advance > area.w {
+            x = 0.0;
+            line = line.saturating_add(1);
+        }
+        places.push((line, x, advance));
+        x += advance;
+    }
+
+    let lines_visible = (area.h / line_h).floor().max(1.0) as usize;
+    let cursor_line = places
+        .get(session.cursor.min(places.len().saturating_sub(1)))
+        .map_or(0, |p| p.0);
+    // The panel follows the typist rather than the text. Without this it showed
+    // the first few lines of every lesson and the cursor walked off the bottom
+    // of it -- which is what the old fixed 200 px panel at y = 100 did.
+    let first_line = cursor_line.saturating_sub(lines_visible.saturating_sub(1));
+
+    f.clip(area);
+    f.push(RenderCommand::PushFont {
+        family: FontFamily::Mono,
+    });
+    for (i, &(line, cx, advance)) in places.iter().enumerate() {
+        if line < first_line || line >= first_line.saturating_add(lines_visible) {
+            continue;
+        }
+        let Some(&ch) = session.text.get(i) else {
+            continue;
+        };
+        let px = area.x + cx;
+        let py = area.y + line.saturating_sub(first_line) as f32 * line_h;
+        let color = if i == session.cursor {
+            fill(
+                f,
+                Rect::new(px - 1.0, py - 1.0, advance + 2.0, line_h),
+                hex(COL_SURFACE1),
+                CornerRadii::all(2.0),
+            );
+            hex(COL_TEXT)
+        } else {
+            match session.statuses.get(i) {
+                Some(CharStatus::Correct) => hex(COL_GREEN),
+                Some(CharStatus::Incorrect) => hex(COL_RED),
+                _ => hex(COL_SURFACE2),
+            }
+        };
+        f.push(RenderCommand::Text {
+            x: px,
+            y: py,
+            text: String::from(ch),
+            color,
+            font_size: size,
+            font_weight: weight,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
     }
+    f.push(RenderCommand::PopFont);
+    f.unclip();
 }
 
-fn main() {
-    let _app = TypingTutorApp::new();
+impl App for TypingTutorApp {
+    fn title(&self) -> String {
+        "Typing Tutor".to_string()
+    }
+
+    fn app_id(&self) -> String {
+        "typingtutor".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// A typing tutor is a stopwatch with a lesson attached, so it asks for the
+    /// tick that drives one. Without an interval here the loop never sends
+    /// `Event::Tick`, `advance_time` is never called, and every WPM and every
+    /// duration the app can show reads zero -- which is what this program did.
+    fn tick_interval(&self) -> Option<Duration> {
+        Some(Duration::from_millis(100))
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against, which is the only reason it is stored at all.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for TypingTutorApp {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }))
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Key(key.clone()))
+    }
+
+    fn scroll_at(&mut self, x: f32, y: f32, dy: f32, size: (f32, f32)) -> Option<Self::Outcome> {
+        self.resize(size.0, size.1);
+        Some(self.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })))
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = TypingTutorApp::new();
+    app::launch("typingtutor", &mut app)
 }
 
 // ===========================================================================
@@ -1184,8 +1871,17 @@ fn main() {
 // ===========================================================================
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::float_cmp,
+    reason = "a test that panics on bad data is a test that failed, which is the point"
+)]
 mod tests {
     use super::*;
+    use guitk::event::Modifiers;
 
     fn make_key(key: Key, text: Option<char>) -> KeyEvent {
         KeyEvent {
@@ -1724,29 +2420,38 @@ mod tests {
 
     // --- Rendering ---
 
+    /// Every `Text` the frame draws at this size, in order.
+    fn texts(app: &TypingTutorApp, w: f32, h: f32) -> Vec<String> {
+        app.frame(w, h)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn render_lesson_select() {
         let app = TypingTutorApp::new();
-        let cmds = app.render(600.0, 800.0);
-        assert!(!cmds.is_empty());
-        let has_title = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Typing Tutor"));
-        assert!(has_title);
+        let drawn = texts(&app, 600.0, 800.0);
+        assert!(
+            drawn.iter().any(|t| t == "Typing Tutor"),
+            "the lesson list has no title: {drawn:?}"
+        );
     }
 
     #[test]
     fn render_typing_view() {
         let mut app = TypingTutorApp::new();
         app.start_lesson(0);
-        let cmds = app.render(600.0, 800.0);
-        assert!(!cmds.is_empty());
-        // Should have the lesson title
-        let title = &app.lessons[0].title;
-        let has_lesson = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == title));
-        assert!(has_lesson);
+        let title = app.lessons[0].title.clone();
+        let drawn = texts(&app, 600.0, 800.0);
+        assert!(
+            drawn.contains(&title),
+            "the typing view does not name its lesson: {drawn:?}"
+        );
     }
 
     /// The lesson text is laid out on the advances the font actually reports,
@@ -1757,57 +2462,46 @@ mod tests {
     /// line of wide characters overrun the panel.
     #[test]
     fn typed_characters_are_placed_on_measured_advances() {
-        let panel_width = 600.0;
         let mut app = TypingTutorApp::new();
         app.start_lesson(0);
-        let cmds = app.render(panel_width, 800.0);
+        let frame = app.frame(600.0, 800.0);
 
         // The lesson body is drawn one character per command, inside the
         // monospace scope; the surrounding chrome is not.
         let mut in_mono = false;
-        let mut glyphs: Vec<(f32, f32, String)> = Vec::new();
-        for cmd in &cmds {
+        let mut glyphs: Vec<(f32, f32, String, f32)> = Vec::new();
+        for cmd in frame.commands() {
             match cmd {
                 RenderCommand::PushFont { .. } => in_mono = true,
                 RenderCommand::PopFont => in_mono = false,
-                RenderCommand::Text { x, y, text, .. } if in_mono => {
-                    glyphs.push((*x, *y, text.clone()));
+                RenderCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size,
+                    ..
+                } if in_mono => {
+                    glyphs.push((*x, *y, text.clone(), *font_size));
                 }
                 _ => {}
             }
         }
         assert!(glyphs.len() > 5, "the lesson body is drawn: {glyphs:?}");
 
-        let cell = text::measure_in(
-            "0",
-            22.0,
-            FontWeightHint::Regular,
-            guitk::render::FontFamily::Mono,
-        );
-        assert!(cell > 0.0);
-
         for pair in glyphs.windows(2) {
-            let Some(((x0, y0, glyph), (x1, y1, _))) = pair.first().zip(pair.get(1)) else {
+            let Some(((x0, y0, glyph, size), (x1, y1, _, _))) = pair.first().zip(pair.get(1))
+            else {
                 continue;
             };
             // A line break resets the pen; only compare within a line.
             if (y0 - y1).abs() > f32::EPSILON {
                 continue;
             }
-            let advance = text::measure_in(
-                glyph,
-                22.0,
-                FontWeightHint::Regular,
-                guitk::render::FontFamily::Mono,
-            );
+            let advance = text::measure_in(glyph, *size, FontWeightHint::Regular, FontFamily::Mono);
             assert!(
                 (x1 - x0 - advance).abs() < 0.01,
                 "{glyph:?} at {x0} is followed by {x1}, which is not one \
                  measured advance ({advance}) along"
-            );
-            assert!(
-                *x1 <= panel_width - 35.0 + 0.01,
-                "a glyph at {x1} is past the right edge of the panel"
             );
         }
     }
@@ -1817,26 +2511,20 @@ mod tests {
         let mut app = TypingTutorApp::new();
         app.view = AppView::Results;
         app.session = Some(TypingSession::new("test"));
-        let cmds = app.render(600.0, 800.0);
-        let has_complete = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Lesson Complete!"));
-        assert!(has_complete);
+        let drawn = texts(&app, 600.0, 800.0);
+        assert!(drawn.iter().any(|t| t == "Lesson Complete!"), "{drawn:?}");
     }
 
     #[test]
     fn render_statistics_empty() {
         let mut app = TypingTutorApp::new();
         app.view = AppView::Statistics;
-        let cmds = app.render(600.0, 800.0);
-        let has_title = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Statistics"));
-        assert!(has_title);
-        let has_empty_msg = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("No lessons")));
-        assert!(has_empty_msg);
+        let drawn = texts(&app, 600.0, 800.0);
+        assert!(drawn.iter().any(|t| t == "Statistics"), "{drawn:?}");
+        assert!(
+            drawn.iter().any(|t| t.contains("No lessons")),
+            "an empty history says so: {drawn:?}"
+        );
     }
 
     #[test]
@@ -1851,31 +2539,66 @@ mod tests {
             duration_ms: 30000,
             text_length: 100,
         });
-        let cmds = app.render(600.0, 800.0);
-        let has_recent = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Recent Results"));
-        assert!(has_recent);
+        let drawn = texts(&app, 600.0, 800.0);
+        assert!(drawn.iter().any(|t| t == "Recent Results"), "{drawn:?}");
     }
 
     #[test]
     fn render_has_background() {
         let app = TypingTutorApp::new();
-        let cmds = app.render(600.0, 800.0);
-        let has_bg = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
-        assert!(has_bg);
+        let frame = app.frame(600.0, 800.0);
+        assert!(
+            frame.commands().iter().any(|c| matches!(c,
+                RenderCommand::FillRect { x, y, width, height, .. }
+                    if *x == 0.0 && *y == 0.0 && *width == 600.0 && *height == 800.0)),
+            "the window is not painted to its own edges"
+        );
     }
 
+    /// The progress bar's fill is as wide a share of its track as the typist
+    /// has covered of the lesson.
+    ///
+    /// The old test looked for `height == 6.0` at `y == 80.0` -- the two
+    /// constants the bar was written with, which is a test of the constants and
+    /// not of the bar. It would have passed just as happily against a fill of
+    /// zero width, which is exactly what an untyped lesson draws.
     #[test]
-    fn render_typing_has_progress_bar() {
+    fn the_progress_bar_fills_by_as_much_as_was_typed() {
         let mut app = TypingTutorApp::new();
         app.start_lesson(0);
-        let cmds = app.render(600.0, 800.0);
-        // Should have the progress bar (two thin fill rects around y=80)
-        let thin_rects = cmds.iter().filter(|c| matches!(c, RenderCommand::FillRect { height, y, .. } if *height == 6.0 && *y == 80.0)).count();
-        assert!(thin_rects >= 2);
+        let total = app.session.as_ref().expect("a session").text.len();
+        for _ in 0..total / 4 {
+            let ch = app.session.as_ref().expect("a session").text
+                [app.session.as_ref().expect("a session").cursor];
+            app.handle_key(&make_key(Key::A, Some(ch)));
+        }
+        let typed = app.session.as_ref().expect("a session").cursor;
+        assert!(typed > 0, "the test typed nothing");
+
+        let l = Layout::solve(600.0, 800.0);
+        let frame = app.frame(600.0, 800.0);
+        let bars: Vec<f32> = frame
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { y, width, .. }
+                    if (*y - l.body.y).abs() < 0.01 && *width > 0.0 =>
+                {
+                    Some(*width)
+                }
+                _ => None,
+            })
+            .collect();
+        let (track, fill) = match bars.as_slice() {
+            [track, fill] => (*track, *fill),
+            other => panic!("want a track and a fill at the top of the body, got {other:?}"),
+        };
+        let want = track * (typed as f32 / total as f32);
+        assert!(
+            (fill - want).abs() < 0.5,
+            "{typed} of {total} characters typed should fill {want} of the \
+             {track}-wide track, not {fill}"
+        );
     }
 
     // --- Key released ignored ---

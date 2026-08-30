@@ -96922,3 +96922,40 @@ with no ownership check and returns the file's full VFS path, which discloses
 the path of any open file in the system even to a caller that cannot read it.
 Covered by the gate in the other entry; noted here because it is a disclosure
 in its own right, not merely a missing check.
+
+### Correction (2026-08-30, same day): libc does not route `dup(2)` through this
+
+Checked after filing. `posix/src/fdtable.rs` (lane B) implements the whole
+POSIX dup family in its own fd table — a new fd entry pointing at the *same*
+kernel handle — and its module doc states outright that "the kernel's
+`SYS_FS_DUP`, which mints a fresh handle with an independent cursor, is
+reserved for cases that genuinely need a separate description; the POSIX dup
+family does not use it."
+
+Two things follow, and they cut in opposite directions:
+
+- **Severity is lower than filed.** No libc caller reaches `SYS_FS_DUP`, so
+  the leak is currently latent rather than active. Downgrade from medium to
+  **low-but-real**: it is a live trap for the first native caller, not a leak
+  happening today.
+- **The independent cursor is deliberate, not a bug.** My first reading was
+  that `sys_fs_dup` calling `dup` instead of `dup_shared` broke POSIX `dup(2)`
+  offset sharing. It does not, because it is not what implements `dup(2)`.
+  `SYS_FS_DUP` is a "clone this open file with a fresh cursor" primitive and is
+  correct as such. Recording this explicitly so the next reader does not
+  "fix" it by switching to `dup_shared` and silently changing its meaning.
+
+**The fix is unchanged and still worth making** — one `register_ipc_handle`
+call — because the leak is a property of the syscall, not of who calls it, and
+because it must be in place before the ownership gate lands or that gate will
+refuse the first native dup'd handle.
+
+**Worth noting for whoever implements a shared-description dup later:** neither
+existing primitive can serve a userspace `dup(2)` on its own. `dup` gives a new
+id but an independent cursor; `dup_shared` shares the cursor but returns *the
+same id*, which cannot be a distinct fd. A native shared-description dup would
+need a new id mapping to an existing `OpenFile` — an id → description
+indirection that `OPEN_FILES` (keyed handle → `OpenFile` directly) does not
+have today, even though `OpenFile.refcount` is documented for exactly that
+sharing. Lane B's fd table sidesteps this by keeping the indirection in
+userspace, which is why the gap has not bitten.

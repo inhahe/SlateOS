@@ -122,14 +122,25 @@
 //!
 //! # How this is checked
 //!
-//! `scripts/ed-diff.sh` runs 239 cases against GNU ed 1.20.1 inside WSL and
+//! `scripts/ed-diff.sh` runs 400 cases against GNU ed 1.20.1 inside WSL and
 //! compares four things, not the usual three: stdout, stderr, the exit status
 //! **and the bytes left on disk**. The fourth is not belt-and-braces — the
 //! data-loss bug above agreed with GNU on the first three and disagreed only on
 //! the file. Every case appears in the two stdin kinds where the two kinds
 //! differ. `OURS=/usr/bin/ed scripts/ed-diff.sh` checks the harness can still
 //! tell the two apart: it turns all 8 deliberate differences into `XPASS` and
-//! all 8 known-bug cases into `KFIXED`, and nothing else moves.
+//! the 1 known-bug case into `KFIXED`, and nothing else moves.
+//!
+//! It is the harness, not the unit tests, that has found every substantive
+//! disagreement here. Four rules in this file were *wrong in a way that reads
+//! correctly* until it ran: a line that `m` moves keeps its `g` selection (it
+//! does not), a global that changes nothing leaves the previous undo record
+//! alone (it does not — the global clears it on entry), `u` restores only the
+//! buffer (it restores `.` too, to where it was before the whole global), and
+//! a file name may run straight onto its command letter (`efive.txt` is
+//! `Unexpected command suffix`). None of the four is visible from GNU's
+//! documentation, and two of them are invisible from GNU's source unless you
+//! already know which function to read.
 
 use coreutils::errmsg::strerror;
 use coreutils::filekind;
@@ -349,6 +360,13 @@ fn unimplemented_long(name: &str) -> getopt::Error {
 enum EdError {
     InvalidAddress,
     InvalidCommandSuffix,
+    /// A file-naming command — `e`, `E`, `f`, `r`, `w`, `W` — whose command
+    /// letter is followed immediately by something other than whitespace, so
+    /// `efive.txt` and `$rf.txt` are refused where `e five.txt` and `$r f.txt`
+    /// work. A separate sentence from [`EdError::InvalidCommandSuffix`], and
+    /// GNU means the difference: this one says "that is a suffix and I did not
+    /// expect one", the other "that is a suffix and it is not one I know".
+    UnexpectedCommandSuffix,
     UnexpectedAddress,
     UnknownCommand,
     NoCurrentFilename,
@@ -358,6 +376,11 @@ enum EdError {
     /// everyday case. GNU distinguishes it from a file that never opened, and
     /// the distinction is visible: see [`Editor::load`].
     CannotReadInputFile,
+    /// A file that would not open at all, which is what `r nosuch.txt` and
+    /// `e nosuch.txt` report. At *startup* the same failure prints only the
+    /// OS's own line and no sentence — see [`Editor::load`] — which is why the
+    /// two are separate variants rather than one.
+    CannotOpenInputFile,
     ControlCharsInName,
     DirectoryAccessRestricted,
     ShellAccessUnsupported,
@@ -389,6 +412,19 @@ enum EdError {
     /// outer one's marks, so the outer loop would resume against a selection
     /// that is no longer its own.
     NestedGlobal,
+    /// `m` asked to move a range to a line inside itself. GNU's test is
+    /// `lo <= dest < hi`, so `1,2m1` is refused and `1,2m2` — which is where the
+    /// range already ends — is a permitted no-op. There is no such error for
+    /// `t`: copying a range into itself is well defined, and GNU does it.
+    InvalidDestination,
+    /// A `k` whose mark is not one of `a`–`z`. Note that `k` with *no* mark at
+    /// all is `Invalid command suffix` instead, because there is no character
+    /// there to call invalid — measured both ways.
+    InvalidMarkCharacter,
+    /// `u` with no change recorded. Every buffer-modifying command replaces the
+    /// record, so this is "the last command did not change anything", not "the
+    /// session has changed nothing".
+    NothingToUndo,
     /// `q` on a modified buffer. Status 1: the *command* failed.
     BufferModified,
     /// End of input on a modified buffer. Status 2 — measured: this is a
@@ -401,12 +437,14 @@ impl EdError {
         match self {
             EdError::InvalidAddress => "Invalid address",
             EdError::InvalidCommandSuffix => "Invalid command suffix",
+            EdError::UnexpectedCommandSuffix => "Unexpected command suffix",
             EdError::UnexpectedAddress => "Unexpected address",
             EdError::UnknownCommand => "Unknown command",
             EdError::NoCurrentFilename => "No current filename",
             EdError::NoMatch => "No match",
             EdError::CannotOpenOutputFile => "Cannot open output file",
             EdError::CannotReadInputFile => "Cannot read input file",
+            EdError::CannotOpenInputFile => "Cannot open input file",
             EdError::ControlCharsInName => "Control characters 1-31 not allowed in file names",
             EdError::DirectoryAccessRestricted => "Directory access restricted",
             EdError::ShellAccessUnsupported => "Shell access not implemented by this ed",
@@ -416,6 +454,9 @@ impl EdError {
             EdError::PatternTooCostly => "Regular expression match abandoned",
             EdError::InfiniteSubstitutionLoop => "Infinite substitution loop",
             EdError::NestedGlobal => "Cannot nest global commands",
+            EdError::InvalidDestination => "Invalid destination",
+            EdError::InvalidMarkCharacter => "Invalid mark character",
+            EdError::NothingToUndo => "Nothing to undo",
             EdError::BufferModified | EdError::BufferModifiedAtEof => "Warning: buffer modified",
         }
     }
@@ -503,6 +544,10 @@ enum AddrBase {
     /// regex — the compile has to be deferred to the editor, which is the only
     /// thing that knows what the last pattern was.
     Search { pattern: Vec<u8>, forward: bool },
+    /// `'x` — wherever the line marked `x` by a `k` command has got to. Carries
+    /// the letter, not a line number: the marked line moves as text is inserted
+    /// and deleted above it, so only the editor can say where it is now.
+    Mark(u8),
 }
 
 /// One address expression: a base plus the sum of its `+N` / `-N` terms.
@@ -788,6 +833,17 @@ fn parse_address(bytes: &[u8], pos: &mut usize) -> Result<Option<Addr>, EdError>
                 pattern,
                 forward: d == b'/',
             })
+        }
+        Some(b'\'') => {
+            *pos = pos.saturating_add(1);
+            let Some(&letter) = bytes.get(*pos) else {
+                return Err(EdError::InvalidMarkCharacter);
+            };
+            if !letter.is_ascii_lowercase() {
+                return Err(EdError::InvalidMarkCharacter);
+            }
+            *pos = pos.saturating_add(1);
+            Some(AddrBase::Mark(letter))
         }
         _ => match read_number(bytes, pos) {
             Some(n) => Some(AddrBase::Line(n?)),
@@ -1268,6 +1324,44 @@ enum Action {
     Quit,
 }
 
+/// One line in transit between [`Editor::cut`] and [`Editor::paste`], carrying
+/// the `k` marks that have to travel with it.
+///
+/// GNU keeps the buffer as a linked list and the `k` marks as pointers *into*
+/// it, so a move that relinks a node carries its marks for free. Here the
+/// buffer is a `Vec` and the marks are a parallel array, which is the right
+/// shape for every other operation and the wrong one for exactly this — so a
+/// move has to lift the two apart and put them back together, and this is the
+/// value that keeps them together in between.
+///
+/// The `g`/`v` *selection* mark deliberately does **not** travel:
+/// [`Editor::cut`] drops it and [`Editor::paste`] inserts a clear one. GNU does
+/// the same by a different route — its `move_lines` calls `unset_active_nodes`
+/// over the moved range — and the difference is observable. In GNU,
+/// `g/^\(one\|four\)$/4m0p` over `one two three four five` runs its list
+/// **once**: the move deselects `four`, which was the second selected line.
+/// Carrying the mark would run it twice.
+struct Taken {
+    text: Vec<u8>,
+    /// The 26-bit set of `k` marks on the line, `a` in bit 0.
+    kmark: u32,
+}
+
+/// Everything `u` puts back.
+///
+/// The marks travel with the buffer because they are *part* of it: `1ka`, `1d`,
+/// `u`, `'ap` prints `alpha` in GNU, so undoing a delete has to bring back the
+/// mark the delete cleared. `modified` travels too — `1d`, `w`, `u`, `q` exits
+/// 0 rather than warning, because the state `u` restored is one that had been
+/// written.
+struct Snapshot {
+    buffer: Vec<Vec<u8>>,
+    marks: Vec<bool>,
+    kmarks: Vec<u32>,
+    current: usize,
+    modified: bool,
+}
+
 struct Editor {
     buffer: Vec<Vec<u8>>,
     /// 1-based; 0 means "before the first line", which is a legal address for
@@ -1275,9 +1369,20 @@ struct Editor {
     current: usize,
     filename: Option<Vec<u8>>,
     modified: bool,
-    /// Whether `q` has already refused once. Cleared by any other command, so
-    /// that `q`, an edit, `q` warns twice.
+    /// Whether a `q` or an `e` has already been refused with `Warning: buffer
+    /// modified` and nothing has happened since to make the refusal worth
+    /// repeating. Set by the run loop when either is refused; cleared by any
+    /// command that *errors* and by any command that *changes the buffer*, and
+    /// by nothing else — so `1d`, `q`, `1p`, `q` quits on the second `q` while
+    /// `1d`, `q`, `1d`, `q` warns again. All measured; see [`Editor::touch`].
     warned: bool,
+    /// Whether the command immediately before this one was that refusal. The
+    /// *end-of-input* warning asks this instead of [`Editor::warned`], and the
+    /// difference is visible: `1d`, `q`, EOF exits 1 with one warning, while
+    /// `1d`, `q`, `1p`, EOF exits 2 with two — the `1p` neither cleared
+    /// `warned` (so a `q` there would still have quit) nor kept the run of
+    /// refusals going. Two rules, so two flags.
+    warned_last: bool,
     opts: Options,
     out: Stream,
     /// The exit status earned so far. Sticky: a later success does not clear
@@ -1308,6 +1413,42 @@ struct Editor {
     /// numbers would have to be rewritten by every edit, and the first one
     /// missed would run the list on the wrong line.
     marks: Vec<bool>,
+    /// The `k` marks: one 26-bit set per buffer line, bit `n` meaning "this line
+    /// is marked `a + n`".
+    ///
+    /// Parallel to the buffer for the same reason [`Editor::marks`] is, and it
+    /// matters more here because a `k` mark outlives the command that set it:
+    /// `2kb`, then `1d`, then `'bp` prints `beta` in GNU — the mark followed its
+    /// line up by one. A table of line numbers would have to be renumbered by
+    /// every insert, delete, move and join, and the one that was forgotten would
+    /// silently address the wrong line rather than fail.
+    ///
+    /// A set per line rather than a letter per line because a line may carry
+    /// several: `1ka` then `1kb` leaves both live. Setting a letter clears it
+    /// wherever it was — measured, `1ka` then `2ka` leaves only line 2 marked.
+    kmarks: Vec<u32>,
+    /// The one-deep undo record: the state as it was just before the last
+    /// buffer-modifying command.
+    ///
+    /// One deep, and swapped rather than popped, because that is what GNU has:
+    /// `u` after `u` *redoes*. A stack would be a different editor, not a better
+    /// one. See [`Editor::snapshot`].
+    undo: Option<Snapshot>,
+    /// A `g`/`v`/`G`/`V` is running and has already taken its undo snapshot, so
+    /// the next modifying command inside it must not take another.
+    ///
+    /// This is what makes one `g` one undo unit: `g/alpha/d` then `u` restores
+    /// every line the global deleted, not just the last.
+    global_undo_taken: bool,
+    /// The state as it was just before the running global started, waiting to
+    /// become the undo record if any command inside it modifies the buffer.
+    ///
+    /// Held here rather than installed as [`Editor::undo`] — which the global
+    /// clears outright — because a `g` that modifies nothing must leave `u`
+    /// with *nothing to do*, not with a no-op to do: GNU answers `Nothing to
+    /// undo` to `1d`, `g/beta/p`, `u`. It is taken — moved out — by the first
+    /// modifying command inside the global.
+    global_before: Option<Snapshot>,
     /// The command list of a running `g`/`v`/`G`/`V`, as lines still to be
     /// consumed, reversed so the next one is the last element.
     ///
@@ -1331,6 +1472,7 @@ impl Editor {
             filename: None,
             modified: false,
             warned: false,
+            warned_last: false,
             opts,
             out: Stream::stdout(),
             status: 0,
@@ -1339,8 +1481,102 @@ impl Editor {
             stdin: std::io::stdin().lock(),
             last_re: None,
             marks: Vec::new(),
+            kmarks: Vec::new(),
+            undo: None,
+            global_undo_taken: false,
+            global_before: None,
             global_input: None,
         }
+    }
+
+    /// Begin a change: forget the old undo record, and hand back the state to
+    /// restore if this command turns out to change something.
+    ///
+    /// Called *after* a command's addresses have been validated and before it
+    /// writes anything. That placement is measured on both sides: `1d`, then
+    /// `1m5` (an invalid destination), then `u` still undoes the `1d` — the
+    /// address failed before this ran — while `1d`, then a `s` that matches
+    /// nothing, then `u` answers `Nothing to undo`.
+    ///
+    /// Clearing and recording are two steps rather than one because they are
+    /// separately observable. GNU clears the undo stack when a modifying
+    /// command *starts* and pushes to it only as lines actually move, so a
+    /// command that clears and then changes nothing leaves `u` with nothing to
+    /// undo: `1d`, then `r` on an empty file, then `u` says `Nothing to undo`
+    /// rather than bringing the deleted line back. A single "replace the
+    /// record" step would get that case backwards.
+    /// Inside a `g`/`v`/`G`/`V` this takes nothing and hands back `None`: the
+    /// unit's "before" was captured by [`Editor::global`] at the top of the
+    /// global, and it has to be, because `u` restores the *current line* along
+    /// with the buffer and the global has already moved `.` onto the selected
+    /// line by the time an inner command runs. Measured: with `.` at 2,
+    /// `g/a/d` then `u` leaves `.` at 2, not at the first line the global
+    /// matched. Not taking one per inner command also stops the snapshot being
+    /// quadratic in the buffer for a global that touches every line.
+    fn begin_change(&mut self) -> Option<Snapshot> {
+        if self.global_input.is_some() {
+            return None;
+        }
+        let before = self.snapshot();
+        self.undo = None;
+        Some(before)
+    }
+
+    /// The whole editor state that one `u` swaps.
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            buffer: self.buffer.clone(),
+            marks: self.marks.clone(),
+            kmarks: self.kmarks.clone(),
+            current: self.current,
+            modified: self.modified,
+        }
+    }
+
+    /// Record `before` as the state `u` will restore.
+    ///
+    /// Inside a global the first call takes the snapshot [`Editor::global`] set
+    /// aside and every later one is ignored, which is what makes a whole global
+    /// one undo unit: `g/alpha/d` then `u` brings back every line the global
+    /// deleted, and puts `.` back where it was before the `g`.
+    fn record_change(&mut self, before: Option<Snapshot>) {
+        if self.global_input.is_some() {
+            if !self.global_undo_taken {
+                self.global_undo_taken = true;
+                self.undo = self.global_before.take();
+            }
+            return;
+        }
+        self.undo = before;
+    }
+
+    /// The destination address of `m` and `t`, with the print suffix that may
+    /// follow it.
+    ///
+    /// The destination is an ordinary address expression, so `1m/gamma/` and
+    /// `1m.-1` both work. With nothing written there at all it is `.` — which
+    /// is why a bare `m` is legal and moves the addressed line to just after the
+    /// current one rather than being a syntax error.
+    ///
+    /// A blank between the destination and its suffix is allowed here where it
+    /// is not after a plain command: `1p ` is `Invalid command suffix` but
+    /// `1m$ p` prints. That is not an inconsistency to smooth over — GNU's
+    /// address scanner eats trailing blanks, and this is the one place the
+    /// difference shows.
+    fn third_address(&mut self, rest: &[u8]) -> Result<(usize, Option<PrintStyle>), EdError> {
+        let mut pos = 0usize;
+        let addr = parse_address(rest, &mut pos)?;
+        skip_blank(rest, &mut pos);
+        let dest = match addr {
+            Some(a) => self.resolve(&a)?,
+            None => i64::try_from(self.current).unwrap_or(i64::MAX),
+        };
+        if dest < 0 || dest > i64::try_from(self.total()).unwrap_or(i64::MAX) {
+            return Err(EdError::InvalidAddress);
+        }
+        let dest = usize::try_from(dest).map_err(|_| EdError::InvalidAddress)?;
+        let suffix = print_suffix(rest.get(pos..).unwrap_or(&[]))?;
+        Ok((dest, suffix))
     }
 
     /// The regex a command asked for: the one it spelled out, or — for an
@@ -1413,6 +1649,7 @@ impl Editor {
                 let re = self.pattern(pattern)?;
                 i64::try_from(self.search(&re, *forward)?).unwrap_or(i64::MAX)
             }
+            AddrBase::Mark(letter) => i64::try_from(self.mark_line(*letter)?).unwrap_or(i64::MAX),
         };
         base.checked_add(a.offset).ok_or(EdError::InvalidAddress)
     }
@@ -1462,6 +1699,66 @@ impl Editor {
     /// what a *file-driven* `ed` does with an unreadable operand. Over a pipe
     /// or a terminal GNU reports the same thing and carries on with an empty
     /// buffer, leaving the status at 0 — measured both ways.
+    /// Read a file's bytes, printing the OS's own complaint on the way out and
+    /// telling "would not open" from "opened and would not read".
+    ///
+    /// Opening and reading are kept apart because GNU grades them differently,
+    /// and `fs::read` would fuse them into one error that cannot be told apart
+    /// afterwards. Measured against GNU ed 1.20.1, at *startup*:
+    ///
+    /// | what failed | over a pipe | from a script file |
+    /// |---|---|---|
+    /// | the open (`nosuch.txt`, an unreadable file) | one line on stderr, empty buffer, status **0** | one line, exit **2**, no editing |
+    /// | the read (`ed .`, a directory) | *two* lines — the errno's, then `Cannot read input file` — empty buffer, status **1** | one line, exit **2** |
+    ///
+    /// So an unreadable directory is a *command* failure and a missing file is
+    /// not, which is worth having right: a script that opens a path it did not
+    /// expect to be a directory otherwise reports success. From `e` and `r`,
+    /// where there *is* a command to fail, both are failures and both print
+    /// their sentence — `Cannot open input file` and `Cannot read input file`
+    /// respectively. That difference in reporting is why this returns the error
+    /// rather than printing it, and why [`Editor::load`] still owns the startup
+    /// half of the table.
+    ///
+    /// `opened` has to come from the open call itself, not from a later
+    /// `metadata` probe: a file with no read permission *exists*, so a probe
+    /// would call its EACCES a read failure and print a second line GNU does
+    /// not print.
+    fn read_file(&mut self, name: &[u8]) -> Result<Vec<u8>, EdError> {
+        let mut opened = false;
+        let read = std::fs::File::open(os_from_bytes(name)).and_then(|mut f| {
+            opened = true;
+            let mut content = Vec::new();
+            std::io::Read::read_to_end(&mut f, &mut content).map(|_| content)
+        });
+        match read {
+            Ok(content) => Ok(content),
+            Err(e) => {
+                self.complain(name, &strerror(&e));
+                Err(if opened {
+                    EdError::CannotReadInputFile
+                } else {
+                    EdError::CannotOpenInputFile
+                })
+            }
+        }
+    }
+
+    /// What `e`, `r` and the startup load all print about a successful read.
+    ///
+    /// `Newline appended` goes out under `-s` and under `-q` alike: it is not a
+    /// diagnostic, it is a statement about what the buffer now holds and
+    /// therefore about what `w` will write. The byte count is the ordinary
+    /// chatter that `-s` exists to silence.
+    fn report_read(&mut self, bytes: usize, appended: bool) {
+        if appended {
+            self.put(b"Newline appended\n");
+        }
+        if !self.opts.script {
+            self.put(format!("{bytes}\n").as_bytes());
+        }
+    }
+
     fn load(&mut self, file: Option<&std::ffi::OsStr>) -> Option<u8> {
         let file = file?;
         let name = os_bytes(file).into_owned();
@@ -1470,56 +1767,27 @@ impl Editor {
             return Some(self.name_refused(&name, e.sentence()));
         }
 
-        // Opening and reading are kept apart because GNU grades them
-        // differently, and `fs::read` would fuse them into one error that
-        // cannot be told apart afterwards. Measured against GNU ed 1.20.1:
-        //
-        // | what failed | over a pipe | from a script file |
-        // |---|---|---|
-        // | the open (`nosuch.txt`, an unreadable file) | one line on stderr, empty buffer, status **0** | one line, exit **2**, no editing |
-        // | the read (`ed .`, a directory) | *two* lines — the errno's, then `Cannot read input file` — empty buffer, status **1** | one line, exit **2** |
-        //
-        // So an unreadable directory is a *command* failure and a missing file
-        // is not, which is worth having right: a script that opens a path it
-        // did not expect to be a directory otherwise reports success.
-        // `opened` has to come from the open call itself, not from a later
-        // `metadata` probe: a file with no read permission *exists*, so a
-        // probe would call its EACCES a read failure and print a second line
-        // GNU does not print.
-        let mut opened = false;
-        let read = std::fs::File::open(os_from_bytes(&name)).and_then(|mut f| {
-            opened = true;
-            let mut content = Vec::new();
-            std::io::Read::read_to_end(&mut f, &mut content).map(|_| content)
-        });
-
-        match read {
+        match self.read_file(&name) {
             Ok(content) => {
                 let (lines, appended) = split_lines(&content, self.opts.strip_cr);
                 self.buffer = lines;
+                self.kmarks = vec![0; self.buffer.len()];
                 self.current = self.buffer.len();
                 self.filename = Some(name);
-                // GNU prints this under `-s` and under `-q` alike: it is not a
-                // diagnostic, it is a statement about what the buffer now holds
-                // and therefore about what `w` will write.
-                if appended {
-                    self.put(b"Newline appended\n");
-                }
-                if !self.opts.script {
-                    self.put(format!("{}\n", byte_count(&self.buffer)).as_bytes());
-                }
+                let bytes = byte_count(&self.buffer);
+                self.report_read(bytes, appended);
                 None
             }
             Err(e) => {
                 self.filename = Some(name.clone());
-                self.complain(&name, &strerror(&e));
                 if self.file_driven {
                     return Some(2);
                 }
-                // The path exists, so this was the read and not the open.
-                if opened {
-                    self.complain(&name, EdError::CannotReadInputFile.sentence());
-                    self.status = self.status.max(EdError::CannotReadInputFile.status());
+                // Only the *read* failure earns a second sentence at startup;
+                // a file that never opened gets the OS's line and nothing else.
+                if e == EdError::CannotReadInputFile {
+                    self.complain(&name, e.sentence());
+                    self.status = self.status.max(e.status());
                 }
                 None
             }
@@ -1589,7 +1857,23 @@ impl Editor {
             }
             let Some(line) = self.read_line() else { break };
             self.line_no = self.line_no.saturating_add(1);
-            match self.execute(&line) {
+            let result = self.execute(&line);
+            // Both flags are maintained here rather than inside `execute`, so
+            // that a `g` list counts as the one command it is spelled as.
+            self.warned_last = matches!(result, Err(EdError::BufferModified));
+            match &result {
+                // The refusal itself is what sets the flag, for `q` and `e`
+                // alike — which is why `1d`, `q`, `e f` proceeds, and so does
+                // the pair the other way round.
+                Err(EdError::BufferModified) => self.warned = true,
+                // Any *other* error puts the warning back: `1d`, `q`, `zzz`,
+                // `q` warns twice. Measured, and not a rule anyone would guess.
+                Err(_) => self.warned = false,
+                // A successful command clears it only if it changed something,
+                // which `Editor::touch` does at the point of the change.
+                Ok(_) => {}
+            }
+            match result {
                 Ok(Action::Continue) => {}
                 Ok(Action::Quit) => return self.status,
                 Err(e) => {
@@ -1601,7 +1885,7 @@ impl Editor {
         }
         // End of input. An unsaved buffer is a problem with the *input*, not
         // with a command, which is why its status is 2 and `q`'s is 1.
-        if self.modified && !self.warned {
+        if self.modified && !self.warned_last {
             self.fail(EdError::BufferModifiedAtEof);
         }
         self.status
@@ -1609,6 +1893,19 @@ impl Editor {
 
     fn total(&self) -> usize {
         self.buffer.len()
+    }
+
+    /// Record that the buffer just changed.
+    ///
+    /// The second half is the part that is not obvious: a change *retracts* an
+    /// outstanding `Warning: buffer modified`, so `1d`, `q`, `1d`, `q` warns
+    /// twice while `1d`, `q`, `1p`, `q` warns once and then quits. Reading it
+    /// as a rule about the user rather than about the flag makes it sensible —
+    /// the warning means "you are about to lose work", and after further work
+    /// is done it is a different, unheeded warning about different work.
+    fn touch(&mut self) {
+        self.modified = true;
+        self.warned = false;
     }
 
     /// Resolve a command's addresses to a `1..=total` range, or to `0..=total`
@@ -1677,8 +1974,20 @@ impl Editor {
         lines
     }
 
-    /// The file a `w` or `f` command names, or the current one.
+    /// The file an `e`, `E`, `f`, `r`, `w` or `W` command names, or the current
+    /// one.
+    ///
+    /// The command letter must be followed by whitespace or by nothing at all:
+    /// `efive.txt` and `$rf.txt` are `Unexpected command suffix`, where
+    /// `e five.txt` and `$r f.txt` work. That is GNU's rule — its
+    /// `unexpected_command_suffix` runs on the byte after the letter for every
+    /// one of these six commands — and it is why a file name can never be run
+    /// straight onto the letter the way `1p` runs a suffix onto `p`. Any number
+    /// of blanks is fine after that, and a tab counts as one.
     fn resolve_name(&mut self, rest: &[u8], remember: bool) -> Result<Vec<u8>, EdError> {
+        if !matches!(rest.first(), None | Some(b' ' | b'\t')) {
+            return Err(EdError::UnexpectedCommandSuffix);
+        }
         let mut pos = 0usize;
         skip_blank(rest, &mut pos);
         let given = rest.get(pos..).unwrap_or(&[]);
@@ -1697,9 +2006,6 @@ impl Editor {
     fn execute(&mut self, line: &[u8]) -> Result<Action, EdError> {
         let total = self.total();
         let parsed = parse_command(line)?;
-        if parsed.cmd != b'q' && parsed.cmd != b'Q' {
-            self.warned = false;
-        }
         let c = self.resolve_command(parsed)?;
 
         match c.cmd {
@@ -1733,10 +2039,12 @@ impl Editor {
                 };
                 let text = self.read_text();
                 let added = text.len();
+                let before = self.begin_change();
                 self.insert(at, text);
                 self.current = at.saturating_add(added);
                 if added > 0 {
-                    self.modified = true;
+                    self.touch();
+                    self.record_change(before);
                 }
                 self.finish_suffix(suffix);
                 Ok(Action::Continue)
@@ -1747,20 +2055,257 @@ impl Editor {
                 let (lo, hi) = self.range(&c, (self.current, self.current), false)?;
                 let text = self.read_text();
                 let added = text.len();
+                let before = self.begin_change();
                 self.delete(lo, hi);
                 self.insert(lo.saturating_sub(1), text);
                 self.current = lo.saturating_sub(1).saturating_add(added);
-                self.modified = true;
+                self.touch();
+                self.record_change(before);
                 self.finish_suffix(suffix);
                 Ok(Action::Continue)
             }
 
+            // Move a range. The destination is "after line N", so `0` is
+            // "before line 1" and `$` is the end.
+            b'm' => {
+                let (lo, hi) = self.range(&c, (self.current, self.current), false)?;
+                let (dest, suffix) = self.third_address(&c.rest)?;
+                // GNU's test, verbatim: `lo <= dest < hi`. It refuses a
+                // destination *strictly inside* the range — there is no place
+                // among the lines being moved for them to go — while allowing
+                // the two no-ops at the edges, `1,2m2` and `1m1`. Both of those
+                // still count as changes: `1m1` then `q` warns about the buffer.
+                if lo <= dest && dest < hi {
+                    return Err(EdError::InvalidDestination);
+                }
+                let before = self.begin_change();
+                let lines = self.cut(lo, hi);
+                let count = lines.len();
+                // The cut removed `count` lines, all of them either wholly above
+                // the destination or wholly below it — which is exactly what the
+                // check above guarantees — so the destination shifts by the whole
+                // count or not at all, never by part of it.
+                let at = if dest >= hi {
+                    dest.saturating_sub(count)
+                } else {
+                    dest
+                };
+                self.paste(at, lines);
+                self.current = at.saturating_add(count);
+                self.touch();
+                self.record_change(before);
+                self.finish_suffix(suffix);
+                Ok(Action::Continue)
+            }
+
+            // Copy a range. Unlike `m` there is no forbidden destination:
+            // copying a range into the middle of itself is well defined, and
+            // `1,2t1` duplicates both lines where they stand.
+            b't' => {
+                let (lo, hi) = self.range(&c, (self.current, self.current), false)?;
+                let (dest, suffix) = self.third_address(&c.rest)?;
+                let copied: Vec<Vec<u8>> = self
+                    .buffer
+                    .get(lo.saturating_sub(1)..hi)
+                    .unwrap_or_default()
+                    .to_vec();
+                let count = copied.len();
+                let before = self.begin_change();
+                // Through `insert` rather than `paste`: a copy is new text and
+                // carries no marks, so `1ka` then `1t$` leaves the mark on line
+                // 1 and not on the copy.
+                self.insert(dest, copied);
+                self.current = dest.saturating_add(count);
+                self.touch();
+                self.record_change(before);
+                self.finish_suffix(suffix);
+                Ok(Action::Continue)
+            }
+
+            // Join a range into one line, with nothing between the pieces.
+            b'j' => {
+                let suffix = print_suffix(&c.rest)?;
+                // The default range is `.,.+1`, which `range` cannot express:
+                // it derives the upper bound from the *lower* default. An
+                // unaddressed `j` on the last line is therefore `Invalid
+                // address`, which is measured and is the reason for the
+                // explicit bounds check here.
+                let (lo, hi) = if c.addressed {
+                    self.range(&c, (self.current, self.current), false)?
+                } else {
+                    let lo = self.current;
+                    let hi = lo.saturating_add(1);
+                    if lo < 1 || hi > self.total() {
+                        return Err(EdError::InvalidAddress);
+                    }
+                    (lo, hi)
+                };
+                // One line is already joined. GNU treats this as a success that
+                // changes nothing — not even the current line — and still
+                // honours the print suffix.
+                if hi > lo {
+                    let before = self.begin_change();
+                    let taken = self.cut(lo, hi);
+                    let mut joined: Vec<u8> = Vec::new();
+                    for line in &taken {
+                        joined.extend_from_slice(&line.text);
+                    }
+                    // The joined line carries neither mark: it is a new line,
+                    // and the lines that had them no longer exist. Measured —
+                    // a `k` mark set on either of two joined lines answers
+                    // `Invalid address` afterwards, and a `g` list that joins
+                    // does not revisit the line it produced.
+                    self.paste(
+                        lo.saturating_sub(1),
+                        vec![Taken {
+                            text: joined,
+                            kmark: 0,
+                        }],
+                    );
+                    self.current = lo;
+                    self.touch();
+                    self.record_change(before);
+                }
+                self.finish_suffix(suffix);
+                Ok(Action::Continue)
+            }
+
+            // `kx` names the addressed line `x`, for `'x` to address later.
+            b'k' => {
+                let (_, hi) = self.range(&c, (self.current, self.current), false)?;
+                // No letter at all is `Invalid command suffix`, not `Invalid
+                // mark character`: there is no character there to call invalid.
+                // Measured both ways.
+                let Some(&letter) = c.rest.first() else {
+                    return Err(EdError::InvalidCommandSuffix);
+                };
+                if !letter.is_ascii_lowercase() {
+                    return Err(EdError::InvalidMarkCharacter);
+                }
+                let suffix = print_suffix(c.rest.get(1..).unwrap_or(&[]))?;
+                let bit = 1u32 << u32::from(letter.wrapping_sub(b'a'));
+                // A letter names one line: `1ka` then `2ka` leaves only line 2
+                // marked, so the old placement has to be cleared first.
+                for m in &mut self.kmarks {
+                    *m &= !bit;
+                }
+                if let Some(m) = self.kmarks.get_mut(hi.saturating_sub(1)) {
+                    *m |= bit;
+                }
+                // `k` does not move `.`, and does not modify the buffer — a `k`
+                // alone still lets `q` quit.
+                self.finish_suffix(suffix);
+                Ok(Action::Continue)
+            }
+
+            // `(.)r FILE` reads a file in after the addressed line. The default
+            // address is `$`, not `.`.
+            b'r' => {
+                let at = match c.second.or(c.first) {
+                    Some(n) => n,
+                    None => i64::try_from(total).unwrap_or(i64::MAX),
+                };
+                if at < 0 || at > i64::try_from(total).unwrap_or(i64::MAX) {
+                    return Err(EdError::InvalidAddress);
+                }
+                let at = usize::try_from(at).map_err(|_| EdError::InvalidAddress)?;
+                let name = self.resolve_name(&c.rest, true)?;
+                // Cleared here, before the read, and recorded only if the read
+                // produced lines — so `r` on an empty file, and `r` on a file
+                // that will not open, both leave `u` with nothing to undo. Both
+                // measured.
+                let before = self.begin_change();
+                let content = self.read_file(&name)?;
+                let (lines, appended) = split_lines(&content, self.opts.strip_cr);
+                let bytes = byte_count(&lines);
+                let added = lines.len();
+                self.insert(at, lines);
+                self.report_read(bytes, appended);
+                // `.` becomes the last line read, or the address itself when
+                // nothing was: `/beta/r` on an empty file leaves `.` at 2.
+                self.current = at.saturating_add(added);
+                if added > 0 {
+                    self.touch();
+                    self.record_change(before);
+                }
+                Ok(Action::Continue)
+            }
+
+            // `e FILE` replaces the buffer; `E FILE` does it without asking.
+            b'e' | b'E' => {
+                if c.addressed {
+                    return Err(EdError::UnexpectedAddress);
+                }
+                if c.cmd == b'e' && self.modified && !self.warned {
+                    return Err(EdError::BufferModified);
+                }
+                let name = self.resolve_name(&c.rest, true)?;
+                // GNU empties the buffer *before* it reads, so a failed `e`
+                // leaves no buffer at all — measured: `e nosuch.txt` then `,p`
+                // answers `Invalid address`. Surprising, and deliberate here:
+                // an `e` that half-worked would be worse than one that plainly
+                // left nothing behind.
+                self.buffer.clear();
+                self.kmarks.clear();
+                self.marks.clear();
+                self.current = 0;
+                self.modified = false;
+                self.undo = None;
+                // The name is remembered even when the read fails, which is
+                // what makes a later bare `e` retry the same file.
+                self.filename = Some(name.clone());
+                let content = self.read_file(&name)?;
+                let (lines, appended) = split_lines(&content, self.opts.strip_cr);
+                self.buffer = lines;
+                self.kmarks = vec![0; self.buffer.len()];
+                self.current = self.buffer.len();
+                let bytes = byte_count(&self.buffer);
+                self.report_read(bytes, appended);
+                Ok(Action::Continue)
+            }
+
+            // One level of undo, and `u` after `u` redoes — see [`Snapshot`].
+            b'u' => {
+                let suffix = print_suffix(&c.rest)?;
+                if c.addressed {
+                    return Err(EdError::UnexpectedAddress);
+                }
+                let Some(prev) = self.undo.take() else {
+                    return Err(EdError::NothingToUndo);
+                };
+                // Swapped, not popped: what `u` puts back becomes what the next
+                // `u` would put back, which is the redo.
+                let redo = Snapshot {
+                    buffer: std::mem::replace(&mut self.buffer, prev.buffer),
+                    marks: std::mem::replace(&mut self.marks, prev.marks),
+                    kmarks: std::mem::replace(&mut self.kmarks, prev.kmarks),
+                    current: std::mem::replace(&mut self.current, prev.current),
+                    modified: std::mem::replace(&mut self.modified, prev.modified),
+                };
+                self.undo = Some(redo);
+                // `u` changes the buffer like any other command, so it retracts
+                // an outstanding warning: `1d`, `q`, `u`, `u` — the second `u`
+                // redoing the delete — warns again at the next `q`. When the
+                // state it restored was unmodified this is unobservable, since
+                // there is then nothing to warn about at all.
+                self.warned = false;
+                self.finish_suffix(suffix);
+                Ok(Action::Continue)
+            }
+
+            // A comment. The rest of the line is text, not a suffix — `#p`
+            // prints nothing — and an address is accepted and then ignored,
+            // though it is still *resolved*, so `/zzz/#` is `No match`.
+            b'#' => Ok(Action::Continue),
+
             b'd' => {
                 let suffix = print_suffix(&c.rest)?;
                 let (lo, hi) = self.range(&c, (self.current, self.current), false)?;
+                let before = self.begin_change();
                 self.delete(lo, hi);
                 self.current = lo.min(self.total());
-                self.modified = true;
+                self.touch();
+                self.record_change(before);
                 self.finish_suffix(suffix);
                 Ok(Action::Continue)
             }
@@ -1769,6 +2314,11 @@ impl Editor {
                 let sub = parse_substitute(&c.rest)?;
                 let re = self.pattern(&sub.pattern)?;
                 let (lo, hi) = self.range(&c, (self.current, self.current), false)?;
+                // Cleared before the first line is looked at and recorded only
+                // once something changes, so a `s` that matches nothing leaves
+                // `u` with nothing to undo — measured, and not the same as
+                // leaving the *previous* command's record in place.
+                let mut before = Some(self.begin_change());
                 let mut hit = None;
                 let mut n = lo;
                 while n <= hi {
@@ -1789,7 +2339,13 @@ impl Editor {
                         // about the buffer on the way out. Measured: `aaa\nbbb`
                         // with `,s/a*/X/g` errors on line 2 and still refuses a
                         // bare `q`.
-                        self.modified = true;
+                        self.touch();
+                        // Recorded on the first line that changes, for the same
+                        // reason and with the same consequence: a `s` that dies
+                        // half-way is still undoable back to where it started.
+                        if let Some(state) = before.take() {
+                            self.record_change(state);
+                        }
                     }
                     n = n.saturating_add(1);
                 }
@@ -1891,7 +2447,6 @@ impl Editor {
                     return Err(EdError::UnexpectedAddress);
                 }
                 if self.modified && !self.warned {
-                    self.warned = true;
                     return Err(EdError::BufferModified);
                 }
                 Ok(Action::Quit)
@@ -1936,6 +2491,10 @@ impl Editor {
             // the pattern selected, so it is not visited. GNU behaves the same
             // way, and the alternative is a `g/x/a` that appends for ever.
             self.marks.insert(at.min(self.marks.len()), false);
+            // A new line carries no `k` mark, but the array still has to grow
+            // *here* so every mark below the insertion point moves down with its
+            // line rather than staying on a number.
+            self.kmarks.insert(at.min(self.kmarks.len()), 0);
             at = at.saturating_add(1);
         }
     }
@@ -1949,7 +2508,66 @@ impl Editor {
             if start < self.marks.len() {
                 self.marks.drain(start..end.min(self.marks.len()));
             }
+            // A `k` mark on a deleted line is gone, not moved: GNU answers
+            // `Invalid address` for `'b` after the line `b` was on is deleted.
+            // Draining the parallel entries is what says so.
+            if start < self.kmarks.len() {
+                self.kmarks.drain(start..end.min(self.kmarks.len()));
+            }
         }
+    }
+
+    /// Cut the 1-based inclusive range `lo..=hi` out of the buffer, marks and
+    /// all, so that `m` and `j` can put it back somewhere else.
+    ///
+    /// Returns each line paired with *both* of its marks, because that pairing
+    /// is the whole reason this exists rather than a `delete` and an `insert`.
+    fn cut(&mut self, lo: usize, hi: usize) -> Vec<Taken> {
+        let start = lo.saturating_sub(1).min(self.buffer.len());
+        let end = hi.min(self.buffer.len());
+        if start >= end {
+            return Vec::new();
+        }
+        let lines: Vec<Vec<u8>> = self.buffer.drain(start..end).collect();
+        // Dropped, not carried: a moved line loses its `g`/`v` selection. See
+        // [`Taken`] for the measurement that says so.
+        if start < self.marks.len() {
+            drop(self.marks.drain(start..end.min(self.marks.len())));
+        }
+        let mut kmarks: Vec<u32> = Vec::with_capacity(lines.len());
+        if start < self.kmarks.len() {
+            kmarks.extend(self.kmarks.drain(start..end.min(self.kmarks.len())));
+        }
+        kmarks.resize(lines.len(), 0);
+        lines
+            .into_iter()
+            .zip(kmarks)
+            .map(|(text, kmark)| Taken { text, kmark })
+            .collect()
+    }
+
+    /// Put lines cut by [`Editor::cut`] back after 0-based offset `at`, `k`
+    /// marks and all — but never selected, per [`Taken`].
+    fn paste(&mut self, at: usize, lines: Vec<Taken>) {
+        let mut at = at.min(self.buffer.len());
+        for line in lines {
+            self.buffer.insert(at, line.text);
+            self.marks.insert(at.min(self.marks.len()), false);
+            self.kmarks.insert(at.min(self.kmarks.len()), line.kmark);
+            at = at.saturating_add(1);
+        }
+    }
+
+    /// The 1-based line carrying mark `letter`, or `Invalid address` when
+    /// nothing does — which is what GNU says both for a mark never set and for
+    /// one whose line has since been deleted.
+    fn mark_line(&self, letter: u8) -> Result<usize, EdError> {
+        let bit = 1u32 << u32::from(letter.wrapping_sub(b'a') & 31);
+        self.kmarks
+            .iter()
+            .position(|m| m & bit != 0)
+            .map(|i| i.saturating_add(1))
+            .ok_or(EdError::InvalidAddress)
     }
 
     /// The engine behind `g`, `v`, `G` and `V`.
@@ -1976,6 +2594,23 @@ impl Editor {
         interactive: bool,
         body: &[u8],
     ) -> Result<Action, EdError> {
+        // The whole global is one undo unit, so its "before" is taken once,
+        // here, before the selection marks are laid down and before `.` starts
+        // walking the selected lines — `u` restores the current line too, and
+        // with `.` at 2, `g/a/d` then `u` puts it back at 2 rather than at the
+        // first line the global matched.
+        //
+        // Set aside rather than installed as the undo record, and the old
+        // record dropped: GNU's `exec_global` clears the undo stack the moment
+        // the global starts and pushes to it only as lines actually move, so a
+        // `g` that modifies nothing leaves `u` with nothing at all to do —
+        // `1d`, `g/beta/p`, `u` answers `Nothing to undo` rather than bringing
+        // the deleted line back. Installing the snapshot here instead would
+        // make that `u` a silent no-op, which is a different answer.
+        // `global_undo_taken` is the flag that says the unit has not opened yet.
+        self.undo = None;
+        self.global_before = Some(self.snapshot());
+        self.global_undo_taken = false;
         self.marks.clear();
         self.marks.resize(self.buffer.len(), false);
         let mut n = lo;
@@ -2662,6 +3297,12 @@ mod tests {
             EdError::InvalidCommandSuffix.sentence(),
             "Invalid command suffix"
         );
+        // Two neighbouring sentences that are not the same sentence: `1p!` is
+        // `Invalid command suffix`, `efive.txt` is `Unexpected command suffix`.
+        assert_eq!(
+            EdError::UnexpectedCommandSuffix.sentence(),
+            "Unexpected command suffix"
+        );
         assert_eq!(EdError::UnexpectedAddress.sentence(), "Unexpected address");
         assert_eq!(EdError::UnknownCommand.sentence(), "Unknown command");
         assert_eq!(EdError::NoCurrentFilename.sentence(), "No current filename");
@@ -2694,6 +3335,10 @@ mod tests {
     fn editor_with(lines_in: &[&str]) -> Editor {
         let mut e = Editor::new(Options::default());
         e.buffer = lines(lines_in);
+        // Parallel to the buffer, exactly as `load` leaves it: the `k` marks are
+        // addressed by position, so an array a different length from the buffer
+        // would put every mark on the wrong line.
+        e.kmarks = vec![0; e.buffer.len()];
         e.current = e.buffer.len();
         e
     }
@@ -2741,6 +3386,343 @@ mod tests {
         let mut e = editor_with(lines_in);
         assert!(e.execute(cmd).is_ok());
         std::mem::take(&mut e.buffer)
+    }
+
+    /// Run a list of command lines against a fresh buffer and hand back the
+    /// buffer, the current line, and the modified flag.
+    ///
+    /// One editor for the whole list, because the commands under test here are
+    /// about what one leaves for the next: a `k` and the `'x` that reads it, a
+    /// `d` and the `u` that puts it back. Only one editor may be alive at a
+    /// time — see [`after`].
+    fn drive(lines_in: &[&str], cmds: &[&[u8]]) -> (Vec<Vec<u8>>, usize, bool) {
+        let mut e = editor_with(lines_in);
+        for cmd in cmds {
+            assert!(e.execute(cmd).is_ok(), "command failed: {:?}", *cmd);
+        }
+        (std::mem::take(&mut e.buffer), e.current, e.modified)
+    }
+
+    /// The error a list of commands ends with. Every command before the last
+    /// must succeed.
+    fn drive_err(lines_in: &[&str], cmds: &[&[u8]]) -> EdError {
+        let mut e = editor_with(lines_in);
+        let Some((last, rest)) = cmds.split_last() else {
+            panic!("no commands");
+        };
+        for cmd in rest {
+            assert!(e.execute(cmd).is_ok(), "command failed: {:?}", *cmd);
+        }
+        match e.execute(last) {
+            Err(err) => err,
+            Ok(_) => panic!("expected an error from {:?}", *last),
+        }
+    }
+
+    /// The error a list of commands ends with, where the commands before the
+    /// last are allowed to fail as well.
+    ///
+    /// Separate from [`drive_err`], which asserts that they all succeed,
+    /// because a middle command's *failure* is sometimes the thing under test:
+    /// a `s` that matches nothing is what clears the undo record.
+    fn drive_last_err(lines_in: &[&str], cmds: &[&[u8]]) -> EdError {
+        let mut e = editor_with(lines_in);
+        let Some((last, rest)) = cmds.split_last() else {
+            panic!("no commands");
+        };
+        for cmd in rest {
+            drop(e.execute(cmd));
+        }
+        match e.execute(last) {
+            Err(err) => err,
+            Ok(_) => panic!("expected an error from {:?}", *last),
+        }
+    }
+
+    #[test]
+    fn move_takes_a_range_out_and_puts_it_back_after_the_destination() {
+        let all = ["alpha", "beta", "gamma"];
+        // Every one of these is measured against GNU ed 1.20.1, buffer and
+        // current line together — the current line is the half a move is
+        // easiest to get wrong, because the destination shifts when the lines
+        // come out from above it.
+        assert_eq!(
+            drive(&all, &[b"1m$"]),
+            (lines(&["beta", "gamma", "alpha"]), 3, true)
+        );
+        assert_eq!(
+            drive(&all, &[b"2m0"]),
+            (lines(&["beta", "alpha", "gamma"]), 1, true)
+        );
+        assert_eq!(
+            drive(&all, &[b"1,2m$"]),
+            (lines(&["gamma", "alpha", "beta"]), 3, true)
+        );
+        assert_eq!(drive(&all, &[b"1,3m0"]), (lines(&all), 3, true));
+        // A destination written as anything an address can be.
+        assert_eq!(
+            drive(&all, &[b"1m/gamma/"]),
+            (lines(&["beta", "gamma", "alpha"]), 3, true)
+        );
+        assert_eq!(
+            drive(&all, &[b"1m.-1"]),
+            (lines(&["beta", "alpha", "gamma"]), 2, true)
+        );
+        // No destination at all means `.`, which is why a bare `m` is legal.
+        assert_eq!(
+            drive(&all, &[b"1m"]),
+            (lines(&["beta", "gamma", "alpha"]), 3, true)
+        );
+    }
+
+    #[test]
+    fn a_move_into_its_own_range_is_refused_but_the_edges_are_not() {
+        let all = ["alpha", "beta", "gamma"];
+        // `lo <= dest < hi`, GNU's test. The two edges are no-ops rather than
+        // errors — and they still mark the buffer modified, which is why the
+        // flag is asserted rather than the buffer alone.
+        assert_eq!(drive_err(&all, &[b"1,2m1"]), EdError::InvalidDestination);
+        assert_eq!(drive(&all, &[b"1,2m2"]), (lines(&all), 2, true));
+        assert_eq!(drive(&all, &[b"1m1"]), (lines(&all), 1, true));
+        // Out of range at either end is an address error, not a destination one.
+        assert_eq!(drive_err(&all, &[b"1m5"]), EdError::InvalidAddress);
+        assert_eq!(drive_err(&all, &[b"0m$"]), EdError::InvalidAddress);
+        assert_eq!(drive_err(&["a"], &[b"1m$x"]), EdError::InvalidCommandSuffix);
+    }
+
+    #[test]
+    fn copy_duplicates_a_range_and_may_copy_into_itself() {
+        let all = ["alpha", "beta", "gamma"];
+        assert_eq!(
+            drive(&all, &[b"1t$"]),
+            (lines(&["alpha", "beta", "gamma", "alpha"]), 4, true)
+        );
+        assert_eq!(
+            drive(&all, &[b"1t0"]),
+            (lines(&["alpha", "alpha", "beta", "gamma"]), 1, true)
+        );
+        // The destination `m` refuses is fine for `t`: nothing is being taken
+        // away, so there is a well-defined answer.
+        assert_eq!(
+            drive(&all, &[b"1,2t1"]),
+            (lines(&["alpha", "alpha", "beta", "beta", "gamma"]), 3, true)
+        );
+        assert_eq!(
+            drive(&all, &[b"1,3t2"]),
+            (
+                lines(&["alpha", "beta", "alpha", "beta", "gamma", "gamma"]),
+                5,
+                true
+            )
+        );
+        assert_eq!(drive_err(&all, &[b"1t5"]), EdError::InvalidAddress);
+        assert_eq!(drive_err(&all, &[b"0t$"]), EdError::InvalidAddress);
+    }
+
+    #[test]
+    fn join_glues_a_range_into_one_line_with_nothing_between() {
+        let all = ["alpha", "beta", "gamma"];
+        assert_eq!(
+            drive(&all, &[b"1,2j"]),
+            (lines(&["alphabeta", "gamma"]), 1, true)
+        );
+        assert_eq!(drive(&all, &[b",j"]), (lines(&["alphabetagamma"]), 1, true));
+        // One line is already joined: not an error, and not a change either —
+        // the current line does not move and the buffer is not marked modified.
+        assert_eq!(drive(&all, &[b"1,1j"]), (lines(&all), 3, false));
+        // The default range is `.,.+1`, which is off the end when `.` is `$`.
+        assert_eq!(drive_err(&all, &[b"j"]), EdError::InvalidAddress);
+        assert_eq!(
+            drive(&all, &[b"1", b"j"]),
+            (lines(&["alphabeta", "gamma"]), 1, true)
+        );
+        assert_eq!(drive_err(&all, &[b"0,1j"]), EdError::InvalidAddress);
+    }
+
+    #[test]
+    fn a_mark_follows_its_line_wherever_the_line_goes() {
+        let all = ["alpha", "beta", "gamma"];
+        // This is the property the parallel array exists for. Each case is a
+        // different way of moving text above the marked line; in every one of
+        // them `'c` still names `gamma`.
+        for shuffle in [
+            &b"1d"[..],
+            &b"1m$"[..],
+            &b"1t0"[..],
+            &b"1,2j"[..],
+            &b"0a"[..],
+        ] {
+            let mut e = editor_with(&all);
+            assert!(e.execute(b"3kc").is_ok());
+            assert!(e.execute(shuffle).is_ok());
+            let at = e.mark_line(b'c').expect("the mark survived");
+            assert_eq!(
+                e.buffer.get(at.saturating_sub(1)).map(Vec::as_slice),
+                Some(&b"gamma"[..]),
+                "after {shuffle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mark_is_one_line_per_letter_and_dies_with_its_line() {
+        let all = ["alpha", "beta", "gamma"];
+        // Setting a letter moves it: only one line answers to `a` at a time.
+        let mut e = editor_with(&all);
+        assert!(e.execute(b"1ka").is_ok());
+        assert!(e.execute(b"2ka").is_ok());
+        assert_eq!(e.mark_line(b'a'), Ok(2));
+        // Several letters may share a line, though.
+        assert!(e.execute(b"2kb").is_ok());
+        assert_eq!(e.mark_line(b'a'), Ok(2));
+        assert_eq!(e.mark_line(b'b'), Ok(2));
+        // `k` moves nothing and changes nothing: `.` stays where it was and the
+        // buffer is not modified, so a `q` after a `k` alone still quits.
+        assert_eq!(e.current, 3);
+        assert!(!e.modified);
+        // Deleting the line takes the marks with it, and `'a` then has no line.
+        assert!(e.execute(b"2d").is_ok());
+        assert_eq!(e.mark_line(b'a'), Err(EdError::InvalidAddress));
+        assert_eq!(e.mark_line(b'b'), Err(EdError::InvalidAddress));
+        // A copy is new text and carries no mark; the original keeps it.
+        assert!(e.execute(b"1ka").is_ok());
+        assert!(e.execute(b"1t$").is_ok());
+        assert_eq!(e.mark_line(b'a'), Ok(1));
+    }
+
+    #[test]
+    fn a_mark_name_is_one_lowercase_letter_and_nothing_else() {
+        let all = ["alpha", "beta", "gamma"];
+        assert_eq!(drive_err(&all, &[b"1kA"]), EdError::InvalidMarkCharacter);
+        assert_eq!(drive_err(&all, &[b"1k1"]), EdError::InvalidMarkCharacter);
+        // No letter at all is a different error: there is no character there to
+        // call invalid. Measured — GNU says `Invalid command suffix`.
+        assert_eq!(drive_err(&all, &[b"1k"]), EdError::InvalidCommandSuffix);
+        // The same rule reading a mark back, and the same two sentences.
+        assert_eq!(drive_err(&all, &[b"'Ap"]), EdError::InvalidMarkCharacter);
+        assert_eq!(drive_err(&all, &[b"'1p"]), EdError::InvalidMarkCharacter);
+        assert_eq!(drive_err(&all, &[b"'"]), EdError::InvalidMarkCharacter);
+        // A mark that was never set is an *address* error, not a name one.
+        assert_eq!(drive_err(&all, &[b"'zp"]), EdError::InvalidAddress);
+        // And a mark that was set addresses its line, offsets and all.
+        assert_eq!(
+            drive(&all, &[b"1ka", b"'a,'a+1d"]),
+            (lines(&["gamma"]), 1, true)
+        );
+    }
+
+    #[test]
+    fn undo_puts_back_one_change_and_a_second_undo_redoes_it() {
+        let all = ["alpha", "beta", "gamma"];
+        // One level deep, and a swap rather than a pop: this is GNU's undo, and
+        // a stack would be a different editor rather than a better one.
+        assert_eq!(drive(&all, &[b"1d", b"u"]), (lines(&all), 3, false));
+        assert_eq!(
+            drive(&all, &[b"1d", b"u", b"u"]),
+            (lines(&["beta", "gamma"]), 1, true)
+        );
+        // Only the last change: two deletes then one undo brings back one line.
+        assert_eq!(
+            drive(&all, &[b"1d", b"1d", b"u"]),
+            (lines(&["beta", "gamma"]), 1, true)
+        );
+        // Every buffer-modifying command records, including the new ones.
+        for cmd in [
+            &b"1d"[..],
+            &b"1m$"[..],
+            &b"1t$"[..],
+            &b"1,2j"[..],
+            &b"1s/a/X/"[..],
+        ] {
+            assert_eq!(
+                drive(&all, &[cmd, b"u"]),
+                (lines(&all), 3, false),
+                "after {cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn undo_restores_the_marks_the_change_disturbed() {
+        // Measured: `1ka`, `1d`, `u`, `'ap` prints `alpha` in GNU. The mark the
+        // delete destroyed comes back with the line, which is only true if the
+        // marks are part of what is snapshotted.
+        let mut e = editor_with(&["alpha", "beta", "gamma"]);
+        assert!(e.execute(b"1ka").is_ok());
+        assert!(e.execute(b"1d").is_ok());
+        assert_eq!(e.mark_line(b'a'), Err(EdError::InvalidAddress));
+        assert!(e.execute(b"u").is_ok());
+        assert_eq!(e.mark_line(b'a'), Ok(1));
+    }
+
+    #[test]
+    fn a_command_that_changes_nothing_leaves_nothing_to_undo() {
+        let all = ["alpha", "beta", "gamma"];
+        // Nothing has happened yet.
+        assert_eq!(drive_err(&all, &[b"u"]), EdError::NothingToUndo);
+        // A command that does not touch the buffer does not disturb the record.
+        assert_eq!(drive(&all, &[b"1d", b"1p", b"u"]), (lines(&all), 3, false));
+        assert_eq!(drive(&all, &[b"1d", b"1ka", b"u"]), (lines(&all), 3, false));
+        // …but one that *starts* to and then changes nothing clears it. This is
+        // the difference between clearing and replacing, and it is measured: a
+        // `s` that matches nothing leaves `u` with nothing to put back.
+        assert_eq!(
+            drive_last_err(&all, &[b"1d", b"1s/zzz/X/", b"u"]),
+            EdError::NothingToUndo
+        );
+        // An address that fails never gets that far, so the record survives.
+        assert_eq!(drive(&all, &[b"1d", b"1p", b"u"]), (lines(&all), 3, false));
+        assert_eq!(drive_err(&all, &[b"1d", b"9m0"]), EdError::InvalidAddress);
+        // `u` takes no address of its own.
+        assert_eq!(drive_err(&all, &[b"1d", b"1u"]), EdError::UnexpectedAddress);
+    }
+
+    #[test]
+    fn a_whole_global_is_one_undo() {
+        let all = ["alpha", "beta", "gamma"];
+        // Three deletes inside one `g`, and one `u` brings all three back —
+        // the snapshot is taken once, at the top of the global.
+        assert_eq!(drive(&all, &[b"g/a/d", b"u"]), (lines(&all), 3, false));
+        // …and it is taken *at the top*, not at the first modifying command
+        // inside: `u` restores the current line as well as the buffer, and by
+        // the time an inner command runs `.` has already been moved onto the
+        // selected line. Measured against GNU: `.` at 2, `g/a/d`, `u` → 2.
+        assert_eq!(
+            drive(&all, &[b"2", b"g/a/d", b"u"]),
+            (lines(&all), 2, false)
+        );
+        assert_eq!(
+            drive(&all, &[b"1", b"g/a/d", b"u"]),
+            (lines(&all), 1, false)
+        );
+        // A global clears the record the moment it starts, and a global that
+        // modifies nothing therefore leaves `u` nothing at all to do — not a
+        // no-op to do. Measured: GNU answers `Nothing to undo` here, and does
+        // so even for a `v` that selects no line whatsoever. This is why the
+        // snapshot is set aside rather than installed when the `g` starts.
+        assert_eq!(
+            drive_err(&all, &[b"1d", b"g/beta/p", b"u"]),
+            EdError::NothingToUndo
+        );
+        assert_eq!(
+            drive_err(&all, &[b"1d", b"v/zzz/p", b"u"]),
+            EdError::NothingToUndo
+        );
+    }
+
+    #[test]
+    fn a_comment_is_the_rest_of_the_line_and_does_nothing() {
+        let all = ["alpha", "beta", "gamma"];
+        // Not even a print suffix: `#p` prints nothing, because `p` is comment.
+        assert_eq!(drive(&all, &[b"#p"]), (lines(&all), 3, false));
+        assert_eq!(drive(&all, &[b"#"]), (lines(&all), 3, false));
+        // An address is accepted and ignored — but it is still *resolved*, so a
+        // search address that finds nothing is still an error.
+        assert_eq!(
+            drive(&all, &[b"1#anything at all"]),
+            (lines(&all), 3, false)
+        );
+        assert_eq!(drive_err(&all, &[b"/zzz/#"]), EdError::NoMatch);
     }
 
     #[test]

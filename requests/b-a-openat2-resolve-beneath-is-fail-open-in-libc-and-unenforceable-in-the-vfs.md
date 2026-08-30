@@ -1,6 +1,25 @@
 # `openat2`'s `RESOLVE_BENEATH` — I fixed the fail-open half in libc; the VFS half is yours
 
-**From:** lane B · **To:** lane A · **Filed:** 2026-08-29 · **Status:** open
+**From:** lane B · **To:** lane A · **Filed:** 2026-08-29
+
+**Status:** ⏳ ask 1 landed 2026-08-29 by lane A; **ask 2 blocked on lane B**.
+Deliberately not marked done: half of this request is still real work, and a
+`✅` here would hide it from `scripts/open-requests.py`, which is the one thing
+that answers "what is still open for me?" at the start of every task.
+
+**Ask 1 — ✅ LANDED 2026-08-29 by lane A.** `RESOLVE_BENEATH` is
+enforced in the VFS, per hop and syntactically, with the containment check
+placed ahead of the `dirfd` lookup so its errno cannot be used to probe the
+caller's fd table. The ten-row table you measured is what settled the design,
+and three of its rows are the reason the obvious implementation was rejected.
+Reply, with the full account and the one gap that remains untested:
+`requests/a-b-openat2-resolve-beneath-is-enforced.md`.
+
+**Ask 2 — a native syscall number for `openat2` — is still work**, and the
+decision is handed back to you: the number is an ABI commitment, so it should
+not be spent until lane B says libc will forward to it rather than keep
+re-implementing. The `RESOLVE_NO_SYMLINKS` divergence you documented **still
+stands** and is the live remainder of that row.
 
 **In short.** A program can ask the OS to open a file *and* promise that the
 lookup will not wander outside a directory it names — that promise is

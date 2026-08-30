@@ -2419,6 +2419,64 @@ check_prerequisites() {
 
 check_prerequisites
 
+# A landed request is stamped, not deleted (roadmap.md rule 2, §315).
+#
+# This runs FIRST, ahead of every other gate, because it is the only one here
+# whose subject is information that is already gone rather than code that is
+# merely wrong.  Every other failure below is a file you can read and fix; this
+# one is a file you cannot read, and the window in which restoring it is free
+# closes when the deletion reaches `main`.
+#
+# It is a gate rather than a sixth reminder because the convention was enforced
+# by attention and attention lost four times, in every lane, over two weeks --
+# `d30e2a5ca`, `57d21b4ee`, `cd23f2f97`, `dd4e34fd9`, all after rule 2 changed
+# in `236dc2206`.  The last of those is the one that settles the argument: its
+# own commit message asserted the *opposite* rule, so the author was not
+# ignoring the convention but misremembering it while explaining it, and no
+# restatement fixes that.  The symptom arrived three minutes later, when the
+# next commit had to repoint two live citations at something that still existed.
+#
+# `scripts/open-requests.py` structurally cannot cover it.  That script answers
+# "which *surviving* files are unresolved?", and a deleted file survives
+# nothing -- so a deletion removes a request from the one report that exists to
+# find it, silently, and in the direction that reads as "nothing is open".
+# Only a diff against history can see a deletion at all.
+#
+# Costs one `git diff` against the merge base with origin/main, so it sees only
+# what this lane removed since diverging and can never fail one lane's build
+# with another lane's history.  A rename passes (rename detection is on), an
+# uncommitted `rm` counts, and `requests/.deletions-allowed` waives a basename
+# with a stated reason for when a deletion really is right.
+check_requests_not_deleted() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== request-deletion check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking that no request file was deleted ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-requests-not-deleted.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A request that has landed gets a" >&2
+    echo "**Status:** line and stays where it is -- it is not a ticket, it is" >&2
+    echo "the argument, and code and documents across the tree cite it by path." >&2
+    echo "" >&2
+    echo "The restore command is printed above.  Use an open/blocked/partial" >&2
+    echo "wording if only part of it landed: open-requests.py ranks those above" >&2
+    echo "'landed', so an honest header is what keeps the unfinished half" >&2
+    echo "visible instead of hiding it behind a tick." >&2
+    exit 1
+}
+
+check_requests_not_deleted
+
 # A self-test that nothing calls is not a test.  It compiles, it reads as
 # coverage, it gets cited in a commit message as "tested" -- and it has never
 # executed.  `evdev::self_test` sat uncalled for exactly one commit, and the
@@ -3559,10 +3617,13 @@ check_shellcheck
 
 # Run the tooling's own test suites.
 #
-# WHY THIS GATE EXISTS.  `scripts/` holds fourteen `test-*.py` suites -- around
-# 400 assertions covering the boot harness itself, the two history loaders, the
-# canary loader, the sysroot fixtures, the space reclaimer, the source digest --
-# and until 2026-08-29 **nothing ran any of them**.  They ran when an agent
+# WHY THIS GATE EXISTS.  `scripts/` holds a `test-*.py` suite for most of the
+# tooling -- the boot harness itself, the two history loaders, the canary
+# loader, the sysroot fixtures, the space reclaimer, the source digest, the
+# open-request report -- and until 2026-08-29 **nothing ran any of them**.  (No
+# count here on purpose: the glob below is the list, and a number in a comment
+# is a second list that goes stale in silence.  This one had, reading
+# "fourteen" while sixteen sat on disk.)  They ran when an agent
 # happened to remember, which for most of them was the day they were written.
 # That is the same failure this file's other gates exist to prevent, one level
 # up: a suite that is not run is not a test, it is a comment that takes an hour
@@ -3570,9 +3631,11 @@ check_shellcheck
 # these scripts *are* the harness -- a regression in `boot-history.py` corrupts
 # the record of every boot, including the ones that would have shown it.
 #
-# WHY IT IS AFFORDABLE.  Measured, not assumed: all fourteen together take ~95 s
-# (the slowest, `test-canary-load.py`, is 31 s), against a boot test that runs
-# 900-1200 s.  It is also the cheapest possible place to spend it -- these fail
+# WHY IT IS AFFORDABLE.  Measured, not assumed: on 2026-08-29 the fourteen
+# suites that existed then took ~95 s together (the slowest,
+# `test-canary-load.py`, is 31 s), against a boot test that runs 900-1200 s.
+# The figure is dated because it is a measurement; it is the ratio that is the
+# argument, and a suite would have to be minutes long to change it.  It is also the cheapest possible place to spend it -- these fail
 # in seconds and before the build, so a broken harness stops the run instead of
 # corrupting its output an hour later.
 #
@@ -3622,7 +3685,23 @@ check_python_suites() {
         # `set -e`, where a failing command in an assignment would abort the
         # whole boot test before the status could be reported as a suite
         # failure.  Same reasoning as check_shellcheck above.
-        out="$("$py" -u "$f" 2>&1)" && rc=0 || rc=$?
+        # PYTHONIOENCODING=:replace -- the empty field before the colon sets the
+        # error handler and leaves the encoding alone.  Capturing with `$(...)`
+        # hands the suite a pipe, and on Windows a pipe gets the *locale*
+        # encoding (cp1252 here), not UTF-8.  A suite that prints a tick or an
+        # em dash -- and several quote the markers lanes really write -- then
+        # dies of UnicodeEncodeError partway through its report.  That is the
+        # worst way for a gate to fail: exit 1 with a charmap traceback is
+        # indistinguishable from a real test failure, and it destroys the
+        # diagnosis at the one moment the diagnosis is what you came for.
+        #
+        # `:replace` rather than `utf-8` on purpose.  Forcing UTF-8 would send
+        # UTF-8 bytes to whatever console the operator has, which for cp1252 is
+        # mojibake; `:replace` keeps the console's own encoding and degrades the
+        # tick to `?`, which is readable everywhere.  Set here rather than in
+        # each suite because this line is what creates the pipe, and it covers
+        # suites added later that have not thought about it.
+        out="$(PYTHONIOENCODING=:replace "$py" -u "$f" 2>&1)" && rc=0 || rc=$?
         if [ "$rc" -eq 0 ]; then
             printf '    %-32s %s\n' "$(basename "$f")" "$(printf '%s\n' "$out" | tail -1)"
             continue

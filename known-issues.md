@@ -15944,7 +15944,7 @@ sequence, which includes the payload. We consume it, as musl does.
 `0x.`, matching glibc would mean converting a digit-less sequence to zero,
 which we should only do if a real port needs it.
 
-### TD-OPENAT2-BENEATH-INROOT. `openat2` `RESOLVE_BENEATH`/`RESOLVE_IN_ROOT` are safely refused, not implemented — ACCEPTED LIMITATION 2026-07-22
+### TD-OPENAT2-BENEATH-INROOT. `openat2` `RESOLVE_IN_ROOT` is safely refused, not implemented (`RESOLVE_BENEATH` now enforced) — ACCEPTED LIMITATION 2026-07-22, narrowed 2026-08-29
 
 **Where:** `kernel/src/syscall/linux.rs::sys_openat2` (the resolve-flag gates)
 and, since 2026-08-29, `posix/src/file.rs::openat2` step 7.
@@ -15990,8 +15990,13 @@ bit — `O_NOFOLLOW` covers the final component only. Refusing is safe; it is
 still a capability a native binary cannot reach. The structural fix is a native
 syscall number for `openat2` so libc forwards instead of re-implementing, which
 is what let the two drift apart in the first place. Both that and the VFS work
-are asked for in `requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-
-and-unenforceable-in-the-vfs.md`.
+were asked for in `requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-
+and-unenforceable-in-the-vfs.md`, which carries a `Status:` stamp recording
+which of its two asks landed — the reply, and the current state of both, is
+`requests/a-b-openat2-resolve-beneath-is-enforced.md` (VFS work done; the
+native syscall number is waiting on lane B to say it will forward, because an
+unused number is an ABI commitment). **This divergence therefore still stands**
+and is the live remainder of the `NO_SYMLINKS` row.
 
 **The generalisable lesson, which is worth more than the bug:** when a syscall
 has two implementations in this tree, a known-limitation note about one of them
@@ -16004,6 +16009,40 @@ needs beneath/in-root resolution". One now does — `userspace/coreutils/src/bin
 tar.rs` emulates `RESOLVE_BENEATH` in userspace (`Dir::locate`) because neither
 target could supply it. See `design-decisions.md` §702 for why emulating beat
 waiting. The emulation is correct and race-free, so this is still not urgent.
+
+**Resolved for `RESOLVE_BENEATH` 2026-08-29 (lane A) — `RESOLVE_IN_ROOT`
+remains an accepted limitation.** The kernel now enforces `RESOLVE_BENEATH`
+rather than refusing it, so this entry's title is half-wrong and the half that
+stays is `IN_ROOT`. What landed:
+
+- `Vfs::beneath_step` — the rule itself, per hop and **syntactic**. An absolute
+  symlink target is refused without ever being compared to the base, and a `..`
+  is refused at the moment the walk would step above the base, not judged by
+  where it eventually lands. The "proper fix" paragraph above said
+  "verify the running resolved path stays at/below the base", and that phrasing
+  is **wrong in the permissive direction** on three of lane B's ten measured
+  rows (`$PWD/sub`, `$PWD`, `../d/sub` — all allowed by a prefix check, all
+  refused by Linux). A resolved path has forgotten how it got there; the
+  implementation tracks a depth counter instead, which is what makes those
+  questions answerable at all.
+- The base is threaded through `Vfs::resolve_inner`'s symlink expansion and
+  checked *before* `normalize_path`, which is the call that destroys the `..`
+  the decision depends on.
+- `Vfs::resolve_beneath`, `fs::handle::open_beneath`, and `sys_openat_beneath`,
+  which shares the whole post-resolution tail (`open_resolved`) with the
+  ordinary open path — a second fd-install path would be this entry's own
+  lesson repeated one layer down.
+- `Vfs::beneath_fragment_ok` — the part of the rule decidable without a base,
+  so the syscall can refuse an escaping fragment *before* it looks up `dirfd`
+  and its answer cannot be used to probe the caller's fd table.
+
+Covered by three suites at different depths: `fs::vfs` (the rule, plus real
+symlinks), `fs::handle` (that a contained open actually succeeds and reads the
+right bytes — the case a refuse-everything implementation would pass), and
+`syscall::linux` (the ABI's refusals). `RESOLVE_IN_ROOT` is deliberately still
+`EOPNOTSUPP`: it is the same machinery with `..` clamping at the base and
+absolute targets re-rooted, but lane B has no consumer for it and an unused
+ABI is a commitment we would have to keep.
 
 ### D-NETSTACK-TCP-MINIMAL. Userspace `netstack` TCP client is minimal (slirp-only correctness) — DEBT 2026-07-14
 
@@ -94329,6 +94368,40 @@ entered) arriving through arithmetic rather than control flow.
 2048, connect4, the file explorer's list — and every `(a - b).abs() < eps`
 centring assertion in a layout suite. The tell is a test whose fixture puts the
 thing under test at rest.
+
+### Lesson 71: asking *whether* a click landed cannot tell a hit box in the right place from one a whole gap away (lane C, 2026-08-29)
+
+**In short:** snake's board grows each square's click box by half the gap on
+every side, so the gap between two squares is split down the middle and a click
+in it goes to the square it is nearer. The test for that clicked the *middle* of
+a gap and asserted the result was one of the two squares either side. Mutate the
+growth so it happens on one side only — `let half = 0.0;`, leaving the
+`r.w + self.gap` that widens it — and the box is still exactly the right size,
+still leaves no gap belonging to nobody, and the test still passes. What has
+changed is that every click box has slid a whole gap off its own ink: clicking
+the left edge of a square now hits its left-hand neighbour, and the last column
+of the board has a strip of dead ink past which the clicks fall off the board
+entirely. Nothing in the suite noticed.
+
+**The rule.** A hit-box assertion must name the target, not merely require one.
+"Landed on something" is satisfied by a box of the right size in the wrong
+place; "landed on *this* square" is not. Where a box is derived from ink by
+growing it, click a point on **each** side of the ink and say which square owns
+it — a box that has slid shows up on one side as the wrong neighbour and on the
+other as nothing at all. Pick the point a quarter of the way into the gap rather
+than half, so it is unambiguously in one square's half of it and the assertion
+is an equality rather than a disjunction.
+
+This is lesson 68 (a containment assertion has slack, and any fault that fits
+inside the slack is invisible) arriving through the hit map instead of through
+geometry: the `a || b` **is** the slack, and a box displaced by exactly one gap
+is the fault that fits inside it.
+
+**Where else to look.** Every `hit_test` assertion written as
+`landed == Some(a) || landed == Some(b)`, and every control whose click box is
+bigger than its ink: the padded switches in these apps' footers, list rows grown
+to the row pitch, and any slider whose thumb carries a grab margin. The tell is
+an assertion whose right-hand side is a set rather than a value.
 
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 

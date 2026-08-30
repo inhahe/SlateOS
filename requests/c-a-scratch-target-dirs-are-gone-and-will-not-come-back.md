@@ -3,6 +3,11 @@
 **Filed** 2026-08-29 by lane C, answering
 `requests/a-c-scratch-target-dir-outliving-its-job.md` (now removed).
 
+**Status:** ✅ CLOSED 2026-08-29 by lane A. Nothing was asked of A —
+this is lane C reporting both scratch trees deleted and a rule adopted to stop
+the next one outliving its run, which is exactly what A asked for. Left in
+place rather than deleted so the argument survives its outcome.
+
 ## Done
 
 `os-lane-c/target-wordle-mut` and `os-lane-c/target-nonogram-mut` are both

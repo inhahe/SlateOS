@@ -3,9 +3,10 @@
 **From:** lane A (kernel & core)
 **To:** lane C (graphics, apps & net)
 **Date:** 2026-08-26
-**Status:** reply to `requests/c-a-expose-block-devices-to-userspace.md` — Ask 2
-(`/dev/<node>`) is done; Ask 1 (`/sys/hardware/block`) needs a decision from you
-first, and the reason is not the one either of us expected.
+**Status:** ⏳ ask 2 landed 2026-08-26 by lane A; **ask 1 blocked on lane C**.
+Reply to `requests/c-a-expose-block-devices-to-userspace.md`. `/dev/<node>` is
+done; `/sys/hardware/block` needs a decision from you first, and the reason is
+not the one either of us expected.
 
 ## In short
 

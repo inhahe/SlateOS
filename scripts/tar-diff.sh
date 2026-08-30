@@ -441,6 +441,33 @@ create_case 'a symlink on its own'       special/rel
 create_case 'a dangling symlink'         special/dangling
 create_case 'a fifo'                     special/pipe
 
+# The link table: the same inode reached twice in one run is stored once, and
+# every later name for it becomes a hard-link record. Three things decide who
+# gets one, and ours had all three wrong before these cases existed:
+#
+#   the link *count* is irrelevant — a file named twice on the command line is
+#     deduplicated even though nothing else on the disk points at it. Without
+#     this, `tar -cf b.tar dir dir` writes the whole tree twice;
+#   only regular files and symlinks join the table — a fifo named twice is two
+#     fifos, not a link;
+#   and only *after* the member is written — ours registered before, so two
+#     names for a socket (which is never archived at all) produced an archive
+#     holding a hard link with nothing to point at.
+#
+# The names here are relative on purpose. An absolute one would strip, and the
+# prefix notices that provoked are a separate question with an unresolved case
+# of its own; see known-issues.md.
+create_case 'one file named twice'       tree/a.txt tree/a.txt
+create_case 'one file named three times' tree/a.txt tree/a.txt tree/a.txt
+create_case 'a hard-linked pair'         special/f special/hard
+create_case 'the pair, other order'      special/hard special/f
+create_case 'a symlink named twice'      special/rel special/rel
+create_case 'a fifo named twice'         special/pipe special/pipe
+create_case 'a directory named twice'    tree/sub tree/sub
+create_case 'a file and its directory'   tree tree/a.txt
+interop_case 'one file named twice'      tree/a.txt tree/a.txt
+interop_case 'a fifo named twice'        special/pipe special/pipe
+
 # A member name longer than the 100-byte `name` field. ustar splits it at a `/`
 # into `prefix` + `name`; a tar that only fills `name` truncates it, produces a
 # well-formed archive holding the wrong name, and exits 0.
@@ -963,6 +990,18 @@ plain_case 'archive does not exist (-x)' -xf nosuch.tar
 plain_case 'archive is a directory'      -tf tree
 plain_case 'archive cannot be created'   -cf /nonexistent-dir/x.tar tree
 plain_case 'member does not exist'       -cf o.tar tree/nosuch
+
+# A member that cannot be opened, named absolutely. The point is the *order*:
+# GNU announces the leading `/` it removed and only then reports that it could
+# not open the file, because the name is stripped before the open. Ours built
+# the header after the open, so for a lone unreadable member it printed the
+# error and never mentioned the prefix at all. It lives in a directory of its
+# own so that no other case has to walk past an unreadable file.
+mkdir -p noread
+printf 'x\n' > noread/f
+chmod 0 noread/f
+plain_case 'an unreadable member'          -cf o.tar noread/f
+plain_case 'an unreadable member, stripped' -cf o.tar "$work/noread/f"
 plain_case 'no mode given'
 plain_case '-f with no argument'         -cf
 plain_case '-C with no argument'         -xC

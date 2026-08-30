@@ -1868,8 +1868,21 @@ impl Creator<'_> {
     /// that wrong on a link or a device would make the extractor read the next
     /// member's header as file contents.
     fn header(&mut self, name: &[u8], meta: &fs::Metadata, dir: bool) -> Option<TarHeader> {
+        let name = self.stored_name(name, dir);
+        self.header_for(&name, meta)
+    }
+
+    /// [`header`](Self::header) for a name that has already been through
+    /// [`stored_name`](Self::stored_name).
+    ///
+    /// The split exists because the two halves happen at different times for a
+    /// regular file: GNU prints the prefix notice *before* it opens the file,
+    /// so a file it cannot open still announces the `/` it removed. Measured
+    /// (`tar-hardnotice3.sh`): `tar -cf x /abs/unreadable` says
+    /// `Removing leading '/' from member names` and only then `Cannot open`.
+    /// Ours built the whole header after the open and so said nothing at all.
+    fn header_for(&mut self, name: &[u8], meta: &fs::Metadata) -> Option<TarHeader> {
         use std::os::unix::fs::MetadataExt;
-        let name = &self.stored_name(name, dir);
         let mut header = TarHeader::new();
         if let Err(e) = header.set_name(name) {
             // Skipped, not fatal to the archive: GNU writes every other member
@@ -1927,21 +1940,40 @@ impl Creator<'_> {
             self.add_dir(path, name, &meta);
             return;
         }
-        // A second name for an inode already archived is stored as a link to
-        // the first, whatever the two names are. Checked before the type
-        // dispatch because it applies to fifos and devices too, not just
-        // regular files, and checked only when the inode admits another name:
-        // a link count of one cannot have a second name to find.
-        if meta.nlink() > 1 {
-            let key = (meta.dev(), meta.ino());
-            if let Some(first) = self.links.get(&key) {
-                let first = first.clone();
-                self.add_link(name, &meta, b'1', &first);
-                return;
-            }
-            self.links.insert(key, name.to_vec());
+        // A second name for an inode already *written* is stored as a hard link
+        // to the first rather than as a second copy of it. Three parts of that
+        // sentence are load-bearing, and ours had all three wrong; measured in
+        // `tar-hardnotice3.sh` and `tar-hardnotice6.sh`:
+        //
+        //   *already written* — the entry is made after the member is in the
+        //     archive, not before. Ours registered first, so a member that
+        //     failed to be written was still a valid link target: two names for
+        //     a *socket* produced an archive holding one hard link and nothing
+        //     for it to point at, which no extractor can unpack.
+        //
+        //   *an inode* — the key is (device, inode) with no reference to the
+        //     link count. GNU dedupes a file named twice on one command line
+        //     even when its count is 1: `tar -cf x f f` stores `f` once and a
+        //     link record for the second. Ours gated on `nlink > 1` and wrote
+        //     the bytes twice, which for `tar -cf b.tar dir dir` is the whole
+        //     tree twice.
+        //
+        //   *regular file or symlink* — a fifo named twice gives two fifos, not
+        //     a link. Devices and sockets are grouped with the fifo here: they
+        //     are the same branch of GNU's dispatch and none of them can be
+        //     created on this machine to measure separately, but the fifo is
+        //     measured and the grouping is what GNU's code shape implies.
+        //
+        // `--hard-dereference` turns the whole mechanism off; ours has no such
+        // option yet, so there is nothing to gate on.
+        let key = (meta.dev(), meta.ino());
+        let linkable = ft.is_file() || ft.is_symlink();
+        if linkable && let Some(first) = self.links.get(&key) {
+            let first = first.clone();
+            self.add_link(name, &meta, b'1', &first);
+            return;
         }
-        if ft.is_symlink() {
+        let written = if ft.is_symlink() {
             let target = match fs::read_link(path) {
                 Ok(t) => os_bytes(t.as_os_str()).into_owned(),
                 Err(e) => {
@@ -1950,34 +1982,52 @@ impl Creator<'_> {
                     return;
                 }
             };
-            self.add_link(name, &meta, b'2', &target);
+            self.add_link(name, &meta, b'2', &target)
         } else if ft.is_file() {
-            self.add_regular(path, name, &meta);
+            self.add_regular(path, name, &meta)
         } else if ft.is_fifo() {
             self.add_special(name, &meta, b'6');
+            false
         } else if ft.is_char_device() {
             self.add_special(name, &meta, b'3');
+            false
         } else if ft.is_block_device() {
             self.add_special(name, &meta, b'4');
+            false
         } else if ft.is_socket() {
             // Not an error, and measured as such: a socket is a kernel object
             // with no contents an archive could hold, so GNU says so and still
             // exits 0. Skipping it silently would be the wrong half of that —
             // the file is missing from the archive and the user should know.
             diag!("tar: {}: socket ignored", escape(name));
+            false
         } else {
             diag!("tar: {}: Unknown file type; file ignored", escape(name));
             self.fail();
+            false
+        };
+        if linkable && written {
+            // The *unstripped* name, stripped again through the link-target
+            // notice when it is actually used as one. Stripping is idempotent,
+            // so the stored bytes come out the same either way; what the delay
+            // buys is GNU's diagnostic order, which reports the link-target
+            // prefix at the member that links rather than at the member that
+            // was linked to.
+            self.links.insert(key, name.to_vec());
         }
     }
 
     /// A member that is a name pointing at another name and nothing else: a
     /// symlink (`2`) or a hard link (`1`). Both store zero bytes of data.
-    fn add_link(&mut self, name: &[u8], meta: &fs::Metadata, typeflag: u8, target: &[u8]) {
+    ///
+    /// Returns whether the member reached the archive, which is what decides
+    /// whether its name may later be linked to; see the link table in
+    /// [`add_to_archive`](Self::add_to_archive).
+    fn add_link(&mut self, name: &[u8], meta: &fs::Metadata, typeflag: u8, target: &[u8]) -> bool {
         // The order is GNU's: the member name's prefix is reported before the
         // link target's, because `header` runs first.
         let Some(mut header) = self.header(name, meta, false) else {
-            return;
+            return false;
         };
         let target = &if typeflag == b'1' {
             self.stored_link_target(target)
@@ -1997,9 +2047,11 @@ impl Creator<'_> {
             self.fail();
         }
         header.compute_checksum();
-        if self.write(header.as_bytes()) {
-            self.announce(name, meta, typeflag, target);
+        if !self.write(header.as_bytes()) {
+            return false;
         }
+        self.announce(name, meta, typeflag, target);
+        true
     }
 
     /// A fifo (`6`) or a device (`3`/`4`): a header, no data.
@@ -2021,7 +2073,10 @@ impl Creator<'_> {
     }
 
     /// A regular file: a header, then its contents padded out to a block.
-    fn add_regular(&mut self, path: &Path, name: &[u8], meta: &fs::Metadata) {
+    ///
+    /// Returns whether the member reached the archive; see
+    /// [`add_to_archive`](Self::add_to_archive).
+    fn add_regular(&mut self, path: &Path, name: &[u8], meta: &fs::Metadata) -> bool {
         // The header commits to a length, so the body must be exactly that
         // many bytes however the read goes. Writing fewer would not merely
         // truncate this member: the extractor reads a fixed number of blocks
@@ -2029,23 +2084,31 @@ impl Creator<'_> {
         // offset and the whole archive after this point would be garbage.
         let declared = meta.len();
 
+        // The name is stripped *before* the open, because that is the order the
+        // diagnostics come out in: GNU announces the prefix it removed and only
+        // then reports that it could not open the file. Building the header
+        // after the open put ours the other way round, and for a lone
+        // unreadable member it swallowed the notice entirely. Measured,
+        // `tar-hardnotice3.sh`.
+        let stored = self.stored_name(name, false);
+
         let mut f = match File::open(path) {
             Ok(f) => f,
             Err(e) => {
                 diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
                 self.fail();
-                return;
+                return false;
             }
         };
 
-        let Some(mut header) = self.header(name, meta, false) else {
-            return;
+        let Some(mut header) = self.header_for(&stored, meta) else {
+            return false;
         };
         TarHeader::set_octal(&mut header.size, declared);
         header.typeflag = b'0';
         header.compute_checksum();
         if !self.write(header.as_bytes()) {
-            return;
+            return false;
         }
 
         self.announce(name, meta, b'0', b"");
@@ -2078,7 +2141,7 @@ impl Creator<'_> {
                 pad.fill(0);
             }
             if !self.write(&buf) {
-                return;
+                return false;
             }
             remaining = remaining.saturating_sub(want as u64);
         }
@@ -2092,6 +2155,10 @@ impl Creator<'_> {
             );
             self.fail();
         }
+        // Still a member of the archive, short or not: the blocks the header
+        // promised are all there, so a later name for the same inode links to
+        // it exactly as GNU's does.
+        true
     }
 
     /// A directory (`5`) and, after it, everything under it in name order.

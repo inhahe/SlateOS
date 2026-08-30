@@ -99263,3 +99263,125 @@ is unconditional there since 2.39, and `-u` (suppress underlining) has no
 effect because the program no longer emits underlining. Ours accepts both so a
 script written for util-linux runs, and ignores both because there is nothing
 to do. This is *not* an unimplemented option.
+
+## TD-B-RM-ONE-FILE-SYSTEM-AND-PRESERVE-ROOT-ALL-ARE-IMPLEMENTED-BUT-UNCERTIFIED (lane B, 2026-08-30)
+
+**In short:** `rm` has two options that only mean anything when a *mount point*
+is involved — a place in the directory tree where a second disk (or a second
+filesystem of any kind) is attached. `--one-file-system` says "delete this
+tree, but stop at any place where a different disk begins"; `--preserve-root=all`
+says "refuse outright to delete a directory that is such a place". Both are
+implemented, and both are covered by unit tests that exercise the code paths.
+Neither has been compared against GNU's `rm` the way every other option has,
+because creating a mount point requires privileges the test harness does not
+have and should not be given. Nothing is known to be wrong; what is missing is
+the evidence that nothing is.
+
+**Where.** `userspace/coreutils/src/bin/rm.rs` — `Rm::crosses_into_its_parent`
+(that is `--preserve-root=all`) and the `level > 0 && self.options.one_file_system`
+branch at the top of `Rm::entry`. The device number both of them compare comes
+from `device_of`, which is `st_dev` on unix and `None` everywhere else.
+
+**Why it could not be measured.** `scripts/rm-diff.sh` runs both binaries inside
+WSL as an ordinary user. `mount -t tmpfs none dir` there fails with `Operation
+not permitted`, and there is no pre-existing mount point inside a directory the
+harness may destroy — which is what these two options need, since both are about
+what happens when a *descendant* of the operand is on a different filesystem
+from the operand. Every other option in the program is certified case by case
+against GNU coreutils 9.4 by that harness.
+
+**What would close it.** `unshare --map-root-user --mount` gives an unprivileged
+process a mount namespace in which it may mount a tmpfs, and WSL2 supports it.
+A section of `rm-diff.sh` guarded on `unshare -r -m true` succeeding could build
+`tree/sub` as a tmpfs mount and then run the same case on both sides:
+
+    rm -rv --one-file-system tree     # sub is skipped, tree/rmdir then fails
+    rm -rv tree                       # sub is descended into and removed
+    rm -rf --preserve-root=all tree/sub
+
+That is the right fix and it is not large. It was left out of the first version
+of the harness deliberately, so that the harness could go in green rather than
+carrying a section that silently skips on every host and is therefore never
+looked at again.
+
+**Related and *not* the same gap.** The recursive root failsafe (`rm -rf /`) is
+also absent from the harness, for a different and permanent reason: a test whose
+failure mode is deleting the operator's filesystem is not worth running at any
+level of confidence. It is covered instead by `rm.rs`'s unit test
+`a_recursive_operand_that_is_the_root_is_refused`, which points `Rm::root` —
+GNU's `x.root_dev_ino` — at a scratch directory, so the comparison under test is
+the real one with no `/` anywhere near it. The harness does carry the
+non-recursive `/` cases (`rm /`, `rm -d /`), which are safe whatever the code
+does because `unlink("/")` and `rmdir("/")` cannot succeed. See
+`scripts/rm-diff.sh`'s header, "What this harness will not do".
+
+**Off unix, both options degrade to doing nothing**, which is the safe
+direction: `device_of` answers `None`, nothing is ever "on a different device",
+and `rm` removes what it was asked to remove instead of silently stopping short.
+The only host that runs this today is the Windows development machine, where the
+unit tests run; the shipped target is SlateOS, which is unix.
+
+## TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL (lane B, 2026-08-30)
+
+**In short:** `rm -r dir` walks the tree by building up path *strings* —
+`dir`, then `dir/sub`, then `dir/sub/file` — and hands each whole string to the
+kernel. Every one of those calls re-walks the path from the top. If another
+program on the machine can write inside that tree, it can replace a directory
+with a symbolic link (a pointer to somewhere else) in the gap between `rm`
+deciding to descend into it and `rm` deleting what is inside it, and the
+deletions then land wherever the link points — outside the tree, possibly
+anywhere the user can write. GNU's `rm` cannot be tricked this way because it
+keeps an open handle to each directory and deletes *relative to that handle*,
+so the name it already resolved cannot be re-pointed underneath it.
+
+**Severity: real but conditional.** It needs a second party who can already
+write inside the directory being removed, running at the same moment. The
+usual shape is a shared or world-writable directory (`/tmp`-like) being cleaned
+up by a privileged process. It is not exploitable by a file's *contents* or by
+anything `rm`'s own user does.
+
+**Where.** `userspace/coreutils/src/bin/rm.rs`:
+
+- `Rm::remove_tree` lists a directory with `fs::read_dir(as_path(path))` and
+  then, for each name, builds `join(path, &name)` and calls
+  `fs::symlink_metadata` on the joined string.
+- `Rm::remove_nondirectory` → `fs::remove_file(as_path(path))`.
+- `Rm::rmdir` → `fs::remove_dir(as_path(path))`.
+
+Each of those is a fresh full-path resolution.
+
+**How to reproduce** (conceptually; not currently in the harness, because it is
+a race and would be flaky):
+
+    mkdir -p t/sub && touch t/sub/f victim
+    # attacker, in a loop: rm -rf t/sub; ln -s "$PWD" t/sub
+    rm -rf t
+    # `victim` can be removed, though it was never inside `t`
+
+**Proper fix.** Descend with directory descriptors, as `fts` does under
+`FTS_CWDFD` and as Rust's own `fs::remove_dir_all` does on Linux:
+
+- keep an `OwnedFd` for the directory being walked, opened once with
+  `O_DIRECTORY | O_NOFOLLOW`;
+- list it with `fdopendir`, and for each child use `fstatat(fd, name, …,
+  AT_SYMLINK_NOFOLLOW)`, `unlinkat(fd, name, 0)` and `unlinkat(fd, name,
+  AT_REMOVEDIR)`;
+- open a child directory with `openat(fd, name, O_DIRECTORY | O_NOFOLLOW)`, so
+  a name that became a symlink between the `fstatat` and the `openat` fails
+  with `ELOOP` instead of being followed.
+
+The path strings stay exactly as they are — they are still what gets *printed*,
+and `scripts/rm-diff.sh` certifies that spelling case by case — but they stop
+being what gets *resolved*. That separation is the whole change: a `walk`
+carrying `(dirfd, path_for_messages)` instead of `path` alone.
+
+**Why it is debt and not a regression.** The version this replaced called
+`fs::remove_dir_all`, which *is* descriptor-relative on Linux, so this
+particular race is new. It is logged rather than fixed immediately because the
+same rewrite removed two *unconditional* data-loss defects — `rm -rf .` emptied
+the current directory and `rm -rf /` was not refused — and a conditional race
+that needs a hostile local process is a strictly better position than those.
+The reasoning is recorded in full in `design-decisions.md` §723, Decision 1.
+
+**Blocked on nothing.** `posix` already has `openat`, `unlinkat` and `fstatat`;
+this is work in `rm.rs` alone.

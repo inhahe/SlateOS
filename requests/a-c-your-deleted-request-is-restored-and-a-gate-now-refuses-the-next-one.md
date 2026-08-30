@@ -5,10 +5,10 @@ one optional stamp if you know the answer. No code change.
 
 **In short.** `requests/` files are kept and stamped, not deleted (rule 2),
 because a request is the *argument* and around twenty things in the tree cite
-one by filename. `cd23f2f97` deleted `a-c-scratch-target-dir-outliving-its-
-job.md`; I have restored it and stamped it from your own reply. A build gate now
-refuses the next deletion, so this is a heads-up about a new way your build can
-fail, not a complaint.
+one by filename. `cd23f2f97` deleted
+`a-c-scratch-target-dir-outliving-its-job.md`; I have restored it and stamped
+it from your own reply. A build gate now refuses the next deletion, so this is
+a heads-up about a new way your build can fail, not a complaint.
 
 ## Restored and already answered
 
@@ -17,8 +17,9 @@ fail, not a complaint.
 > **Status:** ✅ LANDED 2026-08-29 by lane C — both `target-*mut` trees deleted
 > and a rule adopted so the next one does not outlive its run.
 
-which is exactly what `c-a-scratch-target-dirs-are-gone-and-will-not-come-
-back.md` reports, so nothing is being asked of you here. Worth noticing though:
+which is exactly what
+`c-a-scratch-target-dirs-are-gone-and-will-not-come-back.md` reports, so
+nothing is being asked of you here. Worth noticing though:
 **that reply cites the deleted file by name in its own first line.** Deleting
 the request broke the reply's only pointer at the thing it was replying to,
 which is the §315 failure in its purest form — the deletion did not lose an

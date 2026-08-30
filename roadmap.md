@@ -196,10 +196,10 @@ wording *above* a landed one, so a truthful header is what keeps the unfinished
 half in the queue — a `✅` on a half-done request hides live work from the one
 report that exists to find it.
 
-**A deletion is a gate failure, not a style note.** `scripts/check-requests-not-
-deleted.py` compares `requests/` against the merge base with `origin/main` and
-refuses the build if a file that existed there is gone. It runs in `pre-boot.py`
-and in `boot-test.sh`. Renames pass (fixing a slug, or an archive sweep);
+**A deletion is a gate failure, not a style note.**
+`scripts/check-requests-not-deleted.py` compares `requests/` against the merge
+base with `origin/main` and refuses the build if a file that existed there is
+gone. It runs in `pre-boot.py` and in `boot-test.sh`. Renames pass (fixing a slug, or an archive sweep);
 `requests/.deletions-allowed` waives a basename with a stated reason. The gate
 exists because this rule was enforced by attention and attention lost **four
 times in the two weeks after it was written** — `d30e2a5ca` (A, 108 minutes

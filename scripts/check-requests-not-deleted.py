@@ -17,12 +17,13 @@ The convention was enforced by attention, and attention lost four times. Rule 2
 changed in `236dc2206`, 2026-08-16 09:47; every commit below is after it:
 
 * `d30e2a5ca` (lane A, 2026-08-16 11:35) -- one hour and 48 minutes later.
-* `57d21b4ee` (2026-08-25) -- `c-b-sed-test-fixtures-share-one-path-across-
-  processes.md`, still missing until 2026-08-29.
-* `cd23f2f97` (lane C, 2026-08-29) -- `a-c-scratch-target-dir-outliving-its-
-  job.md`, and the reply that lane C filed the same day *cites it by name in
-  its own first line*, so the deletion broke the reply's only pointer at the
-  thing it was replying to.
+* `57d21b4ee` (2026-08-25) --
+  `c-b-sed-test-fixtures-share-one-path-across-processes.md`, still missing
+  until 2026-08-29.
+* `cd23f2f97` (lane C, 2026-08-29) --
+  `a-c-scratch-target-dir-outliving-its-job.md`, and the reply that lane C
+  filed the same day *cites it by name in its own first line*, so the deletion
+  broke the reply's only pointer at the thing it was replying to.
 * `dd4e34fd9` (lane A, 2026-08-29) -- two more, and its own commit message
   asserted the *opposite* rule. That is the telling one: the author was not
   ignoring the convention but misremembering it, which no reminder fixes. The

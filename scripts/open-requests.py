@@ -120,8 +120,28 @@ REPLY_SECTION_RE = re.compile(
 # and it is produced by a line break. The two vocabularies below can only rank
 # against each other when both are searched over the same text, so the block is
 # extracted once and both look at it.
+#
+# The colon may sit inside the bold or outside it. `**Status:**` is what 167 of
+# the 192 files write and what rule 2's example shows; `**Status**:` is what the
+# other four write, and to a reader they are the same line. To this script they
+# were not: the marker did not match at all, so those four reported "no status
+# marker" -- the phrasing reserved for a file that never said anything -- while
+# each in fact carried a plain verdict, two of them `FIXED on main as of
+# 3ccbfcb99`. Typesetting decided whether the sentence was read, which is the
+# same failure this pattern was rewritten to end.
+#
+# The marker is captured, not just skipped, so the reason line can quote the
+# file as written. Reporting `**Status:** FIXED ...` for a file that says
+# `**Status**: FIXED ...` would send a reader grepping for a string that is not
+# there.
+#
+# Deliberately no bare `Status:`. The two bold forms are unambiguous markers;
+# an unemphasised one is a word that appears in prose ("the status: unclear"),
+# and the cost of matching prose is a false clear, which is the direction this
+# report must not fail in.
 STATUS_BLOCK_RE = re.compile(
-    r"\*\*status:\*\*(.*?)(?:\n[ \t]*\n|\Z)", re.IGNORECASE | re.DOTALL
+    r"(\*\*status(?::\*\*|\*\*[ \t]*:))(.*?)(?:\n[ \t]*\n|\Z)",
+    re.IGNORECASE | re.DOTALL,
 )
 
 # How far into a status block the deciding word may sit, in CHARACTERS.
@@ -257,11 +277,15 @@ def status_verdict(text: str) -> tuple[bool, str, bool] | None:
     `## Lane A's answer -- RESOLVED` -- was reported open for six days: the
     unreadable header short-circuited before the heading was ever looked at.
     """
-    blocks = [m.group(1)[:STATUS_WINDOW] for m in STATUS_BLOCK_RE.finditer(text)]
+    # `(marker, block)`: the marker as the file typeset it, so the reason line
+    # quotes something a reader can actually grep for.
+    blocks = [
+        (m.group(1), m.group(2)[:STATUS_WINDOW]) for m in STATUS_BLOCK_RE.finditer(text)
+    ]
     done_hit: str | None = None
-    for block in blocks:
+    for marker, block in blocks:
         if OPEN_WORD_RE.search(block) or OPEN_MARK_RE.search(block):
-            return (True, f"**Status:**{block}".strip()[:80], True)
+            return (True, f"{marker}{block}".strip()[:80], True)
         # Words and glyphs are one vocabulary, ranked the same way: open beats
         # done, and a done hit is only a hit if no negator precedes it. Merging
         # the positions rather than checking the two regexes in sequence keeps
@@ -272,7 +296,7 @@ def status_verdict(text: str) -> tuple[bool, str, bool] | None:
         )
         for start in starts:
             if not NEGATOR_RE.search(block[:start]):
-                done_hit = done_hit or f"**Status:**{block}".strip()[:80]
+                done_hit = done_hit or f"{marker}{block}".strip()[:80]
     if done_hit is not None:
         return (False, done_hit, True)
     if blocks:
@@ -281,7 +305,7 @@ def status_verdict(text: str) -> tuple[bool, str, bool] | None:
         # but say so differently from "no status marker at all" -- the two call
         # for different fixes, and telling them apart is what stops a reader
         # concluding the tool is simply noisy.
-        return (True, f"unrecognised status: {blocks[0].strip()[:60]}", False)
+        return (True, f"unrecognised status: {blocks[0][1].strip()[:60]}", False)
     return None
 
 LANE_BY_CONFIG_DIR = {

@@ -175,7 +175,9 @@ implements it or answers in the same file.
 **When it lands, mark it — do not delete it.** Put a `**Status:**` line
 directly under the title saying `✅ LANDED <date> by lane <x>`, plus one
 sentence on what actually shipped. The queue property comes from that line,
-not from the file's absence:
+not from the file's absence. (`**Status**:`, with the colon outside the bold,
+is read as the same marker — four files write it that way — but write the form
+above; the leniency is for files that already exist, not a second convention.)
 
 ```bash
 python scripts/open-requests.py            # what is still open for your lane

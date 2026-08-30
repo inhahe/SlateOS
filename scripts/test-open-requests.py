@@ -407,6 +407,76 @@ def test_the_loader_sees_an_edit_made_in_the_same_second(mod):  # noqa: ARG001
         sys.modules.pop("stalecheck_reloaded", None)
 
 
+def test_the_colon_may_sit_outside_the_bold(mod):
+    """`**Status**: FIXED` is the same line as `**Status:** FIXED` to a reader.
+
+    Four files in the dropbox typeset it the second way, including both copies
+    of lane B's `known-issues.md was binary to git` notice, which says `FIXED on
+    main as of 3ccbfcb99` in plain English. All four reported *no status marker*
+    -- the phrasing reserved for a file that never said anything at all -- so
+    the reader was told to go and stamp a file that was already stamped.
+
+    Asserted as an equivalence rather than as four literal strings: the claim is
+    that the two typesettings classify identically, and a test that says exactly
+    that cannot be satisfied by a fix that only handles the example.
+    """
+    for body in ("FIXED on `main` as of `3ccbfcb99`.",
+                 "OPEN \u2014 waiting on lane C.",
+                 f"{CHECK} **TAKEN by lane A.**",
+                 "needs a decision from you first"):
+        inside = verdict(mod, f"**Status:** {body}")
+        outside = verdict(mod, f"**Status**: {body}")
+        check(f"colon inside == outside for {body[:34]!r}", outside, inside)
+        check(f"and it is not 'none' for {body[:34]!r}", outside != "none", True)
+
+
+def test_a_bare_unbolded_status_word_is_not_a_marker(mod):
+    """`Status: done` in running prose must not clear a request.
+
+    The counterweight to the test above. Loosening the marker is the direction
+    that costs, because every newly-matched line is a line that might say
+    "done" about something else -- and this dropbox is full of prose *about*
+    statuses, being a dropbox whose rule 2 is on the subject. The two bold forms
+    are unambiguous punctuation a lane chose; an unemphasised `Status:` is a
+    word, and a request that quotes one in a sentence would clear itself.
+    """
+    check("an unbolded marker is not a marker",
+          verdict(mod, "The old checker looked for Status: done and missed it."),
+          "none")
+    check("nor is a single-asterisk one",
+          verdict(mod, "*Status:* done"), "none")
+
+
+def test_the_reason_quotes_the_marker_the_file_actually_wrote(mod):
+    """A reason line must be greppable in the file it describes.
+
+    Reporting `**Status:** FIXED …` for a file that says `**Status**: FIXED …`
+    sends the reader searching for a string that is not there -- a small lie,
+    but this report exists to be acted on, and the act is opening the file.
+    """
+    got = mod.status_verdict("**Status**: FIXED on `main` as of `3ccbfcb99`.")
+    check("the verdict is done", got[0], False)
+    check("the reason opens with the marker as written",
+          got[1].startswith("**Status**:"), True)
+    got2 = mod.status_verdict("**Status:** FIXED on `main` as of `3ccbfcb99`.")
+    check("and the usual form still quotes itself",
+          got2[1].startswith("**Status:**"), True)
+
+    # Both branches, because they build the string separately. Mutation-testing
+    # found this gap: hardcoding the marker in the *open* return survived a
+    # suite that only checked the done one.
+    got3 = mod.status_verdict("**Status**: OPEN \u2014 waiting on lane C.")
+    check("the open verdict is open", got3[0], True)
+    check("and the open reason quotes the marker as written",
+          got3[1].startswith("**Status**:"), True)
+
+    # And the unrecognised branch, which quotes the block without the marker --
+    # asserted so that a change there is a deliberate one.
+    got4 = mod.status_verdict("**Status**: needs a decision from you first")
+    check("the unrecognised reason names the wording",
+          got4[1], "unrecognised status: needs a decision from you first")
+
+
 def test_the_status_glyphs_are_documented_and_classify(mod):
     """The glyph rule must be in rule 2, and must be the glyphs the code reads.
 

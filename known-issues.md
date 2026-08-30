@@ -95035,14 +95035,28 @@ on `bar`, `strip`, `band`, the sidebar rect and `layout.content` — so a contro
 placed outside every band really is recorded outside the window and really does
 fail the assertion.
 
-Both rewrites split the old test in two: `the_whole_frame_is_clipped_to_the_window`
-keeps only the parts that can fail (the outermost `PushClip` is the window, and
-the clip stack balances), and a new `at_a_size_that_fits_the_clip_crops_nothing`
-compares each recorded box against the rect the *layout* put it at — battleship
-against `Grids::cell_rect` for all two hundred cells, freecell against
-`Table::top_slot`/`Table::card_at`. That is the boundary the clip does not
-enforce, so a band that drifts off the edge now comes back smaller than the
-layout said and loses the comparison.
+Both are now `the_whole_frame_is_clipped_to_the_window`, keeping only the parts
+that can fail: the outermost `PushClip` is the window, and the clip stack
+balances. Deleting the vacuous loop then raises the real question — *was the
+coverage it pretended to give present anywhere else?* — and the two apps answer
+differently, which is why it is worth asking per-app rather than assuming:
+
+- **`apps/battleship`: yes, already covered.** `the_cells_are_drawn_where_the_grid_says_they_are`
+  compares all two hundred cells against a rectangle worked out by hand. A new
+  mutation drawing the player's grid one cell right of where `Grids` laid it out
+  is caught by four existing tests. So nothing was added; a test that duplicates
+  an existing one is noise, and the clip test's comment now names the test that
+  really holds the ground.
+- **`apps/freecell`: no, genuinely uncovered.** Nothing compared a recorded box
+  against `Table`'s geometry — the table tests exercise `Table` alone, without a
+  frame. A new `at_a_size_that_fits_the_clip_crops_nothing` measures every free
+  cell, foundation and column bottom against `top_slot`/`card_at`, and the
+  matching mutation (free cells drawn one slot right) is caught by **that test
+  and nothing else**.
+
+The boundary that works in both cases is the layout's own rect, which the clip
+has no opinion about: a band that drifts off the edge comes back smaller than
+the layout said and loses the comparison.
 
 Worth noting what made the old test not merely useless but *misleading*: both
 apps carried the comment *"a hit box is recorded whether or not it would survive

@@ -4539,23 +4539,24 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_drawn_outside_the_window() {
+    fn the_whole_frame_is_clipped_to_the_window() {
         // The clip is the guard: a reading too wide for a narrow window used to
         // spill past the edge, and a zero-sized window still recorded a
         // clickable line at its centre -- a control in a window with no pixels.
+        //
+        // What used to stand here was a loop over `f.hits()` asserting every
+        // box lay inside the window, under a comment saying the boxes could not
+        // see a missing clip. Both halves were wrong. `Frame::hit` trims a box
+        // to the clip in force and drops it outright if nothing of it survives,
+        // so the boxes are the *only* thing that can see the clip vanish -- and
+        // by the same token they can never fail that assertion while it is
+        // there, whatever the layout does. A band the solver walked off the
+        // edge comes back cropped and the loop waves it through. So the clip
+        // itself is asserted here, and whether a box is where it belongs is
+        // measured against the layout, next test down.
         for (w, h) in SIZES {
             let app = app();
             let f = app.frame(w, h);
-            for (target, rect) in f.hits() {
-                assert!(
-                    rect.x < w + 0.01 && rect.y < h + 0.01,
-                    "{target:?} was recorded at {rect:?}, outside a {w}x{h} window"
-                );
-            }
-            // A hit box is recorded whether or not it would survive the clip,
-            // so the rects above cannot see a missing clip at all -- only the
-            // commands can. The outermost one is the window, and it is what
-            // keeps a caption too wide for the frame off the desktop beside it.
             let outer = f.commands().iter().find_map(|c| match c {
                 RenderCommand::PushClip {
                     x,
@@ -4571,6 +4572,57 @@ mod tests {
                 "a {w}x{h} window was not clipped to itself"
             );
         }
+    }
+
+    #[test]
+    fn at_a_size_that_fits_the_clip_crops_nothing() {
+        // The counterpart to the test above, and the one that can actually
+        // fail: the boxes are compared against the table the layout solved, not
+        // against the window that clipped them. A slot the solver put half a
+        // window away comes back merely *smaller* -- still inside the window,
+        // still passing any "is it inside?" check -- but it no longer matches
+        // the rect it was laid out at.
+        let app = app();
+        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let t = Table::new(l.body, app.state.deepest_column());
+        let same = |got: Rect, want: Rect| {
+            (got.x - want.x).abs() < 0.01
+                && (got.y - want.y).abs() < 0.01
+                && (got.w - want.w).abs() < 0.01
+                && (got.h - want.h).abs() < 0.01
+        };
+        for slot in 0..FREE_CELL_COUNT {
+            let want = t.top_slot(slot);
+            let got = f
+                .rect_of(|t| *t == Target::FreeCell(byte(slot)))
+                .unwrap_or_else(|| panic!("free cell {slot} kept no box at all"));
+            assert!(
+                same(got, want),
+                "free cell {slot} was recorded at {got:?}, laid out at {want:?}"
+            );
+        }
+        for idx in 0..FOUNDATION_COUNT {
+            let want = t.top_slot(idx.saturating_add(FREE_CELL_COUNT));
+            let got = f
+                .rect_of(|t| *t == Target::Foundation(byte(idx)))
+                .unwrap_or_else(|| panic!("foundation {idx} kept no box at all"));
+            assert!(
+                same(got, want),
+                "foundation {idx} was recorded at {got:?}, laid out at {want:?}"
+            );
+        }
+        for col in 0..TABLEAU_COLS {
+            let want = t.card_at(col, 0);
+            let got = f
+                .rect_of(|t| *t == Target::Card(byte(col), 0))
+                .unwrap_or_else(|| panic!("the bottom card of column {col} kept no box at all"));
+            assert!(
+                same(got, want),
+                "the bottom card of column {col} was recorded at {got:?}, laid out at {want:?}"
+            );
+        }
+        assert!(f.is_balanced(), "a clip was pushed and never popped");
     }
 
     // ── Full flow tests ────────────────────────────────────────────

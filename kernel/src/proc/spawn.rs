@@ -3420,8 +3420,11 @@ pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
 /// file is really there, a regression that dropped the check would return
 /// `0xCA` instead of `EXDEV` — a visibly different answer.
 ///
-/// Skips gracefully (`Ok`) if fixture staging fails. Must run **after**
-/// filesystem initialization (see `main.rs`).
+/// Skips only when the *environment* cannot host the fixture — a read-only or
+/// absent filesystem, via `selftest_setup!`. A staging error of any other kind
+/// fails the test rather than disabling it, because the staging runs through
+/// the same VFS the probes exercise. Must run **after** filesystem
+/// initialization (see `main.rs`).
 #[allow(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
@@ -3442,18 +3445,28 @@ pub fn self_test_openat2_beneath() -> KernelResult<()> {
     serial_println!("[spawn] Running openat2 RESOLVE_BENEATH (ring 3) integration test...");
 
     // --- Stage the fixture ---------------------------------------------
-    let stage = || -> KernelResult<()> {
-        crate::fs::Vfs::mkdir_all(BASE)?;
-        crate::fs::Vfs::mkdir_all("/slateos-b2-beneath/deep")?;
-        crate::fs::Vfs::mkdir_all("/slateos-b2-decoy")?;
-        crate::fs::Vfs::write_file("/slateos-b2-beneath/inside.txt", &[RIGHT])?;
-        crate::fs::Vfs::write_file("/slateos-b2-decoy/inside.txt", &[DECOY])?;
-        crate::fs::Vfs::write_file("/inside.txt", &[ROOT])?;
-        crate::fs::Vfs::write_file("/slateos-b2-outside.txt", &[OUTSIDE])?;
-        Ok(())
-    };
-    if let Err(e) = stage() {
-        serial_println!("[spawn]   SKIP: openat2 beneath — fixture staging failed: {e:?}");
+    // Deciding the skip from a bare `is_err()` on these calls would be a trap:
+    // the staging goes through the very VFS the probes exercise, so a genuine
+    // defect in it would switch this whole test off and the suite would go
+    // green *because* the code broke.  `selftest_setup!` splits the two
+    // outcomes — only NotSupported / ReadOnlyFilesystem / NoSuchDevice count
+    // as "this system cannot", and every other error fails the test.
+    let mut skips = crate::fs::selftest::Skips::new();
+    let ready = crate::selftest_setup!(
+        skips,
+        "[spawn]",
+        "openat2 beneath",
+        "no writable filesystem to stage the fixture in",
+        crate::fs::Vfs::mkdir_all(BASE),
+        crate::fs::Vfs::mkdir_all("/slateos-b2-beneath/deep"),
+        crate::fs::Vfs::mkdir_all("/slateos-b2-decoy"),
+        crate::fs::Vfs::write_file("/slateos-b2-beneath/inside.txt", &[RIGHT]),
+        crate::fs::Vfs::write_file("/slateos-b2-decoy/inside.txt", &[DECOY]),
+        crate::fs::Vfs::write_file("/inside.txt", &[ROOT]),
+        crate::fs::Vfs::write_file("/slateos-b2-outside.txt", &[OUTSIDE]),
+    );
+    if !ready {
+        skips.report("[spawn]");
         return Ok(());
     }
 

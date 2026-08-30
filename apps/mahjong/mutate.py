@@ -760,7 +760,11 @@ MUTATIONS = [
     (
         "a key this game does not use is swallowed anyway",
         "            _ => return EventResult::Ignored,",
-        "            _ => false,",
+        # Not `_ => false,`, which was the first try: falling out of the match
+        # with nothing changed reaches `if changed { Consumed } else { Ignored }`
+        # and returns Ignored anyway, so the mutant answered every key exactly
+        # as the program does and survived by being equivalent.
+        "            _ => true,",
         ["a_key_this_game_does_not_use_is_left_for_the_window"],
     ),
     (
@@ -805,28 +809,47 @@ MUTATIONS = [
         ["the_arrows_walk_the_cursor_between_free_tiles"],
     ),
     (
-        "the arrows are measured in pixels, so the same press picks a different tile at each size",
+        "the arrows are measured in pixels, so a layer's stagger reads as a step sideways",
         "        let unit = l.tile_w;",
         "        let unit = 1.0;",
-        ["the_arrows_measure_in_tile_widths_so_the_same_press_picks_the_same_tile"],
+        # First named against the two-window test, which survived and could
+        # not have done otherwise: every distance in the search is a ratio of
+        # two lengths that scale together, so the winner is the same tile at
+        # any window size whichever unit is used. The unit only ever moves the
+        # *threshold* -- from a tenth of a tile to a tenth of a pixel -- and
+        # what that admits is a tile one layer down in the same column.
+        ["an_arrow_does_not_read_a_layers_stagger_as_a_step_sideways"],
     ),
     (
         "the cross-axis costs nothing, so an arrow wanders off its row",
         "                    let dist = main + cross * 2.0;",
         "                    let dist = main;",
-        ["the_arrows_measure_in_tile_widths_so_the_same_press_picks_the_same_tile"],
+        # Also first named against the two-window test, and scale-invariant
+        # for the same reason: dropping the bias changes which tile is picked,
+        # but it changes it identically in both windows.
+        ["an_arrow_prefers_its_own_row_to_a_nearer_tile_far_off_it"],
     ),
     (
-        "an arrow at the edge of the board reports a change it did not make",
-        "        if let Some((bi, _)) = best {\n"
-        "            let moved = self.cursor.tile_idx != Some(bi);",
-        "        if let Some((bi, _)) = best {\n            let moved = true;",
-        ["an_arrow_at_the_edge_of_the_board_reports_that_nothing_changed"],
+        "a move the arrow did make is reported as no change",
+        # Was `let moved = self.cursor.tile_idx != Some(bi);` -> `let moved =
+        # true;`, which survived by being equivalent: the search skips the tile
+        # the cursor is on, so `bi` can never equal it and the comparison was
+        # always true. The dead comparison has since been removed from the
+        # program, and what is left to break is the answer itself.
+        "            self.cursor.tile_idx = Some(bi);\n            true",
+        "            self.cursor.tile_idx = Some(bi);\n            false",
+        ["the_arrows_walk_the_cursor_between_free_tiles"],
     ),
     (
-        "a window too small for a tile jumps the cursor to an arbitrary tile",
+        "a window too small for a tile says the cursor moved",
+        # Was a deletion of the whole guard, which survived by accident: with a
+        # zero unit every delta is `0.0 / 0.0`, and NaN fails every comparison
+        # the direction test makes, so no candidate is ever in-direction and
+        # the search falls through to the same `false`. The guard stays --
+        # leaning on NaN for correctness is not a thing to rely on -- and what
+        # is mutated instead is the answer it gives.
         "        if l.tile_w <= 0.0 {\n            return false;\n        }",
-        "",
+        "        if l.tile_w <= 0.0 {\n            return true;\n        }",
         ["a_window_too_small_to_draw_a_tile_leaves_the_cursor_where_it_is"],
     ),
     (

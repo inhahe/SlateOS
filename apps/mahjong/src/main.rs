@@ -1223,9 +1223,13 @@ impl Mahjong {
         }
 
         if let Some((bi, _)) = best {
-            let moved = self.cursor.tile_idx != Some(bi);
+            // The search skips the tile the cursor is already on, so a winner
+            // is by construction a different tile: the `moved` flag that used
+            // to be computed here compared `bi` against a value it could never
+            // equal, and reporting `true` outright is the same answer with the
+            // dead comparison gone.
             self.cursor.tile_idx = Some(bi);
-            moved
+            true
         } else {
             // Already at the edge in that direction. Reporting `false` is what
             // stops the window redrawing an identical frame on every arrow
@@ -4212,6 +4216,62 @@ mod tests {
         assert_eq!(
             small.cursor.tile_idx, large.cursor.tile_idx,
             "four arrow presses land on different tiles in different windows"
+        );
+    }
+
+    #[test]
+    fn an_arrow_does_not_read_a_layers_stagger_as_a_step_sideways() {
+        // Each layer is drawn a tenth of a tile up and to the left of the one
+        // below it, so a tile one layer *down* is a tenth of a tile to the
+        // right of the one above it while standing, on the board, in the very
+        // same column. That is why the direction threshold is a fraction of a
+        // tile: measured in pixels it is a fraction of a *pixel*, which every
+        // stagger clears, and the right arrow starts stepping down through the
+        // layers of one column instead of along the row.
+        //
+        // The two-window test below cannot see this. Every distance in the
+        // search is a ratio of two lengths that scale together, so the tile it
+        // picks is the same at any window size whether the unit is a tile or a
+        // pixel -- the unit only ever moves the threshold.
+        let mut g = game();
+        g.board = board_of(&[
+            (1, 0, 0, TileKind::Bamboo(1)),
+            (0, 2, 0, TileKind::Bamboo(2)),
+        ]);
+        g.cursor.tile_idx = Some(0);
+        g.resize(1200.0, 800.0);
+        assert!(
+            g.board.is_free(1),
+            "the fixture's second tile is not playable"
+        );
+        assert_eq!(
+            press_key(&mut g, Key::Right),
+            EventResult::Ignored,
+            "the right arrow found something to the right of the only tile in \
+             its column"
+        );
+        assert_eq!(g.cursor.tile_idx, Some(0));
+    }
+
+    #[test]
+    fn an_arrow_prefers_its_own_row_to_a_nearer_tile_far_off_it() {
+        // Distance is biased towards the axis the key names, so a tile one
+        // column along but four rows away loses to one two columns along on
+        // the same row. Without the bias the arrow wanders off its row on
+        // every press and the cursor is impossible to follow.
+        let mut g = game();
+        g.board = board_of(&[
+            (0, 0, 0, TileKind::Bamboo(1)),
+            (0, 0, 2, TileKind::Bamboo(2)),
+            (0, 4, 1, TileKind::Bamboo(3)),
+        ]);
+        g.cursor.tile_idx = Some(0);
+        g.resize(1200.0, 800.0);
+        assert_eq!(press_key(&mut g, Key::Right), EventResult::Consumed);
+        assert_eq!(
+            g.cursor.tile_idx,
+            Some(1),
+            "the right arrow left the row it started on"
         );
     }
 

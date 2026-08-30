@@ -126,7 +126,7 @@ const TAR: Program = Program::new("tar", EXIT_USAGE);
 /// the short form `-?`, and `tar -?` prints the help and exits 0. The shared
 /// parser looks the letter up by byte and has no special case for `?`, so
 /// listing it is all that is needed.
-const SHORT_OPTIONS: &str = "cxtvpf:C:?";
+const SHORT_OPTIONS: &str = "cxtvpkUf:C:?";
 
 /// Every long option GNU tar 1.35 has — all 172 — in argp's own table order.
 ///
@@ -473,9 +473,116 @@ struct TarArgs {
     /// not do at all — it left every extracted file at whatever `File::create`
     /// produced.
     same_permissions: bool,
+    /// What to do about something already standing where a member is to go.
+    /// See [`OldFiles`].
+    old_files: OldFiles,
     archive_file: Option<OsString>,
     directory: Option<OsString>,
     files: Vec<OsString>,
+}
+
+/// What extraction does about an entry that is *already there*.
+///
+/// GNU keeps these in one variable, not five flags, and that is observable
+/// rather than an implementation detail: naming two of them is a usage error
+/// (`tar: '--overwrite' cannot be used with '--keep-old-files'`, exit 2) while
+/// naming the *same* one twice is fine. A set of independent booleans cannot
+/// produce that pair of behaviours; a single-valued setting produces both for
+/// free. See [`OldFiles::choose`].
+///
+/// # What each one does, measured
+///
+/// The archive holds `a`; the destination already holds something called `a`.
+///
+/// | | plain file there | hard-linked file | symlink there | directory there | nothing there |
+/// |---|---|---|---|---|---|
+/// | [`Replace`](Self::Replace) (default) | replaced, new inode | link broken, other name keeps its contents | **link replaced**, its target untouched | removed if empty, else `Cannot open: File exists` | created |
+/// | [`Overwrite`](Self::Overwrite) | **written through**, same inode | **other name changes too** | link replaced | `Cannot open: Is a directory` | created |
+/// | [`Keep`](Self::Keep) | `Cannot open: File exists`, exit 2 | as left | as left | `Cannot open: File exists` | created |
+/// | [`Skip`](Self::Skip) | untouched, exit 0 | untouched | untouched | untouched | created |
+/// | [`UnlinkFirst`](Self::UnlinkFirst) | removed, then created | link broken | link removed | removed if empty, else `Cannot unlink: Directory not empty` | created |
+/// | [`KeepNewer`](Self::KeepNewer) | kept if its mtime ≥ the member's | as the mtime says | the *link's* own mtime decides | always replaced — directories are exempt | created |
+///
+/// The two rows that are easy to get wrong are the first two. `Replace`
+/// **unlinks and recreates**, so a file with other hard links to it keeps those
+/// names pointing at the old contents; `Overwrite` **truncates in place**, so
+/// every name for that inode changes at once. That is the entire difference
+/// between them, it is invisible in the output of both, and reversing it
+/// silently rewrites files the archive never mentioned.
+///
+/// The third row is a security property rather than a convenience: none of
+/// these follows a pre-existing symlink out of the destination. Measured
+/// against GNU across the whole family (`tar-ovw2.sh`, `tar-ovw4.sh`), the
+/// only way to make GNU write outside the destination is `-P --keep-old-files`,
+/// where `-P` switches the containment check off by request. `--overwrite` in
+/// particular does *not* write at the far end of a link — see
+/// [`Located::create_file_overwriting`], which is where that is arranged.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+enum OldFiles {
+    /// The default: remove what is there and create the member afresh.
+    #[default]
+    Replace,
+    /// `--overwrite`: truncate what is there and write into it.
+    Overwrite,
+    /// `-k`, `--keep-old-files`: refuse, and report it as a failure.
+    Keep,
+    /// `--skip-old-files`: step over the member, exit status untouched.
+    Skip,
+    /// `-U`, `--unlink-first`: remove first, before even trying to create.
+    UnlinkFirst,
+    /// `--keep-newer-files`: refuse when what is there is at least as new as
+    /// the member, and say so — but as a warning, not a failure.
+    KeepNewer,
+}
+
+impl OldFiles {
+    /// The spelling used in the conflict diagnostic.
+    ///
+    /// Always the *long* name, even for a setting given as `-k` or `-U`: GNU
+    /// answers `tar -U -k` with `'--keep-old-files' cannot be used with
+    /// '--unlink-first'`, naming neither letter.
+    fn long_name(self) -> &'static str {
+        match self {
+            // Never printed — the default is what "no conflict" means — but a
+            // name is owed here rather than a panic, since the compiler cannot
+            // see that and a future caller might not either.
+            Self::Replace => "--no-overwrite-dir",
+            Self::Overwrite => "--overwrite",
+            Self::Keep => "--keep-old-files",
+            Self::Skip => "--skip-old-files",
+            Self::UnlinkFirst => "--unlink-first",
+            Self::KeepNewer => "--keep-newer-files",
+        }
+    }
+
+    /// Adopt `wanted`, or report the conflict with what was already chosen.
+    ///
+    /// Repetition is allowed — `tar -k -k` and `tar --overwrite --overwrite`
+    /// both extract, measured — because the test is whether the *value* would
+    /// change, not whether an option was seen twice.
+    ///
+    /// The exit status is [`EXIT_FATAL`] (2) and not [`EXIT_USAGE`] (64), which
+    /// looks like a mistake and is not: 64 is argp's `argp_err_exit_status`,
+    /// used for the option table's own complaints (`unrecognized option`,
+    /// `is ambiguous`), while this sentence comes from tar's `USAGE_ERROR`
+    /// macro, which exits with tar's ordinary failure status. Both were
+    /// measured; `tar --frobnicate` is 64 and `tar -k --overwrite` is 2.
+    fn choose(&mut self, wanted: Self) -> Result<(), getopt::Error> {
+        if *self != Self::Replace && *self != wanted {
+            return Err(getopt::Error {
+                sentence: format!(
+                    "'{}' cannot be used with '{}'",
+                    wanted.long_name(),
+                    self.long_name()
+                ),
+                referral: None,
+                status: EXIT_FATAL,
+            });
+        }
+        *self = wanted;
+        Ok(())
+    }
 }
 
 /// Parse tar's argv: short options, long options, and operands.
@@ -530,6 +637,8 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Short(b't', _) => out.list = true,
             Opt::Short(b'v', _) => out.verbose = true,
             Opt::Short(b'p', _) => out.same_permissions = true,
+            Opt::Short(b'k', _) => out.old_files.choose(OldFiles::Keep)?,
+            Opt::Short(b'U', _) => out.old_files.choose(OldFiles::UnlinkFirst)?,
             Opt::Short(b'f', value) => out.archive_file = value,
             Opt::Short(b'C', value) => out.directory = value,
             // Unreachable while this arm and `SHORT_OPTIONS` agree, since the
@@ -552,6 +661,14 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 "preserve-permissions" | "same-permissions" => out.same_permissions = true,
                 "file" => out.archive_file = value,
                 "directory" => out.directory = value,
+                // The overwrite-control family. Every one of them assigns to
+                // the same setting, through the check that makes naming two of
+                // them an error. See [`OldFiles`].
+                "overwrite" => out.old_files.choose(OldFiles::Overwrite)?,
+                "keep-old-files" => out.old_files.choose(OldFiles::Keep)?,
+                "skip-old-files" => out.old_files.choose(OldFiles::Skip)?,
+                "unlink-first" => out.old_files.choose(OldFiles::UnlinkFirst)?,
+                "keep-newer-files" => out.old_files.choose(OldFiles::KeepNewer)?,
                 "help" => return Ok(Request::Help),
                 "usage" => return Ok(Request::Usage),
                 "version" => return Ok(Request::Version),
@@ -609,6 +726,17 @@ Examples:
                                than applying the umask
   -v, --verbose              list each file as it is processed
 
+ Overwrite control:
+
+      --keep-newer-files     don't replace existing files that are newer than
+                             their archive copies
+  -k, --keep-old-files       don't replace existing files when extracting,
+                             treat them as errors
+      --overwrite            overwrite existing files when extracting
+      --skip-old-files       don't replace existing files when extracting,
+                             silently skip over them
+  -U, --unlink-first         remove each file prior to extracting over it
+
  Informational options:
 
   -?, --help                 give this help list
@@ -630,15 +758,27 @@ instead of doing something else and reporting success.
 ///
 /// argp generates this by wrapping the option table into a bracketed list, and
 /// wraps it to the terminal width with continuation lines indented to clear the
-/// `Usage: ` prefix. With twelve names the whole thing fits in four lines, so
-/// it is written out rather than generated; the indent matches argp's so the
-/// two look alike side by side.
+/// `Usage: ` prefix. With seventeen names the whole thing still fits in a few
+/// lines, so it is written out rather than generated; the indent matches argp's
+/// so the two look alike side by side.
+///
+/// The order is **GNU's own**, reduced to the names this tar implements, and it
+/// is neither alphabetical nor the order of [`help_text`]. argp emits the option
+/// table's declaration order — the same grouping-by-function that makes
+/// [`LONG_OPTIONS`] unsortable — with the argument-taking short letters pulled
+/// out after the cluster. Measured from `tar --usage`, whose first line is
+/// `[-AcdrtuxGnSkUWOmpsMBiajJzZhPlRvwo?] [-g FILE] [-C DIR] …`: strike the
+/// letters this tar does not have and `ctxkUpv?` is what is left, `p` before
+/// `v` and `k` before `U`. The long names come from the same line and put the
+/// overwrite family between `--directory` and `--preserve-permissions`, which is
+/// where argp's table has it and *not* where the help text does.
 fn usage_text() -> String {
     "\
-Usage: tar [-ctxvp?] [-C DIR] [-f ARCHIVE] [--create] [--list] [--extract]
-            [--get] [--directory=DIR] [--file=ARCHIVE]
-            [--preserve-permissions] [--same-permissions] [--verbose] [--help]
-            [--usage] [--version] [FILE]...
+Usage: tar [-ctxkUpv?] [-C DIR] [-f ARCHIVE] [--create] [--list] [--extract]
+            [--get] [--directory=DIR] [--keep-newer-files] [--keep-old-files]
+            [--overwrite] [--skip-old-files] [--unlink-first]
+            [--preserve-permissions] [--same-permissions] [--file=ARCHIVE]
+            [--verbose] [--help] [--usage] [--version] [FILE]...
 "
     .to_string()
 }
@@ -717,6 +857,7 @@ fn main() {
             },
             &parsed.files,
             parsed.same_permissions,
+            parsed.old_files,
         )
     } else if parsed.list {
         do_list_main(
@@ -2274,7 +2415,13 @@ fn restore_metadata(at: &Located, name: &[u8], mode: u32, mtime: i64, status: &m
 /// The resolved location is handed back with the result because every caller
 /// wants it afterwards — to stamp a mode and an mtime on what it just made, or
 /// to write the member's data into it.
-fn create_at<T, F>(root: &Dir, name: &[u8], status: &mut i32, create: F) -> io::Result<(Located, T)>
+fn create_at<T, F>(
+    root: &Dir,
+    name: &[u8],
+    ovw: Overwriting,
+    status: &mut i32,
+    create: F,
+) -> Result<(Located, T), NotCreated>
 where
     F: Fn(&Located) -> io::Result<T>,
 {
@@ -2293,15 +2440,121 @@ where
         }
         other => other?,
     };
-    match create(&loc) {
-        Err(first) if first.kind() == io::ErrorKind::AlreadyExists => {
-            if loc.unlink().is_err() && loc.rmdir().is_err() {
-                return Err(first);
-            }
-            create(&loc).map(|v| (loc, v))
-        }
-        other => other.map(|v| (loc, v)),
+    // `-U` is the one member of the family that acts *before* the attempt, and
+    // that ordering is the whole of it: the removal's own failure is reported
+    // and the member abandoned, where the default's identical removal happens
+    // only after an `EEXIST` and has its failure discarded. Measured, that is
+    // the difference between `tar: dir: Cannot unlink: Directory not empty`
+    // (`-U`) and `tar: dir: Cannot open: File exists` (default).
+    if ovw.old_files == OldFiles::UnlinkFirst
+        && let Err(e) = loc.clear_for_unlink_first()
+    {
+        diag!("tar: {}: Cannot unlink: {}", escape(name), strerror(&e));
+        *status = EXIT_FATAL;
+        return Err(NotCreated::Silent);
     }
+    match create(&loc) {
+        Err(first) if in_the_way(&first) => match ovw.old_files {
+            // A directory member is the family's standing exception: `-k` steps
+            // over an existing directory without a word, where for every other
+            // type it is an error. Measured — `tar -xkf` over a tree it has
+            // already unpacked prints nothing about the directories and exits 0
+            // if nothing else is in the way.
+            OldFiles::Keep if ovw.directory_member => Err(NotCreated::Silent),
+            // The original `EEXIST` is handed back rather than a sentence of our
+            // own, so the caller phrases it in the member type's own operation:
+            // `Cannot open: File exists`, `Cannot mkfifo: File exists`,
+            // `Cannot create symlink to ‘t’: File exists`. That is GNU's shape
+            // because GNU likewise just stops suppressing the error.
+            OldFiles::Keep => Err(NotCreated::Failed(first)),
+            OldFiles::Skip => {
+                // Every member type, directories included — unlike `-k`, whose
+                // silence about a directory is total. And only under `-v`:
+                // without it `--skip-old-files` says nothing at all.
+                if ovw.verbose {
+                    diag!("tar: {}: skipping existing file", escape(name));
+                }
+                Err(NotCreated::Silent)
+            }
+            _ => {
+                if loc.unlink().is_err() && loc.rmdir().is_err() {
+                    return Err(NotCreated::Immovable(first));
+                }
+                create(&loc).map(|v| (loc, v)).map_err(NotCreated::Failed)
+            }
+        },
+        other => other.map(|v| (loc, v)).map_err(NotCreated::Failed),
+    }
+}
+
+/// Is this failure "something is already standing there"?
+///
+/// `EEXIST` for every creating call that passes `O_EXCL` or has no choice
+/// (`mkdir`, `symlinkat`, `mkfifoat`, `linkat`), and `ELOOP` for the one that
+/// does not: `--overwrite`'s open passes `O_TRUNC|O_NOFOLLOW`, so a symlink in
+/// the way is refused as a link that must not be followed rather than as an
+/// entry that already exists. Both mean the same thing to the recovery below,
+/// and treating only the first as recoverable would leave `--overwrite` unable
+/// to replace a symlink — which GNU does (`tar-ovw2.sh`).
+fn in_the_way(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::AlreadyExists || e.raw_os_error() == Some(ELOOP)
+}
+
+/// Why [`create_at`] created nothing.
+///
+/// Three outcomes rather than one error, because the overwrite-control family
+/// added a way to decline that is not a failure. Collapsing them into an
+/// `io::Error` would force every caller to guess which of its `Cannot …`
+/// sentences to print, and `--skip-old-files` prints none of them.
+enum NotCreated {
+    /// The creating call failed, and the caller should say so in its own
+    /// wording. This is the only arm that sets the exit status, and it is the
+    /// caller that sets it.
+    Failed(io::Error),
+    /// Something was already standing there, the policy called for removing it,
+    /// and the removal failed — a non-empty directory, in practice.
+    ///
+    /// Carries the *creation's* first error rather than the removal's, because
+    /// that is what all but one caller prints: GNU discards the failed removal
+    /// and reports the original `EEXIST`, so a symlink member over a non-empty
+    /// directory says `Cannot open: File exists` and not `Directory not empty`.
+    /// The one exception is a directory member, which has its own sentence for
+    /// it (`Unexpected inconsistency when making directory`) and is the only
+    /// member type that can reach this at all under a default extraction —
+    /// [`Located::mkdir_member`] accepts an existing directory as success, so
+    /// only `--keep-newer-files`, which must use a plain `mkdir`, gets here.
+    Immovable(io::Error),
+    /// Nothing was created and nothing more is to be said. Either
+    /// `--skip-old-files` stepped over an existing entry (exit status
+    /// untouched), or `-k` met a directory that was already there (likewise),
+    /// or `-U` could not clear the way and has already reported it.
+    Silent,
+}
+
+impl From<io::Error> for NotCreated {
+    fn from(e: io::Error) -> Self {
+        Self::Failed(e)
+    }
+}
+
+/// What [`create_at`] needs to know about the extraction it is part of.
+///
+/// Passed as one `Copy` value rather than three parameters because it is
+/// threaded through six member-type arms and two helpers, and a bare
+/// `(OldFiles, bool, bool)` at each of those call sites is two booleans nobody
+/// can tell apart.
+#[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Overwriting {
+    /// What to do about an entry that is already there. See [`OldFiles`].
+    old_files: OldFiles,
+    /// Whether `-v` was given, which is the only thing that decides whether
+    /// `--skip-old-files` announces what it stepped over.
+    verbose: bool,
+    /// Whether the member being created is a **directory**, which `-k` treats
+    /// differently from every other type: silently, and without restoring the
+    /// member's mode or mtime onto the directory that was already there.
+    directory_member: bool,
 }
 
 /// Create a member's missing ancestor directories, GNU's way.
@@ -2438,6 +2691,7 @@ mod oflag {
     pub const WRONLY: i32 = 1;
     pub const CREAT: i32 = 0o100;
     pub const EXCL: i32 = 0o200;
+    pub const TRUNC: i32 = 0o1000;
     pub const NONBLOCK: i32 = 0o4000;
     pub const DIRECTORY: i32 = 0o200_000;
     pub const NOFOLLOW: i32 = 0o400_000;
@@ -2466,8 +2720,12 @@ const AT_FDCWD: i32 = -100;
 #[cfg(unix)]
 const EXDEV: i32 = 18;
 
-/// `ELOOP`, for a chain of symlinks with no end.
-#[cfg(unix)]
+/// `ELOOP`, for a chain of symlinks with no end — and for the `O_NOFOLLOW` open
+/// that refuses to start one, which is how `--overwrite` meets a symlink.
+///
+/// Not `#[cfg(unix)]` like its neighbours because [`in_the_way`] compares
+/// against it on every host; off unix nothing produces the number, so the test
+/// is simply never true there.
 const ELOOP: i32 = 40;
 
 /// How many symlinks one member's parent may be resolved through.
@@ -2927,6 +3185,16 @@ fn make_dev(major: u64, minor: u64) -> u64 {
 const S_IFCHR: u32 = 0o020000;
 const S_IFBLK: u32 = 0o060000;
 
+/// The file-type field of `st_mode`, and the value in it that means "directory".
+///
+/// Needed because `--keep-newer-files` exempts directories: what is standing in
+/// the way has to be classified before its mtime is worth comparing. See
+/// [`Located::kind_and_mtime`].
+#[cfg(unix)]
+const S_IFMT: u32 = 0o170000;
+#[cfg(unix)]
+const S_IFDIR: u32 = 0o040000;
+
 /// The parts of a member's creation whose *wording* is worth keeping beside
 /// the flags that produce it.
 #[cfg(unix)]
@@ -2964,6 +3232,93 @@ impl Located {
             oflag::WRONLY | oflag::CREAT | oflag::EXCL | oflag::NONBLOCK,
             0o666,
         )
+    }
+
+    /// [`create_file`](Self::create_file) as `--overwrite` wants it: keep the
+    /// inode and truncate it, rather than unlinking the name and making a new
+    /// one.
+    ///
+    /// `O_TRUNC` in place of `O_EXCL` is the whole of the option — it is what
+    /// makes an extraction over a hard-linked file change every name for that
+    /// inode, which is the behaviour `create_file`'s doc explains the default
+    /// avoids. Both are right; they are different requests.
+    ///
+    /// **`O_NOFOLLOW` is not optional here.** Without `O_EXCL` the open would
+    /// otherwise follow a symlink already on disk and truncate whatever it
+    /// pointed at, so an archive of `x` unpacked with `--overwrite` into a
+    /// directory holding `x -> ../../outside` would write outside the
+    /// destination — past every other defence in this program, because the link
+    /// came from the filesystem and not from the archive. With the flag the
+    /// open fails `ELOOP`, [`create_at`] removes the link and retries, and a
+    /// *regular file* appears in its place. That is GNU's answer too: measured
+    /// (`tar-ovw2.sh`), `--overwrite` over such a link leaves `x` a plain file
+    /// and the outside target byte-for-byte unchanged.
+    ///
+    /// A **directory** in the way is deliberately not recovered from: `openat`
+    /// says `EISDIR`, and GNU reports `Cannot open: Is a directory` and exits 2
+    /// rather than removing it. `--overwrite` truncates; it does not delete.
+    fn create_file_overwriting(&self) -> io::Result<File> {
+        self.open(
+            oflag::WRONLY | oflag::CREAT | oflag::TRUNC | oflag::NOFOLLOW | oflag::NONBLOCK,
+            0o666,
+        )
+    }
+
+    /// Clear the leaf out of the way for `-U`, before anything is created.
+    ///
+    /// `unlink` then `rmdir`, in that order and for the same reason
+    /// [`create_at`] uses it: a file is the common case and `unlink` on a
+    /// directory is the cheap failure. An empty directory is therefore removed,
+    /// a non-empty one is not, and `ENOENT` — nothing there at all — is the
+    /// success this is usually asking for.
+    ///
+    /// The error kept is the **second** call's, which is what puts
+    /// `Directory not empty` in GNU's message rather than the `Is a directory`
+    /// the `unlink` produced: measured, a `-U` extraction over a non-empty
+    /// directory says `tar: dir: Cannot unlink: Directory not empty`.
+    fn clear_for_unlink_first(&self) -> io::Result<()> {
+        match self.unlink() {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(_) => match self.rmdir() {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            },
+        }
+    }
+
+    /// The leaf's own mtime in whole seconds, and whether it is a directory —
+    /// or `None` when nothing is there.
+    ///
+    /// `AT_SYMLINK_NOFOLLOW`, so a symlink answers for *itself*. That is
+    /// measured GNU behaviour and not an obvious choice: under
+    /// `--keep-newer-files` a link whose own mtime is old is replaced even when
+    /// it points at a brand-new file, and one whose own mtime is new is kept
+    /// even when its target is ancient (`tar-knf.sh`). It also means a dangling
+    /// link answers rather than erroring, which is why such a link is *kept*
+    /// instead of provoking a `Cannot stat` warning.
+    ///
+    /// Whole seconds is exact rather than a simplification: a member's mtime
+    /// comes from a ustar header and so has no fractional part, and the test
+    /// this feeds is `on-disk ≥ member`. Since a nanosecond field is never
+    /// negative, `sec ≥ member` and `(sec, nsec) ≥ (member, 0)` agree on every
+    /// input. Measured at the boundary: on-disk one nanosecond after the
+    /// member's second is kept, one second before it is replaced.
+    fn kind_and_mtime(&self) -> io::Result<Option<(bool, i64)>> {
+        let cname = c_name(&self.leaf)?;
+        let mut st = CStat::default();
+        // SAFETY: as `identity` — `cname` is NUL-terminated and `st` is the
+        // full-size `struct stat` the call fills and does not retain.
+        let rc = unsafe { fstatat(self.dir.0, cname.as_ptr(), &raw mut st, AT_SYMLINK_NOFOLLOW) };
+        if rc == 0 {
+            return Ok(Some((st.st_mode & S_IFMT == S_IFDIR, st.st_mtim.tv_sec)));
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() == io::ErrorKind::NotFound {
+            Ok(None)
+        } else {
+            Err(e)
+        }
     }
 
     /// Stand up the empty file a delayed symlink's place is held with.
@@ -3140,6 +3495,48 @@ impl Located {
             .open(self.path())
     }
 
+    fn create_file_overwriting(&self) -> io::Result<File> {
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(self.path())
+    }
+
+    fn clear_for_unlink_first(&self) -> io::Result<()> {
+        match self.unlink() {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(_) => match self.rmdir() {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            },
+        }
+    }
+
+    /// The unix twin's doc explains what this is for. Here the metadata comes
+    /// from `symlink_metadata`, which is `lstat` under another name, so a
+    /// symlink still answers for itself.
+    fn kind_and_mtime(&self) -> io::Result<Option<(bool, i64)>> {
+        use std::time::UNIX_EPOCH;
+        let md = match fs::symlink_metadata(self.path()) {
+            Ok(md) => md,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let mtime = md.modified()?;
+        // `duration_since` reports a time *before* the epoch as an error whose
+        // payload is the distance back to it, so the two arms are the two signs
+        // of one number rather than a success and a failure.
+        let secs = match mtime.duration_since(UNIX_EPOCH) {
+            Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+            Err(e) => i64::try_from(e.duration().as_secs())
+                .unwrap_or(i64::MAX)
+                .saturating_neg(),
+        };
+        Ok(Some((md.is_dir(), secs)))
+    }
+
     fn create_placeholder(&self) -> io::Result<()> {
         self.create_file().map(drop)
     }
@@ -3213,9 +3610,67 @@ impl Located {
 /// remove-and-retry [`create_at`] does everywhere else -- which is why a symlink
 /// over a *non-empty directory* reports `Cannot open: File exists` rather than
 /// the `Cannot create symlink to ‘…’` a relative one would.
-fn make_placeholder(root: &Dir, name: &[u8], status: &mut i32) -> io::Result<(u64, u64)> {
-    let (at, ()) = create_at(root, name, status, Located::create_placeholder)?;
-    at.identity()
+fn make_placeholder(
+    root: &Dir,
+    name: &[u8],
+    ovw: Overwriting,
+    status: &mut i32,
+) -> Result<(u64, u64), NotCreated> {
+    let (at, ()) = create_at(root, name, ovw, status, Located::create_placeholder)?;
+    Ok(at.identity()?)
+}
+
+/// `--keep-newer-files`: is what already stands at `name` reason to leave the
+/// member unextracted? Says so if it is.
+///
+/// Three answers rather than two, and each was measured (`tar-knf.sh`,
+/// `tar-knf2.sh`, `tar-knf3.sh`):
+///
+/// * **Nothing there** — extract. An absent ancestor counts as nothing there
+///   too, which is why `NotFound` from the resolution is not an error here.
+/// * **A directory there** — extract, whatever its timestamp. Directories are
+///   exempt from this option entirely; a regular member lands on top of a
+///   directory dated a year from now without a word (and then usually fails at
+///   the creation, if the directory is not empty). The exemption is of what is
+///   *on disk*, not of the member: a directory **member** is declined like any
+///   other when a newer plain file holds its name. The exemption is also the
+///   reason a directory member over an existing directory is decided entirely
+///   by whether that directory can be removed — see the `--keep-newer-files`
+///   arm of the directory member's `create` choice in [`do_extract`].
+/// * **Anything else** — compare `lstat`'s mtime, and decline if it is at least
+///   as new as the member's.
+///
+/// A resolution or `stat` failure is a *warning*, not an error: GNU prints
+/// `Warning: Cannot stat` and then declines the member anyway, leaving the exit
+/// status alone. The case that produces it is an archive holding `a/i` where `a`
+/// was itself kept and is a plain file, so the warning is the expected
+/// consequence of a decision this option already made.
+///
+/// The comparison is in whole seconds, which is exact rather than approximate:
+/// see [`Located::kind_and_mtime`].
+fn keeps_newer(root: &Dir, name: &[u8], member_mtime: i64) -> bool {
+    let newer = match root.locate(name).and_then(|at| at.kind_and_mtime()) {
+        Ok(None) => return false,
+        Ok(Some((true, _))) => return false,
+        Ok(Some((false, mtime))) => mtime >= member_mtime,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return false,
+        Err(e) => {
+            diag!(
+                "tar: {}: Warning: Cannot stat: {}",
+                escape(name),
+                strerror(&e)
+            );
+            true
+        }
+    };
+    if newer {
+        // gnulib's `quote()` — curly quotes, not tar's escaping style — and the
+        // name is *not* prefixed with `tar: name:` the way a failure is. GNU's
+        // sentence is `tar: Current ‘a’ is newer or same age`, which reads as a
+        // remark about the tree rather than a complaint about the member.
+        diag!("tar: Current {} is newer or same age", quote(name));
+    }
+    newer
 }
 
 /// Replace every placeholder with the symlink it stood for.
@@ -3275,6 +3730,7 @@ fn do_extract(
     verbose: Verbose,
     members: &[OsString],
     same_permissions: bool,
+    old_files: OldFiles,
 ) -> i32 {
     // The archive is opened before the `-C` chdir, so its own path is resolved
     // against the directory the user was standing in, as GNU does.
@@ -3323,6 +3779,12 @@ fn do_extract(
     // a 0500 directory's mode *and* its timestamp, and ours restored neither.
     let mut pending_dirs: Vec<(Vec<u8>, u32, i64)> = Vec::new();
     let mut delayed: Vec<DelayedLink> = Vec::new();
+    // The same for every member except the directories, which flip one field.
+    let ovw = Overwriting {
+        old_files,
+        verbose: verbose != Verbose::Off,
+        directory_member: false,
+    };
 
     let stop = walk(input.as_mut(), |member, input| {
         let raw_name = member.name.as_slice();
@@ -3361,27 +3823,81 @@ fn do_extract(
             verbose.line(raw_name);
         }
 
+        // `--keep-newer-files` is decided here, above the type switch, because
+        // it applies to *every* member type and not only to the regular files
+        // whose data would be rewritten: measured, a symlink, a fifo, a hard
+        // link and a directory member are all declined by a newer file standing
+        // in the way (`tar-knf2.sh`). It is also below the `-v` name line,
+        // which is where GNU prints its notice — `a` then `tar: Current ‘a’ is
+        // newer or same age`, in that order.
+        if old_files == OldFiles::KeepNewer && keeps_newer(&root, trim_slashes(&name), member.mtime)
+        {
+            return Handled::Skip;
+        }
+
         match member.typeflag {
             _ if member.is_dir() => {
                 // A directory member is stored as `d/`, but every diagnostic
                 // about it names `d` — and the trailing slash would also make
                 // the ancestor walk treat the member itself as its own ancestor.
                 let name = trim_slashes(&name).to_vec();
-                if let Err(e) = create_at(&root, &name, &mut status, Located::mkdir_member) {
-                    diag!("tar: {}: Cannot mkdir: {}", escape(&name), strerror(&e));
-                    status = EXIT_FATAL;
-                } else {
-                    pending_dirs.push((
-                        name,
-                        extraction_mode(member.mode, same_permissions, umask),
-                        member.mtime,
-                    ));
+                let ovw = Overwriting {
+                    directory_member: true,
+                    ..ovw
+                };
+                // Three of the five need a plain `mkdir` rather than
+                // [`Located::mkdir_member`], which reports an existing
+                // *directory* as success — right for the default and for
+                // `--overwrite`, wrong for these, and for two different reasons.
+                //
+                // Under `-k` and `--skip-old-files` it is wrong because success
+                // is what puts the member's mode and mtime in `pending_dirs`:
+                // measured, `tar -xkf` over a directory it has already unpacked
+                // leaves that directory's 0700 mode and old timestamp exactly as
+                // found, where the default restores the member's (`tar-ovw6.sh`).
+                //
+                // Under `--keep-newer-files` it is wrong because GNU does not
+                // take the shortcut at all — it *removes* the existing directory
+                // and makes the member's, so an empty one is replaced (mode and
+                // mtime become the member's) and a non-empty one is a hard error.
+                // The mtime plays no part: an on-disk directory is exempt from
+                // the age test (see [`keeps_newer`]), so what decides is only
+                // whether the removal succeeds (`tar-knf3.sh`).
+                let create: fn(&Located) -> io::Result<()> = match old_files {
+                    OldFiles::Keep | OldFiles::Skip | OldFiles::KeepNewer => Located::mkdir,
+                    _ => Located::mkdir_member,
+                };
+                match create_at(&root, &name, ovw, &mut status, create) {
+                    Err(NotCreated::Failed(e)) => {
+                        diag!("tar: {}: Cannot mkdir: {}", escape(&name), strerror(&e));
+                        status = EXIT_FATAL;
+                    }
+                    // The one member type with a sentence of its own for an
+                    // obstacle it could not clear, and it names neither the call
+                    // nor the errno. Reached only under `--keep-newer-files`,
+                    // over a directory whose removal failed; the members *inside*
+                    // it are still extracted, into the directory that stayed.
+                    Err(NotCreated::Immovable(_)) => {
+                        diag!(
+                            "tar: {}: Unexpected inconsistency when making directory",
+                            escape(&name)
+                        );
+                        status = EXIT_FATAL;
+                    }
+                    Err(NotCreated::Silent) => {}
+                    Ok(_) => {
+                        pending_dirs.push((
+                            name,
+                            extraction_mode(member.mode, same_permissions, umask),
+                            member.mtime,
+                        ));
+                    }
                 }
                 Handled::Skip
             }
             b'0' | b'\0' | b'7' => {
                 let mode = extraction_mode(member.mode, same_permissions, umask);
-                extract_plain(&root, input, &name, member, mode, &mut status)
+                extract_plain(&root, input, &name, member, mode, ovw, &mut status)
             }
             b'2' if is_delayed_target(&member.linkname) => {
                 // A symlink out of the destination — absolute, or climbing —
@@ -3399,27 +3915,31 @@ fn do_extract(
                 // returns, so a second archive would meet a real symlink. What
                 // stops that one is [`Dir::locate`], which refuses to walk
                 // through it however it got there.
-                match make_placeholder(&root, &name, &mut status) {
+                match make_placeholder(&root, &name, ovw, &mut status) {
                     Ok(id) => delayed.push(DelayedLink {
                         name: name.clone(),
                         target: member.linkname.clone(),
                         mtime: member.mtime,
                         id,
                     }),
-                    Err(e) => {
+                    Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         // `Cannot open`, not `Cannot create symlink`: at this
                         // point GNU really is opening a file, and the wording
                         // is how the two paths are told apart in a log.
                         diag!("tar: {}: Cannot open: {}", escape(&name), strerror(&e));
                         status = EXIT_FATAL;
                     }
+                    // Nothing stood up, so nothing is queued: the link is not
+                    // made at the end of the run either, which is the point of
+                    // having declined to disturb what is there.
+                    Err(NotCreated::Silent) => {}
                 }
                 Handled::Skip
             }
             b'2' => {
                 let create = |at: &Located| at.make_symlink(&member.linkname);
-                match create_at(&root, &name, &mut status, create) {
-                    Err(e) => {
+                match create_at(&root, &name, ovw, &mut status, create) {
+                    Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         diag!(
                             "tar: {}: Cannot create symlink to {}: {}",
                             escape(&name),
@@ -3428,6 +3948,7 @@ fn do_extract(
                         );
                         status = EXIT_FATAL;
                     }
+                    Err(NotCreated::Silent) => {}
                     // No mode is applied. A symlink has none of its own on any
                     // system this runs on — `lrwxrwxrwx` is a constant — and
                     // `chmod` through one would silently repermission whatever
@@ -3454,7 +3975,9 @@ fn do_extract(
                     let target = root.locate(&link_target)?;
                     at.hard_link_to(&target)
                 };
-                if let Err(e) = create_at(&root, &name, &mut status, create) {
+                if let Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) =
+                    create_at(&root, &name, ovw, &mut status, create)
+                {
                     // The one place in this program that quotes with `‘…’`
                     // instead of tar's escape style, because it is the one
                     // place GNU does: this sentence is built with gnulib's
@@ -3474,11 +3997,12 @@ fn do_extract(
             }
             b'6' => {
                 let mode = extraction_mode(member.mode, same_permissions, umask);
-                match create_at(&root, &name, &mut status, |at| at.make_fifo(mode)) {
-                    Err(e) => {
+                match create_at(&root, &name, ovw, &mut status, |at| at.make_fifo(mode)) {
+                    Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         diag!("tar: {}: Cannot mkfifo: {}", escape(&name), strerror(&e));
                         status = EXIT_FATAL;
                     }
+                    Err(NotCreated::Silent) => {}
                     Ok((at, ())) => {
                         restore_metadata(&at, &name, mode, member.mtime, &mut status);
                     }
@@ -3490,8 +4014,8 @@ fn do_extract(
                 let block = member.typeflag == b'4';
                 let create =
                     |at: &Located| at.make_device(mode, block, member.devmajor, member.devminor);
-                match create_at(&root, &name, &mut status, create) {
-                    Err(e) => {
+                match create_at(&root, &name, ovw, &mut status, create) {
+                    Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         // `Operation not permitted` for everyone but root, and
                         // that is the point rather than a shortcoming: an
                         // archive that could conjure a block device would be
@@ -3499,6 +4023,7 @@ fn do_extract(
                         diag!("tar: {}: Cannot mknod: {}", escape(&name), strerror(&e));
                         status = EXIT_FATAL;
                     }
+                    Err(NotCreated::Silent) => {}
                     Ok((at, ())) => {
                         restore_metadata(&at, &name, mode, member.mtime, &mut status);
                     }
@@ -3524,7 +4049,7 @@ fn do_extract(
                     escape(&[other])
                 );
                 let mode = extraction_mode(member.mode, same_permissions, umask);
-                extract_plain(&root, input, &name, member, mode, &mut status)
+                extract_plain(&root, input, &name, member, mode, ovw, &mut status)
             }
         }
     });
@@ -3578,9 +4103,10 @@ fn extract_plain(
     name: &[u8],
     member: &Member,
     mode: u32,
+    ovw: Overwriting,
     status: &mut i32,
 ) -> Handled {
-    if extract_regular_file(root, input, name, member.size, mode, member.mtime, status) {
+    if extract_regular_file(root, input, name, member, mode, ovw, status) {
         Handled::Consumed
     } else {
         Handled::Truncated
@@ -3667,14 +4193,29 @@ fn archive_label(archive_file: Option<&OsStr>) -> Vec<u8> {
 /// applied through the *same* resolved parent the file was created in, rather
 /// than by walking the name a second time and hoping it still leads to the file
 /// just written.
-fn open_for_member(root: &Dir, name: &[u8], status: &mut i32) -> Option<(Located, File)> {
-    match create_at(root, name, status, Located::create_file) {
+fn open_for_member(
+    root: &Dir,
+    name: &[u8],
+    ovw: Overwriting,
+    status: &mut i32,
+) -> Option<(Located, File)> {
+    // `--overwrite` is the one setting that changes the *open* rather than what
+    // is done about its failure: `O_TRUNC` where the others use `O_EXCL`, so the
+    // inode survives and every other name for it changes with the contents. See
+    // [`Located::create_file_overwriting`].
+    let create: fn(&Located) -> io::Result<File> = if ovw.old_files == OldFiles::Overwrite {
+        Located::create_file_overwriting
+    } else {
+        Located::create_file
+    };
+    match create_at(root, name, ovw, status, create) {
         Ok(pair) => Some(pair),
-        Err(e) => {
+        Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
             diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
             *status = EXIT_FATAL;
             None
         }
+        Err(NotCreated::Silent) => None,
     }
 }
 
@@ -3686,18 +4227,26 @@ fn open_for_member(root: &Dir, name: &[u8], status: &mut i32) -> Option<(Located
 /// whose header claimed 2^40 bytes made this program try to reserve a
 /// terabyte before reading a single block — a one-line denial of service
 /// costing the attacker 512 bytes of file.
+///
+/// Takes the whole `member` rather than its size and mtime separately — the
+/// `mode` stays a parameter because it is not the member's stored one but the
+/// result of [`extraction_mode`], which the caller has already worked out.
 fn extract_regular_file(
     root: &Dir,
     input: &mut dyn Read,
     name: &[u8],
-    size: u64,
+    member: &Member,
     mode: u32,
-    mtime: i64,
+    ovw: Overwriting,
     status: &mut i32,
 ) -> bool {
+    let size = member.size;
     // Still consume the data whatever happens below: the archive may hold
     // members after this one, and abandoning the stream would lose them too.
-    let mut opened = open_for_member(root, name, status);
+    // That is as true of a member `--skip-old-files` stepped over as of one that
+    // could not be opened — the bytes are in the stream either way, and the
+    // headers after them only line up if they are read.
+    let mut opened = open_for_member(root, name, ovw, status);
 
     let mut remaining = size;
     let mut block = [0u8; BLOCK_SIZE];
@@ -3735,7 +4284,7 @@ fn extract_regular_file(
             diag!("tar: {}: Cannot write: {}", escape(name), strerror(&e));
             *status = EXIT_FATAL;
         } else {
-            restore_metadata(&at, name, mode, mtime, status);
+            restore_metadata(&at, name, mode, member.mtime, status);
         }
     }
     true
@@ -4314,6 +4863,72 @@ mod tests {
     }
 
     #[test]
+    fn parse_takes_each_member_of_the_overwrite_family() {
+        for (argv, want) in [
+            (s(&["-x"]), OldFiles::Replace),
+            (s(&["-x", "--overwrite"]), OldFiles::Overwrite),
+            (s(&["-x", "-k"]), OldFiles::Keep),
+            (s(&["-x", "--keep-old-files"]), OldFiles::Keep),
+            (s(&["-x", "--skip-old-files"]), OldFiles::Skip),
+            (s(&["-x", "-U"]), OldFiles::UnlinkFirst),
+            (s(&["-x", "--unlink-first"]), OldFiles::UnlinkFirst),
+            (s(&["-x", "--keep-newer-files"]), OldFiles::KeepNewer),
+            // Clustered, to prove the two new letters are in `SHORT_OPTIONS`
+            // rather than only in the long table.
+            (s(&["-xk"]), OldFiles::Keep),
+            (s(&["-xU"]), OldFiles::UnlinkFirst),
+        ] {
+            assert_eq!(run_args(&argv).unwrap().old_files, want, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn naming_one_of_the_overwrite_family_twice_is_allowed() {
+        // GNU tests whether the *value* would change, not whether an option was
+        // seen twice, so a repetition is not a conflict. Measured: `tar -k -k`
+        // and `tar --overwrite --overwrite` both extract (`tar-ovw-diff.sh`).
+        assert_eq!(
+            run_args(&s(&["-x", "-k", "-k"])).unwrap().old_files,
+            OldFiles::Keep
+        );
+        assert_eq!(
+            run_args(&s(&["-x", "--overwrite", "--overwrite"]))
+                .unwrap()
+                .old_files,
+            OldFiles::Overwrite
+        );
+        // Two spellings of one option are the same value, so likewise fine.
+        assert_eq!(
+            run_args(&s(&["-x", "-k", "--keep-old-files"]))
+                .unwrap()
+                .old_files,
+            OldFiles::Keep
+        );
+    }
+
+    #[test]
+    fn naming_two_of_the_overwrite_family_is_a_usage_error() {
+        // The *second* option is named first, and both are named by their long
+        // spelling however they were written -- `tar -U -k` complains about
+        // `'--keep-old-files' … '--unlink-first'`, naming neither letter.
+        let e = run_args(&s(&["-x", "-U", "-k"])).unwrap_err();
+        assert_eq!(
+            e.sentence,
+            "'--keep-old-files' cannot be used with '--unlink-first'"
+        );
+        // Exit 2, not the 64 an unrecognised option gets: this sentence comes
+        // from tar's own `USAGE_ERROR`, not from argp's option table. Measured
+        // both ways -- `tar --frobnicate` is 64 and `tar -k --overwrite` is 2.
+        assert_eq!(e.status, EXIT_FATAL);
+        assert_eq!(
+            run_args(&s(&["-x", "--keep-newer-files", "--overwrite"]))
+                .unwrap_err()
+                .sentence,
+            "'--overwrite' cannot be used with '--keep-newer-files'"
+        );
+    }
+
+    #[test]
     fn parse_accepts_an_unambiguous_abbreviation() {
         // `--extr` is a prefix of `--extract` alone. The resolved name is what
         // reaches the match arm, so no arm needs to know about abbreviations.
@@ -4602,6 +5217,11 @@ mod tests {
             "--preserve-permissions",
             "--same-permissions",
             "--verbose",
+            "--keep-newer-files",
+            "--keep-old-files",
+            "--overwrite",
+            "--skip-old-files",
+            "--unlink-first",
             "--help",
             "--usage",
             "--version",
@@ -4610,12 +5230,58 @@ mod tests {
         }
         // The point of writing our own help rather than reproducing GNU's: an
         // option the parser refuses must not be advertised. `--exclude` stands
-        // in for the other 159. See `design-decisions.md` 703.
-        for name in ["--exclude", "--overwrite", "--gzip", "--strip-components"] {
+        // in for the other 155. See `design-decisions.md` 703.
+        //
+        // `--overwrite-dir` is here rather than among the advertised names on
+        // purpose, and it is the reason this list is checked as a *substring*
+        // search rather than a set comparison: it is a real GNU option this tar
+        // does not have, and `--overwrite` — which it does — is a prefix of it,
+        // so a help text that named the pair the other way round would pass a
+        // naive `contains` and lie. The assertion below therefore only holds
+        // because `--overwrite` is written with two trailing spaces before its
+        // description and never as `--overwrite-dir`.
+        for name in [
+            "--exclude",
+            "--overwrite-dir",
+            "--gzip",
+            "--strip-components",
+        ] {
             assert!(
                 !help.contains(name),
                 "help advertises {name}, which we refuse"
             );
+        }
+    }
+
+    /// The synopsis and the help must describe the *same* tar.
+    ///
+    /// They are two hand-written strings that have to be edited together, and
+    /// the failure mode when they are not is silent: an option that works, is
+    /// documented in one place and missing from the other. Every long name in
+    /// the synopsis must appear in the help, and every long name the help
+    /// advertises must appear in the synopsis.
+    #[test]
+    fn usage_and_help_advertise_the_same_options() {
+        let (usage, help) = (usage_text(), help_text());
+        // `[--directory=DIR]` in the synopsis is `--directory=DIR` in the help
+        // too, so the argument spelling needs no special handling; only the
+        // brackets have to come off.
+        for word in usage.split_whitespace() {
+            let Some(name) = word.strip_prefix("[--").map(|w| w.trim_end_matches(']')) else {
+                continue;
+            };
+            assert!(
+                help.contains(&format!("--{name}")),
+                "the synopsis offers --{name} and the help does not mention it"
+            );
+        }
+        for line in help.lines() {
+            for word in line.split([' ', ',']).filter(|w| w.starts_with("--")) {
+                assert!(
+                    usage.contains(&format!("[{word}]")),
+                    "the help documents {word} and the synopsis omits it"
+                );
+            }
         }
     }
 
@@ -4629,7 +5295,7 @@ mod tests {
             }
         }
         assert!(help_text().starts_with("Usage: tar [OPTION...] [FILE]...\n"));
-        assert!(usage_text().starts_with("Usage: tar [-ctxvp?]"));
+        assert!(usage_text().starts_with("Usage: tar [-ctxkUpv?]"));
     }
 
     // ---------------- contains_dot_dot ----------------

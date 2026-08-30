@@ -6004,7 +6004,7 @@ fn sys_openat_ex(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
         Err(_) => return linux_err(errno::EINVAL),
     };
 
-    open_kernel_path_install(path_str, flags, no_symlinks)
+    open_kernel_path_install(path_str, flags, no_symlinks, None)
 }
 
 /// Shared installer for "open by kernel-side absolute path".
@@ -6015,7 +6015,12 @@ fn sys_openat_ex(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
 /// `handlers::sys_fs_open` (capability check, IPC handle registration)
 /// plus the FdEntry install that `open_common` does — so the resulting
 /// fd is indistinguishable from one minted by plain `open()`.
-fn open_kernel_path_install(path: &str, flags: u32, no_symlinks: bool) -> SyscallResult {
+fn open_kernel_path_install(
+    path: &str,
+    flags: u32,
+    no_symlinks: bool,
+    beneath: Option<crate::fs::handle::Beneath<'_>>,
+) -> SyscallResult {
     // Synthetic device nodes (e.g. /dev/snd/pcmC0D0p) are intercepted before
     // the VFS open, exactly as in `open_common`, so a relative openat that
     // resolves to one mints its own HandleKind instead of a File fd.
@@ -6043,7 +6048,16 @@ fn open_kernel_path_install(path: &str, flags: u32, no_symlinks: bool) -> Syscal
         kernel_bits |= crate::fs::handle::OpenFlags::NO_SYMLINKS.bits();
     }
     let kernel_flags = crate::fs::handle::OpenFlags::from_bits(kernel_bits);
-    let raw_handle = match crate::fs::handle::open(path, kernel_flags) {
+    // RESOLVE_BENEATH routes to the containment-checked open; everything
+    // after this point -- handle registration, FdEntry, fd install -- is
+    // identical, which is deliberate.  Lane B's request came from the two
+    // implementations of openat2 drifting apart; a second install path here
+    // would be the same mistake one layer down.
+    let opened = match beneath {
+        Some(b) => crate::fs::handle::open_beneath(b, kernel_flags),
+        None => crate::fs::handle::open(path, kernel_flags),
+    };
+    let raw_handle = match opened {
         Ok(h) => h,
         Err(e) => return linux_err(linux_errno_for(e)),
     };
@@ -31860,14 +31874,14 @@ fn sys_openat2(args: &SyscallArgs) -> SyscallResult {
     if resolve & RESOLVE_IN_ROOT != 0 {
         return linux_err(errno::EOPNOTSUPP);
     }
-    // RESOLVE_BENEATH: prevents .. and absolute paths from escaping
-    // the directory denoted by dirfd.  Without chroot-style tracking
-    // we can't enforce this either; refuse with EXDEV (the Linux
-    // documented error when the walk would cross a forbidden
-    // boundary).
-    if resolve & RESOLVE_BENEATH != 0 {
-        return linux_err(errno::EXDEV);
-    }
+    // RESOLVE_BENEATH: the walk may not leave the directory `dirfd`
+    // names, by `..`, by an absolute path, or by a symlink met on the
+    // way.  Enforced in the VFS resolver as of lane B's request
+    // (requests/b-a-openat2-resolve-beneath-...md, ask 1) -- until then
+    // this returned EXDEV unconditionally, which was safe but meant the
+    // one consumer that wants the semantic (`tar`, unpacking a tree it
+    // did not author) had to hand-roll it in userspace.
+    let beneath = resolve & RESOLVE_BENEATH != 0;
     // RESOLVE_NO_XDEV / RESOLVE_NO_MAGICLINKS ARE trivially satisfied here:
     // we have no bind mounts to cross mid-walk and no /proc magic symlinks.
     // RESOLVE_NO_SYMLINKS, however, is NOT free — this kernel fully supports
@@ -31891,7 +31905,89 @@ fn sys_openat2(args: &SyscallArgs) -> SyscallResult {
         arg4: 0,
         arg5: 0,
     };
+    if beneath {
+        return sys_openat_beneath(&openat_args, no_symlinks);
+    }
     sys_openat_ex(&openat_args, no_symlinks)
+}
+
+/// `openat2` with `RESOLVE_BENEATH`: open `path` under `dirfd`, refusing
+/// any resolution that leaves the directory `dirfd` names.
+///
+/// Split from [`sys_openat_ex`] rather than folded into it because the two
+/// need different things from `dirfd`.  Ordinary `openat` flattens dirfd
+/// and path into one absolute string and forgets which part was which —
+/// that is exactly the information containment needs, so this path keeps
+/// the base and the caller's fragment apart all the way down to
+/// [`crate::fs::Vfs::resolve_beneath`].
+fn sys_openat_beneath(args: &SyscallArgs, no_symlinks: bool) -> SyscallResult {
+    let dirfd = args.arg0 as i32;
+    let path_ptr = args.arg1;
+    let flags = args.arg2 as u32;
+
+    // The base.  `AT_FDCWD` means the process working directory, as it does
+    // for every other `*at` call.
+    let base = if dirfd == AT_FDCWD {
+        let Some(pid) = caller_pid() else {
+            return linux_err(errno::EBADF);
+        };
+        match pcb::get_cwd(pid) {
+            Some(c) => crate::fs::path::PathBuf::from(c),
+            None => return linux_err(errno::ENOENT),
+        }
+    } else {
+        match dirfd_to_guest_dir(dirfd) {
+            Ok(p) => p,
+            Err(r) => return r,
+        }
+    };
+
+    const MAX_REL: usize = 4096;
+    let rel_bytes = match read_user_cstr(path_ptr, MAX_REL) {
+        Ok(b) => b,
+        Err(e) => return linux_err(e),
+    };
+    if rel_bytes.is_empty() {
+        return linux_err(errno::ENOENT);
+    }
+    if rel_bytes.contains(&0) {
+        return linux_err(errno::EINVAL);
+    }
+    let rel = crate::fs::path::Path::new(&rel_bytes);
+
+    // An absolute path is NOT quietly reinterpreted against the base, and
+    // dirfd is NOT ignored the way POSIX has `openat` ignore it: under
+    // RESOLVE_BENEATH an absolute path is an escape by construction, and
+    // Linux returns EXDEV.  `resolve_beneath` refuses it for us, but doing
+    // it here keeps the reason next to the POSIX rule it departs from.
+    if rel.is_absolute() {
+        return linux_err(errno::EXDEV);
+    }
+
+    // The joined path is needed only so the synthetic-device interceptors
+    // in the installer see the same string they would for a plain openat;
+    // the actual resolution uses `base` and `rel` separately.
+    let base_bytes = base.as_bytes();
+    let mut combined: alloc::vec::Vec<u8> =
+        alloc::vec::Vec::with_capacity(base_bytes.len() + 1 + rel_bytes.len());
+    combined.extend_from_slice(base_bytes);
+    if base_bytes.last().copied() != Some(b'/') {
+        combined.push(b'/');
+    }
+    combined.extend_from_slice(&rel_bytes);
+    if combined.len() > 4095 {
+        return linux_err(errno::ENAMETOOLONG);
+    }
+    let Ok(path_str) = core::str::from_utf8(&combined) else {
+        return linux_err(errno::EINVAL);
+    };
+
+    open_kernel_path_install(
+        path_str,
+        flags,
+        no_symlinks,
+        Some(crate::fs::handle::Beneath { base: &base, rel }),
+    )
 }
 
 /// `execveat(dirfd, path, argv, envp, flags)` — non-frame validation entry.

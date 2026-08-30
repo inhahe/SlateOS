@@ -285,11 +285,94 @@ pub fn open_with_mode(
     flags: OpenFlags,
     create_mode: u16,
 ) -> KernelResult<u64> {
-    let path = path.as_ref();
+    open_impl(path.as_ref(), flags, create_mode, None)
+}
 
+/// A request to open under `openat2`'s `RESOLVE_BENEATH`.
+///
+/// The two halves travel together in one type on purpose: a base without
+/// the caller's own fragment cannot be checked (the fragment's `..` are
+/// only visible before the two are joined and normalized), and a fragment
+/// without a base has nothing to be contained by.  Passing them as two
+/// `Option`s that must agree is the shape that lets one arrive without the
+/// other.
+#[derive(Clone, Copy)]
+pub struct Beneath<'a> {
+    /// The directory the walk may not leave — `openat2`'s `dirfd`.
+    pub base: &'a Path,
+    /// The caller's path, relative to `base`.
+    pub rel: &'a Path,
+}
+
+/// Like [`open_with_mode`], but the resolution may not escape `b.base`.
+///
+/// Implements `openat2(dirfd, path, { .resolve = RESOLVE_BENEATH })`.  Any
+/// escape — a `..` in `b.rel`, an absolute `b.rel`, or a symlink met on the
+/// way whose target leaves (or is absolute, or leaves and returns) — fails
+/// with [`KernelError::CrossDevice`] (→ `EXDEV`).  See
+/// [`crate::fs::Vfs::beneath_step`] for why the rule is per-hop rather than
+/// a check on the final answer.
+pub fn open_beneath(b: Beneath<'_>, flags: OpenFlags) -> KernelResult<u64> {
+    open_impl(b.rel, flags, DEFAULT_CREATE_MODE, Some(b))
+}
+
+fn open_impl(
+    path: &Path,
+    flags: OpenFlags,
+    create_mode: u16,
+    beneath: Option<Beneath<'_>>,
+) -> KernelResult<u64> {
     // Must have at least READ or WRITE.
     if !flags.is_readable() && !flags.is_writable() {
         return Err(KernelError::InvalidArgument);
+    }
+
+    // RESOLVE_BENEATH takes its own route to `norm`, because the *order* of
+    // the checks below is part of the guarantee.  A caller that asked for
+    // containment must not be able to learn anything about a path outside
+    // the base -- not even whether it exists -- so the containment-aware
+    // resolution runs first and every later probe is made against its
+    // result.  Running the ordinary `check_writable` / NOFOLLOW-`lstat` on
+    // the naively joined path would probe `base/../out/f` before anything
+    // had refused it, which is an existence oracle for the tree the flag
+    // was invoked to hide.
+    if let Some(b) = beneath {
+        let no_symlinks = flags.contains(OpenFlags::NO_SYMLINKS);
+
+        // Resolve without following the final component.  This validates
+        // the caller's fragment and every parent hop under the containment
+        // rule, so from here on the path is known to be inside the base.
+        let parent_resolved = crate::fs::Vfs::resolve_beneath(b.base, b.rel, false, no_symlinks)?;
+
+        // O_NOFOLLOW, applied to the contained path rather than the raw
+        // one.  Same meaning as the general case below: a final component
+        // that is itself a symlink is ELOOP.
+        if flags.contains(OpenFlags::NOFOLLOW) {
+            match crate::fs::Vfs::lstat(&parent_resolved) {
+                Ok(entry) if entry.entry_type == crate::fs::EntryType::Symlink => {
+                    return Err(KernelError::TooManyLinks);
+                }
+                Ok(_) | Err(KernelError::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        if flags.is_writable()
+            || flags.contains(OpenFlags::CREATE)
+            || flags.contains(OpenFlags::TRUNCATE)
+            || flags.contains(OpenFlags::APPEND)
+        {
+            crate::ipc::namespace::check_writable(&parent_resolved)?;
+        }
+
+        // Follow the final component unless NOFOLLOW asked us not to; the
+        // walk is contained either way.
+        let norm = if flags.contains(OpenFlags::NOFOLLOW) {
+            parent_resolved
+        } else {
+            crate::fs::Vfs::resolve_beneath(b.base, b.rel, true, no_symlinks)?
+        };
+        return open_resolved(norm, flags, create_mode);
     }
 
     // Read-only volume enforcement: if this open would mutate the file
@@ -340,6 +423,17 @@ pub fn open_with_mode(
         crate::fs::Vfs::resolve_path(path)?
     };
 
+    open_resolved(norm, flags, create_mode)
+}
+
+/// Everything an open does once the path has been resolved.
+///
+/// Split out so `RESOLVE_BENEATH` can reach it: that mode resolves by a
+/// different route (containment-checked, and in a different order — see
+/// [`open_impl`]) but must then do exactly what every other open does.
+/// Sharing the tail is what keeps the two from drifting, which is the same
+/// failure mode lane B found between the kernel's `openat2` and libc's.
+fn open_resolved(norm: PathBuf, flags: OpenFlags, create_mode: u16) -> KernelResult<u64> {
     // Check capability tags and POSIX ACLs — the process must be a member of
     // all groups required for this path (or any ancestor with tags), and the
     // path's ACL, if it has one, must grant the access this open asks for.
@@ -382,7 +476,7 @@ pub fn open_with_mode(
                 {
                     return Err(KernelError::IsADirectory);
                 }
-                return allocate_dir_handle(norm, flags);
+                return allocate_dir_handle(norm.clone(), flags);
             }
 
             // Regular file.

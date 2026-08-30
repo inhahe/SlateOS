@@ -3685,7 +3685,23 @@ check_python_suites() {
         # `set -e`, where a failing command in an assignment would abort the
         # whole boot test before the status could be reported as a suite
         # failure.  Same reasoning as check_shellcheck above.
-        out="$("$py" -u "$f" 2>&1)" && rc=0 || rc=$?
+        # PYTHONIOENCODING=:replace -- the empty field before the colon sets the
+        # error handler and leaves the encoding alone.  Capturing with `$(...)`
+        # hands the suite a pipe, and on Windows a pipe gets the *locale*
+        # encoding (cp1252 here), not UTF-8.  A suite that prints a tick or an
+        # em dash -- and several quote the markers lanes really write -- then
+        # dies of UnicodeEncodeError partway through its report.  That is the
+        # worst way for a gate to fail: exit 1 with a charmap traceback is
+        # indistinguishable from a real test failure, and it destroys the
+        # diagnosis at the one moment the diagnosis is what you came for.
+        #
+        # `:replace` rather than `utf-8` on purpose.  Forcing UTF-8 would send
+        # UTF-8 bytes to whatever console the operator has, which for cp1252 is
+        # mojibake; `:replace` keeps the console's own encoding and degrades the
+        # tick to `?`, which is readable everywhere.  Set here rather than in
+        # each suite because this line is what creates the pipe, and it covers
+        # suites added later that have not thought about it.
+        out="$(PYTHONIOENCODING=:replace "$py" -u "$f" 2>&1)" && rc=0 || rc=$?
         if [ "$rc" -eq 0 ]; then
             printf '    %-32s %s\n' "$(basename "$f")" "$(printf '%s\n' "$out" | tail -1)"
             continue

@@ -46558,7 +46558,13 @@ fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
     if let Some((new_cur, new_max)) = new_pair {
         match me {
             Some(p) => {
-                if let Err(e) = pcb::set_rlimit(p, resource_u32, new_cur, new_max) {
+                // The authority is derived by the *same* helper the native
+                // `SYS_RLIMIT_SET` uses, not by a second capability check
+                // spelled out here: a rule derived two ways drifts, and
+                // this pair of ABIs is precisely where that has bitten
+                // before.  See `design-decisions.md` §640.
+                let authority = crate::syscall::handlers::rlimit_authority();
+                if let Err(e) = pcb::set_rlimit(p, resource_u32, new_cur, new_max, authority) {
                     return linux_err(linux_errno_for(e));
                 }
             }
@@ -56806,7 +56812,13 @@ fn self_test_dup3_validation() -> crate::error::KernelResult<()> {
             // non-CAP_SYS_RESOURCE callers, and may never exceed
             // `MAX_FDS` for any caller.  Leaving max at the default while
             // lowering cur to 8 is a valid unprivileged-lowering operation.
-            match pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 8, NOFILE_MAX) {
+            match pcb::set_rlimit(
+                test_pid,
+                pcb::RLIMIT_NOFILE,
+                8,
+                NOFILE_MAX,
+                pcb::LimitAuthority::Unprivileged,
+            ) {
                 Ok(()) => {}
                 Err(e) => {
                     serial_println!("[syscall/linux]   FAIL: set_rlimit(NOFILE) -> {:?}", e);
@@ -57918,7 +57930,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     pcb::get_rlimit(test_pid, pcb::RLIMIT_NOFILE),
                     Some((NOFILE_MAX, NOFILE_MAX))
                 );
-                pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 64, 128).expect("set rlimit");
+                pcb::set_rlimit(
+                    test_pid,
+                    pcb::RLIMIT_NOFILE,
+                    64,
+                    128,
+                    pcb::LimitAuthority::Unprivileged,
+                )
+                .expect("set rlimit");
                 assert_eq!(
                     pcb::get_rlimit(test_pid, pcb::RLIMIT_NOFILE),
                     Some((64, 128))
@@ -57926,7 +57945,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 // Raise hard limit back toward the default -> PermissionDenied.
                 // `NOFILE_MAX` is *not* above the ceiling, so a refusal here
                 // can only come from the no-raise rule.
-                match pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 64, NOFILE_MAX) {
+                match pcb::set_rlimit(
+                    test_pid,
+                    pcb::RLIMIT_NOFILE,
+                    64,
+                    NOFILE_MAX,
+                    pcb::LimitAuthority::Unprivileged,
+                ) {
                     Err(KernelError::PermissionDenied) => {}
                     other => {
                         serial_println!(
@@ -57939,7 +57964,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 // cur > max -> InvalidArgument, and it wins over the ceiling:
                 // 600 and 500 are both above `MAX_FDS`, so this also pins the
                 // gate order (cur>max before the NOFILE ceiling).
-                match pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 600, 500) {
+                match pcb::set_rlimit(
+                    test_pid,
+                    pcb::RLIMIT_NOFILE,
+                    600,
+                    500,
+                    pcb::LimitAuthority::Unprivileged,
+                ) {
                     Err(KernelError::InvalidArgument) => {}
                     other => {
                         serial_println!(
@@ -57950,13 +57981,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                 }
                 // Lower both -> Ok.
-                pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 32, 64).expect("lower rlimit");
+                pcb::set_rlimit(
+                    test_pid,
+                    pcb::RLIMIT_NOFILE,
+                    32,
+                    64,
+                    pcb::LimitAuthority::Unprivileged,
+                )
+                .expect("lower rlimit");
                 assert_eq!(
                     pcb::get_rlimit(test_pid, pcb::RLIMIT_NOFILE),
                     Some((32, 64))
                 );
                 // resource out of range -> InvalidArgument.
-                match pcb::set_rlimit(test_pid, pcb::NUM_RLIMITS, 0, 0) {
+                match pcb::set_rlimit(
+                    test_pid,
+                    pcb::NUM_RLIMITS,
+                    0,
+                    0,
+                    pcb::LimitAuthority::Unprivileged,
+                ) {
                     Err(KernelError::InvalidArgument) => {}
                     other => {
                         serial_println!(
@@ -57985,8 +58029,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 // leaving hard at the default: `set_rlimit` forbids raising
                 // hard, so we can still raise soft back up within [0, MAX_FDS]
                 // later to test the rollback.
-                pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 5, NOFILE_MAX)
-                    .expect("set NOFILE=(5, MAX_FDS)");
+                pcb::set_rlimit(
+                    test_pid,
+                    pcb::RLIMIT_NOFILE,
+                    5,
+                    NOFILE_MAX,
+                    pcb::LimitAuthority::Unprivileged,
+                )
+                .expect("set NOFILE=(5, MAX_FDS)");
 
                 // fd 3 — must succeed (3 < 5).
                 let fd3 = pcb::linux_fd_install(test_pid, FdEntry::console(oflags::O_RDONLY), 0)
@@ -58026,8 +58076,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 // soft cap to 100 (allowed: ≤ hard = MAX_FDS) and re-install —
                 // the entry must land at fd 5, not 6 (no leftover from the
                 // failed install).
-                pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 100, NOFILE_MAX)
-                    .expect("raise soft to 100");
+                pcb::set_rlimit(
+                    test_pid,
+                    pcb::RLIMIT_NOFILE,
+                    100,
+                    NOFILE_MAX,
+                    pcb::LimitAuthority::Unprivileged,
+                )
+                .expect("raise soft to 100");
                 let fd5 = pcb::linux_fd_install(test_pid, FdEntry::console(oflags::O_RDONLY), 0)
                     .expect("install fd 5 after raising soft limit");
                 if fd5 != 5 {
@@ -58056,7 +58112,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 pcb::set_credentials(parent, creds).expect("set creds");
                 // NPROC.cur = 1 so the count (just the parent) + 1 = 2 > 1
                 // triggers EAGAIN.
-                pcb::set_rlimit(parent, 6, 1, pcb::RLIM_INFINITY).expect("set NPROC=(1, INF)");
+                pcb::set_rlimit(
+                    parent,
+                    6,
+                    1,
+                    pcb::RLIM_INFINITY,
+                    pcb::LimitAuthority::Unprivileged,
+                )
+                .expect("set NPROC=(1, INF)");
 
                 // fork_create should reject with WouldBlock (-> EAGAIN).
                 match pcb::fork_create(parent, 0, alloc::vec::Vec::new(), alloc::vec::Vec::new()) {
@@ -58076,7 +58139,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
                 // Raise NPROC.cur to 2 — fork should now succeed since
                 // (1 existing + 1 new) <= 2.
-                pcb::set_rlimit(parent, 6, 2, pcb::RLIM_INFINITY).expect("raise NPROC to 2");
+                pcb::set_rlimit(
+                    parent,
+                    6,
+                    2,
+                    pcb::RLIM_INFINITY,
+                    pcb::LimitAuthority::Unprivileged,
+                )
+                .expect("raise NPROC to 2");
                 let child =
                     pcb::fork_create(parent, 0, alloc::vec::Vec::new(), alloc::vec::Vec::new())
                         .expect("fork with NPROC=2 (room for 1 child)");
@@ -58099,8 +58169,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 // uid 0 is exempt — NPROC.cur=0 still allows fork.
                 let root_parent = pcb::create("rlimit-nproc-test-root", 0);
                 // root_parent inherits root creds from Process::new (uid=0).
-                pcb::set_rlimit(root_parent, 6, 0, pcb::RLIM_INFINITY)
-                    .expect("set NPROC=(0, INF) on root");
+                pcb::set_rlimit(
+                    root_parent,
+                    6,
+                    0,
+                    pcb::RLIM_INFINITY,
+                    pcb::LimitAuthority::Unprivileged,
+                )
+                .expect("set NPROC=(0, INF) on root");
                 let root_child = pcb::fork_create(
                     root_parent,
                     0,
@@ -58139,6 +58215,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     pcb::RLIMIT_AS_INDEX as u32,
                     limit_bytes,
                     pcb::RLIM_INFINITY,
+                    pcb::LimitAuthority::Unprivileged,
                 )
                 .expect("set RLIMIT_AS=(64KiB, INF)");
 
@@ -58203,6 +58280,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     pcb::RLIMIT_AS_INDEX as u32,
                     pcb::RLIM_INFINITY,
                     pcb::RLIM_INFINITY,
+                    pcb::LimitAuthority::Unprivileged,
                 )
                 .expect("raise AS soft to INF");
                 pcb::linux_as_charge(test_pid, u64::MAX / 2)
@@ -58450,8 +58528,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 // Lower the soft limit to 64 KiB and verify try_get_rlimit
                 // observes the change.  This is the path a Linux-mode
                 // process would take via setrlimit(RLIMIT_STACK, ...).
-                pcb::set_rlimit(test_pid, 3, 64 * 1024, 64 * 1024)
-                    .expect("set RLIMIT_STACK to 64 KiB");
+                pcb::set_rlimit(
+                    test_pid,
+                    3,
+                    64 * 1024,
+                    64 * 1024,
+                    pcb::LimitAuthority::Unprivileged,
+                )
+                .expect("set RLIMIT_STACK to 64 KiB");
                 match pcb::try_get_rlimit(test_pid, pcb::RLIMIT_STACK_INDEX as u32) {
                     Some((65_536, 65_536)) => {}
                     other => {

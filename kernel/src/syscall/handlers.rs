@@ -5177,6 +5177,39 @@ fn rlimit_target(arg0: u64) -> KernelResult<Option<pcb::ProcessId>> {
     }
 }
 
+/// Decide whether the current caller may raise a hard resource limit.
+///
+/// This kernel's `CAP_SYS_RESOURCE` is a [`ResourceType::ResourceLimit`]
+/// capability held with [`Rights::WRITE`] — a capability that *already
+/// existed* for this purpose (it landed 2026-08-21) rather than a new
+/// `Rights` bit, because the authority being asserted is "may write
+/// resource limits" and that is exactly what the pair already spells.
+///
+/// Deliberately **not** an error path.  Lacking the capability is not a
+/// failure of `setrlimit`; it is the ordinary case, and it only becomes a
+/// refusal if the call actually attempts a raise.  A caller with no
+/// capability lowering its own hard limit must still succeed, so the
+/// answer is a value ([`pcb::LimitAuthority`]) that
+/// [`pcb::set_rlimit`] consults only where it matters, not a `?` here.
+///
+/// Shared by both ABIs — native `SYS_RLIMIT_SET` and the Linux shim's
+/// `prlimit64`/`setrlimit` — for the same reason `pcb::set_rlimit` is a
+/// single choke point: a rule derived two ways drifts.
+///
+/// See `design-decisions.md` §640.
+pub(crate) fn rlimit_authority() -> pcb::LimitAuthority {
+    if require_cap_type(
+        crate::cap::ResourceType::ResourceLimit,
+        crate::cap::Rights::WRITE,
+    )
+    .is_ok()
+    {
+        pcb::LimitAuthority::MayRaiseHardLimit
+    } else {
+        pcb::LimitAuthority::Unprivileged
+    }
+}
+
 /// `SYS_RLIMIT_GET` — read one of a process's Linux resource limits
 /// (`getrlimit(3)`).
 ///
@@ -5248,7 +5281,10 @@ pub fn sys_rlimit_get(args: &SyscallArgs) -> SyscallResult {
 /// Every policy decision belongs to [`pcb::set_rlimit`] and none to this
 /// function, because the Linux shim's `prlimit64` calls the same thing: a
 /// rule enforced here would apply to one ABI and not the other, which is
-/// the class of bug this syscall exists to end.
+/// the class of bug this syscall exists to end.  The one thing decided on
+/// this side is *who is asking* — [`rlimit_authority`] — which cannot be
+/// answered below the syscall layer at all, and which the Linux shim
+/// derives by calling that same function rather than its own copy.
 ///
 /// In kernel context (a boot self-test with no owning process) the
 /// arguments are validated and the write is discarded — there is no PCB to
@@ -5284,7 +5320,7 @@ pub fn sys_rlimit_set(args: &SyscallArgs) -> SyscallResult {
     let [cur, max] = pair;
 
     match target {
-        Some(pid) => match pcb::set_rlimit(pid, resource, cur, max) {
+        Some(pid) => match pcb::set_rlimit(pid, resource, cur, max, rlimit_authority()) {
             Ok(()) => SyscallResult::ok(0),
             Err(e) => SyscallResult::err(e),
         },

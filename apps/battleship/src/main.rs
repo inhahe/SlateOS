@@ -1,38 +1,33 @@
-#![allow(dead_code)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(clippy::needless_range_loop)]
-#![allow(unused_imports)]
-
-//! Slate OS Battleship -- classic naval combat game with AI opponent.
+//! Slate OS Battleship -- classic naval combat with an AI opponent.
 //!
-//! Features two 10x10 grids (player's fleet and opponent's ocean),
-//! a ship placement phase with rotation and arrow-key positioning,
-//! an AI opponent with hunt/target firing strategy, hit/miss markers,
-//! ship sinking detection with announcements, win/loss detection,
-//! and live stats (shots fired, hit rate, ships remaining).
-//! Randomness comes from the shared `randrange` crate, seeded from the
-//! system so that two players do not get the same game.
+//! Two 10x10 grids side by side -- the player's fleet and the opponent's ocean
+//! -- a ship placement phase with rotation and arrow-key positioning, an AI
+//! that hunts and then targets, hit and miss markers, sinking announcements,
+//! and live stats. Every cell of both grids is clickable as well as typeable.
+//!
+//! The whole picture is solved from the size the window reports each frame:
+//! there is no built-in size the drawing falls back on, and every box a click
+//! is tested against is one the drawing pass recorded.
+//!
+//! Randomness comes from the shared `randrange` crate, seeded from the system.
 //! Themed with the Catppuccin Mocha palette.
 
+use std::process::ExitCode;
+
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
+use oswindow::app::{self, App, Response};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
 const MANTLE: Color = Color::from_hex(0x181825);
 const CRUST: Color = Color::from_hex(0x11111B);
 const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
 const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
 const BLUE: Color = Color::from_hex(0x89B4FA);
@@ -44,34 +39,33 @@ const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 const TEAL: Color = Color::from_hex(0x94E2D5);
 
-// ── Game constants ──────────────────────────────────────────────────
-const GRID_SIZE: usize = 10;
-const CELL_SIZE: f32 = 36.0;
-const CELL_GAP: f32 = 2.0;
-const GRID_PADDING: f32 = 20.0;
-const LABEL_SIZE: f32 = 14.0;
-const LABEL_OFFSET: f32 = 20.0;
-const TITLE_FONT_SIZE: f32 = 22.0;
-const INFO_FONT_SIZE: f32 = 15.0;
-const STATS_FONT_SIZE: f32 = 13.0;
-const HEADER_HEIGHT: f32 = 50.0;
-const GRID_TOP: f32 = HEADER_HEIGHT + 30.0;
-const GRID_LEFT_PLAYER: f32 = GRID_PADDING + LABEL_OFFSET;
-const GRID_SPACING: f32 = 60.0;
-const GRID_WIDTH: f32 = GRID_SIZE as f32 * (CELL_SIZE + CELL_GAP) - CELL_GAP;
-const GRID_LEFT_OPPONENT: f32 = GRID_LEFT_PLAYER + GRID_WIDTH + GRID_SPACING + LABEL_OFFSET;
-const CORNER_RADIUS: f32 = 4.0;
-const MARKER_SIZE: f32 = 10.0;
-const SHIP_CORNER_RADIUS: f32 = 3.0;
+// ── The board ───────────────────────────────────────────────────────
 
-/// Number of ships and their sizes.
-const SHIP_DEFS: [(ShipKind, usize); 5] = [
-    (ShipKind::Carrier, 5),
-    (ShipKind::Battleship, 4),
-    (ShipKind::Cruiser, 3),
-    (ShipKind::Submarine, 3),
-    (ShipKind::Destroyer, 2),
+/// The side of both grids, in cells.
+const GRID_SIZE: usize = 10;
+/// The highest index on either axis, for clamping a cursor onto the board.
+const LAST_CELL: usize = GRID_SIZE.saturating_sub(1);
+
+/// The fleet, in the order it is placed.
+///
+/// Sizes are *not* repeated here. They used to be -- `SHIP_DEFS` carried a
+/// `(kind, size)` pair beside `ShipKind::size()`, which is the same five
+/// numbers written down twice, free to disagree the moment one is edited. The
+/// size is asked of the kind.
+const FLEET: [ShipKind; 5] = [
+    ShipKind::Carrier,
+    ShipKind::Battleship,
+    ShipKind::Cruiser,
+    ShipKind::Submarine,
+    ShipKind::Destroyer,
 ];
+
+/// The size the window asks for on launch, and what the tests draw at.
+///
+/// A *starting* size, not the size the drawing assumes: every frame is solved
+/// from the size the window reports, and this is only what is asked for first.
+const WINDOW_WIDTH: f32 = 1000.0;
+const WINDOW_HEIGHT: f32 = 720.0;
 
 // ── Randomness ──────────────────────────────────────────────────────
 //
@@ -84,6 +78,211 @@ const SHIP_DEFS: [(ShipKind, usize); 5] = [
 // colour of the checkerboard, at every seed, and half the board could not hold
 // the bow of a ship. See `known-issues.md` and `design-decisions.md` §447.
 use randrange::{RandomSource, SeededRng};
+
+// ── What a click can land on ────────────────────────────────────────
+
+/// Everything the drawing pass records a box for.
+///
+/// A click is answered by asking the frame what was drawn where the pointer
+/// is, so a control that moves cannot leave its hit box behind. The two grids
+/// are separate variants because they mean opposite things: a cell of the
+/// player's own grid is where a ship goes, a cell of the opponent's ocean is
+/// where a shell goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    /// A cell of the player's own fleet grid, by row and column.
+    Own(u8, u8),
+    /// A cell of the opponent's ocean, by row and column.
+    Ocean(u8, u8),
+    /// The whole of the player's grid, behind its cells.
+    OwnBoard,
+    /// The whole of the opponent's grid, behind its cells.
+    OceanBoard,
+    Title,
+    Phase,
+    Message,
+    OwnLabel,
+    OceanLabel,
+    Stats,
+    Help,
+}
+
+// ── Layout ──────────────────────────────────────────────────────────
+
+/// Where everything goes, solved from the size the window reports.
+///
+/// Every measurement below is a share of the window. The old drawing had
+/// twenty-odd `const f32` pixel counts -- `CELL_SIZE: f32 = 36.0` among them --
+/// and the window was whatever those constants happened to add up to. A grid
+/// that cannot be resized is a grid that is wrong at every size but one.
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    window: Rect,
+    header: Rect,
+    message: Rect,
+    body: Rect,
+    stats: Rect,
+    help: Rect,
+    pad: f32,
+    title: f32,
+    font: f32,
+    small: f32,
+}
+
+impl Layout {
+    fn solve(w: f32, h: f32) -> Self {
+        let w = w.max(0.0);
+        let h = h.max(0.0);
+        // The padding is a share of the *shorter* side and is capped at half of
+        // it, so a window one pixel wide cannot be given a margin wider than
+        // the window it is a margin inside.
+        let pad = (w.min(h) * 0.02).min(w.min(h) / 2.0);
+        let title = (h * 0.031).clamp(9.0, 30.0);
+        let font = (h * 0.021).clamp(8.0, 20.0);
+        let small = (h * 0.018).clamp(7.0, font);
+
+        let header_h = (h * 0.075).min(h);
+        let message_h = ((h - header_h) * 0.055).max(0.0);
+        let stats_h = ((h - header_h - message_h) * 0.14).max(0.0);
+        let help_h = ((h - header_h - message_h - stats_h) * 0.06).max(0.0);
+
+        let header = Rect::new(0.0, 0.0, w, header_h);
+        let message = Rect::new(0.0, header.bottom(), w, message_h);
+        let body_y = message.bottom();
+        // The lower bands are measured back from the bottom and never allowed
+        // above the body, so a window too short for all four leaves the body
+        // empty rather than stacking the bands out of order.
+        let help_y = (h - help_h).max(body_y);
+        let stats_y = (help_y - stats_h).max(body_y);
+        let body = Rect::new(0.0, body_y, w, (stats_y - body_y).max(0.0));
+        let stats = Rect::new(0.0, stats_y, w, (help_y - stats_y).max(0.0));
+        let help = Rect::new(0.0, help_y, w, (h - help_y).max(0.0));
+
+        Self {
+            window: Rect::new(0.0, 0.0, w, h),
+            header,
+            message,
+            body,
+            stats,
+            help,
+            pad,
+            title,
+            font,
+            small,
+        }
+    }
+
+    /// The two grids, side by side in the body.
+    fn grids(&self) -> Grids {
+        Grids::fit(self.body, self.pad, self.small)
+    }
+}
+
+/// The geometry of the pair of grids: one square-celled 10x10 board each.
+#[derive(Debug, Clone, Copy)]
+struct Grids {
+    /// The top-left of the player's own cells, past its row labels.
+    own: (f32, f32),
+    /// The top-left of the opponent's cells.
+    ocean: (f32, f32),
+    /// The side of one cell, gap included.
+    step: f32,
+    /// The side of the drawn square, which is `step` less its gap.
+    cell: f32,
+    /// Room reserved to the left of and above each grid for its A-J and 1-10.
+    label: f32,
+    /// Where each grid's caption sits, above its labels.
+    caption_y: f32,
+}
+
+impl Grids {
+    /// Fit two labelled 10x10 grids side by side into `area`.
+    ///
+    /// The cell is square and is taken from *both* axes -- the width has to
+    /// hold two grids and their labels, the height only one. Fitting to width
+    /// alone is what let the old fixed layout run its grids off the bottom of
+    /// any window shorter than the one it was written for.
+    fn fit(area: Rect, pad: f32, label_font: f32) -> Self {
+        let side = f32_from_usize(GRID_SIZE);
+        // A label column and a label row, plus a caption line above.
+        let label = label_font * 1.6;
+        let caption = label_font * 1.6;
+        let avail_w = (area.w - pad * 3.0 - label * 2.0).max(0.0);
+        let avail_h = (area.h - pad * 2.0 - label - caption).max(0.0);
+        let step = (avail_w / (side * 2.0)).min(avail_h / side).max(0.0);
+        let cell = (step * 0.94).max(0.0);
+        let grid_w = step * side;
+
+        // Both grids and the gutter between them, centred in what is left.
+        let total = grid_w * 2.0 + label * 2.0 + pad;
+        let left = area.x + (area.w - total).max(0.0) / 2.0;
+        let top = area.y + pad + caption + label;
+
+        Self {
+            own: (left + label, top),
+            ocean: (left + label * 2.0 + grid_w + pad, top),
+            step,
+            cell,
+            label,
+            caption_y: area.y + pad,
+        }
+    }
+
+    /// The drawn square of one cell of a grid whose cells start at `origin`.
+    fn cell_rect(self, origin: (f32, f32), row: usize, col: usize) -> Rect {
+        Rect::new(
+            origin.0 + f32_from_usize(col) * self.step,
+            origin.1 + f32_from_usize(row) * self.step,
+            self.cell,
+            self.cell,
+        )
+    }
+
+    /// The whole of a grid whose cells start at `origin`.
+    fn board_rect(self, origin: (f32, f32)) -> Rect {
+        let side = self.step * f32_from_usize(GRID_SIZE);
+        Rect::new(origin.0, origin.1, side, side)
+    }
+}
+
+/// `usize` to `f32` without a lint-suppressed cast at every call site.
+///
+/// The count of cells on a board is far below `f32`'s exact-integer range, so
+/// the conversion is lossless here; it is written once so that is stated once.
+fn f32_from_usize(v: usize) -> f32 {
+    f32::from(u16::try_from(v).unwrap_or(u16::MAX))
+}
+
+/// A byte index for a `Target`, saturating rather than wrapping.
+fn byte(v: usize) -> u8 {
+    u8::try_from(v).unwrap_or(u8::MAX)
+}
+
+/// `rect` shrunk by `pad` on every side, and never inside out.
+///
+/// A window narrower than twice its own padding would otherwise produce a
+/// negative width, which is not a smaller box but a box that starts to the
+/// right of where it ends.
+fn inset(rect: Rect, pad: f32) -> Rect {
+    Rect::new(
+        rect.x + pad,
+        rect.y + pad,
+        (rect.w - pad * 2.0).max(0.0),
+        (rect.h - pad * 2.0).max(0.0),
+    )
+}
+
+/// `part` as a percentage of `whole`, and zero when nothing has happened yet.
+///
+/// Written once because it was written twice: the player's hit rate and the
+/// AI's carried the same "no shots yet means 0.0, else part/whole*100" three
+/// lines each, one in the state and one buried in the drawing code.
+fn percent(part: usize, whole: usize) -> f32 {
+    if whole == 0 {
+        return 0.0;
+    }
+    f32_from_usize(part) / f32_from_usize(whole) * 100.0
+}
 
 // ── Ship types ──────────────────────────────────────────────────────
 
@@ -162,8 +361,8 @@ impl Ship {
         let mut result = Vec::with_capacity(size);
         for i in 0..size {
             let (r, c) = match self.orientation {
-                Orientation::Horizontal => (self.row, self.col + i),
-                Orientation::Vertical => (self.row + i, self.col),
+                Orientation::Horizontal => (self.row, self.col.saturating_add(i)),
+                Orientation::Vertical => (self.row.saturating_add(i), self.col),
             };
             result.push((r, c));
         }
@@ -174,8 +373,12 @@ impl Ship {
     fn is_within_bounds(self) -> bool {
         let size = self.kind.size();
         match self.orientation {
-            Orientation::Horizontal => self.row < GRID_SIZE && self.col + size <= GRID_SIZE,
-            Orientation::Vertical => self.row + size <= GRID_SIZE && self.col < GRID_SIZE,
+            Orientation::Horizontal => {
+                self.row < GRID_SIZE && self.col.saturating_add(size) <= GRID_SIZE
+            }
+            Orientation::Vertical => {
+                self.row.saturating_add(size) <= GRID_SIZE && self.col < GRID_SIZE
+            }
         }
     }
 }
@@ -218,6 +421,19 @@ impl AiState {
         }
     }
 
+    /// Whether the AI has already fired at a cell.
+    ///
+    /// A cell off the board reads as *already fired at*, which is what keeps
+    /// it out of both the hunt list and the follow-up queue without a second
+    /// bounds test at either call site.
+    fn has_fired(&self, row: usize, col: usize) -> bool {
+        self.fired
+            .get(row)
+            .and_then(|r| r.get(col))
+            .copied()
+            .unwrap_or(true)
+    }
+
     /// Pick the next cell to fire at.
     fn choose_target(&mut self, rng: &mut SeededRng) -> (usize, usize) {
         match &self.mode {
@@ -225,7 +441,7 @@ impl AiState {
                 // Pick the first valid unfired target from the list.
                 let targets_clone = targets.clone();
                 for &(r, c) in &targets_clone {
-                    if !self.fired[r][c] {
+                    if !self.has_fired(r, c) {
                         return (r, c);
                     }
                 }
@@ -246,7 +462,7 @@ impl AiState {
         let mut unfired = Vec::new();
         for r in 0..GRID_SIZE {
             for c in 0..GRID_SIZE {
-                if !self.fired[r][c] {
+                if !self.has_fired(r, c) {
                     unfired.push((r, c));
                 }
             }
@@ -261,23 +477,26 @@ impl AiState {
 
     /// Record a shot result and update the mode.
     fn record_shot(&mut self, row: usize, col: usize, hit: bool) {
-        self.fired[row][col] = true;
-        self.shots += 1;
+        if let Some(cell) = self.fired.get_mut(row).and_then(|r| r.get_mut(col)) {
+            *cell = true;
+        }
+        self.shots = self.shots.saturating_add(1);
         if hit {
-            self.hits += 1;
-            // Add adjacent cells as targets.
+            self.hits = self.hits.saturating_add(1);
+            // Add adjacent cells as targets. `has_fired` reads an off-board
+            // cell as already fired at, so the four neighbours of a corner
+            // need no separate bounds test -- the two that do not exist are
+            // declined by the same call that declines the ones already shot.
             let mut new_targets = Vec::new();
-            if row > 0 && !self.fired[row - 1][col] {
-                new_targets.push((row - 1, col));
-            }
-            if row + 1 < GRID_SIZE && !self.fired[row + 1][col] {
-                new_targets.push((row + 1, col));
-            }
-            if col > 0 && !self.fired[row][col - 1] {
-                new_targets.push((row, col - 1));
-            }
-            if col + 1 < GRID_SIZE && !self.fired[row][col + 1] {
-                new_targets.push((row, col + 1));
+            for (r, c) in [
+                (row.wrapping_sub(1), col),
+                (row.saturating_add(1), col),
+                (row, col.wrapping_sub(1)),
+                (row, col.saturating_add(1)),
+            ] {
+                if !self.has_fired(r, c) {
+                    new_targets.push((r, c));
+                }
             }
             match &mut self.mode {
                 AiMode::Target { targets } => {
@@ -341,23 +560,41 @@ impl Fleet {
         }
     }
 
+    /// Which ship, if any, occupies a cell. Off the board is no ship.
+    fn ship_at(&self, row: usize, col: usize) -> Option<usize> {
+        self.ship_grid.get(row).and_then(|r| r.get(col)).copied()?
+    }
+
+    /// What has been fired at a cell. Off the board reads as untouched.
+    fn mark_at(&self, row: usize, col: usize) -> CellMark {
+        self.marks
+            .get(row)
+            .and_then(|r| r.get(col))
+            .copied()
+            .unwrap_or(CellMark::Empty)
+    }
+
+    /// How many hits a ship has taken. An index past the fleet has taken none.
+    fn hits_on(&self, idx: usize) -> usize {
+        self.ship_hits.get(idx).copied().unwrap_or(0)
+    }
+
     /// Try to place a ship. Returns false if it overlaps or is out of bounds.
     fn place_ship(&mut self, ship: Ship) -> bool {
-        if !ship.is_within_bounds() {
+        // One gate, asked once. `would_overlap` already answers "in bounds and
+        // clear of every other ship"; this used to re-ask both halves itself,
+        // so the rule for whether a ship fits was written twice and the AI's
+        // placement loop asked one copy while the player's asked the other.
+        if self.would_overlap(&ship) {
             return false;
-        }
-        let cells = ship.cells();
-        // Check for overlap with existing ships.
-        for &(r, c) in &cells {
-            if self.ship_grid[r][c].is_some() {
-                return false;
-            }
         }
         let idx = self.ships.len();
         self.ships.push(ship);
         self.ship_hits.push(0);
-        for &(r, c) in &cells {
-            self.ship_grid[r][c] = Some(idx);
+        for (r, c) in ship.cells() {
+            if let Some(cell) = self.ship_grid.get_mut(r).and_then(|row| row.get_mut(c)) {
+                *cell = Some(idx);
+            }
         }
         true
     }
@@ -367,30 +604,32 @@ impl Fleet {
         if row >= GRID_SIZE || col >= GRID_SIZE {
             return (false, None);
         }
-        if self.marks[row][col] != CellMark::Empty {
+        if self.mark_at(row, col) != CellMark::Empty {
             return (false, None); // Already fired here.
         }
-        if let Some(ship_idx) = self.ship_grid[row][col] {
-            self.marks[row][col] = CellMark::Hit;
-            self.ship_hits[ship_idx] += 1;
-            let ship = self.ships[ship_idx];
-            if self.ship_hits[ship_idx] >= ship.kind.size() {
-                return (true, Some(ship.kind));
-            }
-            return (true, None);
+        let hit_ship = self.ship_at(row, col);
+        if let Some(cell) = self.marks.get_mut(row).and_then(|r| r.get_mut(col)) {
+            *cell = if hit_ship.is_some() {
+                CellMark::Hit
+            } else {
+                CellMark::Miss
+            };
         }
-        self.marks[row][col] = CellMark::Miss;
-        (false, None)
+        let Some(ship_idx) = hit_ship else {
+            return (false, None);
+        };
+        if let Some(hits) = self.ship_hits.get_mut(ship_idx) {
+            *hits = hits.saturating_add(1);
+        }
+        match self.ships.get(ship_idx) {
+            Some(ship) if self.hits_on(ship_idx) >= ship.kind.size() => (true, Some(ship.kind)),
+            _ => (true, None),
+        }
     }
 
     /// Returns true if all ships are sunk.
     fn all_sunk(&self) -> bool {
-        for (i, ship) in self.ships.iter().enumerate() {
-            if self.ship_hits[i] < ship.kind.size() {
-                return false;
-            }
-        }
-        !self.ships.is_empty()
+        !self.ships.is_empty() && self.ships_remaining() == 0
     }
 
     /// Returns the number of ships still afloat.
@@ -398,25 +637,21 @@ impl Fleet {
         self.ships
             .iter()
             .enumerate()
-            .filter(|(i, ship)| self.ship_hits[*i] < ship.kind.size())
+            .filter(|&(i, ship)| self.hits_on(i) < ship.kind.size())
             .count()
     }
 
     /// Returns true if a ship at the given index is sunk.
     fn is_ship_sunk(&self, idx: usize) -> bool {
-        if idx >= self.ships.len() {
-            return false;
-        }
-        self.ship_hits[idx] >= self.ships[idx].kind.size()
+        self.ships
+            .get(idx)
+            .is_some_and(|ship| self.hits_on(idx) >= ship.kind.size())
     }
 
     /// Returns true if the cell (row, col) belongs to a sunk ship.
     fn is_cell_sunk(&self, row: usize, col: usize) -> bool {
-        if let Some(idx) = self.ship_grid[row][col] {
-            self.is_ship_sunk(idx)
-        } else {
-            false
-        }
+        self.ship_at(row, col)
+            .is_some_and(|idx| self.is_ship_sunk(idx))
     }
 
     /// Check if placing a ship would overlap with existing ships.
@@ -424,12 +659,9 @@ impl Fleet {
         if !ship.is_within_bounds() {
             return true;
         }
-        for (r, c) in ship.cells() {
-            if self.ship_grid[r][c].is_some() {
-                return true;
-            }
-        }
-        false
+        ship.cells()
+            .into_iter()
+            .any(|(r, c)| self.ship_at(r, c).is_some())
     }
 
     /// Check if a cell has already been fired upon.
@@ -437,7 +669,7 @@ impl Fleet {
         if row >= GRID_SIZE || col >= GRID_SIZE {
             return true;
         }
-        self.marks[row][col] != CellMark::Empty
+        self.mark_at(row, col) != CellMark::Empty
     }
 }
 
@@ -470,16 +702,34 @@ struct BattleshipApp {
 
     // Game over
     player_won: bool,
+
+    /// The size the last frame was drawn at, and so the size the next click
+    /// is read against. Not a size the drawing falls back on: every frame is
+    /// solved from the size the window reports for that frame.
+    size: (f32, f32),
 }
 
 impl BattleshipApp {
+    /// A game on a board nobody has seen before.
+    ///
+    /// The module doc has always said the seed comes from the system "so that
+    /// two players do not get the same game". It did not: `new` wrote
+    /// `SeededRng::new(0xDEAD_BEEF_CAFE_1234)`, one constant, so the AI's five
+    /// ships stood in the same five places on every machine and in every
+    /// session for ever. The doc comment was right about the intent and wrong
+    /// about the code, which is the worst of the two ways for them to disagree.
     fn new() -> Self {
+        Self::with_seed(randrange::seed_from_system(0xDEAD_BEEF_CAFE_1234))
+    }
+
+    /// The same game from a stated seed, so a test can name the board it means.
+    fn with_seed(seed: u64) -> Self {
         let mut app = Self {
             phase: GamePhase::Placement,
             player_fleet: Fleet::new(),
             opponent_fleet: Fleet::new(),
             ai_state: AiState::new(),
-            rng: SeededRng::new(0xDEAD_BEEF_CAFE_1234),
+            rng: SeededRng::new(seed),
             placement_index: 0,
             placement_row: 0,
             placement_col: 0,
@@ -488,11 +738,13 @@ impl BattleshipApp {
             cursor_col: 0,
             player_shots: 0,
             player_hits: 0,
-            message: String::from("Place your Carrier (5). R to rotate, Enter to place."),
+            message: String::new(),
             last_sunk_message: String::new(),
             player_won: false,
+            size: (WINDOW_WIDTH, WINDOW_HEIGHT),
         };
         app.place_ai_ships();
+        app.message = app.placement_prompt();
         app
     }
 
@@ -510,37 +762,38 @@ impl BattleshipApp {
         self.cursor_col = 0;
         self.player_shots = 0;
         self.player_hits = 0;
-        self.message = String::from("Place your Carrier (5). R to rotate, Enter to place.");
+        self.message = String::new();
         self.last_sunk_message = String::new();
         self.player_won = false;
         self.place_ai_ships();
+        self.message = self.placement_prompt();
     }
 
     /// Place AI ships randomly, ensuring no overlaps and within bounds.
+    ///
+    /// The loop asks `place_ship` whether the ship fits and believes the
+    /// answer. It used to test bounds and overlap itself, place the ship, and
+    /// throw away the `bool` that says whether the placement it just made
+    /// actually happened -- two copies of the rule with the authoritative one
+    /// silently discarded.
     fn place_ai_ships(&mut self) {
         self.opponent_fleet = Fleet::new();
-        for &(kind, _) in &SHIP_DEFS {
-            let mut placed = false;
+        for &kind in &FLEET {
             // Safety valve: prevent infinite loops if RNG is pathological.
-            let mut attempts = 0;
-            while !placed && attempts < 1000 {
-                attempts += 1;
+            for _ in 0..1000 {
                 let orientation = if self.rng.flip() {
                     Orientation::Horizontal
                 } else {
                     Orientation::Vertical
                 };
-                let row = self.rng.below(GRID_SIZE);
-                let col = self.rng.below(GRID_SIZE);
                 let ship = Ship {
                     kind,
-                    row,
-                    col,
+                    row: self.rng.below(GRID_SIZE),
+                    col: self.rng.below(GRID_SIZE),
                     orientation,
                 };
-                if ship.is_within_bounds() && !self.opponent_fleet.would_overlap(&ship) {
-                    self.opponent_fleet.place_ship(ship);
-                    placed = true;
+                if self.opponent_fleet.place_ship(ship) {
+                    break;
                 }
             }
         }
@@ -548,7 +801,25 @@ impl BattleshipApp {
 
     /// The ship kind currently being placed (if any).
     fn current_placement_ship(&self) -> Option<ShipKind> {
-        SHIP_DEFS.get(self.placement_index).map(|&(kind, _)| kind)
+        FLEET.get(self.placement_index).copied()
+    }
+
+    /// What to tell the player to place next.
+    ///
+    /// One sentence in one place. It used to be written out three times -- in
+    /// `new`, in `new_game` and again after each successful placement -- and
+    /// two of those spelled the Carrier and its size as literals, so a change
+    /// to the fleet would have left the opening prompt naming a ship the game
+    /// no longer starts with.
+    fn placement_prompt(&self) -> String {
+        match self.current_placement_ship() {
+            Some(kind) => format!(
+                "Place your {} ({}). R to rotate, Enter to place.",
+                kind.name(),
+                kind.size()
+            ),
+            None => String::from("All ships placed! Select target and fire (Enter)."),
+        }
     }
 
     /// Build the preview ship for placement.
@@ -570,126 +841,102 @@ impl BattleshipApp {
         }
     }
 
-    /// Clamp the placement cursor so the ship stays within bounds after rotation.
+    /// Clamp the placement cursor so the ship stays within bounds.
+    ///
+    /// Called after *every* change to the cursor or the orientation, not after
+    /// some of them. It used to be called on Down and Right and not on Up and
+    /// Left, which was harmless only because those two happened to move away
+    /// from the edge that the clamp guards -- a coincidence, not a reason, and
+    /// one that a click placing the cursor anywhere at all destroys.
     fn clamp_placement(&mut self) {
-        if let Some(kind) = self.current_placement_ship() {
-            let size = kind.size();
-            match self.placement_orientation {
-                Orientation::Horizontal => {
-                    if self.placement_col + size > GRID_SIZE {
-                        self.placement_col = GRID_SIZE.saturating_sub(size);
-                    }
-                    if self.placement_row >= GRID_SIZE {
-                        self.placement_row = GRID_SIZE - 1;
-                    }
-                }
-                Orientation::Vertical => {
-                    if self.placement_row + size > GRID_SIZE {
-                        self.placement_row = GRID_SIZE.saturating_sub(size);
-                    }
-                    if self.placement_col >= GRID_SIZE {
-                        self.placement_col = GRID_SIZE - 1;
-                    }
-                }
-            }
-        }
+        let Some(kind) = self.current_placement_ship() else {
+            return;
+        };
+        let size = kind.size();
+        // The last origin at which a ship of this size still ends on the board.
+        let last_along = GRID_SIZE.saturating_sub(size);
+        let (max_row, max_col) = match self.placement_orientation {
+            Orientation::Horizontal => (LAST_CELL, last_along),
+            Orientation::Vertical => (last_along, LAST_CELL),
+        };
+        self.placement_row = self.placement_row.min(max_row);
+        self.placement_col = self.placement_col.min(max_col);
     }
 
     /// Handle keyboard input.
-    fn handle_key(&mut self, key: Key) {
+    ///
+    /// Escape does *not* start a new game. It used to, under a comment reading
+    /// "Could quit, but we just reset for now" -- so the key a player presses
+    /// to back out of something threw away the game in progress, silently and
+    /// with no confirmation, from any phase. Escape now closes the window,
+    /// which is what it does everywhere else, and N alone deals a new board.
+    fn handle_key(&mut self, key: Key) -> EventResult {
         match key {
             Key::N => {
                 self.new_game();
-            }
-            Key::Escape => {
-                // Could quit, but we just reset for now.
-                self.new_game();
+                EventResult::Consumed
             }
             _ => match self.phase {
                 GamePhase::Placement => self.handle_placement_key(key),
                 GamePhase::Firing => self.handle_firing_key(key),
-                GamePhase::GameOver => {
-                    // Only N is handled above.
-                }
+                // Only N is handled above. Saying so with `Ignored` is what
+                // lets the window leave a key it did not use to whatever is
+                // behind it, rather than swallowing every keystroke in the
+                // one phase where the game has nothing left to do.
+                GamePhase::GameOver => EventResult::Ignored,
             },
         }
     }
 
-    fn handle_placement_key(&mut self, key: Key) {
+    fn handle_placement_key(&mut self, key: Key) -> EventResult {
         match key {
-            Key::Up if self.placement_row > 0 => {
-                self.placement_row -= 1;
-            }
-            Key::Down => {
-                if self.placement_row + 1 < GRID_SIZE {
-                    self.placement_row += 1;
-                }
-                self.clamp_placement();
-            }
-            Key::Left if self.placement_col > 0 => {
-                self.placement_col -= 1;
-            }
-            Key::Right => {
-                if self.placement_col + 1 < GRID_SIZE {
-                    self.placement_col += 1;
-                }
-                self.clamp_placement();
-            }
-            Key::R => {
-                self.placement_orientation = self.placement_orientation.toggle();
-                self.clamp_placement();
-            }
+            Key::Up => self.placement_row = self.placement_row.saturating_sub(1),
+            Key::Down => self.placement_row = self.placement_row.saturating_add(1),
+            Key::Left => self.placement_col = self.placement_col.saturating_sub(1),
+            Key::Right => self.placement_col = self.placement_col.saturating_add(1),
+            Key::R => self.placement_orientation = self.placement_orientation.toggle(),
             Key::Enter => {
                 self.try_place_current_ship();
+                return EventResult::Consumed;
             }
-            _ => {}
+            _ => return EventResult::Ignored,
         }
+        // Every move and every rotation is followed by the same clamp, because
+        // every one of them can carry the ship's far end off the board.
+        self.clamp_placement();
+        EventResult::Consumed
     }
 
     fn try_place_current_ship(&mut self) {
         if let Some(ship) = self.placement_preview_ship() {
             if self.player_fleet.place_ship(ship) {
-                self.placement_index += 1;
+                self.placement_index = self.placement_index.saturating_add(1);
                 self.placement_row = 0;
                 self.placement_col = 0;
                 self.placement_orientation = Orientation::Horizontal;
-                if self.placement_index >= SHIP_DEFS.len() {
+                if self.placement_index >= FLEET.len() {
                     self.phase = GamePhase::Firing;
-                    self.message =
-                        String::from("All ships placed! Select target and fire (Enter).");
-                } else {
-                    let (next_kind, next_size) = SHIP_DEFS[self.placement_index];
-                    self.message = format!(
-                        "Place your {} ({}). R to rotate, Enter to place.",
-                        next_kind.name(),
-                        next_size
-                    );
                 }
+                // One sentence in one place: `placement_prompt` already says
+                // "all placed" when there is nothing left to place, so the
+                // last placement does not need its own copy of that string.
+                self.message = self.placement_prompt();
             } else {
                 self.message = String::from("Invalid placement! Ship overlaps or out of bounds.");
             }
         }
     }
 
-    fn handle_firing_key(&mut self, key: Key) {
+    fn handle_firing_key(&mut self, key: Key) -> EventResult {
         match key {
-            Key::Up if self.cursor_row > 0 => {
-                self.cursor_row -= 1;
-            }
-            Key::Down if self.cursor_row + 1 < GRID_SIZE => {
-                self.cursor_row += 1;
-            }
-            Key::Left if self.cursor_col > 0 => {
-                self.cursor_col -= 1;
-            }
-            Key::Right if self.cursor_col + 1 < GRID_SIZE => {
-                self.cursor_col += 1;
-            }
-            Key::Enter | Key::Space => {
-                self.fire_at_opponent();
-            }
-            _ => {}
+            Key::Up => self.cursor_row = self.cursor_row.saturating_sub(1),
+            Key::Down => self.cursor_row = self.cursor_row.saturating_add(1).min(LAST_CELL),
+            Key::Left => self.cursor_col = self.cursor_col.saturating_sub(1),
+            Key::Right => self.cursor_col = self.cursor_col.saturating_add(1).min(LAST_CELL),
+            Key::Enter | Key::Space => self.fire_at_opponent(),
+            _ => return EventResult::Ignored,
         }
+        EventResult::Consumed
     }
 
     fn fire_at_opponent(&mut self) {
@@ -704,9 +951,9 @@ impl BattleshipApp {
         let (hit, sunk) = self
             .opponent_fleet
             .receive_fire(self.cursor_row, self.cursor_col);
-        self.player_shots += 1;
+        self.player_shots = self.player_shots.saturating_add(1);
         if hit {
-            self.player_hits += 1;
+            self.player_hits = self.player_hits.saturating_add(1);
         }
 
         if let Some(kind) = sunk {
@@ -746,10 +993,12 @@ impl BattleshipApp {
                 self.message.push_str(" AI hit your ship! Your turn.");
             }
         } else if !self.message.starts_with("You sank") {
-            self.message = format!(
-                "{} AI missed. Your turn.",
-                if hit { "Hit!" } else { self.message.as_str() }
-            );
+            // The AI missed -- this arm is only reached when `hit` is false --
+            // so what goes in front of "AI missed" is whatever the player's own
+            // shot said. It used to be written `if hit { "Hit!" } else { … }`,
+            // an arm that could not be taken, inside the branch that has
+            // already established the AI did not hit anything.
+            self.message = format!("{} AI missed. Your turn.", self.message);
         }
 
         // Clear last_sunk_message after the full turn.
@@ -765,497 +1014,668 @@ impl BattleshipApp {
 
     /// Compute the player's hit rate as a percentage.
     fn player_hit_rate(&self) -> f32 {
-        if self.player_shots == 0 {
-            0.0
-        } else {
-            (self.player_hits as f32 / self.player_shots as f32) * 100.0
-        }
+        percent(self.player_hits, self.player_shots)
+    }
+
+    /// Compute the AI's hit rate as a percentage.
+    fn ai_hit_rate(&self) -> f32 {
+        percent(self.ai_state.hits, self.ai_state.shots)
     }
 
     // ── Rendering ───────────────────────────────────────────────────
 
-    fn render(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+    /// The word for the phase the game is in, and the colour it is said in.
+    ///
+    /// One `match`, not two. The word and its colour used to be chosen by two
+    /// separate `match self.phase` arms twenty lines apart, so a phase could
+    /// be renamed in one and left coloured by the other.
+    fn phase_label(&self) -> (&'static str, Color) {
+        match self.phase {
+            GamePhase::Placement => ("Ship Placement", YELLOW),
+            GamePhase::Firing => ("Battle", GREEN),
+            GamePhase::GameOver if self.player_won => ("Victory!", GREEN),
+            GamePhase::GameOver => ("Defeat!", RED),
+        }
+    }
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
+    /// The one line of key help for the phase the game is in.
+    fn help_line(&self) -> &'static str {
+        match self.phase {
+            GamePhase::Placement => {
+                "Arrows or click: move  |  R: rotate  |  Enter or click: place  |  N: new game"
+            }
+            GamePhase::Firing => {
+                "Arrows or click: aim  |  Enter, Space or click: fire  |  N: new game"
+            }
+            GamePhase::GameOver => "N: new game  |  Esc: close",
+        }
+    }
+
+    /// Draw one whole frame at `w` x `h`, hit boxes and all.
+    fn frame(&self, w: f32, h: f32) -> Frame<Target> {
+        let l = Layout::solve(w, h);
+        let mut f = Frame::new(l.window.w, l.window.h);
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: GRID_LEFT_OPPONENT + GRID_WIDTH + GRID_PADDING + LABEL_OFFSET,
-            height: GRID_TOP + GRID_WIDTH + 140.0,
+            width: l.window.w,
+            height: l.window.h,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
+        // A window too small for its own contents crops them rather than
+        // painting over its neighbours: the clip is the window itself, so the
+        // last row of a grid that does not fit is cut off, not spilled.
+        f.clip(l.window);
+        self.draw_header(&l, &mut f);
+        self.draw_message(&l, &mut f);
+        self.draw_body(&l, &mut f);
+        self.draw_stats(&l, &mut f);
+        self.draw_help(&l, &mut f);
+        f.unclip();
+        f
+    }
 
-        // Title
-        cmds.push(RenderCommand::Text {
-            x: GRID_LEFT_PLAYER,
-            y: 16.0,
-            text: String::from("Battleship"),
-            color: LAVENDER,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+    /// The title on the left of the header, the phase on the right.
+    fn draw_header(&self, l: &Layout, f: &mut Frame<Target>) {
+        let ink = Ink::new(l.title, FontWeightHint::Bold, LAVENDER);
+        let band = inset(l.header, l.pad);
+        let title = label_in(f, band, "Battleship", ink);
+        f.hit(Target::Title, title);
 
-        // Phase indicator
-        let phase_text = match self.phase {
-            GamePhase::Placement => "Ship Placement",
-            GamePhase::Firing => "Battle",
-            GamePhase::GameOver => {
-                if self.player_won {
-                    "Victory!"
-                } else {
-                    "Defeat!"
-                }
-            }
-        };
-        cmds.push(RenderCommand::Text {
-            x: GRID_LEFT_OPPONENT,
-            y: 16.0,
-            text: String::from(phase_text),
-            color: match self.phase {
-                GamePhase::Placement => YELLOW,
-                GamePhase::Firing => GREEN,
-                GamePhase::GameOver => {
-                    if self.player_won {
-                        GREEN
-                    } else {
-                        RED
-                    }
-                }
-            },
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        let (word, colour) = self.phase_label();
+        let ink = Ink::new(l.title, FontWeightHint::Bold, colour);
+        // Right-aligned by measuring the words, not by a column the words are
+        // assumed to fit in: the phase names differ in length by half again,
+        // and the window they sit in is whatever the user dragged it to.
+        let w = ink.width(word).min(band.w);
+        let right = Rect::new(band.right() - w, band.y, w, band.h);
+        let phase = label_in(f, right, word, ink);
+        f.hit(Target::Phase, phase);
+    }
 
-        // Message bar
-        cmds.push(RenderCommand::FillRect {
-            x: GRID_LEFT_PLAYER,
-            y: HEADER_HEIGHT,
-            width: GRID_LEFT_OPPONENT + GRID_WIDTH - GRID_LEFT_PLAYER,
-            height: 22.0,
+    /// The single line of running commentary under the header.
+    fn draw_message(&self, l: &Layout, f: &mut Frame<Target>) {
+        if l.message.is_empty() {
+            return;
+        }
+        f.push(RenderCommand::FillRect {
+            x: l.message.x + l.pad,
+            y: l.message.y,
+            width: (l.message.w - l.pad * 2.0).max(0.0),
+            height: l.message.h,
             color: SURFACE0,
             corner_radii: CornerRadii::all(3.0),
         });
-        cmds.push(RenderCommand::Text {
-            x: GRID_LEFT_PLAYER + 8.0,
-            y: HEADER_HEIGHT + 3.0,
-            text: self.message.clone(),
-            color: TEXT_COLOR,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Grid titles
-        cmds.push(RenderCommand::Text {
-            x: GRID_LEFT_PLAYER + GRID_WIDTH / 2.0 - 40.0,
-            y: GRID_TOP - 18.0,
-            text: String::from("Your Fleet"),
-            color: SUBTEXT0,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        cmds.push(RenderCommand::Text {
-            x: GRID_LEFT_OPPONENT + GRID_WIDTH / 2.0 - 55.0,
-            y: GRID_TOP - 18.0,
-            text: String::from("Opponent's Ocean"),
-            color: SUBTEXT0,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Column labels (1-10) for both grids
-        self.render_grid_labels(&mut cmds, GRID_LEFT_PLAYER, GRID_TOP);
-        self.render_grid_labels(&mut cmds, GRID_LEFT_OPPONENT, GRID_TOP);
-
-        // Player grid
-        self.render_player_grid(&mut cmds);
-
-        // Opponent grid
-        self.render_opponent_grid(&mut cmds);
-
-        // Stats panel below the grids
-        self.render_stats(&mut cmds);
-
-        // Help text
-        self.render_help(&mut cmds);
-
-        cmds
+        let band = inset(l.message, l.pad);
+        let ink = Ink::new(l.font, FontWeightHint::Regular, TEXT_COLOR);
+        label_in(f, band, &self.message, ink);
+        // The box a click is answered by is the whole bar, not the glyphs: the
+        // message is what the bar is *for*, and an empty message would
+        // otherwise leave a strip of the window answering nothing at all.
+        f.hit(Target::Message, l.message);
     }
 
-    fn render_grid_labels(&self, cmds: &mut Vec<RenderCommand>, grid_x: f32, grid_y: f32) {
-        // Column labels: 1-10
+    /// The two grids, side by side, captions and labels and all.
+    fn draw_body(&self, l: &Layout, f: &mut Frame<Target>) {
+        let g = l.grids();
+        self.draw_own_grid(l, f, g);
+        self.draw_ocean_grid(l, f, g);
+    }
+
+    /// The caption, the A-J column and the 1-10 row around one grid.
+    fn draw_grid_chrome(l: &Layout, f: &mut Frame<Target>, g: Grids, side: Side) {
+        let origin = side.origin(g);
+        let board = g.board_rect(origin);
+        let ink = Ink::new(l.small, FontWeightHint::Bold, SUBTEXT0);
+        let caption = side.caption();
+        // Centred over the grid it names, by measuring it. The old drawing
+        // subtracted a hand-tuned half-width -- 40 for "Your Fleet", 55 for
+        // "Opponent's Ocean" -- so the two captions were centred to different
+        // standards and neither survived a change of font size.
+        let w = ink.width(caption);
+        let x = board.x + (board.w - w) / 2.0;
+        let rect = label(f, x, g.caption_y, caption, ink);
+        f.hit(side.label_target(), rect);
+
+        let ink = Ink::new(l.small, FontWeightHint::Regular, OVERLAY0);
+        let line = ink.height();
         for c in 0..GRID_SIZE {
-            let x = grid_x + c as f32 * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2.0 - 4.0;
-            let label = format!("{}", c + 1);
-            cmds.push(RenderCommand::Text {
-                x,
-                y: grid_y - 4.0,
-                text: label,
-                color: OVERLAY0,
-                font_size: LABEL_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            let s = format!("{}", c.saturating_add(1));
+            let cell = g.cell_rect(origin, 0, c);
+            let x = cell.x + (cell.w - ink.width(&s)) / 2.0;
+            let y = origin.1 - g.label + (g.label - line) / 2.0;
+            label(f, x, y, &s, ink);
         }
-        // Row labels: A-J
         for r in 0..GRID_SIZE {
-            let y =
-                grid_y + LABEL_OFFSET + r as f32 * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2.0 - 7.0;
-            let label = String::from((b'A' + r as u8) as char);
-            cmds.push(RenderCommand::Text {
-                x: grid_x - LABEL_OFFSET + 2.0,
-                y,
-                text: label,
-                color: OVERLAY0,
-                font_size: LABEL_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            let s = String::from(char::from(b'A'.saturating_add(byte(r))));
+            let cell = g.cell_rect(origin, r, 0);
+            let x = origin.0 - g.label + (g.label - ink.width(&s)) / 2.0;
+            let y = cell.y + (cell.h - line) / 2.0;
+            label(f, x, y, &s, ink);
         }
     }
 
-    fn render_player_grid(&self, cmds: &mut Vec<RenderCommand>) {
-        let gx = GRID_LEFT_PLAYER;
-        let gy = GRID_TOP + LABEL_OFFSET;
-
-        // Grid background
-        cmds.push(RenderCommand::FillRect {
-            x: gx - 3.0,
-            y: gy - 3.0,
-            width: GRID_WIDTH + 6.0,
-            height: GRID_WIDTH + 6.0,
-            color: CRUST,
-            corner_radii: CornerRadii::all(6.0),
-        });
+    /// The player's own fleet, ships visible, with the AI's shots marked.
+    fn draw_own_grid(&self, l: &Layout, f: &mut Frame<Target>, g: Grids) {
+        Self::draw_grid_chrome(l, f, g, Side::Own);
+        let origin = g.own;
+        let board = g.board_rect(origin);
+        Self::draw_board_backing(f, g, board);
+        f.hit(Target::OwnBoard, board);
 
         for r in 0..GRID_SIZE {
             for c in 0..GRID_SIZE {
-                let cx = gx + c as f32 * (CELL_SIZE + CELL_GAP);
-                let cy = gy + r as f32 * (CELL_SIZE + CELL_GAP);
-
-                // Cell background
-                let bg = if self.player_fleet.ship_grid[r][c].is_some() {
-                    // Ship cell — show the ship's color.
-                    if let Some(idx) = self.player_fleet.ship_grid[r][c] {
-                        if self.player_fleet.is_ship_sunk(idx) {
-                            // Sunk ship cells are dimmed.
-                            OVERLAY0
-                        } else {
-                            self.player_fleet.ships[idx].kind.color()
-                        }
-                    } else {
-                        SURFACE0
-                    }
-                } else {
-                    SURFACE0
+                let rect = g.cell_rect(origin, r, c);
+                let colour = match self.player_fleet.ship_at(r, c) {
+                    Some(idx) if self.player_fleet.is_ship_sunk(idx) => OVERLAY0,
+                    Some(idx) => self
+                        .player_fleet
+                        .ships
+                        .get(idx)
+                        .map_or(SURFACE0, |s| s.kind.color()),
+                    None => SURFACE0,
                 };
-
-                cmds.push(RenderCommand::FillRect {
-                    x: cx,
-                    y: cy,
-                    width: CELL_SIZE,
-                    height: CELL_SIZE,
-                    color: bg,
-                    corner_radii: CornerRadii::all(CORNER_RADIUS),
-                });
-
-                // Hit/miss markers from AI shots
-                match self.player_fleet.marks[r][c] {
-                    CellMark::Hit => {
-                        // Red X
-                        self.render_hit_marker(cmds, cx, cy);
-                    }
-                    CellMark::Miss => {
-                        // Blue dot
-                        self.render_miss_marker(cmds, cx, cy);
-                    }
-                    CellMark::Empty => {}
-                }
+                Self::draw_cell(f, rect, colour, g.cell);
+                Self::draw_mark(f, rect, self.player_fleet.mark_at(r, c));
+                f.hit(Target::Own(byte(r), byte(c)), rect);
             }
         }
 
-        // Placement preview overlay
+        // The ship the player is placing, floating over the board.
         if self.phase == GamePhase::Placement
             && let Some(ship) = self.placement_preview_ship()
         {
-            let valid = self.is_placement_valid();
-            let preview_color = if valid {
-                Color::rgba(166, 227, 161, 120) // Green tint
+            let tint = if self.is_placement_valid() {
+                Color::rgba(166, 227, 161, 120)
             } else {
-                Color::rgba(243, 139, 168, 120) // Red tint
+                Color::rgba(243, 139, 168, 120)
             };
-            let cells = ship.cells();
-            for (r, c) in cells {
+            for (r, c) in ship.cells() {
                 if r < GRID_SIZE && c < GRID_SIZE {
-                    let cx = gx + c as f32 * (CELL_SIZE + CELL_GAP);
-                    let cy = gy + r as f32 * (CELL_SIZE + CELL_GAP);
-                    cmds.push(RenderCommand::FillRect {
-                        x: cx,
-                        y: cy,
-                        width: CELL_SIZE,
-                        height: CELL_SIZE,
-                        color: preview_color,
-                        corner_radii: CornerRadii::all(CORNER_RADIUS),
-                    });
+                    Self::draw_cell(f, g.cell_rect(origin, r, c), tint, g.cell);
                 }
             }
         }
     }
 
-    fn render_opponent_grid(&self, cmds: &mut Vec<RenderCommand>) {
-        let gx = GRID_LEFT_OPPONENT;
-        let gy = GRID_TOP + LABEL_OFFSET;
+    /// The opponent's ocean: water until fired upon, ships revealed at the end.
+    fn draw_ocean_grid(&self, l: &Layout, f: &mut Frame<Target>, g: Grids) {
+        Self::draw_grid_chrome(l, f, g, Side::Ocean);
+        let origin = g.ocean;
+        let board = g.board_rect(origin);
+        Self::draw_board_backing(f, g, board);
+        f.hit(Target::OceanBoard, board);
 
-        // Grid background
-        cmds.push(RenderCommand::FillRect {
-            x: gx - 3.0,
-            y: gy - 3.0,
-            width: GRID_WIDTH + 6.0,
-            height: GRID_WIDTH + 6.0,
-            color: CRUST,
-            corner_radii: CornerRadii::all(6.0),
-        });
-
+        let reveal = self.phase == GamePhase::GameOver;
         for r in 0..GRID_SIZE {
             for c in 0..GRID_SIZE {
-                let cx = gx + c as f32 * (CELL_SIZE + CELL_GAP);
-                let cy = gy + r as f32 * (CELL_SIZE + CELL_GAP);
-
-                // Only show water unless the cell has been fired upon
-                // or the game is over (reveal ships).
-                let bg = if self.phase == GamePhase::GameOver {
-                    // Reveal all ships on game over.
-                    if let Some(idx) = self.opponent_fleet.ship_grid[r][c] {
-                        if self.opponent_fleet.is_ship_sunk(idx) {
-                            OVERLAY0
-                        } else {
-                            self.opponent_fleet.ships[idx].kind.color()
-                        }
-                    } else {
-                        SURFACE0
-                    }
+                let rect = g.cell_rect(origin, r, c);
+                let colour = if self.opponent_fleet.is_cell_sunk(r, c) {
+                    OVERLAY0
+                } else if reveal {
+                    self.opponent_fleet
+                        .ship_at(r, c)
+                        .and_then(|idx| self.opponent_fleet.ships.get(idx))
+                        .map_or(SURFACE0, |s| s.kind.color())
                 } else {
-                    // During play, show sunk ship cells so player can see them.
-                    if self.opponent_fleet.is_cell_sunk(r, c) {
-                        OVERLAY0
-                    } else {
-                        SURFACE0
-                    }
+                    SURFACE0
                 };
-
-                cmds.push(RenderCommand::FillRect {
-                    x: cx,
-                    y: cy,
-                    width: CELL_SIZE,
-                    height: CELL_SIZE,
-                    color: bg,
-                    corner_radii: CornerRadii::all(CORNER_RADIUS),
-                });
-
-                // Hit/miss markers
-                match self.opponent_fleet.marks[r][c] {
-                    CellMark::Hit => {
-                        self.render_hit_marker(cmds, cx, cy);
-                    }
-                    CellMark::Miss => {
-                        self.render_miss_marker(cmds, cx, cy);
-                    }
-                    CellMark::Empty => {}
-                }
+                Self::draw_cell(f, rect, colour, g.cell);
+                Self::draw_mark(f, rect, self.opponent_fleet.mark_at(r, c));
+                f.hit(Target::Ocean(byte(r), byte(c)), rect);
             }
         }
 
-        // Cursor highlight during firing phase
         if self.phase == GamePhase::Firing {
-            let cx = gx + self.cursor_col as f32 * (CELL_SIZE + CELL_GAP);
-            let cy = gy + self.cursor_row as f32 * (CELL_SIZE + CELL_GAP);
-            cmds.push(RenderCommand::StrokeRect {
-                x: cx,
-                y: cy,
-                width: CELL_SIZE,
-                height: CELL_SIZE,
+            let rect = g.cell_rect(origin, self.cursor_row, self.cursor_col);
+            f.push(RenderCommand::StrokeRect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.w,
+                height: rect.h,
                 color: YELLOW,
-                line_width: 2.5,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
+                line_width: (g.cell * 0.07).max(1.0),
+                corner_radii: CornerRadii::all(g.cell * 0.12),
             });
         }
     }
 
-    fn render_hit_marker(&self, cmds: &mut Vec<RenderCommand>, cx: f32, cy: f32) {
-        let mid_x = cx + CELL_SIZE / 2.0;
-        let mid_y = cy + CELL_SIZE / 2.0;
-        let half = MARKER_SIZE / 2.0;
-        // Red X: two diagonal lines
-        cmds.push(RenderCommand::Line {
-            x1: mid_x - half,
-            y1: mid_y - half,
-            x2: mid_x + half,
-            y2: mid_y + half,
-            color: RED,
-            width: 2.5,
-        });
-        cmds.push(RenderCommand::Line {
-            x1: mid_x + half,
-            y1: mid_y - half,
-            x2: mid_x - half,
-            y2: mid_y + half,
-            color: RED,
-            width: 2.5,
+    /// The dark mat a grid's cells sit on, a hair larger than the cells.
+    fn draw_board_backing(f: &mut Frame<Target>, g: Grids, board: Rect) {
+        let bleed = (g.step - g.cell).max(0.0);
+        f.push(RenderCommand::FillRect {
+            x: board.x - bleed,
+            y: board.y - bleed,
+            width: (board.w + bleed).max(0.0),
+            height: (board.h + bleed).max(0.0),
+            color: CRUST,
+            corner_radii: CornerRadii::all(g.cell * 0.2),
         });
     }
 
-    fn render_miss_marker(&self, cmds: &mut Vec<RenderCommand>, cx: f32, cy: f32) {
-        let mid_x = cx + CELL_SIZE / 2.0 - MARKER_SIZE / 4.0;
-        let mid_y = cy + CELL_SIZE / 2.0 - MARKER_SIZE / 4.0;
-        // Blue dot (small filled rect with rounded corners to approximate circle)
-        cmds.push(RenderCommand::FillRect {
-            x: mid_x,
-            y: mid_y,
-            width: MARKER_SIZE / 2.0,
-            height: MARKER_SIZE / 2.0,
-            color: BLUE,
-            corner_radii: CornerRadii::all(MARKER_SIZE / 4.0),
+    /// One square of water, ship or wreck.
+    fn draw_cell(f: &mut Frame<Target>, rect: Rect, colour: Color, cell: f32) {
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: colour,
+            corner_radii: CornerRadii::all(cell * 0.12),
         });
     }
 
-    fn render_stats(&self, cmds: &mut Vec<RenderCommand>) {
-        let stats_y = GRID_TOP + LABEL_OFFSET + GRID_WIDTH + 16.0;
+    /// What a shot left behind: a red cross for a hit, a blue dot for a miss.
+    fn draw_mark(f: &mut Frame<Target>, rect: Rect, mark: CellMark) {
+        let (cx, cy) = rect.centre();
+        let half = rect.w * 0.26;
+        match mark {
+            CellMark::Hit => {
+                let width = (rect.w * 0.08).max(1.0);
+                for (dx, dy) in [(-half, -half), (half, -half)] {
+                    f.push(RenderCommand::Line {
+                        x1: cx + dx,
+                        y1: cy + dy,
+                        x2: cx - dx,
+                        y2: cy - dy,
+                        color: RED,
+                        width,
+                    });
+                }
+            }
+            CellMark::Miss => {
+                f.push(RenderCommand::FillRect {
+                    x: cx - half / 2.0,
+                    y: cy - half / 2.0,
+                    width: half,
+                    height: half,
+                    color: BLUE,
+                    corner_radii: CornerRadii::all(half / 2.0),
+                });
+            }
+            CellMark::Empty => {}
+        }
+    }
 
-        // Stats background
-        cmds.push(RenderCommand::FillRect {
-            x: GRID_LEFT_PLAYER,
-            y: stats_y,
-            width: GRID_LEFT_OPPONENT + GRID_WIDTH - GRID_LEFT_PLAYER,
-            height: 56.0,
+    /// Six figures on two rows: the player's, the fleets', the AI's.
+    fn draw_stats(&self, l: &Layout, f: &mut Frame<Target>) {
+        if l.stats.is_empty() {
+            return;
+        }
+        f.push(RenderCommand::FillRect {
+            x: l.stats.x + l.pad,
+            y: l.stats.y,
+            width: (l.stats.w - l.pad * 2.0).max(0.0),
+            height: l.stats.h,
             color: MANTLE,
             corner_radii: CornerRadii::all(6.0),
         });
+        f.hit(Target::Stats, l.stats);
 
-        // Player stats
-        let shots_text = format!("Shots: {}", self.player_shots);
-        cmds.push(RenderCommand::Text {
-            x: GRID_LEFT_PLAYER + 12.0,
-            y: stats_y + 8.0,
-            text: shots_text,
-            color: TEXT_COLOR,
-            font_size: STATS_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        let mine = self.player_fleet.ships_remaining();
+        let theirs = self.opponent_fleet.ships_remaining();
+        let fleet_colour = |left: usize| if left <= 1 { RED } else { GREEN };
+        let rows = [
+            [
+                (format!("Shots: {}", self.player_shots), TEXT_COLOR, false),
+                (
+                    format!("Your Ships: {}/{}", mine, FLEET.len()),
+                    fleet_colour(mine),
+                    true,
+                ),
+                (
+                    format!("AI Shots: {}", self.ai_state.shots),
+                    TEXT_COLOR,
+                    false,
+                ),
+            ],
+            [
+                (
+                    format!("Hit Rate: {:.1}%", self.player_hit_rate()),
+                    TEXT_COLOR,
+                    false,
+                ),
+                (
+                    format!("Enemy Ships: {}/{}", theirs, FLEET.len()),
+                    fleet_colour(theirs),
+                    true,
+                ),
+                (
+                    format!("AI Hit Rate: {:.1}%", self.ai_hit_rate()),
+                    TEXT_COLOR,
+                    false,
+                ),
+            ],
+        ];
 
-        let hit_rate_text = format!("Hit Rate: {:.1}%", self.player_hit_rate());
-        cmds.push(RenderCommand::Text {
-            x: GRID_LEFT_PLAYER + 12.0,
-            y: stats_y + 28.0,
-            text: hit_rate_text,
-            color: TEXT_COLOR,
-            font_size: STATS_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Ships remaining
-        let player_remaining = self.player_fleet.ships_remaining();
-        let opponent_remaining = self.opponent_fleet.ships_remaining();
-
-        let your_ships = format!("Your Ships: {}/5", player_remaining);
-        cmds.push(RenderCommand::Text {
-            x: GRID_LEFT_PLAYER + 180.0,
-            y: stats_y + 8.0,
-            text: your_ships,
-            color: if player_remaining <= 1 { RED } else { GREEN },
-            font_size: STATS_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        let enemy_ships = format!("Enemy Ships: {}/5", opponent_remaining);
-        cmds.push(RenderCommand::Text {
-            x: GRID_LEFT_PLAYER + 180.0,
-            y: stats_y + 28.0,
-            text: enemy_ships,
-            color: if opponent_remaining <= 1 { RED } else { GREEN },
-            font_size: STATS_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // AI stats
-        let ai_shots_text = format!("AI Shots: {}", self.ai_state.shots);
-        cmds.push(RenderCommand::Text {
-            x: GRID_LEFT_OPPONENT,
-            y: stats_y + 8.0,
-            text: ai_shots_text,
-            color: TEXT_COLOR,
-            font_size: STATS_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        let ai_rate = if self.ai_state.shots == 0 {
-            0.0
-        } else {
-            (self.ai_state.hits as f32 / self.ai_state.shots as f32) * 100.0
-        };
-        let ai_rate_text = format!("AI Hit Rate: {ai_rate:.1}%");
-        cmds.push(RenderCommand::Text {
-            x: GRID_LEFT_OPPONENT,
-            y: stats_y + 28.0,
-            text: ai_rate_text,
-            color: TEXT_COLOR,
-            font_size: STATS_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        // Three even columns and two even rows carved out of whatever height
+        // the band was given, rather than the old `stats_y + 8` and
+        // `stats_y + 28` -- two offsets into a box of a fixed 56 pixels.
+        let inner = inset(l.stats, l.pad);
+        let row_h = inner.h / 2.0;
+        let col_w = inner.w / 3.0;
+        for (r, row) in rows.iter().enumerate() {
+            for (c, (words, colour, bold)) in row.iter().enumerate() {
+                let weight = if *bold {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                };
+                let cell = Rect::new(
+                    inner.x + f32_from_usize(c) * col_w,
+                    inner.y + f32_from_usize(r) * row_h,
+                    col_w,
+                    row_h,
+                );
+                label_in(f, cell, words, Ink::new(l.small, weight, *colour));
+            }
+        }
     }
 
-    fn render_help(&self, cmds: &mut Vec<RenderCommand>) {
-        let help_y = GRID_TOP + LABEL_OFFSET + GRID_WIDTH + 80.0;
-        let help_text = match self.phase {
-            GamePhase::Placement => "Arrow keys: move | R: rotate | Enter: place | N: new game",
-            GamePhase::Firing => "Arrow keys: move cursor | Enter/Space: fire | N: new game",
-            GamePhase::GameOver => "N: new game | Esc: reset",
+    /// The key help along the bottom.
+    fn draw_help(&self, l: &Layout, f: &mut Frame<Target>) {
+        if l.help.is_empty() {
+            return;
+        }
+        let ink = Ink::new(l.small, FontWeightHint::Regular, OVERLAY0);
+        label_in(f, inset(l.help, l.pad), self.help_line(), ink);
+        f.hit(Target::Help, l.help);
+    }
+
+    // ── Input ───────────────────────────────────────────────────────
+
+    /// The size the next frame will be drawn at, and the next click read
+    /// against.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.size = (width.max(0.0), height.max(0.0));
+    }
+
+    /// Act on a click at window coordinates, by asking the frame what was
+    /// drawn there.
+    ///
+    /// A 10x10 grid is the most click-natural thing a program can put on a
+    /// screen, and this one could not be clicked at all: every cell was
+    /// reachable only by walking a cursor to it with the arrow keys.
+    fn click(&mut self, x: f32, y: f32, button: MouseButton) -> EventResult {
+        if button != MouseButton::Left {
+            return EventResult::Ignored;
+        }
+        let (w, h) = self.size;
+        let Some(target) = self.frame(w, h).hit_test(x, y) else {
+            return EventResult::Ignored;
         };
-        cmds.push(RenderCommand::Text {
-            x: GRID_LEFT_PLAYER,
-            y: help_y,
-            text: String::from(help_text),
-            color: OVERLAY0,
-            font_size: STATS_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        match target {
+            // A click on one's own board places the ship being placed there,
+            // in one action rather than two: the cursor goes to the cell and
+            // the placement is attempted, exactly as arrow keys then Enter
+            // would have done. An invalid cell is refused with the same
+            // message the keys get, so a mis-click costs nothing.
+            Target::Own(r, c) if self.phase == GamePhase::Placement => {
+                self.placement_row = usize::from(r);
+                self.placement_col = usize::from(c);
+                self.clamp_placement();
+                self.try_place_current_ship();
+                EventResult::Consumed
+            }
+            Target::Ocean(r, c) if self.phase == GamePhase::Firing => {
+                self.cursor_row = usize::from(r);
+                self.cursor_col = usize::from(c);
+                self.fire_at_opponent();
+                EventResult::Consumed
+            }
+            // Every other box is answered and does nothing: a click on the
+            // opponent's ocean while still placing ships must not fall through
+            // to the board behind it, and there is no board behind it.
+            Target::Own(_, _)
+            | Target::Ocean(_, _)
+            | Target::OwnBoard
+            | Target::OceanBoard
+            | Target::Title
+            | Target::Phase
+            | Target::Message
+            | Target::OwnLabel
+            | Target::OceanLabel
+            | Target::Stats
+            | Target::Help => EventResult::Consumed,
+        }
     }
 }
 
-fn main() {
-    let _app = BattleshipApp::new();
+// ── Which grid ──────────────────────────────────────────────────────
+
+/// One of the two grids, so the chrome around them is drawn once.
+///
+/// The captions, the A-J column and the 1-10 row were three near-copies of
+/// each other, called twice with different origins; the caption was the only
+/// part that actually differed, and it differed by a string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Own,
+    Ocean,
+}
+
+impl Side {
+    fn origin(self, g: Grids) -> (f32, f32) {
+        match self {
+            Self::Own => g.own,
+            Self::Ocean => g.ocean,
+        }
+    }
+
+    fn caption(self) -> &'static str {
+        match self {
+            Self::Own => "Your Fleet",
+            Self::Ocean => "Opponent's Ocean",
+        }
+    }
+
+    fn label_target(self) -> Target {
+        match self {
+            Self::Own => Target::OwnLabel,
+            Self::Ocean => Target::OceanLabel,
+        }
+    }
+}
+
+// ── Text ────────────────────────────────────────────────────────────
+
+/// A size, a weight and a colour -- one run of text's whole appearance.
+///
+/// It is one value because it travels as one: every caption in the program
+/// passed the same three fields down through four levels of drawing helper,
+/// and a helper that took them separately took them in the wrong order twice.
+#[derive(Debug, Clone, Copy)]
+struct Ink {
+    size: f32,
+    weight: FontWeightHint,
+    color: Color,
+}
+
+impl Ink {
+    const fn new(size: f32, weight: FontWeightHint, color: Color) -> Self {
+        Self {
+            size,
+            weight,
+            color,
+        }
+    }
+
+    /// How wide `s` is when drawn in this ink.
+    fn width(self, s: &str) -> f32 {
+        text::measure(s, self.size, self.weight)
+    }
+
+    /// How tall one line of this ink is.
+    fn height(self) -> f32 {
+        text::line_height(self.size, self.weight)
+    }
+}
+
+/// Draw `s` at `(x, y)` and hand back the box its glyphs occupy.
+fn label(f: &mut Frame<Target>, x: f32, y: f32, s: &str, ink: Ink) -> Rect {
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: s.to_string(),
+        color: ink.color,
+        font_size: ink.size,
+        font_weight: ink.weight,
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+    Rect::new(x, y, ink.width(s), ink.height())
+}
+
+/// Draw `s` left-aligned and vertically centred in `area`, elided to fit.
+///
+/// Elided rather than clipped because every string that goes through here is
+/// variable-length -- a message, a hit rate, a line of key help -- and a
+/// fragment with no mark on it reads as the whole.
+fn label_in(f: &mut Frame<Target>, area: Rect, s: &str, ink: Ink) -> Rect {
+    let y = area.y + (area.h - ink.height()).max(0.0) / 2.0;
+    f.push(RenderCommand::Text {
+        x: area.x,
+        y,
+        text: s.to_string(),
+        color: ink.color,
+        font_size: ink.size,
+        font_weight: ink.weight,
+        max_width: Some(area.w.max(0.0)),
+        overflow: TextOverflow::Ellipsis,
+    });
+    Rect::new(area.x, y, ink.width(s).min(area.w.max(0.0)), ink.height())
+}
+
+// ── The window ──────────────────────────────────────────────────────
+
+/// The one body every event goes through, whichever side it arrives from.
+///
+/// The window calls it and the tests call it, so a key the tests prove works
+/// is the same key the window delivers.
+fn handle_event(app: &mut BattleshipApp, event: &Event) -> EventResult {
+    match event {
+        Event::Key(KeyEvent {
+            key, pressed: true, ..
+        }) => app.handle_key(*key),
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }) => app.click(*x, *y, *button),
+        Event::Resize { width, height } => {
+            app.resize(f32_from_u32(*width), f32_from_u32(*height));
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+/// A window's `u32` size as the `f32` the layout is solved from.
+fn f32_from_u32(v: u32) -> f32 {
+    f32::from(u16::try_from(v).unwrap_or(u16::MAX))
+}
+
+impl App for BattleshipApp {
+    fn title(&self) -> String {
+        "Battleship".to_string()
+    }
+
+    fn app_id(&self) -> String {
+        "battleship".to_string()
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the natural size is two small positive whole numbers"
+    )]
+    fn initial_size(&self) -> (u32, u32) {
+        // Converted from the float pair rather than written out again: two
+        // spellings of one size are two things that can drift apart.
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        // Escape closes the window. It used to deal a new board -- see
+        // `handle_key` -- which is the one thing a player pressing Escape
+        // could least afford it to do.
+        if matches!(
+            event,
+            Event::Key(KeyEvent {
+                key: Key::Escape,
+                pressed: true,
+                ..
+            })
+        ) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against, which is the only reason it is stored at all.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for BattleshipApp {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
+    }
+}
+
+fn main() -> ExitCode {
+    let mut game = BattleshipApp::new();
+    app::launch("battleship", &mut game)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
+    // Panicking on bad data is what a test is for; these are the lints the
+    // production code above is held to and the test code below is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation
+    )]
+
     use super::*;
 
     // ── AI fleet placement is not confined to one colour of the board ──
@@ -2019,7 +2439,7 @@ mod tests {
             app.placement_row = row;
             app.placement_col = col;
             app.placement_orientation = Orientation::Horizontal;
-            if i < SHIP_DEFS.len() {
+            if i < FLEET.len() {
                 app.handle_key(Key::Enter);
             }
         }
@@ -2161,13 +2581,6 @@ mod tests {
         assert_eq!(app.phase, GamePhase::Placement);
     }
 
-    #[test]
-    fn test_escape_resets() {
-        let mut app = setup_firing_app();
-        app.handle_key(Key::Escape);
-        assert_eq!(app.phase, GamePhase::Placement);
-    }
-
     // ── AI placement tests ──────────────────────────────────────────
 
     #[test]
@@ -2206,7 +2619,7 @@ mod tests {
             .iter()
             .map(|s| s.kind.size())
             .collect();
-        sizes.sort();
+        sizes.sort_unstable();
         assert_eq!(sizes, vec![2, 3, 3, 4, 5]);
     }
 
@@ -2230,211 +2643,6 @@ mod tests {
             .zip(app2.opponent_fleet.ships.iter())
             .any(|(a, b)| a.row != b.row || a.col != b.col || a.orientation != b.orientation);
         assert!(differ, "Different seeds should produce different layouts");
-    }
-
-    // ── Rendering tests ─────────────────────────────────────────────
-
-    #[test]
-    fn test_render_produces_commands() {
-        let app = BattleshipApp::new();
-        let cmds = app.render();
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_has_title() {
-        let app = BattleshipApp::new();
-        let cmds = app.render();
-        let has_title = cmds
-            .iter()
-            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Battleship"));
-        assert!(has_title);
-    }
-
-    #[test]
-    fn test_render_has_grid_titles() {
-        let app = BattleshipApp::new();
-        let cmds = app.render();
-        let has_your_fleet = cmds
-            .iter()
-            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Your Fleet"));
-        let has_opponent = cmds.iter().any(
-            |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Opponent's Ocean"),
-        );
-        assert!(has_your_fleet);
-        assert!(has_opponent);
-    }
-
-    #[test]
-    fn test_render_has_column_labels() {
-        let app = BattleshipApp::new();
-        let cmds = app.render();
-        for num in 1..=10 {
-            let num_str = format!("{num}");
-            let has_label = cmds
-                .iter()
-                .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == &num_str));
-            assert!(has_label, "Missing column label {num}");
-        }
-    }
-
-    #[test]
-    fn test_render_has_row_labels() {
-        let app = BattleshipApp::new();
-        let cmds = app.render();
-        for ch in b'A'..=b'J' {
-            let label = String::from(ch as char);
-            let has_label = cmds
-                .iter()
-                .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == &label));
-            assert!(has_label, "Missing row label {}", label);
-        }
-    }
-
-    #[test]
-    fn test_render_has_message() {
-        let app = BattleshipApp::new();
-        let cmds = app.render();
-        let has_msg = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Place your Carrier"))
-        });
-        assert!(has_msg);
-    }
-
-    #[test]
-    fn test_render_has_help_text() {
-        let app = BattleshipApp::new();
-        let cmds = app.render();
-        let has_help = cmds.iter().any(
-            |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Arrow keys")),
-        );
-        assert!(has_help);
-    }
-
-    #[test]
-    fn test_render_firing_phase_has_cursor() {
-        let mut app = setup_firing_app();
-        app.cursor_row = 3;
-        app.cursor_col = 4;
-        let cmds = app.render();
-        // Should have a StrokeRect for the cursor.
-        let has_cursor = cmds
-            .iter()
-            .any(|cmd| matches!(cmd, RenderCommand::StrokeRect { color, .. } if *color == YELLOW));
-        assert!(has_cursor);
-    }
-
-    #[test]
-    fn test_render_placement_preview() {
-        let app = BattleshipApp::new();
-        let cmds = app.render();
-        // The placement preview draws colored FillRects with semi-transparent green.
-        // Just verify render doesn't crash and has a reasonable number of commands.
-        assert!(cmds.len() > 50);
-    }
-
-    #[test]
-    fn test_render_stats_panel() {
-        let app = BattleshipApp::new();
-        let cmds = app.render();
-        let has_shots = cmds
-            .iter()
-            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Shots:")));
-        assert!(has_shots);
-    }
-
-    #[test]
-    fn test_render_ships_remaining_stat() {
-        let app = BattleshipApp::new();
-        let cmds = app.render();
-        let has_enemy_ships = cmds.iter().any(
-            |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Enemy Ships:")),
-        );
-        assert!(has_enemy_ships);
-    }
-
-    #[test]
-    fn test_render_hit_rate_stat() {
-        let app = BattleshipApp::new();
-        let cmds = app.render();
-        let has_rate = cmds.iter().any(
-            |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Hit Rate:")),
-        );
-        assert!(has_rate);
-    }
-
-    #[test]
-    fn test_render_after_hit() {
-        let mut app = setup_firing_app();
-        // Find a cell with an opponent ship and fire at it.
-        let mut target = (0, 0);
-        'outer: for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                if app.opponent_fleet.ship_grid[r][c].is_some() {
-                    target = (r, c);
-                    break 'outer;
-                }
-            }
-        }
-        app.cursor_row = target.0;
-        app.cursor_col = target.1;
-        app.handle_key(Key::Enter);
-        let cmds = app.render();
-        // Should have hit markers (Line commands for the X)
-        let has_hit_line = cmds
-            .iter()
-            .any(|cmd| matches!(cmd, RenderCommand::Line { color, .. } if *color == RED));
-        assert!(has_hit_line);
-    }
-
-    #[test]
-    fn test_render_after_miss() {
-        let mut app = setup_firing_app();
-        // Find a cell without an opponent ship and fire at it.
-        let mut target = (0, 0);
-        'outer: for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                if app.opponent_fleet.ship_grid[r][c].is_none() {
-                    target = (r, c);
-                    break 'outer;
-                }
-            }
-        }
-        app.cursor_row = target.0;
-        app.cursor_col = target.1;
-        app.handle_key(Key::Enter);
-        let cmds = app.render();
-        // Should have a blue miss dot (FillRect with BLUE color)
-        let has_miss_dot = cmds
-            .iter()
-            .any(|cmd| matches!(cmd, RenderCommand::FillRect { color, .. } if *color == BLUE));
-        assert!(has_miss_dot);
-    }
-
-    #[test]
-    fn test_render_game_over_victory() {
-        let mut app = setup_firing_app();
-        app.phase = GamePhase::GameOver;
-        app.player_won = true;
-        app.message = String::from("VICTORY!");
-        let cmds = app.render();
-        let has_victory = cmds
-            .iter()
-            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Victory")));
-        assert!(has_victory);
-    }
-
-    #[test]
-    fn test_render_game_over_defeat() {
-        let mut app = setup_firing_app();
-        app.phase = GamePhase::GameOver;
-        app.player_won = false;
-        app.message = String::from("DEFEAT!");
-        let cmds = app.render();
-        let has_defeat = cmds
-            .iter()
-            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Defeat")));
-        assert!(has_defeat);
     }
 
     // ── Integration / gameplay tests ────────────────────────────────

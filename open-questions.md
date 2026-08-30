@@ -569,6 +569,28 @@ day: a test harness spent it reporting 105 differences against a `bc` that was
 not the `bc` anyone thought it was measuring
 (`known-issues.md` → `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`).
 
+**It cost a second session on 2026-08-30, and the shape was different.** The
+`bc` incident was a harness measuring the wrong binary. This one was *me*
+improving the wrong source file: five commits of GNU-parity work went into
+`userspace/tar` — which nothing outside the workspace glob references — while
+the `tar` that ships and that `scripts/tar-diff.sh` certifies (178 cases) is
+`coreutils/src/bin/tar.rs`, now 7189 lines to the standalone's 2724. The
+duplication is not merely a build hazard, then; it also silently misdirects
+work, and it does so in the direction that wastes the most of it.
+
+The `tar` pair matters for the choice below because it is the clearest case yet
+of the two sides diverging *after* the survey was taken. On 2026-08-22 the
+standalone `tar` was the better one and the table said so; eight days later the
+bundle's is more than twice its size and holds the old-option style, the
+160-entry long-option refusal table and the delayed-symlink traversal defence.
+Under option A, `tar` is one of the pairs where §8 would retire the
+implementation that passes 178 differential cases in favour of the one no
+harness measures. That is not an argument against A by itself — A allows moving
+the better code into the surviving crate — but it does mean the per-pair reading
+A and B both require cannot be done from the 2026-08-22 survey, which is now
+stale in at least this one row and was believed for eight days after it stopped
+being true.
+
 ### The scale, so the options can be priced
 
 - 86 tool names live in `coreutils`; **41** of them also exist as separate

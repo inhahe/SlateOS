@@ -1,26 +1,29 @@
-#![allow(dead_code)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-
-//! Slate OS Checkers — American Checkers (English draughts) with AI opponent.
+//! Slate OS Checkers -- American Checkers (English draughts) against an AI.
 //!
-//! Features an 8x8 board with standard setup, mandatory jumps, multi-jump
-//! chains, king promotion, a minimax AI with alpha-beta pruning, legal move
-//! highlighting, and Catppuccin Mocha theming.
+//! An 8x8 board with the standard rules: mandatory jumps, multi-jump chains,
+//! king promotion, and a minimax search with alpha-beta pruning for the
+//! opponent. Alongside the board sit the piece counts, the captures, the move
+//! number and a scrolling history.
+//!
+//! The whole picture is solved from the size the window reports each frame:
+//! there is no built-in size the drawing falls back on, and every box a click
+//! is tested against is one the drawing pass recorded. Every square is
+//! clickable as well as reachable by the arrow keys.
+//!
+//! Themed with the Catppuccin Mocha palette.
+
+use std::process::ExitCode;
 
 use guitk::color::Color;
 #[cfg(test)]
 use guitk::event::Modifiers;
-use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
+use oswindow::app::{self, App, Response};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -31,15 +34,12 @@ const SURFACE1: Color = Color::from_hex(0x45475A);
 const SURFACE2: Color = Color::from_hex(0x585B70);
 const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
 const YELLOW: Color = Color::from_hex(0xF9E2AF);
 const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
 
 // ── Board colors ────────────────────────────────────────────────────
 const LIGHT_SQUARE: Color = Color::from_hex(0x9CA0B0);
@@ -55,18 +55,17 @@ const BLACK_PIECE: Color = Color::from_hex(0x45475A);
 const BLACK_PIECE_DARK: Color = Color::from_hex(0x313244);
 const KING_CROWN: Color = Color::from_hex(0xF9E2AF);
 
-// ── Layout constants ────────────────────────────────────────────────
-const SQUARE_SIZE: f32 = 64.0;
-const BOARD_OFFSET_X: f32 = 40.0;
-const BOARD_OFFSET_Y: f32 = 60.0;
-const PANEL_X: f32 = BOARD_OFFSET_X + BOARD_PIXEL_SIZE + 20.0;
-const PIECE_RADIUS: f32 = 24.0;
-const PIECE_INNER_RADIUS: f32 = 18.0;
-const LABEL_FONT_SIZE: f32 = 14.0;
-const TITLE_FONT_SIZE: f32 = 22.0;
-const INFO_FONT_SIZE: f32 = 16.0;
-const CROWN_FONT_SIZE: f32 = 20.0;
-const DOT_SIZE: f32 = 16.0;
+// ── The size the window opens at ────────────────────────────────────
+//
+// The only two pixel counts in the file, and they are a *starting* size, not a
+// layout: everything below is solved from whatever size the window reports,
+// and these are merely what it asks the compositor for on the way up. What
+// stood here was eleven of them -- a 64-pixel square, a 40-pixel left margin,
+// a panel pinned to `BOARD_OFFSET_X + BOARD_PIXEL_SIZE + 20.0` -- and the
+// window was whatever they happened to add up to. A board that cannot be
+// resized is a board that is wrong at every size but one.
+const WINDOW_WIDTH: f32 = 880.0;
+const WINDOW_HEIGHT: f32 = 660.0;
 
 // ── AI search depth ─────────────────────────────────────────────────
 const AI_DEPTH: i32 = 3;
@@ -158,25 +157,44 @@ impl Pos {
     /// The only symptom is that the board does not look like a checkers board:
     /// the double corner ends up on each player's left instead of their right.
     fn is_dark(self) -> bool {
-        (self.row + self.col) % 2 == 0
+        self.row.saturating_add(self.col) % 2 == 0
     }
 
-    /// Index into the 32-element dark-square array (0-31).
-    fn dark_index(self) -> Option<usize> {
-        if !self.is_valid() || !self.is_dark() {
+    /// The square `dr` ranks and `dc` files from this one.
+    ///
+    /// Saturating rather than wrapping: a step off the end of an `i8` must stay
+    /// off the board, not reappear on the far side of it. Every caller tests
+    /// the result with `is_valid`, and saturation is what makes that test
+    /// sufficient.
+    fn offset(self, dr: i8, dc: i8) -> Self {
+        Self::new(self.row.saturating_add(dr), self.col.saturating_add(dc))
+    }
+
+    /// This square as a pair of array subscripts, or `None` if it is off the
+    /// board.
+    ///
+    /// The one place a `Pos` becomes a subscript. `is_valid` followed by a pair
+    /// of `as usize` casts used to be written out at each of the four sites
+    /// that indexed the board -- four chances for the check and the cast to
+    /// drift apart, and four `[..]` that a bad `Pos` could panic on.
+    fn index(self) -> Option<(usize, usize)> {
+        if !self.is_valid() {
             return None;
         }
-        // Row 0: dark squares at cols 0,2,4,6 → indices 0,1,2,3
-        // Row 1: dark squares at cols 1,3,5,7 → indices 4,5,6,7
-        // etc. Halving the column works for either parity, since every row has
-        // four dark squares and they alternate.
-        Some((self.row as usize) * 4 + (self.col as usize) / 2)
+        Some((
+            usize::try_from(self.row).ok()?,
+            usize::try_from(self.col).ok()?,
+        ))
     }
 
     /// Label for display (e.g. "a1").
+    ///
+    /// Off-board coordinates are clamped onto the board rather than allowed to
+    /// run past `h` or `8`: this is a display label, and a label reading `` `9 ``
+    /// would be a puzzle rather than a diagnosis.
     fn label(self) -> String {
-        let file = (b'a' + self.col as u8) as char;
-        let rank = (b'1' + self.row as u8) as char;
+        let file = file_letter(self.col);
+        let rank = self.row.clamp(0, 7).saturating_add(1);
         format!("{file}{rank}")
     }
 }
@@ -247,10 +265,10 @@ impl MoveSequence {
 
     /// Descriptive notation for the move.
     fn notation(&self) -> String {
-        if self.steps.is_empty() {
+        let Some(first) = self.steps.first() else {
             return String::new();
-        }
-        let mut result = self.steps[0].from.label();
+        };
+        let mut result = first.from.label();
         let sep = if self.is_jump() { "x" } else { "-" };
         for step in &self.steps {
             result.push_str(sep);
@@ -269,58 +287,237 @@ enum GameResult {
     Draw,
 }
 
-// ── Board geometry ────────────────────────────────────
-//
-// Where a square is painted and which square a click lands on were computed
-// independently, from the same arithmetic copied out at a dozen sites -- the
-// `7 - row` flip alone appeared three times, once of them inverted by hand in
-// the hit test. Nothing but care kept the board a player sees in the same place
-// as the board a click resolves against; these three functions are the one
-// place it is written.
+// ── What a click can land on ────────────────────────────────────────
 
-/// Distance across the whole board, in pixels.
-const BOARD_PIXEL_SIZE: f32 = SQUARE_SIZE * 8.0;
-
-/// Screen coordinates of the top-left corner of a square.
+/// Every box the drawing pass records, and so everything a click can reach.
 ///
-/// `Pos::new(0, 0)` is a1, and draughts — like chess, and unlike Othello next
-/// door in `apps/reversi` — puts rank 1 at the *bottom* of the board. So the
-/// screen row is the board row counted from the other end, and this flip is the
-/// only asymmetry `square_at` has to undo.
-fn square_origin(pos: Pos) -> (f32, f32) {
-    let screen_row = 7 - pos.row;
-    (
-        BOARD_OFFSET_X + pos.col as f32 * SQUARE_SIZE,
-        BOARD_OFFSET_Y + screen_row as f32 * SQUARE_SIZE,
+/// The old spelling had no such list: a click was resolved by `square_at`,
+/// which re-derived the board's position from the same constants the drawing
+/// used and undid the rank flip by hand. Two independent copies of one piece of
+/// arithmetic is one copy too many -- nothing but care kept the board a player
+/// sees in the same place as the board a click resolves against. Now the
+/// drawing pass records where it actually put each square and the click is
+/// tested against that, so the two cannot disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// A square of the board, by `(row, col)` in board coordinates -- row 0 is
+    /// rank 1, which is drawn at the *bottom*.
+    Square(i8, i8),
+    /// The board as a whole, behind the squares.
+    Board,
+    /// The title along the top.
+    Title,
+    /// The side panel's background.
+    Panel,
+    /// The new-game button in the panel.
+    NewGame,
+    /// One of the eight rank numbers down the left of the board.
+    RankLabel(i8),
+    /// One of the eight file letters along the bottom of the board.
+    FileLabel(i8),
+    /// The piece counts for a side.
+    Count(Side),
+    /// The line saying how many pieces each side has taken.
+    Captures,
+    /// The move number.
+    MoveNumber,
+    /// The move history, heading and rows together.
+    History,
+    /// The help line at the foot of the panel.
+    Help,
+    /// The status line along the bottom of the window.
+    Status,
+}
+
+// ── Layout ──────────────────────────────────────────────────────────
+
+/// Where everything goes, worked out from the window size and nothing else.
+///
+/// Every field is derived; none is a constant. What this replaced was eleven
+/// `const f32`s -- a 64-pixel square, a 40-pixel margin, a panel at
+/// `BOARD_OFFSET_X + BOARD_PIXEL_SIZE + 20.0` -- which meant the picture was
+/// right at exactly one window size and wrong at every other, and the window
+/// was never resized because the program never opened one.
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    window: Rect,
+    header: Rect,
+    board_area: Rect,
+    panel: Rect,
+    status: Rect,
+    /// The gap left around and inside every band.
+    pad: f32,
+    /// The title's font size.
+    title: f32,
+    /// The body font size.
+    font: f32,
+    /// The font size for labels, history rows and help.
+    small: f32,
+}
+
+impl Layout {
+    fn solve(w: f32, h: f32) -> Self {
+        let w = w.max(0.0);
+        let h = h.max(0.0);
+        // Everything scales with the *smaller* side, so a wide-and-short window
+        // gets small padding rather than padding that eats its whole height.
+        let pad = (w.min(h) * 0.02).clamp(2.0, 18.0).min(w.min(h) / 2.0);
+        let title = (h * 0.036).clamp(10.0, 30.0);
+        let font = (h * 0.024).clamp(8.0, 18.0);
+        let small = (h * 0.019).clamp(7.0, font);
+
+        let header_h = h * 0.09;
+        let rest = (h - header_h).max(0.0);
+        let status_h = rest * 0.09;
+        let body_h = (rest - status_h).max(0.0);
+
+        let header = Rect::new(0.0, 0.0, w, header_h);
+        let body = Rect::new(0.0, header.bottom(), w, body_h);
+        let status = Rect::new(0.0, body.bottom(), w, status_h);
+
+        // The panel takes a share of the width, floored so its text is legible
+        // and capped so it never crowds the board off a narrow window.
+        let panel_w = (w * 0.28).clamp(120.0, 280.0).min(w / 2.0);
+        let board_area = Rect::new(body.x, body.y, (body.w - panel_w).max(0.0), body.h);
+        let panel = Rect::new(board_area.right(), body.y, panel_w.min(body.w), body.h);
+
+        Self {
+            window: Rect::new(0.0, 0.0, w, h),
+            header,
+            board_area,
+            panel,
+            status,
+            pad,
+            title,
+            font,
+            small,
+        }
+    }
+}
+
+/// The board's squares, fitted to whatever room the layout gave them.
+///
+/// The board is square whatever shape its area is: the step is the smaller of
+/// what the width and the height allow, and the leftovers become margins, so
+/// the squares stay square in a tall window and in a wide one alike.
+#[derive(Debug, Clone, Copy)]
+struct Grid {
+    /// Top-left of the board proper -- past the rank gutter, above the file
+    /// gutter.
+    origin: (f32, f32),
+    /// The side of one square.
+    step: f32,
+    /// The width of the rank gutter and the height of the file gutter.
+    label: f32,
+}
+
+impl Grid {
+    fn fit(area: Rect, label_font: f32) -> Self {
+        let side = 8.0;
+        let label = label_font * 1.7;
+        let step = ((area.w - label).max(0.0) / side)
+            .min((area.h - label).max(0.0) / side)
+            .max(0.0);
+        let board = step * side;
+        let left = area.x + (area.w - board - label).max(0.0) / 2.0;
+        let top = area.y + (area.h - board - label).max(0.0) / 2.0;
+        Self {
+            origin: (left + label, top),
+            step,
+            label,
+        }
+    }
+
+    /// The box a square occupies on screen.
+    ///
+    /// `Pos::new(0, 0)` is a1, and draughts -- like chess, and unlike Othello
+    /// next door in `apps/reversi` -- puts rank 1 at the *bottom* of the board.
+    /// So the screen row is the board row counted from the other end. That flip
+    /// is written here and nowhere else; the file this replaced had it in three
+    /// places, one of them inverted by hand in the hit test.
+    fn square(self, row: i8, col: i8) -> Rect {
+        let screen_row = f32::from(7i8.saturating_sub(row));
+        Rect::new(
+            self.origin.0 + f32::from(col) * self.step,
+            self.origin.1 + screen_row * self.step,
+            self.step,
+            self.step,
+        )
+    }
+
+    /// The middle of a square, where its piece is drawn.
+    fn centre(self, row: i8, col: i8) -> (f32, f32) {
+        let r = self.square(row, col);
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// The eight-by-eight box, gutters excluded.
+    fn board_rect(self) -> Rect {
+        Rect::new(
+            self.origin.0,
+            self.origin.1,
+            self.step * 8.0,
+            self.step * 8.0,
+        )
+    }
+}
+
+/// A rectangle shrunk by `pad` on every side, never past nothing.
+fn inset(rect: Rect, pad: f32) -> Rect {
+    Rect::new(
+        rect.x + pad,
+        rect.y + pad,
+        (rect.w - pad * 2.0).max(0.0),
+        (rect.h - pad * 2.0).max(0.0),
     )
 }
 
-/// Screen coordinates of the middle of a square, where its piece is drawn.
-fn square_center(pos: Pos) -> (f32, f32) {
-    let (x, y) = square_origin(pos);
-    (x + SQUARE_SIZE / 2.0, y + SQUARE_SIZE / 2.0)
+/// The smallest box holding both, ignoring an empty one.
+///
+/// A section's hit box is its heading plus its rows, and a section with no rows
+/// is its heading alone.
+fn union(a: Rect, b: Rect) -> Rect {
+    if a.is_empty() {
+        return b;
+    }
+    if b.is_empty() {
+        return a;
+    }
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    Rect::new(
+        x,
+        y,
+        a.right().max(b.right()) - x,
+        a.bottom().max(b.bottom()) - y,
+    )
 }
 
-/// The square a click at `(x, y)` lands on, or `None` if the click is off the
-/// board.
+/// A `u32` as an `f32`, without a lossy cast.
+fn f32_from_u32(v: u32) -> f32 {
+    f32::from(u16::try_from(v).unwrap_or(u16::MAX))
+}
+
+/// A `usize` as a `u32`, saturating rather than wrapping.
+fn u32_from_usize(v: usize) -> u32 {
+    u32::try_from(v).unwrap_or(u32::MAX)
+}
+
+/// How many whole rows of some height fit in a span.
 ///
-/// The bounds are checked *before* the cast rather than after: a float-to-
-/// integer cast in Rust truncates toward zero, so a point a little to the left
-/// of the board comes out as column `0` rather than as `-1`, and an "is this
-/// index in range" test performed afterwards would wave it through. Gomoku had
-/// exactly that fault and accepted clicks past two of its four edges only; see
-/// known-issues.md `C-GOMOKU-THE-CLICK-SLOP-ONLY-WORKED-ON-TWO-EDGES`.
-fn square_at(x: f32, y: f32) -> Option<Pos> {
-    let bx = x - BOARD_OFFSET_X;
-    let by = y - BOARD_OFFSET_Y;
-    if bx < 0.0 || by < 0.0 || bx >= BOARD_PIXEL_SIZE || by >= BOARD_PIXEL_SIZE {
-        return None;
+/// Saturates at zero for a negative or non-finite span, which is what a window
+/// too short for its own panel produces.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "clamped to 0..=64 either side of the cast, so neither can fire"
+)]
+fn count_from_f32(v: f32) -> usize {
+    if v.is_finite() && v > 0.0 {
+        v.min(64.0) as usize
+    } else {
+        0
     }
-    // Truncation is the intent here -- the fraction is the position within the
-    // square -- and the guard above is what makes the cast safe.
-    let col = (bx / SQUARE_SIZE) as i8;
-    let screen_row = (by / SQUARE_SIZE) as i8;
-    Some(Pos::new(7 - screen_row, col))
 }
 
 // ── Board ───────────────────────────────────────────────────────────
@@ -337,35 +534,26 @@ struct Board {
 
 impl Board {
     /// Create a new board with standard starting position.
+    ///
+    /// Built by `set` onto an empty board rather than by subscripting a local
+    /// array, so the one bounds check in `Pos::index` covers the opening
+    /// position too.
     fn new() -> Self {
-        let mut squares = [[None; 8]; 8];
-
-        // Black pieces on rows 5, 6, 7 (top three rows), dark squares only.
-        // Asking `is_dark` rather than restating its parity is what keeps the
-        // pieces on the squares the board actually paints dark.
-        for row in 5..=7i8 {
-            for col in 0..8i8 {
-                if Pos::new(row, col).is_dark() {
-                    squares[row as usize][col as usize] = Some(Piece::man(Side::Black));
+        let mut board = Self::empty();
+        // Black on rows 5-7 (the top three), Red on rows 0-2 (the bottom
+        // three), dark squares only. Asking `is_dark` rather than restating its
+        // parity is what keeps the pieces on the squares the board paints dark.
+        for (rows, side) in [(5..=7i8, Side::Black), (0..=2i8, Side::Red)] {
+            for row in rows {
+                for col in 0..8i8 {
+                    let pos = Pos::new(row, col);
+                    if pos.is_dark() {
+                        board.set(pos, Some(Piece::man(side)));
+                    }
                 }
             }
         }
-
-        // Red pieces on rows 0, 1, 2 (bottom three rows), dark squares only
-        for row in 0..=2i8 {
-            for col in 0..8i8 {
-                if Pos::new(row, col).is_dark() {
-                    squares[row as usize][col as usize] = Some(Piece::man(Side::Red));
-                }
-            }
-        }
-
-        Self {
-            squares,
-            side_to_move: Side::Red,
-            move_count: 0,
-            no_capture_count: 0,
-        }
+        board
     }
 
     /// Create an empty board.
@@ -380,17 +568,17 @@ impl Board {
 
     /// Get the piece at a position.
     fn get(&self, pos: Pos) -> Option<Piece> {
-        if pos.is_valid() {
-            self.squares[pos.row as usize][pos.col as usize]
-        } else {
-            None
-        }
+        let (row, col) = pos.index()?;
+        self.squares.get(row)?.get(col).copied().flatten()
     }
 
-    /// Set a piece at a position.
+    /// Set a piece at a position. A position off the board is ignored.
     fn set(&mut self, pos: Pos, piece: Option<Piece>) {
-        if pos.is_valid() {
-            self.squares[pos.row as usize][pos.col as usize] = piece;
+        let Some((row, col)) = pos.index() else {
+            return;
+        };
+        if let Some(slot) = self.squares.get_mut(row).and_then(|r| r.get_mut(col)) {
+            *slot = piece;
         }
     }
 
@@ -452,43 +640,12 @@ impl Board {
 
         let mut moves = Vec::new();
         for (dr, dc) in dirs {
-            let to = Pos::new(pos.row + dr, pos.col + dc);
+            let to = pos.offset(dr, dc);
             if to.is_valid() && self.get(to).is_none() {
                 moves.push(CheckersMove::simple(pos, to));
             }
         }
         moves
-    }
-
-    /// Generate all single jump moves for a piece at `pos`.
-    fn generate_jumps_for(&self, pos: Pos) -> Vec<CheckersMove> {
-        let piece = match self.get(pos) {
-            Some(p) => p,
-            None => return Vec::new(),
-        };
-
-        let dirs: Vec<(i8, i8)> = if piece.is_king {
-            Self::king_dirs().to_vec()
-        } else {
-            // For jumps, regular pieces can jump in all diagonal directions
-            // in American checkers. Wait -- that's not standard.
-            // Standard American checkers: men can only jump forward.
-            Self::man_dirs(piece.side)
-        };
-
-        let mut jumps = Vec::new();
-        for (dr, dc) in dirs {
-            let mid = Pos::new(pos.row + dr, pos.col + dc);
-            let to = Pos::new(pos.row + 2 * dr, pos.col + 2 * dc);
-            if to.is_valid()
-                && let Some(mid_piece) = self.get(mid)
-                && mid_piece.side != piece.side
-                && self.get(to).is_none()
-            {
-                jumps.push(CheckersMove::jump(pos, to, mid));
-            }
-        }
-        jumps
     }
 
     /// Generate all jump moves for a piece at `pos`, considering a set of
@@ -512,8 +669,8 @@ impl Board {
 
         let mut jumps = Vec::new();
         for (dr, dc) in dirs {
-            let mid = Pos::new(pos.row + dr, pos.col + dc);
-            let to = Pos::new(pos.row + 2 * dr, pos.col + 2 * dc);
+            let mid = pos.offset(dr, dc);
+            let to = pos.offset(dr.saturating_mul(2), dc.saturating_mul(2));
             if to.is_valid() {
                 // Cannot jump a piece that was already captured in this chain
                 if captured.contains(&mid) {
@@ -640,23 +797,6 @@ impl Board {
             .collect()
     }
 
-    /// Check if any jump moves exist for the current side.
-    fn has_jumps(&self) -> bool {
-        let side = self.side_to_move;
-        for row in 0..8i8 {
-            for col in 0..8i8 {
-                let pos = Pos::new(row, col);
-                if let Some(piece) = self.get(pos)
-                    && piece.side == side
-                    && !self.generate_jumps_for(pos).is_empty()
-                {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     /// Apply a move sequence to the board, returning the new board state.
     fn apply_move(&self, seq: &MoveSequence) -> Self {
         let mut board = self.clone();
@@ -699,11 +839,11 @@ impl Board {
         }
 
         // Update counters
-        self.move_count += 1;
+        self.move_count = self.move_count.saturating_add(1);
         if had_capture {
             self.no_capture_count = 0;
         } else {
-            self.no_capture_count += 1;
+            self.no_capture_count = self.no_capture_count.saturating_add(1);
         }
 
         // Switch sides
@@ -755,16 +895,18 @@ impl Board {
 
                     // Center control bonus (columns 2-5, rows 2-5)
                     if (2..=5).contains(&col) && (2..=5).contains(&row) {
-                        bonus += CENTER_BONUS;
+                        bonus = bonus.saturating_add(CENTER_BONUS);
                     }
 
                     if !piece.is_king {
-                        // Advancement bonus for men
-                        let advance = match piece.side {
-                            Side::Red => row as i32,
-                            Side::Black => (7 - row) as i32,
-                        };
-                        bonus += advance * ADVANCE_BONUS;
+                        // Advancement bonus for men, counted from each side own
+                        // back rank, so both sides are scored on the same
+                        // scale.
+                        let advance = i32::from(match piece.side {
+                            Side::Red => row,
+                            Side::Black => 7i8.saturating_sub(row),
+                        });
+                        bonus = bonus.saturating_add(advance.saturating_mul(ADVANCE_BONUS));
 
                         // Back row defense bonus
                         let back_row = match piece.side {
@@ -772,14 +914,19 @@ impl Board {
                             Side::Black => 7,
                         };
                         if row == back_row {
-                            bonus += BACK_ROW_BONUS;
+                            bonus = bonus.saturating_add(BACK_ROW_BONUS);
                         }
                     }
 
-                    let val = base + bonus;
+                    // Saturating throughout: the search adds at most 32 pieces
+                    // worth of a few hundred points each, so nothing here can
+                    // reach the ends of an i32 -- but an evaluation that
+                    // silently wrapped would make the AI prefer the position it
+                    // wrapped in, which is the worst possible way to find out.
+                    let val = base.saturating_add(bonus);
                     match piece.side {
-                        Side::Black => score += val,
-                        Side::Red => score -= val,
+                        Side::Black => score = score.saturating_add(val),
+                        Side::Red => score = score.saturating_sub(val),
                     }
                 }
             }
@@ -802,8 +949,8 @@ fn minimax(
 ) -> (i32, Option<usize>) {
     let result = board.check_result();
     match result {
-        GameResult::BlackWins => return (100_000 + depth, None),
-        GameResult::RedWins => return (-100_000 - depth, None),
+        GameResult::BlackWins => return (100_000i32.saturating_add(depth), None),
+        GameResult::RedWins => return ((-100_000i32).saturating_sub(depth), None),
         GameResult::Draw => return (0, None),
         GameResult::Ongoing => {}
     }
@@ -823,7 +970,7 @@ fn minimax(
         let mut max_eval = i32::MIN;
         for (i, mv) in moves.iter().enumerate() {
             let new_board = board.apply_move(mv);
-            let (eval, _) = minimax(&new_board, depth - 1, alpha, beta, false);
+            let (eval, _) = minimax(&new_board, depth.saturating_sub(1), alpha, beta, false);
             if eval > max_eval {
                 max_eval = eval;
                 best_idx = Some(i);
@@ -838,7 +985,7 @@ fn minimax(
         let mut min_eval = i32::MAX;
         for (i, mv) in moves.iter().enumerate() {
             let new_board = board.apply_move(mv);
-            let (eval, _) = minimax(&new_board, depth - 1, alpha, beta, true);
+            let (eval, _) = minimax(&new_board, depth.saturating_sub(1), alpha, beta, true);
             if eval < min_eval {
                 min_eval = eval;
                 best_idx = Some(i);
@@ -874,12 +1021,24 @@ struct CheckersApp {
     selected: Option<Pos>,
     legal_moves_for_selected: Vec<MoveSequence>,
     game_result: GameResult,
-    status_message: String,
     move_history: Vec<String>,
     last_move_from: Option<Pos>,
     last_move_to: Option<Pos>,
-    red_captured: u32,
-    black_captured: u32,
+    /// How many pieces Red has taken.
+    ///
+    /// Named for the side that did the taking. The old pair was named for the
+    /// side that was taken *from* -- `red_captured` counted Red's losses -- and
+    /// then printed as `Captured: Red {red_captured}`, which any reader takes
+    /// to mean the pieces Red has captured. The panel said the opposite of what
+    /// it counted, and swapping the names is the fix rather than swapping the
+    /// two at the point of printing, because the printing was not the thing
+    /// that was wrong.
+    red_takes: u32,
+    /// How many pieces Black has taken.
+    black_takes: u32,
+    /// The size the last frame was drawn at, which is the size the next click
+    /// is read against.
+    size: (f32, f32),
 }
 
 impl CheckersApp {
@@ -890,28 +1049,36 @@ impl CheckersApp {
             selected: None,
             legal_moves_for_selected: Vec::new(),
             game_result: GameResult::Ongoing,
-            status_message: "Red to move".to_string(),
             move_history: Vec::new(),
             last_move_from: None,
             last_move_to: None,
-            red_captured: 0,
-            black_captured: 0,
+            red_takes: 0,
+            black_takes: 0,
+            size: (WINDOW_WIDTH, WINDOW_HEIGHT),
         }
     }
 
+    /// Note the size a frame was drawn at.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.size = (width.max(0.0), height.max(0.0));
+    }
+
     /// Start a new game.
+    ///
+    /// Keeps the window size, which is not part of the game. Reversi had the
+    /// same shape and the same trap: `*self = Self::new()` would have snapped
+    /// the board back to its opening size on every new game.
     fn new_game(&mut self) {
         self.board = Board::new();
         self.cursor = Pos::new(0, 0);
         self.selected = None;
         self.legal_moves_for_selected.clear();
         self.game_result = GameResult::Ongoing;
-        self.status_message = "Red to move".to_string();
         self.move_history.clear();
         self.last_move_from = None;
         self.last_move_to = None;
-        self.red_captured = 0;
-        self.black_captured = 0;
+        self.red_takes = 0;
+        self.black_takes = 0;
     }
 
     /// Handle clicking on a board square.
@@ -976,7 +1143,7 @@ impl CheckersApp {
         self.legal_moves_for_selected = moves;
     }
 
-    /// Execute a move and handle AI response.
+    /// Execute Red's move, and let Black answer it.
     fn execute_move(&mut self, mv: &MoveSequence) {
         let notation = mv.notation();
         let captured = mv.captured_count();
@@ -985,27 +1152,30 @@ impl CheckersApp {
         self.last_move_to = Some(mv.to_pos());
 
         self.board.apply_move_in_place(mv);
-        self.black_captured += captured as u32;
+        // Red made this move, so the pieces it took are Red's takings. The old
+        // spelling credited them to `black_captured` and the panel printed that
+        // beside the word "Black".
+        self.red_takes = self.red_takes.saturating_add(u32_from_usize(captured));
 
         self.move_history.push(notation);
 
         self.selected = None;
         self.legal_moves_for_selected.clear();
 
-        // Check game state
         self.game_result = self.board.check_result();
         if self.game_result != GameResult::Ongoing {
-            self.update_status_for_result();
             return;
         }
 
-        self.status_message = "Black thinking...".to_string();
-
-        // AI's turn
+        // What stood here was `status_message = "Black thinking..."`, written
+        // one line before `do_ai_move` overwrote it. The search runs inside
+        // this same event, so no frame is ever drawn between the two: the
+        // message could not be seen, and a notice nobody can see is not a
+        // notice. Reversi's pass notice was the same fault; see roadmap.md.
         self.do_ai_move();
     }
 
-    /// Execute the AI's move.
+    /// Execute Black's reply.
     fn do_ai_move(&mut self) {
         if self.board.side_to_move != Side::Black {
             return;
@@ -1019,439 +1189,664 @@ impl CheckersApp {
             self.last_move_to = Some(ai_mv.to_pos());
 
             self.board.apply_move_in_place(&ai_mv);
-            self.red_captured += captured as u32;
+            self.black_takes = self.black_takes.saturating_add(u32_from_usize(captured));
 
             self.move_history.push(notation);
-
-            self.game_result = self.board.check_result();
-            if self.game_result != GameResult::Ongoing {
-                self.update_status_for_result();
-            } else {
-                self.status_message = "Red to move".to_string();
-            }
-        } else {
-            // AI has no moves
-            self.game_result = self.board.check_result();
-            self.update_status_for_result();
         }
+        // Whether or not a move was found, the position decides the result: a
+        // side with no move has lost, and `check_result` says so. The old
+        // spelling had two arms here that differed only in which of them also
+        // set a status string.
+        self.game_result = self.board.check_result();
     }
 
-    /// Update status message for game-over state.
-    fn update_status_for_result(&mut self) {
-        self.status_message = match self.game_result {
+    /// The line along the bottom of the window.
+    ///
+    /// Derived from the position every frame rather than stored in a field. The
+    /// stored `status_message` was written at five sites, one of which
+    /// ("Black thinking...") could never be read, and one arm of the function
+    /// that set it -- `GameResult::Ongoing` -- was unreachable from all five.
+    /// A string that is a function of the state should be a function.
+    fn status(&self) -> String {
+        match self.game_result {
             GameResult::RedWins => "Red wins!".to_string(),
             GameResult::BlackWins => "Black wins!".to_string(),
             GameResult::Draw => "Draw!".to_string(),
-            GameResult::Ongoing => format!("{} to move", self.board.side_to_move.name()),
-        };
+            GameResult::Ongoing => match self.selected {
+                Some(pos) => format!("{} selected -- click a marked square", pos.label()),
+                None => format!("{} to move", self.board.side_to_move.name()),
+            },
+        }
     }
 
     /// Handle keyboard input.
-    fn handle_key(&mut self, event: &KeyEvent) {
+    fn handle_key(&mut self, event: &KeyEvent) -> EventResult {
         if !event.pressed {
-            return;
+            return EventResult::Ignored;
         }
 
         match event.key {
-            Key::N if event.modifiers.ctrl => {
-                self.new_game();
-            }
-            Key::Left => {
-                self.cursor.col = (self.cursor.col - 1).max(0);
-            }
-            Key::Right => {
-                self.cursor.col = (self.cursor.col + 1).min(7);
-            }
-            Key::Up => {
-                self.cursor.row = (self.cursor.row + 1).min(7);
-            }
-            Key::Down => {
-                self.cursor.row = (self.cursor.row - 1).max(0);
-            }
-            Key::Enter | Key::Space => {
-                self.click_square(self.cursor);
-            }
+            Key::N if event.modifiers.ctrl => self.new_game(),
+            Key::Left => self.cursor.col = self.cursor.col.saturating_sub(1).max(0),
+            Key::Right => self.cursor.col = self.cursor.col.saturating_add(1).min(7),
+            Key::Up => self.cursor.row = self.cursor.row.saturating_add(1).min(7),
+            Key::Down => self.cursor.row = self.cursor.row.saturating_sub(1).max(0),
+            Key::Enter | Key::Space => self.click_square(self.cursor),
             Key::Escape => {
                 self.selected = None;
                 self.legal_moves_for_selected.clear();
             }
-            _ => {}
+            _ => return EventResult::Ignored,
         }
+        EventResult::Consumed
     }
 
-    /// Handle mouse events.
-    fn handle_mouse(&mut self, event: &MouseEvent) {
-        if let MouseEventKind::Press(MouseButton::Left) = event.kind {
-            if let Some(pos) = square_at(event.x, event.y) {
-                self.click_square(pos);
+    /// Resolve a click against the boxes the drawing pass recorded.
+    fn click(&mut self, x: f32, y: f32, button: MouseButton) -> EventResult {
+        if button != MouseButton::Left {
+            return EventResult::Ignored;
+        }
+        let (w, h) = self.size;
+        let Some(target) = self.frame(w, h).hit_test(x, y) else {
+            return EventResult::Ignored;
+        };
+        match target {
+            Target::Square(row, col) => {
+                // One action rather than two: the cursor goes to the square and
+                // the square is acted on, exactly as arrows-then-Enter would
+                // have done.
+                self.cursor = Pos::new(row, col);
+                self.click_square(self.cursor);
+                EventResult::Consumed
             }
+            Target::NewGame => {
+                self.new_game();
+                EventResult::Consumed
+            }
+            // Every other recorded box is answered and does nothing. A click on
+            // the panel must not fall through to the window, which would treat
+            // it as a click on nothing at all.
+            _ => EventResult::Consumed,
         }
     }
 
-    /// Handle any event.
-    fn handle_event(&mut self, event: &Event) {
-        match event {
-            Event::Key(ke) => self.handle_key(ke),
-            Event::Mouse(me) => self.handle_mouse(me),
-            _ => {}
-        }
-    }
+    // ── Drawing ─────────────────────────────────────────────────────
 
-    /// Render the entire UI.
-    fn render(&self) -> Vec<RenderCommand> {
-        let mut commands = Vec::with_capacity(256);
-
-        // Background
-        commands.push(RenderCommand::FillRect {
+    /// One frame at the given size: what to draw, and what a click there hits.
+    fn frame(&self, w: f32, h: f32) -> Frame<Target> {
+        let l = Layout::solve(w, h);
+        let mut f = Frame::new(l.window.w, l.window.h);
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: PANEL_X + 250.0,
-            height: BOARD_OFFSET_Y + BOARD_PIXEL_SIZE + 80.0,
+            width: l.window.w,
+            height: l.window.h,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
-
-        self.render_board(&mut commands);
-        self.render_panel(&mut commands);
-
-        commands
+        // A window too small for its contents crops them rather than painting
+        // over its neighbours. The old background was
+        // `PANEL_X + 250.0` by `BOARD_OFFSET_Y + BOARD_PIXEL_SIZE + 80.0` --
+        // the size the constants happened to add up to, painted whatever the
+        // window's actual size was.
+        f.clip(l.window);
+        self.draw_header(&l, &mut f);
+        self.draw_board(&l, &mut f);
+        self.draw_panel(&l, &mut f);
+        self.draw_status(&l, &mut f);
+        f.unclip();
+        f
     }
 
-    /// Render the checkers board.
-    fn render_board(&self, commands: &mut Vec<RenderCommand>) {
-        // Board border
-        commands.push(RenderCommand::StrokeRect {
-            x: BOARD_OFFSET_X - 2.0,
-            y: BOARD_OFFSET_Y - 2.0,
-            width: BOARD_PIXEL_SIZE + 4.0,
-            height: BOARD_PIXEL_SIZE + 4.0,
+    /// The title along the top, and the piece counts beside it.
+    fn draw_header(&self, l: &Layout, f: &mut Frame<Target>) {
+        let band = inset(l.header, l.pad);
+        let title = label_in(
+            f,
+            band,
+            "Checkers",
+            Ink::new(l.title, FontWeightHint::Bold, LAVENDER),
+        );
+        f.hit(Target::Title, title);
+
+        // The chips follow the title's *measured* width rather than a
+        // hand-counted offset from it, so they cannot slide under the title at
+        // a font size nobody tried.
+        let gap = l.pad * 1.5;
+        let mut x = title.right() + gap;
+        for side in [Side::Red, Side::Black] {
+            let ink = Ink::new(
+                l.font,
+                FontWeightHint::Bold,
+                match side {
+                    Side::Red => RED_PIECE,
+                    Side::Black => SUBTEXT0,
+                },
+            );
+            let kings = self.board.count_kings(side);
+            let text = if kings == 0 {
+                format!("{}: {}", side.name(), self.board.count_pieces(side))
+            } else {
+                format!(
+                    "{}: {} ({}K)",
+                    side.name(),
+                    self.board.count_pieces(side),
+                    kings
+                )
+            };
+            let area = Rect::new(x, band.y, ink.width(&text), band.h);
+            let drawn = label_in(f, area, &text, ink);
+            f.hit(Target::Count(side), drawn);
+            x = area.right() + gap;
+        }
+    }
+
+    /// The board: its border, its squares, the pieces on them, and its a-h and
+    /// 1-8.
+    fn draw_board(&self, l: &Layout, f: &mut Frame<Target>) {
+        let g = Grid::fit(inset(l.board_area, l.pad), l.small);
+        let board = g.board_rect();
+
+        let edge = (g.step * 0.06).max(1.0);
+        f.push(RenderCommand::StrokeRect {
+            x: board.x - edge,
+            y: board.y - edge,
+            width: board.w + edge * 2.0,
+            height: board.h + edge * 2.0,
             color: SURFACE1,
-            line_width: 2.0,
+            line_width: edge,
             corner_radii: CornerRadii::ZERO,
         });
+        // Recorded before the squares so a click that lands between them --
+        // there is nothing between them, but the frame answers with whatever
+        // was recorded last -- reaches the board rather than the window.
+        f.hit(Target::Board, board);
 
-        // Collect legal move destinations for highlighting
         let legal_dests: Vec<Pos> = self
             .legal_moves_for_selected
             .iter()
-            .map(|seq| seq.to_pos())
+            .map(MoveSequence::to_pos)
             .collect();
 
         for row in 0..8i8 {
             for col in 0..8i8 {
                 let pos = Pos::new(row, col);
-                let (sx, sy) = square_origin(pos);
+                let square = g.square(row, col);
 
-                // Square color
-                let is_dark = pos.is_dark();
-                let mut square_color = if is_dark { DARK_SQUARE } else { LIGHT_SQUARE };
-
-                // Highlight last move
+                let mut shade = if pos.is_dark() {
+                    DARK_SQUARE
+                } else {
+                    LIGHT_SQUARE
+                };
                 if self.last_move_from == Some(pos) || self.last_move_to == Some(pos) {
-                    square_color = LAST_MOVE_HIGHLIGHT;
+                    shade = LAST_MOVE_HIGHLIGHT;
                 }
-
-                commands.push(RenderCommand::FillRect {
-                    x: sx,
-                    y: sy,
-                    width: SQUARE_SIZE,
-                    height: SQUARE_SIZE,
-                    color: square_color,
+                f.push(RenderCommand::FillRect {
+                    x: square.x,
+                    y: square.y,
+                    width: square.w,
+                    height: square.h,
+                    color: shade,
                     corner_radii: CornerRadii::ZERO,
                 });
 
-                // Selected square highlight
                 if self.selected == Some(pos) {
-                    commands.push(RenderCommand::StrokeRect {
-                        x: sx + 1.0,
-                        y: sy + 1.0,
-                        width: SQUARE_SIZE - 2.0,
-                        height: SQUARE_SIZE - 2.0,
+                    let ring = (g.step * 0.05).max(1.0);
+                    f.push(RenderCommand::StrokeRect {
+                        x: square.x + ring,
+                        y: square.y + ring,
+                        width: (square.w - ring * 2.0).max(0.0),
+                        height: (square.h - ring * 2.0).max(0.0),
                         color: SELECTED_SQUARE,
-                        line_width: 3.0,
+                        line_width: ring,
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
 
-                // Cursor
                 if self.cursor == pos {
-                    commands.push(RenderCommand::StrokeRect {
-                        x: sx + 2.0,
-                        y: sy + 2.0,
-                        width: SQUARE_SIZE - 4.0,
-                        height: SQUARE_SIZE - 4.0,
+                    let ring = (g.step * 0.032).max(1.0);
+                    f.push(RenderCommand::StrokeRect {
+                        x: square.x + ring * 2.0,
+                        y: square.y + ring * 2.0,
+                        width: (square.w - ring * 4.0).max(0.0),
+                        height: (square.h - ring * 4.0).max(0.0),
                         color: YELLOW,
-                        line_width: 2.0,
+                        line_width: ring,
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
 
-                // Draw piece
                 if let Some(piece) = self.board.get(pos) {
-                    self.render_piece(commands, piece, square_center(pos));
+                    let (cx, cy) = g.centre(row, col);
+                    draw_piece(f, cx, cy, g.step * 0.37, piece);
                 }
 
-                // Legal move indicator
                 if legal_dests.contains(&pos) {
-                    let (mid_x, mid_y) = square_center(pos);
-                    let cx = mid_x - DOT_SIZE / 2.0;
-                    let cy = mid_y - DOT_SIZE / 2.0;
-                    commands.push(RenderCommand::FillRect {
-                        x: cx,
-                        y: cy,
-                        width: DOT_SIZE,
-                        height: DOT_SIZE,
+                    let (cx, cy) = g.centre(row, col);
+                    let r = g.step * 0.11;
+                    f.push(RenderCommand::FillRect {
+                        x: cx - r,
+                        y: cy - r,
+                        width: r * 2.0,
+                        height: r * 2.0,
                         color: LEGAL_MOVE_DOT,
-                        corner_radii: CornerRadii::all(DOT_SIZE / 2.0),
+                        corner_radii: CornerRadii::all(r),
                     });
                 }
+
+                f.hit(Target::Square(row, col), square);
             }
         }
 
-        // Row labels (1-8)
-        for row in 0..8i8 {
-            let label = format!("{}", row + 1);
-            commands.push(RenderCommand::Text {
-                x: BOARD_OFFSET_X - 18.0,
-                y: square_center(Pos::new(row, 0)).1 - 7.0,
-                text: label,
-                color: SUBTEXT0,
-                font_size: LABEL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
+        // The rank numbers run 1..8 *upwards*, which is why they are drawn
+        // against `g.square(i, ...)` rather than counted down the screen: the
+        // grid owns the flip, and a label placed by its own arithmetic is a
+        // second copy of it waiting to disagree.
+        let ink = Ink::new(l.small, FontWeightHint::Regular, SUBTEXT0);
+        for i in 0..8i8 {
+            let square = g.square(i, 0);
+            let number = format!("{}", i.saturating_add(1));
+            let drawn = label(
+                f,
+                board.x - g.label + (g.label - ink.width(&number)) / 2.0,
+                square.y + (g.step - ink.height()) / 2.0,
+                &number,
+                ink,
+            );
+            f.hit(Target::RankLabel(i), drawn);
 
-        // Column labels (a-h)
-        for col in 0..8i8 {
-            let label = format!("{}", (b'a' + col as u8) as char);
-            commands.push(RenderCommand::Text {
-                x: square_center(Pos::new(0, col)).0 - 4.0,
-                y: BOARD_OFFSET_Y + BOARD_PIXEL_SIZE + 6.0,
-                text: label,
-                color: SUBTEXT0,
-                font_size: LABEL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            let square = g.square(0, i);
+            let letter = file_letter(i).to_string();
+            let drawn = label(
+                f,
+                square.x + (g.step - ink.width(&letter)) / 2.0,
+                board.bottom() + (g.label - ink.height()) / 2.0,
+                &letter,
+                ink,
+            );
+            f.hit(Target::FileLabel(i), drawn);
         }
     }
 
-    /// Render a single checker piece as concentric circles.
-    /// Draw a piece centred on `(cx, cy)`.
+    /// The side panel: the new-game button, the captures, the move number, the
+    /// history and the help.
     ///
-    /// Takes the centre rather than the square's corner so that the caller's
-    /// `square_center` is the only place a square's middle is worked out.
-    fn render_piece(&self, commands: &mut Vec<RenderCommand>, piece: Piece, (cx, cy): (f32, f32)) {
-        let (outer_color, inner_color) = match piece.side {
-            Side::Red => (RED_PIECE, RED_PIECE_DARK),
-            Side::Black => (BLACK_PIECE, BLACK_PIECE_DARK),
-        };
-
-        // Outer circle
-        commands.push(RenderCommand::FillRect {
-            x: cx - PIECE_RADIUS,
-            y: cy - PIECE_RADIUS,
-            width: PIECE_RADIUS * 2.0,
-            height: PIECE_RADIUS * 2.0,
-            color: outer_color,
-            corner_radii: CornerRadii::all(PIECE_RADIUS),
+    /// Every line is placed by walking a cursor down the panel, so the panel
+    /// says as much as it has room for and no more. The old spelling put each
+    /// line at a hand-counted offset from the panel's top -- `+ 15.0`,
+    /// `+ 50.0`, `+ 85.0`, `+ 110.0`, `+ 145.0`, `+ 170.0`, `+ 195.0`,
+    /// `+ 210.0`, `+ 235.0` -- and drew a fixed eighteen history rows at a
+    /// fixed eighteen pixels apart, which in a short window ran straight
+    /// through its own help text.
+    fn draw_panel(&self, l: &Layout, f: &mut Frame<Target>) {
+        let band = inset(l.panel, l.pad);
+        f.push(RenderCommand::FillRect {
+            x: band.x,
+            y: band.y,
+            width: band.w,
+            height: band.h,
+            color: MANTLE,
+            corner_radii: CornerRadii::all(l.pad),
         });
+        f.hit(Target::Panel, band);
 
-        // Inner circle
-        commands.push(RenderCommand::FillRect {
-            x: cx - PIECE_INNER_RADIUS,
-            y: cy - PIECE_INNER_RADIUS,
-            width: PIECE_INNER_RADIUS * 2.0,
-            height: PIECE_INNER_RADIUS * 2.0,
-            color: inner_color,
-            corner_radii: CornerRadii::all(PIECE_INNER_RADIUS),
-        });
+        let inner = inset(band, l.pad);
+        let label_ink = Ink::new(l.small, FontWeightHint::Bold, SUBTEXT0);
+        let body_ink = Ink::new(l.font, FontWeightHint::Regular, TEXT_COLOR);
+        let mut y = inner.y;
 
-        // Crown for kings
-        if piece.is_king {
-            commands.push(RenderCommand::Text {
-                x: cx - 8.0,
-                y: cy - 10.0,
-                text: "\u{265A}".to_string(), // crown symbol
-                color: KING_CROWN,
-                font_size: CROWN_FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+        // The new-game button. `Ctrl+N` still works, but a control that exists
+        // only as a line of help text is a control half the players never find.
+        let button_ink = Ink::new(l.font, FontWeightHint::Bold, CRUST);
+        let button = Rect::new(inner.x, y, inner.w, button_ink.height() + l.pad);
+        // Same rule as `panel_row`, which the button cannot use because it is a
+        // filled control rather than a line of text: a button that hangs off
+        // the panel is a button drawn on the board.
+        if button.bottom() <= inner.bottom() + 0.01 {
+            f.push(RenderCommand::FillRect {
+                x: button.x,
+                y: button.y,
+                width: button.w,
+                height: button.h,
+                color: if self.game_result == GameResult::Ongoing {
+                    SURFACE2
+                } else {
+                    GREEN
+                },
+                corner_radii: CornerRadii::all(l.pad / 2.0),
+            });
+            let text = "New Game";
+            label(
+                f,
+                button.x + (button.w - button_ink.width(text)).max(0.0) / 2.0,
+                button.y + (button.h - button_ink.height()).max(0.0) / 2.0,
+                text,
+                button_ink,
+            );
+            f.hit(Target::NewGame, button);
+        }
+        y = button.bottom() + l.small * 0.8;
+
+        panel_row(f, inner, &mut y, "Pieces Taken", label_ink);
+        let drawn = panel_row(
+            f,
+            inner,
+            &mut y,
+            &format!("Red {}   Black {}", self.red_takes, self.black_takes),
+            Ink::new(l.font, FontWeightHint::Regular, PEACH),
+        );
+        f.hit(Target::Captures, drawn);
+        y += l.small * 0.6;
+
+        let drawn = panel_row(
+            f,
+            inner,
+            &mut y,
+            &format!("Move: {}", self.board.move_count),
+            body_ink,
+        );
+        f.hit(Target::MoveNumber, drawn);
+
+        let rule_y = y + l.small * 0.4;
+        if rule_y >= inner.y && rule_y <= inner.bottom() {
+            f.push(RenderCommand::Line {
+                x1: inner.x,
+                y1: rule_y,
+                x2: inner.right(),
+                y2: rule_y,
+                color: SURFACE0,
+                width: 1.0,
             });
         }
+        y += l.small;
+
+        // The help sits on the floor of the panel and the history fills
+        // whatever is between the cursor and it, so the two cannot collide
+        // however long the game runs or however short the window is.
+        let help_ink = Ink::new(l.small, FontWeightHint::Regular, OVERLAY0);
+        let help_h = help_ink.height() * 2.0;
+        let help_top = (inner.bottom() - help_h).max(y);
+
+        let heading = panel_row(f, inner, &mut y, "Move History", label_ink);
+        let row_h = Ink::new(l.small, FontWeightHint::Regular, TEXT_COLOR).height();
+        let rows = count_from_f32((help_top - y) / row_h);
+        let start = self.move_history.len().saturating_sub(rows);
+        let mut history_box = heading;
+        for (idx, notation) in self.move_history.iter().enumerate().skip(start) {
+            // Red plays every even-numbered ply, so the ply number decides both
+            // the colour and whether the line carries a move number.
+            let red = idx % 2 == 0;
+            let text = if red {
+                format!("{}. {notation}", (idx / 2).saturating_add(1))
+            } else {
+                format!("   {notation}")
+            };
+            let ink = Ink::new(
+                l.small,
+                FontWeightHint::Regular,
+                if red { RED_PIECE } else { SUBTEXT0 },
+            );
+            let drawn = panel_row(f, inner, &mut y, &text, ink);
+            history_box = union(history_box, drawn);
+        }
+        f.hit(Target::History, history_box);
+
+        let mut help_y = help_top;
+        let first = panel_row(f, inner, &mut help_y, "Arrows: move   Enter: act", help_ink);
+        let second = panel_row(
+            f,
+            inner,
+            &mut help_y,
+            "Esc: deselect   Ctrl+N: new",
+            help_ink,
+        );
+        f.hit(Target::Help, union(first, second));
     }
 
-    /// Render the info panel on the right side.
-    fn render_panel(&self, commands: &mut Vec<RenderCommand>) {
-        // Panel background
-        commands.push(RenderCommand::FillRect {
-            x: PANEL_X,
-            y: BOARD_OFFSET_Y,
-            width: 230.0,
-            height: BOARD_PIXEL_SIZE,
-            color: MANTLE,
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        // Title
-        commands.push(RenderCommand::Text {
-            x: PANEL_X + 15.0,
-            y: BOARD_OFFSET_Y + 15.0,
-            text: "Checkers".to_string(),
-            color: TEXT_COLOR,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Status message
-        let status_color = match self.game_result {
-            GameResult::RedWins => GREEN,
-            GameResult::BlackWins => RED,
-            GameResult::Draw => YELLOW,
-            GameResult::Ongoing => TEXT_COLOR,
-        };
-        commands.push(RenderCommand::Text {
-            x: PANEL_X + 15.0,
-            y: BOARD_OFFSET_Y + 50.0,
-            text: self.status_message.clone(),
-            color: status_color,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Piece counts
-        let red_count = self.board.count_pieces(Side::Red);
-        let black_count = self.board.count_pieces(Side::Black);
-        let red_kings = self.board.count_kings(Side::Red);
-        let black_kings = self.board.count_kings(Side::Black);
-
-        commands.push(RenderCommand::Text {
-            x: PANEL_X + 15.0,
-            y: BOARD_OFFSET_Y + 85.0,
-            text: format!("Red:   {} pieces ({} kings)", red_count, red_kings),
-            color: RED_PIECE,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        commands.push(RenderCommand::Text {
-            x: PANEL_X + 15.0,
-            y: BOARD_OFFSET_Y + 110.0,
-            text: format!("Black: {} pieces ({} kings)", black_count, black_kings),
-            color: SUBTEXT0,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Captured counts
-        commands.push(RenderCommand::Text {
-            x: PANEL_X + 15.0,
-            y: BOARD_OFFSET_Y + 145.0,
-            text: format!(
-                "Captured: Red {} | Black {}",
-                self.red_captured, self.black_captured
-            ),
-            color: OVERLAY0,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Move counter
-        commands.push(RenderCommand::Text {
-            x: PANEL_X + 15.0,
-            y: BOARD_OFFSET_Y + 170.0,
-            text: format!("Move: {}", self.board.move_count),
-            color: OVERLAY0,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Separator
-        commands.push(RenderCommand::Line {
-            x1: PANEL_X + 10.0,
-            y1: BOARD_OFFSET_Y + 195.0,
-            x2: PANEL_X + 220.0,
-            y2: BOARD_OFFSET_Y + 195.0,
-            color: SURFACE0,
-            width: 1.0,
-        });
-
-        // Move history header
-        commands.push(RenderCommand::Text {
-            x: PANEL_X + 15.0,
-            y: BOARD_OFFSET_Y + 210.0,
-            text: "Move History".to_string(),
-            color: LAVENDER,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Recent moves (show last ~18 moves)
-        let max_display = 18;
-        let start = if self.move_history.len() > max_display {
-            self.move_history.len() - max_display
-        } else {
-            0
-        };
-        let hist_font_size = 13.0_f32;
-        for (i, mv_str) in self.move_history[start..].iter().enumerate() {
-            let actual_idx = start + i;
-            let label = if actual_idx % 2 == 0 {
-                format!("{}. {}", actual_idx / 2 + 1, mv_str)
-            } else {
-                format!("   {}", mv_str)
-            };
-            let color = if actual_idx % 2 == 0 {
-                RED_PIECE
-            } else {
-                SUBTEXT0
-            };
-            commands.push(RenderCommand::Text {
-                x: PANEL_X + 15.0,
-                y: BOARD_OFFSET_Y + 235.0 + i as f32 * 18.0,
-                text: label,
-                color,
-                font_size: hist_font_size,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(200.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        // Controls hint at bottom
-        commands.push(RenderCommand::Text {
-            x: PANEL_X + 15.0,
-            y: BOARD_OFFSET_Y + BOARD_PIXEL_SIZE - 25.0,
-            text: "Arrows/Click | Enter/Space | Ctrl+N".to_string(),
-            color: OVERLAY0,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+    /// The line along the bottom of the window.
+    fn draw_status(&self, l: &Layout, f: &mut Frame<Target>) {
+        let band = inset(l.status, l.pad);
+        let ink = Ink::new(
+            l.font,
+            FontWeightHint::Regular,
+            match self.game_result {
+                GameResult::RedWins => GREEN,
+                GameResult::BlackWins => RED,
+                GameResult::Draw => YELLOW,
+                GameResult::Ongoing => TEXT_COLOR,
+            },
+        );
+        let drawn = label_in(f, band, &self.status(), ink);
+        f.hit(Target::Status, drawn);
     }
 }
 
-fn main() {
-    let _app = CheckersApp::new();
+/// The file letter for a column, `a` through `h`.
+fn file_letter(col: i8) -> char {
+    // Saturating rather than wrapping, and clamped to the board, so a column
+    // outside 0..8 yields a letter on the board rather than an arbitrary byte.
+    let col = col.clamp(0, 7);
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "clamped to 0..=7 on the line above, so it cannot be negative"
+    )]
+    let offset = col as u8;
+    char::from(b'a'.saturating_add(offset))
+}
+
+/// A checker, drawn as two concentric discs and, for a king, a crown.
+///
+/// A free function rather than a method: it read `&self` and used nothing from
+/// it, which is a method only in spelling.
+fn draw_piece(f: &mut Frame<Target>, cx: f32, cy: f32, radius: f32, piece: Piece) {
+    let (outer, inner) = match piece.side {
+        Side::Red => (RED_PIECE, RED_PIECE_DARK),
+        Side::Black => (BLACK_PIECE, BLACK_PIECE_DARK),
+    };
+    f.push(RenderCommand::FillRect {
+        x: cx - radius,
+        y: cy - radius,
+        width: radius * 2.0,
+        height: radius * 2.0,
+        color: outer,
+        corner_radii: CornerRadii::all(radius),
+    });
+    let core = radius * 0.62;
+    f.push(RenderCommand::FillRect {
+        x: cx - core,
+        y: cy - core,
+        width: core * 2.0,
+        height: core * 2.0,
+        color: inner,
+        corner_radii: CornerRadii::all(core),
+    });
+
+    if piece.is_king {
+        // Centred by measurement. The old spelling drew the crown at
+        // `cx - 8.0, cy - 10.0`: two nudges chosen for one font size, which put
+        // the crown off its own piece at any other.
+        let ink = Ink::new(radius * 1.1, FontWeightHint::Bold, KING_CROWN);
+        let crown = "\u{265A}";
+        label(
+            f,
+            cx - ink.width(crown) / 2.0,
+            cy - ink.height() / 2.0,
+            crown,
+            ink,
+        );
+    }
+}
+
+// ── Drawing helpers ─────────────────────────────────────────────────
+
+/// A font size, weight and colour, together, because they always travel
+/// together.
+#[derive(Debug, Clone, Copy)]
+struct Ink {
+    size: f32,
+    weight: FontWeightHint,
+    color: Color,
+}
+
+impl Ink {
+    const fn new(size: f32, weight: FontWeightHint, color: Color) -> Self {
+        Self {
+            size,
+            weight,
+            color,
+        }
+    }
+
+    /// How wide `s` is when drawn in this ink.
+    fn width(self, s: &str) -> f32 {
+        text::measure(s, self.size, self.weight)
+    }
+
+    /// How tall one line of this ink is.
+    fn height(self) -> f32 {
+        text::line_height(self.size, self.weight)
+    }
+}
+
+/// Draw `s` at `(x, y)` and hand back the box its glyphs occupy.
+fn label(f: &mut Frame<Target>, x: f32, y: f32, s: &str, ink: Ink) -> Rect {
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: s.to_string(),
+        color: ink.color,
+        font_size: ink.size,
+        font_weight: ink.weight,
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+    Rect::new(x, y, ink.width(s), ink.height())
+}
+
+/// Draw `s` at the left of `area`, vertically centred, elided to fit.
+fn label_in(f: &mut Frame<Target>, area: Rect, s: &str, ink: Ink) -> Rect {
+    let y = area.y + (area.h - ink.height()).max(0.0) / 2.0;
+    f.push(RenderCommand::Text {
+        x: area.x,
+        y,
+        text: s.to_string(),
+        color: ink.color,
+        font_size: ink.size,
+        font_weight: ink.weight,
+        max_width: Some(area.w.max(0.0)),
+        overflow: TextOverflow::Ellipsis,
+    });
+    Rect::new(area.x, y, ink.width(s).min(area.w.max(0.0)), ink.height())
+}
+
+/// Draw one line at `*y` down the panel, and move the cursor past it.
+///
+/// A row that will not fit inside `band` is not drawn, and comes back empty.
+/// The panel stacks downwards from a fixed top, so at a small enough window
+/// every row after the first hangs off the bottom of the panel and paints over
+/// the status line; half a line of text on the wrong background is worse than
+/// no line. An empty rect is the right answer rather than a special case,
+/// because both [`union`] and [`Frame::hit`] already ignore one.
+fn panel_row(f: &mut Frame<Target>, band: Rect, y: &mut f32, s: &str, ink: Ink) -> Rect {
+    let h = ink.height();
+    let row = Rect::new(band.x, *y, band.w, h);
+    *y += h;
+    if row.y < band.y - 0.01 || row.bottom() > band.bottom() + 0.01 {
+        return Rect::new(row.x, row.y, 0.0, 0.0);
+    }
+    label_in(f, row, s, ink)
+}
+
+// ── The window ──────────────────────────────────────────────────────
+
+/// The one body every event goes through, whichever side it arrives from.
+///
+/// The window calls it and the tests call it, so a key the tests prove works is
+/// the same key the window delivers.
+fn handle_event(app: &mut CheckersApp, event: &Event) -> EventResult {
+    match event {
+        Event::Key(key) => app.handle_key(key),
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }) => app.click(*x, *y, *button),
+        Event::Resize { width, height } => {
+            app.resize(f32_from_u32(*width), f32_from_u32(*height));
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+impl App for CheckersApp {
+    fn title(&self) -> String {
+        "Checkers".to_string()
+    }
+
+    fn app_id(&self) -> String {
+        "checkers".to_string()
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the natural size is two small positive whole numbers"
+    )]
+    fn initial_size(&self) -> (u32, u32) {
+        // Converted from the float pair rather than written out again: two
+        // spellings of one size are two things that can drift apart.
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against, which is the only reason it is stored at all.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for CheckersApp {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
+    }
+}
+
+fn main() -> ExitCode {
+    let mut game = CheckersApp::new();
+    app::launch("checkers", &mut game)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -1462,161 +1857,108 @@ mod tests {
     // has already failed; panicking is the reporting mechanism, not a fault.
     #![allow(
         clippy::arithmetic_side_effects,
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
         clippy::expect_used,
+        clippy::float_cmp,
         clippy::indexing_slicing,
+        clippy::panic,
+        clippy::too_many_lines,
         clippy::unwrap_used
     )]
 
     use super::*;
+    use guitk::probe;
 
-    // ── Helper ──────────────────────────────────────────────────────
-
-    // ── Board geometry tests ───────────────────────────────
+    // ── The window ──────────────────────────────────────────────────
     //
-    // `square_origin` and `square_at` are each other's inverse, so a test that
-    // clicks where the code says it drew something agrees with any mapping,
-    // right or wrong. The checks that carry weight are the ones whose expected
-    // value comes from somewhere else: the painted squares, the window, and the
-    // way a draughts board is numbered. Written against the checklist in
-    // design-decisions.md 485.
+    // Nothing below asks the production code where it *would* have drawn a
+    // square. `square_origin` and `square_at` used to be each other's inverse,
+    // so a test that clicked where the code said it drew something agreed with
+    // any mapping, right or wrong. These read the boxes the drawing pass
+    // actually recorded, and compare them against the window, against each
+    // other, and against the way a draughts board is numbered.
 
-    /// Top-left corners of the painted square backgrounds, in the order the
-    /// renderer emitted them. Nothing here consults `square_origin`, so these
-    /// are the squares a player actually sees.
-    fn painted_squares(commands: &[RenderCommand]) -> Vec<(f32, f32)> {
-        commands
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    x, y, width, color, ..
-                } if (*width - SQUARE_SIZE).abs() < 0.01
-                    && (*color == DARK_SQUARE
-                        || *color == LIGHT_SQUARE
-                        || *color == LAST_MOVE_HIGHLIGHT) =>
-                {
-                    Some((*x, *y))
-                }
-                _ => None,
-            })
-            .collect()
+    /// The sizes every geometry test is run at.
+    ///
+    /// The lopsided ones are the point: a board fitted to the width alone
+    /// passes at 900x640 and runs off the bottom at 400x900, which is exactly
+    /// the fault the old fixed layout had.
+    const SIZES: [(f32, f32); 8] = [
+        (WINDOW_WIDTH, WINDOW_HEIGHT),
+        (640.0, 480.0),
+        (1600.0, 1000.0),
+        (400.0, 900.0),
+        (1200.0, 400.0),
+        (320.0, 240.0),
+        (200.0, 200.0),
+        (60.0, 60.0),
+    ];
+
+    /// A fresh game.
+    fn app() -> CheckersApp {
+        CheckersApp::new()
     }
 
-    /// The painted square that contains `(x, y)`, if any. This is how a test
-    /// says "the same square the player is looking at" without asking
-    /// `square_origin`.
-    fn painted_square_containing(squares: &[(f32, f32)], x: f32, y: f32) -> Option<(f32, f32)> {
-        squares
-            .iter()
-            .copied()
-            .find(|&(sx, sy)| x >= sx && x < sx + SQUARE_SIZE && y >= sy && y < sy + SQUARE_SIZE)
+    /// The box the drawing pass recorded for `target` at `size`, or a panic
+    /// naming it.
+    fn box_at(app: &CheckersApp, target: Target, size: (f32, f32)) -> Rect {
+        probe::rect_of_sized(app, target, size)
+            .unwrap_or_else(|| panic!("{target:?} was not drawn at {size:?}"))
     }
 
-    /// Centres of the pieces the renderer painted. The outer disc is the fill
-    /// of piece radius; the inner one is smaller, so it is not counted twice.
-    fn painted_piece_centers(commands: &[RenderCommand]) -> Vec<(f32, f32)> {
-        commands
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    x, y, width, color, ..
-                } if (*width - PIECE_RADIUS * 2.0).abs() < 0.01
-                    && (*color == RED_PIECE || *color == BLACK_PIECE) =>
-                {
-                    Some((*x + PIECE_RADIUS, *y + PIECE_RADIUS))
-                }
-                _ => None,
-            })
-            .collect()
+    /// The box recorded for `target` at the natural size.
+    fn box_of(app: &CheckersApp, target: Target) -> Rect {
+        box_at(app, target, CheckersApp::SIZE)
     }
 
-    /// Where a coordinate label was drawn. Filtered by font size and colour so
-    /// the panel's own text -- which includes bare digits -- cannot be mistaken
-    /// for a rank number.
-    fn label_pos(commands: &[RenderCommand], want: &str) -> Option<(f32, f32)> {
-        commands.iter().find_map(|c| match c {
-            RenderCommand::Text {
-                x,
-                y,
-                text,
-                font_size,
-                color,
-                ..
-            } if (*font_size - LABEL_FONT_SIZE).abs() < 0.01
-                && *color == SUBTEXT0
-                && text == want =>
-            {
-                Some((*x, *y))
-            }
-            _ => None,
-        })
+    /// Whether two rectangles agree to within a rounding error.
+    fn same(a: Rect, b: Rect) -> bool {
+        (a.x - b.x).abs() < 0.01
+            && (a.y - b.y).abs() < 0.01
+            && (a.w - b.w).abs() < 0.01
+            && (a.h - b.h).abs() < 0.01
     }
 
-    #[test]
-    fn the_painted_board_is_eight_squares_across_and_evenly_spaced() {
-        // Measured against the window and against itself, never against
-        // `square_origin`: 64 squares on an 8x8 lattice, one square apart,
-        // inside the window and clear of the side panel.
-        let app = CheckersApp::new();
-        let squares = painted_squares(&app.render());
-        assert_eq!(squares.len(), 64, "one painted square each");
+    /// A left click at a window coordinate.
+    ///
+    /// `probe::click_sized` clicks a *target* — it asks the hit map where the
+    /// control is and clicks there. That is the wrong instrument for these
+    /// tests, which exist to check the mapping from a raw point back to a
+    /// control, so they go in at the point.
+    fn tap(app: &mut CheckersApp, x: f32, y: f32, size: (f32, f32)) -> EventResult {
+        app.click_at(x, y, MouseButton::Left, size)
+    }
 
-        let mut xs: Vec<f32> = squares.iter().map(|s| s.0).collect();
-        let mut ys: Vec<f32> = squares.iter().map(|s| s.1).collect();
-        xs.sort_by(f32::total_cmp);
-        xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-        ys.sort_by(f32::total_cmp);
-        ys.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-        assert_eq!(xs.len(), 8, "eight distinct files");
-        assert_eq!(ys.len(), 8, "eight distinct ranks");
+    /// A click at a window coordinate with a nominated button.
+    fn tap_with(
+        app: &mut CheckersApp,
+        x: f32,
+        y: f32,
+        button: MouseButton,
+        size: (f32, f32),
+    ) -> EventResult {
+        app.click_at(x, y, button, size)
+    }
 
-        for pair in xs.windows(2) {
-            assert!(
-                (pair[1] - pair[0] - SQUARE_SIZE).abs() < 0.01,
-                "files should be one square apart, got {}",
-                pair[1] - pair[0]
-            );
-        }
-        for pair in ys.windows(2) {
-            assert!(
-                (pair[1] - pair[0] - SQUARE_SIZE).abs() < 0.01,
-                "ranks should be one square apart, got {}",
-                pair[1] - pair[0]
-            );
-        }
-        assert!(
-            xs[0] > 0.0 && ys[0] > 0.0,
-            "the board starts inside the window"
-        );
-        assert!(
-            xs[7] + SQUARE_SIZE <= PANEL_X,
-            "the board should not run under the side panel"
-        );
+    /// Whether `inner` lies within `outer`, allowing a rounding error.
+    fn inside(inner: Rect, outer: Rect) -> bool {
+        inner.x >= outer.x - 0.01
+            && inner.y >= outer.y - 0.01
+            && inner.right() <= outer.right() + 0.01
+            && inner.bottom() <= outer.bottom() + 0.01
     }
 
     #[test]
-    fn every_point_in_a_painted_square_resolves_to_that_square() {
-        // Probed at nine points across each square rather than only at its
-        // centre. A mapping shifted by less than half a square still answers
-        // correctly dead centre, so the centre alone cannot tell a correct
-        // mapping from a shifted one; the corners can.
-        //
-        // The expected value also pins the *flip*: the renderer walks board
-        // rows 0..8, and rank 1 is drawn at the bottom, so the nth square
-        // emitted is board row `n / 8` -- counted up from the bottom of the
-        // window, not down from the top.
-        let app = CheckersApp::new();
-        let squares = painted_squares(&app.render());
-        let inset = 1.0;
-        for (i, &(sx, sy)) in squares.iter().enumerate() {
-            let want = Pos::new(i as i8 / 8, i as i8 % 8);
-            for dx in [inset, SQUARE_SIZE / 2.0, SQUARE_SIZE - inset] {
-                for dy in [inset, SQUARE_SIZE / 2.0, SQUARE_SIZE - inset] {
-                    assert_eq!(
-                        square_at(sx + dx, sy + dy),
-                        Some(want),
-                        "({}, {}) is inside the square painted at ({sx}, {sy})",
-                        sx + dx,
-                        sy + dy
+    fn every_square_is_drawn_at_every_window_size() {
+        for size in SIZES {
+            let app = app();
+            for row in 0..8i8 {
+                for col in 0..8i8 {
+                    assert!(
+                        probe::rect_of_sized(&app, Target::Square(row, col), size).is_some(),
+                        "square ({row}, {col}) was not drawn at {size:?}"
                     );
                 }
             }
@@ -1624,172 +1966,732 @@ mod tests {
     }
 
     #[test]
-    fn the_board_edges_reject_clicks_alike_on_all_four_sides() {
-        // Stated as the interval itself rather than as a mirror of one edge
-        // about the other: the board is the half-open box [left, right) x
-        // [top, bottom), so `left` is on it and `right` is not, and no offset
-        // makes the two edges reflections of each other.
-        let app = CheckersApp::new();
-        let squares = painted_squares(&app.render());
-        let left = squares.iter().map(|s| s.0).fold(f32::MAX, f32::min);
-        let right = squares.iter().map(|s| s.0).fold(f32::MIN, f32::max) + SQUARE_SIZE;
-        let top = squares.iter().map(|s| s.1).fold(f32::MAX, f32::min);
-        let bottom = squares.iter().map(|s| s.1).fold(f32::MIN, f32::max) + SQUARE_SIZE;
-        let mid_x = f32::midpoint(left, right);
-        let mid_y = f32::midpoint(top, bottom);
+    fn the_squares_are_square_and_all_the_same_size() {
+        for size in SIZES {
+            let app = app();
+            let first = box_at(&app, Target::Square(0, 0), size);
+            for row in 0..8i8 {
+                for col in 0..8i8 {
+                    let r = box_at(&app, Target::Square(row, col), size);
+                    assert!(
+                        (r.w - r.h).abs() < 0.01,
+                        "square ({row}, {col}) is {}x{} at {size:?} -- not square",
+                        r.w,
+                        r.h
+                    );
+                    assert!(
+                        (r.w - first.w).abs() < 0.01,
+                        "square ({row}, {col}) is {} across at {size:?}, a1 is {}",
+                        r.w,
+                        first.w
+                    );
+                }
+            }
+        }
+    }
 
-        let mut d = 0.25f32;
-        while d < SQUARE_SIZE * 2.0 {
-            for (name, p) in [
-                ("left", (left - d, mid_y)),
-                ("right", (right + d, mid_y)),
-                ("top", (mid_x, top - d)),
-                ("bottom", (mid_x, bottom + d)),
-            ] {
-                assert_eq!(
-                    square_at(p.0, p.1),
-                    None,
-                    "{d}px past the {name} edge, at ({}, {}), is off the board",
-                    p.0,
-                    p.1
+    #[test]
+    fn the_squares_tile_the_board_edge_to_edge() {
+        for size in SIZES {
+            let app = app();
+            let step = box_at(&app, Target::Square(0, 0), size).w;
+            for row in 0..8i8 {
+                for col in 0..8i8 {
+                    let here = box_at(&app, Target::Square(row, col), size);
+                    if col < 7 {
+                        let right = box_at(&app, Target::Square(row, col + 1), size);
+                        assert!(
+                            (right.x - here.right()).abs() < 0.01,
+                            "a gap of {} between ({row}, {col}) and its neighbour at {size:?}",
+                            right.x - here.right()
+                        );
+                    }
+                    if row < 7 {
+                        // Rank `row + 1` is drawn one step *above* rank `row`:
+                        // draughts puts rank 1 at the bottom.
+                        let above = box_at(&app, Target::Square(row + 1, col), size);
+                        assert!(
+                            (here.y - above.bottom()).abs() < 0.01,
+                            "rank {} is not directly above rank {row} at {size:?}",
+                            row + 1
+                        );
+                    }
+                    assert!(
+                        (here.w - step).abs() < 0.01,
+                        "({row}, {col}) is not one step across at {size:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_board_box_is_exactly_the_squares_it_holds() {
+        // `Target::Board` is recorded from `Grid::board_rect`, which is a
+        // second expression of the same geometry `Grid::square` lays out.
+        // Two expressions of one thing drift; this is what notices.
+        for size in SIZES {
+            let app = app();
+            let mut squares: Option<Rect> = None;
+            for row in 0..8i8 {
+                for col in 0..8i8 {
+                    let square = box_at(&app, Target::Square(row, col), size);
+                    squares = Some(match squares {
+                        Some(so_far) => union(so_far, square),
+                        None => square,
+                    });
+                }
+            }
+            let squares = squares.expect("the board draws sixty-four squares");
+            let board = box_at(&app, Target::Board, size);
+            assert!(
+                same(board, squares),
+                "at {size:?} the board box is {board:?} but its squares fill {squares:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rank_one_is_at_the_bottom_and_file_a_at_the_left() {
+        // The orientation rule, checked against the published one rather than
+        // against the code that implements it. Getting it wrong turns the board
+        // upside down, and every piece of arithmetic in the file stays
+        // self-consistent while it does.
+        for size in SIZES {
+            let app = app();
+            let a1 = box_at(&app, Target::Square(0, 0), size);
+            let a8 = box_at(&app, Target::Square(7, 0), size);
+            let h1 = box_at(&app, Target::Square(0, 7), size);
+            assert!(
+                a1.y > a8.y,
+                "rank 1 is drawn above rank 8 at {size:?} -- the board is upside down"
+            );
+            assert!(
+                h1.x > a1.x,
+                "file h is drawn left of file a at {size:?} -- the board is mirrored"
+            );
+        }
+    }
+
+    #[test]
+    fn the_board_stays_inside_the_window() {
+        for (w, h) in SIZES {
+            let app = app();
+            let window = Rect::new(0.0, 0.0, w, h);
+            for row in 0..8i8 {
+                for col in 0..8i8 {
+                    let r = box_at(&app, Target::Square(row, col), (w, h));
+                    assert!(
+                        inside(r, window),
+                        "square ({row}, {col}) at {r:?} escapes a {w}x{h} window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_board_and_the_panel_do_not_overlap() {
+        for size in SIZES {
+            let app = app();
+            let panel = box_at(&app, Target::Panel, size);
+            for row in 0..8i8 {
+                for col in 0..8i8 {
+                    let r = box_at(&app, Target::Square(row, col), size);
+                    assert!(
+                        panel.intersect(r).is_none(),
+                        "square ({row}, {col}) at {r:?} runs under the panel at {panel:?}, size {size:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_click_in_a_square_reaches_that_square() {
+        // The whole point of the rewrite: the click is resolved against the box
+        // the drawing pass recorded, so this cannot pass by agreeing with a
+        // wrong formula that both sides share.
+        for size in SIZES {
+            for row in 0..8i8 {
+                for col in 0..8i8 {
+                    let mut app = app();
+                    let r = box_at(&app, Target::Square(row, col), size);
+                    if r.w < 2.0 {
+                        // At 60x60 the squares are sub-pixel; the centre of one
+                        // is not distinguishable from its neighbour's, and a
+                        // test that insisted otherwise would be testing float
+                        // rounding.
+                        continue;
+                    }
+                    let (cx, cy) = r.centre();
+                    tap(&mut app, cx, cy, size);
+                    assert_eq!(
+                        app.cursor,
+                        Pos::new(row, col),
+                        "a click in the middle of ({row}, {col}) at {size:?} moved the cursor to {:?}",
+                        app.cursor
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_click_in_each_corner_of_a_square_reaches_that_square() {
+        // A click a hair inside each corner, which is where an off-by-one in
+        // the hit box shows up first.
+        let size = CheckersApp::SIZE;
+        for row in 0..8i8 {
+            for col in 0..8i8 {
+                let r = box_at(&app(), Target::Square(row, col), size);
+                for (x, y) in [
+                    (r.x + 0.5, r.y + 0.5),
+                    (r.right() - 0.5, r.y + 0.5),
+                    (r.x + 0.5, r.bottom() - 0.5),
+                    (r.right() - 0.5, r.bottom() - 0.5),
+                ] {
+                    let mut app = app();
+                    tap(&mut app, x, y, size);
+                    assert_eq!(
+                        app.cursor,
+                        Pos::new(row, col),
+                        "a click at ({x}, {y}), inside ({row}, {col}), moved the cursor to {:?}",
+                        app.cursor
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_click_off_the_board_moves_no_cursor() {
+        // The old `square_at` checked its bounds before its cast, which is what
+        // kept a click to the left of the board from resolving as column 0.
+        // The frame's hit map has no cast to get wrong -- but a box recorded
+        // wider than the square it stands for would have the same symptom, so
+        // the check is still worth making.
+        let size = CheckersApp::SIZE;
+        let board = box_of(&app(), Target::Board);
+        let start = app().cursor;
+        for (x, y) in [
+            (board.x - 4.0, board.centre().1),
+            (board.right() + 4.0, board.centre().1),
+            (board.centre().0, board.y - 4.0),
+            (board.centre().0, board.bottom() + 4.0),
+        ] {
+            let mut app = app();
+            tap(&mut app, x, y, size);
+            assert_eq!(
+                app.cursor, start,
+                "a click at ({x}, {y}), outside the board at {board:?}, moved the cursor"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rank_numbers_line_up_with_the_ranks_they_name() {
+        for size in SIZES {
+            let app = app();
+            for row in 0..8i8 {
+                let square = box_at(&app, Target::Square(row, 0), size);
+                let label = box_at(&app, Target::RankLabel(row), size);
+                assert!(
+                    label.right() <= square.x + 0.01,
+                    "rank {} sits on the board rather than beside it at {size:?}",
+                    row + 1
+                );
+                let (_, ly) = label.centre();
+                let (_, sy) = square.centre();
+                assert!(
+                    (ly - sy).abs() <= square.h / 2.0 + 0.01,
+                    "rank {} is centred at {ly}, but its rank is centred at {sy}, at {size:?}",
+                    row + 1
                 );
             }
-            if d < SQUARE_SIZE {
-                for (name, p) in [
-                    ("left", (left + d, mid_y)),
-                    ("right", (right - d, mid_y)),
-                    ("top", (mid_x, top + d)),
-                    ("bottom", (mid_x, bottom - d)),
-                ] {
+        }
+    }
+
+    #[test]
+    fn the_file_letters_line_up_with_the_files_they_name() {
+        for size in SIZES {
+            let app = app();
+            for col in 0..8i8 {
+                let square = box_at(&app, Target::Square(0, col), size);
+                let label = box_at(&app, Target::FileLabel(col), size);
+                assert!(
+                    label.y >= square.bottom() - 0.01,
+                    "file {} sits on the board rather than below it at {size:?}",
+                    file_letter(col)
+                );
+                let (lx, _) = label.centre();
+                let (sx, _) = square.centre();
+                assert!(
+                    (lx - sx).abs() <= square.w / 2.0 + 0.01,
+                    "file {} is centred at {lx}, but its file is centred at {sx}, at {size:?}",
+                    file_letter(col)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_ranks_read_one_to_eight_upwards_and_the_files_a_to_h_rightwards() {
+        // The numbering itself, read out of the drawn text rather than assumed
+        // from the target names.
+        let f = app().draw(CheckersApp::SIZE);
+        let text_at = |want: &str| -> Option<(f32, f32)> {
+            f.commands().iter().find_map(|c| match c {
+                RenderCommand::Text { x, y, text, .. } if text == want => Some((*x, *y)),
+                _ => None,
+            })
+        };
+        let mut last_y = f32::INFINITY;
+        for rank in 1..=8 {
+            let (_, y) =
+                text_at(&rank.to_string()).unwrap_or_else(|| panic!("rank {rank} was never drawn"));
+            assert!(y < last_y, "rank {rank} is drawn below rank {}", rank - 1);
+            last_y = y;
+        }
+        let mut last_x = f32::NEG_INFINITY;
+        for col in 0..8i8 {
+            let letter = file_letter(col).to_string();
+            let (x, _) =
+                text_at(&letter).unwrap_or_else(|| panic!("file {letter} was never drawn"));
+            assert!(
+                x > last_x,
+                "file {letter} is drawn left of the one before it"
+            );
+            last_x = x;
+        }
+    }
+
+    #[test]
+    fn a_piece_is_drawn_in_the_middle_of_the_square_it_stands_on() {
+        for size in SIZES {
+            let app = app();
+            let f = app.draw(size);
+            // Every disc the renderer emitted, as a centre point.
+            let discs: Vec<(f32, f32)> = f
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        corner_radii,
+                    } if corner_radii.top_left > 0.0
+                        && (*color == RED_PIECE || *color == BLACK_PIECE) =>
+                    {
+                        Some((x + width / 2.0, y + height / 2.0))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                discs.len(),
+                24,
+                "the opening position has 24 pieces, {} were drawn at {size:?}",
+                discs.len()
+            );
+            for row in 0..8i8 {
+                for col in 0..8i8 {
+                    let pos = Pos::new(row, col);
+                    if app.board.get(pos).is_none() {
+                        continue;
+                    }
+                    let square = box_at(&app, Target::Square(row, col), size);
+                    let (cx, cy) = square.centre();
                     assert!(
-                        square_at(p.0, p.1).is_some(),
-                        "{d}px inside the {name} edge, at ({}, {}), is on the board",
-                        p.0,
-                        p.1
+                        discs
+                            .iter()
+                            .any(|&(dx, dy)| (dx - cx).abs() < 0.01 && (dy - cy).abs() < 0.01),
+                        "no piece is centred on ({row}, {col}) at {size:?}, whose middle is ({cx}, {cy})"
                     );
                 }
             }
-            d += 0.25;
         }
     }
 
     #[test]
-    fn nothing_outside_the_painted_board_lands_on_a_square() {
-        // Swept far past every edge, because the faults this is looking for --
-        // a saturating cast, a wrap, a bounds test applied after the cast --
-        // all live beyond the board rather than just outside it.
-        let app = CheckersApp::new();
-        let squares = painted_squares(&app.render());
-        let far = BOARD_OFFSET_X + BOARD_PIXEL_SIZE + 200.0;
-        let mut x = -200.0;
-        while x < far {
-            let mut y = -200.0;
-            while y < far {
-                if let Some(pos) = square_at(x, y) {
+    fn a_legal_move_dot_marks_a_square_the_selected_piece_can_reach() {
+        let size = CheckersApp::SIZE;
+        let mut app = app();
+        // c3 (row 2, col 2) is a Red man with two moves in the opening
+        // position.
+        app.select_piece(Pos::new(2, 2));
+        assert!(
+            !app.legal_moves_for_selected.is_empty(),
+            "the fixture selected a piece with no moves"
+        );
+        let f = app.draw(size);
+        let dots: Vec<(f32, f32)> = f
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *color == LEGAL_MOVE_DOT => Some((x + width / 2.0, y + height / 2.0)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dots.len(),
+            app.legal_moves_for_selected.len(),
+            "one dot per legal move"
+        );
+        for (dx, dy) in dots {
+            let hit = f
+                .hit_test(dx, dy)
+                .unwrap_or_else(|| panic!("the dot at ({dx}, {dy}) is on no recorded box"));
+            let Target::Square(row, col) = hit else {
+                panic!("the dot at ({dx}, {dy}) is on {hit:?}, not a square");
+            };
+            assert!(
+                app.legal_moves_for_selected
+                    .iter()
+                    .any(|seq| seq.to_pos() == Pos::new(row, col)),
+                "a dot marks ({row}, {col}), which the selected piece cannot reach"
+            );
+        }
+    }
+
+    #[test]
+    fn the_whole_frame_is_clipped_to_the_window() {
+        // Only the clip is asserted, not that every recorded box lies inside
+        // the window: `Frame::hit` trims a box to the clip in force and drops
+        // it if nothing survives, so a box half a window away would come back
+        // cropped and wave such an assertion through. See known-issues Lesson
+        // 80. That the boxes are where the layout put them is covered by
+        // `the_board_stays_inside_the_window` and its neighbours, which compare
+        // against the layout rather than against the clip.
+        for (w, h) in SIZES {
+            let f = app().draw((w, h));
+            let outer = f.commands().iter().find_map(|c| match c {
+                RenderCommand::PushClip {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => Some((*x, *y, *width, *height)),
+                _ => None,
+            });
+            assert_eq!(
+                outer,
+                Some((0.0, 0.0, w, h)),
+                "a {w}x{h} window was not clipped to itself"
+            );
+            assert!(f.is_balanced(), "a clip was pushed and never popped");
+        }
+    }
+
+    #[test]
+    fn the_panel_keeps_its_history_clear_of_its_help() {
+        // The old panel drew eighteen history rows at eighteen pixels apart
+        // whatever the window's height, so a long game ran its history straight
+        // through the help line at the bottom.
+        for size in SIZES {
+            let mut app = app();
+            for i in 0..60 {
+                app.move_history.push(format!("m{i}"));
+            }
+            // Below a certain window there is no room for either, and a panel
+            // that drew them anyway would be drawing them on the board. Where
+            // both appear they must not touch; where one is missing there is
+            // nothing to collide with. That is not a hole in the test: the
+            // sizes it actually cares about are the ones where both are drawn,
+            // and `the_panel_draws_its_rows_while_they_fit` is what stops the
+            // panel escaping this test by drawing nothing at all.
+            let (Some(history), Some(help)) = (
+                probe::rect_of_sized(&app, Target::History, size),
+                probe::rect_of_sized(&app, Target::Help, size),
+            ) else {
+                continue;
+            };
+            assert!(
+                history.bottom() <= help.y + 0.01,
+                "the history runs to {} and the help starts at {}, at {size:?}",
+                history.bottom(),
+                help.y
+            );
+        }
+    }
+
+    #[test]
+    fn the_panel_draws_its_rows_while_they_fit() {
+        // The companion to the two tests either side: they permit a panel to
+        // omit a row, and this is what stops it omitting rows it has room for.
+        // Every size the app is meant to be used at holds the whole panel.
+        for size in [
+            CheckersApp::SIZE,
+            (640.0, 480.0),
+            (1600.0, 1000.0),
+            (400.0, 900.0),
+        ] {
+            let app = app();
+            for target in [
+                Target::NewGame,
+                Target::Captures,
+                Target::MoveNumber,
+                Target::History,
+                Target::Help,
+            ] {
+                assert!(
+                    probe::rect_of_sized(&app, target, size).is_some(),
+                    "{target:?} was not drawn at {size:?}, which has room for it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_panel_holds_everything_it_draws() {
+        for size in SIZES {
+            let app = app();
+            let panel = box_at(&app, Target::Panel, size);
+            for target in [
+                Target::NewGame,
+                Target::Captures,
+                Target::MoveNumber,
+                Target::History,
+                Target::Help,
+            ] {
+                // Nothing is clipped to the panel, so this is a real question
+                // and not Lesson 80's tautology: a row drawn past the bottom of
+                // the panel is still inside the window, so the frame keeps its
+                // box at full size and it shows up here.
+                let Some(r) = probe::rect_of_sized(&app, target, size) else {
+                    continue;
+                };
+                assert!(
+                    inside(r, panel),
+                    "{target:?} at {r:?} escapes the panel at {panel:?}, size {size:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_new_game_button_starts_a_new_game() {
+        let size = CheckersApp::SIZE;
+        let mut app = app();
+        app.move_history.push("a1-b2".to_string());
+        app.red_takes = 4;
+        app.selected = Some(Pos::new(2, 2));
+        let button = box_of(&app, Target::NewGame);
+        let (cx, cy) = button.centre();
+        tap(&mut app, cx, cy, size);
+        assert!(
+            app.move_history.is_empty(),
+            "the history survived a new game"
+        );
+        assert_eq!(app.red_takes, 0, "the captures survived a new game");
+        assert_eq!(app.selected, None, "the selection survived a new game");
+    }
+
+    #[test]
+    fn a_new_game_keeps_the_window_size() {
+        let mut app = app();
+        app.resize(1234.0, 567.0);
+        app.new_game();
+        assert_eq!(
+            app.size,
+            (1234.0, 567.0),
+            "a new game snapped the window back to its opening size"
+        );
+    }
+
+    #[test]
+    fn a_resize_event_is_what_the_next_click_is_read_against() {
+        let mut app = app();
+        let _ = handle_event(
+            &mut app,
+            &Event::Resize {
+                width: 1200,
+                height: 900,
+            },
+        );
+        assert_eq!(app.size, (1200.0, 900.0));
+        // And a click now resolves against the boxes at *that* size.
+        let r = box_at(&app, Target::Square(3, 3), (1200.0, 900.0));
+        let (cx, cy) = r.centre();
+        let _ = handle_event(
+            &mut app,
+            &Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        assert_eq!(app.cursor, Pos::new(3, 3));
+    }
+
+    #[test]
+    fn the_window_opens_at_the_size_the_layout_is_written_for() {
+        let app = app();
+        assert_eq!(
+            app.initial_size(),
+            (880, 660),
+            "the window asks for a size the natural-size constants do not name"
+        );
+        assert_eq!(CheckersApp::SIZE, (WINDOW_WIDTH, WINDOW_HEIGHT));
+    }
+
+    #[test]
+    fn a_click_on_the_panel_is_answered_rather_than_dropped() {
+        // A click the app ignores falls through to the window, which treats it
+        // as a click on nothing at all -- so every box the app draws must
+        // answer, even the ones that do nothing.
+        let size = CheckersApp::SIZE;
+        let mut app = app();
+        let panel = box_of(&app, Target::Panel);
+        let outcome = tap(&mut app, panel.x + 2.0, panel.bottom() - 2.0, size);
+        assert_eq!(outcome, EventResult::Consumed);
+    }
+
+    #[test]
+    fn a_right_click_is_not_a_move() {
+        let size = CheckersApp::SIZE;
+        let mut app = app();
+        let r = box_of(&app, Target::Square(2, 2));
+        let (cx, cy) = r.centre();
+        let outcome = tap_with(&mut app, cx, cy, MouseButton::Right, size);
+        assert_eq!(outcome, EventResult::Ignored);
+        assert_eq!(app.selected, None, "a right click selected a piece");
+    }
+
+    #[test]
+    fn the_status_line_says_whose_turn_it_is() {
+        let app = app();
+        assert_eq!(app.status(), "Red to move");
+        let f = app.draw(CheckersApp::SIZE);
+        assert!(
+            f.commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Red to move")),
+            "the status the app reports is not the status it draws"
+        );
+    }
+
+    #[test]
+    fn no_frame_ever_says_black_is_thinking() {
+        // `execute_move` used to set "Black thinking..." on the line before it
+        // called `do_ai_move`, which overwrote it. The search runs inside the
+        // same event, so no frame was ever drawn between the two and the
+        // message could not be seen. It is gone; this is what keeps it gone.
+        let mut app = app();
+        for _ in 0..6 {
+            let moves = app.board.generate_legal_moves();
+            let Some(mv) = moves.first().cloned() else {
+                break;
+            };
+            app.execute_move(&mv);
+            let f = app.draw(CheckersApp::SIZE);
+            for c in f.commands() {
+                if let RenderCommand::Text { text, .. } = c {
                     assert!(
-                        pos.is_valid(),
-                        "({x}, {y}) resolved to ({}, {}), which is off the board",
-                        pos.row,
-                        pos.col
-                    );
-                    assert!(
-                        painted_square_containing(&squares, x, y).is_some(),
-                        "({x}, {y}) resolved to a square but is not inside any painted one"
+                        !text.contains("thinking"),
+                        "a frame drew {text:?}, a notice no player can ever see"
                     );
                 }
-                y += 7.0;
             }
-            x += 7.0;
         }
     }
 
     #[test]
-    fn a_piece_is_painted_in_the_middle_of_the_square_it_stands_on() {
-        // Measured against the painted square that *contains* the piece, not
-        // against `square_center`. Asking `square_center` where the piece
-        // should be would agree with any renderer that used it, including one
-        // that put the piece in a corner: an inverse tells you which square a
-        // point is in, never where in the square it is. See
-        // design-decisions.md 483.
-        let app = CheckersApp::new();
-        let commands = app.render();
-        let squares = painted_squares(&commands);
-        let centers = painted_piece_centers(&commands);
-        assert_eq!(centers.len(), 24, "twelve pieces a side at the start");
-
-        for (x, y) in centers {
-            let (sx, sy) = painted_square_containing(&squares, x, y)
-                .expect("a piece should be painted inside some square");
-            let (want_x, want_y) = (sx + SQUARE_SIZE / 2.0, sy + SQUARE_SIZE / 2.0);
-            assert!(
-                (x - want_x).abs() < 0.01 && (y - want_y).abs() < 0.01,
-                "a piece at ({x}, {y}) is not centred in its square at ({want_x}, {want_y})"
-            );
-        }
-    }
-
-    #[test]
-    fn the_board_is_numbered_upwards_from_rank_one() {
-        // Draughts, like chess, puts rank 1 at the bottom -- the opposite of
-        // Othello next door in apps/reversi, where a1 is the *upper*-left
-        // square. Painting and hit-testing agree with each other whichever way
-        // round this is, so the outside opinion is the window: the label "1"
-        // must sit lower down it than the label "8", and "a" left of "h".
-        let app = CheckersApp::new();
-        let commands = app.render();
-        let (_, y1) = label_pos(&commands, "1").expect("rank 1 label");
-        let (_, y8) = label_pos(&commands, "8").expect("rank 8 label");
-        assert!(
-            y1 > y8,
-            "draughts' rank 1 is the bottom row; got 1 at {y1} and 8 at {y8}"
+    fn the_captures_line_credits_the_side_that_did_the_taking() {
+        // The old pair was named for the side taken *from* -- `red_captured`
+        // counted Red's losses -- and then printed as `Captured: Red {n}`,
+        // which reads as the pieces Red has captured. The panel said the
+        // opposite of what it counted.
+        let mut app = app();
+        let mut board = Board::empty();
+        place(&mut board, 2, 2, Side::Red, false);
+        place(&mut board, 3, 3, Side::Black, false);
+        place(&mut board, 7, 7, Side::Black, false);
+        board.side_to_move = Side::Red;
+        app.board = board;
+        let jump = app
+            .board
+            .generate_legal_moves()
+            .into_iter()
+            .find(|seq| seq.is_jump())
+            .expect("the fixture set up a jump");
+        app.execute_move(&jump);
+        assert_eq!(
+            app.red_takes, 1,
+            "Red took a piece and the count credited to Red is {}",
+            app.red_takes
         );
-
-        let (xa, _) = label_pos(&commands, "a").expect("file a label");
-        let (xh, _) = label_pos(&commands, "h").expect("file h label");
+        let f = app.draw(CheckersApp::SIZE);
         assert!(
-            xa < xh,
-            "file a should be drawn left of file h, got {xa} vs {xh}"
+            f.commands().iter().any(
+                |c| matches!(c, RenderCommand::Text { text, .. } if text == "Red 1   Black 0")
+            ),
+            "the panel does not report Red's single capture"
         );
     }
 
     #[test]
-    fn the_labels_line_up_with_the_squares_they_name() {
-        // Pinned to the *painted* squares rather than recomputed, so labels
-        // that drift off the rank or file they name are caught.
-        let app = CheckersApp::new();
-        let commands = app.render();
-        let squares = painted_squares(&commands);
-        for (i, name) in ["a", "d", "h"].iter().enumerate() {
-            let col = [0usize, 3, 7][i];
-            let (x, _) = label_pos(&commands, name).expect("file label");
-            let want = squares[col].0 + SQUARE_SIZE / 2.0;
-            assert!(
-                (x - want).abs() < SQUARE_SIZE / 2.0,
-                "label {name} sits at {x}, but its file is centred on {want}"
-            );
+    fn the_cursor_walks_the_board_and_stops_at_its_edges() {
+        let size = CheckersApp::SIZE;
+        let mut app = app();
+        // Rank 1 is at the bottom, so Up raises the rank.
+        let up = probe::press(Key::Up);
+        for _ in 0..12 {
+            app.key_at(&up, size);
         }
-        for (i, name) in ["1", "4", "8"].iter().enumerate() {
-            let row = [0usize, 3, 7][i];
-            let (_, y) = label_pos(&commands, name).expect("rank label");
-            let want = squares[row * 8].1 + SQUARE_SIZE / 2.0;
-            assert!(
-                (y - want).abs() < SQUARE_SIZE / 2.0,
-                "label {name} sits at {y}, but its rank is centred on {want}"
-            );
+        assert_eq!(app.cursor.row, 7, "Up did not stop at rank 8");
+        let down = probe::press(Key::Down);
+        for _ in 0..12 {
+            app.key_at(&down, size);
         }
+        assert_eq!(app.cursor.row, 0, "Down did not stop at rank 1");
     }
 
     #[test]
-    fn the_frame_sits_squarely_around_the_painted_squares() {
-        // The frame is drawn from `BOARD_PIXEL_SIZE` and the squares from
-        // `square_origin`. If those two disagree about how big the board is,
-        // the frame is off-centre -- and that is the only symptom, since every
-        // other part of the board is placed from `square_origin` and just
-        // shifts along with it.
-        let app = CheckersApp::new();
-        let commands = app.render();
-        let squares = painted_squares(&commands);
-        let (fx, fy, fw, fh) = commands
+    fn the_cursor_is_drawn_on_the_square_it_is_on() {
+        let size = CheckersApp::SIZE;
+        let mut app = app();
+        app.cursor = Pos::new(5, 3);
+        let f = app.draw(size);
+        let square = box_at(&app, Target::Square(5, 3), size);
+        let ring = f.commands().iter().find_map(|c| match c {
+            RenderCommand::StrokeRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } if *color == YELLOW => Some(Rect::new(*x, *y, *width, *height)),
+            _ => None,
+        });
+        let ring = ring.expect("the cursor was not drawn");
+        assert!(
+            inside(ring, square),
+            "the cursor at {ring:?} is not on its square at {square:?}"
+        );
+    }
+
+    #[test]
+    fn the_selection_ring_is_drawn_on_the_selected_square() {
+        let size = CheckersApp::SIZE;
+        let mut app = app();
+        app.select_piece(Pos::new(2, 2));
+        assert_eq!(app.selected, Some(Pos::new(2, 2)));
+        let f = app.draw(size);
+        let square = box_at(&app, Target::Square(2, 2), size);
+        let ring = f
+            .commands()
             .iter()
             .find_map(|c| match c {
                 RenderCommand::StrokeRect {
@@ -1799,92 +2701,128 @@ mod tests {
                     height,
                     color,
                     ..
-                } if *color == SURFACE1 => Some((*x, *y, *width, *height)),
+                } if *color == SELECTED_SQUARE => Some(Rect::new(*x, *y, *width, *height)),
                 _ => None,
             })
-            .expect("the board frame should be painted");
+            .expect("the selection was not drawn");
+        assert!(
+            inside(ring, square),
+            "the selection ring at {ring:?} is not on its square at {square:?}"
+        );
+    }
 
-        let left = squares.iter().map(|s| s.0).fold(f32::MAX, f32::min);
-        let right = squares.iter().map(|s| s.0).fold(f32::MIN, f32::max) + SQUARE_SIZE;
-        let top = squares.iter().map(|s| s.1).fold(f32::MAX, f32::min);
-        let bottom = squares.iter().map(|s| s.1).fold(f32::MIN, f32::max) + SQUARE_SIZE;
-        let margins = [
-            ("left", left - fx),
-            ("right", fx + fw - right),
-            ("top", top - fy),
-            ("bottom", fy + fh - bottom),
-        ];
-        for &(name, m) in &margins {
+    #[test]
+    fn a_click_selects_a_piece_and_a_second_click_moves_it() {
+        let size = CheckersApp::SIZE;
+        let mut app = app();
+        let from = Pos::new(2, 2);
+        let r = box_of(&app, Target::Square(from.row, from.col));
+        let (cx, cy) = r.centre();
+        tap(&mut app, cx, cy, size);
+        assert_eq!(app.selected, Some(from), "the first click did not select");
+
+        let to = app
+            .legal_moves_for_selected
+            .first()
+            .expect("the selected piece has no moves")
+            .to_pos();
+        let r = box_of(&app, Target::Square(to.row, to.col));
+        let (cx, cy) = r.centre();
+        tap(&mut app, cx, cy, size);
+        assert_eq!(app.selected, None, "the move did not clear the selection");
+        assert!(
+            app.board.get(from).is_none(),
+            "the piece is still on the square it left"
+        );
+        assert!(
+            !app.move_history.is_empty(),
+            "the move was not recorded in the history"
+        );
+    }
+
+    #[test]
+    fn the_header_counts_the_pieces_each_side_has_left() {
+        let app = app();
+        let f = app.draw(CheckersApp::SIZE);
+        let drawn: Vec<&String> = f
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            drawn.iter().any(|t| t.as_str() == "Red: 12"),
+            "the header does not report Red's twelve pieces: {drawn:?}"
+        );
+        assert!(
+            drawn.iter().any(|t| t.as_str() == "Black: 12"),
+            "the header does not report Black's twelve pieces"
+        );
+    }
+
+    #[test]
+    fn the_header_counts_kings_once_there_are_any() {
+        let mut app = app();
+        app.board.set(Pos::new(4, 4), Some(Piece::king(Side::Red)));
+        let f = app.draw(CheckersApp::SIZE);
+        assert!(
+            f.commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Red: 13 (1K)")),
+            "the header does not report Red's king"
+        );
+    }
+
+    #[test]
+    fn a_king_wears_a_crown_centred_on_its_own_piece() {
+        for size in SIZES {
+            let mut app = app();
+            app.board.set(Pos::new(4, 4), Some(Piece::king(Side::Red)));
+            let square = box_at(&app, Target::Square(4, 4), size);
+            let f = app.draw(size);
+            let crown = f.commands().iter().find_map(|c| match c {
+                RenderCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } if text == "\u{265A}" => Some(Rect::new(
+                    *x,
+                    *y,
+                    text::measure(text, *font_size, *font_weight),
+                    text::line_height(*font_size, *font_weight),
+                )),
+                _ => None,
+            });
+            let crown = crown.expect("the king was drawn without a crown");
+            let (kx, ky) = crown.centre();
+            let (sx, sy) = square.centre();
+            // The old crown was drawn at `cx - 8.0, cy - 10.0`: two nudges
+            // chosen for one font size, which put it off its own piece at any
+            // other. Half a square's tolerance is what "on its own piece"
+            // means.
             assert!(
-                m > 0.0,
-                "the {name} margin is {m}; the squares escape the frame"
-            );
-        }
-        for pair in margins.windows(2) {
-            assert!(
-                (pair[0].1 - pair[1].1).abs() < 0.01,
-                "the {} margin is {} but the {} margin is {}",
-                pair[0].0,
-                pair[0].1,
-                pair[1].0,
-                pair[1].1
+                (kx - sx).abs() < square.w / 2.0 && (ky - sy).abs() < square.h / 2.0,
+                "the crown is centred at ({kx}, {ky}) and its square at ({sx}, {sy}), at {size:?}"
             );
         }
     }
 
     #[test]
-    fn a_legal_move_dot_marks_the_middle_of_a_square_that_move_can_reach() {
-        // The dots are what a player aims at, so each one has to sit in the
-        // middle of a square that a click on it would actually move to.
-        // Found by asking the app rather than by naming a square: which piece
-        // can move depends on the opening layout and on whose turn it is, and
-        // hard-coding either would be a third place those are written down.
-        let mut app = CheckersApp::new();
-        for row in 0..8i8 {
-            for col in 0..8i8 {
-                app.click_square(Pos::new(row, col));
-                if !app.legal_moves_for_selected.is_empty() {
-                    break;
-                }
-            }
-            if !app.legal_moves_for_selected.is_empty() {
-                break;
-            }
-        }
-        let dests: Vec<Pos> = app
-            .legal_moves_for_selected
-            .iter()
-            .map(MoveSequence::to_pos)
-            .collect();
-        assert!(!dests.is_empty(), "some piece should have a legal move");
-
-        let commands = app.render();
-        let squares = painted_squares(&commands);
-        let dots: Vec<(f32, f32)> = commands
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect { x, y, color, .. } if *color == LEGAL_MOVE_DOT => {
-                    Some((*x + DOT_SIZE / 2.0, *y + DOT_SIZE / 2.0))
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(dots.len(), dests.len(), "one dot per legal destination");
-
-        for (x, y) in dots {
-            let (sx, sy) = painted_square_containing(&squares, x, y)
-                .expect("a dot should be painted inside some square");
+    fn nothing_is_drawn_at_a_zero_sized_window() {
+        // A compositor can hand a window a zero size while it is being mapped.
+        // The layout must survive it rather than dividing by it.
+        let app = app();
+        let f = app.draw((0.0, 0.0));
+        assert!(f.is_balanced(), "a clip was pushed and never popped");
+        for (_, r) in f.hits() {
             assert!(
-                (x - (sx + SQUARE_SIZE / 2.0)).abs() < 0.01
-                    && (y - (sy + SQUARE_SIZE / 2.0)).abs() < 0.01,
-                "a dot at ({x}, {y}) is not centred in its square at ({sx}, {sy})"
-            );
-            let hit = square_at(x, y).expect("a dot should sit on a clickable square");
-            assert!(
-                dests.contains(&hit),
-                "the dot at ({x}, {y}) resolves to ({}, {}), which is not a legal destination",
-                hit.row,
-                hit.col
+                r.w <= 0.01 && r.h <= 0.01,
+                "a box of {r:?} was recorded in a zero-sized window"
             );
         }
     }
@@ -1899,6 +2837,20 @@ mod tests {
             Piece::man(side)
         };
         board.set(Pos::new(row, col), Some(piece));
+    }
+
+    /// Every capture available to the piece standing on `pos`.
+    ///
+    /// `Board::generate_jumps_for` used to exist for this and was deleted: it
+    /// was a strict subset of `generate_jumps_for_chain` with the chain state
+    /// zeroed, called by nothing but itself and `has_jumps`. The zeroing is
+    /// four words, so it lives here rather than as a second production entry
+    /// point that only the tests reach.
+    fn jumps_from(board: &Board, pos: Pos) -> Vec<CheckersMove> {
+        match board.get(pos) {
+            Some(piece) => board.generate_jumps_for_chain(pos, piece, &[], None),
+            None => Vec::new(),
+        }
     }
 
     // ── Pos tests ───────────────────────────────────────────────────
@@ -1952,15 +2904,23 @@ mod tests {
     #[test]
     fn the_board_is_painted_the_colour_it_says_each_square_is() {
         // Measured against the window rather than against `is_dark`: the
-        // bottom-left square of the drawn board is the one at BOARD_OFFSET_X
-        // and the *largest* y, and it has to come out dark. Reading the colour
-        // back off the paint is what stops `is_dark` and the renderer agreeing
-        // with each other while both disagree with a checkers board.
+        // bottom-left square of the drawn board is the leftmost one at the
+        // *largest* y, and it has to come out dark. Reading the colour back off
+        // the paint is what stops `is_dark` and the renderer agreeing with each
+        // other while both disagree with a checkers board.
+        //
+        // The square is found by geometry, not by asking the hit map for
+        // `Square(0, 0)`: naming the target would let a board drawn upside down
+        // pass, because the flipped board records the flipped box under the
+        // same name.
+        let size = CheckersApp::SIZE;
         let app = CheckersApp::new();
-        let commands = app.render();
-        let bottom_left = commands
+        let f = app.draw(size);
+        let step = box_at(&app, Target::Square(0, 0), size).w;
+        let bottom_left = f
+            .commands()
             .iter()
-            .filter_map(|c| match c {
+            .filter_map(|c| match *c {
                 RenderCommand::FillRect {
                     x,
                     y,
@@ -1968,11 +2928,15 @@ mod tests {
                     height,
                     color,
                     ..
-                } if *width == SQUARE_SIZE && *height == SQUARE_SIZE => Some((*x, *y, *color)),
+                } if (width - step).abs() < 0.01 && (height - step).abs() < 0.01 => {
+                    Some((x, y, color))
+                }
                 _ => None,
             })
-            .filter(|&(x, _, _)| (x - BOARD_OFFSET_X).abs() < 0.01)
-            .max_by(|a, b| a.1.total_cmp(&b.1))
+            // Sorted on y first so that "the bottom row" is settled before
+            // "the left of it": a lexicographic sort the other way round would
+            // pick the leftmost column's *top* square.
+            .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.total_cmp(&a.0)))
             .map(|(_, _, color)| color);
         // Asserted as an Option so that painting no board at all fails here
         // rather than unwrapping into a panic with a different message.
@@ -1989,42 +2953,6 @@ mod tests {
             let dark = (0..8i8).filter(|&col| Pos::new(row, col).is_dark()).count();
             assert_eq!(dark, 4, "row {row} should have four playable squares");
         }
-    }
-
-    #[test]
-    fn test_pos_dark_index() {
-        assert_eq!(Pos::new(0, 0).dark_index(), Some(0));
-        assert_eq!(Pos::new(0, 2).dark_index(), Some(1));
-        assert_eq!(Pos::new(1, 1).dark_index(), Some(4));
-        // Light square has no dark index
-        assert_eq!(Pos::new(0, 1).dark_index(), None);
-        // Invalid pos
-        assert_eq!(Pos::new(-1, 0).dark_index(), None);
-    }
-
-    #[test]
-    fn the_dark_index_numbers_every_playable_square_exactly_once() {
-        // The three hand-picked indices above would still pass if the numbering
-        // collided somewhere else on the board; this cannot.
-        let mut indices = Vec::new();
-        for row in 0..8i8 {
-            for col in 0..8i8 {
-                let pos = Pos::new(row, col);
-                match pos.dark_index() {
-                    Some(i) => {
-                        assert!(pos.is_dark(), "{pos:?} numbered but not playable");
-                        indices.push(i);
-                    }
-                    None => assert!(!pos.is_dark(), "{pos:?} playable but not numbered"),
-                }
-            }
-        }
-        indices.sort_unstable();
-        assert_eq!(
-            indices,
-            (0..32).collect::<Vec<usize>>(),
-            "the 32 playable squares should be numbered 0..32, each exactly once"
-        );
     }
 
     #[test]
@@ -2230,7 +3158,7 @@ mod tests {
         let mut board = Board::empty();
         place(&mut board, 2, 6, Side::Red, false);
         place(&mut board, 3, 5, Side::Black, false);
-        let jumps = board.generate_jumps_for(Pos::new(2, 6));
+        let jumps = jumps_from(&board, Pos::new(2, 6));
         assert_eq!(jumps.len(), 1);
         assert_eq!(jumps[0].to, Pos::new(4, 4));
         assert_eq!(jumps[0].captured, Some(Pos::new(3, 5)));
@@ -2241,7 +3169,7 @@ mod tests {
         let mut board = Board::empty();
         place(&mut board, 2, 6, Side::Red, false);
         place(&mut board, 3, 5, Side::Red, false); // own piece
-        let jumps = board.generate_jumps_for(Pos::new(2, 6));
+        let jumps = jumps_from(&board, Pos::new(2, 6));
         assert!(jumps.is_empty());
     }
 
@@ -2251,7 +3179,7 @@ mod tests {
         place(&mut board, 2, 6, Side::Red, false);
         place(&mut board, 3, 5, Side::Black, false);
         place(&mut board, 4, 4, Side::Red, false); // landing blocked
-        let jumps = board.generate_jumps_for(Pos::new(2, 6));
+        let jumps = jumps_from(&board, Pos::new(2, 6));
         assert!(jumps.is_empty());
     }
 
@@ -2261,7 +3189,7 @@ mod tests {
         place(&mut board, 6, 1, Side::Red, false);
         place(&mut board, 7, 0, Side::Black, false);
         // Jump would land at (8,8) which is off the board
-        let jumps = board.generate_jumps_for(Pos::new(6, 1));
+        let jumps = jumps_from(&board, Pos::new(6, 1));
         assert!(jumps.is_empty());
     }
 
@@ -2270,7 +3198,7 @@ mod tests {
         let mut board = Board::empty();
         place(&mut board, 4, 4, Side::Red, true); // king
         place(&mut board, 3, 5, Side::Black, false);
-        let jumps = board.generate_jumps_for(Pos::new(4, 4));
+        let jumps = jumps_from(&board, Pos::new(4, 4));
         // King can jump backward
         assert!(jumps.iter().any(|j| j.to == Pos::new(2, 6)));
     }
@@ -2281,7 +3209,7 @@ mod tests {
         place(&mut board, 4, 4, Side::Red, true); // king
         place(&mut board, 5, 3, Side::Black, false);
         place(&mut board, 3, 5, Side::Black, false);
-        let jumps = board.generate_jumps_for(Pos::new(4, 4));
+        let jumps = jumps_from(&board, Pos::new(4, 4));
         assert_eq!(jumps.len(), 2);
     }
 
@@ -2744,11 +3672,11 @@ mod tests {
         let mut app = CheckersApp::new();
         app.game_result = GameResult::RedWins;
         app.move_history.push("test".to_string());
-        app.red_captured = 5;
+        app.red_takes = 5;
         app.new_game();
         assert_eq!(app.game_result, GameResult::Ongoing);
         assert!(app.move_history.is_empty());
-        assert_eq!(app.red_captured, 0);
+        assert_eq!(app.red_takes, 0);
     }
 
     #[test]
@@ -2902,7 +3830,8 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let app = CheckersApp::new();
-        let commands = app.render();
+        let frame = app.draw(CheckersApp::SIZE);
+        let commands = frame.commands();
         assert!(!commands.is_empty(), "Render should produce commands");
         // Should have at least: background + 64 squares + board border + pieces
         assert!(commands.len() > 70, "Should produce many render commands");
@@ -2912,7 +3841,8 @@ mod tests {
     fn test_render_selected_square_highlight() {
         let mut app = CheckersApp::new();
         app.click_square(Pos::new(2, 6)); // select a red piece
-        let commands = app.render();
+        let frame = app.draw(CheckersApp::SIZE);
+        let commands = frame.commands();
         let has_selection = commands.iter().any(
             |c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == SELECTED_SQUARE),
         );
@@ -2923,7 +3853,8 @@ mod tests {
     fn test_render_legal_move_indicators() {
         let mut app = CheckersApp::new();
         app.click_square(Pos::new(2, 6)); // select a piece with moves
-        let commands = app.render();
+        let frame = app.draw(CheckersApp::SIZE);
+        let commands = frame.commands();
         let dot_count = commands
             .iter()
             .filter(
@@ -2939,7 +3870,8 @@ mod tests {
     #[test]
     fn test_render_cursor_highlight() {
         let app = CheckersApp::new();
-        let commands = app.render();
+        let frame = app.draw(CheckersApp::SIZE);
+        let commands = frame.commands();
         let has_cursor = commands
             .iter()
             .any(|c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == YELLOW));
@@ -2949,7 +3881,8 @@ mod tests {
     #[test]
     fn test_render_pieces_on_board() {
         let app = CheckersApp::new();
-        let commands = app.render();
+        let frame = app.draw(CheckersApp::SIZE);
+        let commands = frame.commands();
         // Count piece circles (each piece = 2 FillRects with rounded corners)
         let circle_count = commands
             .iter()
@@ -2968,28 +3901,23 @@ mod tests {
 
     #[test]
     fn test_mouse_click_on_piece() {
+        let size = CheckersApp::SIZE;
         let mut app = CheckersApp::new();
-        // Click the middle of c3 -- board row 2, column 6, which the flip
-        // puts five squares down from the top of the window.
-        let (x, y) = square_center(Pos::new(2, 6));
-        let event = MouseEvent {
-            x,
-            y,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        };
-        app.handle_mouse(&event);
+        // The middle of c3 -- board row 2, column 6 -- taken from the box the
+        // drawing pass recorded, not from a second copy of the board
+        // arithmetic. `square_center` was that second copy, and it and
+        // `square_at` were each other's inverse, so this test used to agree
+        // with whatever mapping the pair happened to share.
+        let (x, y) = box_at(&app, Target::Square(2, 6), size).centre();
+        tap(&mut app, x, y, size);
         assert_eq!(app.selected, Some(Pos::new(2, 6)));
     }
 
     #[test]
     fn test_mouse_click_outside_board() {
+        let size = CheckersApp::SIZE;
         let mut app = CheckersApp::new();
-        let event = MouseEvent {
-            x: 0.0,
-            y: 0.0,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        };
-        app.handle_mouse(&event);
+        tap(&mut app, 0.0, 0.0, size);
         assert!(app.selected.is_none());
     }
 
@@ -2998,25 +3926,30 @@ mod tests {
     #[test]
     fn test_handle_event_key() {
         let mut app = CheckersApp::new();
-        let event = Event::Key(KeyEvent {
-            key: Key::Right,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        app.handle_event(&event);
+        let event = Event::Key(probe::press(Key::Right));
+        handle_event(&mut app, &event);
         assert_eq!(app.cursor.col, 1, "cursor starts at a1 and steps right");
     }
 
     #[test]
-    fn test_handle_event_resize_ignored() {
+    fn a_resize_changes_the_size_without_disturbing_the_game() {
+        // This was `test_handle_event_resize_ignored`, and the name was
+        // accurate: the old app ignored resizes because it drew at eleven
+        // fixed pixel counts. The resize now has to land -- and still has to
+        // leave the game alone.
         let mut app = CheckersApp::new();
-        let event = Event::Resize {
-            width: 800,
-            height: 600,
-        };
-        app.handle_event(&event);
+        app.click_square(Pos::new(2, 6));
+        let selected = app.selected;
+        handle_event(
+            &mut app,
+            &Event::Resize {
+                width: 800,
+                height: 600,
+            },
+        );
+        assert_eq!(app.size, (800.0, 600.0), "the resize did not land");
         assert_eq!(app.game_result, GameResult::Ongoing);
+        assert_eq!(app.selected, selected, "the resize disturbed the selection");
     }
 
     #[test]
@@ -3075,7 +4008,7 @@ mod tests {
     fn test_ctrl_n_new_game() {
         let mut app = CheckersApp::new();
         app.game_result = GameResult::RedWins;
-        app.red_captured = 3;
+        app.red_takes = 3;
         let event = KeyEvent {
             key: Key::N,
             pressed: true,
@@ -3084,24 +4017,43 @@ mod tests {
         };
         app.handle_key(&event);
         assert_eq!(app.game_result, GameResult::Ongoing);
-        assert_eq!(app.red_captured, 0);
+        assert_eq!(app.red_takes, 0);
     }
 
-    // ── Has jumps tests ─────────────────────────────────────────────
+    // ── Forced capture ──────────────────────────────────────────────
+    //
+    // `Board::has_jumps` used to answer "is a capture available?" and was
+    // deleted along with `generate_jumps_for`, its only caller. The question is
+    // still worth asking, but the answer that matters is the one the move list
+    // gives: in draughts an available capture is not merely available, it is
+    // *compulsory*, so a board with a capture on it must offer nothing else.
 
     #[test]
-    fn test_has_jumps_initial() {
+    fn the_opening_position_offers_no_capture() {
         let board = Board::new();
-        assert!(!board.has_jumps(), "No jumps at start");
+        assert!(
+            !board
+                .generate_legal_moves()
+                .iter()
+                .any(MoveSequence::is_jump),
+            "no piece can be taken from the opening position"
+        );
     }
 
     #[test]
-    fn test_has_jumps_when_available() {
+    fn a_capture_on_offer_is_the_only_move_allowed() {
         let mut board = Board::empty();
         board.side_to_move = Side::Red;
         place(&mut board, 2, 6, Side::Red, false);
         place(&mut board, 3, 5, Side::Black, false);
-        assert!(board.has_jumps());
+        // The red man could otherwise step to (3, 7); the capture takes that
+        // choice away, which is what "forced capture" means.
+        let moves = board.generate_legal_moves();
+        assert!(!moves.is_empty(), "red has a capture and so has a move");
+        assert!(
+            moves.iter().all(MoveSequence::is_jump),
+            "a quiet move was offered alongside a capture: {moves:?}"
+        );
     }
 
     // ── CheckersMove tests ──────────────────────────────────────────
@@ -3202,19 +4154,9 @@ mod tests {
         place(&mut board, 2, 2, Side::Red, false);
         place(&mut board, 3, 1, Side::Black, false); // jump available for (2,2)
         // (2,2) can jump to (4,0). Mandatory capture.
-        let mut app = CheckersApp {
-            board,
-            cursor: Pos::new(0, 6),
-            selected: None,
-            legal_moves_for_selected: Vec::new(),
-            game_result: GameResult::Ongoing,
-            status_message: String::new(),
-            move_history: Vec::new(),
-            last_move_from: None,
-            last_move_to: None,
-            red_captured: 0,
-            black_captured: 0,
-        };
+        let mut app = CheckersApp::new();
+        app.board = board;
+        app.cursor = Pos::new(0, 6);
         // Try to select (2,6) which has no jump
         app.click_square(Pos::new(2, 6));
         assert!(

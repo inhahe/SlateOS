@@ -51819,8 +51819,18 @@ The buffer also grows lazily rather than being allocated at `record` bytes up
 front. `-b` accepts up to 2147483647 (INT_MAX, measured at both ends), which is a
 1 TB record; reserving it would make `tar -b 2147483647 -cf o.tar tiny.txt` cost
 what the *record* costs instead of what the archive costs. The bytes written are
-identical either way. (Learned the hard way: an early measurement run asked GNU
-for that record on a live WSL instance and took the instance down with it.)
+identical either way.
+
+(Learned the hard way, and the cleanup is the part worth passing on: an early
+measurement run asked GNU for that record on a live WSL instance and took the
+instance down with it — `Wsl/Service/E_UNEXPECTED`, recovered with
+`wsl --shutdown`. What was *not* obvious is that the crash also wrote a **540 GB
+core dump** to `%LOCALAPPDATA%\Temp\wsl-crashes\`, which filled the C: drive to
+zero and sat there silently until something unrelated failed with `No space left
+on device` an hour later. Check that directory after any WSL crash. Every
+measurement in this section was afterwards taken by probing with
+`tar <option> --help`, which runs the same validation and exits before
+allocating a record at all.)
 
 *What it costs:* a hand-written writer where a standard one would have compiled,
 and a comment on it explaining why it must not be "tidied" back into a

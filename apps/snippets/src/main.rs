@@ -5762,19 +5762,53 @@ mod tests {
 
     #[test]
     fn the_overlay_lists_every_statistic() {
+        // The names are written out here rather than read back from
+        // `stat_rows`. Walking the same list the drawing walks asks the code
+        // whether it drew what it drew, and answers yes however many rows have
+        // been dropped from it — a statistic could be deleted outright and
+        // this test would only check the ones that were left.
+        const WANTED: [&str; 7] = [
+            "Snippets",
+            "Folders",
+            "Tags",
+            "Favorites",
+            "Templates",
+            "Total Lines",
+            "Total Size",
+        ];
         let mut a = app();
         a.show_stats = true;
         let seen = texts(&a, W);
-        let stats = a.stats();
-        for (name, value) in a.stat_rows(&stats) {
+        for name in WANTED {
             assert!(seen.contains(&name.to_string()), "{name} is not on it");
+        }
+        let stats = a.stats();
+        let rows = a.stat_rows(&stats);
+        assert_eq!(
+            rows.len(),
+            WANTED.len(),
+            "the overlay has gained or lost a statistic: {rows:?}"
+        );
+        for (name, value) in rows {
             assert!(seen.contains(&value), "{name}'s value {value} is not on it");
         }
     }
 
     #[test]
     fn the_overlay_lists_no_more_languages_than_it_has_room_for() {
+        // Every language in use, so the cap has something to cut. The starting
+        // library uses fewer languages than the overlay has room for, and
+        // against that library the cap and no cap at all draw the same list.
         let mut a = app();
+        for (i, lang) in Language::all().iter().enumerate() {
+            a.create_snippet(&format!("s{i}"), "x", *lang)
+                .expect("a named snippet is made");
+        }
+        assert!(
+            a.languages_in_use().len() > LANGUAGES_ON_OVERLAY,
+            "the fixture leaves the cap nothing to do: {} languages in use",
+            a.languages_in_use().len()
+        );
         a.show_stats = true;
         let counted = texts(&a, W)
             .iter()
@@ -5890,6 +5924,14 @@ mod tests {
         // Not just "the number was stored": the hit box has to move with it.
         // A test that only checked `a.size` would pass with `frame` still
         // drawing at the old size.
+        //
+        // The control has to be one that really travels. This asked the Stats
+        // button, which is laid out from the *left* edge and shifts only by
+        // the padding between these two window sizes — a few pixels, less than
+        // its own width. A click at its wide position still landed inside its
+        // narrow box, so the test passed with the resize thrown away. The
+        // search box is measured from the right edge and moves by nearly the
+        // whole difference, which is what makes the two sizes tell apart.
         let mut a = app();
         handle_event(
             &mut a,
@@ -5898,11 +5940,19 @@ mod tests {
                 height: 900,
             },
         );
-        let wide = a.frame(1600.0, 900.0).rect_of(|t| *t == Target::Stats);
-        let narrow = a.frame(W.0, W.1).rect_of(|t| *t == Target::Stats);
-        let wide = wide.unwrap();
-        let narrow = narrow.unwrap();
-        assert!(wide.x > narrow.x, "the toolbar did not follow the window");
+        let wide = a
+            .frame(1600.0, 900.0)
+            .rect_of(|t| *t == Target::Search)
+            .expect("the wide window has a search box");
+        let narrow = a
+            .frame(W.0, W.1)
+            .rect_of(|t| *t == Target::Search)
+            .expect("the starting window has a search box");
+        assert!(
+            wide.x >= narrow.right(),
+            "the two boxes overlap, so a click cannot tell them apart: \
+             {wide:?} against {narrow:?}"
+        );
         let (cx, cy) = wide.centre();
         assert_eq!(
             a.handle_mouse(&MouseEvent {
@@ -5912,7 +5962,7 @@ mod tests {
             }),
             EventResult::Consumed
         );
-        assert!(a.show_stats);
+        assert!(a.search_focus, "the click did not reach the search box");
     }
 
     #[test]

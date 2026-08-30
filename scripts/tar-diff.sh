@@ -28,11 +28,6 @@
 #   --blocking-factor=1   GNU pads the archive to a 10 KiB record; ours ends
 #                         after the two zero blocks that ustar requires. The
 #                         padding is a tape-drive artefact, not a format rule.
-#   --numeric-owner       on create this leaves `uname`/`gname` empty, which is
-#                         what ours writes. Filling them needs a passwd lookup
-#                         (see the xfail at the bottom), so normalising it here
-#                         keeps that one known gap from masking every other
-#                         difference in the same 512 bytes.
 #   --sort=name           GNU walks a directory in whatever order `readdir`
 #                         returns; ours sorts, so that archiving the same tree
 #                         twice gives the same bytes. ustar imposes no order at
@@ -41,9 +36,12 @@
 #                         against anything, so the reference is the one that
 #                         gets pinned.
 #
-# Nothing else is normalised. In particular the mode, uid, gid and mtime fields
-# are compared as written, because those are the fields a backup exists to
-# preserve.
+# Nothing else is normalised. In particular the mode, uid, gid, mtime *and*
+# uname/gname fields are compared as written, because those are the fields a
+# backup exists to preserve. `--numeric-owner` used to be in that list, to keep
+# ours leaving uname/gname empty from masking every other difference in the same
+# 512 bytes; it came out when ours started filling them, so the owner names are
+# now compared like everything else.
 #
 # Run `OURS=/usr/bin/tar ./scripts/tar-diff.sh` to confirm the harness still
 # discriminates: it should report every xfail as XPASS and nothing else. (The
@@ -59,7 +57,7 @@ DIFF_NEED='find stat cmp od sha256sum touch ln readlink mkfifo'
 pass=0; fail=0; xfail=0; xpass=0
 
 # GNU's format normalisation. See the header.
-GNUFMT="--format=ustar --blocking-factor=1 --numeric-owner --sort=name"
+GNUFMT="--format=ustar --blocking-factor=1 --sort=name"
 
 work=$DIFF_TMP/work
 mkdir -p "$work"
@@ -442,6 +440,33 @@ create_case 'symlinks, a hard link and a fifo' special
 create_case 'a symlink on its own'       special/rel
 create_case 'a dangling symlink'         special/dangling
 create_case 'a fifo'                     special/pipe
+
+# The link table: the same inode reached twice in one run is stored once, and
+# every later name for it becomes a hard-link record. Three things decide who
+# gets one, and ours had all three wrong before these cases existed:
+#
+#   the link *count* is irrelevant — a file named twice on the command line is
+#     deduplicated even though nothing else on the disk points at it. Without
+#     this, `tar -cf b.tar dir dir` writes the whole tree twice;
+#   only regular files and symlinks join the table — a fifo named twice is two
+#     fifos, not a link;
+#   and only *after* the member is written — ours registered before, so two
+#     names for a socket (which is never archived at all) produced an archive
+#     holding a hard link with nothing to point at.
+#
+# The names here are relative on purpose. An absolute one would strip, and the
+# prefix notices that provoked are a separate question with an unresolved case
+# of its own; see known-issues.md.
+create_case 'one file named twice'       tree/a.txt tree/a.txt
+create_case 'one file named three times' tree/a.txt tree/a.txt tree/a.txt
+create_case 'a hard-linked pair'         special/f special/hard
+create_case 'the pair, other order'      special/hard special/f
+create_case 'a symlink named twice'      special/rel special/rel
+create_case 'a fifo named twice'         special/pipe special/pipe
+create_case 'a directory named twice'    tree/sub tree/sub
+create_case 'a file and its directory'   tree tree/a.txt
+interop_case 'one file named twice'      tree/a.txt tree/a.txt
+interop_case 'a fifo named twice'        special/pipe special/pipe
 
 # A member name longer than the 100-byte `name` field. ustar splits it at a `/`
 # into `prefix` + `name`; a tar that only fills `name` truncates it, produces a
@@ -929,6 +954,34 @@ fi
 create_case 'verbose create'  -v tree
 plain_case  'verbose extract' -xvf ref.tar -C od
 
+# Verbosity is one *counter*, not a flag, and it is shared by all three modes:
+# 0 prints nothing, 1 prints member names, 2 or more prints the long `-tv`
+# line. `-v` bumps it — and so does `-t`, which is why `-tt` is a long listing.
+# `-c` and `-x` do not bump it. Measured, `tar-verbose1.sh`/`tar-verbose2.sh`.
+#
+# The second level is the case that matters here, because it is the one that
+# needs a whole formatter rather than a name: at level 2 a create prints for
+# each member the same line `-tv` would print for it afterwards — except that
+# the *name* is the one the user typed, not the stripped one that goes in the
+# archive. `create_case` compares the archive and both streams, so it checks
+# the two against each other in a single case.
+create_case 'create, twice verbose'          -vv tree
+create_case 'create, three times verbose'    -vvv tree
+create_case 'create -vv over every type'     -vv special
+create_case 'create -vv over a long name'    -vv long
+# The unstripped name: what is announced is `$PWD/tree/a.txt`, what is stored
+# is `<pwd>/tree/a.txt` without the leading slash. Only a level-2 create can
+# show that the two differ, because level 1 prints the same name either way.
+create_case 'create -vv strips for the archive but not for the line' -vv "$work/tree/a.txt"
+
+plain_case 'extract, twice verbose'          -xvvf ref.tar -C od
+plain_case 'extract, three times verbose'    -xvvvf ref.tar -C od
+
+list_case 'a repeated -t is a long listing'  -tt -f ref.tar
+list_case 'the same, spelled long'           --list --list -f ref.tar
+list_case '-t and -v reach the same level'   -tvf ref.tar
+list_case 'past two is still two'            -tvvvf ref.tar
+
 # ===========================================================================
 # 6. diagnostics
 # ===========================================================================
@@ -937,12 +990,128 @@ plain_case 'archive does not exist (-x)' -xf nosuch.tar
 plain_case 'archive is a directory'      -tf tree
 plain_case 'archive cannot be created'   -cf /nonexistent-dir/x.tar tree
 plain_case 'member does not exist'       -cf o.tar tree/nosuch
+
+# A member that cannot be opened, named absolutely. The point is the *order*:
+# GNU announces the leading `/` it removed and only then reports that it could
+# not open the file, because the name is stripped before the open. Ours built
+# the header after the open, so for a lone unreadable member it printed the
+# error and never mentioned the prefix at all. It lives in a directory of its
+# own so that no other case has to walk past an unreadable file.
+mkdir -p noread
+printf 'x\n' > noread/f
+chmod 0 noread/f
+plain_case 'an unreadable member'          -cf o.tar noread/f
+plain_case 'an unreadable member, stripped' -cf o.tar "$work/noread/f"
 plain_case 'no mode given'
 plain_case '-f with no argument'         -cf
 plain_case '-C with no argument'         -xC
 
+# More than one mode. This one is not cosmetic: three independent booleans let
+# the last letter win, so `tar -cxf a.tar dir` *created* the archive it was
+# meant to unpack. The archive is named but does not exist, because the refusal
+# happens while the arguments are still being read — if either side ever gets
+# as far as opening it, the case is already wrong.
+plain_case 'two modes, clustered'        -cx
+plain_case 'two modes, separate'         -c -x
+plain_case 'two modes, the other order'  -x -c
+plain_case 'two modes and a file'        -cxf nosuch.tar tree
+plain_case 'two modes, long'             --create --extract
+plain_case 'two modes, an alias'         --create --get
+# Repeating one mode, or naming it twice under its two names, is not a
+# conflict: the test is whether the value would change. These have to actually
+# *run*, so they are given a real archive.
+#
+#
+# `-t` is here too, even though repeating it does one thing more than the
+# others — it also bumps the verbosity counter, so `-tt` lists in the long
+# form. That second effect is section 5's subject; what this case asserts is
+# only that the repeat is *accepted*, which is the mode rule and is separable.
+plain_case 'the same mode twice'         -c -cf o.tar tree/a.txt
+plain_case 'the same mode twice (-t)'    -t -tf ref.tar
+plain_case 'one mode under two names'    -x --get -f ref.tar -C od
+plain_case 'a mode and its alias'        --extract --get -f ref.tar -C od
+
 # ===========================================================================
-# 7. the known divergences
+# 7. the old option style
+# ===========================================================================
+# `tar cvf a.tar dir` — no dash anywhere. It predates getopt, it is how most
+# people write tar, and it is a *splice* rather than a mode: a dash-less first
+# argument is a run of option letters, each letter that takes a value takes the
+# next argv word **in letter order**, and the rewritten argv then goes through
+# the ordinary parser. So everything downstream still has to work afterwards,
+# which is half of what these cases check.
+#
+# The other half is the argument hand-out, and it needs a case that can tell
+# `cfC a.tar dir x` from `cCf dir a.tar x`. Those are the same three words; only
+# the letter order decides which is the archive and which the directory. A case
+# that compared messages alone would pass under a "first value goes to `-f`"
+# misreading, so what is compared is which archive came out and what is in it.
+#
+# The archive is compared by its member *list*, read back by GNU, and not by
+# its bytes: the bytes differ for uname/gname reasons that have nothing to do
+# with parsing (see the xfail at the bottom), and `create_case` is already the
+# place that holds the bytes to account.
+
+# What an old-style run left behind: every archive in the directory, listed by
+# GNU so that both sides are read by one reader.
+old_made() {
+  ( cd "$1" 2>/dev/null || return 0
+    find . -name '*.tar' | LC_ALL=C sort | while IFS= read -r a; do
+      printf '%s[%s]' "$a" \
+        "$("$gnu_real" -tf "$a" 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')"
+    done )
+}
+
+# old_case LABEL ARGS...  — the whole argv, verbatim, on both sides.
+old_case() {
+  local label="$1"; shift
+  local o_rc g_rc d
+  rm -rf od gd
+  for d in od gd; do
+    mkdir -p "$d/src" "$d/other"
+    printf 'A\n' > "$d/src/a"
+    touch -d '2020-01-02 03:04:05' "$d/src/a" "$d/src" "$d/other"
+  done
+  ( cd od && diff_run env PATH="$bindir/ours" tar "$@" \
+      </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err" ); o_rc=$?
+  ( cd gd && diff_run env PATH="$bindir/gnu" tar "$@" \
+      </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err" ); g_rc=$?
+  settle "$o_rc" "$g_rc" "made:$(old_made od)" "made:$(old_made gd)"
+  report "old option: tar $* ($label)"
+}
+
+old_case 'the way most people write tar'   cf o.tar src
+old_case 'with -v, whose names go to stdout' cvf o.tar src
+# Reading, not writing: the mode letter need not be `c`.
+old_case 'listing'                         tvf ../ref.tar
+# Letters that run out of words. The *first* short letter is the one named, so
+# `Cf` says `C` even though `f` is short too, and the status is tar's 2 rather
+# than the 64 getopt uses for a missing option argument.
+old_case 'no words at all for the letters' cf
+old_case 'one word short'                  fC o.tar
+old_case 'the first short letter is named' Cf
+# The cluster reaches the ordinary parser, so an unknown letter is getopt's
+# complaint at getopt's status, and a long option or `--` after it still works.
+old_case 'an unknown letter in the cluster' cQf o.tar src
+old_case 'a long option after the cluster'  cf o.tar --verbose src
+old_case 'a -- after the cluster'           cf o.tar -- src
+# Only the first argument. A cluster later on is a file name, and a dash-less
+# word after a *dashed* first argument is an operand — which is what stops
+# `tar -c f o.tar` from quietly becoming `-c -f o.tar`.
+old_case 'a cluster that is not first'      cf o.tar src cvf
+old_case 'a dash-less word, not first'      -c f o.tar
+old_case 'a dashed first argument'          -cf o.tar src
+# An empty first argument is a cluster of *no* letters, so it consumes nothing
+# and disappears. Not a special case in the code — it falls out of the rule —
+# but it is the edge a caller hits by accident, from an unset shell variable.
+old_case 'an empty first argument'          '' -cf o.tar src
+old_case 'an empty first argument, alone'   ''
+# `--` is a dash, so it disqualifies the cluster and the cluster becomes an
+# operand rather than options.
+old_case 'a -- before the cluster'          -- cf o.tar src
+
+# ===========================================================================
+# 8. the known divergences
 # ===========================================================================
 plain_xcase \
   "GNU's -Z is compression, which this tar does not implement; the message is a refusal either way, and the wording of a refusal for an option we do not have is not something to copy" \
@@ -952,17 +1121,10 @@ plain_xcase \
   "both tars print help and exit 0; the texts differ because ours documents the options it has and GNU's documents 172 it has. Copying GNU's list would advertise options that do not work -- see design-decisions.md 703" \
   'a long option' --help
 
-# `uname`/`gname` are left empty by ours, so an archive moved to a machine with
-# different numeric ids restores to the wrong owner. Filling them needs a
-# passwd lookup, which is why this is recorded rather than fixed in passing.
-# `--numeric-owner` is dropped here so the case is exactly that difference.
-rm -f o.tar gn.tar
-diff_run env PATH="$bindir/ours" tar -cf o.tar tree >/dev/null 2>&1
-"$gnu_real" --format=ustar --blocking-factor=1 -cf gn.tar tree >/dev/null 2>&1
-if cmp -s o.tar gn.tar; then AGREED=yes; else AGREED=no; fi
-REPORT="  (uname/gname)"
-xreport 'create: uname/gname are filled in' \
-  'ours leaves uname/gname empty; GNU fills them from the passwd database, so an archive restored on another machine gets the wrong owner name. Needs a passwd lookup in tar. known-issues.md -> B-tar'
+# `uname`/`gname` were an xfail here until ours learned to fill them. They are
+# not a case of their own any more: `--numeric-owner` came out of GNUFMT at the
+# same time, so every `create_case` above compares those two fields along with
+# the rest of the header, and `header_field` names them if they ever differ.
 
 printf '\ntar: %d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

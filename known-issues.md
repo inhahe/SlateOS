@@ -95853,3 +95853,148 @@ module rather than three copies of a twenty-name denylist.
 lane-a` immediately after a push, compared against what was pushed. A push
 gate is the one program guaranteed to run with a repository named in its
 environment, and it is also the one nobody watches.
+
+---
+
+## `B-tar-EVERY-ARCHIVE-RECORDED-THE-OWNER-AS-A-BARE-NUMBER` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
+
+**In short:** a tar archive records who owns each file twice -- once as a
+number, and once as the account *name* that number stood for on the machine the
+archive was made on. Only the name is portable: user number 1000 is a different
+person on every machine. Ours filled in the number and left the name blank, for
+every file of every archive it ever wrote. Restore such an archive on a
+different machine and the files come out belonging to whoever happens to hold
+number 1000 there -- which on a multi-user machine is simply somebody else.
+
+### Measured, both sides
+
+The `uname` field of the first header, an archive of one file owned by
+`inhahe` (uid 1000):
+
+```
+gnu : uname=[inhahe]  gname=[inhahe]
+ours: uname=[]        gname=[]
+```
+
+The blank field is not meaningless -- it is the encoding for "no name
+recorded", which is exactly what `tar --numeric-owner` writes on purpose. So
+ours was silently producing numeric-owner archives whatever it was asked for,
+and nothing in the output said so. `tar -tvf` on our archive showed
+`1000/1000` where GNU's showed `inhahe/inhahe`, which was the only visible
+symptom.
+
+### The fix
+
+`Creator` gained an `OwnerNames`: the `pwdb` account database plus a
+`BTreeMap` cache per id, loaded once per run. `Creator::header` now sets
+`uname`/`gname` beside the numbers it already set.
+
+Three measured details, from `tar-uname1.sh` and `tar-uname2.sh`:
+
+| Case | GNU | Ours |
+|---|---|---|
+| id is in the database | the name | same |
+| id is **not** in the database | field left empty | same |
+| name is 32 bytes or longer | cut to 31 + NUL, silently, rc 0 | same |
+
+The empty-field case is the one worth stating, because "fall back to the
+number" is the tempting wrong answer: writing `"4242"` as a *name* would make a
+reader restore ownership to an account literally called `4242` if the
+destination machine had one. Leaving it empty says "you only have the number",
+which is true.
+
+The 31-byte cut is not a guess either. It follows from tar's `tar_copy_str`,
+which stops at the first NUL *or* at the field width and so leaves the array's
+own zero byte in place -- unlike the `name` field, which is legally unterminated
+when full.
+
+### Why it survived so long
+
+`scripts/tar-diff.sh` normalised it away. `--numeric-owner` was in the GNUFMT
+flag set, with a comment saying so, precisely so that this one known gap could
+not mask every other difference in the same 512 bytes -- and an xfail at the
+bottom recorded the gap. That was the right call when the gap was open and the
+wrong shape to leave standing: a normalisation is a blind spot with a comment
+on it. The flag is now gone from GNUFMT and the xfail with it, so all 13
+`create_case`s compare `uname`/`gname` byte for byte along with the rest of the
+header -- and `header_field` names the field if they ever diverge again. The 5
+`interop_case`s gain it too: they read our archive with GNU's `-tv`, which
+prints the owner *name* when the field holds one.
+
+The generalisable point: **an xfail plus a normalisation is one gap recorded
+twice, and only the xfail is load-bearing.** The normalisation is what stops
+the differential from ever telling you the gap is closed -- so when the xfail is
+retired, the normalisation has to go in the same change, or the fix is
+unverified.
+
+## B-tar-A-SECOND-NAME-FOR-A-FILE-WAS-A-SECOND-COPY-OF-IT (lane B, 2026-08-29) -- **FIXED 2026-08-29**
+
+**In short:** when `tar` is asked to archive the same file twice in one run --
+`tar -cf backup.tar dir dir/sub`, or just `tar -cf x f f` -- GNU stores the
+bytes once and records the second name as a *hard link* to the first. Ours
+stored the whole file again, so an archive of a tree named twice was twice the
+size it should have been. Worse, ours applied the same idea to file types GNU
+excludes, and applied it *before* writing the member rather than after: two
+names for a **socket** produced an archive containing a hard link pointing at a
+member that was never written, which no extractor can unpack.
+
+Discovered while measuring `-cvv` for the verbosity work: GNU printed a
+`Removing leading '/' from hard link targets` notice where ours printed none,
+for a command line with no link in it at all. Pulling that thread
+(`tar-hardnotice1.sh` .. `tar-hardnotice6.sh`) found the rule underneath it.
+
+### The rule, measured
+
+GNU keys a table on `(device, inode)`. Every member it *successfully writes*
+that is a **regular file or a symlink** goes in; a later member with the same
+key is written as typeflag `1` naming the first. Three parts of that, and ours
+had all three wrong:
+
+| | GNU | Ours (before) | Consequence |
+|---|---|---|---|
+| link count | irrelevant -- an `nlink=1` file named twice is deduplicated | required `nlink > 1` | `tar -cf b.tar dir dir` wrote the tree twice |
+| member type | regular files and symlinks only | every non-directory | a fifo named twice became a link record; GNU writes two fifos |
+| when | after the member is in the archive | before it was attempted | two names for a socket gave a link to a member that does not exist |
+
+`--hard-dereference` turns the mechanism off entirely. Ours has no such option
+yet, so there is nothing to gate on -- but if one is added, that is where it
+goes.
+
+A fourth, smaller divergence came out of the same probes: GNU strips a member's
+name (and so prints the prefix notice) *before* it opens the file, so
+`tar -cf x /abs/unreadable` says `Removing leading '/' from member names` and
+then `Cannot open`. Ours built the whole header after the open and printed
+nothing but the error. `add_regular` now calls `stored_name` before `File::open`
+and passes the result to a split-out `header_for`.
+
+### Still open: one notice that no model explains
+
+`tar -cf x /abs/unreadable /abs/readable` -- GNU prints a
+`Removing leading '/' from hard link targets` notice; ours prints none. It is
+stderr only, on a command line where one member fails, and it does not affect
+any archive. What makes it interesting is that no rule fits the whole table:
+
+| argv (all absolute, all `nlink=1`) | GNU prints the link-target notice? |
+|---|---|
+| one readable member | no |
+| one unreadable member | no |
+| two readable members, different inodes | **yes** |
+| the same readable member twice | **yes** |
+| unreadable then readable | **yes** |
+| readable then unreadable | **yes** |
+| the same unreadable member twice | no |
+
+"Fires once a name is entered in the link table" predicts a notice for a single
+readable member. "Fires when a link record is written" predicts none for two
+different inodes. "Fires on a lookup against a non-empty table" predicts none
+for *unreadable then readable*, since the failed first member is not entered.
+Every model contradicts one row. It is plausibly GNU's separate
+`--check-links` accounting table rather than the dedup table, but that was not
+run to ground.
+
+Ours matches every row above except the two that mix a failure with a success.
+Left as-is deliberately: guessing at a rule that does not fit the measurements
+would be worse than a known, documented gap. The differential's link-table
+cases use *relative* names so that nothing strips and this question cannot
+contaminate them; the notice-ordering case uses a single unreadable member,
+which is a row we do match.

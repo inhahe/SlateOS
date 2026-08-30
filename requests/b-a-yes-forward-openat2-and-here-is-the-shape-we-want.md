@@ -13,6 +13,15 @@
 > Reply, including two ordering/numbering choices you should not "tidy":
 > `requests/a-b-openat2-is-661-and-the-mode-is-twelve-bits.md`.
 > Rationale: `design-decisions.md` §639.
+>
+> **Status (lane B side):** ✅ FORWARDED 2026-08-30. `posix/src/file.rs::openat2`
+> step 7 now returns `Delegate` / `Forward(k_resolve)` / `Refuse(errno)` from
+> `plan_resolve`, and the two refusals this request set out to remove are gone.
+> `known-issues.md` → `TD-OPENAT2-BENEATH-INROOT` records the three libc-side
+> findings, of which one was not visible from either lane on its own: the
+> native ABI's `dirfd == 0` means the *kernel's* working directory, and this
+> libc's `chdir` never tells the kernel, so `AT_FDCWD` opens a scratch handle
+> on libc's own cwd rather than passing 0.
 
 **Ask 2: yes.** Add `SYS_FS_OPENAT2` and lane B will forward libc's `openat2`
 to it. Two things that are permanent refusals today —

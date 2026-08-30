@@ -16078,6 +16078,51 @@ Two things about it are worth reading before touching it:
 `RESOLVE_IN_ROOT` remains the sole open item on this entry, unchanged and still
 without a consumer.
 
+**The libc half landed 2026-08-30 (lane B) — `openat2` forwards, and both
+refusals are gone.** `posix/src/file.rs::openat2` step 7 is now a three-way
+decision rather than a list of refusals: `plan_resolve` returns `Delegate`
+(nothing to carry — plain `openat`), `Forward(k_resolve)` (`BENEATH` and/or
+`NO_SYMLINKS`, translated to the kernel's bit values and sent to
+`SYS_FS_OPENAT2`), or `Refuse(errno)` (`IN_ROOT` → `EOPNOTSUPP`, `CACHED` →
+`EAGAIN`). A native binary can now reach containment; before today it could
+only be told no.
+
+Three things on the libc side that are not obvious from the kernel side:
+
+- **`dirfd == 0` is not usable for a relative path, and the reason is a
+  divergence nobody had written down.** The native ABI reads handle 0 as "the
+  process working directory", meaning the one `pcb::get_cwd` returns — but this
+  libc's `chdir` (`posix/src/unistd.rs`) keeps its answer in a libc-side buffer
+  and *never tells the kernel*. Passing 0 would confine the walk beneath
+  whichever directory the kernel last recorded, which is a containment check
+  against the wrong base, and it fails **open**: a wrong base still returns a
+  valid descriptor, which is this entry's original failure mode again. So
+  `openat2_forward` opens libc's own cwd as a scratch directory handle for
+  `AT_FDCWD` and closes it on every exit path. 0 is passed only for an absolute
+  path, where the base is provably never read — without `BENEATH` the handler
+  takes the fragment as the whole answer, and with `BENEATH` it refuses an
+  absolute fragment before the handle lookup (the ordering pinned by case (b)
+  above).
+- **`/dev/ptmx` and `/dev/pts/<n>` are refused with `EOPNOTSUPP` when a
+  restriction is in play**, because they are answered inside libc and do not
+  exist in the kernel's namespace. Forwarding one would come back `ENOENT` — a
+  lie, since the file exists to that caller. The predicate is factored out as
+  `file::is_pty_device_path` and `open_pty_device` gates on it too, so the
+  refusal cannot name a different set than the claim.
+- **The bit translation is tested directly, not end to end.** A host test cannot
+  open anything (every native syscall is stubbed off-target), so an end-to-end
+  assertion about `RESOLVE_BENEATH` degenerates into "the stub said `ENOSYS`"
+  and would stay green with the translation deleted — exactly the untested
+  marshalling lane A warned about. `plan_resolve` is therefore a pure function
+  with its own tests, including one that asserts every Linux resolve value is
+  `< 0x40` and both kernel values are `>= 0x40`, so a "harmonisation" of the
+  constants fails on this side too and not only in `test_dispatch_openat2_native`.
+
+The five tests that pinned the old refusals for `BENEATH`/`NO_SYMLINKS` are
+gone, replaced rather than inverted: they cannot become "must succeed" on a
+host that cannot open. `IN_ROOT` and `CACHED` keep their end-to-end differential
+tests unchanged.
+
 ### D-NETSTACK-TCP-MINIMAL. Userspace `netstack` TCP client is minimal (slirp-only correctness) — DEBT 2026-07-14
 
 **Where:** `services/netstack/src/main.rs` — `tcp_fetch` / `send_tcp` /
@@ -97781,3 +97826,63 @@ of making a thing account for what it did.
   location.** The class of bug is "the artefact and its source can disagree, and
   nothing compares them". `git config --get core.hooksPath` should stay unset;
   if a future change sets it, the trampoline is bypassed and this returns.
+
+## `TD-B-THE-KERNEL-HAS-A-WORKING-DIRECTORY-AND-LIBC-NEVER-TELLS-IT-ANYTHING` (lane B, 2026-08-30) — DEBT
+
+**In short:** two different parts of the system each believe they know what
+directory this process is "in", and they do not agree. The C library keeps its
+answer in its own memory and never mentions it to the kernel; the kernel keeps
+its own answer, which changes only through the Linux-compatibility calls that
+SlateOS-native programs do not use. Nothing is broken today, because every path
+the library hands the kernel is spelled out in full from the root. It becomes a
+bug the moment any native call resolves a *relative* path — and it would become
+one quietly, since a path resolved against the wrong directory usually still
+finds a file.
+
+**Where:**
+- `posix/src/unistd.rs::chdir` — validates the target with `SYS_FS_STAT`, then
+  stores the normalized absolute path in a libc-side buffer. No syscall tells
+  the kernel.
+- `kernel/src/proc/pcb.rs::{get_cwd, set_cwd}` — the kernel's copy.
+- `kernel/src/syscall/linux.rs` (~42750, ~42821) — the *only* two callers of
+  `set_cwd`, both in the Linux ABI (`chdir`/`fchdir`). There is no native
+  syscall number that sets it.
+
+**How it bites.** A native program that calls `chdir("/a/b")` and then makes any
+syscall whose path is resolved kernel-side against `pcb::get_cwd` gets `/a/b`
+from libc's point of view and the spawn-time directory from the kernel's. Today
+exactly one native call reads that cwd — `SYS_FS_OPENAT2` with `dirfd == 0` —
+and `posix/src/file.rs::openat2_forward` deliberately never passes 0 for a
+relative path for this reason (it opens a scratch handle on libc's own cwd
+instead; `design-decisions.md` §714, decision 2). Every other native fs call
+receives an absolute path from `resolve_or_err`, so the kernel's cwd is never
+consulted.
+
+That makes this latent rather than live, and it is worth being precise about
+why the latent version is still worth an entry: the failure it produces is a
+*wrong answer*, not an error. A relative open resolved against the wrong base
+usually succeeds — on the wrong file. And in the one place it interacts with
+containment, it fails open: `RESOLVE_BENEATH` against the wrong base still
+returns a valid descriptor and still looks like working confinement.
+
+**The rule that holds while this is unfixed:** libc never relies on the
+kernel's process working directory. Any use of `dirfd == 0` (or a future
+equivalent) must be justified by the base being provably unread, as
+`openat2_forward`'s absolute-path case is.
+
+**Trigger to fix:** the first native syscall that resolves a relative path
+against the kernel's cwd, or the first native caller that wants `dirfd == 0`
+for a relative fragment.
+
+**The proper fix, and why it was not done here.** Either (a) a native
+`SYS_FS_SET_CWD` that `chdir`/`fchdir` call, so the two copies stay in step, or
+(b) an explicit statement in the native ABI that the kernel's cwd is not part of
+it, and the removal of `dirfd == 0`'s cwd meaning in favour of an
+`AT_FDCWD`-style sentinel that libc supplies a real handle for. (a) is the
+smaller change and creates a second source of truth that must be kept in sync —
+including across `fork`, `exec` and `spawn`, which is where it would go wrong.
+(b) is the cleaner one and is a request to lane A, not a lane-B change. Neither
+belongs inside a change whose job was to stop refusing `RESOLVE_BENEATH`;
+shipping a cwd-semantics change hidden inside an `openat2` change is how the
+next entry above this one gets written. Filed as
+`requests/b-a-the-kernels-cwd-and-libcs-cwd-are-two-different-directories.md`.

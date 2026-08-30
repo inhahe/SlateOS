@@ -2325,6 +2325,14 @@ fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
 /// here too -- a special case keyed on the *unresolved* argument would be a
 /// special case a caller could step around by accident.
 fn open_pty_device(resolved: &[u8], flags: i32) -> Option<Fd> {
+    // The set this function claims, named once so `openat2_forward` can refuse
+    // exactly it rather than a hand-copied approximation of it.  Redundant
+    // with the two tests below by construction — which is the point: the
+    // predicate is the definition, and these are its consequences.
+    if !is_pty_device_path(resolved) {
+        return None;
+    }
+
     if resolved == b"/dev/ptmx" {
         let fd = crate::ioctl::posix_openpt(flags);
         if fd >= 0 && flags & fcntl::O_CLOEXEC != 0 {
@@ -5503,6 +5511,274 @@ pub(crate) const RAW_O_TMPFILE_I32: i32 = 0o20_000_000;
 /// `S_IALLUGO` check in `build_open_how`.
 const VALID_MODE_BITS: u64 = 0o7777;
 
+// -- The native `resolve` word, which is not Linux's -------------------------
+//
+// `SYS_FS_OPENAT2`'s resolve bits are deliberately nowhere near Linux's:
+// every Linux `RESOLVE_*` value lies in `0x00..=0x3f`, so an *untranslated*
+// `open_how.resolve` arriving at the kernel has no known bit and at least one
+// unknown one, and is refused on its first call.  Had the numbers matched, a
+// dropped translation line would turn one restriction into a different one and
+// the caller would be told its confinement was applied when it was not.
+//
+// That is why the two sets are named apart here (`K_` for the kernel's) rather
+// than one set being reused for both, and why `plan_resolve` is a total
+// function over the Linux word rather than a mask-and-pass.  See
+// `kernel/src/syscall/number.rs::RESOLVE_NO_SYMLINKS` and
+// `requests/a-b-openat2-is-661-and-the-mode-is-twelve-bits.md`.
+
+/// Kernel `resolve` bit: refuse to traverse a symbolic link, in any
+/// component.  Not `RESOLVE_NO_SYMLINKS` (`0x04`) — see the note above.
+const K_RESOLVE_NO_SYMLINKS: u64 = 1 << 16;
+/// Kernel `resolve` bit: refuse to resolve outside `dirfd`.  Not
+/// `RESOLVE_BENEATH` (`0x08`) — see the note above.
+const K_RESOLVE_BENEATH: u64 = 1 << 17;
+
+/// What [`openat2`] does with a `resolve` word that has already passed
+/// validation (steps 1–6 — known bits only, legal mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolvePlan {
+    /// Nothing to carry: `openat` gives the same answer, and it is the call
+    /// with the working machinery (`/dev/ptmx`, umask, `FD_CLOEXEC`, the
+    /// stored path).  Two paths to the filesystem for one request is how the
+    /// two drift, so we take the sibling whenever the word is empty of
+    /// anything we must enforce.
+    Delegate,
+    /// Forward natively with this **kernel** resolve word.
+    Forward(u64),
+    /// Refuse with this errno.  A restriction we cannot apply must never come
+    /// back as a descriptor: that is an unrestricted open wearing the answer
+    /// the caller asked for.
+    Refuse(i32),
+}
+
+/// Decide what to do with `resolve`.
+///
+/// Split out as a pure function because it is the part that can rot in
+/// silence.  A host test cannot open anything — every native syscall is
+/// stubbed off-target — so an end-to-end assertion about `RESOLVE_BENEATH`
+/// degenerates into "the stub said ENOSYS" and would stay green with the
+/// translation deleted.  The bit mapping is exactly what lane A warned would
+/// be untested marshalling, so it is tested directly instead.
+pub(crate) fn plan_resolve(resolve: u64) -> ResolvePlan {
+    // `RESOLVE_CACHED` first: no dcache, so every request is conceptually a
+    // miss, and Linux documents EAGAIN as the answer for a miss.  This is the
+    // one refusal here that is also what Linux itself would say.
+    if resolve & RESOLVE_CACHED != 0 {
+        return ResolvePlan::Refuse(errno::EAGAIN);
+    }
+    // `RESOLVE_IN_ROOT` is not built kernel-side, not planned, and has no
+    // constant there, so it cannot be forwarded even by accident.  Rooted
+    // (chroot-like) resolution needs per-fd root tracking nothing keeps.
+    // `known-issues.md` → `TD-OPENAT2-BENEATH-INROOT`.
+    if resolve & RESOLVE_IN_ROOT != 0 {
+        return ResolvePlan::Refuse(errno::EOPNOTSUPP);
+    }
+
+    let mut native = 0;
+    if resolve & RESOLVE_BENEATH != 0 {
+        native |= K_RESOLVE_BENEATH;
+    }
+    if resolve & RESOLVE_NO_SYMLINKS != 0 {
+        native |= K_RESOLVE_NO_SYMLINKS;
+    }
+    if native != 0 {
+        return ResolvePlan::Forward(native);
+    }
+
+    // `RESOLVE_NO_XDEV` and `RESOLVE_NO_MAGICLINKS` are dropped rather than
+    // forwarded, on the judgement the kernel records for itself: nothing to
+    // cross mid-walk, and no `/proc` magic symlinks to traverse.  That
+    // judgement belongs to the VFS, so if it ever stops holding, this line and
+    // the kernel's must change together.
+    ResolvePlan::Delegate
+}
+
+/// `true` for the two path shapes this libc answers itself rather than
+/// through the filesystem: `/dev/ptmx` and `/dev/pts/<n>`.
+///
+/// The gate is factored out so [`open_pty_device`] and [`openat2_forward`]
+/// cannot disagree about which names are libc-internal — the second refuses
+/// exactly the set the first claims.
+pub(crate) fn is_pty_device_path(resolved: &[u8]) -> bool {
+    resolved == b"/dev/ptmx" || resolved.starts_with(b"/dev/pts/")
+}
+
+/// Forward an `openat2` that carries a restriction to `SYS_FS_OPENAT2`.
+///
+/// Reached only from [`openat2`], and only for a [`ResolvePlan::Forward`], so
+/// `k_resolve` is always non-zero: this is the path that exists *because* the
+/// request cannot be expressed as an `openat`.
+///
+/// Returns a file descriptor, or -1 with errno set.
+fn openat2_forward(dirfd: i32, path: *const u8, h: &OpenHow, k_resolve: u64) -> Fd {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let posix_flags = h.flags as i32;
+
+    // The same two gates `openat` runs, in the same order, because this path
+    // does not go through it.  `build_open_flags` outranks a bad path pointer
+    // (fs/open.c runs it before `getname`), and the O_TMPFILE refusal that
+    // follows is `do_tmpfile`'s, which ranks below both of them.
+    if !validate_open_flags(posix_flags) {
+        return -1;
+    }
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if posix_flags & RAW_O_TMPFILE_I32 != 0 {
+        // Our kernel file handles are path-based, so a nameless inode cannot
+        // be represented.  `open` refuses this for the same reason.
+        errno::set_errno(errno::EOPNOTSUPP);
+        return -1;
+    }
+
+    // SAFETY: `path` is non-null (just checked) and a valid C string by the
+    // caller's contract.
+    let path_len = unsafe { crate::string::strlen(path) };
+    if path_len == 0 {
+        // POSIX: an empty path is ENOENT.  The kernel would answer
+        // InvalidArgument for a zero length, which is the wrong error for the
+        // right reason, so it is answered here.
+        errno::set_errno(errno::ENOENT);
+        return -1;
+    }
+
+    // The bookkeeping path: what this fd will report to a later `openat`,
+    // `fchdir` or `/proc`-style query.  Computed the way `openat` computes it
+    // — textual join plus normalization — so the two agree for identical
+    // arguments.  It is also the name the pty gate below is asked about.
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let resolved_len = if dirfd == AT_FDCWD || is_absolute_path(path) {
+        match resolve_or_err(path, &mut resolved) {
+            Some(n) => n,
+            None => return -1,
+        }
+    } else {
+        let n = resolve_dirfd_path(dirfd, path, &mut resolved);
+        if n == 0 {
+            return -1;
+        }
+        n
+    };
+
+    // `/dev/ptmx` and `/dev/pts/<n>` are answered inside this libc and do not
+    // exist in the kernel's namespace at all.  Forwarding one would come back
+    // ENOENT — a lie, because the file does exist to this caller — so the
+    // honest answer is that a walk cannot be confined to something the walker
+    // does not have.
+    if is_pty_device_path(resolved.get(..resolved_len).unwrap_or(&[])) {
+        errno::set_errno(errno::EOPNOTSUPP);
+        return -1;
+    }
+
+    let native_flags = translate_open_flags(posix_flags);
+    #[allow(clippy::cast_possible_truncation)]
+    let create_mode = if posix_flags & fcntl::O_CREAT != 0 {
+        u64::from(apply_umask(h.mode as ModeT))
+    } else {
+        0
+    };
+
+    // The base the kernel resolves `path` against.
+    //
+    // `dirfd == 0` in the native ABI means the *kernel's* process working
+    // directory — and this libc's working directory is not that one.
+    // `unistd::chdir` keeps its answer in a libc-side buffer and never tells
+    // the kernel, so passing 0 for a relative path would confine the walk
+    // beneath whichever directory the kernel last recorded.  A containment
+    // check against the wrong base is precisely the failure `RESOLVE_BENEATH`
+    // exists to prevent, and it fails *open*: a wrong base still returns a
+    // valid descriptor.
+    //
+    // 0 is safe for an absolute path, and only for an absolute path, because
+    // the base is then never read: without `BENEATH` the handler takes the
+    // fragment as the whole answer, and with `BENEATH` it refuses an absolute
+    // fragment before it looks the base up at all.
+    let mut scratch: u64 = 0;
+    let base = if is_absolute_path(path) {
+        0
+    } else if dirfd == AT_FDCWD {
+        // Give the kernel a handle on *our* cwd.  Resolving "." against it is
+        // how the rest of this file spells "the working directory", so the
+        // base is the same string `resolve_or_err` would have joined against.
+        let mut cwd = [0u8; crate::unistd::PATH_MAX];
+        let Some(cwd_len) = resolve_or_err(b".\0".as_ptr(), &mut cwd) else {
+            return -1;
+        };
+        let ret = syscall4(
+            SYS_FS_OPEN_MODE,
+            cwd.as_ptr() as u64,
+            cwd_len as u64,
+            translate_open_flags(fcntl::O_RDONLY | fcntl::O_DIRECTORY),
+            0,
+        );
+        if ret < 0 {
+            return errno::translate(ret) as Fd;
+        }
+        #[allow(clippy::cast_sign_loss)]
+        {
+            scratch = ret as u64;
+        }
+        scratch
+    } else {
+        let Some(entry) = fdtable::get_fd(dirfd) else {
+            errno::set_errno(errno::EBADF);
+            return -1;
+        };
+        if entry.kind != HandleKind::File {
+            // A pipe, socket or console fd names no directory to walk from.
+            errno::set_errno(errno::ENOTDIR);
+            return -1;
+        }
+        entry.handle
+    };
+
+    let ret = syscall6(
+        SYS_FS_OPENAT2,
+        path.cast::<u8>() as u64,
+        path_len as u64,
+        native_flags,
+        create_mode,
+        k_resolve,
+        base,
+    );
+
+    // The scratch base is ours and nobody else's; it must go back on every
+    // exit from here, success or failure.
+    if scratch != 0 {
+        let _ = syscall1(SYS_FS_CLOSE, scratch);
+    }
+
+    if ret < 0 {
+        return errno::translate(ret) as Fd;
+    }
+
+    // Registration is `open`'s, deliberately identical: the same status flags
+    // survive, the same creation-only flags are stripped, the same
+    // `FD_CLOEXEC`, the same stored path, and the same close-on-overflow.
+    let stored_flags = posix_flags
+        & (fcntl::O_ACCMODE
+            | fcntl::O_APPEND
+            | fcntl::O_NONBLOCK
+            | fcntl::O_SYNC
+            | fcntl::O_NOFOLLOW);
+    #[allow(clippy::cast_sign_loss)]
+    let kernel_handle = ret as u64;
+    if let Some(fd_num) =
+        fdtable::alloc_fd_with_flags(HandleKind::File, kernel_handle, stored_flags)
+    {
+        if posix_flags & fcntl::O_CLOEXEC != 0 {
+            let _ = fdtable::set_fd_flags(fd_num, fdtable::FD_CLOEXEC);
+        }
+        fdtable::store_fd_path(fd_num, resolved.as_ptr(), resolved_len);
+        fd_num
+    } else {
+        let _ = syscall1(SYS_FS_CLOSE, kernel_handle);
+        errno::set_errno(errno::EMFILE);
+        -1
+    }
+}
+
 /// `openat2` — open a file relative to a directory fd with extended
 /// resolution control.
 ///
@@ -5516,11 +5792,14 @@ const VALID_MODE_BITS: u64 = 0o7777;
 /// 4. Inside `build_open_how`: any unknown bit in `how.resolve`
 ///    → `EINVAL`.
 ///
-/// Our implementation delegates the actual open to regular `openat`
-/// once validation passes.  `openat` cannot carry a `resolve` word,
-/// so **every restriction this function cannot enforce is refused,
-/// never dropped** — see step 7.  Validation matches the Linux ABI
-/// so callers see consistent errors regardless of backend.
+/// Once validation passes, step 7 decides between three outcomes
+/// ([`plan_resolve`]): a `resolve` word with nothing to enforce delegates
+/// to plain `openat`; `RESOLVE_BENEATH`/`RESOLVE_NO_SYMLINKS` forward to
+/// `SYS_FS_OPENAT2`, which carries the word to the VFS resolver; and
+/// `RESOLVE_IN_ROOT`/`RESOLVE_CACHED` are refused.  **No restriction is
+/// ever silently dropped** — a bit we can neither carry nor honour comes
+/// back as an error, because a descriptor would be an unrestricted open
+/// wearing the answer the caller asked for.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn openat2(dirfd: i32, path: *const u8, how: *const OpenHow, size: usize) -> Fd {
     // Step 1: size too small for the smallest accepted struct version.
@@ -5591,83 +5870,27 @@ pub extern "C" fn openat2(dirfd: i32, path: *const u8, how: *const OpenHow, size
 
     // Step 7: the resolve restrictions themselves.
     //
-    // This step exists because the alternative is silent non-enforcement.
-    // `openat` takes no `resolve` word, so any bit still set here is a
-    // restriction we are about to *not* apply — and returning a valid fd to a
-    // caller who asked to be confined tells them they were confined when they
-    // were not. Step 4 already refuses *unknown* bits on exactly this
-    // reasoning ("callers asking for security restrictions we don't know about
-    // would silently get an unrestricted open"); the argument does not weaken
-    // for a bit we happen to have named. Recognising a flag is not
-    // implementing it.
+    // The invariant this step keeps is that a restriction is never *dropped*.
+    // `openat` takes no `resolve` word, so a bit we cannot carry and do not
+    // refuse becomes an unrestricted open returned to a caller who asked to be
+    // confined — which is worse than an error, because it looks like success.
+    // Step 4 refuses *unknown* bits on exactly that reasoning; the argument
+    // does not weaken for a bit we happen to have named.
     //
-    // The errnos mirror `kernel/src/syscall/linux.rs::sys_openat2` bit for bit,
-    // so the native libc and the Linux ABI give one answer rather than two.
-    // Before this gate they gave opposite answers, and the dangerous one was
-    // here: the kernel refused `RESOLVE_BENEATH` with `EXDEV` while this
-    // function accepted it and opened without restriction.
-    //
-    // `RESOLVE_NO_XDEV` and `RESOLVE_NO_MAGICLINKS` pass through unrefused,
-    // on the same judgement the kernel records: nothing to cross mid-walk and
-    // no `/proc` magic symlinks to traverse. That judgement belongs to the VFS,
-    // so if it ever stops holding both sites must change together.
-    if h.resolve & RESOLVE_CACHED != 0 {
-        // No dcache, so every request is conceptually a miss. Linux documents
-        // EAGAIN as the answer for a miss, which makes this the one refusal
-        // here that is also what Linux itself would say.
-        errno::set_errno(errno::EAGAIN);
-        return -1;
+    // Until 2026-08-30 the only way to keep it was to refuse: the containment
+    // work existed kernel-side but was reachable only through the *Linux* ABI,
+    // and this is the native one. `SYS_FS_OPENAT2` (661) is the native call
+    // that carries the word, so `RESOLVE_BENEATH` and `RESOLVE_NO_SYMLINKS`
+    // are now enforced rather than refused. `RESOLVE_IN_ROOT` and
+    // `RESOLVE_CACHED` are still refused, and for reasons that have not moved.
+    match plan_resolve(h.resolve) {
+        ResolvePlan::Refuse(e) => {
+            errno::set_errno(e);
+            -1
+        }
+        ResolvePlan::Forward(k_resolve) => openat2_forward(dirfd, path, &h, k_resolve),
+        ResolvePlan::Delegate => openat(dirfd, path, h.flags as i32, h.mode as ModeT),
     }
-    if h.resolve & RESOLVE_IN_ROOT != 0 {
-        // Rooted (chroot-like) resolution needs per-fd root tracking we have
-        // nowhere to keep.
-        errno::set_errno(errno::EOPNOTSUPP);
-        return -1;
-    }
-    if h.resolve & RESOLVE_BENEATH != 0 {
-        // Confinement below `dirfd`. EXDEV is Linux's error for a walk that
-        // would cross a forbidden boundary, and is what the kernel returns.
-        //
-        // Userspace that needs this today must emulate it by walking the path
-        // itself with `openat(O_DIRECTORY|O_NOFOLLOW)` + `readlinkat`, keeping
-        // the parent descriptors on a stack, and creating through the
-        // descriptor the walk returns. `userspace/coreutils/src/bin/tar.rs`
-        // (`Dir::locate`) is the worked example.
-        //
-        // This refusal is on its way out, and the two halves arrive separately.
-        // The VFS half landed 2026-08-29 (`Vfs::resolve_beneath`,
-        // `fs::handle::open_beneath`, `syscall::linux::sys_openat_beneath`) —
-        // but it is reachable only through the *Linux* ABI, and this function
-        // is the native one, which has no syscall to carry a `resolve` word.
-        // `requests/b-a-yes-forward-openat2-and-here-is-the-shape-we-want.md`
-        // asks lane A for `SYS_FS_OPENAT2`
-        // (`path_ptr, path_len, flags, mode, resolve, dirfd` — flat, no
-        // `open_how`); when it exists, this branch and the `NO_SYMLINKS` one
-        // below both go away and the call forwards instead. See
-        // `design-decisions.md` §705, which also records the create-mode width
-        // question the forward has to settle first.
-        errno::set_errno(errno::EXDEV);
-        return -1;
-    }
-    if h.resolve & RESOLVE_NO_SYMLINKS != 0 {
-        // The one place this libc is deliberately stricter than the kernel.
-        // `sys_openat2` *enforces* NO_SYMLINKS, threading it to the VFS
-        // resolver as `OpenFlags::NO_SYMLINKS` so any link in any component is
-        // ELOOP. We cannot reach that: `openat` above flattens `dirfd` and
-        // `path` into one absolute path and calls `open`, whose flag word has
-        // no per-component no-follow bit (`O_NOFOLLOW` is the final component
-        // only). Refusing is the honest answer and the safe one; silently
-        // following is neither.
-        //
-        // Retired by the same forward as `RESOLVE_BENEATH` above: a native
-        // `SYS_FS_OPENAT2` carrying the `resolve` word reaches the same VFS
-        // resolver `sys_openat2` already reaches, and lane A's containment work
-        // composes `BENEATH | NO_SYMLINKS` without special handling.
-        errno::set_errno(errno::EOPNOTSUPP);
-        return -1;
-    }
-
-    openat(dirfd, path, h.flags as i32, h.mode as ModeT)
 }
 
 // ---------------------------------------------------------------------------
@@ -10053,14 +10276,106 @@ mod tests {
         assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
-    // -- Unenforceable restrictions are refused, never silently dropped ----
+    // -- The resolve word: enforced, or refused; never dropped -------------
     //
-    // The property under test is one thing said four ways: a caller that asks
-    // to be confined must not receive a file descriptor. `openat` carries no
-    // `resolve` word, so a success here would be an unrestricted open wearing
-    // the answer the caller wanted. Each errno matches
-    // `kernel/src/syscall/linux.rs::sys_openat2`, so the native libc and the
-    // Linux ABI cannot drift apart without one of these failing.
+    // The property is one thing said several ways: a restriction the caller
+    // asked for must either reach the kernel or come back as an error. It must
+    // never turn into a descriptor, because a descriptor is an unrestricted
+    // open wearing the answer the caller wanted.
+    //
+    // Two bits (`BENEATH`, `NO_SYMLINKS`) are now *enforced*, by forwarding to
+    // `SYS_FS_OPENAT2`; two (`IN_ROOT`, `CACHED`) are still refused. The
+    // enforced half cannot be asserted end-to-end in a host test — every
+    // native syscall is stubbed off-target, so both the forward and the
+    // delegation come back ENOSYS and are indistinguishable — so it is
+    // asserted on `plan_resolve`, which is where the decision actually lives.
+    // That is the half lane A warned would otherwise be untested marshalling.
+
+    /// Every Linux `RESOLVE_*` value, paired with its name for failure text.
+    const LINUX_RESOLVE_BITS: [(&str, u64); 6] = [
+        ("NO_XDEV", RESOLVE_NO_XDEV),
+        ("NO_MAGICLINKS", RESOLVE_NO_MAGICLINKS),
+        ("NO_SYMLINKS", RESOLVE_NO_SYMLINKS),
+        ("BENEATH", RESOLVE_BENEATH),
+        ("IN_ROOT", RESOLVE_IN_ROOT),
+        ("CACHED", RESOLVE_CACHED),
+    ];
+
+    #[test]
+    fn test_resolve_beneath_is_forwarded_not_refused() {
+        // Was EXDEV until the native call existed to carry the word.
+        assert_eq!(
+            plan_resolve(RESOLVE_BENEATH),
+            ResolvePlan::Forward(K_RESOLVE_BENEATH)
+        );
+    }
+
+    #[test]
+    fn test_resolve_no_symlinks_is_forwarded_not_refused() {
+        assert_eq!(
+            plan_resolve(RESOLVE_NO_SYMLINKS),
+            ResolvePlan::Forward(K_RESOLVE_NO_SYMLINKS)
+        );
+    }
+
+    #[test]
+    fn test_resolve_beneath_and_no_symlinks_compose() {
+        // Lane A's containment work composes the two without special handling,
+        // so the translation must too — an `if/else if` here would silently
+        // drop one of a pair the caller asked for together.
+        assert_eq!(
+            plan_resolve(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS),
+            ResolvePlan::Forward(K_RESOLVE_BENEATH | K_RESOLVE_NO_SYMLINKS)
+        );
+    }
+
+    #[test]
+    fn test_kernel_resolve_bits_are_not_linux_resolve_bits() {
+        // The divergence is deliberate and load-bearing: every Linux resolve
+        // value lies in 0x00..=0x3f, so an *untranslated* word arriving at the
+        // kernel has no known bit and at least one unknown one, and is refused
+        // on its first call. Had the numbers matched, a dropped translation
+        // line would turn one restriction into a different one and the caller
+        // would be told its confinement was applied when it was not.
+        //
+        // This test fails if anyone "harmonises" the constants for tidiness —
+        // which is the point. Its kernel-side twin is
+        // `dispatch.rs::test_dispatch_openat2_native` case (a).
+        for (name, bit) in LINUX_RESOLVE_BITS {
+            assert!(
+                bit < 0x40,
+                "Linux RESOLVE_{name} ({bit:#x}) left the range the \
+                 no-collision argument rests on"
+            );
+        }
+        for k in [K_RESOLVE_BENEATH, K_RESOLVE_NO_SYMLINKS] {
+            assert!(
+                k >= 0x40,
+                "kernel resolve bit {k:#x} collides with Linux's range; a \
+                 dropped translation would now mean a *different* restriction \
+                 rather than an unknown one"
+            );
+        }
+    }
+
+    #[test]
+    fn test_every_linux_resolve_bit_has_a_plan() {
+        // Totality: `VALID_RESOLVE_FLAGS` is what step 4 lets through, so every
+        // bit in it reaches `plan_resolve` and none may fall off the end into
+        // `Delegate` by accident. A new bit added to the mask without a line in
+        // `plan_resolve` would silently become "unrestricted open".
+        for (name, bit) in LINUX_RESOLVE_BITS {
+            assert_ne!(bit & VALID_RESOLVE_FLAGS, 0, "RESOLVE_{name} not in mask");
+            let plan = plan_resolve(bit);
+            let delegated = plan == ResolvePlan::Delegate;
+            let free = bit == RESOLVE_NO_XDEV || bit == RESOLVE_NO_MAGICLINKS;
+            assert_eq!(
+                delegated, free,
+                "RESOLVE_{name} plans {plan:?}; only NO_XDEV and \
+                 NO_MAGICLINKS may be delegated unrestricted"
+            );
+        }
+    }
 
     /// Returns the errno a given `resolve` word produces, having first checked
     /// that it is a refusal *and* that the refusal came from the resolve gate.
@@ -10100,15 +10415,9 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_beneath_is_refused_not_ignored() {
-        // The bug this pins: RESOLVE_BENEATH used to return a working fd for a
-        // caller asking to be confined below `dirfd`, while the kernel's
-        // Linux-ABI twin refused the same request with EXDEV.
-        assert_eq!(refused_resolve(RESOLVE_BENEATH), crate::errno::EXDEV);
-    }
-
-    #[test]
     fn test_resolve_in_root_is_refused_not_ignored() {
+        // Still refused: not built kernel-side, no constant there, so it cannot
+        // be forwarded even by accident.
         assert_eq!(refused_resolve(RESOLVE_IN_ROOT), crate::errno::EOPNOTSUPP);
     }
 
@@ -10118,22 +10427,30 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_no_symlinks_is_refused_not_ignored() {
-        // Stricter than the kernel on purpose: `sys_openat2` enforces this via
-        // the VFS resolver, and we have no way to reach that through `open`.
+    fn test_refusal_outranks_a_forwardable_bit() {
+        // A word mixing a forwardable restriction with an unsupported one must
+        // be refused, not partially honoured. Forwarding the BENEATH half and
+        // dropping IN_ROOT would confine the walk less than asked and say
+        // nothing about it.
         assert_eq!(
-            refused_resolve(RESOLVE_NO_SYMLINKS),
-            crate::errno::EOPNOTSUPP
+            plan_resolve(RESOLVE_BENEATH | RESOLVE_IN_ROOT),
+            ResolvePlan::Refuse(crate::errno::EOPNOTSUPP)
+        );
+        assert_eq!(
+            plan_resolve(RESOLVE_BENEATH | RESOLVE_CACHED),
+            ResolvePlan::Refuse(crate::errno::EAGAIN)
         );
     }
 
     #[test]
-    fn test_unenforceable_bit_refused_even_when_mixed_with_free_ones() {
-        // NO_XDEV and NO_MAGICLINKS pass through unrefused, so a caller could
-        // otherwise hide a real restriction behind them and be told yes.
+    fn test_real_restriction_survives_being_mixed_with_free_bits() {
+        // NO_XDEV and NO_MAGICLINKS are dropped rather than forwarded, so a
+        // caller could otherwise hide a real restriction behind them: an
+        // implementation that decided "nothing to forward" from the presence of
+        // a droppable bit would answer the whole word with `Delegate`.
         assert_eq!(
-            refused_resolve(RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_BENEATH),
-            crate::errno::EXDEV
+            plan_resolve(RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_BENEATH),
+            ResolvePlan::Forward(K_RESOLVE_BENEATH)
         );
     }
 

@@ -3,6 +3,13 @@
 **From:** lane A · **To:** lane B · **Filed:** 2026-08-30 · Answers
 `requests/b-a-yes-forward-openat2-and-here-is-the-shape-we-want.md`
 
+> **Status:** ✅ LANDED 2026-08-30 by lane B. `posix/src/file.rs::openat2`
+> forwards to `SYS_FS_OPENAT2` for `RESOLVE_BENEATH`/`RESOLVE_NO_SYMLINKS`;
+> both former refusals are gone. No `AT_FDCWD`-style sentinel is wanted —
+> `dirfd == 0` is used only for an absolute path, where the base is provably
+> never read. See `known-issues.md` → `TD-OPENAT2-BENEATH-INROOT`, final
+> section, for why a relative `AT_FDCWD` open cannot use 0.
+
 **In short:** the syscall number you asked for exists and is wired up. It takes
 exactly the six arguments you specified, in your order. The mode width question
 is settled as your option 1 — twelve bits, applied, not refused — and I widened

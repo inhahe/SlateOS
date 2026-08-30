@@ -552,6 +552,24 @@ static CURRENT_TASK_IDS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
     [INIT; priority_rr::MAX_CPUS]
 };
 
+/// Per-CPU idle task IDs, or `u64::MAX` for a CPU with none registered yet.
+///
+/// The idle task's *priority* is discoverable without this array
+/// (`IDLE_PRIORITY`), but only by looking the task up in `SCHED.tasks`, which
+/// needs the SCHED lock.  [`nr_runnable`] runs in the timer softirq, where a
+/// blocking acquire of a lock the interrupted code may already hold can never
+/// succeed — so the one fact it needs about the running task, "is this the
+/// idle task", has to be answerable from atomics alone.  This array is that
+/// answer: written once per CPU at registration, read lock-free thereafter.
+///
+/// `u64::MAX` rather than 0 is the sentinel because 0 is a real idle task ID
+/// (the BSP's, created by [`init`]); a 0 sentinel would make a CPU that has
+/// not registered yet claim to be idling in task 0.
+static IDLE_TASK_IDS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(u64::MAX));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
 /// Per-CPU "task this CPU has switched away from but is still standing on".
 ///
 /// `CURRENT_TASK_IDS` stops naming the outgoing task the instant
@@ -1343,6 +1361,9 @@ pub fn init() {
     let mut state = SCHED.lock();
     state.tasks.insert(0, idle);
     set_current_task(0, 0); // BSP (CPU 0) starts with idle task 0.
+    if let Some(slot) = IDLE_TASK_IDS.first() {
+        slot.store(0, Ordering::Release);
+    }
 
     state.initialized = true;
     serial_println!(
@@ -1386,6 +1407,9 @@ pub fn register_ap_idle(cpu_index: usize) -> TaskId {
     let mut state = SCHED.lock();
     state.tasks.insert(id, idle);
     set_current_task(cpu_index, id);
+    if let Some(slot) = IDLE_TASK_IDS.get(cpu_index) {
+        slot.store(id, Ordering::Release);
+    }
 
     serial_println!(
         "[sched] Registered AP idle task {} for CPU {}",
@@ -3951,10 +3975,10 @@ fn unthrottle_expired() {
 ///
 /// Called once per second (every `BANDWIDTH_PERIOD_TICKS`) by the BSP,
 /// but only recomputes the EWMAs every 5th call so the effective sample
-/// interval is 5 seconds — Linux's `LOAD_FREQ`.  Samples the number of
-/// runnable tasks across all CPUs (an O(num_cpus) read of per-CPU queue
-/// lengths — no task-list walk, safe in ISR context) and decays the three
-/// averages with Linux's `EXP_1`/`EXP_5`/`EXP_15` constants.
+/// interval is 5 seconds — Linux's `LOAD_FREQ`.  Samples [`nr_runnable`]
+/// (an O(num_cpus) read of per-CPU queue lengths and atomics — no task-list
+/// walk, safe in ISR context) and decays the three averages with Linux's
+/// `EXP_1`/`EXP_5`/`EXP_15` constants.
 fn update_load_average() {
     // Gate to a 5-second effective sample interval.  fetch_add returns the
     // pre-increment value, so the very first call (n == 0) samples
@@ -3964,15 +3988,8 @@ fn update_load_average() {
         return;
     }
 
-    // Count runnable tasks: query per-CPU queue lengths (cheap, lock-light).
-    let num_cpus = crate::smp::cpu_count().max(1);
-    let mut runnable: u64 = 0;
-    for cpu_idx in 0..num_cpus.min(priority_rr::MAX_CPUS) {
-        runnable = runnable.saturating_add(PER_CPU_SCHED.queue_length(cpu_idx) as u64);
-    }
-
     // active = n_runnable in fixed-point (Linux passes `nr_active * FIXED_1`).
-    let active = runnable.saturating_mul(LOAD_FIXED_1);
+    let active = nr_runnable().saturating_mul(LOAD_FIXED_1);
     LOAD_AVG_1.store(
         calc_load(LOAD_AVG_1.load(Ordering::Relaxed), LOAD_EXP_1, active),
         Ordering::Relaxed,
@@ -3985,6 +4002,47 @@ fn update_load_average() {
         calc_load(LOAD_AVG_15.load(Ordering::Relaxed), LOAD_EXP_15, active),
         Ordering::Relaxed,
     );
+}
+
+/// Count the tasks that currently want a CPU, across all CPUs.
+///
+/// This is Linux's `nr_running`: the tasks in a run queue waiting for a CPU,
+/// **plus** the ones actually on a CPU right now.  Both halves matter, and
+/// each was got wrong here before:
+///
+/// - *Queued* is [`priority_rr::PerCpuScheduler::real_queue_length`], not
+///   `queue_length` — the latter counts each CPU's parked idle task, which
+///   would report load 1.0 per CPU on a completely idle machine.
+/// - *Running* is not in any queue at all: `pick_next` pops the task it
+///   selects.  Counting queues alone reports load 0 for a machine with one
+///   CPU-bound task per CPU and nothing waiting — the busiest state the box
+///   can be in without queueing.
+///
+/// A CPU's running task is counted only when it is not that CPU's idle task,
+/// which [`IDLE_TASK_IDS`] answers without taking the SCHED lock.
+///
+/// ISR-safe: per-CPU `try_lock` reads and atomic loads only, no allocation.
+/// A contended queue contributes 0 for that sample rather than blocking; the
+/// EWMA absorbs the occasional undercount.
+#[must_use]
+pub fn nr_runnable() -> u64 {
+    let num_cpus = crate::smp::cpu_count().max(1).min(priority_rr::MAX_CPUS);
+    let mut runnable: u64 = 0;
+    for cpu_idx in 0..num_cpus {
+        runnable = runnable.saturating_add(PER_CPU_SCHED.real_queue_length(cpu_idx) as u64);
+
+        // The task on the CPU, if it is doing real work.
+        let idle_id = IDLE_TASK_IDS
+            .get(cpu_idx)
+            .map_or(u64::MAX, |s| s.load(Ordering::Acquire));
+        let current = CURRENT_TASK_IDS
+            .get(cpu_idx)
+            .map_or(0, |s| s.load(Ordering::Acquire));
+        if idle_id != u64::MAX && current != idle_id {
+            runnable = runnable.saturating_add(1);
+        }
+    }
+    runnable
 }
 
 /// Get the three system load averages in Linux fixed-point form.
@@ -8485,7 +8543,66 @@ fn test_load_average() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    serial_println!("[sched]   load-average EWMA + formatting OK");
+    // The EWMA is only as honest as its input.  `nr_runnable` feeds it, and
+    // both halves of that count were wrong before: the queued half counted
+    // each CPU's parked idle task (load 1.00 per idle CPU), and the running
+    // half was missing entirely (load 0.00 for a fully-busy machine, because
+    // `pick_next` pops the task it selects).  Exercise the queue-side
+    // exclusion directly on a scratch queue, where the answer is exact.
+    // exclusion directly on scratch queues, where the answer is exact.
+    //
+    // Every backend, not just the default: the run queue behind
+    // `real_queue_length` is a `SchedulerBackend`, so a backend that forgot
+    // the exclusion would put the floor back for anyone who booted with
+    // `sched.backend=eevdf` — and only for them, which is the kind of bug
+    // that survives a long time.
+    for id in [
+        backend::BACKEND_PRIORITY_RR,
+        backend::BACKEND_EEVDF,
+        backend::BACKEND_DEADLINE,
+    ] {
+        let name = backend::backend_name(id);
+
+        let mut q = backend::SchedulerBackend::from_id(id);
+        q.enqueue(4001, task::IDLE_PRIORITY);
+        q.enqueue(4002, 5);
+        q.enqueue(4003, 5);
+        if q.total_tasks() != 3 {
+            serial_println!(
+                "[sched]   FAIL: {name} total_tasks counted {} of 3 queued",
+                q.total_tasks()
+            );
+            return Err(KernelError::InternalError);
+        }
+        if q.real_tasks() != 2 {
+            serial_println!(
+                "[sched]   FAIL: {name} real_tasks counted {} of 2 non-idle (idle task leaked in)",
+                q.real_tasks()
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // A queue holding nothing but an idle task is an *idle* CPU: load 0.
+        let mut q = backend::SchedulerBackend::from_id(id);
+        q.enqueue(4004, task::IDLE_PRIORITY);
+        if q.real_tasks() != 0 {
+            serial_println!(
+                "[sched]   FAIL: {name} idle-only queue reported {} runnable, want 0",
+                q.real_tasks()
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // The live count must at least be answerable in this context without
+    // blocking (it runs in the timer softirq) and must not be absurd.
+    let live = nr_runnable();
+    if live > (priority_rr::MAX_CPUS as u64).saturating_mul(4096) {
+        serial_println!("[sched]   FAIL: nr_runnable() returned implausible {live}");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[sched]   load-average EWMA + formatting + nr_runnable OK");
     Ok(())
 }
 

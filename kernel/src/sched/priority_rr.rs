@@ -519,6 +519,33 @@ impl PriorityRoundRobin {
         total
     }
 
+    /// Count the queued tasks that are *not* the CPU's idle task.
+    ///
+    /// [`total_tasks`](Self::total_tasks) is the right count for work
+    /// stealing, which wants to know how deep a queue is regardless of what
+    /// is in it.  It is the wrong count for the load average, which asks
+    /// "how much work is waiting for a CPU" — and a queued idle task is by
+    /// definition the absence of work.  Counting it would floor the reported
+    /// load at one per idle CPU, which is exactly backwards.
+    ///
+    /// This is the counting twin of [`has_real_work`](Self::has_real_work):
+    /// same `IDLE_PRIORITY` exclusion, a count instead of a predicate.
+    #[must_use]
+    pub fn real_tasks(&self) -> usize {
+        // Mask out the IDLE_PRIORITY bit so its queue is never visited.
+        let idle_bit = 1u32 << super::task::IDLE_PRIORITY;
+        let mut bits = self.bitmap & !idle_bit;
+        let mut total = 0usize;
+        while bits != 0 {
+            let level = bits.trailing_zeros() as usize;
+            if let Some(q) = self.queues.get(level) {
+                total = total.saturating_add(q.len());
+            }
+            bits &= bits.wrapping_sub(1); // clear lowest set bit
+        }
+        total
+    }
+
     /// Steal up to `count` tasks from the back of the highest-priority
     /// non-empty queue.  Returns stolen (task_id, priority) pairs.
     ///
@@ -1058,6 +1085,20 @@ impl PerCpuScheduler {
             .get(cpu)
             .and_then(|m| m.try_lock())
             .map_or(0, |guard| guard.total_tasks())
+    }
+
+    /// Get the number of *non-idle* tasks queued on a CPU.
+    ///
+    /// Returns 0 if the CPU index is out of range or the lock is
+    /// contended (uses `try_lock` — safe in ISR context).  See
+    /// [`PriorityRoundRobin::real_tasks`] for why the load average wants this
+    /// rather than [`queue_length`](Self::queue_length).
+    #[must_use]
+    pub fn real_queue_length(&self, cpu: usize) -> usize {
+        self.queues
+            .get(cpu)
+            .and_then(|m| m.try_lock())
+            .map_or(0, |guard| guard.real_tasks())
     }
 
     /// Check if any *other* CPU has real work that could be stolen.

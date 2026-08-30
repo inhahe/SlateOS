@@ -97592,16 +97592,25 @@ each length exactly.
 
 ---
 
-## `A-LOCKDEP-SELF-TEST-PANICS-ON-EVERY-RELEASE-BUILD` (lane A, 2026-08-30) — **fixed 2026-08-30**
+## `A-LOCKDEP-SELF-TEST-PANICS-ON-EVERY-RELEASE-BUILD` (lane A, 2026-08-30) — **fixed 2026-08-30 (took two attempts; the first misdiagnosed it)**
 
-**Status:** FIXED 2026-08-30.
+**Status:** FIXED 2026-08-30, on the second attempt. The first attempt, recorded
+below as written at the time, concluded the *test* was wrong and the code was
+right. It was the other way round. Read the round-2 section for what was
+actually broken; round 1 is kept because the reasoning error is the useful part.
 
 **In short:** the kernel would not finish booting when built with optimisations
 on. It panicked partway through startup, inside a self-test belonging to the
-lock-order checker — not because anything about locking was wrong, but because
-the test identified a function by name and the optimiser had folded that
-function into another one, so the name it expected was gone. Every debug boot
-passed; every release boot died. The boot test builds debug, so nothing said so.
+lock-order checker. The test was checking that the checker correctly records
+*which piece of code took a lock* — information that appears in every deadlock
+report it prints. In an optimised build it was recording the wrong function: not
+the one that took the lock, but the one that called it. So every "taken at" line
+in every release-build lock report pointed at innocent code. The self-test was
+right to panic; two rounds of diagnosis were needed to believe it.
+
+---
+
+### Round 1 (wrong): "the test is asserting a property of the build"
 
 **What happened.** `lockdep`'s test 9b checks that `caller_ips()` walks exactly
 one frame up from `lock_acquire`, landing on the caller. It identified that
@@ -97660,11 +97669,90 @@ any other function in this file.
 **Not a regression in lockdep.** `caller_ips` was right in both builds
 throughout; only the test's way of naming its own caller was wrong.
 
+*(That last paragraph is the error. It was written without re-running `--bench`,
+because the change was "obviously" sufficient. It was not.)*
+
+---
+
+### Round 2 (correct): `lock_acquire` was `#[inline]`, so the walk lost a frame
+
+Running `--bench` after round 1 panicked again, and the stronger assertion round
+1 had installed is what made the second panic legible:
+
+```
+panicked at kernel\src\lockdep.rs:1680:13:
+recorded site resolved to kernel_main, not to the function that took the lock
+(Some("_ZN6kernel7lockdep18site_probe_acquire…")) — caller_ips() walked to the wrong frame
+```
+
+Both sides of that comparison now come from the symbol table, so this is not a
+naming quibble: the walk genuinely landed on `kernel_main` when the function
+that took the lock was `site_probe_acquire`, which still exists as a real
+`#[inline(never)]` frame. Round 1's premise — "there is no `self_test` frame to
+walk to, because there is no `self_test`" — had been repaired, and the walk was
+*still* one frame high. That is the tell that the walker, not the target, was
+wrong.
+
+**The actual cause.** `caller_ips()` is `#[inline(never)]` and reads two frames:
+its own, then its parent's — the parent being `lock_acquire`, whose return
+address is the acquisition site. That is correct only while `lock_acquire` *has*
+a frame. It was declared `#[inline]`. In a release build LLVM took the hint, so
+the "parent frame" the walk found was not `lock_acquire`'s but its caller's, and
+the return address in it belonged to the caller's **caller**. Every recorded
+site was off by exactly one level of call.
+
+`#[inline]` is a hint and `#[inline(never)]` is a guarantee, and the frame walk
+was resting the whole of its correctness on the hint.
+
+**This was never confined to the test.** The same run prints the held-lock dump
+a few lines above the panic, and it shows the defect directly:
+
+```
+[lockdep]   cpu 0 holds 2 lock(s):
+[lockdep]     [0] test-A @ 0xdead0001, taken at 0xffffffff812eec9b (kernel_main+0x16b)
+[lockdep]     [1] test-B @ 0xdead0002, taken at 0xffffffff812eec9b (kernel_main+0x16b)
+```
+
+Two different locks, taken at two different places, reported at one identical
+address — the call to `self_test` in `kernel_main`. In a release build every
+lockdep report attributed every acquisition to whoever called the function that
+took the lock. That is worse than printing nothing: a bare address carries an
+implicit claim to be worth reading, and this one sends you to code that never
+touched the lock.
+
+**The fix, in two parts, because a frame can be lost two ways.**
+
+1. `lock_acquire` is now `#[inline(never)]`. The invariant the walk depends on
+   becomes a guarantee instead of a hope. It costs nothing measurable: there are
+   two call sites, both already doing `preempt_disable` + `ensure_registered` +
+   `tracking_enabled` on the same path, and `ENABLED` is true from boot onward,
+   so the early-out that the inline hint existed to fold away is the branch not
+   taken in production.
+2. `site_probe_acquire` gained a `core::hint::black_box(probe)` after the
+   acquire. `#[inline(never)]` on the *callee* does not stop the *caller's* own
+   frame vanishing: a body consisting of one call in tail position can be
+   emitted as `jmp` instead of `call`, reusing the frame rather than pushing
+   one, which produces the identical off-by-one from the opposite direction.
+   The barrier takes the call out of tail position, which is what makes the
+   frame mandatory.
+
+**The transferable lesson.** Round 1 explained the failure convincingly and
+fixed a real weakness (the substring assertion *was* build-dependent), then drew
+the wrong conclusion from it and did not re-run the one command that would have
+said so. A plausible mechanism that accounts for the symptom is not the same as
+the cause, and "this fix is obviously sufficient" is precisely the belief that
+needs the 20-minute run to check. The saving grace was that round 1 made the
+assertion *stronger* rather than weaker — a fix that had loosened it to make the
+panic go away would have shipped the wrong attribution silently and permanently.
+
 | | |
 |---|---|
 | The panic | `kernel/src/lockdep.rs`, test 9b in `self_test` |
-| The fix | `kernel/src/lockdep.rs::site_probe_acquire` |
-| How to reproduce (before the fix) | `./scripts/boot-test.sh --bench` — release build, panics before the bench task runs |
+| The real defect | `kernel/src/lockdep.rs::lock_acquire` — `#[inline]` where the frame walk needed `#[inline(never)]` |
+| The round-1 fix (kept, insufficient alone) | `kernel/src/lockdep.rs::site_probe_acquire` + symbol-table-vs-symbol-table assertion |
+| The round-2 fix | `#[inline(never)]` on `lock_acquire`; `black_box` in `site_probe_acquire` to defeat the sibling call |
+| Blast radius before the fix | every `taken at` address in every release-build lockdep report, not just the self-test |
+| How to reproduce (before the fix) | `./scripts/boot-test.sh --bench` — release build, panics ~20s into the boot |
 | The gate that missed it | `scripts/boot-test.sh` without `--bench` builds debug |
 
 ---

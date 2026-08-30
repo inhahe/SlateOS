@@ -594,7 +594,30 @@ pub enum Acquire {
 /// `lock_addr`: address of the lock (e.g., `&spinlock as *const _ as usize`).
 /// `name`: short human-readable name for diagnostics.
 /// `how`: see [`Acquire`] — a `Try` records no *incoming* dependency edges.
-#[inline]
+///
+/// # Why `#[inline(never)]`
+///
+/// This function must occupy a stack frame of its own, because [`caller_ips`]
+/// identifies the acquisition site by walking *past* that frame to the return
+/// address in it. This was `#[inline]` and the walk was therefore correct only
+/// where the optimiser happened to leave the frame standing. In a release build
+/// it did not: `lock_acquire` folded into its caller, the walk's "parent frame"
+/// became the caller's own, and every recorded site named the **caller's
+/// caller** instead. The self-test caught it, but the damage was not confined
+/// to the test — every `taken at` in every release-build lockdep report pointed
+/// at the wrong function, which is worse than no attribution, because a plain
+/// address invites you to go and read code that never took the lock.
+///
+/// `noinline` is a hard guarantee from LLVM; `#[inline]` was a hint. The
+/// invariant the frame walk rests on is now stated in the type system's only
+/// available voice rather than assumed.
+///
+/// It costs nothing worth having. There are two call sites (`Mutex::lock` and
+/// `Mutex::try_lock`), both of which already do a `preempt_disable`, an
+/// `ensure_registered` and a `tracking_enabled` check on the same path, and
+/// `ENABLED` is set true during boot and stays true — so the early-out the
+/// inline hint existed to fold away is the branch *not* taken in production.
+#[inline(never)]
 pub fn lock_acquire(lock_addr: usize, name: &[u8], how: Acquire) {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
@@ -1399,9 +1422,20 @@ impl core::fmt::Display for AddrDesc {
 ///
 /// Do not merge this back into the block that calls it, however tempting; it
 /// is one line and the reason it is not inline is three paragraphs long.
+///
+/// The `black_box` is load-bearing for the same reason and is not a second
+/// copy of it. `#[inline(never)]` stops the *callee* being folded into this
+/// function; it does not stop this function's own frame from disappearing. A
+/// body that is nothing but a call in tail position is a sibling call: the
+/// compiler may emit `jmp` rather than `call`, reusing this frame instead of
+/// pushing one, so `lock_acquire` returns straight to `self_test`'s caller and
+/// the walk lands one frame high — the identical symptom, from the opposite
+/// end. Putting an opaque use of `probe` after the call takes the call out of
+/// tail position, which is the only thing that makes the frame mandatory.
 #[inline(never)]
 fn site_probe_acquire(probe: usize) {
     lock_acquire(probe, b"site-probe", Acquire::Blocking);
+    core::hint::black_box(probe);
 }
 
 /// Boot-time self-test of the lock order validator.

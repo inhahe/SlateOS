@@ -55,11 +55,13 @@ A name holding a newline is measured on its own rather than in a batch: under
 of a batch could not be split back into one answer per name.
 """
 
-import importlib.util
 import os
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import srcload  # noqa: E402
 
 # See `quote-probe.py`'s note on this: `C`, not `C.UTF-8`, would measure a
 # locale SlateOS does not have, and would pin GNU's ASCII branch -- straight
@@ -94,11 +96,10 @@ def load_corpus() -> list[bytes]:
     """
     here = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(here, "quote-probe.py")
-    spec = importlib.util.spec_from_file_location("quote_probe", path)
-    if spec is None or spec.loader is None:
-        raise SystemExit("cannot load scripts/quote-probe.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    try:
+        mod = srcload.load(path, "quote_probe")
+    except OSError as exc:
+        raise SystemExit(f"cannot load scripts/quote-probe.py: {exc}") from exc
 
     names = list(mod.corpus())
     # The same positional sweeps `quote-probe.py` runs. Position decides which

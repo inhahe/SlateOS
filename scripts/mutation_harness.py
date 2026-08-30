@@ -184,6 +184,56 @@ def refuse_a_dirty_start(src, bak):
     sys.exit(2)
 
 
+def check_the_table(original, mutations):
+    """Report every unusable row in the table at once, before any build time.
+
+    Four ways a row says nothing, all of them silent at run time:
+
+    * **The anchor does not appear exactly once.**  Zero and the mutation is
+      never applied; more than one and it is applied in places the row does not
+      claim to be about.
+    * **`old == new`.**  The "mutant" is the program.  Nothing fails, and the
+      row is scored `SURVIVED` -- a coverage hole reported where there is none.
+    * **`expect` names a test that does not exist.**  The expectation can never
+      be met, so the row reports `WRONG TESTS` for as long as it survives.
+
+    An **empty** `expect` is not a problem: it is the table's way of saying "no
+    named test can report this, because the program dies first" -- maze's
+    `the search renumbers cells it has already reached` re-queues cells until the
+    binary is killed on a two-gigabyte allocation.  `sweep` gives that spelling
+    teeth (see the `not expect` arm); it used to be the most dangerous row a
+    table could hold, because `set() <= failed` holds for *every* `failed`, the
+    empty set included, so such a row was scored `[ok]` whatever happened.
+
+    Doing this up front rather than per-mutation is the whole point.  Each row
+    costs a build and a suite run -- around fifteen seconds here -- so a table of
+    128 spends half an hour to report what one pass over a string already knows.
+    That is not hypothetical: snippets' first sweep spent 296 seconds to
+    discover that 3 of 19 anchors were mis-indented, and the full table had 8.
+
+    Returns the number of problems; prints each one.
+    """
+    # Rust test functions take no arguments, so this is exact enough to be worth
+    # trusting: it will not match a helper that takes one, and every `#[test]`
+    # in the file is of this shape.
+    defined = set(re.findall(r"fn\s+([a-z0-9_]+)\s*\(\s*\)", original))
+    problems = 0
+    for name, old, new, expect in mutations:
+        n = original.count(old)
+        if n != 1:
+            print(f"[table] anchor appears {n}x: {name}")
+            print(f"        {old!r}")
+            problems += 1
+        if old == new:
+            print(f"[table] mutation changes nothing: {name}")
+            problems += 1
+        for t in expect:
+            if t not in defined:
+                print(f"[table] no such test `{t}`: {name}")
+                problems += 1
+    return problems
+
+
 def sweep(src, mutations, crate, timeout=240, only=None):
     """Apply each mutation in turn and report which tests noticed.
 
@@ -222,6 +272,19 @@ def sweep(src, mutations, crate, timeout=240, only=None):
 
     verdicts = []
     only = sys.argv[1:] if only is None else only
+    selected = [
+        (name, to_source_eol(old), to_source_eol(new), expect)
+        for name, old, new, expect in mutations
+        if not only or any(o in name for o in only)
+    ]
+
+    # Cheapest check first: one pass over a string, before a compiler is started.
+    problems = check_the_table(original, selected)
+    if problems:
+        bak.unlink(missing_ok=True)
+        print(f"\n{problems} unusable row(s) in the table.  Fix them first: a row")
+        print("that cannot be applied is coverage that is not being verified.")
+        return 2
 
     # Prove the suite passes on the REAL program before believing anything about
     # a broken one.  A sweep that never establishes this cannot tell "the
@@ -252,14 +315,13 @@ def sweep(src, mutations, crate, timeout=240, only=None):
     print("baseline: clean.\n")
 
     try:
-        for name, old, new, expect in mutations:
-            if only and not any(o in name for o in only):
-                continue
-            old, new = to_source_eol(old), to_source_eol(new)
-            if original.count(old) != 1:
-                verdicts.append((name, f"SKIP anchor appears {original.count(old)}x"))
-                print(f"[skip] {name}: anchor appears {original.count(old)} times")
-                continue
+        # There used to be a `original.count(old) != 1` skip here.  It could not
+        # fire: `original` is read once and every mutant is built from it, so the
+        # count this loop would compute is the count `check_the_table` already
+        # computed over the same string a moment ago -- a guard in front of a
+        # rule that already holds (`known-issues.md` lesson 51), and one no test
+        # could reach to own.  The check moved up rather than being duplicated.
+        for name, old, new, expect in selected:
             src.write_text(original.replace(old, new), encoding="utf-8", newline="")
             # Build this mutant OUTSIDE the timed window, every time -- not just
             # once at startup.  The timeout is there to catch a mutant that loops
@@ -299,6 +361,20 @@ def sweep(src, mutations, crate, timeout=240, only=None):
                 print(
                     f"[ok]   {name}: caught \u2014 the harness died (exit {out.returncode})"
                 )
+            elif not expect:
+                # An empty expectation means "no named test can report this --
+                # the program dies before one can".  The `timed_out` and
+                # `crashed` arms above are the only ways such a row may pass, so
+                # reaching here means it stopped dying, and the row must say so.
+                #
+                # This arm is the whole reason the spelling is safe.  Without it
+                # the `set(expect) <= failed` below caught the empty case first,
+                # and `set() <= failed` is true for *every* `failed` including
+                # the empty one -- so a row that had quietly stopped killing the
+                # program was scored `[ok] caught ()` with nothing having failed
+                # at all.  maze has carried such a row since it was written.
+                verdicts.append((name, f"NO LONGER DIES: {sorted(failed)}"))
+                print(f"[BAD]  {name}: expected the program to die; it survived")
             elif set(expect) <= failed:
                 verdicts.append((name, f"caught by {len(failed)} test(s)"))
                 print(f"[ok]   {name}: caught ({', '.join(sorted(failed))})")
@@ -323,9 +399,12 @@ def sweep(src, mutations, crate, timeout=240, only=None):
     # The run is green only if every mutation was caught by the tests named for
     # it.  A `[skip]` counts as a failure and that is the important half.  A
     # survivor is loud: some test should have failed and none did.  A skip is
-    # silent -- the anchor stopped matching because the production code moved
-    # under it, so the mutation was never applied and the coverage it stood for
+    # silent -- the mutation was never applied, so the coverage it stood for
     # quietly stopped being verified, inside a run that still ends "0 survived".
+    # The commonest cause of that, an anchor the production code moved out from
+    # under, is now a hard stop before the run rather than a skip inside it; what
+    # remains here is the mutant that would not compile, which is a real finding
+    # about the code (see snake's `let mut moves = 0;`) and not a table typo.
     bad = [(n, v) for n, v in verdicts if not v.startswith("caught")]
     if bad:
         print(f"\nFAIL: {len(bad)} of {len(verdicts)} mutation(s) not caught as named:")

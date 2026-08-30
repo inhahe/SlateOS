@@ -34,12 +34,14 @@ against the specific ways a checker goes quietly wrong:
 
 from __future__ import annotations
 
-import importlib.util
 import inspect
 import json
 import os
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import srcload  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "check-design-decisions-bands.py")
@@ -55,14 +57,15 @@ _FAILURES: list[str] = []
 
 
 def load_module():
-    """Import check-design-decisions-bands.py by path (name is not an ident)."""
-    spec = importlib.util.spec_from_file_location("ddbands", SCRIPT)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {SCRIPT}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["ddbands"] = module
-    spec.loader.exec_module(module)
-    return module
+    """Import check-design-decisions-bands.py by path (name is not an ident).
+
+    Loaded through `srcload` rather than `importlib`: a `SourceFileLoader`
+    consults `__pycache__`, whose staleness check is `(mtime, size)` at
+    one-second resolution, so two same-size writes inside one second leave the
+    second one invisible and the suite validates bytecode that is not on disk.
+    That has actually happened here. See `scripts/srcload.py`.
+    """
+    return srcload.load(SCRIPT, "ddbands")
 
 
 def check(label, got, want):

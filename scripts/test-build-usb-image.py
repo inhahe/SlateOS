@@ -37,7 +37,6 @@ its own and that hardware hits immediately:
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import io
 import shutil
 import struct
@@ -47,16 +46,17 @@ from binascii import crc32
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-_SPEC = importlib.util.spec_from_file_location(
-    "build_usb_image", _HERE / "build-usb-image.py"
-)
-assert _SPEC and _SPEC.loader
-usbimg = importlib.util.module_from_spec(_SPEC)
-# Registered before exec: @dataclass resolves annotations via
-# sys.modules[cls.__module__], which does not exist yet for a module loaded
-# straight from a spec, and fails with a bare AttributeError if it is missing.
-sys.modules["build_usb_image"] = usbimg
-_SPEC.loader.exec_module(usbimg)
+sys.path.insert(0, str(_HERE))
+import srcload  # noqa: E402
+
+# Loaded from source rather than through `importlib`: a `SourceFileLoader`
+# consults `__pycache__`, whose staleness check is `(mtime, size)` at
+# one-second resolution, so two same-size writes inside one second leave the
+# second one invisible and this suite would validate bytecode that is not on
+# disk. `srcload` also registers the module before running its body, which
+# this one needs -- @dataclass resolves annotations via
+# sys.modules[cls.__module__] while the class body is still executing.
+usbimg = srcload.load(str(_HERE / "build-usb-image.py"), "build_usb_image")
 
 SECTOR = 512
 _FAILURES: list[str] = []

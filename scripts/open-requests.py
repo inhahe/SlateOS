@@ -121,22 +121,37 @@ REPLY_SECTION_RE = re.compile(
 # and it is produced by a line break. The two vocabularies below can only rank
 # against each other when both are searched over the same text, so the block is
 # extracted once and both look at it.
-# Both `**Status:**` and `**Status**:` are accepted, because Markdown renders
-# them identically -- bold "Status", then a colon -- so the difference is
-# invisible in the artifact the writer is looking at while they write it. Four
-# files in the dropbox use the second spelling, two of them filed by lane B,
-# and every one of them was reported "no status marker" while carrying a
-# perfectly clear stamp. That is the conflation the `unrecognised status`
-# branch exists to avoid, arriving one step earlier: a reader is told the file
-# was never stamped, so they go to stamp it, and find it already was.
+#
+# The colon may sit inside the bold or outside it. `**Status:**` is what 167 of
+# the 192 files write and what rule 2's example shows; `**Status**:` is what the
+# other four write, and to a reader they are the same line -- Markdown renders
+# both as bold "Status" then a colon, so the difference is invisible in the
+# artifact the writer is looking at while they write it. To this script they
+# were not the same: the marker did not match at all, so those four reported "no
+# status marker" -- the phrasing reserved for a file that never said anything --
+# while each in fact carried a plain verdict, two of them `FIXED on main as of
+# 3ccbfcb99`. Typesetting decided whether the sentence was read, which is the
+# same failure this pattern was rewritten to end. It is also the `unrecognised
+# status` conflation arriving one step earlier: a reader is told the file was
+# never stamped, so they go to stamp it, and find it already was.
+#
+# The marker is captured, not just skipped, so the reason line can quote the
+# file as written. Reporting `**Status:** FIXED ...` for a file that says
+# `**Status**: FIXED ...` would send a reader grepping for a string that is not
+# there.
 #
 # Safe in a way that widening DONE_WORDS is not, and the distinction is the
 # reason this change is made and that one is refused. This decides only *where*
 # the classifier looks; the ranking, the negator guard and STATUS_WINDOW all
 # then run over the same text and mean the same things. No word changes sense,
 # so no open request can become done by it.
+#
+# Deliberately no bare `Status:`. The two bold forms are unambiguous markers;
+# an unemphasised one is a word that appears in prose ("the status: unclear"),
+# and the cost of matching prose is a false clear, which is the direction this
+# report must not fail in.
 STATUS_BLOCK_RE = re.compile(
-    r"\*\*status(?::\*\*|\*\*[ \t]*:)(.*?)(?:\n[ \t]*\n|\Z)",
+    r"(\*\*status(?::\*\*|\*\*[ \t]*:))(.*?)(?:\n[ \t]*\n|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -190,6 +205,40 @@ OPEN_WORDS = (
 DONE_WORD_RE = re.compile(rf"(?<!\w)({DONE_WORDS})(?![\w-])", re.IGNORECASE)
 OPEN_WORD_RE = re.compile(rf"(?<!\w)({OPEN_WORDS})(?![\w-])", re.IGNORECASE)
 
+# The glyphs. This dropbox does not only stamp statuses in words -- 149 of the
+# status blocks in 192 files open with `✅`, and `roadmap.md` rule 2 *instructs*
+# the lanes to write `**Status:** ⏳ ask 1 landed …; ask 2 blocked on lane <x>`.
+# The script read none of them, so a status whose meaning was carried by the
+# glyph and whose words happened to fall outside the vocabulary was reported
+# unrecognised, and an unrecognised status is one the reader learns to skim.
+#
+# Three files were being reported open on that basis, each stamped with a tick
+# and a word the list does not have: `✅ **TAKEN by lane A.**`,
+# `✅ **ACKNOWLEDGED … the argument is accepted.**`, `✅ **REBUILT … twice**`.
+# All three were checked by hand and all three are genuinely finished.
+#
+# The glyph is a better signal than those words would be, which is why this is
+# the fix and widening DONE_WORDS is not. `taken`, `acknowledged` and `accepted`
+# all have a live reading -- "seen, not yet done" -- so putting them in the done
+# list would clear requests that are still work. The tick has no such reading:
+# nobody stamps `✅` on something they have not finished. Measured over the
+# whole dropbox the two agree 97.7% of the time (129 status blocks carry a tick,
+# 126 already read done from their words), and every one of the three
+# disagreements is a case where the tick is right.
+#
+# The open glyphs change no verdict today -- all three files that use one also
+# say `blocked` in words. They are here because the rule the roadmap gives the
+# lanes is "put the glyph in the status", and a lane that follows it without
+# also writing `blocked` would otherwise get a false clear on the `landed` in
+# the same sentence. Reading the marker the convention asks for costs nothing
+# and closes that hole before someone falls in it.
+#
+# Only U+2705 is listed for done, because only U+2705 is used: a survey of every
+# non-ASCII character inside a status window found ✅ 149 times and no other
+# tick -- no ✔, no ✔️, so no variation-selector case to get wrong.
+DONE_MARK_RE = re.compile("\u2705")  # ✅
+OPEN_MARK_RE = re.compile("[\u23f3\u26d4]")  # ⏳ ⛔
+
 # A done word with a negator just before it is not a completion. Before this
 # guard, `**Status:** not yet resolved` and `**Status:** never landed` were both
 # reported *done* -- a status line saying in plain English that the work is
@@ -228,7 +277,7 @@ def status_verdict(text: str) -> tuple[bool, str, bool] | None:
     stamp and an appended reply section has two, and the reader wants the answer
     that accounts for both. Open wins over done for the reason in NEGATOR_RE.
 
-    `decisive` says whether a vocabulary word was actually matched, as opposed
+    `decisive` says whether a vocabulary word or glyph was actually matched, as opposed
     to the fallback below where a `**Status:**` block exists but says nothing
     this function recognises. Both cases report open, so the flag makes no
     difference to *this* function's answer -- it exists so `classify()` can tell
@@ -239,14 +288,26 @@ def status_verdict(text: str) -> tuple[bool, str, bool] | None:
     `## Lane A's answer -- RESOLVED` -- was reported open for six days: the
     unreadable header short-circuited before the heading was ever looked at.
     """
-    blocks = [m.group(1)[:STATUS_WINDOW] for m in STATUS_BLOCK_RE.finditer(text)]
+    # `(marker, block)`: the marker as the file typeset it, so the reason line
+    # quotes something a reader can actually grep for.
+    blocks = [
+        (m.group(1), m.group(2)[:STATUS_WINDOW]) for m in STATUS_BLOCK_RE.finditer(text)
+    ]
     done_hit: str | None = None
-    for block in blocks:
-        if OPEN_WORD_RE.search(block):
-            return (True, f"**Status:**{block}".strip()[:80], True)
-        for m in DONE_WORD_RE.finditer(block):
-            if not NEGATOR_RE.search(block[: m.start()]):
-                done_hit = done_hit or f"**Status:**{block}".strip()[:80]
+    for marker, block in blocks:
+        if OPEN_WORD_RE.search(block) or OPEN_MARK_RE.search(block):
+            return (True, f"{marker}{block}".strip()[:80], True)
+        # Words and glyphs are one vocabulary, ranked the same way: open beats
+        # done, and a done hit is only a hit if no negator precedes it. Merging
+        # the positions rather than checking the two regexes in sequence keeps
+        # that true of `✅ not fixed yet` as well as of `not fixed yet`.
+        starts = sorted(
+            [m.start() for m in DONE_WORD_RE.finditer(block)]
+            + [m.start() for m in DONE_MARK_RE.finditer(block)]
+        )
+        for start in starts:
+            if not NEGATOR_RE.search(block[:start]):
+                done_hit = done_hit or f"{marker}{block}".strip()[:80]
     if done_hit is not None:
         return (False, done_hit, True)
     if blocks:
@@ -255,7 +316,7 @@ def status_verdict(text: str) -> tuple[bool, str, bool] | None:
         # but say so differently from "no status marker at all" -- the two call
         # for different fixes, and telling them apart is what stops a reader
         # concluding the tool is simply noisy.
-        return (True, f"unrecognised status: {blocks[0].strip()[:60]}", False)
+        return (True, f"unrecognised status: {blocks[0][1].strip()[:60]}", False)
     return None
 
 LANE_BY_CONFIG_DIR = {

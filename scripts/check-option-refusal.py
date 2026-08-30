@@ -87,23 +87,27 @@ prints a smaller number and looks like progress.
 Exit status: 0 clean, 1 unaccounted sites found.
 """
 
-import importlib.util
 import pathlib
 import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from rust_scopes import scope_stack_per_line, classify  # noqa: E402
+import srcload  # noqa: E402
 
 # `strip_noise` is the directory's one self-tested Rust scanner. The filename's
-# hyphens make it un-`import`able normally, hence the spec dance.
+# hyphens make it un-`import`able normally, hence the load by path.
 _SIBLING = pathlib.Path(__file__).resolve().parent / "check-recursive-locks.py"
-_spec = importlib.util.spec_from_file_location("check_recursive_locks", _SIBLING)
-if _spec is None or _spec.loader is None:  # pragma: no cover - packaging error
-    print(f"error: cannot load {_SIBLING}", file=sys.stderr)
-    raise SystemExit(2)
-_rl = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_rl)
+# Loaded from source rather than through `importlib`: a `SourceFileLoader`
+# consults `__pycache__`, whose staleness check is `(mtime, size)` at
+# one-second resolution, so two same-size writes to the sibling inside one
+# second leave the second one invisible and this script silently runs the
+# previous version of it. See `scripts/srcload.py`.
+try:
+    _rl = srcload.load(str(_SIBLING), "check_recursive_locks")
+except OSError as _exc:  # pragma: no cover - packaging error
+    print(f"error: cannot load {_SIBLING}: {_exc}", file=sys.stderr)
+    raise SystemExit(2) from _exc
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PATH = ROOT / "kernel" / "src" / "kshell.rs"

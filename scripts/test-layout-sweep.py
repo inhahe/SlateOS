@@ -30,10 +30,12 @@ finally produced pointed at the wrong thing.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import inspect
 import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import srcload  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "layout-sweep.py")
@@ -42,13 +44,15 @@ _FAILURES = []
 
 
 def load_module():
-    """Import layout-sweep.py by path (its name is not a valid identifier)."""
-    spec = importlib.util.spec_from_file_location("layout_sweep", SCRIPT)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {SCRIPT}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    """Import layout-sweep.py by path (its name is not a valid identifier).
+
+    Loaded through `srcload` rather than `importlib`: a `SourceFileLoader`
+    consults `__pycache__`, whose staleness check is `(mtime, size)` at
+    one-second resolution, so two same-size writes inside one second leave the
+    second one invisible and the suite validates bytecode that is not on disk.
+    That has actually happened here. See `scripts/srcload.py`.
+    """
+    return srcload.load(SCRIPT, "layout_sweep")
 
 
 def check(label, got, want):

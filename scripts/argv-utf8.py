@@ -67,7 +67,6 @@ deciding whether the scope is right, and nobody is reading in a push hook.
 
 from __future__ import annotations
 
-import importlib.util
 import re
 import sys
 from pathlib import Path
@@ -85,12 +84,18 @@ SURVEYED = ROOT / "userspace"
 # of Rust lexing that already earned its keep once -- `raced-globals.py` spent a
 # pass reporting a global whose name appeared only in a comment about it -- and
 # a second copy is a copy that drifts. The hyphen in the module's name is why
-# this needs importlib rather than `import`.
-_spec = importlib.util.spec_from_file_location(
-    "_raced_globals", str(Path(__file__).resolve().parent / "raced-globals.py")
+# this needs a loader rather than `import`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import srcload  # noqa: E402
+
+# Loaded from source rather than through `importlib`: a `SourceFileLoader`
+# consults `__pycache__`, whose staleness check is `(mtime, size)` at
+# one-second resolution, so two same-size writes to the sibling inside one
+# second leave the second one invisible and this script silently runs the
+# previous version of it. See `scripts/srcload.py`.
+_rg = srcload.load(
+    str(Path(__file__).resolve().parent / "raced-globals.py"), "_raced_globals"
 )
-_rg = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_rg)
 strip_comments_and_strings = _rg.strip_comments_and_strings
 
 

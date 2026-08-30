@@ -50,11 +50,13 @@ way this kind of tool goes quietly wrong.
 
 from __future__ import annotations
 
-import importlib.util
 import inspect
 import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import srcload  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "open-requests.py")
@@ -85,15 +87,33 @@ for _stream in (sys.stdout, sys.stderr):
 _FAILURES: list[str] = []
 
 
-def load_module():
-    """Import open-requests.py by path (the name is not an identifier)."""
-    spec = importlib.util.spec_from_file_location("openrequests", SCRIPT)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {SCRIPT}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["openrequests"] = module
-    spec.loader.exec_module(module)
-    return module
+def load_module(path=SCRIPT, name="openrequests"):
+    """Import open-requests.py by path (the name is not an identifier).
+
+    Compiled from the source *text* rather than loaded through
+    `spec.loader.exec_module`, and the difference is not stylistic.
+
+    A `SourceFileLoader` consults `__pycache__`, and decides the cache is
+    current by comparing the source's `(mtime, size)` against the pair recorded
+    in the `.pyc` header. The recorded mtime has **one-second** resolution. So
+    two writes to the script inside the same second, producing the same size,
+    leave the second one invisible: the loader finds a `.pyc` whose stamp still
+    matches and runs the *previous* version.
+
+    That is not theoretical. It was found by mutation-testing this very suite:
+    two mutants of `open-requests.py` were reported as surviving -- the suite
+    printed all-pass against code that was not on disk -- and both were caught
+    the moment they were run one at a time, slowly. The staleness window is
+    small, but a suite that can silently validate the wrong bytes is exactly the
+    failure this file's docstring is about, only pointed at itself. `compile()`
+    on freshly-read text has no cache to be stale.
+
+    The fix was written here first, then moved to `scripts/srcload.py` when it
+    turned out all fourteen suites in this directory had the same defect. This
+    wrapper stays because the suite loads a second module in one of its tests
+    and reads better naming what it does.
+    """
+    return srcload.load(path, name)
 
 
 def check(label, got, want):
@@ -334,6 +354,252 @@ def test_the_roadmap_vocabulary_table_matches_the_code(mod):
     if check("the table states a window size", stated is not None, True):
         check("the stated window is the coded one",
               int(stated.group(1)), mod.STATUS_WINDOW)
+
+
+def test_this_suites_loader_still_reads_the_file(mod):  # noqa: ARG001
+    """`load_module` must test the bytes on disk, not a cached compile of them.
+
+    Narrower than it looks, and deliberately so. That the *mechanism* defeats
+    the bytecode cache is `test-srcload.py`'s property, tested there against
+    both loaders. What this file needs to keep pinned is that its own
+    `load_module` is still wired to that mechanism -- a one-line revert to
+    `spec.loader.exec_module` would leave every other test here green while the
+    suite validated code that is not on disk, which is the failure the whole
+    file's docstring is about, pointed at itself.
+
+    The cache is primed and then invalidated dishonestly: the rewrite is the
+    same size and is stamped with the *same* mtime via `os.utime`, so
+    `(mtime, size)` still matches and a `SourceFileLoader` would hand back the
+    old value. Pinning the stamp rather than racing the clock is what makes
+    this reproduce every run instead of almost every run.
+    """
+    import importlib.util
+    import tempfile
+
+    stamp = 1_600_000_000.0
+
+    def write(path, text):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.utime(path, (stamp, stamp))
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "stalecheck.py")
+        write(path, "VALUE = 111\n")
+
+        # Primed the way the old loader did, which also writes the `.pyc` that
+        # a cache-consulting loader would go on to reuse.
+        spec = importlib.util.spec_from_file_location("stalecheck", path)
+        primed = importlib.util.module_from_spec(spec)
+        sys.modules["stalecheck"] = primed
+        spec.loader.exec_module(primed)
+        check("the primed load sees the first version", primed.VALUE, 111)
+        was = os.path.getsize(path)
+
+        write(path, "VALUE = 222\n")
+        check("the rewrite is the same size", os.path.getsize(path), was)
+
+        check("load_module sees the rewrite",
+              load_module(path, name="stalecheck_reloaded").VALUE, 222)
+        sys.modules.pop("stalecheck", None)
+        sys.modules.pop("stalecheck_reloaded", None)
+
+
+def test_the_colon_may_sit_outside_the_bold(mod):
+    """`**Status**: FIXED` is the same line as `**Status:** FIXED` to a reader.
+
+    Four files in the dropbox typeset it the second way, including both copies
+    of lane B's `known-issues.md was binary to git` notice, which says `FIXED on
+    main as of 3ccbfcb99` in plain English. All four reported *no status marker*
+    -- the phrasing reserved for a file that never said anything at all -- so
+    the reader was told to go and stamp a file that was already stamped.
+
+    Asserted as an equivalence rather than as four literal strings: the claim is
+    that the two typesettings classify identically, and a test that says exactly
+    that cannot be satisfied by a fix that only handles the example.
+    """
+    for body in ("FIXED on `main` as of `3ccbfcb99`.",
+                 "OPEN \u2014 waiting on lane C.",
+                 f"{CHECK} **TAKEN by lane A.**",
+                 "needs a decision from you first"):
+        inside = verdict(mod, f"**Status:** {body}")
+        outside = verdict(mod, f"**Status**: {body}")
+        check(f"colon inside == outside for {body[:34]!r}", outside, inside)
+        check(f"and it is not 'none' for {body[:34]!r}", outside != "none", True)
+
+
+def test_a_bare_unbolded_status_word_is_not_a_marker(mod):
+    """`Status: done` in running prose must not clear a request.
+
+    The counterweight to the test above. Loosening the marker is the direction
+    that costs, because every newly-matched line is a line that might say
+    "done" about something else -- and this dropbox is full of prose *about*
+    statuses, being a dropbox whose rule 2 is on the subject. The two bold forms
+    are unambiguous punctuation a lane chose; an unemphasised `Status:` is a
+    word, and a request that quotes one in a sentence would clear itself.
+    """
+    check("an unbolded marker is not a marker",
+          verdict(mod, "The old checker looked for Status: done and missed it."),
+          "none")
+    check("nor is a single-asterisk one",
+          verdict(mod, "*Status:* done"), "none")
+
+
+def test_the_reason_quotes_the_marker_the_file_actually_wrote(mod):
+    """A reason line must be greppable in the file it describes.
+
+    Reporting `**Status:** FIXED …` for a file that says `**Status**: FIXED …`
+    sends the reader searching for a string that is not there -- a small lie,
+    but this report exists to be acted on, and the act is opening the file.
+    """
+    got = mod.status_verdict("**Status**: FIXED on `main` as of `3ccbfcb99`.")
+    check("the verdict is done", got[0], False)
+    check("the reason opens with the marker as written",
+          got[1].startswith("**Status**:"), True)
+    got2 = mod.status_verdict("**Status:** FIXED on `main` as of `3ccbfcb99`.")
+    check("and the usual form still quotes itself",
+          got2[1].startswith("**Status:**"), True)
+
+    # Both branches, because they build the string separately. Mutation-testing
+    # found this gap: hardcoding the marker in the *open* return survived a
+    # suite that only checked the done one.
+    got3 = mod.status_verdict("**Status**: OPEN \u2014 waiting on lane C.")
+    check("the open verdict is open", got3[0], True)
+    check("and the open reason quotes the marker as written",
+          got3[1].startswith("**Status**:"), True)
+
+    # And the unrecognised branch, which quotes the block without the marker --
+    # asserted so that a change there is a deliberate one.
+    got4 = mod.status_verdict("**Status**: needs a decision from you first")
+    check("the unrecognised reason names the wording",
+          got4[1], "unrecognised status: needs a decision from you first")
+
+
+def test_the_status_glyphs_are_documented_and_classify(mod):
+    """The glyph rule must be in rule 2, and must be the glyphs the code reads.
+
+    Same contract as the word table, for the same reason: a marker the tool
+    honours in silence is a marker only its author can use. It is checked
+    separately because the glyphs are prose in rule 2 rather than a table row --
+    a tick is not a "word" and putting it in the table would make the word test
+    assert that `✅` normalises like `landed`.
+
+    The two directions are asserted against the *coded* regexes, not against a
+    second copy of the list, so adding a glyph to the code without documenting
+    it fails here rather than passing quietly.
+    """
+    with open(ROADMAP, encoding="utf-8") as fh:
+        roadmap = fh.read()
+    anchor = roadmap.find(ROADMAP_ANCHOR)
+    if not check("roadmap rule 2 is still findable", anchor >= 0, True):
+        return
+    region = roadmap[anchor:anchor + 1500]
+
+    if not check("rule 2 documents the glyphs at all",
+                 "glyphs count as words" in region, True):
+        return
+
+    # Every glyph quoted in the paragraph, and every glyph the code knows.
+    documented = set(re.findall(r"[\u2705\u23f3\u26d4]", region))
+    coded = {"\u2705", "\u23f3", "\u26d4"}
+    check("no coded glyph is missing from rule 2",
+          sorted(coded - documented), [])
+    check("no glyph in rule 2 is unknown to the code",
+          sorted(documented - coded), [])
+
+    # And they classify the way the paragraph says they do. Asserting through
+    # the classifier is the half that matters: the paragraph could name the
+    # right glyph and still describe the wrong verdict.
+    for glyph, want in (("\u2705", "done"), ("\u23f3", "open"),
+                        ("\u26d4", "open")):
+        check(f"a bare {glyph!r} status classifies as {want}",
+              verdict(mod, f"**Status:** {glyph} TAKEN by lane A."), want)
+        check(f"{glyph!r} is matched by the coded regex",
+              bool((mod.DONE_MARK_RE if want == "done"
+                    else mod.OPEN_MARK_RE).search(glyph)), True)
+
+
+def test_a_tick_is_read_when_the_words_around_it_are_not(mod):
+    """The three real statuses this rule was added for.
+
+    Each is a genuine completion stamped with a verb the table does not have --
+    `TAKEN`, `ACKNOWLEDGED`, `REBUILT`. All three were verified by hand against
+    the tree before the rule was added; all three were reported open for weeks
+    on the strength of the missing word, with the tick sitting right there.
+
+    They are quoted rather than paraphrased because the point is not that a tick
+    works in the abstract -- `test_the_status_glyphs_...` covers that -- but that
+    it works on the sentences the lanes actually wrote, punctuation and bold
+    markers included.
+    """
+    for text in (
+        f"**Status:** {CHECK} **TAKEN by lane A.** `ere = {{ path = \"..\" }}`"
+        " is in the workspace.",
+        f"**Status:** {CHECK} **ACKNOWLEDGED 2026-08-17 by lane B \u2014 the"
+        " argument is accepted.**",
+        f"**Status:** {CHECK} **REBUILT 2026-08-21 by lane B**, twice \u2014"
+        " `b405fc5c6` cleared the drift you reported.",
+    ):
+        check(f"tick carries: {text[12:46]!r}", verdict(mod, text), "done")
+
+
+def test_the_widened_vocabulary_did_not_widen_to_the_words(mod):
+    """`taken`/`acknowledged`/`accepted` must NOT be done words on their own.
+
+    This is the test that keeps the fix honest. The cheap version of it was to
+    add those three verbs to `DONE_WORDS`, and it would have passed every test
+    above -- while clearing requests that are still work, because all three
+    have a live reading. `**Status:** acknowledged, fix scheduled for next
+    week` is not done, and neither is `TAKEN -- I own it now, starting
+    Monday`. The tick has no such reading, which is the whole reason the glyph
+    is the marker and the verb is not.
+
+    So: a tick with those words is done (above), and the same words without a
+    tick are open (here). If someone later "simplifies" this by moving the
+    verbs into the word list, this fails.
+    """
+    for text in (
+        "**Status:** TAKEN by lane A, starting once the sysroot lands.",
+        "**Status:** ACKNOWLEDGED \u2014 I agree with the argument.",
+        "**Status:** accepted, scheduled behind the ext4 port.",
+    ):
+        check(f"no tick, no clear: {text[12:46]!r}", verdict(mod, text), "open")
+
+
+def test_an_open_glyph_outranks_a_tick_in_the_same_status(mod):
+    """`✅ ask 1 landed … ⏳ ask 2 blocked` is open, exactly like the words.
+
+    Rule 2 tells the lanes to write a half-done status this way, so the ranking
+    that makes it safe has to hold for glyphs and not only for the vocabulary.
+    Both orders are checked: the merge in `status_verdict` sorts done positions
+    but returns on the first open hit anywhere in the block, so a tick that
+    comes *first* must still lose.
+    """
+    check("tick then hourglass is open",
+          verdict(mod, f"**Status:** {CHECK} ask 1 landed; \u23f3 ask 2 sits"
+                       " with lane C."),
+          "open")
+    check("hourglass then tick is open",
+          verdict(mod, f"**Status:** \u23f3 ask 2 sits with lane C; {CHECK}"
+                       " ask 1 landed."),
+          "open")
+    check("a lone tick with no open glyph is still done",
+          verdict(mod, f"**Status:** {CHECK} ask 1 landed."), "done")
+
+
+def test_a_negated_tick_is_not_a_clear(mod):
+    """`not ✅` reads as open, like every other done marker.
+
+    The glyph goes through the same negator guard as the words, which is why
+    `status_verdict` merges the two sets of match positions instead of running
+    the tick regex as a separate short-circuit. A separate check would have
+    skipped the guard and made the tick the one done marker that cannot be
+    negated -- in the direction that loses work.
+    """
+    check("a negated tick does not clear",
+          verdict(mod, f"**Status:** not {CHECK} yet \u2014 waiting on the"
+                       " sysroot."),
+          "open")
 
 
 def test_no_status_line_at_all_is_open(mod):

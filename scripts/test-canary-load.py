@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
-import importlib.util
 import io
 import json
 import os
@@ -40,6 +39,9 @@ import tempfile
 import threading
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import srcload  # noqa: E402
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CANARY_LOAD = os.path.join(REPO_ROOT, "scripts", "canary-load.py")
 
@@ -47,10 +49,15 @@ FAILURES = []
 
 
 def load_module(path, name):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    """Import a `scripts/*.py` by path (their names are not identifiers).
+
+    Loaded through `srcload` rather than `importlib`: a `SourceFileLoader`
+    consults `__pycache__`, whose staleness check is `(mtime, size)` at
+    one-second resolution, so two same-size writes inside one second leave the
+    second one invisible and the suite validates bytecode that is not on disk.
+    That has actually happened here. See `scripts/srcload.py`.
+    """
+    return srcload.load(path, name)
 
 
 cl = load_module(CANARY_LOAD, "canary_load")

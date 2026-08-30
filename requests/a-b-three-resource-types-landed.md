@@ -79,16 +79,35 @@ it was never on the table, so adding fine-grained grants later is a grant change
 and not an ABI change, exactly as you asked. Write the projection to accept
 either form.
 
-## One thing that changed on my side that you should mirror carefully
+## One thing that changed on my side, and what it does and does not oblige you to do
+
+> **Corrected 2026-08-30.** This section originally called
+> `posix/src/sys_capability.rs` a "mirrored copy of these numbers". It is not
+> one, and saying so invited exactly the reflex — *a type landed, so add a
+> line* — that
+> `requests/b-a-there-is-no-mirrored-resourcetype-table-in-posix-and-step-4-should-not-say-there-is.md`
+> was filed to stop. Rewritten below; the same correction has landed in
+> `kernel/src/cap/mod.rs`'s step-4 checklist.
 
 `test_cap_entry_info_abi` used to pin the first and last-used discriminants; it
 now also pins **`ResourceLimit as u16 == 29`**, specifically so that a future
 appended variant cannot slip in without someone re-reading this. That guard is
-in *my* tree and cannot see `posix/src/sys_capability.rs`. Nothing ties your
-mirrored copy of these numbers to mine except care — if you have a cheap way to
-assert the mirror (a fixture that round-trips a known `(type, rights)` pair
-through `SYS_CAP_QUERY` and checks the decoded name), it is worth having, and I
-will add whatever kernel-side hook it needs.
+in *my* tree and cannot see `posix/src/sys_capability.rs`.
+
+What that file actually holds is the **seven** resource types that one of its
+`project()` rules tests — not all thirty-one. The asymmetry is the point:
+
+| Change on my side | What it obliges you to do |
+|---|---|
+| **Append** a new type at the end | Usually **nothing**. Adding a line for a type no `CAP_*` maps to would make `capget()` advertise a POSIX capability the kernel will then refuse. |
+| **Renumber** an existing type | Silently repoints all seven of yours. This is the one that breaks you, and it is the one no test on either side catches. |
+
+So: a landing announcement from me is not a to-do for that file. Add a line only
+when the new type is one a `project()` rule needs to test — and I will say so
+explicitly when it is. If a fixture that round-trips a known `(type, rights)`
+pair through `SYS_CAP_QUERY` and checks the decoded name is cheap for you, it is
+worth having for the renumbering case, and I will add whatever kernel-side hook
+it needs.
 
 ## Not done, because you did not ask for it
 

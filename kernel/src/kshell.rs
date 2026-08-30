@@ -1480,6 +1480,16 @@ fn remove_quotes(s: &str) -> String {
 /// that also rules out an ordinary bracket expression: `s/[a-z] [0-9]/x/`
 /// cannot be said without a space.
 ///
+/// `touch` is here because its `-d` operand is a datetime whose date and time
+/// halves are separated by a space — `touch -d '2026-08-30 12:30:00' f`, which
+/// is the exact string its own usage line prints. Dequoted, that is four words,
+/// so `-d` took `2026-08-30`, `12:30:00` became the path operand, and `f`
+/// was refused as an extra one. Worse without the trailing path: `touch -d
+/// '2026-08-30 12:30:00'` created a file *named* `12:30:00`. The time half of
+/// [`parse_datetime_to_ns`] was therefore unreachable through this command —
+/// which is why the guessed hour/minute/second it used to substitute went
+/// forty-one batches without being noticed.
+///
 /// The list is the migration path, not a special case: a command moves onto
 /// it when it learns to parse quotes, and when everything is on it this
 /// function and [`remove_quotes`] both go away in favour of a real argv.
@@ -1487,7 +1497,7 @@ fn remove_quotes(s: &str) -> String {
 fn command_parses_own_quotes(cmd: &str) -> bool {
     matches!(
         cmd,
-        "trap" | "awk" | "fold" | "base64" | "cut" | "tr" | "sed" | "column"
+        "trap" | "awk" | "fold" | "base64" | "cut" | "tr" | "sed" | "column" | "touch"
     )
 }
 
@@ -21188,6 +21198,65 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_lacks("and nothing is reported read", &out, b"bytes from");
     }
 
+    serial_println!(
+        "  kshell::self_test 107: `touch -d' accepts the space-separated datetime \
+         its own usage line prints, stamps the file with the exact instant asked \
+         for, and refuses an unreadable time instead of taking it as the path"
+    );
+    {
+        // Rung 107 -- the defect batch 41 surfaced while fixing
+        // `parse_datetime_to_ns`. The time half of that parser was *unreachable*
+        // through `touch`: quote removal happens at the dispatch boundary, so
+        // `touch -d '2026-08-30 12:30:00' f` arrived as four whitespace-separated
+        // words. `-d` took `2026-08-30`, `12:30:00` became the path operand, and
+        // `f` was refused as an extra one -- and with no trailing path, `touch`
+        // created a file *named* `12:30:00`. `touch` is now on
+        // `command_parses_own_quotes` and splits with `split_words`.
+        //
+        // The stamp is asserted as an exact nanosecond count rather than by
+        // reading a formatted date back, because every intermediate step this
+        // rung is about -- the quoting, the hour/minute/second fields, and the
+        // civil-date arithmetic -- can be wrong in a way that still prints a
+        // plausible date. 2026-08-30 12:30:00 UTC is 20695 days plus 45000
+        // seconds after the epoch.
+        const ZZ_TOUCH_NS: u64 = 1_788_093_000_000_000_000;
+
+        let out = capture_command("touch -d \"2026-08-30 12:30:00\" /tmp/zz_touchdt.txt");
+        assert_eq!(last_exit(), 0, "a quoted datetime is one operand");
+        assert_output_lacks(
+            "the time half is not mistaken for a second path",
+            &out,
+            b"extra operand",
+        );
+        match crate::fs::Vfs::metadata(crate::fs::path::Path::new("/tmp/zz_touchdt.txt")) {
+            Ok(meta) => assert_eq!(
+                meta.modified_ns, ZZ_TOUCH_NS,
+                "the file carries the instant asked for, to the second"
+            ),
+            Err(e) => panic!("touch -d did not create /tmp/zz_touchdt.txt: {:?}", e),
+        }
+
+        // The same line with an unreadable minute. This is the assertion that
+        // proves the time fields are *reached*: before the quoting fix the
+        // mistyped word was never parsed as a time at all -- it became the path,
+        // and `touch` cheerfully created a file called `12:3o:00`.
+        let out = capture_command("touch -d \"2026-08-30 12:3o:00\" /tmp/zz_touchdt2.txt");
+        assert_output_contains(
+            "an unreadable minute is refused as a date, not accepted as a path",
+            &out,
+            b"invalid date",
+        );
+        assert_eq!(last_exit(), 1, "`touch -d' with an unreadable time errors");
+        assert!(
+            crate::fs::Vfs::metadata(crate::fs::path::Path::new("/tmp/zz_touchdt2.txt")).is_err(),
+            "and no file is stamped with a guessed midday"
+        );
+        assert!(
+            crate::fs::Vfs::metadata(crate::fs::path::Path::new("12:3o:00")).is_err(),
+            "and nothing is created under the name of the operand it could not read"
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -23850,13 +23919,24 @@ fn cmd_touch(args: &str) {
         return;
     }
 
+    // Quote-aware, and it has to be: `-d`'s operand contains a space in the
+    // very format the usage line above advertises, so
+    // `touch -d '2026-08-30 12:30:00' f` is three arguments and not four.
+    // Split on whitespace it was four — `-d` took `2026-08-30`, `12:30:00`
+    // became the path, and `f` was refused as an extra operand; without a
+    // trailing path it created a file *named* `12:30:00`. `touch` is on
+    // `command_parses_own_quotes`, so the quoting survives dispatch, and
+    // `split_words` both respects and removes it.
+    let words = split_words(args);
+
     let mut date_str: Option<&str> = None;
     let mut ref_file: Option<&str> = None;
     let mut file_path = "";
 
     let mut flags_done = false;
-    let mut words = args.split_whitespace();
-    while let Some(w) = words.next() {
+    let mut i = 0usize;
+    while let Some(w) = words.get(i).map(alloc::string::String::as_str) {
+        i += 1;
         if !flags_done && w == "--" {
             flags_done = true;
             continue;
@@ -23874,20 +23954,21 @@ fn cmd_touch(args: &str) {
             continue;
         }
         if w == "-d" {
-            // Collect the date string — it might have spaces (e.g., "2026-01-15 12:30:00").
-            date_str = words.next();
-            if date_str.is_none() {
+            let Some(v) = words.get(i).map(alloc::string::String::as_str) else {
                 shell_println!("touch: -d requires a date");
                 set_exit(1);
                 return;
-            }
+            };
+            i += 1;
+            date_str = Some(v);
         } else if w == "-r" {
-            ref_file = words.next();
-            if ref_file.is_none() {
+            let Some(v) = words.get(i).map(alloc::string::String::as_str) else {
                 shell_println!("touch: -r requires a reference file");
                 set_exit(1);
                 return;
-            }
+            };
+            i += 1;
+            ref_file = Some(v);
         } else {
             shell_println!("touch: unrecognized option `{}'", w);
             set_exit(1);

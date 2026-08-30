@@ -84433,6 +84433,55 @@ ledger cannot silently rot into a rubber stamp.
 
 ---
 
+## `A-TOUCH--D-CANNOT-ACCEPT-THE-FORMAT-ITS-OWN-USAGE-LINE-PRINTS` (lane A, 2026-08-30) — ✅ **FIXED** 2026-08-30
+
+**In short:** `touch -d` documents `YYYY-MM-DD HH:MM:SS` and could not accept
+it. The space in the middle split the datetime into two arguments before
+`touch` ever saw it, so the time was taken as the *filename*:
+`touch -d '2026-08-30 12:30:00' notes.txt` refused `notes.txt` as an extra
+operand, and `touch -d '2026-08-30 12:30:00'` on its own created a file
+called `12:30:00`.
+
+**Where.** `kernel/src/kshell.rs` — `cmd_touch`, and `command_parses_own_quotes`.
+
+**Why the quoting did not survive.** Every kshell command receives a flat
+`&str`, not an argv, so "these two words were one argument" is a fact the
+dispatch boundary cannot carry. `dispatch` calls `remove_quotes` on the
+argument string — which deletes the quote characters and leaves the space —
+and `cmd_touch` then re-split on whitespace. Four words came out of three
+arguments. Commands that need the distinction opt onto
+`command_parses_own_quotes` and use `split_words`, which respects quotes and
+removes them; `trap`, `awk`, `fold`, `base64`, `cut`, `tr`, `sed` and `column`
+were already there for the same reason. `touch` is now the ninth.
+
+**What made it invisible for so long.** The failure mode is not an error
+message about the date — it is an error message about the *path*, or a
+silently-created file with a strange name. Nobody reading
+`touch: extra operand ‘notes.txt’` looks at the `-d` operand.
+
+**It was hiding a second defect underneath it.** Because the time half was
+unreachable, the three `.unwrap_or(0)` reads of hour/minute/second in
+`parse_datetime_to_ns` had no way to fire, and so survived forty-one batches
+of the §600 guessed-value burn-down above. They were fixed in batch 41 —
+present fields must now parse, absent ones are still zero, and a fourth
+colon-separated field is refused rather than dropped. The two fixes are
+worth stating as one lesson: **a guessed value in dead code is not harmless,
+it is merely dormant**, and the batch that makes the code reachable is the
+batch that ships the bug.
+
+**Pinned by self-test rung 107**, which asserts the resulting `modified_ns`
+as an exact nanosecond count (`2026-08-30 12:30:00` UTC = 20695 days +
+45000 s after the epoch) rather than reading a formatted date back. Every
+step the rung covers — the quoting, the time fields, and the civil-date
+arithmetic — can be wrong in a way that still prints a plausible date. It
+also asserts that a mistyped minute is refused *as a date*, which is what
+proves the time fields are now reached at all, and that nothing is created
+under the name `12:3o:00`.
+
+**Not a regression.** True since `cmd_touch` was written.
+
+---
+
 ## `A-KSHELL-TWO-CHECKERS-READ-COMMENTS-AS-CODE` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25
 
 **In short:** two of the build's own gate scripts searched the source with

@@ -2230,3 +2230,79 @@ Nothing breaks and nothing gets worse on its own — but a growing number of
 finished, tested applications stay unable to do the one thing they exist for.
 credmanager is the third app now waiting on this. It is not blocking my current
 work; I am carrying on down the roadmap.
+
+---
+
+## Two commits that appear to delete the whole OS are permanently in `main`'s history. Leave them, or rewrite? (lane A, 2026-08-29)
+
+**In short:** on 2026-08-29 a safety check that runs just before uploading code
+accidentally committed to the real project instead of to the scratch copy it
+meant to use, and those commits got uploaded. As far as those two commits are
+concerned, every file in the operating system was deleted. **The current files
+are completely fine** — I repaired that within minutes, and nothing is missing.
+What
+remains is only the *record*: anyone scrolling back through the project's
+history will see two commits that look like a catastrophe. Removing them from
+the record is possible but requires an operation I am forbidden to perform
+without you saying so, because it can destroy other people's work.
+
+**Question.** Should the two commits (`7f6a6b446` "base" and `71f164f7e`
+"delete one, sweep another") be removed from the published history?
+
+Two terms, glossed:
+
+- **Published history** — the copy on GitHub that all three lanes (the three
+  parallel Claude sessions) pull from. Everyone's work is built on top of it.
+- **Force-push** (the operation in question) — replacing that shared history
+  with a different one. It is the only way to remove a commit that is already
+  published. It is dangerous because any lane whose work sits on top of the
+  removed commits has its history invalidated, and anything not yet uploaded
+  can be lost outright. Standing project policy forbids it without your
+  explicit say-so, which is why this is a question and not something I did.
+
+**What the current state actually is.** The repair used a merge whose *content*
+is the correct tree, so the files are right and both branches moved forward
+normally — no rewriting was needed. The two bad commits survive as *ancestry*
+(steps in the chain) but not as *content* (no file reflects them). `git log`
+shows them; `git status` and every checkout are clean.
+
+### Options
+
+**A. Leave them, documented.** *What changes:* nothing observable; `git log`
+keeps showing two alarming-looking commits, and `known-issues.md` explains why.
+*Pros:* zero risk; no force-push; the incident stays legible, which has value —
+the commits are the evidence for the post-mortem that produced the fix.
+*Cons:* anyone reading history cold gets a scare and has to go find the
+explanation; a future automated tool that audits history for mass deletions
+will flag them forever.
+
+**B. Rewrite history to remove them.** *What changes:* `git log` no longer
+shows the two commits at all. *Pros:* a clean record. *Cons:* requires a
+force-push to `main` and `lane-a`; the other two lanes must re-sync, and any
+uncommitted or unpushed work of theirs is at risk; ~40 commits now sit on top
+of the bad ones, all of which get new identities, invalidating every commit
+hash cited in `known-issues.md`, `design-decisions.md` and the request files —
+including the citations *in the entry that explains this incident*.
+
+### If never answered
+
+Option A is the current state and it is safe. Nothing is blocked and nothing
+degrades functionally — but it does get *more* expensive to change with time,
+since every commit added on top is one more that a rewrite would have to
+rewrite. If you are ever going to pick B, sooner costs less.
+
+### Claude's recommendation
+
+**A, clearly.** The content is correct, the incident is documented at length in
+`known-issues.md`
+(`A-A-PUSH-GATE-DELETED-THE-REPOSITORY-IT-WAS-GATING`), and trading a cosmetic
+blemish in the log for a force-push across three active lanes is a bad
+exchange — the cure has a real chance of destroying work, which is precisely
+the failure the original bug caused. I raise it only because it is your
+history, force-push authority is yours alone, and the cost of choosing B rises
+with every commit.
+
+**Where it bites.** Git history only: `7f6a6b446`, `71f164f7e`, repaired by
+`f0534726e`. No file in the tree is affected.
+
+**Status:** OPEN

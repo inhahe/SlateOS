@@ -52936,3 +52936,396 @@ ed 1.20.1) caught it in one run. Three other rules in the same batch were wrong
 the same way — see the `FIXED` note on that `known-issues.md` entry. Reading a
 reference implementation tells you what it does in the case you thought to look
 at; running it tells you what it does.
+
+---
+
+## 717. `sh` emulates a subshell by snapshot-and-restore in one process, and buys back the concurrency it loses with temporary files
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** A shell is built around `fork` — the system call that clones the
+running program into two. `( … )`, every pipeline stage, `$(…)` and a `&` all
+mean "run this in a copy of me". This crate has no `fork`: it is one binary
+that also has to build for a Windows host, where the call does not exist, and
+`std::process` offers only "start a *different* program", never "clone this
+one". So the rewrite had to decide what a subshell *is* here. It runs the body
+in the same process and puts the state back afterwards.
+
+### Decision 1: a subshell is a saved-and-restored state, not a process
+
+`Shell::snapshot`/`Shell::restore` copy the variables, functions, positional
+parameters, `$?`, the option flags, the working directory and the `exec`
+descriptor table; `Shell::subshell` runs the body between them, and converts an
+`exit`/`break`/`return` that escapes into an end of *the subshell* rather than
+of the script.
+
+*What changes:* `( X=1 ); echo $X` prints nothing, and `( cd /tmp ); pwd` prints
+where you were — the two things a subshell is actually used for — but a
+subshell cannot outlive its parent or run beside it.
+
+- **For:** it covers everything POSIX says a subshell must not leak, it is
+  ~30 lines, and it works identically on the host build and the target. The
+  alternative that does not need `fork` — re-executing `/proc/self/exe` with
+  the script text — costs a process spawn per `( … )` and per `$(…)`, needs a
+  serialisation of the whole shell state to pass through it, and cannot work
+  before the target has a working `exec` at all.
+- **Against:** it is a lie in the two cases where a subshell is a *process*.
+  An `exec cmd` inside `( … )` really does replace this process, so the rest of
+  the script never runs. And nothing inside the parentheses can run
+  concurrently with anything outside them.
+- **Why the "for" wins:** the leak-prevention half is what scripts depend on and
+  is exact; the process half is what job control needs, and job control is
+  already out of scope by §72 (it lives in `osh`). Both gaps are written into
+  the module header rather than left to be discovered. `dash` agrees with us on
+  every one of the ~225 harness cases regardless, which is the measurement that
+  says the approximation is where scripts do not look.
+
+### Decision 2: no `fork` means `&` backgrounds only a single external command
+
+`Shell::run_background` spawns when the thing after `&` is one simple external
+command, and otherwise runs it in the foreground and reports 0.
+
+*What changes:* `{ echo grouped; } & wait` prints `grouped` before `wait`
+rather than beside it. dash's output is byte-identical; only the timing differs,
+and a script cannot observe the timing without job control.
+
+- **For:** `cmd &` — a daemon, a long-running build — is what `&` is for in a
+  script, and that case is genuinely concurrent because `Command::spawn` gives a
+  real process. The rest would need `fork`.
+- **Against:** `{ a; b; } & c` silently serialises. A script that backgrounded a
+  loop to overlap it with something else gets the work done but not the overlap.
+- **Why the "for" wins:** there is no third option without `fork`. Reporting an
+  error instead would break scripts that work today and produce correct output;
+  running it in the foreground produces the right answer more slowly, which is
+  the failure mode that costs least.
+
+### Decision 3: two in-process stages of a pipeline are joined by a file, not a pipe
+
+`connect` uses a real `pipe()` whenever a real process is on either end, and a
+temporary file when both stages are builtins or functions. `$(…)` and here-docs
+likewise capture through a temporary file.
+
+*What changes:* nothing observable — except that `yes | head -2` returns, where
+it used to hang forever.
+
+- **For:** a pipe has a fixed buffer (64 KiB on Linux), and two in-process
+  stages *cannot* run at the same time here: the writer must finish before the
+  reader starts. A pipe between them wedges the instant the writer exceeds the
+  buffer, and that is a hang, not an error. A file has no such limit.
+- **Against:** it touches the disk for something that should be memory, and the
+  writer's whole output is materialised before the reader sees a byte, so a
+  builtin producing gigabytes needs the space.
+- **Why the "for" wins:** the choice is between "always correct, sometimes
+  slower" and "fast until it deadlocks". `TD-B-sh-IS-NOT-A-SHELL` records what
+  the second one looked like in the previous implementation. Note that the
+  common cases keep the real pipe — anything with an external command on one
+  end, which is nearly every pipeline anyone writes — so this is the fallback,
+  not the mechanism.
+
+---
+
+## 718. `sh`'s descriptor table is a map of overrides the shell never installs, and an `exec` redirection is scoped to the construct that ran it
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** When a shell runs `echo hi > f`, something has to make `echo`'s
+output land in `f`. A shell with `fork` does it by really pointing descriptor 1
+at the file in the child, which is safe because the child is thrown away
+afterwards. Our builtins run *inside* the shell process, so doing that would
+leave the shell itself writing to `f` forever. Instead redirections are carried
+as a *table* — "for this command, 1 means this file" — that the real descriptors
+never see. Two consequences had to be decided: what a table means for a child
+process, and what `exec 2>log` (a redirection with no command, which is supposed
+to stick) does to it.
+
+### Decision 1: a table of overrides, not `dup2` on the shell's own descriptors
+
+`Io` is a `BTreeMap<i32, Fd>` consulted by every builtin and translated into
+`Stdio` values for a child. The shell's own descriptors are never redirected.
+
+*What changes:* nothing a script can see; it is what makes `echo hi > f; echo
+hi` print once and write once, rather than writing twice.
+
+- **For:** correctness without save-and-restore of real descriptors — and the
+  host build *cannot* save and restore, its stdout not being a descriptor at
+  all. It also makes an `Io` cheap to clone, which the pipeline and subshell
+  paths do constantly.
+- **Against:** every builtin has to be written to consult the table rather than
+  to just print, and two POSIX behaviours become approximations: `n>&-` hands a
+  child the null device rather than a closed descriptor, and descriptors above
+  2 reach an external child only on unix, where `extra_fds` can install them
+  between fork and exec.
+- **Why the "for" wins:** the approximations are each observable only by a
+  program that tests for `EBADF` on a descriptor the shell deliberately shut,
+  which no case in ~225 could construct; the alternative is wrong for every
+  builtin on every run. Both gaps are in the module header.
+
+### Decision 2: `exec`'s table is scoped to the construct that ran it, not global
+
+`Shell::exec_io` is cleared on entry to any construct that has redirections of
+its own and restored on the way out (`Shell::in_redir_scope`), so `Some` means
+"an `exec` happened *in this scope*" and `Shell::io_now` needs no generation
+counter.
+
+*What changes:* `{ exec 2>inner; nosuchcommand; } 2>outer` writes the message to
+`inner`, matching dash, where a global table put it in `outer`.
+
+- **For:** it is what a real shell's save/`dup2`/restore *does*, expressed
+  directly. The rule it replaces was an attempt to state a static precedence
+  between `exec`'s redirections and a construct's own — and no static precedence
+  is right, because an `exec` *before* a group must lose to the group while one
+  *inside* it must win. That is ordering, and ordering is scope.
+- **Against:** it is one more thing every execution path has to remember to do,
+  and forgetting it is silent: the wrong file gets the output.
+- **Why the "for" wins:** the failed alternative is in the history. An overlay
+  merge (`merged_io`) was tried first and got the boundary case backwards, and
+  a generation counter was the next idea — more state to keep in step, for a
+  question the scope already answers. The harness has six cases pinning the
+  boundaries, including a subshell one, so the silence is covered by a test.
+
+### Decision 3: a bad descriptor is fatal when it is *unparseable*, not when it is merely closed
+
+`cat <&9` on a closed descriptor fails the command with status 2 and the shell
+continues; `cat <&notanumber` kills a non-interactive shell. `fd_is_open` probes
+with `dup` + `close`.
+
+*What changes:* `cat <&9; echo $?` prints `2` and keeps going; `cat <&x; echo
+unreached` prints nothing after the error.
+
+- **For:** it is dash's line, measured rather than guessed, and it is a sensible
+  one: a non-numeric target is a *syntax* error the parser could in principle
+  have caught, while a closed descriptor is a runtime condition a script may
+  legitimately provoke and check.
+- **Against:** the split looks arbitrary read from POSIX alone, which calls both
+  a redirection error.
+- **Why the "for" wins:** matching the reference shell is the whole point of
+  this file, and the harness is how we know what the reference does.
+  `dup`+`close` is the probe rather than `fcntl(F_GETFD)` because it needs no
+  `fcntl` binding and no `F_GETFD` constant for a target whose libc headers are
+  ours; it costs a descriptor for the length of one call and answers the same
+  question.
+
+---
+
+## 719. `sh`'s diagnostics follow POSIX's wording and the current redirections, and the differential harness normalises only dash's side
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** A shell's error messages are an interface: scripts grep them, and
+the harness that certifies this shell against `dash` compares them byte for
+byte. Three things had to be settled — where a message goes when the script has
+redirected stderr, what words it uses, and what the harness is allowed to ignore
+when the two shells disagree about wording.
+
+### Decision 1: a thread-local "current stderr", not a parameter on every message
+
+`CURRENT_ERR` is a `thread_local!` holding the `Fd` diagnostics go to, and
+`ErrScope` sets and restores it as execution enters and leaves each construct.
+The local `diag!` macro writes through it.
+
+*What changes:* `nosuchcommand 2> err` puts the not-found message in `err`,
+where before it went to the terminal and `err` was empty.
+
+- **For:** the alternative is threading an `&Io` into every function that can
+  fail, including expansion and arithmetic, which are recursive and many layers
+  deep — and a single missed thread is a message in the wrong file. `sed.rs`
+  already sets this precedent in this crate.
+- **Against:** it is global mutable state, and an `ErrScope` that is dropped out
+  of order leaves the wrong destination installed.
+- **Why the "for" wins:** the scope guard is RAII, so out-of-order is not
+  reachable without going out of one's way, and the harness compares the *files*
+  a case left behind as well as its streams — which is exactly the check that
+  catches a message written to the wrong place.
+
+### Decision 2: POSIX's `strerror` text, not the host's and not dash's
+
+`coreutils::errmsg::strerror` supplies the words: `File exists`, not Windows's
+`The file exists. (os error 80)`; and `No such file or directory`, not dash's
+abbreviated `No such file`.
+
+*What changes:* a failed redirection reads the same on the host build as on
+SlateOS, and reads the way every other program on the system reads.
+
+- **For:** an error message that changes with the build host is untestable.
+  Against dash specifically: dash carries a *private* abbreviated table, and
+  copying it would make our messages disagree with our own `strerror` and with
+  every other binary in the tree.
+- **Against:** a script that greps for dash's exact text does not match ours.
+- **Why the "for" wins:** such a script is already unportable — bash, ksh and
+  busybox all say `No such file or directory` too. The same reasoning settles
+  `cd`: a failed `cd` names the errno (`cd: /nonexistent-dir: No such file or
+  directory`) the way bash does, rather than dash's `cd: can't cd to …`, and
+  `echo $(( ))` is `0` as in bash and ksh where dash calls it a syntax error.
+  Both are in the harness's "differ on purpose" list, so the difference is
+  recorded rather than drifted into.
+
+### Decision 3: the harness normalises two fields, on dash's side only
+
+`scripts/sh-diff.sh` strips dash's `sh: <line>: ` prefix and expands dash's
+abbreviated `strerror` before comparing. Everything else — stdout, exit status,
+stderr, and every file the case left on disk — is compared byte for byte.
+
+*What changes:* the harness can be green while our messages still differ from
+dash's in exactly those two respects, and in no other.
+
+- **For:** neither field is comparable. The line number is dash's position in
+  *its* input, which for a `-c` string is meaningless; the abbreviation is
+  settled by decision 2 above. Every other byte stays under test, including the
+  disk state, which is what catches a diagnostic written to the wrong file.
+- **Against:** a normaliser is a hole in a differential test by construction —
+  it is the one place a real difference can hide.
+- **Why the "for" wins:** the hole is bounded by two things. The rules are
+  keyed on *which side is dash*, not on which side is the reference, so
+  `OURS=/bin/dash` runs the harness against itself as a self-check — and that
+  self-check is the reason the keying is that way: a rule that fired on "the
+  reference" only would make the self-check report every diagnostic case as a
+  difference and thereby useless. And an early side-blind version of the rule
+  was caught eating *our* descriptor number out of `sh: 3: Bad file descriptor`,
+  which is precisely the class of bug the objection predicts; it was found in
+  one run because the self-check exists.
+
+---
+
+## 720. `sh` ends a command by unwinding a `Result`, not by exiting the process — which is what lets a failed special builtin be fatal in the right places
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** `exit 3`, `break`, `continue` and `return` all mean "stop what you
+are doing and leave", and so does a fatal error such as a bad substitution. The
+simplest implementation is to call `exit()` there and then. This one instead
+returns an error value that propagates up through every caller.
+
+`Flow` is that value — `Break(n)`, `Continue(n)`, `Return(n)`, `Exit(n)` — and
+`Run<T>` is `Result<T, Flow>`, so every executing function's `?` carries it.
+
+*What changes:* `exit 3` inside `( … )` sets the subshell's status and the
+script continues; `break` inside a function called from a loop unwinds to the
+loop; and a failed `.`, `eval`, `shift` or `export` — the "special builtins",
+which POSIX says end a non-interactive shell — ends it, but ends only the
+subshell when it is inside one.
+
+- **For:** every one of those behaviours is *positional* — the same `exit 3`
+  means different things depending on what encloses it — and a process exit
+  cannot be positional. It is also what allows a subshell to be a
+  snapshot-and-restore (§717): the restore has to run, and it cannot if the
+  process is gone. And it makes the shell testable in-process: the unit tests
+  run whole scripts and read the status back, which a shell that calls `exit()`
+  cannot offer.
+- **Against:** every function in the executor returns `Run<T>` whether or not it
+  can fail that way, which is visible noise; and a caller that writes `let _ =`
+  instead of `?` silently swallows an `exit`.
+- **Why the "for" wins:** the noise is one type alias, and the swallowing risk
+  is the same one `Result` carries everywhere in this codebase, where the
+  house rule already forbids discarding one without a comment. The alternative
+  was in the previous implementation, which used `stdfd::exit_now` and therefore
+  could not have had `( exit 3 ); echo still-here` work at all.
+
+## 721. `fetch` resolves names itself, requires an ASCII host but not an ASCII path, and refuses to let a URL choose a file name outside the current directory
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Lane:** B
+**Where:** `userspace/coreutils/src/bin/fetch.rs` — `net::Connection::connect`,
+`ParsedUrl::parse`, `ParsedUrl::filename`.
+
+**In short:** `fetch` is the "download this URL" utility. Rewriting it to stop
+crashing on odd filenames turned up that it could not reach a web site at all —
+it only understood numeric addresses like `93.184.215.14`, never names like
+`example.com`. Fixing that forced four small choices about what to do with the
+awkward cases: a name with accents in it, a name that resolves to several
+addresses, a slow name lookup, and a URL that tries to name the file it will be
+saved as. None of them has an answer that is simply right; each is written down
+here with what a user would see either way.
+
+### Decision 1: A URL's **host** must be ASCII; its **path** may be any bytes
+
+*What changes:* `fetch http://café.example/` says
+`non-ASCII host name (IDN is not supported)` and exits 3, while
+`fetch http://example.com/café.txt` works and saves a file called `café.txt` —
+or, with a path holding bytes that are not text at all, a file holding exactly
+those bytes.
+
+- **For:** The two halves of a URL genuinely differ. The path is opaque octets
+  that we hand to the server and, with `-O`, to `open` — treating it as bytes
+  is not a compromise, it is the correct model, and it is the whole point of
+  the argv-UTF-8 conversion. The host is not opaque: it must be turned into a
+  question for a resolver, and a resolver takes a *name*, which for a non-ASCII
+  label means Punycode (the `xn--` encoding that spells `café` as `xn--caf-dma`)
+  — an implementation of IDNA, including its normalisation and its per-script
+  validity rules, that is far larger than this utility and belongs in a library
+  the OS does not yet have. Refusing is honest; the alternative is passing the
+  raw UTF-8 to the platform resolver and getting a failure whose message blames
+  the network.
+- **Against:** A user who pastes an internationalised URL from a browser gets a
+  refusal for something the browser plainly manages. And the split is a little
+  subtle to explain: the same accented characters are fine four characters to
+  the right.
+- **Why the "for" wins:** The refusal names its own reason (`IDN is not
+  supported`) and so is a request for a feature rather than a mystery. A
+  silently-mangled lookup would be neither.
+
+### Decision 2: Every resolved address is tried, and the error reported is the last one
+
+*What changes:* On a machine with no IPv6 route, `fetch http://<dual-stack>/`
+succeeds via IPv4 instead of failing on the AAAA record that sorted first.
+
+- **For:** A name commonly resolves to several addresses precisely so that a
+  client can fall back, and this is what every other HTTP client does. Trying
+  only the first would make `fetch` fail on hosts that work everywhere else,
+  for a reason invisible to the user.
+- **Against:** With a long address list and an unreachable host, the wait is
+  `--timeout` multiplied by the number of addresses, not `--timeout`. And
+  reporting the *last* error can be misleading: if IPv6 fails instantly with
+  `ENETUNREACH` and IPv4 then times out, the user sees the timeout — arguably
+  the less informative of the two.
+- **Why the "for" wins:** Connecting to a host that works matters more than the
+  precision of the message when none of them does; and the last error is in
+  fact usually the informative one, because the address family that got
+  furthest is the one that took longest to fail.
+
+### Decision 3: `--timeout` does not cover name resolution
+
+*What changes:* `fetch --timeout 2 http://slow-to-resolve/` can block for
+however long the platform resolver blocks — typically 5–30 s — before the two
+seconds it promised ever start.
+
+- **For:** `std::net::ToSocketAddrs` is a blocking call into the platform
+  resolver with no deadline parameter, and there is no portable way to bound it
+  short of doing the lookup on a thread and abandoning it. Abandoning a
+  blocked resolver thread leaks it for the life of the process; joining it
+  defeats the purpose. Neither is something to bolt onto one utility.
+- **Against:** A flag named `--timeout` that does not bound the total wait is a
+  flag that lies, and the case it fails to cover — an unreachable DNS server —
+  is one of the commonest ways a fetch hangs.
+- **Why the "for" wins:** The gap is documented at the call site and in
+  `known-issues.md` rather than papered over, and the real fix is a resolver of
+  our own, which this OS needs anyway once `net/` serves userspace. A
+  thread-per-lookup hack in one binary would make that fix harder to land, not
+  easier. (This is the "document the deferral with its trigger" case from
+  `CLAUDE.md`, not a quick hack: the trigger is `net/`'s userspace resolver.)
+
+### Decision 4: `-O` does not percent-decode, but does refuse `.` and `..`
+
+*What changes:* `fetch -O http://x/caf%C3%A9.txt` writes a file literally named
+`caf%C3%A9.txt` (curl's behaviour, not wget's), and
+`fetch -O http://x/a/b/..` refuses instead of writing to the parent directory.
+
+- **For:** Not decoding is what curl does, and the reason is that decoding lets
+  the *server's* URL choose bytes in a local file name — `%2F` would introduce a
+  path separator, `%00` a terminator. Refusing dot segments closes the same
+  door from the other side: a URL ending in `..` would otherwise make `-O` write
+  outside the directory the user ran the command in, which is not something a
+  download tool should ever do on the say-so of a redirect.
+- **Against:** The file name is then not the name the user sees in their
+  browser, which is mildly surprising for the common accented case; and a
+  literal `%` in a file name is ugly. wget decodes, so a user coming from wget
+  will notice.
+- **Why the "for" wins:** The surprise is cosmetic and the alternative is a
+  path-traversal primitive driven by a remote server. Note that the refusal is
+  needed *because* we do not decode — with decoding, the check would have to be
+  redone after decoding, and getting that order wrong is exactly how these bugs
+  ship.
+

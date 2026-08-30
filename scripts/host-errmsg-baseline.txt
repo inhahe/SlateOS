@@ -15,6 +15,4 @@
 
 userspace/coreutils/src/bin/bc.rs:host-error-text
 userspace/coreutils/src/bin/diff.rs:host-error-text
-userspace/coreutils/src/bin/fetch.rs:host-error-text
 userspace/coreutils/src/bin/patch.rs:host-error-text
-userspace/coreutils/src/bin/sh.rs:host-error-text

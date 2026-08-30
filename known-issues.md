@@ -14961,6 +14961,109 @@ lookup is filed under before asking what the lookup does.
 
 ## Fixed Bugs
 
+### B-FETCH-CANNOT-RESOLVE-A-HOST-NAME. `fetch` could reach a literal IP address and nothing else — 2026-08-30 — FIXED 2026-08-30 (lane B)
+
+**Where:** `net::Connection::connect`, `userspace/coreutils/src/bin/fetch.rs`.
+One call site, in `fetch_url`.
+
+**Symptom.** Every URL naming a host — which is every URL anyone would type —
+failed before a packet was sent:
+
+```
+$ fetch -I http://example.com/
+fetch: connection to example.com:80 failed: bad address: invalid socket address syntax
+$ echo $?
+2
+```
+
+The utility's entire stated purpose is to fetch a URL, so this was not a
+corner: `fetch` worked only when handed a numeric address, and no test or
+document mentioned that restriction.
+
+**Cause.** The connect path never resolved anything. It read:
+
+```rust
+let addr: SocketAddr = format!("{host}:{port}")
+    .parse()
+    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad address"))?;
+```
+
+`str::parse::<SocketAddr>` is *not* a resolver — it parses the textual form of
+an address that is already numeric. `"93.184.215.14:80"` parses;
+`"example.com:80"` does not, and the `InvalidInput` it returns was then
+reported as the network having a bad address rather than as the program never
+having asked the network anything.
+
+**Why it lasted.** Every test in the file exercised URL *parsing*
+(`ParsedUrl::parse`), header parsing, chunk decoding and redirect resolution —
+all of which are pure functions over bytes and all of which were correct. The
+one step that is not pure, and so is not unit-testable without a network, was
+also the one step that was wrong. Nothing in the crate ever ran the binary
+against a server.
+
+**Fix.** `to_socket_addrs()`, which is the resolver, and then *every* returned
+address is tried rather than the first, because a dual-stack name commonly
+resolves to an AAAA record this machine has no route to. Resolution failure and
+connection failure are now separate arms of a `ConnectError`, because they want
+different diagnostics: a name that does not resolve gets one wording on all
+platforms (`fetch: could not resolve host: <host>`), since the host's own text
+for it is not an errno and is not portable — Windows says `No such host is
+known.` where glibc says `failed to lookup address information: Name or service
+not known`, and `coreutils::errmsg::strerror` can normalise neither. A refused
+or unreachable *address* is a real errno and is reported exactly.
+
+Measured after the fix, against the live network:
+
+| command | result |
+|---|---|
+| `fetch -I http://example.com/` | `HTTP 200 OK`, headers, `rc=0` |
+| `fetch -L -I http://google.com/` | follows to `http://www.google.com/`, `rc=0` |
+| `fetch http://no-such-host-xyzzy.invalid/` | `fetch: could not resolve host: …`, `rc=2` |
+| `fetch http://127.0.0.1:9/` | `fetch: connection to 127.0.0.1:9 failed: Connection refused`, `rc=2` |
+| `fetch -q http://httpbin.org/stream/3` | 3 lines (chunked decoding) |
+| `fetch -L -q http://httpbin.org/redirect/12` | `fetch: too many redirects (max 10)`, `rc=1` |
+
+**Known limitation, deliberate:** `--timeout` bounds each `connect` and each
+later read and write, but **not** the name lookup — `to_socket_addrs` is the
+platform resolver and offers no deadline. A resolver that hangs hangs us. The
+fix is a resolver of our own, which this OS will need anyway once `net/` serves
+userspace; it is not worth a thread-per-lookup workaround in one utility.
+
+### B-FETCH-ARGV-AND-HEADERS-WERE-UTF-8. Six more defects found while converting `fetch` to bytes — 2026-08-30 — FIXED 2026-08-30 (lane B)
+
+**Where:** `userspace/coreutils/src/bin/fetch.rs`, throughout. This was the
+`fetch.rs:argv-as-string` line of `scripts/argv-utf8-baseline.txt`; the
+conversion is what surfaced the rest, including the resolver bug above.
+
+1. **`env::args().skip(1).collect::<Vec<String>>()`** — the tracked finding.
+   A URL or `-o` name holding a byte that is not valid UTF-8 (a legal filename
+   on this OS) aborted the process before `main` ran. Now `args_os()` carried
+   through as `OsString`/`Vec<u8>` to the socket and to the `open`.
+2. **`String::from_utf8_lossy` on the response header block.** A `Location:`
+   or `Content-Disposition:` byte that is not UTF-8 became U+FFFD, and with
+   `-O` that replacement character went into a **file name**. Headers are now
+   `Vec<u8>` end to end; only the host is required to be ASCII.
+3. **A hand-written option loop.** No `--`, no bundling (`-qv`), no attached
+   value (`-oout.html`, `--output=…`), no unambiguous long-prefix (`--verb`),
+   and no `--version` at all. Replaced with `coreutils::getopt`, which gives
+   all of those and POSIX's own error wording.
+4. **`println!` for the `-I` header dump.** A `SIGPIPE`-less write failure
+   panicked instead of being reported; `fetch -I url | head -1` was the way in.
+   Now `stdfd::Stream::stdout` + `close_stdout`, as the rest of the crate does.
+5. **`-d` could not send a binary body.** The data came in as `String`, so a
+   POST of anything but text was impossible. Now `Vec<u8>`.
+6. **`find_subsequence` could panic.** `haystack.windows(n)` panics when
+   `n == 0`; an empty needle reached it from the header scan. Guarded, with a
+   test.
+
+Also fixed in passing: the `Saved to:` diagnostic printed the path unquoted,
+so a name with a space or a control byte was ambiguous or invisible — it now
+goes through `quotef_os`, and `-O` refuses a URL whose last segment is `.` or
+`..` rather than writing to the parent directory.
+
+`python scripts/argv-utf8.py --check` now reports **4 findings across 4 files**
+(`diff logger patch ps`), down from 5.
+
 ### B-KSHELL-ECHO-E-MANGLES-NON-ASCII. `echo -e` doubled every byte of every multi-byte character — 2026-08-24 — FIXED 2026-08-24 (lane A, `abeaca2aa`)
 
 **Where:** `interpret_echo_escapes`, `kernel/src/kshell.rs` (~line 8691); one
@@ -95344,9 +95447,119 @@ boxes are the only thing that *can* see the clip vanish, and are blind to
 everything else. A wrong comment beside a vacuous assertion is how a tautology
 survives three readings.
 
-Still open: `guitk`'s own tests for `Frame::hit`, and any test asserting a
-widget's rect is inside its parent where the parent rect was used to compute the
-child's.
+**`guitk`'s own tests for `Frame::hit` — checked 2026-08-30, nothing to do.**
+The worry was that the toolkit never pinned down the behaviour the app tests
+were unknowingly leaning on, in which case it could drift and take fifty apps'
+tests with it. It pins it down in five places: `a_target_is_trimmed_to_the_clip_in_force`
+(a straddling box comes back cut, and the cut half is not clickable),
+`a_target_entirely_outside_the_clip_is_dropped`,
+`a_nested_clip_can_only_shrink_the_visible_region`,
+`a_degenerate_clip_clips_everything_away`, and
+`an_over_popped_clip_stops_trimming_the_callers_hits`, which is the same rule
+read from the other side. So the lesson is about where an app puts its
+assertion, not about a gap in the toolkit.
+
+Still open: any test asserting a widget's rect is inside its parent where the
+parent rect was used to compute the child's.
+
+**It happened again in `apps/solitaire`, 2026-08-30 — the shape is more common
+than the two apps above suggested.** `every_pile_is_drawn_inside_the_window`
+walked every recorded box and asserted it lay within `0..w, 0..h`. The app
+clips to the window, so that is exactly the tautology described above, written
+independently by a different pass over a different app. A mutation fitting the
+card size to the tableau alone — which runs the top row clean off the side of a
+narrow window — passed it. What replaced it is a second usable spelling worth
+remembering alongside "compare against the layout's own rect": **compare the
+boxes against each other.** Every card in a card game is one size, so a card
+that comes back narrower than its neighbours is a card the clip cut, and the
+assertion is `w == max(w)` over the card targets rather than `x >= 0`. Any app
+that draws a grid of identically-sized things — a board, a keypad, a palette,
+a tile map — can use it, and unlike the "inside the window" form it cannot be
+satisfied by the trimming itself.
+
+### Lesson 81: a recorded hit box is not evidence that anything was drawn in it (lane C, 2026-08-30)
+
+**In short:** the natural way to check that a panel drew all its rows is to ask
+the frame whether each row's target has a box —
+`probe::rect_of_sized(&app, Target::Captures, size).is_some()`. That checks the
+row was *laid out*. It does not check the row was *painted*. In `apps/checkers`
+the two are separable: `panel_row` computes the row's rectangle, draws the text
+into it, and returns the rectangle, and the caller hands that rectangle to
+`f.hit`. Delete the drawing and keep the return — one line — and every box is
+still recorded, every `is_some()` still answers yes, and the panel is blank.
+A mutation doing exactly that survived the test whose stated job was to catch
+it.
+
+**The rule.** A hit box and a painted pixel are two different outputs of the
+drawing pass, and a test that reads one says nothing about the other. If what
+you mean is "the user can see this", assert against the render commands. If
+what you mean is "the user can click this", assert against the hit map. Say
+which one you meant, and if you meant both, assert both — the box exists *and*
+some `RenderCommand::Text`/`FillRect` origin falls inside it.
+
+**The tell.** A drawing helper that returns the rect it was given rather than
+the rect it drew, with a call site of the shape
+`f.hit(Target::X, helper(f, ..))`. The rect flows to the hit map through a path
+that does not pass through the painting. Also: any test whose only assertion is
+`rect_of(..).is_some()` for a target whose *content* is the point of it. The
+inverse shape — a control painted but never recorded — is caught by clicking
+it, so it is the visible half that goes unguarded.
+
+**How it was found.** A mutation sweep on `apps/checkers` gutting `panel_row`'s
+body to `let _ = (f, s, ink); row`. The row was expected to be caught by
+`the_panel_draws_its_rows_while_they_fit` and was instead caught only by
+`the_captures_line_credits_the_side_that_did_the_taking`, which happens to read
+the text. Fixed by requiring each of the panel's five boxes to contain the
+origin of a line of text.
+
+**Where else to look.** Every app in this campaign has a
+"the panel/toolbar/sidebar drew its rows" test, and the cheap spelling of it is
+`is_some()` over a list of targets. Wherever the drawing helper's return value
+is independent of whether it drew — which is most of them, since returning the
+laid-out rect is what makes `union` and the stacking cursor work — the test is
+measuring the layout and reporting on the paint.
+
+### Lesson 82: a `min` whose losing side never loses is an untested half of the code (lane C, 2026-08-30)
+
+**In short:** layout code is full of "fit it to A, fit it to B, take the
+smaller" — `size = by_width.min(by_height)`. Only one of the two ever *wins* in
+any given state, and the tests are written against the states the app is
+normally in, so the other side of the `min` can be deleted outright without a
+single test noticing. In `apps/solitaire`, `Table::fit` sizes a card to the top
+row and to the deepest fan a column can reach, and takes the smaller. The
+deepest fan it reserves for is six face-down cards under twelve face-up. The
+*opening deal* fans column 6 seven cards deep. Every geometry test in the suite
+read an opening deal, so the fan half of the fit was slack in all of them, and
+two mutations that removed it survived or were caught only by tests that had no
+business firing.
+
+**The rule.** A `min`/`max`/`clamp` in layout code is a branch, and a branch has
+two sides. If the app's ordinary state always takes the same side, the other
+side is unexecuted code wearing the same coverage number as the line it shares.
+Write a test that *forces* the losing side — construct the worst case directly
+rather than hoping the natural one contains it. In solitaire that meant
+clearing a column and pushing eighteen cards into it by hand, which is a state
+the game can reach and the opening deal never is.
+
+**The tell.** Any `fit`/`solve` function that reserves room for a maximum
+(`MAX_DEPTH`, `worst_case_rows`, "enough for the longest label") when the
+fixtures are all typical. Also: a suite whose every drawing test starts from the
+same `App::new()`, which for a game means the opening position — the position
+most carefully chosen to be unremarkable.
+
+**How it was found.** A mutation sweep on `apps/solitaire` replacing
+`by_top.min(by_tableau)` with each half alone. `the card is fitted across
+alone` and `the card is fitted to the top row alone` were expected to be caught
+by the deep-column test and were not, because that test read the opening deal.
+Fixed by `the_deepest_fan_a_deal_can_reach_still_fits_the_window`, which builds
+the eighteen-card column and asserts the first and last card are the same size.
+
+**Where else to look.** Every app in this campaign has a `Layout::solve` with at
+least one `min` of two candidate sizes, and the reserve-for-the-worst-case side
+is the one that only bites at a window size or a game state the fixtures do not
+visit: sudoku's pencil-mark grid, chess's move history, checkers' capture
+panel, and every app that reserves room for a scrollback it never fills in a
+test.
 
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
@@ -98821,3 +99034,161 @@ section, alongside 26 other `h`/`H` cases.)
 | The error sentences | same file, `EdError`, `EdError::sentence` |
 | Where `-v` is read today | same file, `Options::verbose`, `Editor::fail` |
 | The harness case | `scripts/ed-diff.sh`, the `kbug_pipe` block |
+
+---
+
+## TD-B-sh-IS-NOT-A-SHELL — `if`, `while`, `case`, functions, `$(())`, globs, here-docs and backticks are all absent, non-ASCII text is corrupted, and `yes | head -2` hangs forever (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+**In short:** `userspace/coreutils/src/bin/sh.rs` is the program that ships as
+`sh` — the thing an init script, a `Makefile` recipe and a `system()` call all
+end up running. It advertises seventeen features in its own module header. Of
+those, measured against `dash` on 2026-08-30, roughly **four work**. A one-line
+`if true; then echo yes; fi` does not run; it tries to execute a program called
+`true;`. Any word containing a non-ASCII byte is silently corrupted before it
+reaches the command. And `yes | head -2` never returns.
+
+Found while converting the file for `TD-B-ARGV-IS-DECODED-AS-UTF-8-AND-A-BAD-BYTE-IS-A-PANIC`
+(it is one of the seven remaining findings). The panic that checker sees is, as
+that entry predicts, the smallest of the defects in the file.
+
+### Measured
+
+`sh -c CMD` against `dash -c CMD`, both built from this tree's
+`x86_64-unknown-linux-gnu` build, WSL, `LC_ALL=C.UTF-8`:
+
+| Command | dash | ours |
+|---|---|---|
+| `echo héllo` | `héllo` | `hÃ\|Â\|Ã\|Â©llo` — six bytes for two |
+| `X=world; echo "hi $X" tail` | `hi world tail` | `hi world tailX tail` |
+| `echo hi > f; cat f` | `hi` | `hi` **twice** — the builtin ignores the redirect |
+| `for i in 1 2 3; do echo $i; done` | `1 2 3` | *nothing at all* |
+| `if true; then echo yes; fi` | `yes` | `sh: true;: Permission denied` |
+| `while false; do echo x; done` | — | `sh: false;: Permission denied` |
+| `case a in a) echo m;; esac` | `m` | `sh: case: Permission denied` |
+| `f() { echo in f; }; f` | `in f` | three `Permission denied` lines |
+| `echo "a\|b"` | `a\|b` | `sh: b: Permission denied` |
+| `echo $((2+3))` | `5` | *empty* |
+| `echo ${UNSET:-def}` | `def` | *empty* |
+| `echo ${#PATH}` | `2775` | *empty* |
+| `set -- a b c; echo $#; echo $@` | `3` / `a b c` | dumps the whole environment |
+| `echo *` | the directory | `*` |
+| ``echo a`echo b`c`` | `abc` | ``a`echo b`c`` |
+| `( echo sub )` | `sub` | `sh: (: Permission denied` |
+| `{ echo grp; }` | `grp` | `sh: {: Permission denied` |
+| `read x <<EOF` … | `hello` | three `Permission denied` lines |
+| `exec echo hi` | `hi` | `sh: exec: Permission denied` |
+| **`yes \| head -2`** | `y` `y` | **hangs forever** |
+
+What does work: `echo hi`, `a && b \|\| c`, `$(...)` (only unnested at the end of
+a word), `cd`, `;`, and simple external commands.
+
+### Why, in each case
+
+The file has **no lexer and no parser**. `execute_script` splits the text into
+*lines*, `execute_if`/`execute_while`/`execute_for` look for their keywords with
+`str::starts_with` on a whole trimmed line, and everything else is handed to
+`execute_command`, which splits on `;` and then hands words to `Command::new`.
+Six separate consequences follow:
+
+1. **Compound commands must be spread over lines.** `if true; then echo yes; fi`
+   is one line, so `execute_script` never sees a line equal to `then`; the `if `
+   prefix strips to `true; then echo yes; fi`, `trim_end_matches("; then")`
+   removes nothing, and the condition run is the whole rest of the line. `for`
+   on one line finds `body_start == body_end` and runs an empty body — which is
+   why it prints nothing rather than erroring.
+2. **`case`, `until`, `{ }`, `( )`, `!`, functions and here-documents are not
+   implemented at all.** `f() { … }` is only recognised when the `{` ends the
+   line *and* the closing `}` is alone on its own line.
+3. **Non-ASCII is destroyed twice.** `expand_variables` and `tokenize` both copy
+   input with `result.push(bytes[i] as char)`. A byte ≥ 0x80 becomes the
+   `char` of that code point, which re-encodes to *two* UTF-8 bytes; the word
+   passes through both functions, so two bytes become six. This is silent data
+   corruption on ordinary UTF-8 text, not merely on invalid input.
+4. **The double-quote branch of `expand_variables` abandons its position.** On
+   seeing `$` inside `"…"` it expands *the entire remainder of the string* —
+   past the closing quote — appends it, `break`s, and then lets the outer loop
+   resume one byte later, so the tail is emitted a second time. That is the
+   `hi world tailX tail` row.
+5. **Pipelines are split on a bare `cmd.contains('\|')`, ignoring quotes**, so
+   `echo "a|b"` becomes two commands; and `execute_pipeline` calls
+   `child.wait()` on stage *i* before spawning stage *i+1*. A first stage that
+   writes more than one pipe buffer therefore blocks on a reader that will never
+   be started. `yes | head -2` is the two-line reproduction.
+6. **Builtins ignore the redirections that were parsed for them.**
+   `parse_redirections` runs before the builtin match, and only
+   `execute_external` consults the result — so `echo hi > f` writes the file
+   (via the parse) *and* stdout. Every builtin also writes through `println!`,
+   which panics rather than reporting on `EPIPE`.
+
+Two more, not visible above: `$@`/`$*` are absent, so `$@` falls through the
+`$VAR` path, reads no variable, and `set` with no `--` handling prints the
+environment; and `expand_variables` looks up `$X` in one flat `HashMap` that
+also holds the imported environment, so a positional parameter and an
+environment variable share a namespace.
+
+### The fix
+
+Rewrite the file around a real lexer → parser → expander → executor, working in
+`&[u8]` throughout. Bytes end-to-end is what removes the two `argv-utf8`
+findings (`sh.rs:55` argv, `sh.rs:183` environment) and is also, on its own, the
+whole of fix 3: a shell that never converts to `str` cannot mangle a byte.
+
+The scope is fixed by `design-decisions.md` §72, which says this file is to
+"stay a small POSIX baseline" while `userspace/oils` (`osh`, 150k lines) is the
+bash-superset shell. Small, therefore — but a shell that cannot run
+`if true; then echo yes; fi` is not a baseline of anything.
+
+### Where
+
+| | |
+|---|---|
+| The file | `userspace/coreutils/src/bin/sh.rs` (1236 lines) |
+| The corruption | same file, `expand_variables`, `tokenize` — `push(bytes[i] as char)` |
+| The quote bug | same file, `expand_variables`, the `b'"'` branch |
+| The deadlock | same file, `execute_pipeline` — `child.wait()` inside the spawn loop |
+| The line-scanner | same file, `execute_script`, `execute_if`, `execute_while`, `execute_for` |
+| The umbrella | `TD-B-ARGV-IS-DECODED-AS-UTF-8-AND-A-BAD-BYTE-IS-A-PANIC`, `scripts/argv-utf8-baseline.txt` |
+| The reference | `dash` under WSL; harness to be `scripts/sh-diff.sh` |
+
+### Fixed 2026-08-30 — `5ae8dfc41` (the rewrite) and `44027020a` (the certification)
+
+The file is now ~6,000 lines built as the four classical stages: `Lexer` →
+`Parser` → `Shell::expand_word` → `Shell::run_list`, in `&[u8]` from `args_os`
+to the `exec`. Every row of the measured table above passes, and so does the
+whole of what the header advertised.
+
+**The evidence is `scripts/sh-diff.sh`**, written for this and now the standing
+gate. It runs ours and dash over ~225 cases and compares **four** things byte
+for byte — stdout, exit status, stderr, and the files the case left on disk —
+and reports `217 passed, 0 differed, 8 differ on purpose`. `OURS=/bin/dash`
+runs it against itself, which is what keeps the two normalisations honest: it
+must report zero differences, and it does.
+
+Only two fields are normalised away, both on dash's side only, because neither
+is comparable and neither is ours to imitate: the `sh: <line>: ` prefix dash
+puts on a diagnostic, and dash's private abbreviated `strerror` table, which
+says `No such file` where every other program on the system — and POSIX — says
+`No such file or directory`. The normaliser runs over stdout and the disk files
+as well as stderr, since `2>&1`, `2>err` and `exec 2>log` move a diagnostic
+between all three.
+
+**The eight deliberate differences** are `trap`, `getopts`, aliases, `times`,
+`readonly` and `local` (absent by scope — `design-decisions.md` §72 puts them
+in `osh`), plus two wordings where dash is the outlier and we follow bash and
+ksh: `echo $(( ))` is `0` here where dash calls it a syntax error, and a failed
+`cd` names the errno (`cd: /nonexistent-dir: No such file or directory`) rather
+than dash's `cd: can't cd to …`.
+
+**Three limitations remain**, all documented in the module header and none
+reachable by a harness case:
+
+| | |
+|---|---|
+| `&` backgrounds only a single *external* command | no `fork`; a builtin, function or compound after `&` runs in the foreground and reports 0 (`Shell::run_background`) |
+| descriptors above 2 reach an external child on unix only | `Command` names three, the rest are installed between fork and exec by `extra_fds`, which has no Windows counterpart. In-process builtins see them everywhere |
+| `n>&-` hands a child the null device | not a genuinely closed descriptor, so a write is discarded rather than returning `EBADF` (`stdio_for`) |
+
+Both `argv-utf8` findings are gone with it — `sh.rs` is out of
+`scripts/argv-utf8-baseline.txt`, and `python scripts/argv-utf8.py --check`
+now prints **5 findings across 5 files** (`diff fetch logger patch ps`), down
+from 7 across 6.

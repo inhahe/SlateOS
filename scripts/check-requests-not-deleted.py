@@ -52,6 +52,13 @@ Deletions are compared with rename detection on, so moving a file (fixing a
 slug, or sweeping an entry into an archive directory) is a rename and passes.
 Only an actual disappearance fails.
 
+Every path counts, not only `*.md`: a request that argues from a measurement or
+a capture cites that file by path just as other documents cite the request, so
+losing the attachment breaks a citation in exactly the same way. The two
+exceptions are in `MACHINERY` below, and they are exceptions because the advice
+this script gives is incoherent when applied to them, not because they matter
+less.
+
 Uncommitted deletions count. `git diff <base>` compares the base against the
 *working tree*, so a `rm` that has not been committed yet is caught before it
 becomes history rather than after -- which is the whole point, since the cost of
@@ -97,6 +104,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 REQUESTS = "requests/"
 ALLOWLIST = ROOT / "requests" / ".deletions-allowed"
+
+# Files under `requests/` that are this gate's own plumbing rather than anyone's
+# argument. They are exempt because the advice this script gives is incoherent
+# when applied to them: `.gitkeep` cannot carry a `**Status:**` line, and
+# reporting the deletion of `.deletions-allowed` would tell the reader to fix it
+# by adding a basename to the very file they just removed. Both are also safe to
+# lose -- `.gitkeep` is meaningless once the directory has 186 real files in it,
+# and dropping the allowlist withdraws every waiver, which fails toward strict.
+MACHINERY = frozenset({".gitkeep", ".deletions-allowed"})
 
 # Preference order for the trunk to compare against. `origin/main` is the real
 # trunk; local `main` is the fallback for a worktree whose remote ref is missing
@@ -207,9 +223,14 @@ def main() -> int:
         return 2
 
     allowed = load_allowlist()
-    violations = [p for p in gone if Path(p).name not in allowed]
-    waived = [p for p in gone if Path(p).name in allowed]
+    machinery = [p for p in gone if Path(p).name in MACHINERY]
+    rest = [p for p in gone if Path(p).name not in MACHINERY]
+    waived = [p for p in rest if Path(p).name in allowed]
+    violations = [p for p in rest if Path(p).name not in allowed]
 
+    for path in machinery:
+        print(f"  note  {path} deleted; this gate's own plumbing, not a "
+              f"request -- ignored")
     for path in waived:
         print(f"  note  {path} deleted, allowed by "
               f"requests/.deletions-allowed: {allowed[Path(path).name]}")
@@ -217,19 +238,41 @@ def main() -> int:
     if violations:
         for path in violations:
             print(f"  ERROR {path} was deleted", file=sys.stderr)
+
+        # An attachment -- a measurement, a capture, the log a request argues
+        # from -- is cited by path exactly as the request is, so it is restored
+        # the same way. It just takes no status line of its own, and telling
+        # someone to stamp a `.csv` would read as a bug in this script.
+        attachments = [p for p in violations if not p.endswith(".md")]
+        stamp_note = (
+            "    # then add, e.g.:  **Status:** LANDED <date> by lane <x>\n"
+            if len(attachments) < len(violations)
+            else ""
+        )
+        attach_note = (
+            "\n"
+            f"  {len(attachments)} of these {'is' if len(attachments) == 1 else 'are'}"
+            " not a request but a file one cites -- a\n"
+            "  measurement, a capture, a log. Restore it the same way; it takes\n"
+            "  no status line of its own.\n"
+            if attachments
+            else ""
+        )
+
         print(
             "\ncheck-requests-not-deleted: FAILED "
-            f"({len(violations)} deleted request"
-            f"{'s' if len(violations) != 1 else ''})\n"
+            f"({len(violations)} deleted file"
+            f"{'s' if len(violations) != 1 else ''} under requests/)\n"
             "\n"
             "  A landed request is stamped, not deleted (roadmap.md rule 2,\n"
             "  design-decisions.md 315). The file is the argument, and code and\n"
             "  documents across the tree cite it by path.\n"
             "\n"
-            "  To fix, restore it and add a status line under the title:\n"
+            "  To fix, restore it:\n"
             f"    git checkout {base[:12]} -- " + " ".join(violations) + "\n"
-            "    # then add, e.g.:  **Status:** LANDED <date> by lane <x>\n"
-            "\n"
+            + stamp_note
+            + attach_note
+            + "\n"
             "  Use an open/blocked/partial wording instead if only part of it\n"
             "  landed -- scripts/open-requests.py ranks that above 'landed', so\n"
             "  an honest header is what keeps the unfinished half visible.\n"

@@ -14,6 +14,11 @@
 //! load-bearing rather than decorative, and [`unsupported`] for why refusing
 //! beats the two cheaper answers.
 //!
+//! The dash-less spelling works too — `tar cvf a.tar dir` is how most people
+//! write tar, and it is older than getopt. A first argument with no leading
+//! dash is a run of option letters whose value-taking letters take the argv
+//! words that follow, in letter order; see [`explode_old_option`].
+//!
 //! Supports basic POSIX/ustar tar format (uncompressed).
 //! Files > 8GB and paths > 255 chars are not supported.
 //!
@@ -69,13 +74,25 @@ use coreutils::getopt::{self, Opt, Program, Takes};
 // diagnostic now comes from `coreutils::getopt`, which does its own rendering
 // (glibc's straight-marked style, not gnulib's locale-aware one).
 use coreutils::quote::{escape, escape_os, os_bytes, quote};
-// Only the non-unix twin of `Dir` builds a path out of a member's bytes; on
-// unix every component is handed to `openat` as it stands.
-#[cfg(any(not(unix), test))]
+// Used on every host by [`explode_old_option`], which has to build `-<byte>`
+// out of one byte of the old-style cluster and cannot go through `char`: a
+// cluster is argv, so it may hold any byte, and `0xE9 as char` would widen to
+// the two UTF-8 bytes of `é` and change which letter got refused. Beyond that
+// it is the non-unix twin of `Dir` that needs it, to build a path out of a
+// member's bytes; on unix every component is handed to `openat` as it stands.
 use coreutils::quote::os_from_bytes;
 use coreutils::stdfd;
+// Split, and not merged back: `BTreeSet` backs [`PrefixNotice`], which every
+// host builds because `tar -tf` issues the same `Removing leading` notices a
+// unix extraction does. `BTreeMap` backs the uid/gid name cache and the
+// hard-link table, both of which only exist behind `#[cfg(unix)]`, so importing
+// it unconditionally would be an unused import on Windows. A single gated
+// `use` for both was a build failure on the host target, caught by
+// `cargo check --workspace --target x86_64-pc-windows-gnu`, which is the only
+// thing in the tree that compiles this file for a non-unix host.
 #[cfg(unix)]
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -463,10 +480,13 @@ enum Request {
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct TarArgs {
-    create: bool,
-    extract: bool,
-    list: bool,
-    verbose: bool,
+    /// Which operation was asked for, as one setting rather than three flags.
+    /// See [`Mode`].
+    mode: Mode,
+    /// GNU's one verbosity counter, not a flag: `-v` bumps it and so does
+    /// `-t`/`--list`, which is why `tar -tt` is `tar -tv`. See [`Verbose`] for
+    /// what each level renders.
+    verbose: u8,
     /// `-p`, `--same-permissions`: restore the stored mode exactly, umask and
     /// setuid bits included. Without it a non-root extraction applies
     /// `mode & 0o777 & !umask`, which is what GNU does and what this tar did
@@ -479,6 +499,89 @@ struct TarArgs {
     archive_file: Option<OsString>,
     directory: Option<OsString>,
     files: Vec<OsString>,
+}
+
+impl TarArgs {
+    /// `-t` / `--list`: choose list mode **and** bump the verbosity counter.
+    ///
+    /// The two go together in GNU's own handler, and separating them here would
+    /// be a silent divergence rather than a tidier design — `tar -tt` and
+    /// `tar --list --list` print the long listing precisely because the second
+    /// one bumped a counter that the first had already bumped. A helper rather
+    /// than two statements in each arm, so the short and long spellings cannot
+    /// drift apart.
+    ///
+    /// # Errors
+    ///
+    /// The conflict from [`Mode::choose`] when another mode was already named.
+    /// The counter is left alone in that case, which is moot — the error is
+    /// fatal — but keeps the failure from being half-applied.
+    fn list(&mut self) -> Result<(), getopt::Error> {
+        self.mode.choose(Mode::List)?;
+        self.verbose = self.verbose.saturating_add(1);
+        Ok(())
+    }
+}
+
+/// Which of tar's operations the command line asked for.
+///
+/// **One setting, not three booleans**, for the same reason [`OldFiles`] is one
+/// setting: the difference is observable. GNU refuses a second, *different*
+/// mode with `You may not specify more than one '-Acdtrux', '--delete' or
+/// '--test-label' option` at exit 2, while repeating the same one — `tar -x -x`,
+/// or `-x --get`, which are two spellings of one mode — is fine. Independent
+/// flags give neither behaviour: they silently let the last letter win, which
+/// is what this tar used to do. `tar -cxf a.tar dir` **created** an archive
+/// where GNU refuses the command line, so a mistyped `-cxf` for `-xf` destroyed
+/// the archive it was meant to unpack. Measured, `tar-mode1.sh`.
+///
+/// The letters GNU lists that this tar does not implement — `-A`, `-r`, `-u`,
+/// `-d`, `--delete`, `--test-label` — are not modes here. They are refused by
+/// name as unimplemented (see [`unsupported`]), so `tar -c --delete` says
+/// `--delete` rather than GNU's sentence about two modes. Both refuse; naming
+/// the option the caller actually typed is the more useful of the two, and
+/// pretending to have a mode in order to reproduce a conflict message about it
+/// would be the wrong trade.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+enum Mode {
+    /// No mode letter was given. `tar -f a.tar` is this, and it is an error —
+    /// but a different one, reported by `main` rather than by the parser.
+    #[default]
+    Unset,
+    /// `-c`, `--create`.
+    Create,
+    /// `-x`, `--extract`, `--get`.
+    Extract,
+    /// `-t`, `--list`.
+    List,
+}
+
+impl Mode {
+    /// Adopt `wanted`, or report the conflict with what was already chosen.
+    ///
+    /// The sentence is GNU's verbatim, **double space and all**: it reads
+    /// `… '--delete' or  '--test-label' option`, with two spaces after `or`,
+    /// because that is what is in tar's source string and a differential
+    /// harness compares bytes. Measured, `tar-mode1.sh`.
+    ///
+    /// The status is [`EXIT_FATAL`] (2) rather than [`EXIT_USAGE`] (64) for the
+    /// reason set out at [`OldFiles::choose`]: this is tar's own `USAGE_ERROR`,
+    /// not argp's complaint about its option table.
+    fn choose(&mut self, wanted: Self) -> Result<(), getopt::Error> {
+        if *self != Self::Unset && *self != wanted {
+            return Err(getopt::Error {
+                sentence:
+                    "You may not specify more than one '-Acdtrux', '--delete' or  '--test-label' \
+                     option"
+                        .to_string(),
+                referral: None,
+                status: EXIT_FATAL,
+            });
+        }
+        *self = wanted;
+        Ok(())
+    }
 }
 
 /// What extraction does about an entry that is *already there*.
@@ -624,6 +727,8 @@ impl OldFiles {
 /// panicking, and a long name that is not UTF-8 can match no option and so
 /// takes the `unrecognized option` path rather than failing some third way.
 fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+    let exploded = explode_old_option(args)?;
+    let args: &[OsString] = &exploded;
     let mut out = TarArgs::default();
 
     for item in TAR.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
@@ -632,10 +737,16 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // `tar --help --frobnicate` print help and `tar --frobnicate
             // --help` an error. See [`Request`].
             Opt::Short(b'?', _) => return Ok(Request::Help),
-            Opt::Short(b'c', _) => out.create = true,
-            Opt::Short(b'x', _) => out.extract = true,
-            Opt::Short(b't', _) => out.list = true,
-            Opt::Short(b'v', _) => out.verbose = true,
+            // The three mode letters, through the check that makes naming two
+            // *different* ones an error and repeating one harmless. See [`Mode`].
+            Opt::Short(b'c', _) => out.mode.choose(Mode::Create)?,
+            Opt::Short(b'x', _) => out.mode.choose(Mode::Extract)?,
+            // `-t` bumps the verbosity counter as well as choosing the mode.
+            // That is not a quirk to work around — it is the whole reason
+            // `tar -tt` and `tar --list --list` print the long listing. See
+            // [`Verbose`].
+            Opt::Short(b't', _) => out.list()?,
+            Opt::Short(b'v', _) => out.verbose = out.verbose.saturating_add(1),
             Opt::Short(b'p', _) => out.same_permissions = true,
             Opt::Short(b'k', _) => out.old_files.choose(OldFiles::Keep)?,
             Opt::Short(b'U', _) => out.old_files.choose(OldFiles::UnlinkFirst)?,
@@ -651,13 +762,14 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // Long names, as the *table* spells them: an abbreviation has
             // already been resolved, so `--extr` arrives here as `extract`.
             Opt::Long(name, value) => match name {
-                "create" => out.create = true,
+                "create" => out.mode.choose(Mode::Create)?,
                 // GNU's own alias pair for `-x`, and likewise `-p` below. Both
                 // spellings are separate table entries because `getopt_long`
-                // matches on names; they converge here.
-                "extract" | "get" => out.extract = true,
-                "list" => out.list = true,
-                "verbose" => out.verbose = true,
+                // matches on names; they converge here — which is why `tar -x
+                // --get` is accepted and `tar -x --list` is not.
+                "extract" | "get" => out.mode.choose(Mode::Extract)?,
+                "list" => out.list()?,
+                "verbose" => out.verbose = out.verbose.saturating_add(1),
                 "preserve-permissions" | "same-permissions" => out.same_permissions = true,
                 "file" => out.archive_file = value,
                 "directory" => out.directory = value,
@@ -680,6 +792,101 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     }
 
     Ok(Request::Run(out))
+}
+
+/// tar's "old option style": rewrite a dash-less first argument into ordinary
+/// options before the parser ever sees it.
+///
+/// `tar cvf a.tar dir` is how most people write tar, and it predates getopt. A
+/// first argument that does not begin with `-` is not an operand: it is a run
+/// of option **letters**, and the letters that take a value take it from the
+/// argv words that follow, **in the order the letters appear**. So
+/// `tar cfC a.tar dir x` means `-c -f a.tar -C dir x`, while `tar cCf dir a.tar
+/// x` means `-c -C dir -f a.tar x` — the same three words, handed out
+/// differently because the letters are in a different order. Measured,
+/// `tar-old1.sh`.
+///
+/// It is a **splice, not a flag**: GNU builds a new argv (`decode_options` in
+/// `tar.c`) and runs the ordinary parser over it, which is why every other rule
+/// still applies afterwards — `tar cf a.tar --verbose dir` takes the long
+/// option, and `tar cQf …` reports `invalid option -- 'Q'` with argp's status
+/// 64 rather than anything about old options. Doing the same here means the
+/// permutation, the `--` handling and the abbreviation matching are all
+/// inherited rather than reimplemented for this path.
+///
+/// Three consequences worth stating, each measured:
+///
+/// * **Only the first argument.** `tar cf a.tar dir cvf` archives a file named
+///   `cvf`, and `tar -c f a.tar dir` treats `f` as a file name.
+/// * **Anything that is not a dash starts a cluster**, however unlike an option
+///   it looks. `tar src -cf a.tar` reads `src` as `-s -r -c` and fails with
+///   `You may not specify more than one '-Acdtrux' …` — not as a file name.
+/// * **An empty first argument is a cluster of no letters**, so it consumes
+///   nothing and disappears: `tar '' -tf a.tar` lists the archive. That falls
+///   out of the rule rather than being a case in it, and GNU behaves the same
+///   way for the same reason.
+///
+/// Which letters take a value is read from [`SHORT_OPTIONS`] rather than
+/// written out again, so a letter added there cannot be forgotten here. GNU's
+/// equivalent list also holds letters this tar does not implement; for those,
+/// not consuming a value is right, because the letter is going to be refused as
+/// unknown either way.
+///
+/// # Errors
+///
+/// `Old option 'f' requires an argument.` — tar's own sentence, with its
+/// trailing period, naming the first letter that ran out. It is a
+/// `USAGE_ERROR`, so the status is [`EXIT_FATAL`] (2) and not [`EXIT_USAGE`]
+/// (64): measured, `tar cf` is 2 where `tar -cf` is 64, because the second is
+/// getopt reporting a missing option argument and the first is tar reporting
+/// that it could not even build the argv.
+fn explode_old_option(args: &[OsString]) -> Result<Vec<OsString>, getopt::Error> {
+    let Some(first) = args.first() else {
+        return Ok(args.to_vec());
+    };
+    let letters = os_bytes(first);
+    let letters: &[u8] = &letters;
+    if letters.first() == Some(&b'-') {
+        return Ok(args.to_vec());
+    }
+    let mut out = Vec::with_capacity(args.len() + letters.len());
+    let mut rest = args[1..].iter();
+    for &letter in letters {
+        out.push(os_from_bytes(&[b'-', letter]));
+        if !takes_a_value(letter) {
+            continue;
+        }
+        let Some(value) = rest.next() else {
+            // `escape` and not `letter as char`, even though only an ASCII
+            // letter can reach here — the letters that take a value are exactly
+            // the ones [`SHORT_OPTIONS`] lists, and all of those are ASCII, so
+            // the two spellings agree today. The conversion is the one that
+            // stays right if that ever stops being true: `0xE9 as char` widens
+            // to the two bytes of `é`, where GNU's `%c` writes the one byte.
+            return Err(getopt::Error {
+                sentence: format!("Old option '{}' requires an argument.", escape(&[letter])),
+                referral: None,
+                status: EXIT_FATAL,
+            });
+        };
+        out.push(value.clone());
+    }
+    out.extend(rest.cloned());
+    Ok(out)
+}
+
+/// Does this short option letter take a value, according to [`SHORT_OPTIONS`]?
+///
+/// A letter takes one when a `:` follows it. The `::` of an optional value is
+/// not a case here — tar has no such letter — and would answer "yes", which is
+/// the wrong answer for an optional value but is unreachable rather than a
+/// latent bug: a `::` letter added to [`SHORT_OPTIONS`] would fail the test
+/// that walks it.
+fn takes_a_value(letter: u8) -> bool {
+    let spec = SHORT_OPTIONS.as_bytes();
+    spec.iter()
+        .position(|&b| b == letter)
+        .is_some_and(|i| spec.get(i + 1) == Some(&b':'))
 }
 
 /// The full option list, on stdout, for `-?` and `--help`.
@@ -827,54 +1034,56 @@ fn main() {
     // "some members failed" survives to the caller. A tool that reports 0
     // after writing half an archive is worse than one that fails outright:
     // the script that invoked it deletes the source and moves on.
-    let status = if parsed.create {
-        // The one case where the member list is a diagnostic rather than
-        // output: with no `-f`, the archive itself is on stdout, and a name
-        // printed there would be a block of the archive.
-        let verbose = match (parsed.verbose, parsed.archive_file.is_some()) {
-            (false, _) => Verbose::Off,
-            (true, true) => Verbose::Stdout,
-            (true, false) => Verbose::Stderr,
-        };
-        #[cfg(unix)]
-        {
-            do_create(parsed.archive_file.as_deref(), &parsed.files, verbose)
+    let status = match parsed.mode {
+        Mode::Create => {
+            // The one case where the member list is a diagnostic rather than
+            // output: with no `-f`, the archive itself is on stdout, and a name
+            // printed there would be a block of the archive.
+            let verbose = Verbose::new(parsed.verbose, parsed.archive_file.is_none());
+            #[cfg(unix)]
+            {
+                do_create(parsed.archive_file.as_deref(), &parsed.files, verbose)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = verbose;
+                diag!("tar: create mode is unix-only on this build");
+                EXIT_FATAL
+            }
         }
-        #[cfg(not(unix))]
-        {
-            let _ = verbose;
-            diag!("tar: create mode is unix-only on this build");
-            EXIT_FATAL
-        }
-    } else if parsed.extract {
-        do_extract(
+        Mode::Extract => do_extract(
             parsed.archive_file.as_deref(),
             parsed.directory.as_deref(),
-            if parsed.verbose {
-                Verbose::Stdout
-            } else {
-                Verbose::Off
-            },
+            // Extraction never writes the archive to stdout, so the list always
+            // goes there.
+            Verbose::new(parsed.verbose, false),
             &parsed.files,
             parsed.same_permissions,
             parsed.old_files,
-        )
-    } else if parsed.list {
-        do_list_main(
+        ),
+        Mode::List => do_list_main(
             parsed.archive_file.as_deref(),
             parsed.verbose,
             &parsed.files,
-        )
-    } else {
-        // GNU's own sentence, listing options this tar does not have. That is
-        // deliberate: the message tells the reader what the *format* accepts,
-        // and a user who reaches for `-r` after reading it gets a specific
-        // `invalid option` rather than being told twice that they typed
-        // nothing. The status is 2, not argp's 64 — this is not a malformed
-        // command line, it is a well-formed one that asked for no operation.
-        diag!("tar: You must specify one of the '-Acdtrux', '--delete' or '--test-label' options");
-        diag!("{TRY_HELP}");
-        EXIT_FATAL
+        ),
+        Mode::Unset => {
+            // GNU's own sentence, listing options this tar does not have. That
+            // is deliberate: the message tells the reader what the *format*
+            // accepts, and a user who reaches for `-r` after reading it gets a
+            // specific `invalid option` rather than being told twice that they
+            // typed nothing. The status is 2, not argp's 64 — this is not a
+            // malformed command line, it is a well-formed one that asked for no
+            // operation.
+            //
+            // Note the single space before `'--test-label'` here where
+            // [`Mode::choose`]'s sentence has two. Both are copied from GNU as
+            // they stand; the doubled space is in the other string only.
+            diag!(
+                "tar: You must specify one of the '-Acdtrux', '--delete' or '--test-label' options"
+            );
+            diag!("{TRY_HELP}");
+            EXIT_FATAL
+        }
     };
 
     process::exit(status);
@@ -926,6 +1135,11 @@ enum NameTooLong {
     CannotSplit,
 }
 
+// The variants are classified on every host — `set_name` is shared — but only
+// the archive-creation path ever renders one, and that path reads `meta.mode()`
+// and so exists only on unix. Ungated, this is a `dead_code` warning on the
+// Windows host target.
+#[cfg(unix)]
 impl NameTooLong {
     /// GNU's wording, which names the limit in the first case and not in the
     /// second. Both end `; not dumped`, and both leave the archive otherwise
@@ -1066,6 +1280,27 @@ impl TarHeader {
         target.len() <= NAME_FIELD
     }
 
+    /// Store an owner *name* in one of the two 32-byte `uname`/`gname` fields.
+    ///
+    /// Unlike `name`, these fields are NUL-terminated even when full, so the
+    /// usable width is 31 and a longer name is cut to fit — silently. That is
+    /// measured, not assumed (`tar-uname2.sh`): GNU stores 31 `u`s and a NUL for
+    /// an owner named with 32, 33 or 40 of them, says nothing about it, and
+    /// exits 0. It follows from tar's `tar_copy_str`, which stops at the first
+    /// NUL *or* at the field width, leaving the array's own zero byte in place.
+    ///
+    /// An empty name is stored as an all-NUL field, which is how ustar spells
+    /// "no name recorded" — the reader then falls back to the numeric id. That
+    /// is the same encoding `--numeric-owner` produces, deliberately: an id with
+    /// no account is indistinguishable from one whose name was suppressed, and
+    /// both mean "you only have the number".
+    fn set_owner_name(field: &mut [u8; 32], name: &[u8]) {
+        let kept = name.len().min(field.len().saturating_sub(1));
+        if let (Some(dst), Some(src)) = (field.get_mut(..kept), name.get(..kept)) {
+            dst.copy_from_slice(src);
+        }
+    }
+
     /// Write `value` as a zero-padded octal string into `field`.  The
     /// field always ends with a trailing null byte, matching ustar.
     fn set_octal(field: &mut [u8], value: u64) {
@@ -1114,27 +1349,66 @@ impl TarHeader {
     }
 }
 
-/// Where `-v` writes its running list of member names.
+/// How much `-v` says, and where it says it.
+///
+/// # How much: GNU keeps one counter, and `-t` bumps it
+///
+/// There is no `verbose` *flag* in GNU tar — there is a single integer,
+/// `verbose_option`, that `-v` increments. So does `-t`/`--list`, which is why
+/// `tar -tt` prints the same long listing as `tar -tv` and why `--list --list`
+/// does too. `-c` and `-x` do not bump it. Rendering is then uniform across all
+/// three modes, and saturates at two:
+///
+/// | Level | Reached by | Prints |
+/// |---|---|---|
+/// | 0 | nothing | nothing |
+/// | 1 | `-cv`, `-xv`, `-t` | member names |
+/// | 2+ | `-cvv`, `-xvv`, `-tv`, `-tt` | the long `ls -l`-ish line |
+///
+/// All measured against GNU tar 1.35 (`tar-verbose1.sh`, `tar-verbose2.sh`);
+/// `-vvv` renders exactly as `-vv`. Ours had a boolean per mode, so `-cvv` and
+/// `-xvv` printed bare names and `-tt` printed names where GNU printed the long
+/// form.
+///
+/// # Where: stdout, except when the archive is already there
 ///
 /// This used to be "stderr, always", which is wrong in the ordinary case and
 /// right in exactly one unusual one. GNU writes the list to **stdout**, because
 /// it is output, not a diagnostic: `tar -cvf a.tar d > manifest` is how you get
 /// a manifest, and ours produced an empty `manifest` and printed the names past
 /// the redirection onto the terminal. The single exception is an archive being
-/// written *to* stdout — `tar -cvf - d` — where the names would be interleaved
+/// written *to* stdout — `tar -cv - d` — where the names would be interleaved
 /// with the archive bytes and ruin both; there, and only there, they go to
-/// stderr.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Verbose {
-    /// No `-v`: say nothing.
-    Off,
-    /// The usual case.
-    Stdout,
-    /// `-cv` with the archive itself on stdout.
-    Stderr,
+/// stderr. Measured for the long form too: `tar -cvv t > /dev/null` puts every
+/// long line on stderr.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+struct Verbose {
+    /// GNU's counter, saturated at 2 — nothing above that renders differently,
+    /// and saturating here is what keeps `-vvvv` from overflowing a `u8`.
+    level: u8,
+    /// The archive itself is on stdout, so the listing must not be.
+    to_stderr: bool,
 }
 
 impl Verbose {
+    /// The counter as parsing produced it, and where this mode sends its list.
+    fn new(level: u8, to_stderr: bool) -> Self {
+        Self {
+            level: level.min(2),
+            to_stderr,
+        }
+    }
+
+    /// Says nothing at all — no `-v`, and not a mode that bumps the counter.
+    fn silent(self) -> bool {
+        self.level == 0
+    }
+
+    /// Level 2 or more: the long line rather than the bare name.
+    fn long(self) -> bool {
+        self.level >= 2
+    }
+
     /// Announce one member name, rendered exactly as a diagnostic would render
     /// it.
     ///
@@ -1155,13 +1429,21 @@ impl Verbose {
         let mut line = Vec::with_capacity(shown.len().saturating_add(1));
         line.extend_from_slice(shown.as_bytes());
         line.push(b'\n');
-        match self {
-            Self::Off => {}
+        self.write(&line);
+    }
+
+    /// Emit an already-rendered line, newline included.
+    fn write(self, line: &[u8]) {
+        if self.silent() {
+            return;
+        }
+        if self.to_stderr {
+            stdfd::diag_bytes(line);
+        } else {
             // Unbuffered, by fd. Nothing else in `-c`/`-x` writes to stdout, so
             // there is no ordering to keep with a `BufWriter`, and a failure to
             // write the listing must not abort the archive.
-            Self::Stdout => drop(stdfd::write_all(1, &line)),
-            Self::Stderr => stdfd::diag_bytes(&line),
+            drop(stdfd::write_all(1, line));
         }
     }
 }
@@ -1379,6 +1661,70 @@ impl PrefixNotice {
     }
 }
 
+/// The account database, plus the answers already looked up in it.
+///
+/// ustar stores each member's owner *twice*: as a number, and as the name that
+/// number had on the machine the archive was written on. Only the name survives
+/// a move — uid 1000 is a different person on every machine — so an archive
+/// with the field left empty restores to whoever happens to hold the number
+/// there. Ours left it empty for every member of every archive it ever wrote,
+/// which is why this exists.
+///
+/// The cache is the reason it is a struct rather than two calls. Archiving a
+/// home directory means one lookup per member against a database that is a
+/// linear scan, all of them asking about the same one or two accounts; the map
+/// turns that into one scan per distinct id. GNU caches for the same reason,
+/// though it keeps only the most recent answer.
+///
+/// A name is stored only when the database has one. An id it does not know
+/// leaves the field empty, exactly as `--numeric-owner` would — measured
+/// (`tar-uname1.sh`): `tar --owner=4242` writes an empty `uname` and lists the
+/// member as `4242/…`. Leaving it empty is the honest encoding; inventing
+/// `"4242"` as a *name* would make the reader restore ownership to an account
+/// literally called `4242` if one existed.
+#[cfg(unix)]
+struct OwnerNames {
+    db: pwdb::Db,
+    users: BTreeMap<u32, Vec<u8>>,
+    groups: BTreeMap<u32, Vec<u8>>,
+}
+
+#[cfg(unix)]
+impl OwnerNames {
+    /// Read `/etc/passwd` and `/etc/group` once, for the whole run.
+    ///
+    /// Through `pwdb` and not libc's `getpwuid`, which on this system answers
+    /// "root" for uid 0 and nothing for anything else — see that crate's docs.
+    /// A missing or unreadable database yields an empty one rather than an
+    /// error: not knowing who uid 1000 is has an encoding in the format, so it
+    /// is not a failure and must not cost the user their archive.
+    fn load() -> Self {
+        Self {
+            db: pwdb::Db::load(),
+            users: BTreeMap::new(),
+            groups: BTreeMap::new(),
+        }
+    }
+
+    fn user(&mut self, uid: u32) -> &[u8] {
+        let db = &self.db;
+        self.users.entry(uid).or_insert_with(|| {
+            db.user_by_uid(uid)
+                .map(|u| u.name.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    fn group(&mut self, gid: u32) -> &[u8] {
+        let db = &self.db;
+        self.groups.entry(gid).or_insert_with(|| {
+            db.group_by_gid(gid)
+                .map(|g| g.name.clone())
+                .unwrap_or_default()
+        })
+    }
+}
+
 /// The state one `-c` pass carries from member to member.
 ///
 /// This was four free functions threading a `&mut i32`. The hard-link table is
@@ -1399,6 +1745,15 @@ struct Creator<'a> {
     /// unique within one filesystem — a bare `ino` key would link together two
     /// unrelated files that happen to share a number across mount points.
     links: BTreeMap<(u64, u64), Vec<u8>>,
+    /// The passwd/group database and the answers already taken from it, for the
+    /// `uname`/`gname` header fields. See [`OwnerNames`].
+    owners: OwnerNames,
+    /// The running column maximum `-cvv`'s long lines are laid out against, and
+    /// the timezone their timestamps are rendered in. Both are unused at lower
+    /// verbosity; the zone is read once so that a long run cannot straddle a
+    /// zone change mid-archive.
+    ugswidth: usize,
+    zone: localtime::Zone,
     /// How much has already been stripped from a member name and from a hard
     /// link's target, so that the notice is issued once per *longer* prefix.
     /// This is why `tar -c ..` produces two lines, ``Removing leading `..'``
@@ -1421,6 +1776,61 @@ struct Creator<'a> {
 impl Creator<'_> {
     fn fail(&mut self) {
         self.status = EXIT_FATAL;
+    }
+
+    /// Say that this member went in, at whatever length `-v` was asked for.
+    ///
+    /// `shown` is the name **as the user gave it**, not as it was stored: `-cv`
+    /// on `/etc` lists `/etc/...` while the archive holds `etc/...`, and
+    /// measurement (`tar-cvv1.sh`) says `-cvv` does the same — the long line for
+    /// `tar -cvvf a.tar /tmp/x/a` names `/tmp/x/a`. So the long line is *not*
+    /// simply the `-tv` line of the archive we just wrote; every other column is,
+    /// which is why it goes through the same [`long_line`].
+    ///
+    /// The `Member` here is a description of the member just written, assembled
+    /// from the same `stat` the header was, rather than the header read back.
+    /// Both would render the same today. This one cannot drift into rendering a
+    /// *stored* name, which is the difference the paragraph above turns on.
+    fn announce(&mut self, shown: &[u8], meta: &fs::Metadata, typeflag: u8, linkname: &[u8]) {
+        use std::os::unix::fs::MetadataExt;
+        if self.verbose.silent() {
+            return;
+        }
+        if !self.verbose.long() {
+            self.verbose.line(shown);
+            return;
+        }
+        // Borrowed out first: the two lookups take `&mut self`, and the struct
+        // literal below borrows it again.
+        let uname = self.owners.user(meta.uid()).to_vec();
+        let gname = self.owners.group(meta.gid()).to_vec();
+        // ustar leaves these blank for every type but a device, and `long_line`
+        // reads them only for `3`/`4`, so the `rdev` of a plain file is not
+        // merely unused — asking for it would be meaningless.
+        let (devmajor, devminor) = if typeflag == b'3' || typeflag == b'4' {
+            split_dev(meta.rdev())
+        } else {
+            (0, 0)
+        };
+        let member = Member {
+            name: shown.to_vec(),
+            mode: meta.mode() & 0o7777,
+            uid: meta.uid(),
+            gid: meta.gid(),
+            // Trusted only for the types that carry data; `long_line` prints 0
+            // for the rest, which is why a hard link's `st_size` — the size of
+            // the file it names, not of the member — cannot leak into the line.
+            size: meta.len(),
+            mtime: meta.mtime(),
+            typeflag,
+            linkname: linkname.to_vec(),
+            devmajor,
+            devminor,
+            uname,
+            gname,
+        };
+        let line = long_line(&member, linkname, &mut self.ugswidth, &self.zone);
+        self.verbose.write(&line);
     }
 
     fn write(&mut self, buf: &[u8]) -> bool {
@@ -1472,8 +1882,21 @@ impl Creator<'_> {
     /// that wrong on a link or a device would make the extractor read the next
     /// member's header as file contents.
     fn header(&mut self, name: &[u8], meta: &fs::Metadata, dir: bool) -> Option<TarHeader> {
+        let name = self.stored_name(name, dir);
+        self.header_for(&name, meta)
+    }
+
+    /// [`header`](Self::header) for a name that has already been through
+    /// [`stored_name`](Self::stored_name).
+    ///
+    /// The split exists because the two halves happen at different times for a
+    /// regular file: GNU prints the prefix notice *before* it opens the file,
+    /// so a file it cannot open still announces the `/` it removed. Measured
+    /// (`tar-hardnotice3.sh`): `tar -cf x /abs/unreadable` says
+    /// `Removing leading '/' from member names` and only then `Cannot open`.
+    /// Ours built the whole header after the open and so said nothing at all.
+    fn header_for(&mut self, name: &[u8], meta: &fs::Metadata) -> Option<TarHeader> {
         use std::os::unix::fs::MetadataExt;
-        let name = &self.stored_name(name, dir);
         let mut header = TarHeader::new();
         if let Err(e) = header.set_name(name) {
             // Skipped, not fatal to the archive: GNU writes every other member
@@ -1487,6 +1910,10 @@ impl Creator<'_> {
         TarHeader::set_octal(&mut header.mode, u64::from(meta.mode()) & 0o7777);
         TarHeader::set_octal(&mut header.uid, u64::from(meta.uid()));
         TarHeader::set_octal(&mut header.gid, u64::from(meta.gid()));
+        // Beside each number, the name it stands for here. The number alone is
+        // meaningless on any other machine; see [`OwnerNames`].
+        TarHeader::set_owner_name(&mut header.uname, self.owners.user(meta.uid()));
+        TarHeader::set_owner_name(&mut header.gname, self.owners.group(meta.gid()));
         TarHeader::set_octal(&mut header.size, 0);
         TarHeader::set_octal(&mut header.mtime, meta.mtime().unsigned_abs());
         header.magic = *b"ustar\0";
@@ -1527,21 +1954,40 @@ impl Creator<'_> {
             self.add_dir(path, name, &meta);
             return;
         }
-        // A second name for an inode already archived is stored as a link to
-        // the first, whatever the two names are. Checked before the type
-        // dispatch because it applies to fifos and devices too, not just
-        // regular files, and checked only when the inode admits another name:
-        // a link count of one cannot have a second name to find.
-        if meta.nlink() > 1 {
-            let key = (meta.dev(), meta.ino());
-            if let Some(first) = self.links.get(&key) {
-                let first = first.clone();
-                self.add_link(name, &meta, b'1', &first);
-                return;
-            }
-            self.links.insert(key, name.to_vec());
+        // A second name for an inode already *written* is stored as a hard link
+        // to the first rather than as a second copy of it. Three parts of that
+        // sentence are load-bearing, and ours had all three wrong; measured in
+        // `tar-hardnotice3.sh` and `tar-hardnotice6.sh`:
+        //
+        //   *already written* — the entry is made after the member is in the
+        //     archive, not before. Ours registered first, so a member that
+        //     failed to be written was still a valid link target: two names for
+        //     a *socket* produced an archive holding one hard link and nothing
+        //     for it to point at, which no extractor can unpack.
+        //
+        //   *an inode* — the key is (device, inode) with no reference to the
+        //     link count. GNU dedupes a file named twice on one command line
+        //     even when its count is 1: `tar -cf x f f` stores `f` once and a
+        //     link record for the second. Ours gated on `nlink > 1` and wrote
+        //     the bytes twice, which for `tar -cf b.tar dir dir` is the whole
+        //     tree twice.
+        //
+        //   *regular file or symlink* — a fifo named twice gives two fifos, not
+        //     a link. Devices and sockets are grouped with the fifo here: they
+        //     are the same branch of GNU's dispatch and none of them can be
+        //     created on this machine to measure separately, but the fifo is
+        //     measured and the grouping is what GNU's code shape implies.
+        //
+        // `--hard-dereference` turns the whole mechanism off; ours has no such
+        // option yet, so there is nothing to gate on.
+        let key = (meta.dev(), meta.ino());
+        let linkable = ft.is_file() || ft.is_symlink();
+        if linkable && let Some(first) = self.links.get(&key) {
+            let first = first.clone();
+            self.add_link(name, &meta, b'1', &first);
+            return;
         }
-        if ft.is_symlink() {
+        let written = if ft.is_symlink() {
             let target = match fs::read_link(path) {
                 Ok(t) => os_bytes(t.as_os_str()).into_owned(),
                 Err(e) => {
@@ -1550,34 +1996,52 @@ impl Creator<'_> {
                     return;
                 }
             };
-            self.add_link(name, &meta, b'2', &target);
+            self.add_link(name, &meta, b'2', &target)
         } else if ft.is_file() {
-            self.add_regular(path, name, &meta);
+            self.add_regular(path, name, &meta)
         } else if ft.is_fifo() {
             self.add_special(name, &meta, b'6');
+            false
         } else if ft.is_char_device() {
             self.add_special(name, &meta, b'3');
+            false
         } else if ft.is_block_device() {
             self.add_special(name, &meta, b'4');
+            false
         } else if ft.is_socket() {
             // Not an error, and measured as such: a socket is a kernel object
             // with no contents an archive could hold, so GNU says so and still
             // exits 0. Skipping it silently would be the wrong half of that —
             // the file is missing from the archive and the user should know.
             diag!("tar: {}: socket ignored", escape(name));
+            false
         } else {
             diag!("tar: {}: Unknown file type; file ignored", escape(name));
             self.fail();
+            false
+        };
+        if linkable && written {
+            // The *unstripped* name, stripped again through the link-target
+            // notice when it is actually used as one. Stripping is idempotent,
+            // so the stored bytes come out the same either way; what the delay
+            // buys is GNU's diagnostic order, which reports the link-target
+            // prefix at the member that links rather than at the member that
+            // was linked to.
+            self.links.insert(key, name.to_vec());
         }
     }
 
     /// A member that is a name pointing at another name and nothing else: a
     /// symlink (`2`) or a hard link (`1`). Both store zero bytes of data.
-    fn add_link(&mut self, name: &[u8], meta: &fs::Metadata, typeflag: u8, target: &[u8]) {
+    ///
+    /// Returns whether the member reached the archive, which is what decides
+    /// whether its name may later be linked to; see the link table in
+    /// [`add_to_archive`](Self::add_to_archive).
+    fn add_link(&mut self, name: &[u8], meta: &fs::Metadata, typeflag: u8, target: &[u8]) -> bool {
         // The order is GNU's: the member name's prefix is reported before the
         // link target's, because `header` runs first.
         let Some(mut header) = self.header(name, meta, false) else {
-            return;
+            return false;
         };
         let target = &if typeflag == b'1' {
             self.stored_link_target(target)
@@ -1597,9 +2061,11 @@ impl Creator<'_> {
             self.fail();
         }
         header.compute_checksum();
-        if self.write(header.as_bytes()) {
-            self.verbose.line(name);
+        if !self.write(header.as_bytes()) {
+            return false;
         }
+        self.announce(name, meta, typeflag, target);
+        true
     }
 
     /// A fifo (`6`) or a device (`3`/`4`): a header, no data.
@@ -1616,12 +2082,15 @@ impl Creator<'_> {
         }
         header.compute_checksum();
         if self.write(header.as_bytes()) {
-            self.verbose.line(name);
+            self.announce(name, meta, typeflag, b"");
         }
     }
 
     /// A regular file: a header, then its contents padded out to a block.
-    fn add_regular(&mut self, path: &Path, name: &[u8], meta: &fs::Metadata) {
+    ///
+    /// Returns whether the member reached the archive; see
+    /// [`add_to_archive`](Self::add_to_archive).
+    fn add_regular(&mut self, path: &Path, name: &[u8], meta: &fs::Metadata) -> bool {
         // The header commits to a length, so the body must be exactly that
         // many bytes however the read goes. Writing fewer would not merely
         // truncate this member: the extractor reads a fixed number of blocks
@@ -1629,26 +2098,34 @@ impl Creator<'_> {
         // offset and the whole archive after this point would be garbage.
         let declared = meta.len();
 
+        // The name is stripped *before* the open, because that is the order the
+        // diagnostics come out in: GNU announces the prefix it removed and only
+        // then reports that it could not open the file. Building the header
+        // after the open put ours the other way round, and for a lone
+        // unreadable member it swallowed the notice entirely. Measured,
+        // `tar-hardnotice3.sh`.
+        let stored = self.stored_name(name, false);
+
         let mut f = match File::open(path) {
             Ok(f) => f,
             Err(e) => {
                 diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
                 self.fail();
-                return;
+                return false;
             }
         };
 
-        let Some(mut header) = self.header(name, meta, false) else {
-            return;
+        let Some(mut header) = self.header_for(&stored, meta) else {
+            return false;
         };
         TarHeader::set_octal(&mut header.size, declared);
         header.typeflag = b'0';
         header.compute_checksum();
         if !self.write(header.as_bytes()) {
-            return;
+            return false;
         }
 
-        self.verbose.line(name);
+        self.announce(name, meta, b'0', b"");
 
         let mut remaining = declared;
         let mut buf = [0u8; BLOCK_SIZE];
@@ -1678,7 +2155,7 @@ impl Creator<'_> {
                 pad.fill(0);
             }
             if !self.write(&buf) {
-                return;
+                return false;
             }
             remaining = remaining.saturating_sub(want as u64);
         }
@@ -1692,6 +2169,10 @@ impl Creator<'_> {
             );
             self.fail();
         }
+        // Still a member of the archive, short or not: the blocks the header
+        // promised are all there, so a later name for the same inode links to
+        // it exactly as GNU's does.
+        true
     }
 
     /// A directory (`5`) and, after it, everything under it in name order.
@@ -1721,7 +2202,7 @@ impl Creator<'_> {
         // /etc` lists `/etc/...` while the archive holds `etc/...`. Measured.
         let mut shown = name.to_vec();
         shown.push(b'/');
-        self.verbose.line(&shown);
+        self.announce(&shown, meta, b'5', b"");
 
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
@@ -1794,6 +2275,9 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
         verbose,
         status: 0,
         links: BTreeMap::new(),
+        owners: OwnerNames::load(),
+        ugswidth: UGSWIDTH_MIN,
+        zone: localtime::Zone::from_env(),
         prefixes: PrefixNotice::new(),
         archive_id,
         writable: true,
@@ -3177,12 +3661,20 @@ const _: () = assert!(core::mem::size_of::<CStat>() == 144);
 /// same number, and Linux's packing puts the low 8 bits of the minor and the
 /// low 12 of the major where a naive `(major << 8) | minor` would put something
 /// else entirely.
+///
+/// `#[cfg(unix)]` with its three callers: the only thing that rebuilds a
+/// `dev_t` is `Located::make_device`, and the non-unix twin of that refuses the
+/// member outright rather than inventing a device number for a system with no
+/// `mknod`.
+#[cfg(unix)]
 fn make_dev(major: u64, minor: u64) -> u64 {
     ((major & 0xfff) << 8) | ((major & !0xfff) << 32) | (minor & 0xff) | ((minor & !0xff) << 12)
 }
 
 /// The `S_IFMT` bits `mknod` wants for each of the two device flavours.
+#[cfg(unix)]
 const S_IFCHR: u32 = 0o020000;
+#[cfg(unix)]
 const S_IFBLK: u32 = 0o060000;
 
 /// The file-type field of `st_mode`, and the value in it that means "directory".
@@ -3772,6 +4264,11 @@ fn do_extract(
     let mut prefixes = PrefixNotice::new();
     let mut selector = Selector::new(members);
     let umask = read_umask();
+    // Only `-xvv` uses these, but both are cheap and reading `TZ` once up front
+    // is what stops a long extraction from straddling a zone change mid-file —
+    // the same reason `do_list_main` resolves it before the first member.
+    let mut ugswidth = UGSWIDTH_MIN;
+    let zone = localtime::Zone::from_env();
     // Directory metadata is applied last, in reverse order. It has to be: a
     // directory's mtime is bumped by every child written into it, and a
     // directory whose stored mode has no write bit cannot receive children at
@@ -3782,7 +4279,7 @@ fn do_extract(
     // The same for every member except the directories, which flip one field.
     let ovw = Overwriting {
         old_files,
-        verbose: verbose != Verbose::Off,
+        verbose: !verbose.silent(),
         directory_member: false,
     };
 
@@ -3819,7 +4316,16 @@ fn do_extract(
         // `.` member of an archive made with `tar -cf x.tar .`. No slash is
         // appended for a directory either — a type-`5` member stored without
         // one is announced without one (`tar-rules3.sh`).
-        if verbose != Verbose::Off {
+        //
+        // At level 2 — `-xvv` — it is the same long line `-tv` prints, from the
+        // same renderer and the same header. That is not an assumption: measured
+        // (`tar-verbose2.sh`), `tar -xvvf a.tar` and `tar -tvf a.tar` produce
+        // byte-identical listings, column arithmetic included, which is why the
+        // running `ugswidth` maximum lives beside the walk here exactly as it
+        // does in `list_archive`.
+        if verbose.long() {
+            verbose.write(&long_line(member, &link_target, &mut ugswidth, &zone));
+        } else {
             verbose.line(raw_name);
         }
 
@@ -4290,7 +4796,7 @@ fn extract_regular_file(
     true
 }
 
-fn do_list_main(archive_file: Option<&OsStr>, verbose: bool, members: &[OsString]) -> i32 {
+fn do_list_main(archive_file: Option<&OsStr>, verbose: u8, members: &[OsString]) -> i32 {
     let mut input: Box<dyn Read> = match archive_file {
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
@@ -4356,10 +4862,15 @@ const UGSWIDTH_MIN: usize = 18;
 /// both the bytes written and *why* the read ended — the old version returned
 /// `io::Result<()>` and answered `Ok(())` for a truncated archive, a corrupt
 /// one, and a file that was never an archive alike.
+///
+/// `verbose` is the counter, not a flag. Listing is the mode where that matters
+/// most: `-t` alone is already level 1 because `-t` bumps it, so the interesting
+/// threshold here is 2 — reached by `-tv`, and equally by `-tt`. See
+/// [`Verbose`].
 fn list_archive(
     input: &mut dyn Read,
     out: &mut dyn Write,
-    verbose: bool,
+    verbose: u8,
     selector: &mut Selector,
     zone: &localtime::Zone,
 ) -> (Stop, Option<io::Error>) {
@@ -4398,7 +4909,7 @@ fn list_archive(
         // feedable back to `tar -x`, so the bytes must survive — was wrong on
         // its own terms: GNU's output is not feedable back either, and a name
         // containing a newline would put two lines in the manifest.
-        let line = if verbose {
+        let line = if verbose >= 2 {
             long_line(member, &link_target, &mut ugswidth, zone)
         } else {
             let mut l = escape(&member.name).into_bytes();
@@ -4605,6 +5116,18 @@ mod tests {
 
     /// Build an argv out of raw byte strings, so a test can pass an argument
     /// that no `&str` can hold.
+    ///
+    /// `#[cfg(unix)]`, along with every test that calls it, because on a
+    /// Windows host it cannot do what its name says: `os_from_bytes` there is
+    /// `String::from_utf8_lossy`, documented as lossy in `quoting`, so
+    /// `b"caf\xe9"` arrives as `caf\u{FFFD}` and the byte the test is about
+    /// never reaches the parser. Ungated, six of these fail outright and two
+    /// pass while testing the replacement character rather than the byte —
+    /// which is worse, because a green test that checked something else is a
+    /// claim of coverage that is not there. This went unnoticed until
+    /// 2026-08-30 only because the whole binary failed to compile for a
+    /// non-unix host; see the import split at the top of this file.
+    #[cfg(unix)]
     fn b(items: &[&[u8]]) -> Vec<OsString> {
         items.iter().map(|x| os_from_bytes(x)).collect()
     }
@@ -4644,17 +5167,21 @@ mod tests {
     /// reason it stopped. The zone is UTC rather than the machine's so that a
     /// timestamp assertion means the same thing on every machine that runs the
     /// suite.
+    ///
+    /// Level 1 is what a bare `-t` produces: `-t` bumps the counter once, so
+    /// the plain listing is level 1, not level 0 (which is silent).
     fn list_names(input: &[u8], out: &mut Vec<u8>) -> Stop {
         let mut sel = Selector::new(&[]);
-        let (stop, err) = list_archive(&mut &input[..], out, false, &mut sel, &Zone::utc());
+        let (stop, err) = list_archive(&mut &input[..], out, 1, &mut sel, &Zone::utc());
         assert!(err.is_none(), "unexpected write error listing to a Vec");
         stop
     }
 
-    /// As [`list_names`], in the long (`-tv`) form.
+    /// As [`list_names`], in the long (`-tv`) form — level 2, the counter's
+    /// ceiling.
     fn list_long(input: &[u8], out: &mut Vec<u8>) -> Stop {
         let mut sel = Selector::new(&[]);
-        let (stop, err) = list_archive(&mut &input[..], out, true, &mut sel, &Zone::utc());
+        let (stop, err) = list_archive(&mut &input[..], out, 2, &mut sel, &Zone::utc());
         assert!(err.is_none(), "unexpected write error listing to a Vec");
         stop
     }
@@ -4701,7 +5228,7 @@ mod tests {
     #[test]
     fn parse_create_with_file() {
         let a = run_args(&s(&["-c", "-f", "out.tar", "a", "b"])).unwrap();
-        assert!(a.create);
+        assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.files, s(&["a", "b"]));
     }
@@ -4710,8 +5237,8 @@ mod tests {
     fn parse_clustered_create_verbose_file() {
         // -cvf out.tar a -- the f consumes the next argv element.
         let a = run_args(&s(&["-cvf", "out.tar", "a"])).unwrap();
-        assert!(a.create);
-        assert!(a.verbose);
+        assert_eq!(a.mode, Mode::Create);
+        assert_eq!(a.verbose, 1);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.files, s(&["a"]));
     }
@@ -4719,7 +5246,7 @@ mod tests {
     #[test]
     fn parse_extract_with_directory() {
         let a = run_args(&s(&["-x", "-C", "/tmp", "-f", "in.tar"])).unwrap();
-        assert!(a.extract);
+        assert_eq!(a.mode, Mode::Extract);
         assert_eq!(a.directory.as_deref(), Some(OsStr::new("/tmp")));
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("in.tar")));
     }
@@ -4727,7 +5254,7 @@ mod tests {
     #[test]
     fn parse_list() {
         let a = run_args(&s(&["-tf", "x.tar"])).unwrap();
-        assert!(a.list);
+        assert_eq!(a.mode, Mode::List);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("x.tar")));
     }
 
@@ -4760,7 +5287,7 @@ mod tests {
     fn parse_files_with_dashes_handled() {
         // Bare positional arg starting with non-dash is a file.
         let a = run_args(&s(&["-c", "f1", "f2"])).unwrap();
-        assert!(a.create);
+        assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.files, s(&["f1", "f2"]));
     }
 
@@ -4771,9 +5298,10 @@ mod tests {
     // `B-tar-READ-EVERY-PATH-AS-UTF-8`.
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn parse_keeps_an_operand_that_is_not_utf8() {
         let a = run_args(&b(&[b"-c", b"caf\xe9", b"ok"])).unwrap();
-        assert!(a.create);
+        assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.files, b(&[b"caf\xe9", b"ok"]));
         // Not merely "did not crash": the bytes are the ones passed in, so the
         // file that gets archived is the file that was named.
@@ -4781,6 +5309,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn parse_keeps_a_dash_f_value_that_is_not_utf8() {
         let a = run_args(&b(&[b"-cf", b"\xff\xfe.tar", b"x"])).unwrap();
         let f = a.archive_file.unwrap();
@@ -4788,14 +5317,16 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn parse_keeps_a_dash_c_value_that_is_not_utf8() {
         let a = run_args(&b(&[b"-x", b"-C", b"/tmp/d\x80r"])).unwrap();
-        assert!(a.extract);
+        assert_eq!(a.mode, Mode::Extract);
         let d = a.directory.unwrap();
         assert_eq!(os_bytes(&d).as_ref(), b"/tmp/d\x80r");
     }
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn parse_refuses_a_cluster_byte_that_is_not_an_option_without_panicking() {
         // A cluster is walked byte by byte, so a `-` followed by something
         // that is not UTF-8 at all is refused like any other unknown flag
@@ -4825,7 +5356,9 @@ mod tests {
             "x",
         ]))
         .unwrap();
-        assert!(a.create && a.verbose && a.same_permissions);
+        assert_eq!(a.mode, Mode::Create);
+        assert_eq!(a.verbose, 1);
+        assert!(a.same_permissions);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.directory.as_deref(), Some(OsStr::new("/tmp")));
         assert_eq!(a.files, s(&["x"]));
@@ -4840,7 +5373,7 @@ mod tests {
             s(&["--extract", "--file", "in.tar"]),
         ] {
             let a = run_args(&argv).unwrap();
-            assert!(a.extract);
+            assert_eq!(a.mode, Mode::Extract);
             assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("in.tar")));
         }
     }
@@ -4848,8 +5381,8 @@ mod tests {
     #[test]
     fn parse_accepts_gnus_alias_spellings() {
         // Two names, one option, in both of GNU's pairs.
-        assert!(run_args(&s(&["--get"])).unwrap().extract);
-        assert!(run_args(&s(&["--extract"])).unwrap().extract);
+        assert_eq!(run_args(&s(&["--get"])).unwrap().mode, Mode::Extract);
+        assert_eq!(run_args(&s(&["--extract"])).unwrap().mode, Mode::Extract);
         assert!(
             run_args(&s(&["--same-permissions"]))
                 .unwrap()
@@ -4860,6 +5393,131 @@ mod tests {
                 .unwrap()
                 .same_permissions
         );
+    }
+
+    #[test]
+    fn naming_two_different_modes_is_a_usage_error() {
+        // The bug this replaced: three independent booleans let the last letter
+        // win, so `tar -cxf a.tar dir` *created* the archive it was meant to
+        // unpack. GNU refuses the command line instead, and the wording is the
+        // one thing here worth reading twice — it carries a double space after
+        // `or`, which is in GNU's source string and so is in ours.
+        const CONFLICT: &str =
+            "You may not specify more than one '-Acdtrux', '--delete' or  '--test-label' option";
+        for argv in [
+            s(&["-cx"]),
+            s(&["-c", "-x"]),
+            s(&["-x", "-c"]),
+            s(&["-ct"]),
+            s(&["-tx"]),
+            s(&["-cxf", "a.tar", "dir"]),
+            s(&["--create", "--extract"]),
+            s(&["--create", "--get"]),
+            s(&["-x", "--list"]),
+            // The old style reaches the same check, since it is a splice into
+            // argv and not a path of its own.
+            s(&["cxf", "a.tar", "dir"]),
+        ] {
+            let e = run_args(&argv).unwrap_err();
+            assert_eq!(e.sentence, CONFLICT, "{argv:?}");
+            // tar's own USAGE_ERROR, so 2 rather than argp's 64.
+            assert_eq!(e.status, EXIT_FATAL, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn naming_one_mode_twice_or_by_two_names_is_allowed() {
+        // The test is whether the *value* would change, not whether a letter
+        // was seen twice — the same rule the overwrite family follows, and the
+        // reason both are one setting rather than a set of flags. `-x --get` is
+        // the case that shows it is about the value: two different spellings,
+        // one mode, accepted.
+        assert_eq!(run_args(&s(&["-x", "-x"])).unwrap().mode, Mode::Extract);
+        assert_eq!(
+            run_args(&s(&["-x", "-x", "-x"])).unwrap().mode,
+            Mode::Extract
+        );
+        assert_eq!(run_args(&s(&["-x", "--get"])).unwrap().mode, Mode::Extract);
+        assert_eq!(
+            run_args(&s(&["--extract", "--get"])).unwrap().mode,
+            Mode::Extract
+        );
+        assert_eq!(
+            run_args(&s(&["-c", "--create"])).unwrap().mode,
+            Mode::Create
+        );
+    }
+
+    #[test]
+    fn a_second_mode_is_refused_before_help_is_reached() {
+        // `--help` and `--version` return the moment they are parsed, so what
+        // decides is argv order — and GNU agrees: `tar -cx --help` is the
+        // conflict, not the help text. Measured, `tar-mode1.sh`.
+        assert!(run_args(&s(&["-cx", "--help"])).is_err());
+        assert!(run_args(&s(&["-cx", "--version"])).is_err());
+        assert!(matches!(
+            parse_args(&s(&["--help", "-cx"])),
+            Ok(Request::Help)
+        ));
+    }
+
+    #[test]
+    fn no_mode_at_all_is_not_the_parsers_error() {
+        // It is a well-formed command line that asked for no operation, so the
+        // parser accepts it and `main` reports it — with a *different* sentence
+        // (`You must specify one of …`, single-spaced) from the conflict one.
+        assert_eq!(run_args(&s(&["-f", "a.tar"])).unwrap().mode, Mode::Unset);
+    }
+
+    #[test]
+    fn verbosity_is_one_counter_that_t_bumps_as_well_as_v() {
+        // GNU's `verbose_option` is an `int` that `-v` increments — and so does
+        // `-t`/`--list`, because listing *is* the first level of verbosity.
+        // `-c` and `-x` do not. Measured, `tar-verbose1.sh`: `tar -tt` prints
+        // the same long lines as `tar -tv`, and `tar --list --list` likewise.
+        for (argv, want) in [
+            (s(&["-c"]), 0u8),
+            (s(&["-x"]), 0),
+            (s(&["-cc"]), 0),
+            (s(&["-cv"]), 1),
+            (s(&["-t"]), 1),
+            (s(&["--list"]), 1),
+            (s(&["-tt"]), 2),
+            (s(&["--list", "--list"]), 2),
+            (s(&["-tv"]), 2),
+            (s(&["-cvv"]), 2),
+            (s(&["-xvv"]), 2),
+        ] {
+            assert_eq!(
+                run_args(&argv).unwrap().verbose,
+                want,
+                "verbosity of {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn verbosity_past_two_still_renders_as_two() {
+        // The counter keeps climbing in GNU, but nothing reads a third level:
+        // `-vvv` and `-vvvvv` print exactly what `-vv` prints. Saturating in
+        // `Verbose::new` rather than in the parser keeps the *parsed* count
+        // faithful to argv — which is what the parser tests above assert — while
+        // giving the renderer a value it can compare against a fixed ceiling.
+        assert_eq!(run_args(&s(&["-cvvv"])).unwrap().verbose, 3);
+        assert_eq!(run_args(&s(&["-cvvvvv"])).unwrap().verbose, 5);
+        assert_eq!(Verbose::new(3, false).level, 2);
+        assert_eq!(Verbose::new(255, false).level, 2);
+        assert_eq!(Verbose::new(2, false), Verbose::new(9, false));
+    }
+
+    #[test]
+    fn the_verbosity_levels_are_silent_then_names_then_long() {
+        let silent = Verbose::new(0, false);
+        assert!(silent.silent() && !silent.long());
+        let names = Verbose::new(1, false);
+        assert!(!names.silent() && !names.long());
+        let long = Verbose::new(2, false);
+        assert!(!long.silent() && long.long());
     }
 
     #[test]
@@ -4929,11 +5587,156 @@ mod tests {
     }
 
     #[test]
+    fn the_old_option_style_is_the_way_most_people_write_tar() {
+        // `tar cvf a.tar dir` — no dash anywhere, and the `f`'s value is the
+        // word after the whole cluster, not after the `f`.
+        let a = run_args(&s(&["cvf", "a.tar", "dir"])).unwrap();
+        assert_eq!(a.mode, Mode::Create);
+        assert_eq!(a.verbose, 1);
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("a.tar")));
+        assert_eq!(a.files, s(&["dir"]));
+    }
+
+    #[test]
+    fn old_option_values_are_handed_out_in_letter_order() {
+        // The same three words either way; which letter gets which depends only
+        // on the order the letters are written in. This is the whole of the
+        // old style's argument rule, and the pair of cases is the only way to
+        // state it — either alone passes under a "first value goes to `-f`"
+        // misreading. Measured against GNU: `tar-old1.sh`.
+        let a = run_args(&s(&["cfC", "a.tar", "dir", "x"])).unwrap();
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("a.tar")));
+        assert_eq!(a.directory.as_deref(), Some(OsStr::new("dir")));
+        assert_eq!(a.files, s(&["x"]));
+
+        let a = run_args(&s(&["cCf", "dir", "a.tar", "x"])).unwrap();
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("a.tar")));
+        assert_eq!(a.directory.as_deref(), Some(OsStr::new("dir")));
+        assert_eq!(a.files, s(&["x"]));
+    }
+
+    #[test]
+    fn only_the_first_argument_is_an_old_option_cluster() {
+        // A cluster later on is a file name, and a dash-less word after a
+        // *dashed* first argument is likewise. Both measured; the second is
+        // what stops `tar -c f a.tar` from quietly becoming `-c -f a.tar`.
+        let a = run_args(&s(&["cf", "a.tar", "dir", "cvf"])).unwrap();
+        assert_eq!(a.files, s(&["dir", "cvf"]));
+
+        let a = run_args(&s(&["-c", "f", "a.tar", "dir"])).unwrap();
+        assert!(a.archive_file.is_none());
+        assert_eq!(a.files, s(&["f", "a.tar", "dir"]));
+    }
+
+    #[test]
+    fn an_empty_first_argument_is_a_cluster_of_no_letters() {
+        // It consumes nothing and disappears, so what follows parses as if it
+        // had been alone. Not a special case in the code — it falls out of the
+        // rule — but it is the one edge a caller hits by accident, from an
+        // unset shell variable. Measured: `tar '' -tf a.tar` lists.
+        let a = run_args(&s(&["", "-tf", "a.tar"])).unwrap();
+        assert_eq!(a.mode, Mode::List);
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("a.tar")));
+        assert!(a.files.is_empty());
+    }
+
+    #[test]
+    fn an_old_option_cluster_still_goes_through_the_ordinary_parser() {
+        // The transform is a splice into argv, not a mode the parser enters, so
+        // everything downstream still applies: a long option after the cluster,
+        // `--` after it, and an unknown letter reported by getopt in getopt's
+        // words (`invalid option -- 'Q'`, status 64) rather than by anything
+        // that knows about old options.
+        let a = run_args(&s(&["cf", "a.tar", "--verbose", "dir"])).unwrap();
+        assert_eq!(a.mode, Mode::Create);
+        assert_eq!(a.verbose, 1);
+        assert_eq!(a.files, s(&["dir"]));
+
+        let a = run_args(&s(&["cf", "a.tar", "--", "-dir"])).unwrap();
+        assert_eq!(a.files, s(&["-dir"]));
+
+        let e = run_args(&s(&["cQf", "a.tar", "dir"])).unwrap_err();
+        assert_eq!(e.sentence, "invalid option -- 'Q'");
+        assert_eq!(e.status, EXIT_USAGE);
+    }
+
+    #[test]
+    fn an_old_option_letter_that_runs_out_of_words_is_tars_own_error() {
+        // tar's sentence, with its trailing period, naming the *first* letter
+        // that ran out — and at status 2, not the 64 getopt uses for a missing
+        // option argument, because tar could not even finish building the argv.
+        // Measured: `tar cf` is 2 where `tar -cf` is 64.
+        let e = run_args(&s(&["cf"])).unwrap_err();
+        assert_eq!(e.sentence, "Old option 'f' requires an argument.");
+        assert_eq!(e.status, EXIT_FATAL);
+
+        // `Cf` names `C`: the letters are served in order, so the first one
+        // short of a word is the one reported even though `f` is short too.
+        let e = run_args(&s(&["Cf"])).unwrap_err();
+        assert_eq!(e.sentence, "Old option 'C' requires an argument.");
+    }
+
+    #[test]
+    fn takes_a_value_reads_the_short_option_table() {
+        // The point of deriving it: a letter added to `SHORT_OPTIONS` cannot be
+        // forgotten in the old-option path. Walk the whole table so the pair
+        // stays in step, and assert the shape the doc comment relies on — no
+        // `::` (an optional value, which `takes_a_value` would answer wrongly)
+        // and no leading `:` or `+`/`-` mode character, which would be read as
+        // a letter here.
+        let spec = SHORT_OPTIONS.as_bytes();
+        assert!(!matches!(spec.first(), Some(b':' | b'+' | b'-')));
+        let mut expected: Vec<u8> = Vec::new();
+        for (i, &c) in spec.iter().enumerate() {
+            if c == b':' {
+                assert_ne!(
+                    spec.get(i + 1),
+                    Some(&b':'),
+                    "an optional value in {SHORT_OPTIONS}"
+                );
+                continue;
+            }
+            if spec.get(i + 1) == Some(&b':') {
+                expected.push(c);
+            }
+            assert_eq!(
+                takes_a_value(c),
+                spec.get(i + 1) == Some(&b':'),
+                "letter {}",
+                c as char
+            );
+        }
+        // Spelled out as well as derived, so that a letter silently gaining or
+        // losing a `:` is a test failure and not a test that agrees with it.
+        assert_eq!(expected, b"fC");
+        assert!(!takes_a_value(b'Q'));
+    }
+
+    #[test]
+    #[cfg(unix)] // see `b()`
+    fn an_old_option_cluster_may_hold_bytes_that_are_not_utf8() {
+        // A cluster is argv, so it can hold any byte, and the byte has to reach
+        // the parser as itself. Going through `char` would widen `0xE9` into
+        // the two UTF-8 bytes of `é` and refuse the wrong letter — so this
+        // asserts on the reported byte, which is where that bug would show.
+        //
+        // The *spelling* is a deliberate, getopt-wide divergence: GNU's `%c`
+        // writes the raw `0xE9` to the terminal, and `getopt::named` escapes it
+        // instead (`\351`). Measured both, `tar-old-byte.sh`; the choice is
+        // documented at `getopt::named` and asserted there too, so this test is
+        // about *which byte* is named, not about how it is rendered.
+        let e = run_args(&b(&[b"c\xe9f", b"a.tar"])).unwrap_err();
+        assert_eq!(e.sentence, "invalid option -- '\\351'");
+        assert_eq!(e.status, EXIT_USAGE);
+    }
+
+    #[test]
     fn parse_accepts_an_unambiguous_abbreviation() {
         // `--extr` is a prefix of `--extract` alone. The resolved name is what
         // reaches the match arm, so no arm needs to know about abbreviations.
         let a = run_args(&s(&["--extr", "--verbo"])).unwrap();
-        assert!(a.extract && a.verbose);
+        assert_eq!(a.mode, Mode::Extract);
+        assert_eq!(a.verbose, 1);
     }
 
     #[test]
@@ -4949,7 +5752,7 @@ mod tests {
             err.sentence,
             "option '--verb' is ambiguous; possibilities: '--verbose' '--verbatim-files-from'"
         );
-        assert!(run_args(&s(&["--verbo"])).unwrap().verbose);
+        assert_eq!(run_args(&s(&["--verbo"])).unwrap().verbose, 1);
     }
 
     #[test]
@@ -5034,7 +5837,7 @@ mod tests {
         // branch and was looked for inside the archive, so this exited 2 with
         // `tar: --: Not found in archive` where GNU exits 0.
         let a = run_args(&s(&["-xf", "t.tar", "--", "a"])).unwrap();
-        assert!(a.extract);
+        assert_eq!(a.mode, Mode::Extract);
         assert_eq!(a.files, s(&["a"]));
     }
 
@@ -5043,7 +5846,7 @@ mod tests {
         // The point of the terminator: a member really called `--exclude` is
         // archivable, and a member called `-c` does not turn on create.
         let a = run_args(&s(&["-c", "--", "--exclude", "-c"])).unwrap();
-        assert!(a.create);
+        assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.files, s(&["--exclude", "-c"]));
     }
 
@@ -5052,7 +5855,8 @@ mod tests {
         // `-fout.tar` used to be read as more option letters and failed on the
         // `o`: `invalid option -- 'o'`.
         let a = run_args(&s(&["-cvfout.tar", "x"])).unwrap();
-        assert!(a.create && a.verbose);
+        assert_eq!(a.mode, Mode::Create);
+        assert_eq!(a.verbose, 1);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.files, s(&["x"]));
     }
@@ -5060,13 +5864,17 @@ mod tests {
     #[test]
     fn parse_permutes_options_after_operands() {
         // Measured: `tar -tf t.tar a --verbose` gives a long listing, so an
-        // option after an operand is still an option.
+        // option after an operand is still an option. It is *long* rather than
+        // plain because `-t` bumps the counter too: one from the `-t`, one from
+        // the `--verbose`, which is level 2.
         let a = run_args(&s(&["-tf", "t.tar", "a", "--verbose"])).unwrap();
-        assert!(a.list && a.verbose);
+        assert_eq!(a.mode, Mode::List);
+        assert_eq!(a.verbose, 2);
         assert_eq!(a.files, s(&["a"]));
     }
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn parse_keeps_a_long_option_value_that_is_not_utf8() {
         // The `=VALUE` half of a long option is a path like any other, and must
         // survive bytes that are not text.
@@ -5076,6 +5884,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn parse_refuses_a_long_name_that_is_not_utf8_without_panicking() {
         // No option name is non-ASCII, so such a name matches nothing; it must
         // reach the unrecognised path rather than failing some third way.
@@ -5092,9 +5901,7 @@ mod tests {
         // `scripts/getopt-ambiguity-check.py` re-derives the whole thing from
         // `tar --=x` at push time; this is the cheap local guard.
         assert_eq!(LONG_OPTIONS.len(), 172);
-        // Fully qualified: the file's `BTreeSet` import is `#[cfg(unix)]`, and
-        // this test is not.
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen = BTreeSet::new();
         for (name, _) in LONG_OPTIONS {
             assert!(seen.insert(*name), "duplicate long option: --{name}");
         }
@@ -5799,6 +6606,72 @@ mod tests {
     }
 
     #[test]
+    fn an_owner_name_is_cut_to_31_bytes_because_the_field_is_terminated() {
+        // Not 32, the field's width -- unlike `name`, which is legally
+        // unterminated when full, `uname` always keeps its NUL. Measured
+        // (`tar-uname2.sh`): GNU stores 31 `u`s and a NUL for an owner named
+        // with 32, 33 or 40 of them, prints no diagnostic, and exits 0.
+        let mut f = [0u8; 32];
+        TarHeader::set_owner_name(&mut f, b"inhahe");
+        assert_eq!(&f[..6], b"inhahe");
+        assert!(f[6..].iter().all(|&b| b == 0));
+
+        let mut f = [0u8; 32];
+        TarHeader::set_owner_name(&mut f, &[b'u'; 31]);
+        assert_eq!(&f[..31], &[b'u'; 31][..]);
+        assert_eq!(f[31], 0);
+
+        // The three GNU renders identically, terminator kept.
+        for len in [32usize, 33, 40] {
+            let mut f = [0u8; 32];
+            TarHeader::set_owner_name(&mut f, &vec![b'u'; len]);
+            assert_eq!(&f[..31], &[b'u'; 31][..], "len {len}");
+            assert_eq!(f[31], 0, "len {len}");
+        }
+    }
+
+    #[test]
+    fn an_id_with_no_account_leaves_the_owner_field_empty() {
+        // The tempting wrong answer is to fall back to the number. It would be
+        // wrong as a *name*: a reader restoring the archive on a machine that
+        // has an account literally called `4242` would hand the file to it.
+        // Empty is the format's own encoding for "you only have the number",
+        // and it is what GNU writes -- measured, `tar --owner=4242` leaves
+        // `uname` all-NUL and lists the member as `4242/...`.
+        let mut f = [0u8; 32];
+        TarHeader::set_owner_name(&mut f, b"");
+        assert!(f.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owner_names_come_from_the_database_and_are_cached() {
+        // The cache is not an optimisation detail worth a test on its own --
+        // it is tested because it is a *map keyed by id*, and the failure mode
+        // of getting that wrong is every member in the archive being stamped
+        // with the first member's owner.
+        let mut o = OwnerNames {
+            db: pwdb::Db::from_bytes(
+                b"alice:x:1000:1000:A:/home/alice:/bin/sh\n\
+                  bob:x:1001:2000:B:/home/bob:/bin/sh\n",
+                b"alice:x:1000:\nstaff:x:2000:alice\n",
+            ),
+            users: BTreeMap::new(),
+            groups: BTreeMap::new(),
+        };
+        assert_eq!(o.user(1000), b"alice");
+        assert_eq!(o.user(1001), b"bob");
+        assert_eq!(o.user(1000), b"alice");
+        assert_eq!(o.group(2000), b"staff");
+        // An id the database does not know: empty, and the emptiness is cached
+        // too, so a tree full of orphaned ids costs one scan and not one per
+        // member.
+        assert_eq!(o.user(4242), b"");
+        assert_eq!(o.group(4242), b"");
+        assert_eq!(o.users.len(), 3);
+    }
+
+    #[test]
     #[cfg(unix)]
     fn device_numbers_split_the_way_the_kernel_packs_them() {
         // /dev/null is 1,3 -- measured, GNU lists it as `crw-rw-rw- 0/0 1,3`.
@@ -6290,6 +7163,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // see `b()`
     fn selector_takes_an_operand_that_is_not_utf8() {
         let mut sel = Selector::new(&b(&[b"caf\xe9"]));
         assert!(sel.wants(b"caf\xe9"));

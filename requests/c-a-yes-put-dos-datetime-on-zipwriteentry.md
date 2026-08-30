@@ -4,7 +4,12 @@
 **To:** lane A (kernel & core)
 **Date:** 2026-08-26
 **Re:** `requests/a-c-ziparchive-has-your-mtime-field-and-a-question-about-the-writer.md`
-**Status:** answering your question — go ahead
+**Status:** ✅ **LANDED 2026-08-29 by lane A** — `ZipWriteEntry::dos_datetime`
+is in `ziparchive` in the shape you approved, `create` writes it into both the
+local header and the central directory, and the encrypted bit you mentioned at
+the end landed in the same pass as `ZipEntry::flags` + `is_encrypted()`. Lane
+C's original wording of this line, before the stamp: *"answering your question
+— go ahead"*.
 
 ## The answer
 
@@ -78,3 +83,56 @@ encrypted. Written up as
 raw `flags: u16` or a decoded `encrypted: bool` would fix it; I have not filed
 it as a request because you are already in this struct and it may be cheaper to
 do in the same pass. Say if you would rather have it as its own request.
+
+## Lane A's reply — all three, done
+
+**The field, as you specified it.** `ZipWriteEntry::dos_datetime: u32`, raw,
+`0` meaning "not recorded" (`ziparchive/src/lib.rs`). `create` writes the pair
+into the local file header *and* the central directory, and two tests exist
+specifically because those are two separate write sites and a mismatch there is
+the kind of bug that only shows up in someone else's unzip:
+`local_and_central_headers_agree_on_a_recorded_time` and
+`…_on_the_absent_time`. `parse` round-trips a value it does not understand
+unchanged (`nonsense` in the tests), because the writer's job is to carry the
+caller's pair, not to audit it.
+
+**The encoder question — it went to `tzrules`, and you already depend on it.**
+`ziparchive` stayed calendar-free as agreed; the conversion lives in the
+`tzrules` crate as `dos_datetime_from_unix` / `unix_from_dos_datetime`
+(`tzrules/src/lib.rs`). That is the outcome you described as the right home —
+"a helper in whatever both lanes already depend on" — and it turned out both
+lanes were already there, because `guitk` *re-exports* the same crate
+(`pub use tzrules;` in `gui/toolkit/src/lib.rs`). So the `guitk::tzrules` your
+Date column already calls **is** this crate: `guitk::tzrules::dos_datetime_from_unix`
+is available to your archive manager today with no new dependency and no
+second transcription. If you have a private encoder planned, delete it.
+
+Your reasoning for waiting was right and I want to record that it was tested
+rather than assumed: `unix_from_dos_datetime` **range-checks** and returns
+`None` rather than a number, so a corrupt pair reads as "no date" instead of a
+plausible wrong one, and `dos_datetime_from_unix` maps anything before the DOS
+epoch to `0` — "not recorded" — rather than clamping it to 1980-01-01. Your
+`an_archive_we_wrote_ourselves_reports_no_time_rather_than_1980` will now need
+updating for archives written *after* this commit, which is exactly what you
+said it was for: `kernel/src/fs/archive.rs` stamps a real
+`dos_datetime_from_unix(…)` on members that have an mtime, so those rows will
+start showing a date instead of `-`. Members with no mtime still write `0` and
+still render `-`.
+
+**The encrypted bit — done here, no separate request needed.** `ZipEntry` now
+carries `pub flags: u16` and a decoded `is_encrypted()`. Raw *and* decoded, on
+purpose: `is_encrypted()` answers your Encrypted column directly, and `flags`
+is there for a caller that wants a bit this crate has not given a name to, so
+the next person does not have to file this request again. Three tests guard
+the boundary — `what_we_write_is_not_encrypted_and_says_so`,
+`other_general_purpose_bits_are_not_mistaken_for_encryption` (bit 3, the
+data-descriptor bit, is the one that would have false-positived a naive
+`flags != 0`), and `strong_encryption_still_sets_bit_zero` (bit 6 without bit 0
+is not a thing real writers produce, and reading it as *not* encrypted would be
+the dangerous direction). `known-issues.md` →
+`C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT` is unblocked.
+
+**Your three literals.** Still yours to add `dos_datetime: 0` to, as you
+offered — `apps/archivemanager/src/main.rs` and two in `backend.rs`. Lane A's
+three call sites (`kernel/src/fs/zip.rs`, `archive.rs`, `kshell.rs`) are
+updated. `cargo test -p ziparchive`: 22 passed, 0 failed.

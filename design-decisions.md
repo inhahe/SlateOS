@@ -50846,3 +50846,394 @@ that checked the whole command line before returning would fail row 1; one that
 scanned for `--help` up front would fail rows 2 and 4. A 19-case shape
 differential against the real binary — exit status, which stream, which class of
 message — found zero differences.
+
+---
+
+## 705. libc's `openat2` will forward to the kernel, as six flat arguments and not as Linux's `open_how` struct — and `tar`'s hand-rolled walk stays regardless
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous, lane B)
+**Lane:** B
+
+**In short:** `openat2` is a system call that opens a file *and* takes a list of
+safety restrictions on how the filename may be resolved — chiefly "do not let
+this walk leave the directory I gave you", which is what stops a malicious
+archive from writing outside where you unpacked it. Our C library recognises
+those restrictions but cannot carry out two of them, so it refuses them outright
+rather than pretending. Lane A has now built the missing enforcement in the
+kernel and offered a system-call number to reach it. Two things had to be
+decided: whether to take the offer, and what the call should *look like*. Yes,
+and: six plain arguments rather than Linux's packed structure.
+
+### Decision 1 — take the offer
+
+`posix/src/file.rs::openat2` today refuses `RESOLVE_BENEATH` with `EXDEV` and
+`RESOLVE_NO_SYMLINKS` with `EOPNOTSUPP`, because it finishes by calling plain
+`openat`, which flattens `dirfd` and `path` into one absolute path and has no
+per-component no-follow bit to carry either restriction. That refusal is the
+*honest* answer (see §702's amendment — the alternative, silently dropping the
+restriction, is what the fail-open bug was), but it is not a *useful* one: every
+SlateOS program that needs a contained open has to hand-roll the walk, as `tar`
+does.
+
+* **For forwarding:** the enforcement now exists (`Vfs::resolve_beneath`,
+  `fs::handle::open_beneath`), it composes with `NO_SYMLINKS`, and it is the
+  design's own answer — one enforcement point in the kernel rather than ~200
+  lines of resolution logic per utility. Two refusals become two working
+  features for the cost of a marshalling function.
+* **Against:** a new syscall number is an ABI commitment. Lane A's standing
+  position (from the `kcmp` exchange) is to add one when something asks — so
+  the objection is really "is there a caller?", and the answer has to be a real
+  one, not a hypothetical.
+* The caller is libc's own `openat2`, and through it any program that calls it.
+  That is not circular: the number turns a permanent refusal into an
+  implementation, which is a different thing from adding an entry point nothing
+  reaches. **Chosen: forward.**
+
+### Decision 2 — flat arguments, not `open_how`
+
+Lane A offered byte-for-byte `struct open_how` (trivial forward, someone else's
+layout forever) or a native shape, and leant native. Taken further than lane A
+proposed: **there should be no struct at all.**
+
+`open_how` exists in Linux for one reason — it is *extensible by size*, so a
+future field needs no new syscall number. That is a solution to a problem this
+kernel solved differently and better: `design.txt` mandates **versioned syscall
+tables**, so a future field gets a new number in a new version and the old
+number keeps meaning exactly what it always meant. Importing `open_how` would
+mean carrying Linux's `size`-negotiation convention *and* our versioning, two
+extensibility mechanisms for one call, with the imported one pinning three field
+widths we never chose.
+
+The native family already answers this: `SYS_FS_OPEN_MODE` is
+`(path_ptr, path_len, flags, mode)` — flat, no struct. So:
+
+```
+SYS_FS_OPENAT2(path_ptr, path_len, flags, mode, resolve, dirfd) -> fd
+```
+
+keeping the sibling's first four arguments in the same positions, so the forward
+reads against `SYS_FS_OPEN_MODE` line for line, and appending the two the Linux
+call adds. Six arguments is exactly what `SyscallArgs` and libc's `syscall6`
+carry, so nothing is squeezed.
+
+The translation cost this is supposed to incur is close to zero, because
+`openat2` **already** does the field-level work: steps 1–6 unpack the struct,
+range-check `mode` against `S_IALLUGO`, and reject unknown `resolve` bits before
+any open happens. Those checks are Linux-ABI conformance and belong on the libc
+side of the boundary whatever the kernel call looks like; the kernel should not
+re-learn `S_IALLUGO`.
+
+**One width to settle with lane A, and it is a real difference rather than a
+detail:** `SYS_FS_OPEN_MODE` masks the create mode to `0o777`, dropping setuid,
+setgid and sticky. Linux's `open_how.mode` admits `0o7777`, and our own
+`openat2` validates against `0o7777` — so a forward onto the existing width
+would silently drop three bits that the caller was told were accepted. Either
+the new call takes `0o7777`, or libc must refuse those three bits explicitly.
+Silently dropping them is the one option ruled out here, on §702's amendment's
+reasoning: accepting a request and not honouring it is the failure mode this
+whole exchange started from.
+
+### Decision 3 — `tar`'s `Dir::locate` stays, and not merely "for now"
+
+Lane A notes `Dir::locate` is retirable. It is not, and §702 already says why in
+a sentence that has not weakened: **`tar` is differentially tested against the
+real GNU binary on Linux/glibc**, that harness is the only thing that verifies
+any of `tar`'s behaviour, and glibc exports no `openat2` wrapper. Replacing the
+walk with `openat2` would make the containment path on the *host* build either
+untested or a raw `syscall(437, …)`, in exchange for deleting code that is
+measured correct on all ten rows of the rule table.
+
+There is a second, smaller reason and it is lane A's own: the marshalling in
+`sys_openat_beneath` between the ABI and `fs::handle` (`AT_FDCWD` → cwd,
+`dirfd_to_guest_dir`) is reached by no test, and a hostile-archive extraction
+would be its first real caller. Lane A offered to close that with a ring-3 test.
+The reply asks for it — but as a prerequisite for *libc's forward*, not for
+retiring the walk, which is declined on the harness argument alone.
+
+**What would change this:** a second SlateOS caller wanting a contained open. At
+that point the shared implementation is the kernel's, and `tar` keeping its own
+walk for the host build becomes a `cfg` rather than a policy.
+
+---
+
+## 706. `InputDevice` is granted per service in `/etc/startup.conf`, not to init — so the answer to lane A is "not yet, and here is the field that unblocks it"
+
+**Date:** 2026-08-30
+**Decided by:** Claude (autonomous, lane B)
+**Lane:** B
+
+**In short:** The kernel now has keyboard and mouse device files, and opening
+one requires a permission token called `InputDevice` — without that gate,
+anything that can name a path can read every keystroke on the machine,
+passwords included. No userspace program holds the token, so the devices are
+currently unopenable, and lane A asked lane B to grant it once at the top of
+the process tree so the display server can inherit it. The decision is **not to
+do that**, because a token granted at the top is held by *everything* and there
+is no way to give one up — the gate would then be around the whole system,
+which is the same as no gate. Instead the token gets granted to one named
+service, which needs a small kernel change lane A has already offered to make.
+
+### The decision
+
+1. **No grant to init.** `services/init` is the root of the userspace tree and
+   `fork` copies the capability table wholesale, `execve` does not clear it, and
+   there is no syscall to drop one. So `InputDevice` on init is `InputDevice` on
+   the shell, on every service, and on every program a user ever launches,
+   permanently.
+2. **The grant goes on a service entry**, declared in `/etc/startup.conf`
+   alongside the `args:`, `env:` and `depends:` keywords that are already there:
+
+   ```text
+   /bin/compositor depends:logger caps:InputDevice/0/r
+   ```
+
+3. **That needs a field `SpawnExArgs` does not have**, so the immediate answer to
+   lane A's request is "not yet", and the request filed back asks for the field.
+   See `requests/b-a-per-service-capabilities-are-where-inputdevice-goes-and-here-is-the-spawn-ex-shape.md`.
+4. **Nothing is blocked meanwhile**, because `/etc/startup.conf` starts
+   `/bin/ticker` and nothing else. There is no compositor service to grant
+   anything to.
+
+### Why not take lane A's fallback
+
+Lane A explicitly pre-approved the weaker answer — *"if the answer is 'init, for
+now, because there is no per-service capability plumbing yet', that is a fine
+answer"* — and offered to treat the narrowing as tracked debt. Declining a
+pre-approved shortcut needs a reason, and the reason is not tidiness:
+
+* **The debt could not be paid by lane B alone.** Narrowing later needs the same
+  kernel field the narrow version needs *now*, so "grant it to init and narrow
+  later" is not a cheaper path to the same place — it is the same path with a
+  live keystroke-readable-by-everything window in the middle of it. The only
+  thing the shortcut buys is time, and there is nothing waiting on the time.
+* **Lane A's argument for it does not hold here.** Their case was that a gate
+  nothing is inside is *no worse than* `SYS_CONSOLE_READ_CHAR`, which has no
+  gate at all. True as far as it goes — but that is an argument for the grant
+  being harmless, not for it being right, and it stops holding the moment
+  anything else in the tree is worth protecting from a program that can read
+  the keyboard. Which is to say: it stops holding at the point the system
+  becomes usable.
+* **A capability that everything holds reads, in an audit, exactly like a
+  capability that was properly scoped.** `SYS_CAP_QUERY` on the compositor
+  would answer "holds InputDevice" either way. The difference is invisible
+  from inside, which is the property that makes a temporary grant permanent.
+
+### Why a per-service list rather than any of the alternatives
+
+| option | why not |
+|---|---|
+| Grant to init, narrow later | Above. Same kernel work, done later, with a window. |
+| A `SYS_CAP_DROP` so children shed what they don't need | Puts the decision in the child, which is the party that benefits from keeping it. Delegation must be the parent's call. Also: every existing program would have to learn to drop, and the ones that forget are exactly the ones that matter. |
+| `SYS_CAP_REQUEST` (ask the human) | Prompts a human, and the display server is what a human would answer the prompt *on*. Lane A already flagged this; it also rejects type 30 today. |
+| A capability daemon handing out tokens over IPC | A whole subsystem, and it needs its own authority to hand out, which is this problem one level up. |
+
+### The name table question, and the rule it follows
+
+`/etc/startup.conf` is text, so init needs `"InputDevice" → 30`. That is a
+mirror of a kernel enum in another tree, which is precisely the thing that went
+wrong in `sys_cap_request` (its copy stopped at 15, and fifteen types added past
+it returned `InvalidArgument` with nothing failing to compile).
+
+The rule adopted is the same one `posix/src/sys_capability.rs::kernel_view::res`
+already follows and that §312 states: **list what you use, not what exists.**
+Init's table holds only the types init is prepared to delegate — one today —
+and an unrecognised name is a hard refusal to start that service, with the name
+printed. Failing closed and loudly is what makes drift a boot-visible event
+rather than a silently unprivileged compositor, and a short purpose-built table
+does not accumulate the obligation to track an enum it does not otherwise care
+about.
+
+### The `SpawnExArgs` shape asked for
+
+Two fields appended, `caps_ptr: u64` and `caps_count: u64`, with entries in the
+existing 24-byte `CapEntryInfo` layout that `SYS_CAP_QUERY` already returns.
+Reusing that struct is the load-bearing part: a supervisor's natural
+implementation is "enumerate what I hold, filter it, pass the subset down", and
+that is one struct doing both halves rather than two layouts to drift apart.
+
+`caps_ptr == 0` must keep meaning *inherit everything* — today's behaviour, so
+no existing spawn changes — while a non-null pointer with `caps_count == 0`
+means *grant nothing*. Distinguishing "did not say" from "said none" is the
+whole reason the pointer carries the meaning rather than the count: a bare
+count makes the safest possible request indistinguishable from the default.
+
+**What would change this:** a `SYS_CAP_DROP`, or per-service capabilities
+arriving from some other direction (a manifest format, a capability broker). If
+`SpawnExArgs` never grows the field, the fallback is lane A's original ask, and
+it should then be written down as debt with this entry as the reason it was not
+the first choice.
+
+---
+
+## 636. `RESOLVE_BENEATH` is decided per hop and syntactically, not by canonicalising the final path
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous, lane A) — implementing ask 1 of
+`requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-and-unenforceable-in-the-vfs.md`,
+with lane B's measured evidence. That file is stamped rather than deleted (rule
+2 / §315), so the evidence is still where the argument is; the reply — which
+reproduces it — is `requests/a-b-openat2-resolve-beneath-is-enforced.md`.
+
+**Lane:** A
+
+**In short:** a program can ask us to open a file *and* promise the lookup will
+not wander outside a directory it names — that promise is `openat2`'s
+`RESOLVE_BENEATH` flag, and it is what a program unpacking an untrusted archive
+uses so a booby-trapped entry cannot write outside the folder you chose. We
+refused the request before; now we honour it. The decision recorded here is
+*how* we check, because the obvious way to check is wrong, and wrong in the
+direction that lets attacks through.
+
+**The obvious implementation.** Follow the path wherever it goes, work out the
+final real location ("canonicalise" it — resolve every shortcut and every `..`
+until one plain path is left), and then check that the answer sits inside the
+base directory. It is one comparison at the end, it is easy to reason about,
+and every part of it is already written.
+
+**Why it is wrong.** Lane B measured GNU tar — which emulates these exact
+semantics — across ten cases. On three of them a final-path comparison
+*disagrees with Linux, and always by allowing something Linux refuses*:
+
+| the shortcut points at | `RESOLVE_BENEATH` | final-path comparison |
+|---|---|---|
+| `sub` (a name inside) | allow | allow |
+| `deep/../sub` (goes down, back up, down — never leaves) | allow | allow |
+| `deep/er/../..` (back up to the base itself) | allow | allow |
+| `/the/base/sub` (spelled from the root, and **inside** the base) | **refuse** | allow ✗ |
+| `/the/base` (spelled from the root, **is** the base) | **refuse** | allow ✗ |
+| `../d/sub` (steps out of the base and straight back in) | **refuse** | allow ✗ |
+| `../out`, `/tmp` (leaves and stays out) | refuse | refuse |
+
+The rule those rows describe is not about *where you end up*. It is about *how
+you got there*: a path spelled from the root is refused for being spelled from
+the root, even when it names a file inside the base; and a `..` is refused at
+the instant the walk would step above the base, not forgiven by a later
+component that steps back down. `deep/er/../..` is allowed because it never
+rises above the base; `../d/sub` is refused because it does, though it returns.
+
+**Why the obvious implementation *cannot* be patched into correctness.** The
+question "did this walk ever step above the base?" is not answerable from the
+final path. A resolved path has forgotten how it got there — `../d/sub` and
+`sub` can name the identical file. So the check has to happen while the walk
+still knows where it stands. Concretely: `resolve_inner` calls `normalize_path`
+on every symlink hop, and that call is precisely what collapses the `..` the
+decision depends on. The check is therefore placed *before* it, at the hop, and
+counts depth relative to the base rather than comparing text.
+
+**What we gave up.** More code in the resolver's hot recursive path, a
+containment base threaded through a function that had four parameters and now
+has five, and a rule that reads as arbitrary until you see the table. Against
+that: the alternative is more permissive than Linux in exactly the three shapes
+an attacker picks, while looking correct and passing any test written by
+someone who reasoned about it the obvious way. That is the worst failure mode
+available — a security check that is confidently wrong. The table is reproduced
+in `Vfs::beneath_step`'s doc comment for the same reason it is reproduced here.
+
+**A second, smaller call, recorded because it is easy to undo by accident.**
+`sys_openat_beneath` refuses an escaping *fragment* — an absolute path, or one
+that opens with `..` — **before** it looks up `dirfd`. That ordering is not
+tidiness: with the lookup first, a caller could tell a valid directory
+descriptor from an invalid one by whether the refusal came back `EXDEV` or
+`EBADF`, which is an oracle for exactly the state the flag exists to keep out
+of reach. The same reasoning puts the containment-aware resolution *ahead of*
+the writability check and the `NOFOLLOW` lstat in `open_impl`: running those on
+the naively joined path would probe `base/../out/f` before anything refused it,
+turning the refusal into an existence oracle for the tree the caller asked us
+to hide. The check that comes first is part of the guarantee, not an
+optimisation, and a future reader tidying the order would silently remove it.
+
+**`RESOLVE_IN_ROOT` deliberately not built.** It is the same machinery with
+`..` at the base clamping instead of erroring and absolute targets re-rooted
+instead of refused — so having one, we nearly have the other. Lane B explicitly
+has no consumer and said not to build it on their account. An unused syscall
+capability is a commitment to an ABI we would then have to keep, and the
+standing lane-A position (from the `kcmp` exchange) is that we add one when
+something asks. Nothing does.
+
+## 637. Repository-binding git variables are scrubbed by one shared module, not per call site
+
+**Date:** 2026-08-29
+**Lane:** A
+**Decided by:** Claude (autonomous, lane A) — after the `pre-push` gate
+described in `known-issues.md`
+(`A-A-PUSH-GATE-DELETED-THE-REPOSITORY-IT-WAS-GATING`) wrote two
+tree-deleting commits onto `lane-a` and published them.
+
+**In short:** when a program runs `git`, three different things claim to say
+*which* repository it means: the directory the program is sitting in, an
+explicit `-C <dir>` argument, and an environment variable called `GIT_DIR`.
+The environment variable wins over both. Git sets that variable automatically
+whenever it runs a hook — so a script that builds a scratch repository to test
+itself against gets a scratch repository when a human runs it, and gets *the
+real one* when the hook runs it. Ours did, and committed to it. The decision
+here is where the defence lives: one shared module every caller uses, rather
+than each caller cleaning its own environment.
+
+**Context.** `scripts/check-requests-not-deleted.py --selftest` built a fixture
+with `git init` / `git add -A` / `git commit` in a temp directory, each call
+passing `cwd=<tmp>`. Run from `pre-push`, `GIT_DIR` pointed every one of them
+at the repository being pushed. Two other suites
+(`test-src-digest.py`, `test-boot-test.py`) build fixture repositories the same
+way and carry the same latent bug, so the fix had at least three call sites
+from the start, and the set of variables to remove is about twenty names —
+`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+`GIT_QUARANTINE_PATH`, the `GIT_CONFIG_*` family and its numbered
+`GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` pairs, among others.
+
+**Decision.** `scripts/gitenv.py` owns the list. It exposes `clean_env()` for a
+subprocess that should pick its repository by `cwd`/`-C`, and
+`scrub_environ()` for a test harness that should never touch the ambient
+repository at all. It is an explicit allow-through, not a blanket
+`del GIT_*`.
+
+**Rationale.**
+
+- *One list, not three.* Three copies of a twenty-name denylist is three
+  chances to omit `GIT_QUARANTINE_PATH`, and the omission is invisible until a
+  hook runs. The list also grows: git has added repository-binding variables
+  before and will again.
+- *Two functions, because there are genuinely two situations.* A production
+  script wants a scrubbed environment for the child it is about to spawn, and
+  nothing more. A *test harness* has no business talking to the ambient
+  repository at all, so scrubbing the process once is both stronger and
+  unforgettable — it covers a call site added later by someone who never read
+  this entry, and it covers non-git children, which matters concretely:
+  `test-boot-test.py` shells out to `bash`, and the `bash` runs `git`, where a
+  per-call `env=` on the Python side would never have reached.
+- *Not a blanket `GIT_*` delete.* `GIT_EXEC_PATH` is on some installs the only
+  thing telling git where its own subcommands live, and `GIT_SSH`, `GIT_TRACE`
+  and the proxy settings are all things a caller may legitimately have set. The
+  goal is to choose the repository, not to run git in a vacuum — a denylist
+  that overreaches breaks git rather than redirecting it, which is a louder
+  failure but still a failure.
+
+**Alternatives considered.**
+
+- **`env=` at each call site, no module.** Rejected: see "one list, not three".
+  It also puts the twenty names in the diff of every script that spawns git,
+  where they read as noise and get "tidied".
+- **Pass `--git-dir` explicitly everywhere instead of scrubbing.** This does
+  work for `GIT_DIR`, but not for `GIT_INDEX_FILE` or
+  `GIT_OBJECT_DIRECTORY`, which have no command-line equivalent — so it fixes
+  the loud shape of the bug and leaves the quiet one.
+- **Have the fixtures not be git repositories.** The checker's self-test
+  genuinely needs to exercise `git diff --name-status -M` against real
+  commits; a mocked git would test the mock.
+- **Rely on the self-test to notice.** It cannot: its verdict is a statement
+  about the fixture, and in the failure the fixture *was* the repository.
+  Every assertion it made was true while it was destroying the tree. This is
+  why the regression test is a separate suite that snapshots a sacrificial
+  repository from outside.
+
+**Where it lives.** `scripts/gitenv.py` (the list and both functions);
+`scripts/check-requests-not-deleted.py` (`clean_env()` on `_git()` and on the
+self-test's fixture driver); `scripts/test-src-digest.py` and
+`scripts/test-boot-test.py` (`scrub_environ()` at import);
+`scripts/test-check-requests-not-deleted.py` (the outside-observer regression
+suite).
+
+**How to reverse.** Inline `clean_env()` into each caller and delete the
+module. Note that doing so re-opens the question of who keeps the list current;
+if this is ever reversed, the regression suite is the thing that must not be
+deleted with it, because it is the only part that fails when the list is wrong.

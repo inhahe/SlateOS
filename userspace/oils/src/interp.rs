@@ -3322,6 +3322,117 @@ enum StderrTarget {
     Closed,
 }
 
+/// A test-only tee of everything the shell writes to its **real** stderr.
+///
+/// The test harness captures fd 1 (it hands `run_source_out` an
+/// [`Out::Capture`]) and nothing at all for fd 2, so a diagnostic the shell
+/// emitted while a test ran went to the process's stderr and was swallowed by
+/// libtest. That is invisible exactly when it matters most — when the
+/// diagnostic is the *reason* the assertion failed.
+///
+/// Lane C's `requests/c-b-oils-tests-cannot-see-a-failed-spawn.md` is the case
+/// that motivated this: under two concurrent `cargo test --workspace` runs,
+/// eight tests here went red with `left: ""` while the shell had correctly
+/// written `osh: grep: command not found` and exited 127. With fd 2 unseen the
+/// failure reads as "the builtin under test stopped producing output", so the
+/// triage starts at `readonly -p` — which was never broken.
+///
+/// This is an **observer**, deliberately. fd 2 still goes precisely where it
+/// went before, so no test exercises a different code path than production
+/// does; the alternative — pointing the shell's base fd 2 at a
+/// [`StderrTarget::Buffer`] — would have changed `/dev/stderr` availability
+/// ([`SpecialSrc::Unavailable`]), the `2>&1` sink-identity check in
+/// [`Shell::child_stdio_for_stdout`], and how ~88 external children are
+/// spawned. What changes here is only that a panicking test *also* prints what
+/// the shell said.
+#[cfg(test)]
+mod stderr_tee {
+    use std::cell::RefCell;
+    use std::sync::Once;
+
+    thread_local! {
+        static SEEN: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Note bytes on their way to the process's real fd 2.
+    pub(super) fn record(bytes: &[u8]) {
+        // `try_borrow_mut` rather than `borrow_mut`: the panic hook holds the
+        // buffer while it prints, and a panic *inside* a diagnostic write would
+        // otherwise turn a legible failure into a borrow-panic on top of it.
+        SEEN.with(|s| {
+            if let Ok(mut seen) = s.try_borrow_mut() {
+                seen.extend_from_slice(bytes);
+            }
+        });
+    }
+
+    /// Drop what this thread has recorded so far.
+    ///
+    /// Called from the test shell factory, so a failure reports the diagnostics
+    /// of the run it belongs to rather than every run the test made — and so a
+    /// `--test-threads=1` run, where libtest executes every test on one thread,
+    /// does not attribute one test's stderr to the next.
+    pub(super) fn reset() {
+        SEEN.with(|s| {
+            if let Ok(mut seen) = s.try_borrow_mut() {
+                seen.clear();
+            }
+        });
+    }
+
+    /// A copy of what this thread has recorded, for the harness's own self-test.
+    pub(super) fn snapshot() -> Vec<u8> {
+        SEEN.with(|s| s.try_borrow().map(|seen| seen.clone()).unwrap_or_default())
+    }
+
+    /// Chain a panic hook that prints the recording, once per process.
+    ///
+    /// Chained rather than replacing: libtest's own hook is what prints the
+    /// `assertion failed` block and the backtrace, and it runs first so the
+    /// diagnostic reads as context underneath the assertion instead of ahead of
+    /// it. Panic hooks run on the panicking thread, which is why a
+    /// thread-local is the right place to have kept the bytes.
+    pub(super) fn install() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let prev = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                prev(info);
+                let seen = SEEN.with(|s| {
+                    s.try_borrow_mut()
+                        .map(|mut seen| std::mem::take(&mut *seen))
+                        .unwrap_or_default()
+                });
+                if let Some(block) = report(&seen) {
+                    eprint!("{block}");
+                }
+            }));
+        });
+    }
+
+    /// The block the panic hook prints, or `None` when fd 2 stayed quiet.
+    ///
+    /// Split out from the hook so the harness can test its own rendering: a
+    /// panic hook is awkward to observe from inside a test, and this is the
+    /// half with the decisions in it.
+    pub(super) fn report(seen: &[u8]) -> Option<String> {
+        if seen.is_empty() {
+            return None;
+        }
+        let mut block = String::from("the shell also wrote this to fd 2:\n");
+        // Lossily, and per line: these are shell diagnostics, which may quote a
+        // filename that is not text (TD-OILS-BYTE-STRINGS), and a panic message
+        // is no place to lose the rest of a line over one such byte. The `|`
+        // gutter marks the quoted text as the shell's rather than the harness's.
+        for line in String::from_utf8_lossy(seen).lines() {
+            block.push_str("  | ");
+            block.push_str(line);
+            block.push('\n');
+        }
+        Some(block)
+    }
+}
+
 /// What a user-space write descriptor (fd ≥ 3, in [`Shell::open_write_fds`])
 /// actually points at.
 ///
@@ -57556,6 +57667,11 @@ impl Shell {
                     // dropped — as bash drops a failed write to fd 2.
                     let _ = write_to_write_fd(w, bytes);
                 } else {
+                    // The one place the shell's own diagnostics reach the
+                    // process's fd 2, and therefore the one place a test can
+                    // see them at all — see [`stderr_tee`].
+                    #[cfg(test)]
+                    stderr_tee::record(bytes);
                     let _shared = std_handles_shared();
                     let e = io::stderr();
                     let mut lock = e.lock();
@@ -70371,6 +70487,11 @@ mod tests {
     /// harness's environment. Exported because a real shell's is, and because
     /// a child that runs a lookup of its own must search the same list.
     fn new_shell() -> Shell {
+        // Every test helper builds its shell here, so this is where fd 2 starts
+        // being watched and where the previous run's record is dropped. See
+        // [`super::stderr_tee`] for why the harness needs to watch it at all.
+        super::stderr_tee::install();
+        super::stderr_tee::reset();
         let mut sh = Shell::new();
         sh.cwd = test_cwd();
         sh.put_var("PWD".to_string(), sh.cwd.clone());
@@ -70520,6 +70641,67 @@ mod tests {
         };
         let buf = take_capture(&buf);
         (String::from_utf8_lossy(&buf).into_owned(), status)
+    }
+
+    /// The harness watches fd 2, so a failure can say what the shell said.
+    ///
+    /// Lane C's `c-b-oils-tests-cannot-see-a-failed-spawn.md`: eight tests here
+    /// went red under load with `left: ""`, because the shell's explanation —
+    /// a failed spawn, reported correctly on fd 2 — was written to a stream the
+    /// harness never looked at. [`super::stderr_tee`] looks at it now.
+    ///
+    /// The second half is the part that keeps the tee honest: a diagnostic that
+    /// a *redirect* took somewhere else must not appear in the recording, or
+    /// the panic message would report a message the test had deliberately
+    /// captured itself.
+    #[test]
+    fn the_harness_sees_what_the_shell_writes_to_the_real_fd_2() {
+        // A diagnostic with no redirect in force reaches the process's fd 2,
+        // which is the case the tee exists for.
+        let (out, rc) = run("cd /no_such_dir_xyz123");
+        assert_eq!(out, "", "the diagnostic must not be on stdout");
+        assert_ne!(rc, 0);
+        let seen = String::from_utf8(super::stderr_tee::snapshot()).expect("text");
+        assert!(
+            seen.contains("/no_such_dir_xyz123"),
+            "fd 2 went unrecorded: {seen:?}"
+        );
+
+        // `run` builds a fresh shell through `new_shell`, which drops the
+        // previous run's record — so a failure reports its own run's fd 2 and
+        // not the accumulation of the whole test.
+        let (out, _) = run("echo hi");
+        assert_eq!(out, "hi\n");
+        assert_eq!(super::stderr_tee::snapshot(), b"", "the reset did not fire");
+
+        // `2>&1` sends the same diagnostic to the capture instead. The tee is
+        // on the real-stderr branch alone, so it must stay empty.
+        let (out, _) = run("cd /no_such_dir_xyz123 2>&1");
+        assert!(
+            out.contains("/no_such_dir_xyz123"),
+            "the redirect did not merge: {out:?}"
+        );
+        assert_eq!(
+            super::stderr_tee::snapshot(),
+            b"",
+            "a redirected diagnostic was recorded as if it had reached fd 2"
+        );
+
+        // And what the panic hook would have printed. A quiet fd 2 adds
+        // nothing at all — the block must not appear under every unrelated
+        // failure — and a noisy one is quoted line by line behind a gutter.
+        assert_eq!(super::stderr_tee::report(b""), None);
+        assert_eq!(
+            super::stderr_tee::report(b"osh: grep: command not found\n").as_deref(),
+            Some("the shell also wrote this to fd 2:\n  | osh: grep: command not found\n")
+        );
+        // A byte that is not text keeps its line rather than truncating it.
+        assert_eq!(
+            super::stderr_tee::report(b"osh: a\xffb: No such file or directory\n").as_deref(),
+            Some(
+                "the shell also wrote this to fd 2:\n  | osh: a\u{fffd}b: No such file or directory\n"
+            )
+        );
     }
 
     #[test]

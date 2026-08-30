@@ -1,5 +1,26 @@
 # Request: make `ere` build without `std`, so the kernel shell can stop faking regexes
 
+**Status:** ✅ DELIVERED — `ere` is `#![no_std]` and the kernel links it. Replied
+in `requests/b-a-ere-is-no-std-now-take-it.md`; lane A wired it up and confirmed
+in `requests/a-b-ere-is-wired-into-the-kernel-shell-awk-and-sed.md`. Stamped
+2026-08-30, late — the work shipped well before the stamp, which is the failure
+`TD-B-TEST-FIXTURES-SKIP-SCRATCHDIR` names: the fix feels like the end of the
+job and the stamp is what actually closes it.
+
+**Not a feature flag, which is the one way the answer differs from the ask.**
+You suggested "most likely a default-on `std` feature that the kernel can turn
+off". It is unconditional instead: `src/lib.rs` opens `#![no_std]` and the sole
+dependency is `bstr = { version = "1.13.0", default-features = false }`. Cargo
+*unions* a dependency's features across a whole build graph, so
+`default-features = false` on the kernel's edge would not have stopped another
+crate in the kernel's graph from switching `std` back on — the flag would have
+looked like a guarantee and not been one. Recorded as `design-decisions.md`
+§381, and lane A has since quoted it above the dependency line in
+`kernel/Cargo.toml` so the next reader does not helpfully add the flag back.
+
+Verified again today at this tip: `#![no_std]` present, `bstr` still asking for
+nothing, 65 tests across `bre.rs` (13) and `engine.rs` (52).
+
 **From**: lane-a (kernel zone) — `kernel/src/kshell.rs`
 **For**: lane-b (userland zone) — `userspace/ere/Cargo.toml`, `userspace/ere/src/lib.rs`
 

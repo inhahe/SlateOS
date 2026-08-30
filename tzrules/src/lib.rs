@@ -881,10 +881,13 @@ pub const DOS_END_UNIX: i64 = 4_354_819_199;
 /// dependency-free, and already a dependency of both the kernel and `guitk`.
 /// See design-decisions.md §621.
 ///
-/// The inverse is deliberately absent: the only decoder today is
-/// `apps/archivemanager`'s, which also range-checks the pair as part of
-/// deciding whether to show it at all. Add one here when a second caller wants
-/// it, rather than shipping API nothing calls.
+/// The inverse is [`unix_from_dos_datetime`], below. It was deliberately
+/// absent when this function was written — the only decoder then was
+/// `apps/archivemanager`'s, and the rule was "add one here when a second
+/// caller wants it, rather than shipping API nothing calls". A second caller
+/// arrived (`kernel/src/fs/archive.rs`, listing a ZIP's members with their
+/// times), so it was added, and it range-checks rather than normalising for
+/// the reason its own docs give.
 #[must_use]
 #[allow(clippy::arithmetic_side_effects)]
 // Every cast below is exact and the ranges are enforced by the arithmetic, not

@@ -28,7 +28,6 @@ Exit: 0 all passed, 1 one or more failed.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import shutil
 import sys
@@ -36,16 +35,20 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+sys.path.insert(0, HERE)
+import srcload  # noqa: E402
+
 
 def load_module():
-    """Import reclaim-space.py, whose hyphen makes it un-importable by name."""
-    path = os.path.join(HERE, "reclaim-space.py")
-    spec = importlib.util.spec_from_file_location("reclaim_space", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("cannot load %s" % path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    """Import reclaim-space.py, whose hyphen makes it un-importable by name.
+
+    Loaded through `srcload` rather than `importlib`: a `SourceFileLoader`
+    consults `__pycache__`, whose staleness check is `(mtime, size)` at
+    one-second resolution, so two same-size writes inside one second leave the
+    second one invisible and the suite validates bytecode that is not on disk.
+    That has actually happened here. See `scripts/srcload.py`.
+    """
+    return srcload.load(os.path.join(HERE, "reclaim-space.py"), "reclaim_space")
 
 
 FAILURES = []

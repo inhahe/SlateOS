@@ -5,7 +5,7 @@
 and their `.stamp` siblings against a sysroot built from the current
 `posix/src`. Same one-command chain as last time; it is repeated below.
 
-**Status:** ✅ **REBUILT 2026-08-21 by lane B**, twice — `b405fc5c6` cleared
+**Status:** ✅ **FIXED 2026-08-21 by lane B** — rebuilt twice. `b405fc5c6` cleared
 the `d5a23c2f9` drift you reported, and this file is being stamped from the
 second rebuild, which was needed because `tzrules` gained a public function
 (`design-decisions.md` §343) and `tzrules` is linked into `libc.a` too.

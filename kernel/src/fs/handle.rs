@@ -285,11 +285,94 @@ pub fn open_with_mode(
     flags: OpenFlags,
     create_mode: u16,
 ) -> KernelResult<u64> {
-    let path = path.as_ref();
+    open_impl(path.as_ref(), flags, create_mode, None)
+}
 
+/// A request to open under `openat2`'s `RESOLVE_BENEATH`.
+///
+/// The two halves travel together in one type on purpose: a base without
+/// the caller's own fragment cannot be checked (the fragment's `..` are
+/// only visible before the two are joined and normalized), and a fragment
+/// without a base has nothing to be contained by.  Passing them as two
+/// `Option`s that must agree is the shape that lets one arrive without the
+/// other.
+#[derive(Clone, Copy)]
+pub struct Beneath<'a> {
+    /// The directory the walk may not leave — `openat2`'s `dirfd`.
+    pub base: &'a Path,
+    /// The caller's path, relative to `base`.
+    pub rel: &'a Path,
+}
+
+/// Like [`open_with_mode`], but the resolution may not escape `b.base`.
+///
+/// Implements `openat2(dirfd, path, { .resolve = RESOLVE_BENEATH })`.  Any
+/// escape — a `..` in `b.rel`, an absolute `b.rel`, or a symlink met on the
+/// way whose target leaves (or is absolute, or leaves and returns) — fails
+/// with [`KernelError::CrossDevice`] (→ `EXDEV`).  See
+/// [`crate::fs::Vfs::beneath_step`] for why the rule is per-hop rather than
+/// a check on the final answer.
+pub fn open_beneath(b: Beneath<'_>, flags: OpenFlags) -> KernelResult<u64> {
+    open_impl(b.rel, flags, DEFAULT_CREATE_MODE, Some(b))
+}
+
+fn open_impl(
+    path: &Path,
+    flags: OpenFlags,
+    create_mode: u16,
+    beneath: Option<Beneath<'_>>,
+) -> KernelResult<u64> {
     // Must have at least READ or WRITE.
     if !flags.is_readable() && !flags.is_writable() {
         return Err(KernelError::InvalidArgument);
+    }
+
+    // RESOLVE_BENEATH takes its own route to `norm`, because the *order* of
+    // the checks below is part of the guarantee.  A caller that asked for
+    // containment must not be able to learn anything about a path outside
+    // the base -- not even whether it exists -- so the containment-aware
+    // resolution runs first and every later probe is made against its
+    // result.  Running the ordinary `check_writable` / NOFOLLOW-`lstat` on
+    // the naively joined path would probe `base/../out/f` before anything
+    // had refused it, which is an existence oracle for the tree the flag
+    // was invoked to hide.
+    if let Some(b) = beneath {
+        let no_symlinks = flags.contains(OpenFlags::NO_SYMLINKS);
+
+        // Resolve without following the final component.  This validates
+        // the caller's fragment and every parent hop under the containment
+        // rule, so from here on the path is known to be inside the base.
+        let parent_resolved = crate::fs::Vfs::resolve_beneath(b.base, b.rel, false, no_symlinks)?;
+
+        // O_NOFOLLOW, applied to the contained path rather than the raw
+        // one.  Same meaning as the general case below: a final component
+        // that is itself a symlink is ELOOP.
+        if flags.contains(OpenFlags::NOFOLLOW) {
+            match crate::fs::Vfs::lstat(&parent_resolved) {
+                Ok(entry) if entry.entry_type == crate::fs::EntryType::Symlink => {
+                    return Err(KernelError::TooManyLinks);
+                }
+                Ok(_) | Err(KernelError::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        if flags.is_writable()
+            || flags.contains(OpenFlags::CREATE)
+            || flags.contains(OpenFlags::TRUNCATE)
+            || flags.contains(OpenFlags::APPEND)
+        {
+            crate::ipc::namespace::check_writable(&parent_resolved)?;
+        }
+
+        // Follow the final component unless NOFOLLOW asked us not to; the
+        // walk is contained either way.
+        let norm = if flags.contains(OpenFlags::NOFOLLOW) {
+            parent_resolved
+        } else {
+            crate::fs::Vfs::resolve_beneath(b.base, b.rel, true, no_symlinks)?
+        };
+        return open_resolved(norm, flags, create_mode);
     }
 
     // Read-only volume enforcement: if this open would mutate the file
@@ -340,6 +423,17 @@ pub fn open_with_mode(
         crate::fs::Vfs::resolve_path(path)?
     };
 
+    open_resolved(norm, flags, create_mode)
+}
+
+/// Everything an open does once the path has been resolved.
+///
+/// Split out so `RESOLVE_BENEATH` can reach it: that mode resolves by a
+/// different route (containment-checked, and in a different order — see
+/// [`open_impl`]) but must then do exactly what every other open does.
+/// Sharing the tail is what keeps the two from drifting, which is the same
+/// failure mode lane B found between the kernel's `openat2` and libc's.
+fn open_resolved(norm: PathBuf, flags: OpenFlags, create_mode: u16) -> KernelResult<u64> {
     // Check capability tags and POSIX ACLs — the process must be a member of
     // all groups required for this path (or any ancestor with tags), and the
     // path's ACL, if it has one, must grant the access this open asks for.
@@ -382,7 +476,7 @@ pub fn open_with_mode(
                 {
                     return Err(KernelError::IsADirectory);
                 }
-                return allocate_dir_handle(norm, flags);
+                return allocate_dir_handle(norm.clone(), flags);
             }
 
             // Regular file.
@@ -2161,6 +2255,138 @@ pub fn self_test() -> KernelResult<()> {
     } else {
         crate::fs::Vfs::remove(nfp_link).ok();
         crate::fs::Vfs::remove(nfp_target).ok();
+    }
+
+    // `open_beneath` — RESOLVE_BENEATH all the way to an installed handle.
+    //
+    // `fs::vfs`'s self-test already proves the containment *rule* against
+    // real symlinks, and `syscall::linux`'s proves the two refusals the ABI
+    // returns.  Neither reaches this function, and the thing neither can
+    // show is the one that matters most here: that a contained open still
+    // **succeeds**, and hands back a handle that reads the right bytes.  A
+    // containment check that refused everything would pass both of those
+    // suites and be useless, so the positive case is asserted first.
+    let bn_base = "/handle_beneath/base";
+    let bn_cleanup = || {
+        crate::fs::Vfs::remove("/handle_beneath/base/escape").ok();
+        crate::fs::Vfs::remove("/handle_beneath/base/sub/f").ok();
+        crate::fs::Vfs::rmdir("/handle_beneath/base/sub").ok();
+        crate::fs::Vfs::rmdir("/handle_beneath/base").ok();
+        crate::fs::Vfs::remove("/handle_beneath/out/f").ok();
+        crate::fs::Vfs::rmdir("/handle_beneath/out").ok();
+        crate::fs::Vfs::rmdir("/handle_beneath").ok();
+    };
+    bn_cleanup();
+    let bn_ready = crate::selftest_setup!(
+        skips,
+        "[fs::handle]",
+        "open_beneath honours RESOLVE_BENEATH",
+        "no mkdir/symlink support",
+        crate::fs::Vfs::mkdir_all("/handle_beneath/base/sub"),
+        crate::fs::Vfs::mkdir_all("/handle_beneath/out"),
+        crate::fs::Vfs::write_file("/handle_beneath/base/sub/f", b"inside"),
+        crate::fs::Vfs::write_file("/handle_beneath/out/f", b"outside"),
+        // An ancestor symlink that leaves the base.  The file it reaches
+        // exists and is readable, so nothing but containment can refuse it —
+        // which is the whole point of testing with a live target rather than
+        // a dangling one.
+        crate::fs::Vfs::symlink("/handle_beneath/base/escape", "../out"),
+    );
+    if bn_ready {
+        let ok = |rel: &str| -> KernelResult<()> {
+            let h = open_beneath(
+                Beneath {
+                    base: Path::new(bn_base.as_bytes()),
+                    rel: Path::new(rel.as_bytes()),
+                },
+                OpenFlags::READ,
+            )?;
+            let mut buf = [0u8; 16];
+            let n = read(h, &mut buf)?;
+            close(h)?;
+            if buf.get(..n) != Some(b"inside".as_slice()) {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: open_beneath({}) read the wrong file",
+                    rel
+                );
+                return Err(KernelError::InternalError);
+            }
+            Ok(())
+        };
+        // Allowed: plainly inside, and inside by a route whose `..` never
+        // rises above the base.  The second is the row a "canonicalise the
+        // final path" implementation gets right by accident and a "reject any
+        // `..`" implementation gets wrong.
+        for rel in ["sub/f", "sub/../sub/f"] {
+            if let Err(e) = ok(rel) {
+                crate::serial_println!("[fs::handle]   FAIL: open_beneath({}): {:?}", rel, e);
+                bn_cleanup();
+                return Err(e);
+            }
+        }
+        // Refused: `..` out of the base; an absolute path *naming a file that
+        // is inside the base* (refused for being absolute, not for where it
+        // points); and a symlink whose target leaves.
+        for rel in [
+            "../out/f",
+            "/handle_beneath/base/sub/f",
+            "escape/f",
+            "../handle_beneath/base/sub/f",
+        ] {
+            match open_beneath(
+                Beneath {
+                    base: Path::new(bn_base.as_bytes()),
+                    rel: Path::new(rel.as_bytes()),
+                },
+                OpenFlags::READ,
+            ) {
+                Err(KernelError::CrossDevice) => {}
+                other => {
+                    // A leaked handle here would also be a leaked *capability*,
+                    // so close it rather than only complaining.
+                    if let Ok(h) = other {
+                        close(h).ok();
+                    }
+                    crate::serial_println!(
+                        "[fs::handle]   FAIL: open_beneath({}) was not refused with CrossDevice",
+                        rel
+                    );
+                    bn_cleanup();
+                    return Err(KernelError::InternalError);
+                }
+            }
+        }
+        // The escape route is real: unconfined, the same path opens the file
+        // outside.  Without this the refusals above would also pass if the
+        // symlink were simply broken.
+        match open(Path::new(b"/handle_beneath/base/escape/f"), OpenFlags::READ) {
+            Ok(h) => {
+                let mut buf = [0u8; 16];
+                let n = read(h, &mut buf).unwrap_or(0);
+                close(h).ok();
+                if buf.get(..n) != Some(b"outside".as_slice()) {
+                    crate::serial_println!(
+                        "[fs::handle]   FAIL: unconfined open through the escape symlink read \
+                         the wrong file — the refusals above prove nothing"
+                    );
+                    bn_cleanup();
+                    return Err(KernelError::InternalError);
+                }
+            }
+            Err(e) => {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: the escape symlink does not actually escape ({:?}), \
+                     so the CrossDevice refusals above are vacuous",
+                    e
+                );
+                bn_cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+        bn_cleanup();
+        crate::serial_println!("[fs::handle]   open_beneath honours RESOLVE_BENEATH: OK");
+    } else {
+        bn_cleanup();
     }
 
     // Cleanup test files.

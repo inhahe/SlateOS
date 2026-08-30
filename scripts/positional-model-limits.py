@@ -56,22 +56,25 @@ Exit 0 if the model still behaves as documented, 1 if it does not.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+import srcload  # noqa: E402
 
 
 def load_bench_history():
-    """Import `bench-history.py`, whose hyphen makes it un-importable normally."""
+    """Import `bench-history.py`, whose hyphen makes it un-importable normally.
+
+    Loaded from source rather than through `importlib`: a `SourceFileLoader`
+    consults `__pycache__`, whose staleness check is `(mtime, size)` at
+    one-second resolution, so two same-size writes to the sibling inside
+    one second leave the second one invisible and this script silently
+    runs the previous version of it. See `scripts/srcload.py`.
+    """
     path = ROOT / "scripts" / "bench-history.py"
-    spec = importlib.util.spec_from_file_location("bench_history", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return srcload.load(str(path), "bench_history")
 
 
 bh = load_bench_history()

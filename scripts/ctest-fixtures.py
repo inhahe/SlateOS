@@ -130,6 +130,17 @@ tracebacks that do not mention fastpy at all. To override the search:
     FASTPY_DIR="D:/visual studio projects/fastpy" python scripts/ctest-fixtures.py build
     PYTHONPATH="D:/visual studio projects/fastpy" python scripts/ctest-fixtures.py build
 
+That preflight proves fastpy *imports*. It cannot prove fastpy still *compiles*,
+and the difference bit on 2026-08-29: a Python upgrade moved `site-packages`, so
+fastpy's own third-party dependency was silently absent from the new version, and
+once installed it arrived as a release that had dropped a keyword fastpy passed.
+The import probe was clean and all 70 fixtures then died at code generation with
+one identical `TypeError`. So `build` also watches the *shape* of its failures --
+three consecutive fixtures failing on the same final line is one broken toolchain
+seen three times, not three broken fixtures, and it says so and stops instead of
+printing the same traceback 70 times. Distinct failures are unaffected: they never
+match, so every fixture is still attempted and each is reported in full.
+
 **Rebuild through this script, not by running `services/<name>/build.py`
 directly.** `build.py` produces a correct ELF and does not touch the `.stamp`,
 which still describes the *previous* one — so `check` then reports STALE for a
@@ -811,6 +822,27 @@ def _build_sysroot() -> bool:
     return LIBC.is_file()
 
 
+def _fail_signature(result: subprocess.CompletedProcess[str]) -> str:
+    """One line naming *why* a `build.py` failed, for comparing two failures.
+
+    The last non-empty stderr line, which for an uncaught Python exception is
+    the `SomeError: message` line -- the one thing that is the same across
+    fixtures when the toolchain is broken and different when the fixture is.
+    Deliberately not the whole traceback: that differs per fixture (different
+    source paths and frames) even when the cause is identical, so comparing it
+    would never match and the aggregation would never fire.
+
+    Falls back to stdout, and finally to the exit code, so the signature is
+    always defined -- a build that fails silently still has to compare equal
+    to another that fails the same silent way.
+    """
+    for stream in (result.stderr, result.stdout):
+        lines = [ln.strip() for ln in (stream or "").splitlines() if ln.strip()]
+        if lines:
+            return lines[-1]
+    return f"exit {result.returncode}, no output"
+
+
 def cmd_build(only: str | None, force: bool = False) -> int:
     # A stale libc.a is not a warning any more. Every fixture links it, so
     # building against one that is behind produces 70 binaries that test a
@@ -846,6 +878,53 @@ def cmd_build(only: str | None, force: bool = False) -> int:
         f"{fastpy}{os.pathsep}{existing}" if existing else str(fastpy)
     )
     print(f"[ctest] fastpy: {fastpy}")
+
+    # Finding the checkout is not the same as being able to use it.  Every
+    # build.py below starts by importing fastpy's compiler, which imports
+    # llvmlite; if that dependency is absent the loop still runs, and all 70
+    # fixtures fail with byte-identical tracebacks naming a module the reader
+    # has to recognise as third-party to act on.  That happened on 2026-08-29
+    # after a Python upgrade dropped the site-packages: 70 copies of one root
+    # cause, none of them named.  So ask once, here, where the checkout is
+    # already in hand.
+    #
+    # In a subprocess rather than in-process, for the same reason build.py
+    # runs in one: what must be importable is `sys.executable` + this
+    # PYTHONPATH, not whatever this script happens to have loaded.  It also
+    # keeps llvmlite's 43 MB out of a process that only needs to hash files.
+    probe = subprocess.run(
+        [sys.executable, "-c", "import compiler.codegen, compiler.toolchain"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=child_env,
+    )
+    if probe.returncode != 0:
+        missing = None
+        for line in probe.stderr.splitlines():
+            if "ModuleNotFoundError: No module named" in line:
+                missing = line.split("'")[1] if "'" in line else None
+        print(f"[ctest] ERROR: found fastpy at {fastpy}, but cannot import it.")
+        if missing and not missing.startswith("compiler"):
+            print(f"[ctest]        Missing third-party module: {missing!r}")
+            print(f"[ctest]        Install it into THIS interpreter:")
+            print(f"[ctest]          {sys.executable} -m pip install {missing}")
+            print("[ctest]        (fastpy's compiler needs llvmlite to emit object")
+            print("[ctest]         code; a Python upgrade loses site-packages, so this")
+            print("[ctest]         reappears after every interpreter bump.)")
+        elif missing:
+            print(f"[ctest]        {fastpy} does not look like a fastpy checkout:")
+            print(f"[ctest]        it has no importable {missing!r}.")
+        else:
+            print("[ctest]        The import failed for a reason other than a missing")
+            print("[ctest]        module — full output below.")
+        print(probe.stdout)
+        print(probe.stderr)
+        print("[ctest]        Refusing to build: every fixture would fail this way,")
+        print("[ctest]        and 70 identical tracebacks name the cause no better")
+        print("[ctest]        than one does.")
+        return 1
+
     selected = [f for f in fixtures() if not only or only in f.name]
     if not selected:
         print(f"[ctest] ERROR: no fixture matches --only {only!r}" if only
@@ -853,6 +932,18 @@ def cmd_build(only: str | None, force: bool = False) -> int:
         return 1
     rc, built, skipped = 0, 0, 0
     started = time.monotonic()
+    # The preflight above proves fastpy *imports*; it cannot prove fastpy still
+    # *compiles*. On 2026-08-29 a Python upgrade pulled in llvmlite 0.49, which
+    # had dropped a keyword fastpy passed, and every one of the 70 fixtures died
+    # at code generation with a byte-identical `TypeError` -- 70 full tracebacks
+    # of one environment fault, with the useful line 70 rows above the summary.
+    #
+    # Distinct fixtures share nothing but their toolchain, so three of them
+    # failing on the *same* final line is not three coincidences: it is one
+    # broken toolchain observed three times. Report it once and stop, rather
+    # than spending minutes proving it 67 more times.
+    first_seen: dict[str, str] = {}   # failure signature -> fixture that showed it
+    streak_sig, streak_n = None, 0
     for fixture in selected:
         why = "forced" if force else is_stale(fixture)
         if why is None:
@@ -867,11 +958,29 @@ def cmd_build(only: str | None, force: bool = False) -> int:
             env=child_env,
         )
         if result.returncode != 0:
-            print(f"[ctest] ERROR {fixture.name}: build.py exited {result.returncode}")
-            print(result.stdout)
-            print(result.stderr)
             rc = 1
+            sig = _fail_signature(result)
+            print(f"[ctest] ERROR {fixture.name}: build.py exited {result.returncode}")
+            if sig in first_seen:
+                # Already shown in full once; a second copy adds no information.
+                print(f"[ctest]   same failure as {first_seen[sig]}: {sig}")
+            else:
+                first_seen[sig] = fixture.name
+                print(result.stdout)
+                print(result.stderr)
+            streak_n = streak_n + 1 if sig == streak_sig else 1
+            streak_sig = sig
+            if streak_n >= 3:
+                print(
+                    f"[ctest] ERROR: {streak_n} different fixtures in a row failed with the "
+                    f"identical error, so this is one broken build environment rather than "
+                    f"{streak_n} broken fixtures. Stopping here -- fix the error printed above "
+                    f"(first seen under {first_seen[sig]}) and re-run; the remaining fixtures "
+                    f"were not attempted."
+                )
+                return 1
             continue
+        streak_sig, streak_n = None, 0
         built += 1
         print(f"[ctest]   {result.stdout.strip().splitlines()[-1] if result.stdout.strip() else 'built'}")
     print(

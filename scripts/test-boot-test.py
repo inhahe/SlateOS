@@ -29,7 +29,6 @@ from the source, not copied here -- against a scratch git repository.
 
 from __future__ import annotations
 
-import importlib.util
 import inspect
 import os
 import shutil
@@ -39,6 +38,24 @@ import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOOT_TEST = os.path.join(REPO_ROOT, "scripts", "boot-test.sh")
+
+sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+import gitenv  # noqa: E402
+import srcload  # noqa: E402
+
+# The fixtures below are throwaway repositories picked with `-C` and `cwd=`.
+# Neither beats an inherited `GIT_DIR`, which git exports into hooks,
+# `git bisect run` and `git rebase --exec` -- so under any of those this suite
+# would build its fixtures inside the real repository and commit to it. On
+# 2026-08-29 the equivalent bug in `check-requests-not-deleted.py --selftest`
+# did exactly that and published two commits deleting the whole tree; see
+# `scripts/gitenv.py`.
+#
+# Scrubbing the process environment rather than passing `env=` per call matters
+# more here than anywhere: this suite runs `bash`, and the bash runs git. A
+# per-call `env=` on the Python side would not reach that git at all, because
+# the variable would arrive through bash's own inherited environment.
+gitenv.scrub_environ()
 
 _FAILURES = []
 
@@ -55,20 +72,20 @@ def check(label, got, want):
 
 
 def load_script(path):
-    """Import a `scripts/*.py` by path (their names are not identifiers)."""
-    name = os.path.basename(path).replace("-", "_").removesuffix(".py")
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    # Registered before execution because a module defining `@dataclass` types
-    # is looked up by name in `sys.modules` while its own body is still running
-    # (dataclasses resolves annotations against the defining module). Skipping
-    # this raises an opaque `'NoneType' object has no attribute '__dict__'`
-    # from inside dataclasses.py, which says nothing about the real cause.
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    """Import a `scripts/*.py` by path (their names are not identifiers).
+
+    Loaded through `srcload` rather than `importlib`: a `SourceFileLoader`
+    consults `__pycache__`, whose staleness check is `(mtime, size)` at
+    one-second resolution, so two same-size writes inside one second leave the
+    second one invisible and the suite validates bytecode that is not on disk.
+    That has actually happened here. See `scripts/srcload.py`.
+
+    `srcload` derives the same name this used to derive, and registers the
+    module before running its body -- which both of this function's callers
+    need, because they define `@dataclass` types and dataclasses looks the
+    defining module up by name while the class body is still executing.
+    """
+    return srcload.load(path)
 
 
 def extract_dirty_check(source=None):

@@ -15944,7 +15944,7 @@ sequence, which includes the payload. We consume it, as musl does.
 `0x.`, matching glibc would mean converting a digit-less sequence to zero,
 which we should only do if a real port needs it.
 
-### TD-OPENAT2-BENEATH-INROOT. `openat2` `RESOLVE_BENEATH`/`RESOLVE_IN_ROOT` are safely refused, not implemented — ACCEPTED LIMITATION 2026-07-22
+### TD-OPENAT2-BENEATH-INROOT. `openat2` `RESOLVE_IN_ROOT` is safely refused, not implemented (`RESOLVE_BENEATH` now enforced) — ACCEPTED LIMITATION 2026-07-22, narrowed 2026-08-29
 
 **Where:** `kernel/src/syscall/linux.rs::sys_openat2` (the resolve-flag gates)
 and, since 2026-08-29, `posix/src/file.rs::openat2` step 7.
@@ -15990,8 +15990,13 @@ bit — `O_NOFOLLOW` covers the final component only. Refusing is safe; it is
 still a capability a native binary cannot reach. The structural fix is a native
 syscall number for `openat2` so libc forwards instead of re-implementing, which
 is what let the two drift apart in the first place. Both that and the VFS work
-are asked for in `requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-
-and-unenforceable-in-the-vfs.md`.
+were asked for in `requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-
+and-unenforceable-in-the-vfs.md`, which carries a `Status:` stamp recording
+which of its two asks landed — the reply, and the current state of both, is
+`requests/a-b-openat2-resolve-beneath-is-enforced.md` (VFS work done; the
+native syscall number is waiting on lane B to say it will forward, because an
+unused number is an ABI commitment). **This divergence therefore still stands**
+and is the live remainder of the `NO_SYMLINKS` row.
 
 **The generalisable lesson, which is worth more than the bug:** when a syscall
 has two implementations in this tree, a known-limitation note about one of them
@@ -16004,6 +16009,40 @@ needs beneath/in-root resolution". One now does — `userspace/coreutils/src/bin
 tar.rs` emulates `RESOLVE_BENEATH` in userspace (`Dir::locate`) because neither
 target could supply it. See `design-decisions.md` §702 for why emulating beat
 waiting. The emulation is correct and race-free, so this is still not urgent.
+
+**Resolved for `RESOLVE_BENEATH` 2026-08-29 (lane A) — `RESOLVE_IN_ROOT`
+remains an accepted limitation.** The kernel now enforces `RESOLVE_BENEATH`
+rather than refusing it, so this entry's title is half-wrong and the half that
+stays is `IN_ROOT`. What landed:
+
+- `Vfs::beneath_step` — the rule itself, per hop and **syntactic**. An absolute
+  symlink target is refused without ever being compared to the base, and a `..`
+  is refused at the moment the walk would step above the base, not judged by
+  where it eventually lands. The "proper fix" paragraph above said
+  "verify the running resolved path stays at/below the base", and that phrasing
+  is **wrong in the permissive direction** on three of lane B's ten measured
+  rows (`$PWD/sub`, `$PWD`, `../d/sub` — all allowed by a prefix check, all
+  refused by Linux). A resolved path has forgotten how it got there; the
+  implementation tracks a depth counter instead, which is what makes those
+  questions answerable at all.
+- The base is threaded through `Vfs::resolve_inner`'s symlink expansion and
+  checked *before* `normalize_path`, which is the call that destroys the `..`
+  the decision depends on.
+- `Vfs::resolve_beneath`, `fs::handle::open_beneath`, and `sys_openat_beneath`,
+  which shares the whole post-resolution tail (`open_resolved`) with the
+  ordinary open path — a second fd-install path would be this entry's own
+  lesson repeated one layer down.
+- `Vfs::beneath_fragment_ok` — the part of the rule decidable without a base,
+  so the syscall can refuse an escaping fragment *before* it looks up `dirfd`
+  and its answer cannot be used to probe the caller's fd table.
+
+Covered by three suites at different depths: `fs::vfs` (the rule, plus real
+symlinks), `fs::handle` (that a contained open actually succeeds and reads the
+right bytes — the case a refuse-everything implementation would pass), and
+`syscall::linux` (the ABI's refusals). `RESOLVE_IN_ROOT` is deliberately still
+`EOPNOTSUPP`: it is the same machinery with `..` clamping at the base and
+absolute targets re-rooted, but lane B has no consumer for it and an unused
+ABI is a commitment we would have to keep.
 
 ### D-NETSTACK-TCP-MINIMAL. Userspace `netstack` TCP client is minimal (slirp-only correctness) — DEBT 2026-07-14
 
@@ -84894,7 +84933,7 @@ makes, and now a future call that breaks it says so instead of hanging.
 
 ---
 
-## TD-B-TEST-FIXTURES-SKIP-SCRATCHDIR — twelve test fixtures in three of lane B's files name a fixed temp path, so two concurrent runs delete each other's (filed by lane C, 2026-08-25) — **open**
+## TD-B-TEST-FIXTURES-SKIP-SCRATCHDIR — twelve test fixtures in three of lane B's files name a fixed temp path, so two concurrent runs delete each other's (filed by lane C, 2026-08-25) — ✅ **FIXED** 2026-08-26 in `f051d93b0`
 
 **Not lane C's to fix** — `userspace/coreutils/src/bin/sed.rs`,
 `userspace/firejail/src/main.rs` and `userspace/useradd/src/main.rs` are lane
@@ -84957,6 +84996,24 @@ that contains the letters.
 **Suggested fix** (lane B's call; spelled out in the request): convert all
 twelve to `scratchdir::ScratchDir`, which also gets cleanup on the *failing*
 path — `Drop` runs during unwind where a trailing `remove_dir_all` does not.
+
+**Fixed** 2026-08-26 in `f051d93b0` — all twelve took `ScratchDir`, the
+suggested fix rather than the `process::id()` minimum, for the cleanup-on-unwind
+reason above. `useradd`'s `TestEnv` kept its `AtomicU32`; it was never wrong,
+only one axis of two, and now draws both from `ScratchDir`.
+
+The stamp is late: the commit landed on 2026-08-26 and this heading still read
+**open** on 2026-08-29, found while answering lane A's
+`a-b-two-restored-requests-need-a-stamp-…`. **That is the same failure this
+file exists to prevent, arrived at from the other side** — a *fixed* issue left
+reading open costs the next reader a re-derivation just as an *unfixed* one
+left unwritten does, and it is the easier of the two to commit, because the fix
+feels like the end of the work. Stamp the tracker in the commit that fixes the
+bug, not in a later sweep.
+
+Lesson 3 above — assert the fixture where the code under test treats an empty
+read as a valid answer — landed separately on 2026-08-29 for the `sed` `R`
+test, the one site in the twelve where that is true.
 
 ---
 
@@ -95850,6 +95907,14 @@ string — a compatibility divergence noticed while reading the 17, not fixed
 here because it needs bash's arithmetic-context rules rather than a guess at
 them.
 
+**The second of those is now closed** (2026-08-29): the rules were measured
+against bash rather than guessed, and turned out to cover *four* divergences
+rather than the one noticed here, all failing in the same direction — see
+`A-KSHELL-SUBSTRING-OPERANDS-WERE-PARSED-NOT-EVALUATED` at the end of this
+file. Worth recording that the deferral was the right call and not merely a
+cautious one: the guess anyone would have made — "treat a non-numeric length as
+zero" — fixes the reported row and none of the other three.
+
 ### A sixth blindness, in the rung rather than the gate — and this one is not fixable by a gate
 
 The boot that verified this batch passed, and rung 103's six assertions all
@@ -95973,3 +96038,460 @@ is the only part the compiler is not reading.
 Self-test rung 104 asserts the corrected case in the serial log as well
 (`filelock pid 1O` must name `filelock` and must not contain `epollstat`), so
 the invariant is pinned both statically and at runtime.
+
+---
+
+## `A-A-PUSH-GATE-DELETED-THE-REPOSITORY-IT-WAS-GATING` (lane A, 2026-08-29) — **FIXED 2026-08-29**, published damage
+
+**Status:** FIXED 2026-08-29 (`f0534726e` repair, `31eb8c6bd` root cause,
+`93fb3227b` the same latent bug in two more suites, and a later config repair
+-- see "The residue" below, which is the part that was still broken after this
+entry first said FIXED)
+
+**In short:** a safety check that runs just before `git push` built itself a
+scratch repository to test itself against. It did not get a scratch
+repository — it got *this* one, and its scratch commits landed on `lane-a`
+and were published to `origin/main`. The commit it wrote has a tree
+consisting of one `requests/` directory: as far as those two commits are
+concerned, the entire operating system was deleted. The gate reported
+success throughout, because it had genuinely verified a fixture and the
+fixture was the repository.
+
+### What actually happened
+
+`pre-push` gate 9 runs `check-requests-not-deleted.py --selftest` before
+trusting the checker. The self-test builds a fixture with `git init` /
+`git add -A` / `git commit` in a `tempfile.TemporaryDirectory`, each call
+passing `cwd=<tmp>`.
+
+**`GIT_DIR` outranks both `cwd=` and `git -C`.** And git *exports* `GIT_DIR`
+— along with `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_WORK_TREE`,
+`GIT_QUARANTINE_PATH` and the `GIT_CONFIG_*` family — into the environment of
+every hook. So on the first real invocation, every fixture command operated
+on the repository being pushed:
+
+| Fixture command | What it did to this repository |
+|---|---|
+| `git init` | re-initialised it and set `core.bare=true` on the shared config, which made the `os` integration worktree unusable — `git status` there answered "this operation must be run in a work tree" |
+| `git add -A` | replaced the index with the fixture's three files |
+| `git commit` | wrote `7f6a6b446` ("base") and `71f164f7e` ("delete one, sweep another") onto `lane-a` |
+
+The commit *messages* are what identified it: "base" and "delete one, sweep
+another" are the fixture's own strings, appearing in the history of an OS
+kernel. `git ls-tree 71f164f7e` confirmed it — a single `requests` entry.
+
+Both commits were then pushed to `origin/lane-a` and `origin/main`, because
+the gate passed.
+
+### The repair, and why it is a merge and not a force-push
+
+Force-pushing is forbidden outright here, and the bad tip was already
+published. The fix was to make a commit whose *content* is correct but whose
+first parent is the bad tip, so both refs fast-forward onto it:
+
+```
+git commit-tree "79abf2546^{tree}" -p 71f164f7e -p 79abf2546   # -> f0534726e
+```
+
+Verified with `git diff --stat 79abf2546 f0534726e` (empty — the tree is
+exactly the good one) and `git merge-base --is-ancestor 71f164f7e f0534726e`
+(true — so it fast-forwards). Then a single push updated both refs
+`71f164f7e..f0534726e`. `core.bare` was set back to `false` in `os`.
+
+**The two junk commits remain in `main`'s ancestry, permanently.** They are
+ancestry, not content: no file in the tree reflects them. Removing them would
+require rewriting published history, which needs a force-push. That is the
+price of the no-force-push rule and it is the right trade — but it means a
+`git log` of this repository will always show two commits that appear to
+delete everything, and this entry is the explanation a future reader will
+need.
+
+### Root cause fix
+
+`scripts/gitenv.py` is now the single place that knows which variables bind a
+repository. `clean_env()` for a subprocess that should choose its repository
+by `cwd`/`-C`; `scrub_environ()` for a test harness that should never touch
+the ambient repository at all. It deliberately does **not** drop every
+`GIT_*` — `GIT_EXEC_PATH` is on some installs the only thing telling git
+where its own subcommands live, so a blanket denylist would break git rather
+than redirect it.
+
+### Why the self-test could not have caught this, and what does
+
+A self-test cannot detect that it corrupted the repository it runs from: its
+verdict is a statement about the fixture, and here the fixture *was* the
+repository. Every assertion it made was true. The regression test therefore
+had to be an **outside observer** —
+`scripts/test-check-requests-not-deleted.py` snapshots a sacrificial repo
+(HEAD, branch, refs, `core.bare`, index, log, status), runs the checker
+against it under three hook environments, and diffs the snapshots.
+
+Two things about that test are load-bearing and easy to get wrong:
+
+- **`GIT_DIR` alone is the shape that matters**, because it is what `git
+  push` actually sets, and it is the shape that fails *quietly* — the fixture
+  succeeds and writes commits. Adding `GIT_INDEX_FILE` makes git crash early,
+  so the run is caught by exit code. A test that only covered the loud shape
+  would have proved the least.
+- **The probes must not raise.** The first version called `git` and let
+  failures propagate; against a repository the mutant had just made bare, the
+  snapshot threw and killed the harness with a traceback, losing the other
+  two environments. `_probe()` now returns a sentinel string, so a repository
+  too broken to answer still produces a *diff* rather than a crash.
+
+Every fix was mutation-tested by reverting it individually. Two mutants
+initially escaped, and each escape was a real weakness in the test rather
+than a nuisance: the snapshot-crash above, and an assertion that checked only
+for `"OK"` in the output, which a *foreign* repository satisfies just as well
+— now replaced by comparing the computed merge-base sha in both directions.
+
+### The generalisation, which is the part worth keeping
+
+Two other suites (`test-src-digest.py`, `test-boot-test.py`) build fixture
+repositories the same way. Neither is reachable from a hook today, so neither
+had fired — but "not currently reachable from a hook" is not a property
+either file states, nor one a reviewer can check, and `git bisect run`,
+`git rebase --exec`, `git filter-branch` callbacks and `git submodule
+foreach` export the same variables. Both were fixed anyway, via the shared
+module rather than three copies of a twenty-name denylist.
+
+**The check that would have caught this within seconds:** `git rev-parse
+lane-a` immediately after a push, compared against what was pushed. A push
+gate is the one program guaranteed to run with a repository named in its
+environment, and it is also the one nobody watches.
+
+### The residue: closing the leak did not undo what it had already written
+
+Found later the same day, by running exactly the post-push check recommended
+just above. It printed `core.bare: true` for a repository that is not bare.
+
+The fixture does three things before it commits anything, and through the
+leaked `GIT_DIR` all three landed in the *real* shared config at
+`os/.git/config` rather than in its temporary directory:
+
+| Fixture line | What it wrote into the real config | Effect |
+|---|---|---|
+| `run(tmp, "init", ...)` | `core.bare = true` | the `os` integration worktree stopped being a worktree |
+| `run(tmp, "config", "user.email"/"user.name", ...)` | `[user] selftest <selftest@example.invalid>` | the commit identity of **all three lanes** |
+| `run(tmp, "config", "diff.renames", "false")` | `[diff] renames = false` | rename detection off in every diff and log, everywhere |
+
+Worktrees share one config, so none of this was confined to lane A.
+
+`core.bare` was the loud one: `git status` in `os` answered `fatal: this
+operation must be run in a work tree` and `git worktree list` reported the
+tree as `(bare)`. Nothing was lost -- all 107 top-level entries were present
+and `HEAD` still named `refs/heads/main` -- but `os` is the tree the
+"merge your lane up to `main`" step is performed in, so that step had been
+quietly impossible since the incident.
+
+`user.email` was the quiet one, and therefore the expensive one. **33 commits
+are permanently authored `selftest <selftest@example.invalid>`** -- 16
+reachable from `lane-a`, 9 from `lane-b`, 3 from `lane-c`, 5 from `main`, all
+pushed. The oldest is the fixture's own `base` commit at 22:43:17; every
+commit any lane made afterwards inherited it, including the commits that
+fixed the incident. They cannot be repaired: changing an author rewrites the
+commit, which requires a force-push to published branches. That is the same
+decision already queued for the operator over the two junk commits, and it is
+recorded there rather than duplicated here.
+
+`diff.renames = false` deserves its own note, because the gate's own source
+comment names it as the configuration that "would otherwise turn every sweep
+into a refused push" -- the fixture set the hostile condition it was written
+to simulate, on the real repository, and then the gate went on passing.
+
+Repaired by unsetting the three; the operator's identity resolves again in all
+four worktrees and `os` is a checkout of `main` once more. **The leak itself
+was verified closed rather than assumed:** the self-test was re-run with
+`GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` all pointed at the real
+repository -- the precise conditions of the incident -- and the config hash,
+the ref hashes and `HEAD` were byte-identical afterwards.
+
+**The lesson, which is not the same as the one above.** That one was about a
+check that could not observe its own damage. This one is about what happens
+*after* a fix: closing a leak does not undo what leaked through it. The
+commits were found immediately because a tree with the whole OS missing is
+impossible to miss; the config was not found for another hour because a
+config setting makes no noise at all. So when a bug is found to have written
+to shared persistent state, the fix is only half the work -- the other half is
+diffing that state against what it should be, and *the quiet damage is the
+part that is still there*.
+
+---
+
+## `B-tar-EVERY-ARCHIVE-RECORDED-THE-OWNER-AS-A-BARE-NUMBER` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
+
+**In short:** a tar archive records who owns each file twice -- once as a
+number, and once as the account *name* that number stood for on the machine the
+archive was made on. Only the name is portable: user number 1000 is a different
+person on every machine. Ours filled in the number and left the name blank, for
+every file of every archive it ever wrote. Restore such an archive on a
+different machine and the files come out belonging to whoever happens to hold
+number 1000 there -- which on a multi-user machine is simply somebody else.
+
+### Measured, both sides
+
+The `uname` field of the first header, an archive of one file owned by
+`inhahe` (uid 1000):
+
+```
+gnu : uname=[inhahe]  gname=[inhahe]
+ours: uname=[]        gname=[]
+```
+
+The blank field is not meaningless -- it is the encoding for "no name
+recorded", which is exactly what `tar --numeric-owner` writes on purpose. So
+ours was silently producing numeric-owner archives whatever it was asked for,
+and nothing in the output said so. `tar -tvf` on our archive showed
+`1000/1000` where GNU's showed `inhahe/inhahe`, which was the only visible
+symptom.
+
+### The fix
+
+`Creator` gained an `OwnerNames`: the `pwdb` account database plus a
+`BTreeMap` cache per id, loaded once per run. `Creator::header` now sets
+`uname`/`gname` beside the numbers it already set.
+
+Three measured details, from `tar-uname1.sh` and `tar-uname2.sh`:
+
+| Case | GNU | Ours |
+|---|---|---|
+| id is in the database | the name | same |
+| id is **not** in the database | field left empty | same |
+| name is 32 bytes or longer | cut to 31 + NUL, silently, rc 0 | same |
+
+The empty-field case is the one worth stating, because "fall back to the
+number" is the tempting wrong answer: writing `"4242"` as a *name* would make a
+reader restore ownership to an account literally called `4242` if the
+destination machine had one. Leaving it empty says "you only have the number",
+which is true.
+
+The 31-byte cut is not a guess either. It follows from tar's `tar_copy_str`,
+which stops at the first NUL *or* at the field width and so leaves the array's
+own zero byte in place -- unlike the `name` field, which is legally unterminated
+when full.
+
+### Why it survived so long
+
+`scripts/tar-diff.sh` normalised it away. `--numeric-owner` was in the GNUFMT
+flag set, with a comment saying so, precisely so that this one known gap could
+not mask every other difference in the same 512 bytes -- and an xfail at the
+bottom recorded the gap. That was the right call when the gap was open and the
+wrong shape to leave standing: a normalisation is a blind spot with a comment
+on it. The flag is now gone from GNUFMT and the xfail with it, so all 13
+`create_case`s compare `uname`/`gname` byte for byte along with the rest of the
+header -- and `header_field` names the field if they ever diverge again. The 5
+`interop_case`s gain it too: they read our archive with GNU's `-tv`, which
+prints the owner *name* when the field holds one.
+
+The generalisable point: **an xfail plus a normalisation is one gap recorded
+twice, and only the xfail is load-bearing.** The normalisation is what stops
+the differential from ever telling you the gap is closed -- so when the xfail is
+retired, the normalisation has to go in the same change, or the fix is
+unverified.
+
+## B-tar-A-SECOND-NAME-FOR-A-FILE-WAS-A-SECOND-COPY-OF-IT (lane B, 2026-08-29) -- **FIXED 2026-08-29**
+
+**In short:** when `tar` is asked to archive the same file twice in one run --
+`tar -cf backup.tar dir dir/sub`, or just `tar -cf x f f` -- GNU stores the
+bytes once and records the second name as a *hard link* to the first. Ours
+stored the whole file again, so an archive of a tree named twice was twice the
+size it should have been. Worse, ours applied the same idea to file types GNU
+excludes, and applied it *before* writing the member rather than after: two
+names for a **socket** produced an archive containing a hard link pointing at a
+member that was never written, which no extractor can unpack.
+
+Discovered while measuring `-cvv` for the verbosity work: GNU printed a
+`Removing leading '/' from hard link targets` notice where ours printed none,
+for a command line with no link in it at all. Pulling that thread
+(`tar-hardnotice1.sh` .. `tar-hardnotice6.sh`) found the rule underneath it.
+
+### The rule, measured
+
+GNU keys a table on `(device, inode)`. Every member it *successfully writes*
+that is a **regular file or a symlink** goes in; a later member with the same
+key is written as typeflag `1` naming the first. Three parts of that, and ours
+had all three wrong:
+
+| | GNU | Ours (before) | Consequence |
+|---|---|---|---|
+| link count | irrelevant -- an `nlink=1` file named twice is deduplicated | required `nlink > 1` | `tar -cf b.tar dir dir` wrote the tree twice |
+| member type | regular files and symlinks only | every non-directory | a fifo named twice became a link record; GNU writes two fifos |
+| when | after the member is in the archive | before it was attempted | two names for a socket gave a link to a member that does not exist |
+
+`--hard-dereference` turns the mechanism off entirely. Ours has no such option
+yet, so there is nothing to gate on -- but if one is added, that is where it
+goes.
+
+A fourth, smaller divergence came out of the same probes: GNU strips a member's
+name (and so prints the prefix notice) *before* it opens the file, so
+`tar -cf x /abs/unreadable` says `Removing leading '/' from member names` and
+then `Cannot open`. Ours built the whole header after the open and printed
+nothing but the error. `add_regular` now calls `stored_name` before `File::open`
+and passes the result to a split-out `header_for`.
+
+### Still open: one notice that no model explains
+
+`tar -cf x /abs/unreadable /abs/readable` -- GNU prints a
+`Removing leading '/' from hard link targets` notice; ours prints none. It is
+stderr only, on a command line where one member fails, and it does not affect
+any archive. What makes it interesting is that no rule fits the whole table:
+
+| argv (all absolute, all `nlink=1`) | GNU prints the link-target notice? |
+|---|---|
+| one readable member | no |
+| one unreadable member | no |
+| two readable members, different inodes | **yes** |
+| the same readable member twice | **yes** |
+| unreadable then readable | **yes** |
+| readable then unreadable | **yes** |
+| the same unreadable member twice | no |
+
+"Fires once a name is entered in the link table" predicts a notice for a single
+readable member. "Fires when a link record is written" predicts none for two
+different inodes. "Fires on a lookup against a non-empty table" predicts none
+for *unreadable then readable*, since the failed first member is not entered.
+Every model contradicts one row. It is plausibly GNU's separate
+`--check-links` accounting table rather than the dedup table, but that was not
+run to ground.
+
+Ours matches every row above except the two that mix a failure with a success.
+Left as-is deliberately: guessing at a rule that does not fit the measurements
+would be worse than a known, documented gap. The differential's link-table
+cases use *relative* names so that nothing strips and this question cannot
+contaminate them; the notice-ordering case uses a single unreadable member,
+which is a row we do match.
+
+---
+
+## B-A-TEST-HARNESS-THAT-CAPTURES-ONLY-FD-1-HIDES-THE-REASON-FOR-ITS-OWN-FAILURES (lane B, 2026-08-29) — ✅ FIXED 2026-08-29
+
+**In short:** `oils`' test helpers collected what the shell printed, but not
+what the shell *complained* about. So when eight tests went red under load, the
+harness reported `left: ""` — "the builtin produced nothing" — while the shell
+had in fact written `osh: grep: command not found` to a stream nobody was
+watching, and exited 127 like it should. The failure named the innocent party,
+and cost a triage cycle establishing that `readonly -p` had not broken. The
+harness now watches that stream and quotes it under the assertion.
+
+Reported by lane C as
+`requests/c-b-oils-tests-cannot-see-a-failed-spawn.md` (2026-08-16, deleted
+that day, restored 2026-08-29 by lane A, answered the same day).
+
+**The general shape, which is not about shells.** A test that captures one of
+the two output streams and drops the other will, for any failure that the code
+*explained on the dropped stream*, report the explanation's **absence** rather
+than the explanation. That reads as "the feature stopped working", which is the
+worst possible pointer: it aims the reader at the code that is behaving
+correctly. The tell is an assertion whose `left` is empty or short and never
+wrong — six of the eight here.
+
+**Why the obvious fix was the wrong one.** "Capture fd 2 as well" reads as
+"point the shell's fd 2 at a buffer" — for `oils`, a `StderrTarget::Buffer` as
+the base of the stderr stack. That is a *semantic* change, not an observational
+one: `Buffer` makes `/dev/stderr` report `SpecialSrc::Unavailable`, changes the
+sink-identity comparison that decides whether a `2>&1` is a merge, and routes
+every external child's fd 2 through a pipe-and-drain rather than a dup of the
+real descriptor. The tests would then be exercising a path production never
+takes, in the one file whose entire purpose is "what does the real shell do
+here". **In a test harness, prefer an observer to a redirect** — tee the bytes
+on their way to where they were already going.
+
+**What landed.** `interp.rs` → `mod stderr_tee` (`#[cfg(test)]`): a thread-local
+that records the single `else` branch of `Shell::emit_stderr_depth` (the one
+place shell diagnostics reach the process's real fd 2), plus a *chained* panic
+hook that prints the recording beneath libtest's own assertion block. No call
+site changed, so all ~88 external-spawn sites and every other test in the file
+are covered at once. Cleared in `new_shell`, so a failure reports its own run's
+diagnostics and a `--test-threads=1` run does not attribute one test's stderr
+to the next. Rendering is a separate `report()` with its own assertions: a
+quiet fd 2 prints nothing (or the block would appear under every unrelated
+failure), and a non-text byte in a quoted filename costs that byte rather than
+the rest of the line.
+
+`the_harness_sees_what_the_shell_writes_to_the_real_fd_2` asserts the negative
+too — a diagnostic that a `2>&1` took into the capture must **not** appear in
+the recording, or the panic message would quote back a message the test had
+deliberately collected itself.
+
+---
+
+### A-KSHELL-SUBSTRING-OPERANDS-WERE-PARSED-NOT-EVALUATED. `${x:off:len}` read its two operands with `parse::<i64>()` instead of evaluating them, and indexed by byte — **Status: FIXED** 2026-08-29 (boot test green, rung 105 present in the serial log; merged to `main` 2026-08-30)
+
+**In short:** the shell's "give me part of this string" syntax got the wrong
+part in six different situations. `${x:0:n}` — take the first `n` characters,
+the most ordinary use there is — ignored `n` entirely and returned the whole
+string; `${x:1+1:2}` returned nothing at all; and on any string containing a
+non-ASCII character, cutting it usually produced nothing. Every one of these
+was silent: no message, no failure status, just a different answer.
+
+**Where:** `kernel/src/kshell.rs` — one arm of `expand_brace_expr`'s
+eleven-arm operator chain, now split out as `expand_substring`.
+
+**What was wrong.** Bash evaluates both operands as *arithmetic expressions*,
+in the same context `$(( ))` uses: a bare name is that variable's value, an
+unset name is `0`, an empty expression is `0`. Ours called
+`parse::<i64>()` / `parse::<usize>()` on them, which is correct on every
+literal and wrong on every name — which is exactly why it lasted. With
+`x=abcdefgh`:
+
+| Expression | bash | ours | direction |
+|---|---|---|---|
+| `${x:1:abc}` | `` (unset name ⇒ 0) | `bcdefgh` | too much |
+| `${x:0:n}`, `n=3` | `abc` | `abcdefgh` | too much |
+| `${x:2:-2}` | `cdef` | `cdefgh` | too much |
+| `${x: -3:-1}` | `fg` | `fgh` | too much |
+| `${x:1+1:2}` | `cd` | `` | too little |
+| `${x:abc}` | `abcdefgh` (offset 0) | `` | too little |
+| `${x:2}`, `x=héllo` | `llo` | `` | too little |
+| `${x:7:-2}` | error, `` | `h` | too much |
+
+**Which way it failed depended on which operand it could not read**, and that
+is worth stating plainly because the tempting summary — "it returned too much"
+— would send the next reader looking for a clamp. An unreadable *length* left
+`end` at its initialiser, "the rest of the string"; an unreadable *offset*
+skipped the whole `if let Ok` and pushed nothing.
+
+The `-2` rows are a rule rather than an off-by-one: **a negative length is an
+offset from the end of the whole value, not a count**, so `${x:2:-2}` means
+"from character 2 up to two from the end". `parse::<usize>()` rejected it and
+the code fell through to "the rest of the string" — the exact opposite of
+dropping the tail. A negative length landing *before* the offset is the single
+case bash diagnoses (`substring expression < 0`); an out-of-range *offset* it
+silently expands to nothing. That asymmetry is bash's and is kept.
+
+The `héllo` row is separate and was not in the original report. Indices were
+**byte** offsets, so a cut landing inside a UTF-8 sequence made `str::get`
+return `None`, which `.unwrap_or("")` turned into the empty string — silently,
+with no diagnostic and no failure status. `${#x}` had the matching fault in the
+other direction: it reported `6` for a five-character string.
+
+**The fix.** Both operands now go through `eval_arithmetic`, the same evaluator
+`$(( ))` uses, so a name, an expression and an empty string all mean what they
+mean everywhere else in the shell. Indices count **characters**: that is what
+SlateOS's real shell does (`userspace/oils`, see `TD-OILS-STRLEN-CHARS` in this
+file) and what bash does in a UTF-8 locale, which is the only locale this OS
+has — a debug shell that disagreed with the system shell about `${x:1:2}` would
+be its own trap. `${#NAME}` was changed to count characters in the same commit,
+because a shell that measures a string one way and cuts it another makes
+`${x:0:${#x}}` an expression whose two halves disagree about what a unit is.
+
+**How it was found:** by reading, not by a failure. It was noticed while
+auditing the 17 false positives of the option-refusal gate's D1 shape (see the
+batch-40 section above, where it is recorded as deferred) and deferred there on
+the grounds that fixing it needed bash's actual arithmetic-context rules rather
+than a guess at them. Those rules were then measured against bash directly —
+each row of the table above is an observed result, not a reading of the manual.
+
+**Pinned by** self-test rung 105, which asserts every row of the table plus the
+`substring expression < 0` diagnostic, the silent-empty out-of-range cases, and
+that `${#x}` and a cut of that exact length agree. The error case is captured
+around `expand_vars` rather than around a command: the diagnostic belongs to the
+expander, not to any command, and `check-selftest-wording.py` correctly refused
+the first draft, which had asserted it against `echo`.
+
+**Still divergent, deliberately not fixed here:** `${x:}` — an empty spec — is
+`bad substitution` in bash and expands to the variable's value here, because
+the substring arm is guarded by `rest.len() > 1`. That is a question about the
+shell's error *reporting* (kshell has no "bad substitution" concept at all),
+not about substring arithmetic, and folding it in would have made this commit
+two changes.

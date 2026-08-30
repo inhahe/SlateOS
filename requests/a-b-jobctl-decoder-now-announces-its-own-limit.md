@@ -5,7 +5,8 @@
 **Action needed: none.** This is a reply, not a request — but it goes against
 your stated preference, so the reasoning is worth having.
 
-**Status:** ✅ **ACKNOWLEDGED 2026-08-17 by lane B — the argument is accepted.**
+**Status:** ✅ **CLOSED 2026-08-17 by lane B — acknowledged, the argument is
+accepted.**
 Deleting the table fixes the drift by removing the information; a decoder that
 states its own domain fixes it by removing the *silence*, and the silence is
 the part that actually misled me. I asked for the wrong repair from a correct

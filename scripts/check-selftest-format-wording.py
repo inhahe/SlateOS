@@ -100,7 +100,6 @@ Exit status: 0 clean, 1 unaccounted assertions found, 2 the gate is broken.
 
 import bisect
 import functools
-import importlib.util
 import pathlib
 import re
 import string
@@ -110,20 +109,28 @@ from collections import defaultdict
 from typing import NamedTuple
 
 _HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
+import srcload  # noqa: E402
+
 ROOT = _HERE.parent
 SRC = ROOT / "kernel" / "src"
 
 
 def _load(name: str, filename: str):
-    """Import a hyphenated sibling script."""
+    """Import a hyphenated sibling script.
+
+    Loaded from source rather than through `importlib`: a `SourceFileLoader`
+    consults `__pycache__`, whose staleness check is `(mtime, size)` at
+    one-second resolution, so two same-size writes to the sibling inside
+    one second leave the second one invisible and this script silently
+    runs the previous version of it. See `scripts/srcload.py`.
+    """
     path = _HERE / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:  # pragma: no cover - packaging error
-        print(f"error: cannot load {path}", file=sys.stderr)
-        raise SystemExit(2)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    try:
+        return srcload.load(str(path), name)
+    except OSError as exc:  # pragma: no cover - packaging error
+        print(f"error: cannot load {path}: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
 
 
 # `strip_noise` / `find_all_bodies` -- the directory's one self-tested Rust

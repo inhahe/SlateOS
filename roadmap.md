@@ -175,11 +175,81 @@ implements it or answers in the same file.
 **When it lands, mark it — do not delete it.** Put a `**Status:**` line
 directly under the title saying `✅ LANDED <date> by lane <x>`, plus one
 sentence on what actually shipped. The queue property comes from that line,
-not from the file's absence:
+not from the file's absence. (`**Status**:`, with the colon outside the bold,
+is read as the same marker — four files write it that way — but write the form
+above; the leniency is for files that already exist, not a second convention.
+Markdown renders the two spellings identically, which is why the drift was
+invisible to everyone who introduced it.)
 
 ```bash
-grep -L '^\*\*Status:\*\* ✅' requests/*.md      # everything still open
+python scripts/open-requests.py            # what is still open for your lane
+python scripts/open-requests.py --outgoing # what you filed on other lanes
 ```
+
+**Use the script, not a grep.** The obvious query — `grep -L '^\*\*Status:\*\*
+✅' requests/*.md` — is what this rule used to recommend, and it under-reports
+in the direction that matters: it misses a marker written mid-line
+(`**Filed:** … **Status:** …`), and any `ls | grep | head` variant silently
+truncates, which twice reported *nothing open* when something was. The script
+is loose about where the marker sits and strict about what counts as done, and
+anything it cannot classify it calls open.
+
+Say so honestly when only half of a request landed: write `**Status:** ⏳ ask 1
+landed …; ask 2 blocked on lane <x>`. The script ranks an open/blocked/partial
+wording *above* a landed one, so a truthful header is what keeps the unfinished
+half in the queue — a `✅` on a half-done request hides live work from the one
+report that exists to find it.
+
+**Write the status in words the script knows.** It reads the first ~120
+characters after `**Status:**` and looks for one of these:
+
+| Verdict | Words |
+|---|---|
+| still work | `open` `reopened` `partial` `partially` `in progress` `blocked` `pending` `not started` |
+| finished | `done` `landed` `fixed` `implemented` `delivered` `resolved` `answered` `folded in` `closed` `declined` `withdrawn` `obsolete` `superseded` `fulfilled` `consumed` `wontfix` |
+
+**The stamp glyphs count as words.** `✅` reads as *finished*, `⏳` and `⛔` as
+*still work*, ranked exactly like the table above — so `✅ … ⏳ ask 2 blocked`
+is open, and a tick alone is enough when the sentence after it uses a verb the
+table does not have (`✅ **TAKEN by lane A**` was read as unrecognised for
+weeks). Prefer a table word *and* the glyph; the glyph is the safety net, not
+the substitute.
+
+Anything else — `**Status:** needs a decision from you first` was a real one —
+reads as *unrecognised*, which counts as open. The report says so in those
+words and then prints this vocabulary once at the bottom, so you can fix it
+without coming back here; the list it prints is generated from the matcher, not
+copied from this table, so the two cannot say different things.
+A negated done word (`not fixed`, `never landed`) counts as open; a heading like
+`## Resolved` works as a marker on its own. Prefer a word from the table over
+inventing one: the table is what the report can act on, and a status it cannot
+parse is a status that only works on the day you write it.
+
+**A deletion is a gate failure, not a style note.**
+`scripts/check-requests-not-deleted.py` compares `requests/` against the merge
+base with `origin/main` and refuses the build if a file that existed there is
+gone. It runs in `pre-boot.py` and in `boot-test.sh`. Renames pass (fixing a slug, or an archive sweep);
+`requests/.deletions-allowed` waives a basename with a stated reason.
+
+It runs a third time at the push boundary, as gate 9 of `scripts/hooks/pre-push`
+— and there it is invoked with `--head <sha>` for each ref being pushed, which
+matters. Without `--head` the checker diffs the merge base against the *working
+tree*, which is right for a build gate and wrong here in the dangerous
+direction: a commit that deletes a request passes as soon as the file has been
+restored and staged, so the deletion is published while every local check reads
+green. `--head` judges the commit that is actually being sent. The gate
+self-tests the checker (`--selftest`) before believing it, because every one of
+the checker's own failure modes returns "no deletions found", which is
+byte-identical to a healthy repo. Bypass: `ALLOW_REQUEST_DELETION=1`.
+
+The gate exists because this rule was enforced by attention and attention lost
+**four times in the two weeks after it was written** — `d30e2a5ca` (A, 108 minutes
+after the rule landed), `57d21b4ee`, `cd23f2f97` (C — and the reply lane C
+filed the same day cites the deleted file by name in its own first line), and
+`dd4e34fd9` (A, in a commit whose own message asserted the *opposite* rule).
+Every lane, in commits that are otherwise careful; misremembering a rule is not
+something a further reminder fixes. All the missing files were restored on
+2026-08-29.
 
 The rule used to say "delete the file when it lands", and that was wrong for
 a reason that only shows up later: **a request file is the canonical write-up
@@ -192,9 +262,13 @@ That is not hypothetical: three files were deleted under the old rule
 §306/§307 and `todo.txt` pointing at nothing. All three have been restored.
 See `design-decisions.md` §315.
 
-A landed request is cheap to keep — the whole dropbox is under 30 small files
-— and expensive to lose, because what it holds is the *why*, which is exactly
-what the citing comment is reaching for.
+A landed request is cheap to keep — 186 files and 1.8 MiB of markdown as of
+2026-08-29, growing by a handful a day — and expensive to lose, because what
+it holds is the *why*, which is exactly what the citing comment is reaching
+for. (The "under 30 small files" this paragraph used to claim was true when
+the rule was written and had been wrong by 6× for weeks; the argument does not
+depend on the number, but a stale one invites the reader to re-derive the
+conclusion from a figure that no longer holds.)
 
 ### 3. Shared documents are append-only, with per-lane sections
 

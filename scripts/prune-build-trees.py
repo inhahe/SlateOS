@@ -73,13 +73,15 @@ and `--prune` on a tree that does not qualify is a no-op with a warning:
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import os
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import srcload  # noqa: E402
 
 
 def _load_detect_lane():
@@ -93,11 +95,10 @@ def _load_detect_lane():
     lane's build trees.
     """
     path = Path(__file__).resolve().parent / "which-lane.py"
-    spec = importlib.util.spec_from_file_location("which_lane", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        module = srcload.load(str(path), "which_lane")
+    except OSError as exc:
+        raise ImportError(f"cannot load {path}") from exc
     return module.detect_lane
 
 

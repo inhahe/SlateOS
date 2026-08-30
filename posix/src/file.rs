@@ -5632,9 +5632,20 @@ pub extern "C" fn openat2(dirfd: i32, path: *const u8, how: *const OpenHow, size
         // itself with `openat(O_DIRECTORY|O_NOFOLLOW)` + `readlinkat`, keeping
         // the parent descriptors on a stack, and creating through the
         // descriptor the walk returns. `userspace/coreutils/src/bin/tar.rs`
-        // (`Dir::locate`) is the worked example; requests/
-        // b-a-openat2-resolve-beneath-is-fail-open-in-libc-and-unenforceable-in-the-vfs.md
-        // asks lane A for the VFS support that would retire it.
+        // (`Dir::locate`) is the worked example.
+        //
+        // This refusal is on its way out, and the two halves arrive separately.
+        // The VFS half landed 2026-08-29 (`Vfs::resolve_beneath`,
+        // `fs::handle::open_beneath`, `syscall::linux::sys_openat_beneath`) —
+        // but it is reachable only through the *Linux* ABI, and this function
+        // is the native one, which has no syscall to carry a `resolve` word.
+        // `requests/b-a-yes-forward-openat2-and-here-is-the-shape-we-want.md`
+        // asks lane A for `SYS_FS_OPENAT2`
+        // (`path_ptr, path_len, flags, mode, resolve, dirfd` — flat, no
+        // `open_how`); when it exists, this branch and the `NO_SYMLINKS` one
+        // below both go away and the call forwards instead. See
+        // `design-decisions.md` §705, which also records the create-mode width
+        // question the forward has to settle first.
         errno::set_errno(errno::EXDEV);
         return -1;
     }
@@ -5647,6 +5658,11 @@ pub extern "C" fn openat2(dirfd: i32, path: *const u8, how: *const OpenHow, size
         // no per-component no-follow bit (`O_NOFOLLOW` is the final component
         // only). Refusing is the honest answer and the safe one; silently
         // following is neither.
+        //
+        // Retired by the same forward as `RESOLVE_BENEATH` above: a native
+        // `SYS_FS_OPENAT2` carrying the `resolve` word reaches the same VFS
+        // resolver `sys_openat2` already reaches, and lane A's containment work
+        // composes `BENEATH | NO_SYMLINKS` without special handling.
         errno::set_errno(errno::EOPNOTSUPP);
         return -1;
     }

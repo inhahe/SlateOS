@@ -58,11 +58,24 @@ def find_duplicates(
     Matching is on the heading title, not the body: a resurrected entry is by
     definition one whose *body* may already have diverged, so requiring equal
     bodies would hide exactly the case that matters most.
+
+    Only headings that are *entries* are compared. `ki_split.parse` returns
+    every heading, and the subsection headings inside entries are ordinary
+    prose that repeats freely across unrelated entries -- "Test", "The shape of
+    the fix", "What was and was not reachable". Comparing those reported a
+    permanent false positive (`### Test`, one copy under a PCI entry here and
+    one under an HTML-escaping entry in the archive), which is worse than no
+    check at all: a tool that always exits 1 cannot tell anyone that a *real*
+    duplicate has appeared. See `ki_split.opens_with_entry_id`.
     """
     _, live_entries = ki_split.parse(live_path)
     _, archive_entries = ki_split.parse(archive_path)
-    archived = {e.title: e for e in archive_entries}
-    return [(e, archived[e.title]) for e in live_entries if e.title in archived]
+    archived = {e.title: e for e in archive_entries if e.is_entry}
+    return [
+        (e, archived[e.title])
+        for e in live_entries
+        if e.is_entry and e.title in archived
+    ]
 
 
 def _relation(live: ki_split.Entry, archived: ki_split.Entry) -> str:

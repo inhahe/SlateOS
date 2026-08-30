@@ -16208,7 +16208,22 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "netsettings dns nosuchif auto",
                 b"Usage:",
             ),
-            ("perfmon dismiss", "perfmon dismiss 999999", b"Usage:"),
+            // The `let ... else` form, where the guard *is* the binding: the
+            // operand is pulled out with `parts.get(1)` and the absent case is
+            // the `else` block. This slot used to hold `perfmon dismiss`, a
+            // second example of the `} else if` form above; it was replaced
+            // rather than deleted when `dismiss` went away with the alert
+            // buffer, because a slot covering a shape nothing else covers is
+            // worth more than a duplicate of one `netsettings dns` already
+            // pins. The control is a *malformed* operand rather than a
+            // nonexistent one -- `perfmon cpu-alert 50` would succeed and
+            // leave the threshold changed for the rest of the boot, which is
+            // not a self-test's business.
+            (
+                "perfmon cpu-alert",
+                "perfmon cpu-alert notanumber",
+                b"Usage:",
+            ),
         ];
         for (bare, control, marker) in arity_cases {
             let out = capture_command(bare);

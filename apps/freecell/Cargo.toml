@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window. Without it `main` was `let _app = FreeCell::new();` — it dealt
+# fifty-two cards across eight columns and dropped the lot, so no card ever
+# reached a screen and no key ever arrived.
+oswindow = { path = "../../gui/window" }
 randrange = { path = "../../randrange" }
 
 [lints]

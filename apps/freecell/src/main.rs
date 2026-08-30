@@ -1,16 +1,3 @@
-#![allow(dead_code)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(clippy::needless_range_loop)]
-#![allow(unused_imports)]
-
 //! Slate OS FreeCell -- classic FreeCell card game.
 //!
 //! Standard 52-card deck dealt across 8 tableau columns (7,7,7,7,6,6,6,6).
@@ -68,6 +55,9 @@ const OVERLAY_FONT_SIZE: f32 = 28.0;
 
 /// Number of tableau columns.
 const TABLEAU_COLS: usize = 8;
+/// How many columns get the extra card: 52 cards over 8 columns is four of
+/// seven and four of six.
+const DEEP_COLUMNS: usize = 4;
 /// Number of free cells.
 const FREE_CELL_COUNT: usize = 4;
 /// Number of foundation piles.
@@ -292,19 +282,40 @@ enum Selection {
 
 // ── Undo ────────────────────────────────────────────────────────────
 
-/// Records one undoable action.
-#[derive(Clone, Debug)]
-enum UndoAction {
-    /// Moved a card between locations.
-    Move {
-        from: MoveLocation,
-        to: MoveLocation,
-    },
-    /// Auto-moved a card to foundation.
-    AutoMove {
-        from: MoveLocation,
-        to: MoveLocation,
-    },
+/// One reversible step: a single card moved from one place to another.
+///
+/// A press can move more than one card. Placing a card can set off a run of
+/// cards flying home to the foundations, and all of that is one press as far as
+/// the player is concerned -- so it must be one press as far as the move counter
+/// and the undo key are concerned too. `player` is what says so: it is true on
+/// the step the player asked for and false on every step the game added on top
+/// of it, and `undo` unwinds added steps until it has unwound one asked-for one.
+///
+/// The two used to be separate variants, `Move` and `AutoMove`, and the counting
+/// did not follow from them: a run of auto-moves incremented nothing and yet each
+/// undo of one decremented the counter, so undoing a placement that sent three
+/// cards home took two presses and left the count two lower than the one press
+/// that made it had raised it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UndoStep {
+    from: MoveLocation,
+    to: MoveLocation,
+    /// Whether the player asked for this step, rather than the game adding it.
+    player: bool,
+}
+
+/// Who set off a run of cards to the foundations.
+///
+/// The same run means two different things depending on the answer, which is why
+/// it cannot be inferred inside the run itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutoRun {
+    /// The player pressed the auto-move key. The run *is* the player's move, so
+    /// its first card is the step `undo` stops at and the counter counts one.
+    Asked,
+    /// The run followed a placement. Every card in it belongs to that placement's
+    /// press, so undoing the press has to take the whole run with it.
+    Followed,
 }
 
 /// Location for move tracking.
@@ -330,7 +341,7 @@ struct GameState {
     /// Current selection (if any).
     selection: Option<Selection>,
     /// Undo history.
-    undo_stack: Vec<UndoAction>,
+    undo_stack: Vec<UndoStep>,
     /// Total moves made.
     move_count: u32,
     /// Whether the game has been won.
@@ -388,13 +399,16 @@ impl GameState {
         self.focus = FocusArea::default_focus();
 
         // Deal cards: first 4 columns get 7 cards, last 4 get 6 cards.
-        let mut idx = 0;
-        for col in 0..TABLEAU_COLS {
-            let count = if col < 4 { 7 } else { 6 };
-            for _ in 0..count {
-                self.tableau[col].push(deck[idx]);
-                idx += 1;
-            }
+        //
+        // Drawn from the deck as an iterator rather than by a running index.
+        // The index version read `deck[idx]` fifty-two times against a deck
+        // whose length nothing here checks, so a `make_deck` that returned one
+        // card short would not have dealt a short column -- it would have
+        // panicked, in the middle of a deal, with the board half built.
+        let mut deck = deck.into_iter();
+        for (col, pile) in self.tableau.iter_mut().enumerate() {
+            let count = if col < DEEP_COLUMNS { 7 } else { 6 };
+            pile.extend(deck.by_ref().take(count));
         }
     }
 
@@ -439,34 +453,60 @@ impl GameState {
         self.tableau.iter().filter(|t| t.is_empty()).count()
     }
 
+    /// The card in free cell `idx`, if that cell exists and is occupied.
+    fn free_cell(&self, idx: usize) -> Option<Card> {
+        self.free_cells.get(idx).copied().flatten()
+    }
+
+    /// How deep the longest tableau column is.
+    ///
+    /// The drawing pass needs this to fit the cascade: a column deeper than
+    /// the window can show has to tighten the whole board rather than run off
+    /// the bottom.
+    fn deepest_column(&self) -> usize {
+        self.tableau.iter().map(Vec::len).max().unwrap_or(0)
+    }
+
     // ── Move logic ──────────────────────────────────────────────────
 
     /// Check if a card can be placed on a tableau column.
+    ///
+    /// Asked of the column itself rather than of `tableau_top`, which answers
+    /// `None` both for a column that is *empty* and for a column that does not
+    /// *exist* -- and empty means "any card may go here". Conflating the two
+    /// meant this said yes to a move onto column 99, and the bound had to be
+    /// spelled a second time above the question to stop it. One lookup answers
+    /// both now, so there is no second copy of the bound to drift.
     fn can_place_on_tableau(&self, card: Card, col: usize) -> bool {
-        if col >= TABLEAU_COLS {
-            return false;
-        }
-        match self.tableau_top(col) {
-            Some(top) => card.can_stack_on_tableau(top),
+        self.tableau.get(col).is_some_and(|pile| match pile.last() {
+            Some(top) => card.can_stack_on_tableau(*top),
             // Any card can go on an empty column.
             None => true,
-        }
+        })
     }
 
     /// Try to move a card from a free cell to a tableau column.
     fn try_freecell_to_tableau(&mut self, fc_idx: usize, col: usize) -> bool {
-        let card = match self.free_cells.get(fc_idx).copied().flatten() {
-            Some(c) => c,
-            None => return false,
+        let Some(card) = self.free_cell(fc_idx) else {
+            return false;
         };
         if !self.can_place_on_tableau(card, col) {
             return false;
         }
-        self.free_cells[fc_idx] = None;
-        self.tableau[col].push(card);
-        self.undo_stack.push(UndoAction::Move {
+        // The column is found before the cell is emptied. Emptying first and
+        // then failing to find the column would not misplace the card, it
+        // would destroy it -- the one outcome a card game must not have.
+        let Some(pile) = self.tableau.get_mut(col) else {
+            return false;
+        };
+        pile.push(card);
+        if let Some(cell) = self.free_cells.get_mut(fc_idx) {
+            *cell = None;
+        }
+        self.undo_stack.push(UndoStep {
             from: MoveLocation::FreeCell(fc_idx),
             to: MoveLocation::Tableau(col),
+            player: true,
         });
         self.move_count += 1;
         true
@@ -474,19 +514,24 @@ impl GameState {
 
     /// Try to move a card from a free cell to its foundation.
     fn try_freecell_to_foundation(&mut self, fc_idx: usize) -> bool {
-        let card = match self.free_cells.get(fc_idx).copied().flatten() {
-            Some(c) => c,
-            None => return false,
+        let Some(card) = self.free_cell(fc_idx) else {
+            return false;
         };
         let fidx = card.suit.index();
         if !card.can_place_on_foundation(self.foundation_top_value(fidx)) {
             return false;
         }
-        self.free_cells[fc_idx] = None;
-        self.foundations[fidx].push(card);
-        self.undo_stack.push(UndoAction::Move {
+        let Some(pile) = self.foundations.get_mut(fidx) else {
+            return false;
+        };
+        pile.push(card);
+        if let Some(cell) = self.free_cells.get_mut(fc_idx) {
+            *cell = None;
+        }
+        self.undo_stack.push(UndoStep {
             from: MoveLocation::FreeCell(fc_idx),
             to: MoveLocation::Foundation(fidx),
+            player: true,
         });
         self.move_count += 1;
         self.check_win();
@@ -499,15 +544,23 @@ impl GameState {
             Some(c) => c,
             None => return false,
         };
-        let fc_idx = match self.first_empty_free_cell() {
-            Some(i) => i,
-            None => return false,
+        let Some(fc_idx) = self.first_empty_free_cell() else {
+            return false;
         };
-        self.tableau[col].pop();
-        self.free_cells[fc_idx] = Some(card);
-        self.undo_stack.push(UndoAction::Move {
+        // The cell is found before the card leaves the column, for the same
+        // reason as above: a card taken off the board and then not placed is a
+        // card gone.
+        let Some(cell) = self.free_cells.get_mut(fc_idx) else {
+            return false;
+        };
+        *cell = Some(card);
+        if let Some(pile) = self.tableau.get_mut(col) {
+            pile.pop();
+        }
+        self.undo_stack.push(UndoStep {
             from: MoveLocation::Tableau(col),
             to: MoveLocation::FreeCell(fc_idx),
+            player: true,
         });
         self.move_count += 1;
         true
@@ -515,21 +568,26 @@ impl GameState {
 
     /// Try to move the top card from a tableau column to a specific free cell.
     fn try_tableau_to_specific_freecell(&mut self, col: usize, fc_idx: usize) -> bool {
-        if fc_idx >= FREE_CELL_COUNT {
+        // One lookup answers both "is there such a cell" and "is it free".
+        // It used to be a `fc_idx >= FREE_CELL_COUNT` bound followed by an
+        // index -- the bound a second spelling of the array's own length.
+        if !self.free_cells.get(fc_idx).is_some_and(Option::is_none) {
             return false;
         }
-        if self.free_cells[fc_idx].is_some() {
+        let Some(card) = self.tableau_top(col) else {
             return false;
-        }
-        let card = match self.tableau_top(col) {
-            Some(c) => c,
-            None => return false,
         };
-        self.tableau[col].pop();
-        self.free_cells[fc_idx] = Some(card);
-        self.undo_stack.push(UndoAction::Move {
+        let Some(cell) = self.free_cells.get_mut(fc_idx) else {
+            return false;
+        };
+        *cell = Some(card);
+        if let Some(pile) = self.tableau.get_mut(col) {
+            pile.pop();
+        }
+        self.undo_stack.push(UndoStep {
             from: MoveLocation::Tableau(col),
             to: MoveLocation::FreeCell(fc_idx),
+            player: true,
         });
         self.move_count += 1;
         true
@@ -545,11 +603,17 @@ impl GameState {
         if !card.can_place_on_foundation(self.foundation_top_value(fidx)) {
             return false;
         }
-        self.tableau[col].pop();
-        self.foundations[fidx].push(card);
-        self.undo_stack.push(UndoAction::Move {
+        let Some(pile) = self.foundations.get_mut(fidx) else {
+            return false;
+        };
+        pile.push(card);
+        if let Some(from) = self.tableau.get_mut(col) {
+            from.pop();
+        }
+        self.undo_stack.push(UndoStep {
             from: MoveLocation::Tableau(col),
             to: MoveLocation::Foundation(fidx),
+            player: true,
         });
         self.move_count += 1;
         self.check_win();
@@ -558,21 +622,29 @@ impl GameState {
 
     /// Try to move the top card from one tableau column to another.
     fn try_tableau_to_tableau(&mut self, from_col: usize, to_col: usize) -> bool {
-        if from_col == to_col || from_col >= TABLEAU_COLS || to_col >= TABLEAU_COLS {
+        // Only the "not onto itself" rule is stated here. The two bounds that
+        // used to sit beside it were a second spelling of the array's length,
+        // and `tableau_top` / `can_place_on_tableau` each answer their own.
+        if from_col == to_col {
             return false;
         }
-        let card = match self.tableau_top(from_col) {
-            Some(c) => c,
-            None => return false,
+        let Some(card) = self.tableau_top(from_col) else {
+            return false;
         };
         if !self.can_place_on_tableau(card, to_col) {
             return false;
         }
-        self.tableau[from_col].pop();
-        self.tableau[to_col].push(card);
-        self.undo_stack.push(UndoAction::Move {
+        let Some(to) = self.tableau.get_mut(to_col) else {
+            return false;
+        };
+        to.push(card);
+        if let Some(from) = self.tableau.get_mut(from_col) {
+            from.pop();
+        }
+        self.undo_stack.push(UndoStep {
             from: MoveLocation::Tableau(from_col),
             to: MoveLocation::Tableau(to_col),
+            player: true,
         });
         self.move_count += 1;
         true
@@ -580,17 +652,29 @@ impl GameState {
 
     /// Try to move a card from a free cell to a specific free cell (swap).
     fn try_freecell_to_freecell(&mut self, from: usize, to: usize) -> bool {
-        if from == to || from >= FREE_CELL_COUNT || to >= FREE_CELL_COUNT {
+        // As above: the bounds are the arrays' own, asked by `get`.
+        if from == to
+            || self.free_cell(from).is_none()
+            || !self.free_cells.get(to).is_some_and(Option::is_none)
+        {
             return false;
         }
-        if self.free_cells[from].is_none() || self.free_cells[to].is_some() {
+        // Destination first, as everywhere else: taking the card out and then
+        // failing to find the cell to put it in would lose it.
+        let Some(card) = self.free_cell(from) else {
             return false;
+        };
+        let Some(cell) = self.free_cells.get_mut(to) else {
+            return false;
+        };
+        *cell = Some(card);
+        if let Some(src) = self.free_cells.get_mut(from) {
+            *src = None;
         }
-        let card = self.free_cells[from].take();
-        self.free_cells[to] = card;
-        self.undo_stack.push(UndoAction::Move {
+        self.undo_stack.push(UndoStep {
             from: MoveLocation::FreeCell(from),
             to: MoveLocation::FreeCell(to),
+            player: true,
         });
         self.move_count += 1;
         true
@@ -621,8 +705,13 @@ impl GameState {
         true
     }
 
-    /// Auto-move eligible cards to foundations. Returns how many were moved.
-    fn auto_move_to_foundations(&mut self) -> usize {
+    /// Send every card that is safe to send home, over and over until none is.
+    /// Returns how many cards moved.
+    ///
+    /// `run` says whose move this is; see [`AutoRun`]. It is the caller's answer
+    /// and not something this can work out for itself, because the run looks
+    /// identical either way -- the difference is only in what the player pressed.
+    fn auto_move_to_foundations(&mut self, run: AutoRun) -> usize {
         let mut total = 0;
         loop {
             let mut moved_any = false;
@@ -636,9 +725,14 @@ impl GameState {
                     {
                         self.free_cells[fc_idx] = None;
                         self.foundations[fidx].push(card);
-                        self.undo_stack.push(UndoAction::AutoMove {
+                        self.undo_stack.push(UndoStep {
                             from: MoveLocation::FreeCell(fc_idx),
                             to: MoveLocation::Foundation(fidx),
+                            // Only the first card of a run the player asked for
+                            // is the player's step; everything after it -- and
+                            // every card of a run that merely followed a
+                            // placement -- came free with that one press.
+                            player: run == AutoRun::Asked && total == 0,
                         });
                         total += 1;
                         moved_any = true;
@@ -655,9 +749,10 @@ impl GameState {
                     {
                         self.tableau[col].pop();
                         self.foundations[fidx].push(card);
-                        self.undo_stack.push(UndoAction::AutoMove {
+                        self.undo_stack.push(UndoStep {
                             from: MoveLocation::Tableau(col),
                             to: MoveLocation::Foundation(fidx),
+                            player: run == AutoRun::Asked && total == 0,
                         });
                         total += 1;
                         moved_any = true;
@@ -670,6 +765,12 @@ impl GameState {
             }
         }
         if total > 0 {
+            // A run the player asked for is one move however many cards it sent
+            // home, which is the same rule every other press follows. A run that
+            // followed a placement is already counted by that placement.
+            if run == AutoRun::Asked {
+                self.move_count += 1;
+            }
             self.check_win();
         }
         total
@@ -677,35 +778,33 @@ impl GameState {
 
     // ── Undo ────────────────────────────────────────────────────────
 
-    /// Undo the last action.
+    /// Undo the last press: reverse the cards the game sent home on its own, and
+    /// then the one card the player actually moved.
+    ///
+    /// Written as a loop rather than the recursion it replaced. The recursion
+    /// decided whether to keep going by looking at the *next* entry, so the last
+    /// auto-move of a chain -- the one sitting directly on the player's move --
+    /// stopped, leaving the board in a state the player never chose and needing
+    /// a second press to finish. The condition belongs on the entry being undone,
+    /// not on the one below it, and then there is nothing to look ahead at.
     fn undo(&mut self) {
-        let action = match self.undo_stack.pop() {
-            Some(a) => a,
-            None => return,
-        };
-        match action {
-            UndoAction::Move { from, to } | UndoAction::AutoMove { from, to } => {
-                // Reverse: take from `to`, put back at `from`.
-                let card = self.take_card_from(to);
-                if let Some(c) = card {
-                    self.put_card_at(from, c);
-                }
-                // Undo auto-moves recursively (they chain).
-                if matches!(action, UndoAction::AutoMove { .. }) {
-                    // Keep undoing auto-moves.
-                    if let Some(next) = self.undo_stack.last()
-                        && matches!(next, UndoAction::AutoMove { .. })
-                    {
-                        self.undo();
-                        return;
-                    }
-                }
-                if self.move_count > 0 {
-                    self.move_count -= 1;
-                }
+        let mut undid_a_press = false;
+        while let Some(step) = self.undo_stack.pop() {
+            // Reverse: take from `to`, put back at `from`.
+            if let Some(card) = self.take_card_from(step.to) {
+                self.put_card_at(step.from, card);
+            }
+            self.won = false;
+            if step.player {
+                undid_a_press = true;
+                break;
             }
         }
-        self.won = false;
+        if undid_a_press {
+            // Saturating because the counter is unsigned, not because it could
+            // legitimately be zero here: every `player` step incremented it once.
+            self.move_count = self.move_count.saturating_sub(1);
+        }
     }
 
     /// Take a card from a location (used by undo).
@@ -777,7 +876,7 @@ impl GameState {
                 self.selection = None;
             }
             Key::A => {
-                self.auto_move_to_foundations();
+                self.auto_move_to_foundations(AutoRun::Asked);
             }
             _ => {}
         }
@@ -840,7 +939,10 @@ impl GameState {
                 }
             }
             FocusArea::Foundation(i) => FocusArea::FreeCell(i.min(FREE_CELL_COUNT - 1)),
-            other => other,
+            // Named rather than `other => other`: a wildcard here matches any
+            // zone added to `FocusArea` later, so a new zone would silently
+            // have no `Up` at all instead of failing to compile.
+            FocusArea::FreeCell(i) => FocusArea::FreeCell(i),
         };
     }
 
@@ -849,7 +951,7 @@ impl GameState {
         self.focus = match self.focus {
             FocusArea::FreeCell(i) => FocusArea::Tableau(i.min(TABLEAU_COLS - 1)),
             FocusArea::Foundation(i) => FocusArea::Tableau((i + 4).min(TABLEAU_COLS - 1)),
-            other => other,
+            FocusArea::Tableau(i) => FocusArea::Tableau(i),
         };
     }
 
@@ -860,7 +962,7 @@ impl GameState {
             let placed = self.try_place_selection(sel);
             if placed {
                 self.selection = None;
-                self.auto_move_to_foundations();
+                self.auto_move_to_foundations(AutoRun::Followed);
             } else {
                 // If placing failed and we're clicking the same spot, deselect.
                 let same_spot = match (sel, self.focus) {
@@ -1334,6 +1436,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // Panicking on bad data is what a test is for; these are the lints the
+    // production code above is held to and the test code below is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects,
+        clippy::cast_precision_loss
+    )]
+
     use super::*;
 
     // ── Helpers ─────────────────────────────────────────────────────
@@ -1840,7 +1954,7 @@ mod tests {
     fn test_auto_move_ace() {
         let mut state = empty_game();
         state.tableau[0].push(card(Suit::Hearts, Rank::Ace));
-        let moved = state.auto_move_to_foundations();
+        let moved = state.auto_move_to_foundations(AutoRun::Asked);
         assert_eq!(moved, 1);
         assert_eq!(state.foundations[0].len(), 1);
     }
@@ -1849,7 +1963,7 @@ mod tests {
     fn test_auto_move_ace_from_freecell() {
         let mut state = empty_game();
         state.free_cells[0] = Some(card(Suit::Clubs, Rank::Ace));
-        let moved = state.auto_move_to_foundations();
+        let moved = state.auto_move_to_foundations(AutoRun::Asked);
         assert_eq!(moved, 1);
         assert_eq!(state.foundations[2].len(), 1);
         assert!(state.free_cells[0].is_none());
@@ -1864,7 +1978,7 @@ mod tests {
         }
         // Now a two should be safe to auto-move.
         state.tableau[0].push(card(Suit::Hearts, Rank::Two));
-        let moved = state.auto_move_to_foundations();
+        let moved = state.auto_move_to_foundations(AutoRun::Asked);
         assert_eq!(moved, 1);
         assert_eq!(state.foundations[0].len(), 2);
     }
@@ -1875,7 +1989,7 @@ mod tests {
         // Set up ace, then two in different columns.
         state.tableau[0].push(card(Suit::Hearts, Rank::Ace));
         state.tableau[1].push(card(Suit::Hearts, Rank::Two));
-        let moved = state.auto_move_to_foundations();
+        let moved = state.auto_move_to_foundations(AutoRun::Asked);
         // Ace moves first, then two becomes eligible.
         assert_eq!(moved, 2);
         assert_eq!(state.foundations[0].len(), 2);
@@ -1892,7 +2006,7 @@ mod tests {
         // For rank=2, needed=1, opposite colors need at least 1.
         // So if clubs/spades have no aces, red 2 is not safe.
         state.tableau[0].push(card(Suit::Hearts, Rank::Two));
-        let moved = state.auto_move_to_foundations();
+        let moved = state.auto_move_to_foundations(AutoRun::Asked);
         // Two is always safe per our rule (rank 2 returns true early).
         assert_eq!(moved, 1);
     }
@@ -1906,7 +2020,7 @@ mod tests {
         // Hearts 3 needs opposite colors (black) to have at least rank 2 on foundations.
         // Clubs and Spades are empty, so 3 is NOT safe.
         state.tableau[0].push(card(Suit::Hearts, Rank::Three));
-        let moved = state.auto_move_to_foundations();
+        let moved = state.auto_move_to_foundations(AutoRun::Asked);
         assert_eq!(moved, 0);
     }
 
@@ -1922,7 +2036,7 @@ mod tests {
         state.foundations[3].push(card(Suit::Spades, Rank::Ace));
         state.foundations[3].push(card(Suit::Spades, Rank::Two));
         state.tableau[0].push(card(Suit::Hearts, Rank::Three));
-        let moved = state.auto_move_to_foundations();
+        let moved = state.auto_move_to_foundations(AutoRun::Asked);
         assert_eq!(moved, 1);
     }
 
@@ -1941,7 +2055,7 @@ mod tests {
     #[test]
     fn test_auto_move_does_nothing_on_empty() {
         let mut state = empty_game();
-        let moved = state.auto_move_to_foundations();
+        let moved = state.auto_move_to_foundations(AutoRun::Asked);
         assert_eq!(moved, 0);
     }
 
@@ -2752,7 +2866,7 @@ mod tests {
 
         // Auto-move chains: ace moves first, then two becomes eligible
         // (rank 2 is always safe), so both move in one call.
-        state.auto_move_to_foundations();
+        state.auto_move_to_foundations(AutoRun::Asked);
         assert_eq!(state.foundations[0].len(), 2);
         // 3 won't move since opposite-color foundations don't have rank 2.
         assert_eq!(state.tableau[2].len(), 1);
@@ -2787,5 +2901,159 @@ mod tests {
         // At least one column should differ.
         let any_diff = (0..TABLEAU_COLS).any(|col| s1.tableau[col] != s2.tableau[col]);
         assert!(any_diff);
+    }
+
+    /// Builds a board where placing the hearts ace sends four cards home: the
+    /// ace itself, and then the twos and three that the ace unblocks.
+    fn board_that_cascades() -> GameState {
+        let mut state = empty_game();
+        // Three of the four aces are already home, so the fourth completes the
+        // rank and the twos become safe behind it.
+        state.foundations[Suit::Spades.index()].push(card(Suit::Spades, Rank::Ace));
+        state.foundations[Suit::Diamonds.index()].push(card(Suit::Diamonds, Rank::Ace));
+        state.foundations[Suit::Clubs.index()].push(card(Suit::Clubs, Rank::Ace));
+        // The card the player will move, and the cards it frees.
+        state.tableau[0].push(card(Suit::Hearts, Rank::Ace));
+        state.tableau[1].push(card(Suit::Hearts, Rank::Two));
+        state.tableau[2].push(card(Suit::Spades, Rank::Two));
+        state.tableau[3].push(card(Suit::Diamonds, Rank::Two));
+        state
+    }
+
+    #[test]
+    fn one_press_of_undo_takes_back_one_press_of_play() {
+        // The player makes one move -- ace of hearts to its foundation -- and the
+        // game answers by sending three more cards home unasked. Pressing undo
+        // once must give back the board as it was before that one press, not a
+        // half-unwound board the player never saw and never chose.
+        let mut state = board_that_cascades();
+        let before = state.tableau.clone();
+        state.focus = FocusArea::Tableau(0);
+        state.activate();
+        state.focus = FocusArea::Foundation(Suit::Hearts.index());
+        state.activate();
+        assert_eq!(
+            state.foundation_total(),
+            7,
+            "the cascade did not run, so this test is not testing what it says"
+        );
+
+        state.undo();
+        assert_eq!(
+            state.tableau, before,
+            "one undo left the board partway through the cascade"
+        );
+        assert_eq!(
+            state.foundation_total(),
+            3,
+            "cards stayed home after the undo"
+        );
+    }
+
+    #[test]
+    fn the_move_count_returns_to_where_it_started() {
+        // The counter is what the player is shown, so an undo that overshoots it
+        // is a visible lie about how many moves the game has taken. A cascade
+        // adds no moves of its own, so undoing the press that caused it must
+        // subtract exactly the one move that press added.
+        let mut state = board_that_cascades();
+        state.focus = FocusArea::Tableau(0);
+        state.activate();
+        state.focus = FocusArea::Foundation(Suit::Hearts.index());
+        state.activate();
+        assert_eq!(
+            state.move_count, 1,
+            "the press counted as {} moves",
+            state.move_count
+        );
+
+        state.undo();
+        assert_eq!(
+            state.move_count, 0,
+            "undoing one press left the count at {}",
+            state.move_count
+        );
+    }
+
+    #[test]
+    fn asking_for_the_auto_move_is_itself_one_move() {
+        // Pressing the auto-move key changes the board, so it is a move and the
+        // counter must say so -- once, however many cards flew home. It used to
+        // say nothing at all, which then made the next undo subtract from a
+        // count the run had never added to.
+        let mut state = empty_game();
+        state.tableau[0].push(card(Suit::Hearts, Rank::Ace));
+        state.tableau[1].push(card(Suit::Hearts, Rank::Two));
+        let moved = state.auto_move_to_foundations(AutoRun::Asked);
+        assert_eq!(moved, 2);
+        assert_eq!(
+            state.move_count, 1,
+            "two cards home counted as {} moves",
+            state.move_count
+        );
+
+        state.undo();
+        assert_eq!(state.move_count, 0);
+        assert_eq!(
+            state.foundation_total(),
+            0,
+            "undo left part of the run home"
+        );
+    }
+
+    #[test]
+    fn a_run_the_player_asked_for_is_not_swallowed_by_the_move_before_it() {
+        // The trap in unwinding a cascade is unwinding too far: the auto-move key
+        // and the cascade after a placement look identical from inside the run,
+        // so an undo that pops until it finds a player's move would, after the
+        // key, run on into the move the player made *before* pressing it.
+        let mut state = empty_game();
+        state.tableau[0].push(card(Suit::Spades, Rank::Two));
+        state.tableau[1].push(card(Suit::Hearts, Rank::Ace));
+
+        // A plain move first: the two goes to a free cell.
+        assert!(state.try_tableau_to_freecell(0));
+        assert_eq!(state.move_count, 1);
+
+        // Then the auto-move key, which sends the ace home.
+        assert_eq!(state.auto_move_to_foundations(AutoRun::Asked), 1);
+        assert_eq!(state.move_count, 2);
+
+        // One undo takes back the run only.
+        state.undo();
+        assert_eq!(state.move_count, 1);
+        assert_eq!(state.foundation_total(), 0);
+        assert!(
+            state.free_cells[0].is_some(),
+            "the undo ran past the run and took back the move before it"
+        );
+    }
+
+    #[test]
+    fn a_won_game_that_is_undone_is_no_longer_won() {
+        // The win banner takes over the whole window and refuses every key but
+        // `N`, so a board still marked won after an undo is a board the player
+        // cannot go on playing.
+        let mut state = empty_game();
+        for &s in &Suit::ALL {
+            for r in Rank::ALL {
+                if r == Rank::King && s == Suit::Hearts {
+                    continue;
+                }
+                state.foundations[s.index()].push(card(s, r));
+            }
+        }
+        state.tableau[0].push(card(Suit::Hearts, Rank::King));
+        assert_eq!(state.auto_move_to_foundations(AutoRun::Asked), 1);
+        assert!(
+            state.won,
+            "the board did not reach a win, so this proves nothing"
+        );
+
+        state.undo();
+        assert!(
+            !state.won,
+            "the game stayed won with a card back on the tableau"
+        );
     }
 }

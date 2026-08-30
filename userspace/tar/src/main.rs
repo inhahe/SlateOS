@@ -20,8 +20,9 @@
 //! padded to 512-byte boundaries. Archives are terminated by two consecutive
 //! zero blocks.
 
-use quoting::{quoteaf, quotef_os};
+use quoting::{escape_os, quoteaf};
 use std::env;
+use std::ffi::OsStr;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -693,9 +694,27 @@ fn format_timestamp(epoch_secs: u64) -> String {
 // CREATE mode
 // ============================================================================
 
+/// [`encode_octal`] with the `tar: ` prefix its message needs to be printable.
+fn octal_field(buf: &mut [u8], val: u64) -> Result<(), String> {
+    encode_octal(buf, val).map_err(|e| format!("tar: {}", e))
+}
+
 /// Write a single file or directory entry (header + data) to the archive.
+///
+/// `archive` is the name `-f` was given, needed only to report a write failure
+/// the way GNU does — `tar: /dev/full: Cannot write: No space left on device`
+/// names the *archive*, not the member being written into it, and is fatal
+/// rather than accumulated. Every other failure here concerns `full_path` and
+/// is returned for the caller to accumulate.
+///
+/// The returned string is a complete diagnostic line, `tar: ` prefix included.
+/// It has to be: some failures name the member, some (a name too long for the
+/// ustar fields) name a path that is neither the member nor its argument, and a
+/// caller that added the prefix and a name of its own would double up on the
+/// first kind.
 fn write_entry<W: Write>(
     writer: &mut W,
+    archive: &str,
     rel_path: &str,
     full_path: &Path,
     meta: &Metadata,
@@ -709,15 +728,18 @@ fn write_entry<W: Write>(
         rel_path.to_string()
     };
 
-    let (prefix, name) = split_path(&archive_path)?;
+    // These two carry their own context — `split_path` names the over-long
+    // path, `encode_octal` names the value and the field width — so they get
+    // the `tar: ` prefix and nothing else.
+    let (prefix, name) = split_path(&archive_path).map_err(|e| format!("tar: {}", e))?;
 
     // Fill header fields.
     copy_str_to_field(&mut header[..100], &name);
-    encode_octal(&mut header[100..108], u64::from(get_mode(meta)))?;
-    encode_octal(&mut header[108..116], 0)?; // uid
-    encode_octal(&mut header[116..124], 0)?; // gid
-    encode_octal(&mut header[124..136], get_size(meta))?;
-    encode_octal(&mut header[136..148], get_mtime(meta))?;
+    octal_field(&mut header[100..108], u64::from(get_mode(meta)))?;
+    octal_field(&mut header[108..116], 0)?; // uid
+    octal_field(&mut header[116..124], 0)?; // gid
+    octal_field(&mut header[124..136], get_size(meta))?;
+    octal_field(&mut header[136..148], get_mtime(meta))?;
     // Checksum placeholder: 8 spaces.
     header[148..156].copy_from_slice(b"        ");
 
@@ -752,30 +774,33 @@ fn write_entry<W: Write>(
     let copy_len = cksum_bytes.len().min(8);
     header[148..148 + copy_len].copy_from_slice(&cksum_bytes[..copy_len]);
 
-    // Write header.
-    writer
-        .write_all(&header)
-        .map_err(|e| format!("write header for '{}': {}", rel_path, e))?;
+    // Write header. A failed archive write is not an error about this member —
+    // it is the archive going away underneath the whole run — so it is fatal
+    // and names the archive, which is what GNU does: writing to /dev/full gives
+    // "tar: /dev/full: Cannot write: No space left on device" followed by
+    // "Error is not recoverable: exiting now", and no per-member line at all.
+    if let Err(e) = writer.write_all(&header) {
+        fail_cannot(archive, "write", &e);
+    }
 
     // Write file data if it is a regular file with content.
     if meta.is_file() {
         let size = meta.len();
         if size > 0 {
-            let mut file = File::open(full_path)
-                .map_err(|e| format!("open '{}': {}", full_path.display(), e))?;
+            let mut file = File::open(full_path).map_err(|e| cannot(full_path, "open", &e))?;
             let mut remaining = size;
             let mut buf = [0u8; 8192];
             while remaining > 0 {
                 let to_read = (remaining as usize).min(buf.len());
                 let n = file
                     .read(&mut buf[..to_read])
-                    .map_err(|e| format!("read '{}': {}", full_path.display(), e))?;
+                    .map_err(|e| cannot(full_path, "read", &e))?;
                 if n == 0 {
                     break;
                 }
-                writer
-                    .write_all(&buf[..n])
-                    .map_err(|e| format!("write data for '{}': {}", rel_path, e))?;
+                if let Err(e) = writer.write_all(&buf[..n]) {
+                    fail_cannot(archive, "write", &e);
+                }
                 remaining = remaining.saturating_sub(n as u64);
             }
 
@@ -783,9 +808,9 @@ fn write_entry<W: Write>(
             let pad_len = (BLOCK_SIZE - (size as usize % BLOCK_SIZE)) % BLOCK_SIZE;
             if pad_len > 0 {
                 let zeros = [0u8; BLOCK_SIZE];
-                writer
-                    .write_all(&zeros[..pad_len])
-                    .map_err(|e| format!("write padding for '{}': {}", rel_path, e))?;
+                if let Err(e) = writer.write_all(&zeros[..pad_len]) {
+                    fail_cannot(archive, "write", &e);
+                }
             }
         }
     }
@@ -797,6 +822,7 @@ fn write_entry<W: Write>(
 /// `prefix`, writing each entry to the archive.
 fn archive_path_recursive<W: Write>(
     writer: &mut W,
+    archive: &str,
     base_path: &Path,
     prefix: &str,
     excludes: &[String],
@@ -821,12 +847,13 @@ fn archive_path_recursive<W: Write>(
         return;
     }
 
+    // "Cannot stat", measured: a directory readable but not searchable makes
+    // GNU say `tar: src/dir/b.txt: Cannot stat: Permission denied` for each
+    // child and carry on, exiting 2 at the end.
     let meta = match fs::metadata(base_path) {
         Ok(m) => m,
         Err(e) => {
-            let msg = format!("tar: {}: {}", base_path.display(), e);
-            eprintln!("{}", msg);
-            errors.push(msg);
+            report(cannot(base_path, "stat", &e), errors);
             return;
         }
     };
@@ -835,20 +862,19 @@ fn archive_path_recursive<W: Write>(
         if verbose {
             eprintln!("{}", rel);
         }
-        if let Err(e) = write_entry(writer, &rel, base_path, &meta) {
-            let msg = format!("tar: {}: {}", rel, e);
-            eprintln!("{}", msg);
-            errors.push(msg);
+        if let Err(msg) = write_entry(writer, archive, &rel, base_path, &meta) {
+            report(msg, errors);
         }
     }
 
     if meta.is_dir() {
+        // Also measured: an unreadable directory is `Cannot open`, not
+        // `Cannot read` and not `Cannot opendir` — GNU routes both a failed
+        // `open` and a failed directory scan through the same verb.
         let entries = match fs::read_dir(base_path) {
             Ok(rd) => rd,
             Err(e) => {
-                let msg = format!("tar: {}: {}", base_path.display(), e);
-                eprintln!("{}", msg);
-                errors.push(msg);
+                report(cannot(base_path, "open", &e), errors);
                 return;
             }
         };
@@ -858,17 +884,13 @@ fn archive_path_recursive<W: Write>(
         for entry in entries {
             match entry {
                 Ok(e) => children.push(e.path()),
-                Err(e) => {
-                    let msg = format!("tar: reading directory '{}': {}", base_path.display(), e);
-                    eprintln!("{}", msg);
-                    errors.push(msg);
-                }
+                Err(e) => report(cannot(base_path, "read", &e), errors),
             }
         }
         children.sort();
 
         for child in &children {
-            archive_path_recursive(writer, child, &rel, excludes, verbose, errors);
+            archive_path_recursive(writer, archive, child, &rel, excludes, verbose, errors);
         }
     }
 }
@@ -987,9 +1009,10 @@ fn select_destination<'a>(
 fn report_unmatched(plan: &Plan<'_>, matched: &[bool], errors: &mut Vec<String>) {
     for ((name, _), hit) in plan.filters.iter().zip(matched.iter()) {
         if !*hit {
-            let msg = format!("tar: {}: Not found in archive", quotef_os(name));
-            eprintln!("{}", msg);
-            errors.push(msg);
+            report(
+                format!("tar: {}: Not found in archive", escape_os(name)),
+                errors,
+            );
         }
     }
 }
@@ -1053,7 +1076,16 @@ fn member_matches(member: &str, name: &str) -> bool {
 /// archive or `-C` stops everything immediately, whereas a missing operand
 /// among good ones still produces an archive containing the good ones.
 fn fail_cannot_open(what: &str, err: &io::Error) -> ! {
-    eprintln!("tar: {}: Cannot open: {}", quotef_os(what), strerror(err));
+    fail_cannot(what, "open", err);
+}
+
+/// [`cannot`] as a fatal error: the diagnostic, then GNU's "not recoverable"
+/// line, then status 2.
+///
+/// Used where the failure is not *about* one member — a lost archive, a `-C`
+/// that does not exist — so there is nothing to accumulate and carry on with.
+fn fail_cannot<P: AsRef<OsStr>>(name: P, call: &str, err: &io::Error) -> ! {
+    eprintln!("{}", cannot(name, call, err));
     eprintln!("tar: Error is not recoverable: exiting now");
     process::exit(2);
 }
@@ -1090,6 +1122,67 @@ fn strerror(err: &io::Error) -> String {
         io::ErrorKind::AlreadyExists => "File exists".to_string(),
         _ => err.to_string(),
     }
+}
+
+/// GNU's `call_arg_error` (`tar/misc.c`): `tar: NAME: Cannot CALL: STRERROR`.
+///
+/// Nearly every non-fatal diagnostic tar emits is this one sentence with a
+/// different verb in the middle — `Cannot stat`, `Cannot open`, `Cannot mkdir`,
+/// `Cannot write` — so it is worth having once rather than reassembled at each
+/// of the dozen sites, where the pieces drifted apart before this existed
+/// (`create '{}': {}`, `tar: symlink {}: {}`, `set permissions on '{}': {}`).
+///
+/// Two details are measured against GNU 1.35 rather than guessed:
+///
+/// * **The name is not quoted.** GNU tar's default quoting style is `escape`,
+///   not the `'...'` *shell-escape* style coreutils defaults to, so a member
+///   called `it's a *.txt` prints bare: `tar: src/it's a *.txt: Cannot open:
+///   File exists`. Only unprintable bytes are escaped, and a newline comes out
+///   as `\n`. Hence [`escape_os`] here and `quoteaf` nowhere.
+/// * **The name goes through [`escape_os`], never `Path::display()`.** That
+///   method is documented to substitute U+FFFD for bytes it cannot decode,
+///   which for a filename is silent corruption of the one field the message
+///   exists to identify — and the project forbids lossy conversion of
+///   OS-boundary data outright.
+fn cannot<P: AsRef<OsStr>>(name: P, call: &str, err: &io::Error) -> String {
+    format!(
+        "tar: {}: Cannot {}: {}",
+        escape_os(name),
+        call,
+        strerror(err)
+    )
+}
+
+/// Which of tar's two failure modes a diagnostic belongs to.
+///
+/// The distinction is GNU's and it is visible in the exit path: a member that
+/// could not be written is reported, the run continues, and the last line is
+/// "Exiting with failure status due to previous errors"; the archive itself
+/// failing means there is no next member to try, so the last line is "Error is
+/// not recoverable: exiting now" and nothing further is attempted.
+///
+/// It is an enum rather than a convention because the two were previously told
+/// apart by which function had produced the `String`, and that is invisible at
+/// the call site: a truncated archive was reported once by the member loop and
+/// then again by the header read that followed it, so GNU's single
+/// "Unexpected EOF in archive" came out twice.
+enum Fail {
+    /// About one member. Report it and keep going.
+    Member(String),
+    /// About the archive. Stop.
+    Fatal(String),
+}
+
+/// Print a diagnostic and remember that it happened.
+///
+/// The remembering is the point: a non-fatal failure must still reach the exit
+/// status, and the `Vec` being non-empty at the end is what triggers
+/// [`exit_with_previous_errors`]. Printing without pushing is the bug this
+/// helper exists to make hard to write — it produces a run that complains on
+/// stderr and then exits 0.
+fn report(msg: String, errors: &mut Vec<String>) {
+    eprintln!("{}", msg);
+    errors.push(msg);
 }
 
 /// Create a tar archive from the listed files/directories.
@@ -1133,13 +1226,7 @@ fn create_archive(opts: &Options) -> Result<(), String> {
         // `symlink_metadata`, not `metadata`, because tar archives a dangling
         // symlink as a symlink rather than refusing it as a missing target.
         if let Err(e) = fs::symlink_metadata(path) {
-            let msg = format!(
-                "tar: {}: Cannot stat: {}",
-                quotef_os(file_arg),
-                strerror(&e)
-            );
-            eprintln!("{}", msg);
-            errors.push(msg);
+            report(cannot(file_arg, "stat", &e), &mut errors);
             continue;
         }
 
@@ -1153,6 +1240,7 @@ fn create_archive(opts: &Options) -> Result<(), String> {
 
         archive_path_recursive(
             &mut writer,
+            &opts.archive,
             path,
             &prefix,
             &opts.excludes,
@@ -1161,18 +1249,18 @@ fn create_archive(opts: &Options) -> Result<(), String> {
         );
     }
 
-    // Write two zero blocks to mark end of archive.
+    // Write two zero blocks to mark end of archive. Same reasoning as the
+    // header write: this is the archive failing, not a member, so it names the
+    // archive and stops rather than joining `errors`.
     let zero_block = [0u8; BLOCK_SIZE];
-    writer
-        .write_all(&zero_block)
-        .map_err(|e| format!("write end-of-archive: {}", e))?;
-    writer
-        .write_all(&zero_block)
-        .map_err(|e| format!("write end-of-archive: {}", e))?;
-
-    writer
-        .flush()
-        .map_err(|e| format!("flush archive: {}", e))?;
+    for _ in 0..2 {
+        if let Err(e) = writer.write_all(&zero_block) {
+            fail_cannot(&opts.archive, "write", &e);
+        }
+    }
+    if let Err(e) = writer.flush() {
+        fail_cannot(&opts.archive, "write", &e);
+    }
 
     // Each failure was already reported as it happened, which is why this
     // says nothing about how many there were: GNU's summary is a verdict, not
@@ -1190,10 +1278,17 @@ fn create_archive(opts: &Options) -> Result<(), String> {
 // ============================================================================
 
 /// Read exactly `n` bytes from the reader, returning an error on short reads.
+///
+/// Running out of archive is by far the likeliest failure here and gets GNU's
+/// own sentence for it, measured on an archive cut off mid-member: `tar:
+/// Unexpected EOF in archive`, followed by the unrecoverable line and status 2.
+/// It names no file, because at this point tar no longer knows which member it
+/// was in the middle of — and neither do we.
 fn read_exact<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<(), String> {
-    reader
-        .read_exact(buf)
-        .map_err(|e| format!("read error: {}", e))
+    reader.read_exact(buf).map_err(|e| match e.kind() {
+        io::ErrorKind::UnexpectedEof => "tar: Unexpected EOF in archive".to_string(),
+        _ => format!("tar: Cannot read: {}", strerror(&e)),
+    })
 }
 
 /// Check whether a 512-byte block is entirely zero (end-of-archive marker).
@@ -1311,18 +1406,37 @@ fn print_json_entry(entry: &TarEntry) {
 // ============================================================================
 
 /// Set file permissions (Unix only).
+///
+/// Returns the raw `io::Error` rather than a message, because the message has
+/// to name the *member* and this function only knows the destination path they
+/// were joined into — see the note at the extract loop's `named`.
 #[cfg(unix)]
-fn set_permissions(path: &Path, mode: u32) -> Result<(), String> {
+fn set_permissions(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(mode);
-    fs::set_permissions(path, perms)
-        .map_err(|e| format!("set permissions on '{}': {}", path.display(), e))
+    fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
 #[cfg(not(unix))]
-fn set_permissions(_path: &Path, _mode: u32) -> Result<(), String> {
+fn set_permissions(_path: &Path, _mode: u32) -> io::Result<()> {
     // Not applicable on non-Unix hosts.
     Ok(())
+}
+
+/// GNU's `chmod_error_details`: `NAME: Cannot change mode to MODE`, the mode in
+/// four octal digits.
+///
+/// The one diagnostic in this file taken from GNU's source rather than measured
+/// against a running GNU tar: provoking a chmod failure needs a file we own on
+/// a filesystem that refuses the change — an immutable inode — which needs
+/// root, which the comparison harness does not have. It is also the one that
+/// does not fit [`cannot`]'s shape, since the verb carries an argument.
+fn cannot_chmod(name: &str, mode: u32, err: &io::Error) -> String {
+    format!(
+        "tar: {}: Cannot change mode to {:04o}: {}",
+        escape_os(name),
+        mode,
+        strerror(err)
+    )
 }
 
 /// Extract all entries from an archive.
@@ -1424,9 +1538,7 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
         let output_path_str = match sanitize_member_name(&output_path_str) {
             Ok(p) => p,
             Err(msg) => {
-                let msg = format!("tar: {}", msg);
-                eprintln!("{}", msg);
-                errors.push(msg);
+                report(format!("tar: {}", msg), &mut errors);
                 skip_data(&mut reader, entry.size)?;
                 continue;
             }
@@ -1438,19 +1550,35 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
             eprintln!("{}", output_path_str);
         }
 
+        // Every diagnostic below names `output_path_str`, never `dest`.
+        //
+        // They are not the same string, and GNU prints the first: `tar -xkf
+        // a.tar -C dst` over an existing file reports `tar: src/top.txt:
+        // Cannot open: File exists`, not `dst/src/top.txt`. GNU gets this for
+        // free — it has chdir'd, so the member name *is* the path — whereas we
+        // do the join arithmetic instead (see `select_destination`) and so
+        // hold a `dest` that is tempting and wrong to print. It is wrong twice
+        // over on a Windows build, where the join introduces a separator the
+        // archive never contained and `escape_os` then dutifully escapes it:
+        // `tar: .\\src/dir/b.txt: Cannot open: …`.
+        let named = output_path_str.as_str();
+        // The member's own parent, for the same reason: `Cannot mkdir` names
+        // `src`, not `dst/src`.
+        let named_parent = Path::new(named)
+            .parent()
+            .and_then(Path::to_str)
+            .filter(|p| !p.is_empty())
+            .unwrap_or(named);
+
         match entry.typeflag {
             TYPEFLAG_DIRECTORY => {
                 if let Err(e) = fs::create_dir_all(&dest) {
-                    let msg = format!("tar: {}: {}", dest.display(), e);
-                    eprintln!("{}", msg);
-                    errors.push(msg);
+                    report(cannot(named, "mkdir", &e), &mut errors);
                 }
                 if opts.preserve_permissions
                     && let Err(e) = set_permissions(&dest, entry.mode)
                 {
-                    let msg = format!("tar: {}: {}", dest.display(), e);
-                    eprintln!("{}", msg);
-                    errors.push(msg);
+                    report(cannot_chmod(named, entry.mode, &e), &mut errors);
                 }
             }
             TYPEFLAG_REGULAR | b'\0' => {
@@ -1459,34 +1587,36 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
                     && !parent.exists()
                     && let Err(e) = fs::create_dir_all(parent)
                 {
-                    let msg = format!("tar: {}: {}", parent.display(), e);
-                    eprintln!("{}", msg);
-                    errors.push(msg);
+                    report(cannot(named_parent, "mkdir", &e), &mut errors);
                     skip_data(&mut reader, entry.size)?;
                     continue;
                 }
 
+                // `-k` refusing a member is a *failure*, not a note: GNU says
+                // "tar: src/top.txt: Cannot open: File exists" and exits 2. We
+                // used to print "already exists, skipping" and exit 0, so a
+                // script could not tell a `-k` run that extracted everything
+                // from one that extracted nothing.
                 if opts.keep_old_files && dest.exists() {
-                    eprintln!("tar: {}: already exists, skipping", dest.display());
+                    let exists = io::Error::from(io::ErrorKind::AlreadyExists);
+                    report(cannot(named, "open", &exists), &mut errors);
                     skip_data(&mut reader, entry.size)?;
                     continue;
                 }
 
-                match extract_file_data(&mut reader, &dest, entry.size) {
+                match extract_file_data(&mut reader, &dest, named, entry.size) {
                     Ok(()) => {
                         if opts.preserve_permissions
                             && let Err(e) = set_permissions(&dest, entry.mode)
                         {
-                            let msg = format!("tar: {}: {}", dest.display(), e);
-                            eprintln!("{}", msg);
-                            errors.push(msg);
+                            report(cannot_chmod(named, entry.mode, &e), &mut errors);
                         }
                     }
-                    Err(e) => {
-                        let msg = format!("tar: {}: {}", dest.display(), e);
-                        eprintln!("{}", msg);
-                        errors.push(msg);
-                    }
+                    // A failed write to the destination is about this member
+                    // and the next one may still succeed; a failed read of the
+                    // archive means there is no next one.
+                    Err(Fail::Member(msg)) => report(msg, &mut errors),
+                    Err(Fail::Fatal(msg)) => return Err(msg),
                 }
             }
             TYPEFLAG_SYMLINK => {
@@ -1499,16 +1629,29 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
                 #[cfg(unix)]
                 {
                     if let Err(e) = std::os::unix::fs::symlink(&entry.linkname, &dest) {
-                        let msg = format!("tar: symlink {}: {}", dest.display(), e);
-                        eprintln!("{}", msg);
-                        errors.push(msg);
+                        // The one message here that is not `Cannot VERB`:
+                        // GNU names the target too, and quotes *it* — measured
+                        // in the C locale as `tar: src/link: Cannot create
+                        // symlink to 'top.txt': File exists`. The member is
+                        // bare (escape style) and the target is not, because
+                        // the target is a value being quoted into a sentence
+                        // rather than the subject of the message.
+                        report(
+                            format!(
+                                "tar: {}: Cannot create symlink to {}: {}",
+                                escape_os(named),
+                                quoteaf(entry.linkname.as_bytes()),
+                                strerror(&e)
+                            ),
+                            &mut errors,
+                        );
                     }
                 }
                 #[cfg(not(unix))]
                 {
                     eprintln!(
                         "tar: {}: symlink extraction not supported on this platform",
-                        dest.display()
+                        escape_os(named)
                     );
                 }
                 skip_data(&mut reader, entry.size)?;
@@ -1516,7 +1659,7 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
             _ => {
                 eprintln!(
                     "tar: {}: unsupported type flag {}, skipping",
-                    quotef_os(&entry.path),
+                    escape_os(&entry.path),
                     // The byte, not `as char`: `u8 as char` is a Latin-1
                     // widening, so a crafted type flag of 0xE9 would be
                     // reported as an accented letter that cannot fit in the
@@ -1539,16 +1682,28 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
 
 /// Read file data from the archive and write it to `dest`, then skip any
 /// padding bytes to the next 512-byte boundary.
-fn extract_file_data<R: Read>(reader: &mut R, dest: &Path, size: u64) -> Result<(), String> {
-    let mut file = File::create(dest).map_err(|e| format!("create '{}': {}", dest.display(), e))?;
+///
+/// `named` is how the message should spell this member; `dest` is where the
+/// bytes go. See the extract loop for why those differ.
+fn extract_file_data<R: Read>(
+    reader: &mut R,
+    dest: &Path,
+    named: &str,
+    size: u64,
+) -> Result<(), Fail> {
+    // "Cannot open", not "Cannot create": GNU reports a failed `open(…,
+    // O_CREAT)` with the verb it called, which is why extracting into a
+    // read-only tree says `Cannot open: No such file or directory` rather than
+    // anything mentioning creation.
+    let mut file = File::create(dest).map_err(|e| Fail::Member(cannot(named, "open", &e)))?;
 
     let mut remaining = size;
     let mut buf = [0u8; 8192];
     while remaining > 0 {
         let to_read = (remaining as usize).min(buf.len());
-        read_exact(reader, &mut buf[..to_read])?;
+        read_exact(reader, &mut buf[..to_read]).map_err(Fail::Fatal)?;
         file.write_all(&buf[..to_read])
-            .map_err(|e| format!("write '{}': {}", dest.display(), e))?;
+            .map_err(|e| Fail::Member(cannot(named, "write", &e)))?;
         remaining = remaining.saturating_sub(to_read as u64);
     }
 
@@ -1556,7 +1711,7 @@ fn extract_file_data<R: Read>(reader: &mut R, dest: &Path, size: u64) -> Result<
     let pad = (BLOCK_SIZE - (size as usize % BLOCK_SIZE)) % BLOCK_SIZE;
     if pad > 0 {
         let mut discard = [0u8; BLOCK_SIZE];
-        read_exact(reader, &mut discard[..pad])?;
+        read_exact(reader, &mut discard[..pad]).map_err(Fail::Fatal)?;
     }
 
     Ok(())
@@ -1614,7 +1769,7 @@ fn list_archive(opts: &Options) -> Result<(), String> {
             if consecutive_zero_blocks > 0 {
                 break;
             }
-            return Err("unexpected end of archive".to_string());
+            return Err("tar: Unexpected EOF in archive".to_string());
         }
 
         if is_zero_block(&block) {
@@ -1725,8 +1880,20 @@ fn main() {
         Mode::List => list_archive(&opts),
     };
 
+    // Printed verbatim, not `format!("tar: {}", e)`. Every string that reaches
+    // here is already a whole diagnostic line, which is the crate's rule: a
+    // message is assembled once, where the facts are, by [`cannot`] or by the
+    // handful of sites with a shape of their own. The alternative — some
+    // messages prefixed at the source and some at the sink — is what produced
+    // `tar: tar: …` and `tar: src/x: src/x: Cannot open: …` before, because
+    // whether a given `String` had been through a prefixer was not visible in
+    // its type.
     if let Err(e) = result {
-        eprintln!("tar: {}", e);
+        eprintln!("{}", e);
+        // Everything that lands here stopped the run rather than being
+        // collected, so it gets GNU's fatal ending rather than the
+        // "previous errors" one.
+        eprintln!("tar: Error is not recoverable: exiting now");
         // 2, not 1. GNU reserves 1 for "some files differ", which only
         // `--compare` can produce, so exiting 1 for a fatal error told a
         // script the archive had been read successfully and merely disagreed
@@ -2352,5 +2519,103 @@ mod tests {
         let mut errors = Vec::new();
         report_unmatched(&p, &hit, &mut errors);
         assert_eq!(errors, vec!["tar: top.txt: Not found in archive"]);
+    }
+
+    // -- Diagnostic wording --
+
+    /// GNU tar's default quoting style is `escape`, not the *shell-escape*
+    /// style coreutils defaults to, so a name with a space, an apostrophe or a
+    /// glob character in it is printed exactly as it is. Measured on GNU 1.35:
+    /// `tar -kxf w.tar` over an existing `src/it's a *.txt` prints
+    /// `tar: src/it's a *.txt: Cannot open: File exists` — no quotes anywhere.
+    /// Reaching for `quotef`/`quoteaf` here, as the rest of the tree's
+    /// utilities correctly do, would make every one of tar's messages differ
+    /// from GNU's on exactly the names a user is most likely to get wrong.
+    #[test]
+    fn test_names_are_not_quoted_the_way_coreutils_quotes_them() {
+        let err = io::Error::from(io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            cannot("src/it's a *.txt", "open", &err),
+            "tar: src/it's a *.txt: Cannot open: File exists"
+        );
+    }
+
+    /// The other half of `escape` style: what it *does* escape. A control
+    /// character becomes a C escape rather than being emitted raw, so a member
+    /// name containing a newline cannot forge an extra line of tar output — a
+    /// script reading stderr line by line would otherwise see an invented
+    /// diagnostic. This is also the assertion that pins the rendering away from
+    /// `Path::display()`, which would print the newline as a newline.
+    #[test]
+    fn test_a_newline_in_a_name_cannot_forge_a_line_of_output() {
+        let err = io::Error::from(io::ErrorKind::NotFound);
+        let msg = cannot("two\nlines", "stat", &err);
+        assert_eq!(
+            msg,
+            "tar: two\\nlines: Cannot stat: No such file or directory"
+        );
+        assert_eq!(msg.lines().count(), 1);
+    }
+
+    /// The errno text is ours, not the host's. Built on Windows,
+    /// `io::Error`'s own `Display` for a missing file reads "The system cannot
+    /// find the file specified. (os error 2)", which would make tar's stderr —
+    /// an interface that scripts grep and that `scripts/` diffs against GNU
+    /// line for line — depend on where the binary was compiled.
+    #[test]
+    fn test_errno_text_does_not_follow_the_build_host() {
+        for (kind, text) in [
+            (io::ErrorKind::NotFound, "No such file or directory"),
+            (io::ErrorKind::PermissionDenied, "Permission denied"),
+            (io::ErrorKind::NotADirectory, "Not a directory"),
+            (io::ErrorKind::AlreadyExists, "File exists"),
+        ] {
+            assert_eq!(strerror(&io::Error::from(kind)), text, "{:?}", kind);
+        }
+    }
+
+    /// Every verb GNU uses is the *call it made*, not a conclusion about the
+    /// file, which is why an unreadable directory is `Cannot open` and a
+    /// searchless one is `Cannot stat` on its children. All measured.
+    #[test]
+    fn test_the_verb_is_the_call_that_failed() {
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            cannot("src/dir", "open", &denied),
+            "tar: src/dir: Cannot open: Permission denied"
+        );
+        assert_eq!(
+            cannot("src/dir/b.txt", "stat", &denied),
+            "tar: src/dir/b.txt: Cannot stat: Permission denied"
+        );
+        assert_eq!(
+            cannot(
+                "src/dir",
+                "mkdir",
+                &io::Error::from(io::ErrorKind::AlreadyExists)
+            ),
+            "tar: src/dir: Cannot mkdir: File exists"
+        );
+    }
+
+    /// Running off the end of an archive is one specific GNU sentence, and it
+    /// names no file on purpose — see [`read_exact`].
+    #[test]
+    fn test_a_truncated_archive_gets_gnus_sentence() {
+        let mut short: &[u8] = b"only seven";
+        let mut buf = [0u8; 512];
+        assert_eq!(
+            read_exact(&mut short, &mut buf),
+            Err("tar: Unexpected EOF in archive".to_string())
+        );
+    }
+
+    /// A message that is printed but not collected is a run that complains and
+    /// then exits 0. [`report`] exists so the two cannot come apart.
+    #[test]
+    fn test_reporting_a_failure_also_records_it() {
+        let mut errors = Vec::new();
+        report("tar: x: Cannot open: File exists".to_string(), &mut errors);
+        assert_eq!(errors, vec!["tar: x: Cannot open: File exists"]);
     }
 }

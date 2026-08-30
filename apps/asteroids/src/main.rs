@@ -962,6 +962,17 @@ impl AsteroidsApp {
     /// playfield to click *at*. Over an overlay it does what the overlay says
     /// the keyboard does, which is the only reason the overlay's lines are
     /// hit boxes at all.
+    ///
+    /// Every part of a sheet counts as the sheet. Written the obvious way --
+    /// one arm for `Target::Overlay`, one for `Target::NewGame` -- the
+    /// game-over sheet had a dead zone in the shape of its own box: the box
+    /// is drawn over the middle of the overlay, and its title and final-score
+    /// lines are hit boxes recorded *after* the overlay's, so they, not the
+    /// overlay, won the hit test. A click on "GAME OVER" or on "Score: 4200"
+    /// did nothing while a click on the dim margin around them started a new
+    /// game -- the dead zone was exactly the part of the sheet a person
+    /// looks at. The pause sheet only escaped because its middle line
+    /// happens to be `Resume`, which had an arm of its own.
     pub fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
         if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
             return EventResult::Ignored;
@@ -971,15 +982,24 @@ impl AsteroidsApp {
             return EventResult::Ignored;
         };
         match (self.state, target) {
-            (GameState::Paused, Target::Resume | Target::Overlay) => {
-                self.state = GameState::Playing;
-                EventResult::Consumed
-            }
+            // "New game" says so on both sheets, so it means that on both.
+            // This arm comes first because the game-over arm below would
+            // otherwise have to name every target except this one.
             (GameState::Paused | GameState::GameOver, Target::NewGame) => {
                 self.new_game();
                 EventResult::Consumed
             }
-            (GameState::GameOver, Target::Overlay) => {
+            (
+                GameState::Paused,
+                Target::Overlay | Target::OverlayTitle | Target::Resume | Target::FinalStat(_),
+            ) => {
+                self.state = GameState::Playing;
+                EventResult::Consumed
+            }
+            (
+                GameState::GameOver,
+                Target::Overlay | Target::OverlayTitle | Target::Resume | Target::FinalStat(_),
+            ) => {
                 self.new_game();
                 EventResult::Consumed
             }
@@ -3201,5 +3221,955 @@ mod tests {
         tick(&mut app, 16);
         assert_eq!(app.state, GameState::GameOver);
         assert_eq!(app.high_score, 1000);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Window wiring
+    //
+    // The program this replaces drew into a `Vec<RenderCommand>` nobody
+    // displayed, at a size it worked out for itself. Everything below asks
+    // the frame where things are rather than asking the game state, because
+    // the frame is what a player sees and the state is not.
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Every string the app draws at a given size.
+    fn texts(app: &AsteroidsApp, size: (f32, f32)) -> Vec<String> {
+        app.frame(size.0, size.1)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Do two rectangles share any area?
+    fn overlaps(a: Rect, b: Rect) -> bool {
+        a.intersect(b).is_some_and(|r| r.w > 0.01 && r.h > 0.01)
+    }
+
+    /// Is `inner` wholly within `outer`, give or take a rounding error?
+    fn inside(inner: Rect, outer: Rect) -> bool {
+        inner.x >= outer.x - 0.01
+            && inner.y >= outer.y - 0.01
+            && inner.right() <= outer.right() + 0.01
+            && inner.bottom() <= outer.bottom() + 0.01
+    }
+
+    /// A game whose ship is not blinking, so it is on screen to be found.
+    fn app_with_a_settled_ship() -> AsteroidsApp {
+        let mut app = test_app();
+        app.invulnerable_timer = 0.0;
+        app
+    }
+
+    // ── Layout ──────────────────────────────────────────────────────
+
+    #[test]
+    fn the_bands_do_not_overlap_and_stay_inside_the_window() {
+        for (w, h) in [
+            (824.0, 674.0),
+            (400.0, 300.0),
+            (1600.0, 1200.0),
+            (300.0, 900.0),
+        ] {
+            let l = Layout::new(w, h);
+            assert!(
+                inside(l.header, l.window),
+                "the header left the window at {w}x{h}"
+            );
+            assert!(
+                inside(l.body, l.window),
+                "the body left the window at {w}x{h}"
+            );
+            assert!(
+                !overlaps(l.header, l.body),
+                "the bands overlapped at {w}x{h}"
+            );
+            assert!(
+                l.body.y >= l.header.bottom(),
+                "the body started above the header at {w}x{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_band_is_ever_drawn_inside_out() {
+        // A rectangle of negative height draws from its bottom edge upwards,
+        // which is a band in the wrong place rather than a band that is
+        // missing -- much harder to notice, so it is asserted rather than
+        // trusted.
+        for (w, h) in [(0.0, 0.0), (10.0, 4.0), (824.0, 6.0), (2.0, 674.0)] {
+            let l = Layout::new(w, h);
+            for (name, r) in [("window", l.window), ("header", l.header), ("body", l.body)] {
+                assert!(r.w >= 0.0, "{name} had a negative width at {w}x{h}");
+                assert!(r.h >= 0.0, "{name} had a negative height at {w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_negative_window_is_read_as_no_window() {
+        let l = Layout::new(-100.0, -50.0);
+        assert_eq!(l.window.w, 0.0);
+        assert_eq!(l.window.h, 0.0);
+    }
+
+    #[test]
+    fn a_taller_window_gives_the_playfield_the_extra_room() {
+        let short = Layout::new(824.0, 500.0);
+        let tall = Layout::new(824.0, 900.0);
+        assert!(
+            tall.body.h > short.body.h,
+            "400 more pixels of window and the playfield got none of them"
+        );
+    }
+
+    // ── The field ───────────────────────────────────────────────────
+
+    #[test]
+    fn the_field_keeps_the_worlds_proportions_whatever_the_window() {
+        let want = FIELD_WIDTH / FIELD_HEIGHT;
+        for (w, h) in [
+            (824.0, 674.0),
+            (2000.0, 700.0),
+            (500.0, 1400.0),
+            (400.0, 320.0),
+        ] {
+            let field = Field::new(Layout::new(w, h).body);
+            assert!(field.rect.h > 0.0, "no field at all at {w}x{h}");
+            let got = field.rect.w / field.rect.h;
+            assert!(
+                (got - want).abs() < 0.001,
+                "the world was stretched at {w}x{h}: {got} against {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wide_window_letterboxes_the_field_rather_than_stretching_it() {
+        let area = Layout::new(2000.0, 700.0).body;
+        let field = Field::new(area);
+        assert!(
+            inside(field.rect, area),
+            "the field ran out of the space it was given"
+        );
+        assert!(
+            field.rect.w < area.w - 1.0,
+            "a window twice as wide as the world left no margin, so the field was stretched"
+        );
+        // Centred: the two margins are equal.
+        let left = field.rect.x - area.x;
+        let right = area.right() - field.rect.right();
+        assert!(
+            (left - right).abs() < 0.01,
+            "the field was not centred: {left} against {right}"
+        );
+    }
+
+    #[test]
+    fn a_tall_window_letterboxes_the_field_above_and_below() {
+        let area = Layout::new(500.0, 1400.0).body;
+        let field = Field::new(area);
+        assert!(inside(field.rect, area));
+        assert!(
+            field.rect.h < area.h - 1.0,
+            "no margin in a window far taller than the world"
+        );
+        let top = field.rect.y - area.y;
+        let bottom = area.bottom() - field.rect.bottom();
+        assert!(
+            (top - bottom).abs() < 0.01,
+            "the field was not centred: {top} against {bottom}"
+        );
+    }
+
+    #[test]
+    fn the_corners_of_the_world_land_on_the_corners_of_the_field() {
+        let field = Field::new(Layout::new(824.0, 674.0).body);
+        let (x0, y0) = field.to_screen(Vec2::ZERO);
+        let (x1, y1) = field.to_screen(Vec2::new(FIELD_WIDTH, FIELD_HEIGHT));
+        assert!((x0 - field.rect.x).abs() < 0.01);
+        assert!((y0 - field.rect.y).abs() < 0.01);
+        assert!((x1 - field.rect.right()).abs() < 0.01);
+        assert!((y1 - field.rect.bottom()).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_bigger_window_draws_the_same_game_bigger() {
+        let small = Field::new(Layout::new(500.0, 420.0).body);
+        let big = Field::new(Layout::new(1600.0, 1300.0).body);
+        assert!(
+            big.scale > small.scale,
+            "the field did not grow with the window"
+        );
+        // The same point in the world is further from the field's own corner.
+        let mid = Vec2::new(FIELD_WIDTH / 2.0, FIELD_HEIGHT / 2.0);
+        let (sx, _) = small.to_screen(mid);
+        let (bx, _) = big.to_screen(mid);
+        assert!(bx - big.rect.x > sx - small.rect.x);
+    }
+
+    #[test]
+    fn a_window_with_no_room_has_a_field_of_nothing_rather_than_a_backwards_one() {
+        let field = Field::new(Layout::new(20.0, 8.0).body);
+        assert!(field.scale >= 0.0);
+        assert!(field.rect.w >= 0.0 && field.rect.h >= 0.0);
+    }
+
+    #[test]
+    fn a_line_never_thins_away_to_nothing_in_a_small_window() {
+        // A hairline that rounds to zero is a ship that vanishes, which reads
+        // as the game losing the ship rather than the window being small.
+        let field = Field::new(Layout::new(120.0, 100.0).body);
+        assert!(
+            field.scale < 1.0,
+            "the window was not small enough to be a test"
+        );
+        assert!(field.stroke(1.0) >= 1.0);
+        assert!(field.stroke(0.0) >= 1.0);
+    }
+
+    // ── The header ──────────────────────────────────────────────────
+
+    #[test]
+    fn the_header_names_every_reading() {
+        let app = test_app();
+        for target in [
+            Target::Title,
+            Target::Score,
+            Target::HighScore,
+            Target::Lives,
+            Target::Wave,
+            Target::Controls,
+        ] {
+            assert!(
+                probe::is_visible(&app, target),
+                "{target:?} was not on screen"
+            );
+        }
+    }
+
+    #[test]
+    fn the_readings_do_not_overlap_each_other() {
+        let mut app = test_app();
+        // Numbers wide enough that a fixed-offset layout would collide.
+        app.score = 1_234_567;
+        app.high_score = 9_876_543;
+        app.lives = 1_000_000;
+        app.wave = 999_999;
+        let frame = app.frame(SIZE.0, SIZE.1);
+        let boxes: Vec<Rect> = [
+            Target::Title,
+            Target::Score,
+            Target::HighScore,
+            Target::Lives,
+            Target::Wave,
+        ]
+        .into_iter()
+        .filter_map(|t| frame.rect_of(|c| *c == t))
+        .collect();
+        assert!(boxes.len() >= 2, "not enough readings drawn to be a test");
+        for (i, a) in boxes.iter().enumerate() {
+            for b in boxes.iter().skip(i + 1) {
+                assert!(
+                    !overlaps(*a, *b),
+                    "two readings shared space: {a:?} and {b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_score_on_screen_is_the_score() {
+        let mut app = test_app();
+        app.score = 4242;
+        let shown = texts(&app, SIZE);
+        assert!(
+            shown.iter().any(|t| t == "Score: 4242"),
+            "the header did not say the score: {shown:?}"
+        );
+    }
+
+    #[test]
+    fn a_narrow_window_drops_readings_rather_than_drawing_them_over_each_other() {
+        let app = test_app();
+        let narrow = (240.0, 674.0);
+        let frame = app.frame(narrow.0, narrow.1);
+        let boxes: Vec<Rect> = [
+            Target::Title,
+            Target::Score,
+            Target::HighScore,
+            Target::Lives,
+            Target::Wave,
+        ]
+        .into_iter()
+        .filter_map(|t| frame.rect_of(|c| *c == t))
+        .collect();
+        assert!(
+            boxes.len() < 5,
+            "all five readings claimed to fit in a 240-pixel window"
+        );
+        for r in &boxes {
+            assert!(
+                inside(*r, Layout::new(narrow.0, narrow.1).header),
+                "a reading was drawn past the end of the header: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_with_room_for_one_row_keeps_the_score_and_drops_the_controls_line() {
+        // 120 pixels of window: the header band is 20 tall, which one row of
+        // type fills. The score is worth more than a reminder of which key
+        // turns left, so it is the hint that goes.
+        let app = test_app();
+        let size = (824.0, 120.0);
+        assert!(
+            probe::is_visible_sized(&app, Target::Score, size),
+            "the score went before the hint did"
+        );
+        assert!(
+            !probe::is_visible_sized(&app, Target::Controls, size),
+            "both rows claimed to fit in a 20-pixel band"
+        );
+    }
+
+    #[test]
+    fn a_reading_that_will_not_fit_is_not_drawn_at_all() {
+        // Not merely clipped: a hit box for a control nobody can see is a
+        // click that lands on nothing.
+        let mut app = test_app();
+        app.wave = 4_000_000;
+        let frame = app.frame(200.0, 674.0);
+        if let Some(r) = frame.rect_of(|c| *c == Target::Wave) {
+            assert!(
+                inside(r, Layout::new(200.0, 674.0).header),
+                "{r:?} left the header"
+            );
+        }
+    }
+
+    // ── What the playfield draws ────────────────────────────────────
+
+    #[test]
+    fn the_playfield_is_on_screen_and_inside_the_body() {
+        let app = test_app();
+        let l = Layout::new(SIZE.0, SIZE.1);
+        let rect = probe::rect_of(&app, Target::Field).expect("the field is drawn");
+        assert!(inside(rect, l.body));
+    }
+
+    #[test]
+    fn every_asteroid_is_drawn_where_the_field_puts_it() {
+        let app = test_app();
+        let field = Field::new(Layout::new(SIZE.0, SIZE.1).body);
+        assert!(!app.asteroids.is_empty(), "no asteroids to look for");
+        for (i, asteroid) in app.asteroids.iter().enumerate() {
+            let rect = probe::rect_of(&app, Target::Asteroid(i))
+                .unwrap_or_else(|| panic!("asteroid {i} was not drawn"));
+            let (cx, cy) = field.to_screen(asteroid.pos);
+            let (gx, gy) = rect.centre();
+            assert!(
+                (cx - gx).abs() < 0.01 && (cy - gy).abs() < 0.01,
+                "asteroid {i}'s hit box is not where the field puts it"
+            );
+        }
+    }
+
+    #[test]
+    fn an_asteroid_wins_the_hit_test_over_the_playfield_behind_it() {
+        // The field's box is recorded first on purpose. A click on an
+        // asteroid that answered `Field` would be a click that could never
+        // reach anything in the game.
+        let app = test_app();
+        let rect = probe::rect_of(&app, Target::Asteroid(0)).expect("the first asteroid is drawn");
+        let (x, y) = rect.centre();
+        assert_eq!(
+            app.draw(SIZE).hit_test(x, y),
+            Some(Target::Asteroid(0)),
+            "the playfield swallowed the asteroid in front of it"
+        );
+    }
+
+    #[test]
+    fn the_ship_is_on_screen_once_it_has_stopped_blinking() {
+        let app = app_with_a_settled_ship();
+        let field = Field::new(Layout::new(SIZE.0, SIZE.1).body);
+        let rect = probe::rect_of(&app, Target::Ship).expect("the ship is drawn");
+        let (cx, cy) = field.to_screen(app.ship.pos);
+        let (gx, gy) = rect.centre();
+        assert!((cx - gx).abs() < 0.01 && (cy - gy).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_blinking_ship_is_off_the_screen_on_the_frames_it_is_not_drawn() {
+        // Asking the game state would say the ship is alive on every one of
+        // these frames. The screen says otherwise for half of them, and the
+        // screen is what the player is looking at.
+        let mut app = test_app();
+        app.invulnerable_timer = INVULNERABLE_TIME;
+        let mut drawn = 0;
+        let mut hidden = 0;
+        for counter in 0..6 {
+            app.frame_counter = counter;
+            if probe::is_visible(&app, Target::Ship) {
+                drawn += 1;
+            } else {
+                hidden += 1;
+            }
+        }
+        assert_eq!(drawn, 3, "the ship did not blink");
+        assert_eq!(hidden, 3, "the ship did not come back");
+    }
+
+    #[test]
+    fn a_dead_ship_is_not_drawn() {
+        let mut app = app_with_a_settled_ship();
+        app.ship_alive = false;
+        assert!(!probe::is_visible(&app, Target::Ship));
+    }
+
+    #[test]
+    fn a_shot_in_the_air_is_drawn_where_the_field_puts_it() {
+        let mut app = test_app();
+        app.asteroids.clear();
+        app.invulnerable_timer = 0.0;
+        app.input.shoot = true;
+        tick(&mut app, 16);
+        assert!(!app.bullets.is_empty(), "the shot was never fired");
+        let field = Field::new(Layout::new(SIZE.0, SIZE.1).body);
+        let rect = probe::rect_of(&app, Target::Bullet(0)).expect("the shot is drawn");
+        let (cx, cy) = field.to_screen(app.bullets[0].pos);
+        let (gx, gy) = rect.centre();
+        assert!((cx - gx).abs() < 0.01 && (cy - gy).abs() < 0.01);
+    }
+
+    // ── The overlays ────────────────────────────────────────────────
+
+    #[test]
+    fn the_pause_sheet_names_both_ways_out() {
+        let mut app = test_app();
+        app.state = GameState::Paused;
+        for target in [
+            Target::Overlay,
+            Target::OverlayTitle,
+            Target::Resume,
+            Target::NewGame,
+        ] {
+            assert!(
+                probe::is_visible(&app, target),
+                "{target:?} was not on the pause sheet"
+            );
+        }
+        assert!(texts(&app, SIZE).iter().any(|t| t == "PAUSED"));
+    }
+
+    #[test]
+    fn the_game_over_box_reports_every_final_number() {
+        let mut app = test_app();
+        app.state = GameState::GameOver;
+        app.score = 1234;
+        app.high_score = 5678;
+        app.wave = 9;
+        let shown = texts(&app, SIZE);
+        for wanted in [
+            "GAME OVER",
+            "Score: 1234",
+            "High Score: 5678",
+            "Wave reached: 9",
+        ] {
+            assert!(
+                shown.iter().any(|t| t == wanted),
+                "{wanted:?} was missing from {shown:?}"
+            );
+        }
+        for i in 0..3 {
+            assert!(
+                probe::is_visible(&app, Target::FinalStat(i)),
+                "final stat {i} had no box"
+            );
+        }
+    }
+
+    #[test]
+    fn the_overlay_lines_do_not_sit_on_top_of_each_other() {
+        let mut app = test_app();
+        app.state = GameState::GameOver;
+        let frame = app.frame(SIZE.0, SIZE.1);
+        let boxes: Vec<Rect> = [
+            Target::OverlayTitle,
+            Target::FinalStat(0),
+            Target::FinalStat(1),
+            Target::FinalStat(2),
+            Target::NewGame,
+        ]
+        .into_iter()
+        .filter_map(|t| frame.rect_of(|c| *c == t))
+        .collect();
+        assert_eq!(boxes.len(), 5, "not every line was drawn");
+        for (i, a) in boxes.iter().enumerate() {
+            for b in boxes.iter().skip(i + 1) {
+                assert!(!overlaps(*a, *b), "two overlay lines shared space");
+            }
+        }
+    }
+
+    #[test]
+    fn an_overlay_in_a_short_window_drops_lines_rather_than_running_out_of_the_box() {
+        let mut app = test_app();
+        app.state = GameState::GameOver;
+        let size = (824.0, 200.0);
+        let frame = app.frame(size.0, size.1);
+        let field = Field::new(Layout::new(size.0, size.1).body);
+        let boxes: Vec<Rect> = [
+            Target::OverlayTitle,
+            Target::FinalStat(0),
+            Target::FinalStat(1),
+            Target::FinalStat(2),
+            Target::NewGame,
+        ]
+        .into_iter()
+        .filter_map(|t| frame.rect_of(|c| *c == t))
+        .collect();
+        assert!(
+            boxes.len() < 5,
+            "all five lines claimed to fit a 200-pixel window"
+        );
+        for r in &boxes {
+            assert!(
+                inside(*r, field.rect),
+                "an overlay line ran out of the field: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_game_over_box_takes_its_share_of_the_field_rather_than_a_fixed_size() {
+        let mut app = test_app();
+        app.state = GameState::GameOver;
+        let small = (500.0, 420.0);
+        let big = (1600.0, 1300.0);
+        let a = probe::rect_of_sized(&app, Target::OverlayTitle, small).expect("drawn small");
+        let b = probe::rect_of_sized(&app, Target::OverlayTitle, big).expect("drawn big");
+        assert!(
+            b.w > a.w,
+            "the box was the same size in a window three times as large"
+        );
+    }
+
+    #[test]
+    fn there_is_no_overlay_while_the_game_is_being_played() {
+        let app = test_app();
+        assert_eq!(app.state, GameState::Playing);
+        assert!(!probe::is_visible(&app, Target::Overlay));
+        assert!(!probe::is_visible(&app, Target::Resume));
+    }
+
+    // ── Clicks ──────────────────────────────────────────────────────
+
+    #[test]
+    fn a_click_on_the_resume_line_resumes() {
+        let mut app = test_app();
+        app.state = GameState::Paused;
+        assert_eq!(
+            probe::click(&mut app, Target::Resume),
+            EventResult::Consumed
+        );
+        assert_eq!(app.state, GameState::Playing);
+    }
+
+    #[test]
+    fn a_click_anywhere_on_the_pause_sheet_resumes() {
+        let mut app = test_app();
+        app.state = GameState::Paused;
+        assert_eq!(
+            probe::click(&mut app, Target::Overlay),
+            EventResult::Consumed
+        );
+        assert_eq!(app.state, GameState::Playing);
+    }
+
+    #[test]
+    fn a_click_on_the_new_game_line_while_paused_starts_a_new_game() {
+        let mut app = test_app();
+        // Both, because that is the pair real play produces: the high score
+        // is raised as the score is earned, not at the end, so a game
+        // abandoned at 500 has already banked its 500. Setting `score`
+        // alone would be a state the game cannot reach, and the assertion
+        // below would then be testing the fixture rather than `new_game`.
+        app.score = 500;
+        app.high_score = 500;
+        app.state = GameState::Paused;
+        assert_eq!(
+            probe::click(&mut app, Target::NewGame),
+            EventResult::Consumed
+        );
+        assert_eq!(app.score, 0, "the old score survived the new game");
+        assert_eq!(app.state, GameState::Playing);
+        assert_eq!(
+            app.high_score, 500,
+            "the high score did not survive the new game"
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_game_over_sheet_starts_a_new_game() {
+        let mut app = test_app();
+        app.state = GameState::GameOver;
+        app.lives = 0;
+        assert_eq!(
+            probe::click(&mut app, Target::Overlay),
+            EventResult::Consumed
+        );
+        assert_eq!(app.state, GameState::Playing);
+        assert_eq!(app.lives, INITIAL_LIVES);
+    }
+
+    /// The dead zone the sheet's own box used to cut out of itself.
+    ///
+    /// `probe::click(.., Target::Overlay)` aims at the middle of the overlay,
+    /// which is where the box is, so the test above covers this too -- but
+    /// only by accident of where the centre lands. These aim at the lines by
+    /// name, so a future overlay that moves its box off-centre still has the
+    /// question asked of it.
+    #[test]
+    fn a_click_on_a_line_of_the_game_over_box_starts_a_new_game() {
+        for target in [
+            Target::OverlayTitle,
+            Target::FinalStat(0),
+            Target::FinalStat(1),
+            Target::FinalStat(2),
+        ] {
+            let mut app = test_app();
+            app.state = GameState::GameOver;
+            app.lives = 0;
+            assert_eq!(
+                probe::click(&mut app, target),
+                EventResult::Consumed,
+                "{target:?} is part of the sheet and did nothing"
+            );
+            assert_eq!(app.state, GameState::Playing, "{target:?}");
+        }
+    }
+
+    #[test]
+    fn a_click_on_the_title_of_the_pause_sheet_resumes() {
+        let mut app = test_app();
+        app.state = GameState::Paused;
+        assert_eq!(
+            probe::click(&mut app, Target::OverlayTitle),
+            EventResult::Consumed
+        );
+        assert_eq!(app.state, GameState::Playing);
+    }
+
+    #[test]
+    fn a_click_during_play_does_nothing() {
+        // There is nothing on a playfield to click at, and a pointer cannot
+        // fly a ship. Saying `Ignored` is what stops the window redrawing on
+        // every stray click.
+        let mut app = test_app();
+        assert_eq!(probe::click(&mut app, Target::Field), EventResult::Ignored);
+        assert_eq!(app.state, GameState::Playing);
+    }
+
+    #[test]
+    fn a_click_on_the_header_does_nothing() {
+        let mut app = test_app();
+        app.state = GameState::Paused;
+        assert_eq!(probe::click(&mut app, Target::Score), EventResult::Ignored);
+        assert_eq!(
+            app.state,
+            GameState::Paused,
+            "the score bar resumed the game"
+        );
+    }
+
+    #[test]
+    fn a_click_on_nothing_at_all_does_nothing() {
+        let mut app = test_app();
+        app.state = GameState::Paused;
+        assert_eq!(probe::click_background(&mut app), EventResult::Ignored);
+        assert_eq!(app.state, GameState::Paused);
+    }
+
+    #[test]
+    fn a_right_click_is_not_a_click() {
+        let mut app = test_app();
+        app.state = GameState::Paused;
+        assert_eq!(
+            probe::click_with(&mut app, Target::Resume, MouseButton::Right),
+            EventResult::Ignored
+        );
+        assert_eq!(app.state, GameState::Paused);
+    }
+
+    #[test]
+    fn a_click_lands_where_the_window_it_was_resized_to_put_the_control() {
+        // The click is read against the size the frame was drawn at. If the
+        // app kept the size it started with, this click would land on the
+        // wrong thing in a window the user resized.
+        let mut app = test_app();
+        app.state = GameState::Paused;
+        let small = (500.0, 420.0);
+        let rect = probe::rect_of_sized(&app, Target::Resume, small).expect("drawn small");
+        let (x, y) = rect.centre();
+        assert_eq!(
+            app.click_at(x, y, MouseButton::Left, small),
+            EventResult::Consumed
+        );
+        assert_eq!(app.state, GameState::Playing);
+    }
+
+    #[test]
+    fn the_overlay_hides_the_asteroids_behind_it_from_a_click() {
+        // The sheet is drawn over the field, so it takes the click. Anything
+        // else would be a paused game that could still be poked.
+        let mut app = test_app();
+        let rect = probe::rect_of(&app, Target::Asteroid(0)).expect("an asteroid is drawn");
+        let (x, y) = rect.centre();
+        app.state = GameState::Paused;
+        let hit = app.draw(SIZE).hit_test(x, y);
+        assert!(
+            matches!(
+                hit,
+                Some(Target::Overlay | Target::Resume | Target::NewGame | Target::OverlayTitle)
+            ),
+            "the asteroid was still reachable through the pause sheet: {hit:?}"
+        );
+    }
+
+    // ── Keys ────────────────────────────────────────────────────────
+
+    #[test]
+    fn keys_reach_the_app_through_the_window() {
+        let mut app = test_app();
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::Left)),
+            EventResult::Consumed
+        );
+        assert!(app.input.left);
+    }
+
+    #[test]
+    fn a_key_coming_back_up_is_not_a_second_press_while_paused() {
+        // A `P` held down pauses on the way down. Acting on the way up too
+        // would unpause the moment the player let go.
+        let mut app = test_app();
+        key_down(&mut app, Key::P);
+        assert_eq!(app.state, GameState::Paused);
+        assert_eq!(key_up(&mut app, Key::P), EventResult::Ignored);
+        assert_eq!(
+            app.state,
+            GameState::Paused,
+            "letting go of P unpaused the game"
+        );
+    }
+
+    #[test]
+    fn a_key_coming_back_up_does_not_restart_a_finished_game() {
+        let mut app = test_app();
+        app.state = GameState::GameOver;
+        assert_eq!(key_up(&mut app, Key::N), EventResult::Ignored);
+        assert_eq!(app.state, GameState::GameOver);
+    }
+
+    #[test]
+    fn a_key_the_game_does_not_use_is_ignored() {
+        let mut app = test_app();
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::Q)),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn pausing_lets_go_of_every_key_that_was_held() {
+        // The up-stroke for a key held at the moment of pausing goes to
+        // whatever has the keyboard while the game is away, so it never
+        // arrives. A ship still turning on unpause is what that looks like.
+        let mut app = test_app();
+        key_down(&mut app, Key::Left);
+        key_down(&mut app, Key::Up);
+        assert!(app.input.left && app.input.thrust);
+        key_down(&mut app, Key::P);
+        assert!(!app.input.left, "the ship was still turning");
+        assert!(!app.input.thrust, "the engine was still running");
+    }
+
+    // ── The window ──────────────────────────────────────────────────
+
+    #[test]
+    fn the_window_has_a_name() {
+        let app = test_app();
+        assert_eq!(app.title(), "Asteroids");
+        assert_eq!(app.app_id(), "asteroids");
+    }
+
+    #[test]
+    fn the_window_opens_at_the_size_the_game_was_drawn_for() {
+        let app = test_app();
+        let (w, h) = app.initial_size();
+        assert_eq!(f32_from_u32(w), AsteroidsApp::SIZE.0);
+        assert_eq!(f32_from_u32(h), AsteroidsApp::SIZE.1);
+    }
+
+    #[test]
+    fn the_window_asks_to_be_woken_for_the_animation() {
+        // Without a tick interval nothing moves: every asteroid in the game
+        // is where it was when the window opened.
+        let app = test_app();
+        assert_eq!(app.tick_interval(), Some(TICK));
+    }
+
+    #[test]
+    fn the_close_button_closes() {
+        let mut app = test_app();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn an_event_that_changed_something_asks_for_a_redraw() {
+        let mut app = test_app();
+        assert_eq!(
+            app.on_event(&Event::Key(probe::press(Key::Left))),
+            Response::Redraw
+        );
+    }
+
+    #[test]
+    fn an_event_that_changed_nothing_does_not_ask_for_a_redraw() {
+        let mut app = test_app();
+        assert_eq!(
+            app.on_event(&Event::Key(probe::press(Key::Q))),
+            Response::Idle
+        );
+    }
+
+    #[test]
+    fn a_tick_while_paused_is_not_a_change() {
+        // Sixty ticks a second against a frame that cannot have changed. A
+        // paused game that answered `Redraw` would repaint sixty times a
+        // second to no effect.
+        let mut app = test_app();
+        app.state = GameState::Paused;
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 16 }),
+            Response::Idle
+        );
+    }
+
+    #[test]
+    fn a_tick_while_playing_is_a_change() {
+        let mut app = test_app();
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 16 }),
+            Response::Redraw
+        );
+    }
+
+    #[test]
+    fn a_resize_is_remembered() {
+        let mut app = test_app();
+        assert_eq!(
+            handle_event(
+                &mut app,
+                &Event::Resize {
+                    width: 640,
+                    height: 480
+                }
+            ),
+            EventResult::Consumed
+        );
+        assert_eq!(app.size(), (640.0, 480.0));
+    }
+
+    #[test]
+    fn the_size_a_frame_is_drawn_at_is_the_size_the_next_click_is_read_against() {
+        let mut app = test_app();
+        app.state = GameState::Paused;
+        let _ = app.render(500.0, 420.0);
+        assert_eq!(app.size(), (500.0, 420.0));
+    }
+
+    #[test]
+    fn starting_a_new_game_does_not_forget_the_window() {
+        // `new_game` is `*self = Self::with_seed(..)`, which would otherwise
+        // put the size back to the one the program guessed at startup -- and
+        // the next click would be read against a window that is not there.
+        let mut app = test_app();
+        app.resize(500.0, 420.0);
+        app.new_game();
+        assert_eq!(app.size(), (500.0, 420.0));
+    }
+
+    #[test]
+    fn the_frame_is_balanced() {
+        // Every clip and translate pushed is popped. An unbalanced frame
+        // draws the next window's contents through this one's clip.
+        let mut app = test_app();
+        assert!(app.frame(SIZE.0, SIZE.1).is_balanced());
+        app.state = GameState::Paused;
+        assert!(app.frame(SIZE.0, SIZE.1).is_balanced());
+        app.state = GameState::GameOver;
+        assert!(app.frame(SIZE.0, SIZE.1).is_balanced());
+    }
+
+    #[test]
+    fn a_window_of_no_size_still_draws_a_frame() {
+        // The compositor can hand out a zero-size window while a resize is in
+        // flight. Panicking there loses the game.
+        let mut app = test_app();
+        for size in [(0.0, 0.0), (1.0, 800.0), (800.0, 1.0)] {
+            assert!(app.frame(size.0, size.1).is_balanced());
+        }
+        app.state = GameState::GameOver;
+        assert!(app.frame(0.0, 0.0).is_balanced());
+    }
+
+    // ── Faults the wiring exposed ───────────────────────────────────
+
+    #[test]
+    fn a_late_wave_does_not_fill_the_field_with_asteroids() {
+        // `INITIAL_ASTEROIDS + wave - 1` with nothing on the end of it: wave
+        // two hundred meant two hundred and three asteroids, each wanting a
+        // spawn point 150 units clear of the ship in a field 800 across.
+        let mut app = test_app();
+        app.asteroids.clear();
+        app.wave = 200;
+        app.advance_wave();
+        assert_eq!(app.asteroids.len(), MAX_WAVE_ASTEROIDS);
+    }
+
+    #[test]
+    fn an_early_wave_is_still_one_asteroid_bigger_than_the_last() {
+        // The cap must not flatten the difficulty curve where the curve is
+        // the point.
+        let mut app = test_app();
+        app.asteroids.clear();
+        app.wave = 1;
+        app.advance_wave();
+        assert_eq!(app.asteroids.len(), INITIAL_ASTEROIDS + 1);
+    }
+
+    #[test]
+    fn a_score_at_the_ceiling_does_not_wrap_round_to_nothing() {
+        let mut app = setup_target_practice();
+        app.score = u32::MAX;
+        app.high_score = u32::MAX;
+        app.input.shoot = true;
+        tick_many(&mut app, 500, 16);
+        assert_eq!(app.score, u32::MAX, "the score wrapped");
+    }
+
+    #[test]
+    fn the_wave_counter_does_not_wrap_round_to_nothing() {
+        let mut app = test_app();
+        app.wave = u32::MAX;
+        app.asteroids.clear();
+        app.advance_wave();
+        assert_eq!(app.wave, u32::MAX);
     }
 }

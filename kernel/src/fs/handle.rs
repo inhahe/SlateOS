@@ -272,9 +272,10 @@ pub fn open(path: impl AsRef<Path>, flags: OpenFlags) -> KernelResult<u64> {
 }
 
 /// Like [`open`], but when the `CREATE` flag causes a new file to be
-/// created the file is stamped `create_mode` (masked to the low 9
-/// permission bits) instead of the 0o644 default.  `create_mode` is
-/// ignored when no file is created (existing file, or `CREATE` absent).
+/// created the file is stamped `create_mode` (masked to the low 12
+/// permission bits — `0o7777`, so setuid/setgid/sticky survive) instead
+/// of the 0o644 default.  `create_mode` is ignored when no file is
+/// created (existing file, or `CREATE` absent).
 ///
 /// The mode is expected to be **already umask-masked by the caller**: our
 /// umask lives in the userspace POSIX layer (per design-decision on the
@@ -313,7 +314,27 @@ pub struct Beneath<'a> {
 /// [`crate::fs::Vfs::beneath_step`] for why the rule is per-hop rather than
 /// a check on the final answer.
 pub fn open_beneath(b: Beneath<'_>, flags: OpenFlags) -> KernelResult<u64> {
-    open_impl(b.rel, flags, DEFAULT_CREATE_MODE, Some(b))
+    open_beneath_with_mode(b, flags, DEFAULT_CREATE_MODE)
+}
+
+/// Like [`open_beneath`], but a file created by `CREATE` is stamped
+/// `create_mode` instead of [`DEFAULT_CREATE_MODE`].
+///
+/// This is what `SYS_FS_OPENAT2` calls, and it exists for the same reason
+/// [`open_with_mode`] does: `openat2(2)` carries a mode, and a containment
+/// wrapper that quietly substituted 0o644 would create files with
+/// permissions the caller did not ask for and cannot see it did not get.
+/// `open_beneath` is now defined in terms of this one rather than beside
+/// it, so the two can never drift on anything but the mode.
+///
+/// `create_mode` is the final on-disk permission bits, already
+/// umask-masked by the caller, exactly as for [`open_with_mode`].
+pub fn open_beneath_with_mode(
+    b: Beneath<'_>,
+    flags: OpenFlags,
+    create_mode: u16,
+) -> KernelResult<u64> {
+    open_impl(b.rel, flags, create_mode, Some(b))
 }
 
 fn open_impl(
@@ -531,10 +552,25 @@ fn open_resolved(norm: PathBuf, flags: OpenFlags, create_mode: u16) -> KernelRes
 
             // Stamp the caller-supplied (umask-masked) permission bits.  The
             // underlying write_file stamps a 0o644 default; overwrite it with
-            // the requested mode so O_CREAT honours its `mode` argument.  Only
-            // the low 9 bits are meaningful today (setuid/setgid/sticky on a
-            // brand-new file are not yet plumbed through the create path).
-            let perm = create_mode & 0o777;
+            // the requested mode so O_CREAT honours its `mode` argument.
+            //
+            // Twelve bits, not nine.  This used to mask to `0o777` on the
+            // grounds that "setuid/setgid/sticky on a brand-new file are not
+            // yet plumbed through the create path" -- but they are: the VFS
+            // stores twelve (`ext4`'s `set_permissions_ino` writes
+            // `permissions & 0o7777`, `memfs` stores the `u16` whole) and
+            // reports twelve back through `metadata`, so the mask was the
+            // only thing dropping them.  Silently discarding a permission
+            // bit a caller explicitly asked for is the failure lane B and
+            // lane A agreed to rule out when settling `SYS_FS_OPENAT2`'s
+            // width; see design-decisions.md §639.
+            //
+            // Storing a setuid bit that `exec` does not yet honour is safe
+            // in this direction only: an unenforced bit grants no privilege,
+            // so the discrepancy is "less privilege than the metadata
+            // claims", which fails closed.  Enforcing a bit we did not store
+            // would not be.
+            let perm = create_mode & 0o7777;
             if perm != DEFAULT_CREATE_MODE {
                 crate::fs::Vfs::set_permissions(&norm, perm)?;
             }

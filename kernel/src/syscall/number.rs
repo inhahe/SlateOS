@@ -3191,6 +3191,80 @@ pub const SYS_FS_OPEN: u64 = 610;
 /// Returns: file handle on success, negative error code on failure.
 pub const SYS_FS_OPEN_MODE: u64 = 659;
 
+/// Open a file relative to a directory handle, under path-resolution
+/// restrictions — the native equivalent of Linux's `openat2(2)`.
+///
+/// `arg0`: pointer to path bytes.
+/// `arg1`: path length.
+/// `arg2`: open flags (`OpenFlags` bits) — same as [`SYS_FS_OPEN_MODE`].
+/// `arg3`: create mode, `0o7777` wide — same position as
+///   [`SYS_FS_OPEN_MODE`], but see the width note below.
+/// `arg4`: resolve restrictions ([`RESOLVE_NO_SYMLINKS`],
+///   [`RESOLVE_BENEATH`]); any other bit set is `InvalidArgument`.
+/// `arg5`: directory handle the path is resolved against, or `0` for the
+///   process's current working directory.  Native file handle 0 is never
+///   valid, so this is not an invented in-band sentinel.
+///
+/// The first four arguments are [`SYS_FS_OPEN_MODE`]'s, in its order and
+/// positions, so a caller forwarding to this reads line for line against
+/// its sibling and only `resolve` and `dirfd` are new.  Six flat
+/// arguments rather than Linux's `open_how` struct: `open_how` exists to
+/// be extensible *by struct size*, which `design.txt`'s versioned syscall
+/// tables already solve differently — taking it would give one call two
+/// extensibility mechanisms and pin three field widths we did not choose.
+/// See `design-decisions.md` §639 and lane B's
+/// `requests/b-a-yes-forward-openat2-and-here-is-the-shape-we-want.md`.
+///
+/// **The create mode here is twelve bits, not nine.**  `SYS_FS_OPEN_MODE`
+/// used to mask to `0o777`, silently dropping setuid/setgid/sticky; that
+/// mask was a bug in one line of one handler rather than a limit of the
+/// filesystem, which stores twelve (`ext4`'s `set_permissions_ino` masks
+/// to `0o7777`).  Both calls now take `0o7777`, so
+/// `open(O_CREAT, 0o4755)` and this agree.
+///
+/// Number 661: 600–660 were contiguous and exhausted.
+///
+/// Returns: file handle on success, negative error code on failure.
+pub const SYS_FS_OPENAT2: u64 = 661;
+
+/// [`SYS_FS_OPENAT2`] `resolve` bit: refuse to traverse a symbolic link
+/// at any component of the path, including the final one.
+///
+/// Maps to `OpenFlags::NO_SYMLINKS` and thence to
+/// `Vfs::resolve_no_symlinks`.
+///
+/// **Why this is `1 << 16` and not Linux's `0x04`.**  Deliberately far
+/// from Linux's numbering, so that a caller forwarding Linux's
+/// `open_how.resolve` *without* translating it fails loudly instead of
+/// quietly: every Linux resolve value lies in `0x00..=0x3f`, so an
+/// untranslated one has no known bit set here and at least one unknown
+/// bit, and is rejected on the first call.  Had we reused Linux's
+/// values, a dropped translation line would turn `RESOLVE_NO_XDEV` into
+/// some *other* restriction of ours and the caller would be told its
+/// confinement was applied when it was not — the same silent-security
+/// failure class as `TD-OPENAT2-BENEATH-INROOT`.  `resolve == 0` means
+/// the same thing in both schemes, which is the one value where a
+/// pass-through is harmless.  See `design-decisions.md` §639.
+pub const RESOLVE_NO_SYMLINKS: u64 = 1 << 16;
+
+/// [`SYS_FS_OPENAT2`] `resolve` bit: refuse to resolve outside the
+/// directory named by `dirfd` — no `..` above it, no absolute path, no
+/// symlink escaping it.
+///
+/// Requires a real `dirfd`; combining it with `dirfd == 0` (cwd) is
+/// accepted and confines to the cwd.  `1 << 17` rather than Linux's
+/// `0x08` for the reason given on [`RESOLVE_NO_SYMLINKS`].
+pub const RESOLVE_BENEATH: u64 = 1 << 17;
+
+/// Every `resolve` bit [`SYS_FS_OPENAT2`] understands.
+///
+/// Any bit outside this mask is `InvalidArgument` — including every one
+/// of Linux's, which is the point.  `RESOLVE_IN_ROOT` is deliberately
+/// absent: lane B does not want it, nothing in `userspace/**` or
+/// `posix/**` asks for it, and libc answers `EOPNOTSUPP`.  If that
+/// changes it will change with a named caller attached.
+pub const RESOLVE_ALL: u64 = RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH;
+
 /// Close an open file handle.
 ///
 /// `arg0`: file handle.

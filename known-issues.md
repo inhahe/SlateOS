@@ -15991,8 +15991,8 @@ still a capability a native binary cannot reach. The structural fix is a native
 syscall number for `openat2` so libc forwards instead of re-implementing, which
 is what let the two drift apart in the first place. Both that and the VFS work
 were asked for in `requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-
-and-unenforceable-in-the-vfs.md`, which the dropbox convention removed once it
-was answered — the reply, and the current state of both asks, is
+and-unenforceable-in-the-vfs.md`, which carries a `Status:` stamp recording
+which of its two asks landed — the reply, and the current state of both, is
 `requests/a-b-openat2-resolve-beneath-is-enforced.md` (VFS work done; the
 native syscall number is waiting on lane B to say it will forward, because an
 unused number is an ABI commitment). **This divergence therefore still stands**

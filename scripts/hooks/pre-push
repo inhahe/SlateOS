@@ -58,6 +58,24 @@
 
 set -u
 
+# Reached through the trampoline .git/hooks/pre-push installs, or as a copy?
+#
+# A copy is how this used to be installed, and it fails toward silence: an edit
+# to this file did nothing until someone remembered to re-run install-hooks.sh,
+# and a run that never reached a gate looks exactly like a gate that found
+# nothing. That is not hypothetical — a gate added on 2026-08-30 was committed,
+# pushed, and did not run, and the push output gave no sign of it.
+#
+# A warning rather than a refusal, because the case it catches is a hook copied
+# into place by hand: the tree is still checked, just possibly by an older
+# revision of these gates than the one checked out. See scripts/install-hooks.sh.
+if [ "${SLATEOS_HOOK_TRAMPOLINE:-}" != "1" ]; then
+    echo "pre-push: WARNING — this hook was installed as a copy, not as the" >&2
+    echo "  trampoline .git/hooks/pre-push should be. The gates that run are" >&2
+    echo "  whichever ones were current when it was copied, which may be older" >&2
+    echo "  than the ones in this checkout. Fix with: ./scripts/install-hooks.sh" >&2
+fi
+
 # Paths that must never leave this machine. Matched exactly against the paths
 # git reports, so these are repo-root-relative with no leading slash.
 GUARDED="todo2.txt"
@@ -491,6 +509,19 @@ case "$changed" in
 esac
 
 getopt_failed=0
+if [ "$skip_getopt" != "1" ] && { [ "$run_all" = "1" ] || [ -n "$bins" ]; }; then
+    # Check the checker before believing it. One utility (GNU ed) parses long
+    # options with its own parser rather than glibc's, so its table is compared
+    # through a second path -- names scraped from `--help`, plus a probe that
+    # keeps an undocumented-but-parsed option from being reported as a defect.
+    # That path cannot be exercised by the sweep: `ed` agrees with GNU today,
+    # and a broken comparison would look exactly like that agreement.
+    # --selftest is the only thing that tells the two apart.
+    if ! "$py" "$gopt" --selftest; then
+        echo "pre-push: getopt-ambiguity-check.py --selftest failed" >&2
+        exit 1
+    fi
+fi
 if [ "$skip_getopt" != "1" ]; then
     if [ "$run_all" = "1" ]; then
         "$py" "$gopt" || getopt_failed=1
@@ -526,6 +557,13 @@ Fix the table, not the check. Read GNU's own copy with:
 
 The empty prefix matches every entry, so the ambiguity message lists the whole
 table in declaration order -- names, and order, in one measurement.
+
+Unless the utility is in OWN_PARSER (GNU ed is), in which case it does not use
+glibc's getopt_long, prints no candidate list, and \`--=x\` reads back nothing.
+Those are compared against the names in \`<util> --help\` as an unordered set,
+and a name we carry that the help omits is only reported once \`<util> --<name>\`
+has answered "unrecognized option" -- because help text routinely omits options
+the parser still accepts (\`cp --path\`, \`date --uct\`, \`tar --HANG\`).
 
 If a difference is genuine (\`--context\` is compiled out of a build without
 SELinux, say), exempt that one name explicitly in

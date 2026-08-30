@@ -14,7 +14,6 @@
 # which records *why*, not here, which records only *that*.
 
 userspace/coreutils/src/bin/diff.rs:argv-as-string
-userspace/coreutils/src/bin/ed.rs:argv-as-string
 userspace/coreutils/src/bin/fetch.rs:argv-as-string
 userspace/coreutils/src/bin/logger.rs:argv-as-string
 userspace/coreutils/src/bin/patch.rs:argv-as-string

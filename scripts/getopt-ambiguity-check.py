@@ -63,11 +63,36 @@ A genuine difference is possible without anyone being wrong: ``--context`` is
 compiled out of a build without SELinux.  If that ever shows up here, exempt the
 one name explicitly rather than loosening the comparison.
 
+**When the utility is not a glibc one.**  Check 1 assumes ``getopt_long``, and
+one utility we transcribe does not use it: GNU ed carries its own
+``arg_parser.c``, which prints ``option '--=x' is ambiguous`` and stops, with no
+candidate list to read back.  The readout came back empty and the gate said
+"utility missing?" about a utility that is installed — a diagnostic that sends
+the reader looking for a package rather than at the real difference.
+
+Those bins are listed in ``OWN_PARSER`` and compared through a second path: the
+names in ``<util> --help``, as an unordered *set*.  Unordered because the thing
+declaration order decides in glibc is which candidate a diagnostic names first,
+and these utilities print no candidates — so help-text order would be evidence
+about the manual, not about the parser.  Check 2 is unaffected and does the real
+work: these parsers were written to imitate glibc closely enough that they emit
+the same two phrases it classifies on.
+
+A ``--help`` scrape is a one-sided measurement, and the code is asymmetric to
+match.  Cross-checked against the ``--=x`` readout on six glibc utilities, help
+never named an option the parser lacked but routinely omitted ones it had —
+``cp --path``, ``date --uct``, ``tar --HANG``.  So a name GNU documents and we
+lack is reported outright, while a name we carry and its help omits is reported
+only after GNU has been asked directly and answered "unrecognized option".
+Without that second step every undocumented alias we correctly carry would read
+as a defect to be deleted.
+
 Running it
 ----------
 
     python scripts/getopt-ambiguity-check.py            # check every bin
     python scripts/getopt-ambiguity-check.py cp rmdir   # just these
+    python scripts/getopt-ambiguity-check.py --selftest # check the checker
 
 It needs a GNU userland to compare against.  On this Windows host that means
 WSL, which it finds itself; on a Linux host it runs the utilities directly.  If
@@ -97,6 +122,33 @@ NOT_GNU = {
     "fetch",
     "logger",
     "minishell",
+}
+
+# Bins whose GNU counterpart parses long options with its *own* parser rather
+# than glibc's `getopt_long`, and the reason. These are not skipped -- the
+# comparison is still wanted, and the prefix sweep below still works, because
+# these parsers were written to imitate glibc and emit the same two phrases
+# ("is ambiguous", "unrecognized option") that `gnu_verdicts` classifies on.
+# What does *not* work is the `--=x` table readout: it depends on glibc listing
+# the candidates, and these parsers print the complaint without the list. The
+# readout comes back empty, which `gnu_table` reports as `None` and `check`
+# renders as "utility missing?" -- a diagnostic that sends the reader to look
+# for a package that is in fact installed.
+#
+# For these the names are read out of `--help` instead (`gnu_help_table`), and
+# compared as a *set*: `--help` is hand-written prose, so its order is evidence
+# about the manual rather than about the parser, and ordering is meaningless
+# here anyway -- the thing declaration order decides in glibc is which
+# candidate a diagnostic names first, and these utilities print no candidates.
+# The per-prefix sweep is what actually pins the behaviour down, and it is
+# unaffected.
+OWN_PARSER: dict[str, str] = {
+    # GNU ed carries `arg_parser.c` (the "carg_parser" Antonio Diaz Diaz uses
+    # across his projects) so that it builds where glibc is not. Measured on
+    # ed 1.20.1: `ed --=x` prints "ed: option '--=x' is ambiguous" and stops,
+    # where a glibc utility would go on to "possibilities: ...".
+    "ed": "GNU ed uses carg_parser, not glibc getopt_long, so it prints no "
+          "candidate list for --=x to read back",
 }
 
 # Bins that have no `LONG_OPTIONS` table on purpose, and the reason. Without
@@ -336,6 +388,91 @@ def gnu_table(runner: list[str], util: str) -> list[str] | None:
     return None
 
 
+# An option line in a GNU `--help` block: two or more spaces, optionally a
+# short form and its comma, then the long form. Anchoring on the leading indent
+# is what keeps prose out — a sentence in the description that happens to name
+# `--foo` starts at column 0 or inside a paragraph, not in the option column.
+HELP_OPT_RE = re.compile(r"^\s{2,}(?:-\w,\s+)?(--\S.*)$")
+HELP_NAME_RE = re.compile(r"--([A-Za-z0-9][A-Za-z0-9-]*)")
+
+
+def gnu_help_table(runner: list[str], util: str) -> set[str] | None:
+    """GNU's long-option names scraped out of ``--help``, or ``None``.
+
+    The fallback for `OWN_PARSER` utilities, whose ambiguity diagnostic carries
+    no candidate list. A *set*, not a list, and deliberately so: see the comment
+    on `OWN_PARSER` for why order read off hand-written help text would be
+    evidence about the manual rather than about the parser.
+
+    Only the option column of each line is considered. Everything from the
+    first run of two-or-more spaces onward is the description, which is prose
+    and may legitimately mention an option this utility does not have (`ed`'s
+    own help talks about `red`; other utilities cross-reference each other).
+    """
+    proc = subprocess.run(
+        [*runner, "bash", "-c",
+         'export LC_ALL=C.UTF-8; cd "$(mktemp -d)" || exit 1; '
+         'exec timeout 5 "$1" --help 2>&1 </dev/null',
+         "probe", util],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    names: set[str] = set()
+    for line in proc.stdout.splitlines():
+        m = HELP_OPT_RE.match(line)
+        if not m:
+            continue
+        # `--quiet, --silent      suppress ...` -> `--quiet, --silent`.
+        column = re.split(r"\s{2,}", m.group(1), maxsplit=1)[0]
+        names.update(HELP_NAME_RE.findall(column))
+    return names or None
+
+
+def compare_name_sets(
+    table: Table, theirs: set[str], verdicts: dict[str, str]
+) -> list[str]:
+    """Unordered comparison, for utilities read out of ``--help``.
+
+    Compares the *declared* names rather than `Table.readout()`: the elision
+    `readout` performs models glibc's candidate list, and these utilities print
+    no candidate list for it to model.
+
+    The two directions are not symmetric, because a `--help` scrape is a
+    one-sided measurement. Cross-checked against the `--=x` readout on six
+    glibc utilities, `--help` never named an option the parser lacked, but it
+    routinely omitted ones it had: `cp` parses `--path` and `--recursive`,
+    `date` parses `--uct`, `--iso-8601`, `--rfc-822` and `--rfc-2822`, and
+    `tar` parses `--HANG`, none of which appear in their help text. Deprecated
+    spellings are kept working and dropped from the manual, which is exactly
+    the shape of thing a table transcribed from source would have and a table
+    transcribed from `--help` would not.
+
+    So a name GNU's help lists and we lack is reported outright, but a name we
+    list and its help does not is only reported once GNU has been asked
+    directly and answered "unrecognized option" (`verdicts`). Without that
+    second step every undocumented alias we correctly carry would be reported
+    as a defect, and the gate would be teaching the reader to delete correct
+    entries.
+    """
+    ours = set(table.names) | set(table.aliases)
+    problems = []
+    for n in sorted(theirs - ours):
+        problems.append(
+            f"{table.util}: GNU has --{n}, LONG_OPTIONS does not; "
+            f"every abbreviation of it is one we may misresolve"
+        )
+    for n in sorted(ours - theirs):
+        if verdicts.get(n) != "unknown":
+            continue  # undocumented but parsed, or unmeasured — not a finding
+        problems.append(
+            f"{table.util}: LONG_OPTIONS has --{n}, GNU neither documents nor "
+            f"accepts it; likely copied from a different release"
+        )
+    return problems
+
+
 def compare_tables(table: Table, theirs: list[str]) -> list[str]:
     """Ordered comparison of our names against GNU's.
 
@@ -432,10 +569,29 @@ cd /; rmdir "$d" 2>/dev/null || true
 
 def check(table: Table, runner: list[str]) -> list[str]:
     """Every way this bin's table disagrees with GNU's."""
-    theirs_table = gnu_table(runner, table.gnu)
-    if theirs_table is None:
-        return [f"{table.util}: could not read GNU's table (utility missing?)"]
-    if mismatch := compare_tables(table, theirs_table):
+    if table.util in OWN_PARSER:
+        theirs_names = gnu_help_table(runner, table.gnu)
+        if theirs_names is None:
+            return [
+                f"{table.util}: could not read GNU's options out of --help "
+                f"(utility missing?). It is in OWN_PARSER because "
+                f"{OWN_PARSER[table.util]}, so --=x is not an option either."
+            ]
+        # Probing an exact name can run the option for real, which is why the
+        # prefix sweep below skips them. Here it is unavoidable and narrow: the
+        # only names probed are ones GNU's help does not document, and the
+        # question asked of each is whether it exists at all. `gnu_verdicts`
+        # bounds every probe with a timeout, a scratch directory and
+        # /dev/null on stdin.
+        extras = sorted((set(table.names) | set(table.aliases)) - theirs_names)
+        verdicts = gnu_verdicts(runner, table.gnu, extras) if extras else {}
+        mismatch = compare_name_sets(table, theirs_names, verdicts)
+    else:
+        theirs_table = gnu_table(runner, table.gnu)
+        if theirs_table is None:
+            return [f"{table.util}: could not read GNU's table (utility missing?)"]
+        mismatch = compare_tables(table, theirs_table)
+    if mismatch:
         # Stop here rather than also sweeping prefixes. Every prefix of a name
         # that only one side has disagrees, so the sweep would bury the one
         # finding that matters under a dozen restatements of it.
@@ -475,8 +631,108 @@ def check(table: Table, runner: list[str]) -> list[str]:
     return problems
 
 
+def selftest() -> int:
+    """Check the rules that decide what the `--help` readout reports.
+
+    This path exists because one utility's parser is not glibc's, so it cannot
+    be exercised by running the gate on the tree: `ed` agrees with GNU today,
+    and a broken comparison would look exactly like that agreement. The
+    asymmetry in `compare_name_sets` is the specific thing at risk — the
+    suppression of undocumented-but-parsed names is one `continue` away from
+    either reporting every alias as a defect or reporting nothing at all, and
+    neither mistake changes the summary line on a clean tree.
+
+    Rules are counted from `rule()` calls rather than a literal, so adding a
+    case cannot leave the summary claiming a total that no longer ran.
+    """
+    failures: list[str] = []
+    rules: list[str] = []
+    current = ""
+
+    def rule(name: str) -> None:
+        nonlocal current
+        current = name
+        rules.append(name)
+
+    def expect(label: str, got: object, want: object) -> None:
+        if got != want:
+            failures.append(f"{current}: {label}: want {want!r}, got {got!r}")
+
+    # 1. The option column is taken, the description is not. GNU ed's help is
+    #    the real text: a short form and its comma, a value placeholder, two
+    #    long forms on one line, and a line with no short form at all.
+    rule("help-scrape")
+    help_text = (
+        "Usage: ed [options] [[+line] file]\n"
+        "Options:\n"
+        "  -h, --help                 display this help and exit\n"
+        "  -p, --prompt=STRING        use STRING as an interactive prompt\n"
+        "  -q, --quiet, --silent      suppress diagnostics\n"
+        "      --unsafe-names         allow control characters\n"
+        "The file name may be preceded by '+line'. See also --nonesuch.\n"
+    )
+    got: set[str] = set()
+    for line in help_text.splitlines():
+        m = HELP_OPT_RE.match(line)
+        if m:
+            column = re.split(r"\s{2,}", m.group(1), maxsplit=1)[0]
+            got.update(HELP_NAME_RE.findall(column))
+    expect(
+        "names",
+        got,
+        {"help", "prompt", "quiet", "silent", "unsafe-names"},
+    )
+
+    t = Table(util="u", names=["alpha", "beta"])
+
+    # 2. Agreement is silence.
+    rule("agree")
+    expect("clean", compare_name_sets(t, {"alpha", "beta"}, {}), [])
+
+    # 3. A name GNU documents and we lack is reported on the help readout
+    #    alone. This direction needs no probe: `--help` was never observed to
+    #    name an option the parser lacked.
+    rule("missing")
+    out = compare_name_sets(t, {"alpha", "beta", "gamma"}, {})
+    expect("count", len(out), 1)
+    expect("names-gamma", out and "--gamma" in out[0], True)
+
+    # 4. A name we carry that GNU's help omits is NOT a finding until GNU has
+    #    been asked. Unmeasured and "resolves" both stay silent; only
+    #    "unknown" — GNU answering "unrecognized option" — is reported. Get
+    #    this wrong and `cp --path`, `date --uct` and `tar --HANG` become
+    #    defects to be deleted.
+    rule("extra")
+    expect("unmeasured-silent", compare_name_sets(t, {"alpha"}, {}), [])
+    expect(
+        "undocumented-silent",
+        compare_name_sets(t, {"alpha"}, {"beta": "resolves"}),
+        [],
+    )
+    out = compare_name_sets(t, {"alpha"}, {"beta": "unknown"})
+    expect("absent-reported", len(out), 1)
+    expect("names-beta", out and "--beta" in out[0], True)
+
+    # 5. An ALIASES row counts as one of ours, or every aliased spelling GNU
+    #    documents would be reported as missing from a table that has it.
+    rule("aliases")
+    ta = Table(util="u", names=["alpha"], aliases={"alias": "alpha"})
+    expect("alias-is-ours", compare_name_sets(ta, {"alpha", "alias"}, {}), [])
+
+    for f in failures:
+        print(f"selftest FAIL {f}")
+    print(
+        f"selftest: {len(rules) - len({f.split(':')[0] for f in failures})}"
+        f"/{len(rules)} rules ok"
+    )
+    return 1 if failures else 0
+
+
 def main() -> int:
-    wanted = set(sys.argv[1:])
+    args = sys.argv[1:]
+    if "--selftest" in args:
+        return selftest()
+    wanted = set(args)
     runner = find_runner()
     if runner is None:
         # ASCII only: this console's code page is not UTF-8 and mangles the rest.
@@ -505,6 +761,18 @@ def main() -> int:
         for p in BIN_DIR.rglob("*.rs")
         if (p.stem if p.stem != "main" else p.parent.name) == name
         and parse_table(p) is not None
+    ]
+
+    # An OWN_PARSER entry can go stale the same way, in the other direction: if
+    # upstream switches to glibc (or the recorded observation was wrong), --=x
+    # starts listing candidates and the entry is now downgrading an ordered
+    # comparison to an unordered one for no reason. One WSL round trip per
+    # entry, over the whole tree rather than just `wanted`, for the reason
+    # above -- a push that does not touch the bin should still catch it.
+    stale_own_parser = [
+        name
+        for name in sorted(OWN_PARSER)
+        if gnu_table(runner, GNU_NAME.get(name, name)) is not None
     ]
 
     if wanted:
@@ -538,6 +806,16 @@ def main() -> int:
             f"{name}: listed in NOT_GETOPT, but it now has a LONG_OPTIONS "
             f"table. Remove the exemption so the table is actually compared, "
             f"and delete the recorded reason -- it is no longer true."
+        )
+        print(line, flush=True)
+        problems.append(line)
+
+    for name in stale_own_parser:
+        line = (
+            f"{name}: listed in OWN_PARSER, but --=x now reads back a candidate "
+            f"list, so it does use glibc getopt_long after all. Remove the "
+            f"entry -- it is costing the ordered comparison and the recorded "
+            f"reason ({OWN_PARSER[name]}) is no longer true."
         )
         print(line, flush=True)
         problems.append(line)

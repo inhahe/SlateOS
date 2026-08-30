@@ -95734,3 +95734,122 @@ is the only part the compiler is not reading.
 Self-test rung 104 asserts the corrected case in the serial log as well
 (`filelock pid 1O` must name `filelock` and must not contain `epollstat`), so
 the invariant is pinned both statically and at runtime.
+
+---
+
+## `A-A-PUSH-GATE-DELETED-THE-REPOSITORY-IT-WAS-GATING` (lane A, 2026-08-29) — **FIXED 2026-08-29**, published damage
+
+**Status:** FIXED 2026-08-29 (`f0534726e` repair, `31eb8c6bd` root cause,
+`93fb3227b` the same latent bug in two more suites)
+
+**In short:** a safety check that runs just before `git push` built itself a
+scratch repository to test itself against. It did not get a scratch
+repository — it got *this* one, and its scratch commits landed on `lane-a`
+and were published to `origin/main`. The commit it wrote has a tree
+consisting of one `requests/` directory: as far as those two commits are
+concerned, the entire operating system was deleted. The gate reported
+success throughout, because it had genuinely verified a fixture and the
+fixture was the repository.
+
+### What actually happened
+
+`pre-push` gate 9 runs `check-requests-not-deleted.py --selftest` before
+trusting the checker. The self-test builds a fixture with `git init` /
+`git add -A` / `git commit` in a `tempfile.TemporaryDirectory`, each call
+passing `cwd=<tmp>`.
+
+**`GIT_DIR` outranks both `cwd=` and `git -C`.** And git *exports* `GIT_DIR`
+— along with `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_WORK_TREE`,
+`GIT_QUARANTINE_PATH` and the `GIT_CONFIG_*` family — into the environment of
+every hook. So on the first real invocation, every fixture command operated
+on the repository being pushed:
+
+| Fixture command | What it did to this repository |
+|---|---|
+| `git init` | re-initialised it and set `core.bare=true` on the shared config, which made the `os` integration worktree unusable — `git status` there answered "this operation must be run in a work tree" |
+| `git add -A` | replaced the index with the fixture's three files |
+| `git commit` | wrote `7f6a6b446` ("base") and `71f164f7e` ("delete one, sweep another") onto `lane-a` |
+
+The commit *messages* are what identified it: "base" and "delete one, sweep
+another" are the fixture's own strings, appearing in the history of an OS
+kernel. `git ls-tree 71f164f7e` confirmed it — a single `requests` entry.
+
+Both commits were then pushed to `origin/lane-a` and `origin/main`, because
+the gate passed.
+
+### The repair, and why it is a merge and not a force-push
+
+Force-pushing is forbidden outright here, and the bad tip was already
+published. The fix was to make a commit whose *content* is correct but whose
+first parent is the bad tip, so both refs fast-forward onto it:
+
+```
+git commit-tree "79abf2546^{tree}" -p 71f164f7e -p 79abf2546   # -> f0534726e
+```
+
+Verified with `git diff --stat 79abf2546 f0534726e` (empty — the tree is
+exactly the good one) and `git merge-base --is-ancestor 71f164f7e f0534726e`
+(true — so it fast-forwards). Then a single push updated both refs
+`71f164f7e..f0534726e`. `core.bare` was set back to `false` in `os`.
+
+**The two junk commits remain in `main`'s ancestry, permanently.** They are
+ancestry, not content: no file in the tree reflects them. Removing them would
+require rewriting published history, which needs a force-push. That is the
+price of the no-force-push rule and it is the right trade — but it means a
+`git log` of this repository will always show two commits that appear to
+delete everything, and this entry is the explanation a future reader will
+need.
+
+### Root cause fix
+
+`scripts/gitenv.py` is now the single place that knows which variables bind a
+repository. `clean_env()` for a subprocess that should choose its repository
+by `cwd`/`-C`; `scrub_environ()` for a test harness that should never touch
+the ambient repository at all. It deliberately does **not** drop every
+`GIT_*` — `GIT_EXEC_PATH` is on some installs the only thing telling git
+where its own subcommands live, so a blanket denylist would break git rather
+than redirect it.
+
+### Why the self-test could not have caught this, and what does
+
+A self-test cannot detect that it corrupted the repository it runs from: its
+verdict is a statement about the fixture, and here the fixture *was* the
+repository. Every assertion it made was true. The regression test therefore
+had to be an **outside observer** —
+`scripts/test-check-requests-not-deleted.py` snapshots a sacrificial repo
+(HEAD, branch, refs, `core.bare`, index, log, status), runs the checker
+against it under three hook environments, and diffs the snapshots.
+
+Two things about that test are load-bearing and easy to get wrong:
+
+- **`GIT_DIR` alone is the shape that matters**, because it is what `git
+  push` actually sets, and it is the shape that fails *quietly* — the fixture
+  succeeds and writes commits. Adding `GIT_INDEX_FILE` makes git crash early,
+  so the run is caught by exit code. A test that only covered the loud shape
+  would have proved the least.
+- **The probes must not raise.** The first version called `git` and let
+  failures propagate; against a repository the mutant had just made bare, the
+  snapshot threw and killed the harness with a traceback, losing the other
+  two environments. `_probe()` now returns a sentinel string, so a repository
+  too broken to answer still produces a *diff* rather than a crash.
+
+Every fix was mutation-tested by reverting it individually. Two mutants
+initially escaped, and each escape was a real weakness in the test rather
+than a nuisance: the snapshot-crash above, and an assertion that checked only
+for `"OK"` in the output, which a *foreign* repository satisfies just as well
+— now replaced by comparing the computed merge-base sha in both directions.
+
+### The generalisation, which is the part worth keeping
+
+Two other suites (`test-src-digest.py`, `test-boot-test.py`) build fixture
+repositories the same way. Neither is reachable from a hook today, so neither
+had fired — but "not currently reachable from a hook" is not a property
+either file states, nor one a reviewer can check, and `git bisect run`,
+`git rebase --exec`, `git filter-branch` callbacks and `git submodule
+foreach` export the same variables. Both were fixed anyway, via the shared
+module rather than three copies of a twenty-name denylist.
+
+**The check that would have caught this within seconds:** `git rev-parse
+lane-a` immediately after a push, compared against what was pushed. A push
+gate is the one program guaranteed to run with a repository named in its
+environment, and it is also the one nobody watches.

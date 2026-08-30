@@ -1974,6 +1974,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 coverage that a process cannot use a file handle it does not own.
+    // Also has to be ring 3, and for a sharper reason than the one above: the
+    // gate is a deliberate no-op when `caller_pid()` is `None`, so a
+    // kernel-context test would observe only the bypass and always pass.
+    if let Err(e) = proc::spawn::self_test_file_handle_ownership() {
+        serial_println!(
+            "WARNING: file-handle ownership (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     {
         #[inline(never)]
         fn case() {

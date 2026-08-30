@@ -9588,18 +9588,22 @@ fn cmd_uptime() {
     // Current wall-clock time.
     let now = crate::timekeeping::now();
 
-    // Load averages (1/5/15 minute EWMA).
-    let (l1, l5, l15) = crate::loadavg::get();
-    let (l1_w, l1_f) = crate::loadavg::format_load(l1);
-    let (l5_w, l5_f) = crate::loadavg::format_load(l5);
-    let (l15_w, l15_f) = crate::loadavg::format_load(l15);
+    // Load averages (1/5/15 minute EWMA) — the scheduler's, the same numbers
+    // /proc/loadavg and SYS_LOADAVG report.
+    let (l1, l5, l15) = crate::sched::load_averages_fixed();
+    let (l1_w, l1_f) = (crate::sched::load_int(l1), crate::sched::load_frac(l1));
+    let (l5_w, l5_f) = (crate::sched::load_int(l5), crate::sched::load_frac(l5));
+    let (l15_w, l15_f) = (crate::sched::load_int(l15), crate::sched::load_frac(l15));
 
-    // Active (non-idle) task count.
+    // `runnable/total`, as `uptime` has always meant it: how many of the
+    // tasks that exist actually want a CPU right now.  Both halves used to be
+    // spawned-minus-exited, so the field read `N/N` for every N and told the
+    // reader nothing.
     let stats = crate::sched::sched_stats();
-    let active = stats
+    let total = stats
         .total_tasks_spawned
         .saturating_sub(stats.total_tasks_exited);
-    let nr_run = crate::loadavg::nr_running();
+    let nr_run = crate::sched::nr_runnable();
 
     shell_println!(
         " {:02}:{:02}:{:02} up {:02}:{:02}:{:02}.{:03}, load: {}.{:02}, {}.{:02}, {}.{:02}, {}/{} tasks",
@@ -9617,7 +9621,7 @@ fn cmd_uptime() {
         l15_w,
         l15_f,
         nr_run,
-        active,
+        total,
     );
 }
 
@@ -128050,16 +128054,25 @@ fn cmd_memtype() {
 /// Displays 1-minute, 5-minute, and 15-minute exponential moving
 /// averages of the number of runnable tasks (like `/proc/loadavg`).
 fn cmd_loadavg() {
-    let (l1, l5, l15) = crate::loadavg::get();
-    let (l1_w, l1_f) = crate::loadavg::format_load(l1);
-    let (l5_w, l5_f) = crate::loadavg::format_load(l5);
-    let (l15_w, l15_f) = crate::loadavg::format_load(l15);
+    let (l1, l5, l15) = crate::sched::load_averages_fixed();
+    let (l1_w, l1_f) = (crate::sched::load_int(l1), crate::sched::load_frac(l1));
+    let (l5_w, l5_f) = (crate::sched::load_int(l5), crate::sched::load_frac(l5));
+    let (l15_w, l15_f) = (crate::sched::load_int(l15), crate::sched::load_frac(l15));
 
-    let nr_run = crate::loadavg::nr_running();
-    let samples = crate::loadavg::sample_count();
+    let nr_run = crate::sched::nr_runnable();
+    let total = {
+        let stats = crate::sched::sched_stats();
+        stats
+            .total_tasks_spawned
+            .saturating_sub(stats.total_tasks_exited)
+    };
+    let samples = crate::sched::load_sample_count();
 
+    // Linux's /proc/loadavg field 4 is `running/total`.  This printed the
+    // literal word "total" where the denominator belongs, so the line looked
+    // like Linux's and could not be read like it.
     shell_println!(
-        "{}.{:02} {}.{:02} {}.{:02} {}/total {}",
+        "{}.{:02} {}.{:02} {}.{:02} {}/{} {}",
         l1_w,
         l1_f,
         l5_w,
@@ -128067,10 +128080,11 @@ fn cmd_loadavg() {
         l15_w,
         l15_f,
         nr_run,
+        total,
         samples,
     );
     shell_println!("");
-    shell_println!("  1-min  5-min  15-min  running  samples");
+    shell_println!("  1-min  5-min  15-min  runnable/total  samples");
     shell_println!("  Load averages sampled every 5 seconds (EWMA, fixed-point)");
 }
 

@@ -137,7 +137,6 @@ mod ktrace;
 mod kwarn;
 mod layout_pad;
 mod limine;
-mod loadavg;
 mod lockdep;
 mod logpersist;
 mod mm;

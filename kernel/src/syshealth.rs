@@ -363,14 +363,22 @@ fn check_memory(config: &HealthConfig, metrics: &mut Vec<HealthMetric>, overall:
 }
 
 /// Check system load average.
+///
+/// The scheduler's averages are Linux fixed-point — `v / 2048` is the real
+/// load, `FSHIFT = 11`.  This function's whole vocabulary is `x100`, so every
+/// value crossing the boundary is converted once, here, by
+/// [`load_x100`]; the raw fixed-point numbers never reach a comparison or a
+/// format string.  Reading a ×2048 value as though it were ×100 is exactly
+/// the bug this replaced: it inflated the number by 20.48×, which put a
+/// completely idle machine permanently over a "critical" threshold of 8.00
+/// per CPU and re-announced it once a second.
 fn check_load(config: &HealthConfig, metrics: &mut Vec<HealthMetric>, overall: &mut HealthLevel) {
-    // Get load average from the loadavg subsystem.
-    // get() returns (load1, load5, load15) as fixed-point x100.
-    let (load1, load5, load15) = crate::loadavg::get();
+    let (load1, load5, load15) = crate::sched::load_averages_fixed();
+    let (load1, load5, load15) = (load_x100(load1), load_x100(load5), load_x100(load15));
 
     let ncpus = core::cmp::max(crate::smp::cpu_count() as u64, 1);
     // Per-CPU load x100.
-    let per_cpu_x100 = load1 * 100 / ncpus;
+    let per_cpu_x100 = load1 / ncpus;
 
     let level = if per_cpu_x100 >= u64::from(config.load_crit_per_cpu_x100) {
         HealthLevel::Critical
@@ -402,6 +410,15 @@ fn check_load(config: &HealthConfig, metrics: &mut Vec<HealthMetric>, overall: &
             ncpus
         ),
     });
+}
+
+/// Convert a Linux fixed-point load value (`v / 2048`) to this module's ×100.
+///
+/// `load × 100 = v × 100 / 2048`, done as a shift so the multiply is the only
+/// rounding step: load 1.00 (2048) is exactly 100, load 0.5 (1024) exactly 50.
+#[must_use]
+fn load_x100(v: u64) -> u64 {
+    crate::sched::load_int(v.saturating_mul(100))
 }
 
 /// Check CPU temperature.
@@ -735,6 +752,35 @@ fn self_test_inner() -> bool {
     // Test 9: Load metric exists.
     let has_load = snap.metrics.iter().any(|m| m.name == "load");
     check!("load metric present", has_load);
+
+    // Test 9b: the load metric is on this module's ×100 scale, not the
+    // scheduler's ×2048 one.
+    //
+    // This is the regression that matters most here, because getting it wrong
+    // is *silent* and self-reinforcing: reading the fixed-point value as ×100
+    // multiplied every reported load by 20.48, which pushed an idle machine
+    // past `load_crit_per_cpu_x100` (800 = 8.00 per CPU) permanently, and a
+    // health check that always says Critical is one nobody reads.
+    //
+    // The conversion is asserted directly, on values whose answer is exact,
+    // rather than on the live load — which on an idle test machine is 0, the
+    // one input that is identical under both scales and therefore proves
+    // nothing.  2048 is load 1.00 → 100; 1024 is 0.50 → 50; 0 is 0.
+    check!("load_x100(0) == 0", load_x100(0) == 0);
+    check!("load_x100(FIXED_1) == 100", load_x100(2048) == 100);
+    check!("load_x100(FIXED_1/2) == 50", load_x100(1024) == 50);
+    check!("load_x100(3 * FIXED_1) == 300", load_x100(6144) == 300);
+
+    // And the metric that reaches /proc/health is on that scale too: an idle
+    // or lightly-loaded test machine must not report a per-CPU load that a
+    // real machine could not reach.  A ×2048 value would be at least 2048 per
+    // runnable task; anything under 100 000 (load 1000 per CPU) is a scale
+    // this module could legitimately produce, and the old code could not.
+    let load_metric = snap.metrics.iter().find(|m| m.name == "load");
+    check!(
+        "load metric value is on the x100 scale",
+        load_metric.is_some_and(|m| m.value < 100_000)
+    );
 
     // Test 10: Uptime metric exists.
     let has_uptime = snap.metrics.iter().any(|m| m.name == "uptime");

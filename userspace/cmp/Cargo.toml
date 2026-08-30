@@ -1,9 +1,0 @@
-[package]
-name = "cmp"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS byte-by-byte file comparison"
-[dependencies]
-# cmp names the two files it is comparing and the byte offset where they
-# differ, and both paths come from the command line.
-quoting = { path = "../quoting" }

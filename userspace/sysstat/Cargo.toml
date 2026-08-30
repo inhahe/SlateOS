@@ -1,6 +1,0 @@
-[package]
-name = "sysstat"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS sysstat utility"
-[dependencies]

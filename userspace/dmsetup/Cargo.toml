@@ -1,9 +1,0 @@
-[package]
-name = "dmsetup"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS device mapper control"
-[dependencies]
-
-[build-dependencies]
-embed-manifest = "1.5.0"

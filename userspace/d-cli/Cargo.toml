@@ -1,9 +1,0 @@
-[package]
-name = "d-cli"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-# The new project's name and the dub subcommand name are argv words echoed
-# back.
-quoting = { path = "../quoting" }

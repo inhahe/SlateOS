@@ -1,6 +1,0 @@
-[package]
-name = "fstrim"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS fstrim - filesystem trim/discard (fstrim/blkdiscard/wipefs)"
-[dependencies]

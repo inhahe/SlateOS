@@ -1,6 +1,0 @@
-[package]
-name = "nano"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS simple text editor"
-[dependencies]

@@ -1,9 +1,0 @@
-[package]
-name = "vi"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS vi text editor"
-[dependencies]
-
-[dev-dependencies]
-scratchdir = { path = "../scratchdir" }

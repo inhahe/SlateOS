@@ -1,6 +1,0 @@
-[package]
-name = "hardlink"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS duplicate file hardlinker"
-[dependencies]

@@ -1,9 +1,0 @@
-[package]
-name = "modprobe-cli"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-# modprobe-cli names kernel modules and their parameters, strings that come
-# from the command line and from the modules tree on disk.
-quoting = { path = "../quoting" }

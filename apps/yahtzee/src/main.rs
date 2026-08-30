@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -6,23 +5,30 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(clippy::needless_range_loop)]
-#![allow(unused_imports)]
 
-//! Slate OS Yahtzee — the classic dice game.
+//! Slate OS Yahtzee -- the dice game, in a window.
 //!
-//! Roll five dice up to three times per turn, strategically holding dice
-//! between rolls, and assign the result to one of 13 scoring categories.
-//! Features full Yahtzee scoring including upper-section bonus (35 points
-//! when upper total >= 63), Yahtzee bonus (100 per additional Yahtzee),
-//! keyboard and mouse controls, a visual scorecard, and high-score tracking.
+//! Roll five dice up to three times a turn, holding the ones you want to keep,
+//! and spend the result on one of thirteen scoring boxes. Full Yahtzee scoring:
+//! the upper-section bonus at 63, the Joker rule, and 100 points for every
+//! Yahtzee after the first. Playable with the keyboard or with the pointer.
+//!
+//! The whole picture is solved from the size the window reports each frame:
+//! there is no built-in size the drawing falls back on, and every box a click
+//! is tested against is one the drawing pass recorded.
+//!
+//! Themed with the Catppuccin Mocha palette.
+
+use std::process::ExitCode;
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
+use oswindow::app::{self, App, Response};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -42,24 +48,18 @@ const MAUVE: Color = Color::from_hex(0xCBA6F7);
 const TEAL: Color = Color::from_hex(0x94E2D5);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
-// ── Layout constants ────────────────────────────────────────────────
-const PADDING: f32 = 16.0;
-const DICE_SIZE: f32 = 64.0;
-const DICE_GAP: f32 = 12.0;
-const DICE_DOT_RADIUS: f32 = 6.0;
-const DICE_CORNER_RADIUS: f32 = 8.0;
-const SCORECARD_WIDTH: f32 = 320.0;
-const SCORECARD_ROW_HEIGHT: f32 = 28.0;
-const HEADER_HEIGHT: f32 = 50.0;
-const DICE_AREA_HEIGHT: f32 = 120.0;
-const BUTTON_HEIGHT: f32 = 36.0;
-const BUTTON_WIDTH: f32 = 140.0;
-const TITLE_FONT_SIZE: f32 = 24.0;
-const HEADER_FONT_SIZE: f32 = 16.0;
-const SCORE_FONT_SIZE: f32 = 14.0;
-const DICE_LABEL_FONT_SIZE: f32 = 11.0;
-const BUTTON_FONT_SIZE: f32 = 14.0;
-const INFO_FONT_SIZE: f32 = 13.0;
+// ── The size the window opens at ────────────────────────────────────
+//
+// The only two pixel counts in the file, and they are a *starting* size rather
+// than a layout: everything below is solved from whatever size the window
+// reports. What stood here was sixteen of them -- a 64-pixel die, a 320-pixel
+// scorecard, a 28-pixel row, a high score pinned to `PADDING + 400.0` -- and
+// the window was whatever they happened to add up to. `render` did take a
+// width and a height, and spent them on the background rectangle and nothing
+// else, so a wider window got a wider backdrop behind an unchanged picture and
+// a shorter one lost its scorecard off the bottom.
+const WINDOW_WIDTH: f32 = 820.0;
+const WINDOW_HEIGHT: f32 = 700.0;
 
 /// Total number of scoring categories.
 const NUM_CATEGORIES: usize = 13;
@@ -83,6 +83,14 @@ const SMALL_STRAIGHT_SCORE: u16 = 30;
 const LARGE_STRAIGHT_SCORE: u16 = 40;
 /// Yahtzee score.
 const YAHTZEE_SCORE: u16 = 50;
+
+/// The lines of key help along the bottom of the left column.
+const HINTS: [&str; 4] = [
+    "R: Roll  |  1-5: Hold/Release",
+    "Tab: Switch focus  |  Arrows: Navigate",
+    "Space/Enter: Hold die or Score category",
+    "N: New Game",
+];
 
 // ── Scoring categories ─────────────────────────────────────────────
 
@@ -121,6 +129,15 @@ impl Category {
         Category::Chance,
     ];
 
+    /// The category at `index`, or `None` past the end of the card.
+    ///
+    /// Folding the bounds check into the lookup is what lets every caller stop
+    /// writing `if index >= NUM_CATEGORIES` a line away from the panic it was
+    /// meant to prevent.
+    fn at(index: usize) -> Option<Category> {
+        Category::ALL.get(index).copied()
+    }
+
     fn name(self) -> &'static str {
         match self {
             Category::Ones => "Ones",
@@ -139,7 +156,6 @@ impl Category {
         }
     }
 
-    /// Whether this category belongs to the upper section (Ones-Sixes).
     fn is_upper(self) -> bool {
         matches!(
             self,
@@ -152,9 +168,11 @@ impl Category {
         )
     }
 
-    /// The index into `Category::ALL`.
     fn index(self) -> usize {
-        Category::ALL.iter().position(|&c| c == self).unwrap_or(0)
+        Category::ALL
+            .iter()
+            .position(|&c| c == self)
+            .unwrap_or_default()
     }
 }
 
@@ -167,8 +185,16 @@ enum FocusRegion {
     Scorecard,
 }
 
-// ── Game state ──────────────────────────────────────────────────────
+// ── Game phase ──────────────────────────────────────────────────────
 
+/// Where the turn stands: derived, never stored.
+///
+/// This used to be a field, set by `roll` and by `advance_turn` alongside the
+/// two counters it is a function of. Two representations of one fact are two
+/// things that can disagree, and these did in practice: nothing in the drawing
+/// or the input ever asked for `MustScore` -- the button read
+/// `roll_number >= MAX_ROLLS` instead -- so the stored value was a third of it
+/// dead and the rest a slower spelling of `turn_number >= NUM_TURNS`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GamePhase {
     /// Player needs to roll (start of turn, or between rolls).
@@ -205,8 +231,9 @@ use randrange::{RandomSource, SeededRng};
 /// game's unit and not the generator's.
 fn roll_die(rng: &mut SeededRng) -> u8 {
     // `below` reduces with the high bits, so nothing carries from one call to
-    // the next. The cast cannot truncate: the result is 0..=5.
-    (rng.below(6) as u8).saturating_add(1)
+    // the next. `try_from` cannot fail on 0..=5; a fallback that can never run
+    // is still better than a cast that silently would.
+    u8::try_from(rng.below(6)).unwrap_or(0).saturating_add(1)
 }
 
 // ── Scoring logic (pure functions) ──────────────────────────────────
@@ -216,16 +243,26 @@ fn roll_die(rng: &mut SeededRng) -> u8 {
 fn face_counts(dice: &[u8; NUM_DICE]) -> [u8; 7] {
     let mut counts = [0u8; 7];
     for &d in dice {
-        if (1..=6).contains(&d) {
-            counts[d as usize] += 1;
+        // A die outside 1..=6 has no column to be counted in, and asking the
+        // array for one rather than checking the range first is the same test
+        // written where it cannot drift from the access it guards.
+        if let Some(c) = counts.get_mut(usize::from(d)).filter(|_| d >= 1) {
+            *c = c.saturating_add(1);
         }
     }
     counts
 }
 
+/// The counts of the six real faces, without the unused zero column.
+fn face_columns(counts: &[u8; 7]) -> impl Iterator<Item = u8> + '_ {
+    counts.iter().skip(1).copied()
+}
+
 /// Sum of all dice.
 fn dice_sum(dice: &[u8; NUM_DICE]) -> u16 {
-    dice.iter().map(|&d| u16::from(d)).sum()
+    dice.iter()
+        .map(|&d| u16::from(d))
+        .fold(0, u16::saturating_add)
 }
 
 /// Score for an upper-section category (Ones-Sixes): sum of dice matching
@@ -234,13 +271,12 @@ fn score_upper(dice: &[u8; NUM_DICE], target: u8) -> u16 {
     dice.iter()
         .filter(|&&d| d == target)
         .map(|&d| u16::from(d))
-        .sum()
+        .fold(0, u16::saturating_add)
 }
 
 /// Returns true if the dice contain at least `n` of any single face.
 fn has_n_of_a_kind(dice: &[u8; NUM_DICE], n: u8) -> bool {
-    let counts = face_counts(dice);
-    counts[1..].iter().any(|&c| c >= n)
+    face_columns(&face_counts(dice)).any(|c| c >= n)
 }
 
 /// Score for Three of a Kind: sum of all dice if at least 3 match.
@@ -266,8 +302,8 @@ fn score_four_of_a_kind(dice: &[u8; NUM_DICE]) -> u16 {
 /// full house unless the Joker rule applies.
 fn score_full_house(dice: &[u8; NUM_DICE]) -> u16 {
     let counts = face_counts(dice);
-    let has_three = counts[1..].contains(&3);
-    let has_two = counts[1..].contains(&2);
+    let has_three = face_columns(&counts).any(|c| c == 3);
+    let has_two = face_columns(&counts).any(|c| c == 2);
     if has_three && has_two {
         FULL_HOUSE_SCORE
     } else {
@@ -275,20 +311,20 @@ fn score_full_house(dice: &[u8; NUM_DICE]) -> u16 {
     }
 }
 
-/// Returns true if dice contain the consecutive sequence of length `len`
-/// starting at `start`.
+/// Returns true if dice contain a consecutive run of length `len`.
 fn has_consecutive_run(dice: &[u8; NUM_DICE], len: u8) -> bool {
-    let counts = face_counts(dice);
-    // Check every possible starting point for a run of `len`.
-    'outer: for start in 1..=(7 - len) {
-        for offset in 0..len {
-            if counts[(start + offset) as usize] == 0 {
-                continue 'outer;
-            }
-        }
+    if len == 0 {
         return true;
     }
-    false
+    let counts = face_counts(dice);
+    // A run is a window of `len` adjacent faces with no gap in it. Sliding a
+    // window over the six real columns says that directly; the old form
+    // computed `7 - len` as a loop bound and indexed `start + offset`, which is
+    // the same walk written in a way that can leave the array.
+    let present: Vec<bool> = face_columns(&counts).map(|c| c > 0).collect();
+    present
+        .windows(usize::from(len))
+        .any(|w| w.iter().all(|&p| p))
 }
 
 /// Score for Small Straight: 30 if dice contain 4 consecutive values.
@@ -342,6 +378,198 @@ fn potential_score(dice: &[u8; NUM_DICE], category: Category) -> u16 {
     }
 }
 
+// ── Geometry ────────────────────────────────────────────────────────
+
+/// Shrink a rect by `pad` on every side, never past empty.
+fn inset(rect: Rect, pad: f32) -> Rect {
+    Rect::new(
+        rect.x + pad,
+        rect.y + pad,
+        (rect.w - pad * 2.0).max(0.0),
+        (rect.h - pad * 2.0).max(0.0),
+    )
+}
+
+/// Widen a `u32` the window hands us into the `f32` the layout works in.
+fn f32_from_u32(v: u32) -> f32 {
+    // `u32::MAX` is not representable exactly, but a window that wide does not
+    // exist; every real size round-trips.
+    v as f32
+}
+
+/// The bands the window is divided into, solved from its live size.
+#[derive(Clone, Copy, Debug)]
+struct Layout {
+    window: Rect,
+    /// The strip along the top holding the title, the turn and the high score.
+    header: Rect,
+    /// The left column: the dice, the roll button and the key help.
+    left: Rect,
+    /// The right column: the scorecard.
+    card: Rect,
+    /// The gap left around and inside every band.
+    pad: f32,
+    /// The title's font size.
+    title: f32,
+    /// The body font size.
+    font: f32,
+    /// The font size for labels and the key help.
+    small: f32,
+}
+
+impl Layout {
+    fn solve(w: f32, h: f32) -> Self {
+        let w = w.max(0.0);
+        let h = h.max(0.0);
+        // Everything scales with the *smaller* side, so a wide-and-short window
+        // gets small padding rather than padding that eats its whole height.
+        let pad = (w.min(h) * 0.02).clamp(2.0, 16.0).min(w.min(h) / 2.0);
+        let title = (h * 0.034).clamp(10.0, 28.0);
+        let font = (h * 0.022).clamp(8.0, 17.0);
+        let small = (h * 0.018).clamp(7.0, font);
+
+        let header_h = h * 0.09;
+        let header = Rect::new(0.0, 0.0, w, header_h);
+        let body = Rect::new(0.0, header.bottom(), w, (h - header_h).max(0.0));
+
+        // The scorecard is floored so its longest row -- a name, a gap and a
+        // score -- still fits, and capped at half the window so it can never
+        // crowd the dice off a narrow one.
+        let card_w = (w * 0.44).clamp(170.0, 380.0).min(w / 2.0);
+        let left = Rect::new(body.x, body.y, (body.w - card_w).max(0.0), body.h);
+        let card = Rect::new(left.right(), body.y, card_w.min(body.w), body.h);
+
+        Self {
+            window: Rect::new(0.0, 0.0, w, h),
+            header,
+            left,
+            card,
+            pad,
+            title,
+            font,
+            small,
+        }
+    }
+
+    /// The three bands of the left column, bottom-anchored.
+    ///
+    /// The help is pinned to the floor, the button sits above it and the dice
+    /// take whatever is left, so the help cannot slide under the window's edge
+    /// and the button cannot land on top of the dice. All three used to be
+    /// stacked downwards from a fixed top with no regard for the bottom.
+    fn left_bands(self) -> (Rect, Rect, Rect) {
+        let inner = inset(self.left, self.pad);
+        let line = self.small * 1.5;
+        let hints_h = (line * HINTS.len() as f32).min(inner.h);
+        let hints = Rect::new(
+            inner.x,
+            (inner.bottom() - hints_h).max(inner.y),
+            inner.w,
+            hints_h,
+        );
+        let button_h = (self.font * 2.2).min((hints.y - inner.y).max(0.0));
+        let button = Rect::new(
+            inner.x,
+            (hints.y - self.pad - button_h).max(inner.y),
+            inner.w,
+            button_h,
+        );
+        let dice = Rect::new(
+            inner.x,
+            inner.y,
+            inner.w,
+            (button.y - self.pad - inner.y).max(0.0),
+        );
+        (dice, button, hints)
+    }
+}
+
+/// The five dice, fitted to the room the layout gave them.
+///
+/// A die is square whatever shape its area is: the side is the smaller of what
+/// the width and the height allow, and the leftovers become margins. The old
+/// die was 64 pixels with a 12-pixel gap and its pips 6 pixels across at a
+/// fixed 16-pixel offset, so nothing about a die scaled with anything.
+#[derive(Clone, Copy, Debug)]
+struct Dice {
+    /// Top-left of the first die.
+    origin: (f32, f32),
+    /// The side of one die.
+    side: f32,
+    /// The gap between two dice.
+    gap: f32,
+}
+
+impl Dice {
+    fn fit(area: Rect, label: f32) -> Self {
+        let n = NUM_DICE as f32;
+        // The gap is a share of the die rather than a constant, so five dice
+        // in a narrow window shrink together instead of the gaps swallowing
+        // them.
+        let gap_share = 0.2;
+        let by_w = (area.w / (n + gap_share * (n - 1.0))).max(0.0);
+        // A die sits between the number above it and the HELD label below, so
+        // the height it may use is what is left after both.
+        let by_h = (area.h - label * 3.4).max(0.0);
+        let side = by_w.min(by_h).max(0.0);
+        let gap = side * gap_share;
+        let row_w = side * n + gap * (n - 1.0);
+        Self {
+            origin: (
+                area.x + (area.w - row_w).max(0.0) / 2.0,
+                area.y + label * 1.7,
+            ),
+            side,
+            gap,
+        }
+    }
+
+    /// The box die `i` occupies on screen.
+    fn die(self, i: usize) -> Rect {
+        Rect::new(
+            self.origin.0 + (self.side + self.gap) * i as f32,
+            self.origin.1,
+            self.side,
+            self.side,
+        )
+    }
+
+    /// The whole row, from the first die's left edge to the last one's right.
+    fn row(self) -> Rect {
+        let first = self.die(0);
+        let last = self.die(NUM_DICE.saturating_sub(1));
+        Rect::new(first.x, first.y, (last.right() - first.x).max(0.0), first.h)
+    }
+}
+
+/// One row of the scorecard, in the order they are drawn.
+///
+/// The list is built once and both the painting and the hit boxes walk it. It
+/// used to be described twice: `render_scorecard` advanced a running `row_y`
+/// past the header, the two totals and the rule, while `category_display_row`
+/// said the same thing over again as `cat_index + 3`. The click was tested
+/// against the second description, so it agreed with the picture only for as
+/// long as nobody inserted a row in one place and not the other -- and the
+/// Yahtzee-bonus row, which appears only after a second Yahtzee, is a row that
+/// does exactly that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Row {
+    /// The "Category / Score" heading.
+    Head,
+    /// A scoring box.
+    Cat(usize),
+    /// The upper section's running total against the bonus threshold.
+    UpperTotal,
+    /// The upper section's bonus.
+    Bonus,
+    /// The rule between the sections.
+    Rule,
+    /// The Yahtzee bonus tally, present only once one has been earned.
+    YahtzeeBonus,
+    /// The grand total.
+    GrandTotal,
+}
+
 // ── Main game struct ────────────────────────────────────────────────
 
 struct Yahtzee {
@@ -357,8 +585,6 @@ struct Yahtzee {
     scores: [Option<u16>; NUM_CATEGORIES],
     /// Number of Yahtzee bonuses earned.
     yahtzee_bonus_count: u16,
-    /// Current game phase.
-    phase: GamePhase,
     /// Which UI region has keyboard focus.
     focus: FocusRegion,
     /// Currently selected die index (0..5) when focus is on dice.
@@ -369,6 +595,10 @@ struct Yahtzee {
     high_score: u16,
     /// RNG for dice rolls.
     rng: SeededRng,
+    /// The size the last frame was drawn at, which is the size the next click
+    /// is read against.
+    width: f32,
+    height: f32,
 }
 
 impl Yahtzee {
@@ -384,43 +614,69 @@ impl Yahtzee {
             turn_number: 0,
             scores: [None; NUM_CATEGORIES],
             yahtzee_bonus_count: 0,
-            phase: GamePhase::Rolling,
             focus: FocusRegion::Dice,
             selected_die: 0,
             selected_category: 0,
             high_score: 0,
             rng: SeededRng::new(seed),
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
         }
+    }
+
+    /// Remember the size the window last reported.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.width = width.max(0.0);
+        self.height = height.max(0.0);
     }
 
     // ── Game logic ─────────────────────────────────────────────────
 
+    /// Where the turn stands. Derived from the two counters rather than stored
+    /// beside them; see [`GamePhase`].
+    fn phase(&self) -> GamePhase {
+        if self.turn_number >= NUM_TURNS {
+            GamePhase::GameOver
+        } else if self.roll_number >= MAX_ROLLS {
+            GamePhase::MustScore
+        } else {
+            GamePhase::Rolling
+        }
+    }
+
     /// Roll all un-held dice. Returns false if no rolls remain.
     fn roll(&mut self) -> bool {
-        if self.roll_number >= MAX_ROLLS || self.phase == GamePhase::GameOver {
+        if self.phase() != GamePhase::Rolling {
             return false;
         }
 
         for i in 0..NUM_DICE {
-            if !self.held[i] {
-                self.dice[i] = roll_die(&mut self.rng);
+            let held = self.held.get(i).copied().unwrap_or(false);
+            if !held {
+                let value = roll_die(&mut self.rng);
+                if let Some(slot) = self.dice.get_mut(i) {
+                    *slot = value;
+                }
             }
         }
 
-        self.roll_number += 1;
-        if self.roll_number >= MAX_ROLLS {
-            self.phase = GamePhase::MustScore;
-        } else {
-            self.phase = GamePhase::Rolling;
-        }
-
+        self.roll_number = self.roll_number.saturating_add(1);
         true
     }
 
-    /// Toggle the hold state of a die at the given index.
-    fn toggle_hold(&mut self, index: usize) {
-        if index < NUM_DICE && self.roll_number > 0 && self.roll_number < MAX_ROLLS {
-            self.held[index] = !self.held[index];
+    /// Toggle the hold state of a die. Returns whether anything changed.
+    fn toggle_hold(&mut self, index: usize) -> bool {
+        // Held dice only mean anything between rolls: before the first there is
+        // nothing to keep, and after the last there is nothing to re-roll.
+        if self.roll_number == 0 || self.roll_number >= MAX_ROLLS {
+            return false;
+        }
+        match self.held.get_mut(index) {
+            Some(h) => {
+                *h = !*h;
+                true
+            }
+            None => false,
         }
     }
 
@@ -429,33 +685,37 @@ impl Yahtzee {
         has_n_of_a_kind(&self.dice, 5)
     }
 
+    /// The score already written in `index`'s box, if any.
+    fn score_at(&self, index: usize) -> Option<u16> {
+        self.scores.get(index).copied().flatten()
+    }
+
     /// Returns whether the Yahtzee category has already been scored with
     /// a non-zero value.
     fn yahtzee_already_scored_nonzero(&self) -> bool {
-        self.scores[Category::Yahtzee.index()].is_some_and(|s| s > 0)
+        self.score_at(Category::Yahtzee.index())
+            .is_some_and(|s| s > 0)
     }
 
     /// Check and award Yahtzee bonus: if the player already scored a Yahtzee
     /// (non-zero) and rolls another Yahtzee, they get 100 bonus points.
     fn check_yahtzee_bonus(&mut self) {
         if self.is_yahtzee() && self.yahtzee_already_scored_nonzero() {
-            self.yahtzee_bonus_count += 1;
+            self.yahtzee_bonus_count = self.yahtzee_bonus_count.saturating_add(1);
         }
     }
 
     /// Attempt to score the selected category. Returns false if invalid.
     fn score_category(&mut self, cat_index: usize) -> bool {
-        if cat_index >= NUM_CATEGORIES {
+        let Some(cat) = Category::at(cat_index) else {
             return false;
-        }
+        };
         if self.roll_number == 0 {
             return false;
         }
-        if self.scores[cat_index].is_some() {
+        if self.score_at(cat_index).is_some() {
             return false;
         }
-
-        let cat = Category::ALL[cat_index];
 
         // Check for Yahtzee bonus before scoring.
         self.check_yahtzee_bonus();
@@ -468,8 +728,8 @@ impl Yahtzee {
         // Small Straight, and Large Straight score their face values
         // (25, 30, 40 respectively) even though the dice wouldn't normally
         // qualify. This function applies the Joker scoring adjustment.
-        let score = if self.is_yahtzee() && self.scores[Category::Yahtzee.index()].is_some() {
-            // Joker rule for lower-section categories
+        let joker = self.is_yahtzee() && self.score_at(Category::Yahtzee.index()).is_some();
+        let score = if joker {
             match cat {
                 Category::FullHouse => FULL_HOUSE_SCORE,
                 Category::SmallStraight => SMALL_STRAIGHT_SCORE,
@@ -480,34 +740,46 @@ impl Yahtzee {
             potential_score(&self.dice, cat)
         };
 
-        self.scores[cat_index] = Some(score);
+        // The box is filled before the turn advances: writing the score
+        // through a checked lookup means a box that turned out not to exist
+        // costs the player nothing rather than costing them a turn.
+        let Some(slot) = self.scores.get_mut(cat_index) else {
+            return false;
+        };
+        *slot = Some(score);
         self.advance_turn();
         true
     }
 
     /// Advance to the next turn after scoring.
     fn advance_turn(&mut self) {
-        self.turn_number += 1;
+        self.turn_number = self.turn_number.saturating_add(1);
         self.roll_number = 0;
         self.held = [false; NUM_DICE];
 
-        if self.turn_number >= NUM_TURNS {
-            self.phase = GamePhase::GameOver;
-            let total = self.grand_total();
-            if total > self.high_score {
-                self.high_score = total;
-            }
-        } else {
-            self.phase = GamePhase::Rolling;
+        if self.phase() == GamePhase::GameOver {
+            self.high_score = self.high_score.max(self.grand_total());
         }
     }
 
     /// Start a new game, preserving the high score.
     fn new_game(&mut self) {
-        let high = self.high_score;
-        let seed = self.rng.next_u64();
-        *self = Self::with_seed(seed);
-        self.high_score = high;
+        // Only the fields that describe a *game* are reset. This used to be
+        // `*self = Self::with_seed(seed)` with the high score put back by hand
+        // afterwards, which makes forgetting the default: every field is wiped
+        // unless someone remembers to name it, and the window size this rewrite
+        // added is exactly such a field -- a new game would have snapped the
+        // layout back to the size the window opened at.
+        self.rng = SeededRng::new(self.rng.next_u64());
+        self.dice = [1; NUM_DICE];
+        self.held = [false; NUM_DICE];
+        self.roll_number = 0;
+        self.turn_number = 0;
+        self.scores = [None; NUM_CATEGORIES];
+        self.yahtzee_bonus_count = 0;
+        self.focus = FocusRegion::Dice;
+        self.selected_die = 0;
+        self.selected_category = 0;
     }
 
     // ── Score calculation ──────────────────────────────────────────
@@ -525,7 +797,7 @@ impl Yahtzee {
             .iter()
             .enumerate()
             .filter(|&(_, &c)| in_section(c))
-            .filter_map(|(i, _)| self.scores.get(i).copied().flatten())
+            .filter_map(|(i, _)| self.score_at(i))
             .fold(0u16, u16::saturating_add)
     }
 
@@ -550,12 +822,21 @@ impl Yahtzee {
 
     /// Total Yahtzee bonus points.
     fn yahtzee_bonus_total(&self) -> u16 {
-        self.yahtzee_bonus_count * YAHTZEE_BONUS_VALUE
+        // 656 bonuses would wrap a `u16`. That is a great many Yahtzees, but a
+        // score that runs backwards is a worse answer than one that stops.
+        self.yahtzee_bonus_count.saturating_mul(YAHTZEE_BONUS_VALUE)
     }
 
     /// Grand total score.
     fn grand_total(&self) -> u16 {
-        self.upper_total() + self.upper_bonus() + self.lower_total() + self.yahtzee_bonus_total()
+        [
+            self.upper_total(),
+            self.upper_bonus(),
+            self.lower_total(),
+            self.yahtzee_bonus_total(),
+        ]
+        .into_iter()
+        .fold(0u16, u16::saturating_add)
     }
 
     // There was a `categories_filled` here -- how many of the thirteen boxes
@@ -568,709 +849,832 @@ impl Yahtzee {
 
     // ── Input handling ─────────────────────────────────────────────
 
-    fn handle_key(&mut self, key: Key, pressed: bool) {
-        if !pressed {
-            return;
+    /// Answer a key, and say whether the game used it.
+    ///
+    /// It used to return nothing at all, so a key the game ignored looked to
+    /// the caller exactly like a move and every key release repainted the
+    /// whole window.
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
         }
 
-        match key {
-            Key::R if self.phase != GamePhase::GameOver => {
-                self.roll();
+        match key.key {
+            Key::R => {
+                if !self.roll() {
+                    return EventResult::Ignored;
+                }
             }
-            Key::N => {
-                self.new_game();
-            }
+            Key::N => self.new_game(),
             Key::Tab => {
-                // Toggle focus between dice and scorecard.
                 self.focus = match self.focus {
                     FocusRegion::Dice => FocusRegion::Scorecard,
                     FocusRegion::Scorecard => FocusRegion::Dice,
                 };
             }
-            Key::Left if self.focus == FocusRegion::Dice && self.selected_die > 0 => {
-                self.selected_die -= 1;
-            }
-            Key::Right if self.focus == FocusRegion::Dice && self.selected_die < NUM_DICE - 1 => {
-                self.selected_die += 1;
-            }
-            Key::Up if self.focus == FocusRegion::Scorecard && self.selected_category > 0 => {
-                self.selected_category -= 1;
-            }
-            Key::Down
-                if self.focus == FocusRegion::Scorecard
-                    && self.selected_category < NUM_CATEGORIES - 1 =>
-            {
-                self.selected_category += 1;
-            }
-            Key::Space | Key::Enter => match self.focus {
-                FocusRegion::Dice => {
-                    self.toggle_hold(self.selected_die);
+            Key::Left if self.focus == FocusRegion::Dice => {
+                if self.selected_die == 0 {
+                    return EventResult::Ignored;
                 }
-                FocusRegion::Scorecard => {
-                    self.score_category(self.selected_category);
+                self.selected_die = self.selected_die.saturating_sub(1);
+            }
+            Key::Right if self.focus == FocusRegion::Dice => {
+                let last = NUM_DICE.saturating_sub(1);
+                if self.selected_die >= last {
+                    return EventResult::Ignored;
                 }
-            },
-            Key::Num1 => self.toggle_hold(0),
-            Key::Num2 => self.toggle_hold(1),
-            Key::Num3 => self.toggle_hold(2),
-            Key::Num4 => self.toggle_hold(3),
-            Key::Num5 => self.toggle_hold(4),
-            _ => {}
+                self.selected_die = self.selected_die.saturating_add(1).min(last);
+            }
+            Key::Up if self.focus == FocusRegion::Scorecard => {
+                if self.selected_category == 0 {
+                    return EventResult::Ignored;
+                }
+                self.selected_category = self.selected_category.saturating_sub(1);
+            }
+            Key::Down if self.focus == FocusRegion::Scorecard => {
+                let last = NUM_CATEGORIES.saturating_sub(1);
+                if self.selected_category >= last {
+                    return EventResult::Ignored;
+                }
+                self.selected_category = self.selected_category.saturating_add(1).min(last);
+            }
+            Key::Space | Key::Enter => {
+                let acted = match self.focus {
+                    FocusRegion::Dice => self.toggle_hold(self.selected_die),
+                    FocusRegion::Scorecard => self.score_category(self.selected_category),
+                };
+                if !acted {
+                    return EventResult::Ignored;
+                }
+            }
+            Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 => {
+                let index = match key.key {
+                    Key::Num1 => 0,
+                    Key::Num2 => 1,
+                    Key::Num3 => 2,
+                    Key::Num4 => 3,
+                    _ => 4,
+                };
+                if !self.toggle_hold(index) {
+                    return EventResult::Ignored;
+                }
+            }
+            _ => return EventResult::Ignored,
         }
+        EventResult::Consumed
     }
 
-    fn handle_mouse_click(&mut self, x: f32, y: f32) {
-        // Check dice area clicks.
-        let dice_y_start = PADDING + HEADER_HEIGHT + 10.0;
-        let dice_x_start = PADDING;
-        for i in 0..NUM_DICE {
-            let dx = dice_x_start + i as f32 * (DICE_SIZE + DICE_GAP);
-            let dy = dice_y_start;
-            if x >= dx && x <= dx + DICE_SIZE && y >= dy && y <= dy + DICE_SIZE {
+    /// Answer a click by asking the frame what is under it.
+    ///
+    /// There was no mouse handling in the toolkit sense at all: the old
+    /// `handle_mouse_click` recomputed the dice row, the button and the
+    /// scorecard rows from the same constants the drawing used, a second copy
+    /// of the geometry kept in step with the picture by nothing but care.
+    fn click(&mut self, x: f32, y: f32, button: MouseButton) -> EventResult {
+        // A card game answers the left button. Answering all three meant a
+        // right-click scored a category, which is a turn the player cannot
+        // take back.
+        if button != MouseButton::Left {
+            return EventResult::Ignored;
+        }
+        let Some(target) = self.frame(self.width, self.height).hit_test(x, y) else {
+            return EventResult::Ignored;
+        };
+        match target {
+            Target::Die(i) => {
+                let moved = self.focus != FocusRegion::Dice || self.selected_die != i;
                 self.focus = FocusRegion::Dice;
                 self.selected_die = i;
-                self.toggle_hold(i);
-                return;
+                let held = self.toggle_hold(i);
+                if moved || held {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
             }
-        }
-
-        // Check roll button click.
-        let roll_btn_x = PADDING;
-        let roll_btn_y = dice_y_start + DICE_SIZE + 30.0;
-        if x >= roll_btn_x
-            && x <= roll_btn_x + BUTTON_WIDTH
-            && y >= roll_btn_y
-            && y <= roll_btn_y + BUTTON_HEIGHT
-        {
-            if self.phase == GamePhase::GameOver {
-                self.new_game();
-            } else {
-                self.roll();
+            Target::RollButton => {
+                if self.phase() == GamePhase::GameOver {
+                    self.new_game();
+                    EventResult::Consumed
+                } else if self.roll() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
             }
-            return;
-        }
-
-        // Check scorecard category clicks.
-        let sc_x = self.scorecard_x();
-        let sc_y = PADDING + HEADER_HEIGHT + 10.0 + SCORECARD_ROW_HEIGHT; // after header row
-        for i in 0..NUM_CATEGORIES {
-            // Account for section headers and separators.
-            let row_y = sc_y + self.category_display_row(i) as f32 * SCORECARD_ROW_HEIGHT;
-            if x >= sc_x
-                && x <= sc_x + SCORECARD_WIDTH
-                && y >= row_y
-                && y <= row_y + SCORECARD_ROW_HEIGHT
-            {
+            Target::Category(i) => {
+                let moved = self.focus != FocusRegion::Scorecard || self.selected_category != i;
                 self.focus = FocusRegion::Scorecard;
                 self.selected_category = i;
-                self.score_category(i);
-                return;
+                let scored = self.score_category(i);
+                if moved || scored {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
             }
+            Target::Title
+            | Target::Turn
+            | Target::High
+            | Target::Hint(_)
+            | Target::Tally(_)
+            | Target::Scorecard => EventResult::Ignored,
         }
-    }
-
-    /// Map category index to display row, accounting for the separator
-    /// between upper and lower sections, and the bonus/total rows.
-    fn category_display_row(&self, cat_index: usize) -> usize {
-        if cat_index < 6 {
-            // Upper section: rows 0..5
-            cat_index
-        } else {
-            // Lower section: skip upper(6) + upper-total row + bonus row + separator row = +3
-            cat_index + 3
-        }
-    }
-
-    /// X position of the scorecard panel.
-    fn scorecard_x(&self) -> f32 {
-        PADDING + NUM_DICE as f32 * (DICE_SIZE + DICE_GAP) + 20.0
     }
 
     // ── Rendering ──────────────────────────────────────────────────
 
-    fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+    /// The rows of the scorecard, in the order they are drawn.
+    fn rows(&self) -> Vec<Row> {
+        let mut rows = vec![Row::Head];
+        let mut in_upper = true;
+        for (i, cat) in Category::ALL.iter().enumerate() {
+            if in_upper && !cat.is_upper() {
+                // The upper section's tally and its bonus close it, and the
+                // rule separates it from the lower one. Which section a
+                // category is in is asked of the category, not of its index.
+                rows.push(Row::UpperTotal);
+                rows.push(Row::Bonus);
+                rows.push(Row::Rule);
+                in_upper = false;
+            }
+            rows.push(Row::Cat(i));
+        }
+        if self.yahtzee_bonus_count > 0 {
+            rows.push(Row::YahtzeeBonus);
+        }
+        rows.push(Row::GrandTotal);
+        rows
+    }
 
-        // Background.
-        cmds.push(RenderCommand::FillRect {
+    /// Draw the whole game at the size the window reports.
+    ///
+    /// Every box a click is tested against is recorded here as it is painted,
+    /// so a hit test cannot disagree with the picture.
+    fn frame(&self, w: f32, h: f32) -> Frame<Target> {
+        let l = Layout::solve(w, h);
+        let mut f = Frame::new(w, h);
+
+        // The background is the window, not a remembered size.
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width,
-            height,
+            width: w,
+            height: h,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
+        f.clip(l.window);
 
-        // Title.
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: PADDING + 4.0,
+        self.draw_header(&mut f, &l);
+        self.draw_scorecard(&mut f, &l);
+        self.draw_left(&mut f, &l);
+
+        f.unclip();
+        f
+    }
+
+    /// The title, the turn and roll counter, and the high score, laid left to
+    /// right and measured rather than nudged.
+    ///
+    /// The counter used to be drawn at `PADDING + 130.0` and the high score at
+    /// `PADDING + 400.0`: in a narrow window the high score was off the right
+    /// edge entirely, and in a wide one all three huddled in the left quarter
+    /// with the rest of the strip empty.
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+        let band = inset(l.header, l.pad);
+        if band.is_empty() {
+            return;
+        }
+
+        let title_w = text::measure("Yahtzee", l.title, FontWeightHint::Bold);
+        let title = Rect::new(band.x, band.y, title_w.min(band.w), band.h);
+        f.push(RenderCommand::Text {
+            x: title.x,
+            y: title.y,
             text: String::from("Yahtzee"),
             color: LAVENDER,
-            font_size: TITLE_FONT_SIZE,
+            font_size: l.title,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(title.w),
+            overflow: TextOverflow::Ellipsis,
         });
+        f.hit(Target::Title, title);
 
-        // Turn and roll info.
-        let turn_display = if self.phase == GamePhase::GameOver {
+        let turn_text = if self.phase() == GamePhase::GameOver {
             String::from("Game Over!")
         } else {
             format!(
                 "Turn {}/{}  |  Roll {}/{}",
-                self.turn_number + 1,
+                self.turn_number.saturating_add(1),
                 NUM_TURNS,
                 self.roll_number,
                 MAX_ROLLS
             )
         };
-        cmds.push(RenderCommand::Text {
-            x: PADDING + 130.0,
-            y: PADDING + 8.0,
-            text: turn_display,
+        let high_text = format!("High: {}", self.high_score);
+
+        // The high score is anchored to the right edge and the turn counter
+        // fills what is left between the title and it, so the three never
+        // overlap and never drift apart.
+        let high_w = text::measure(&high_text, l.font, FontWeightHint::Bold);
+        let high = Rect::new(
+            (band.right() - high_w).max(title.right() + l.pad),
+            band.y,
+            high_w.min(band.w),
+            band.h,
+        );
+        let turn_x = title.right() + l.pad;
+        let turn = Rect::new(turn_x, band.y, (high.x - l.pad - turn_x).max(0.0), band.h);
+
+        f.push(RenderCommand::Text {
+            x: turn.x,
+            y: turn.y + (l.title - l.font).max(0.0) / 2.0,
+            text: turn_text,
             color: SUBTEXT0,
-            font_size: HEADER_FONT_SIZE,
+            font_size: l.font,
             font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(turn.w),
+            overflow: TextOverflow::Ellipsis,
         });
+        f.hit(Target::Turn, turn);
 
-        // High score.
-        cmds.push(RenderCommand::Text {
-            x: PADDING + 400.0,
-            y: PADDING + 8.0,
-            text: format!("High: {}", self.high_score),
+        f.push(RenderCommand::Text {
+            x: high.x,
+            y: high.y + (l.title - l.font).max(0.0) / 2.0,
+            text: high_text,
             color: YELLOW,
-            font_size: HEADER_FONT_SIZE,
+            font_size: l.font,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(high.w),
+            overflow: TextOverflow::Ellipsis,
         });
-
-        // Render dice.
-        self.render_dice(&mut cmds);
-
-        // Render action button.
-        self.render_button(&mut cmds);
-
-        // Render controls hint.
-        self.render_controls_hint(&mut cmds);
-
-        // Render scorecard.
-        self.render_scorecard(&mut cmds);
-
-        // Render grand total.
-        self.render_grand_total(&mut cmds);
-
-        cmds
+        f.hit(Target::High, high);
     }
 
-    fn render_dice(&self, cmds: &mut Vec<RenderCommand>) {
-        let dice_y = PADDING + HEADER_HEIGHT + 10.0;
-        let dice_x_start = PADDING;
+    /// The dice, the roll button and the key help.
+    fn draw_left(&self, f: &mut Frame<Target>, l: &Layout) {
+        let (dice_area, button, hints) = l.left_bands();
+        let d = Dice::fit(dice_area, l.small);
 
         for i in 0..NUM_DICE {
-            let x = dice_x_start + i as f32 * (DICE_SIZE + DICE_GAP);
-            let y = dice_y;
-
-            // Die background.
-            let bg_color = if self.held[i] { SURFACE1 } else { SURFACE0 };
-            let border_color = if self.focus == FocusRegion::Dice && self.selected_die == i {
-                BLUE
-            } else if self.held[i] {
-                PEACH
-            } else {
-                OVERLAY0
-            };
-
-            // Border (slightly larger rect behind).
-            cmds.push(RenderCommand::FillRect {
-                x: x - 2.0,
-                y: y - 2.0,
-                width: DICE_SIZE + 4.0,
-                height: DICE_SIZE + 4.0,
-                color: border_color,
-                corner_radii: CornerRadii::all(DICE_CORNER_RADIUS + 2.0),
-            });
-
-            // Die face.
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y,
-                width: DICE_SIZE,
-                height: DICE_SIZE,
-                color: bg_color,
-                corner_radii: CornerRadii::all(DICE_CORNER_RADIUS),
-            });
-
-            // Draw dots if rolled.
-            if self.roll_number > 0 {
-                self.render_die_dots(cmds, x, y, self.dice[i]);
-            }
-
-            // "HELD" label.
-            if self.held[i] {
-                cmds.push(RenderCommand::Text {
-                    x: x + 14.0,
-                    y: y + DICE_SIZE + 4.0,
-                    text: String::from("HELD"),
-                    color: PEACH,
-                    font_size: DICE_LABEL_FONT_SIZE,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
-
-            // Die number label (1-5).
-            cmds.push(RenderCommand::Text {
-                x: x + DICE_SIZE / 2.0 - 3.0,
-                y: y - 14.0,
-                text: format!("{}", i + 1),
-                color: OVERLAY0,
-                font_size: DICE_LABEL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            self.draw_die(f, l, d, i);
         }
-    }
 
-    /// Render the dots on a single die face using filled circles (approximated
-    /// as small rounded rectangles).
-    fn render_die_dots(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, value: u8) {
-        let dot_size = DICE_DOT_RADIUS * 2.0;
-        let cx = x + DICE_SIZE / 2.0; // center X of die
-        let cy = y + DICE_SIZE / 2.0; // center Y of die
-        let off = 16.0; // offset from center for corner dots
+        self.draw_button(f, l, button, d);
 
-        let dot_color = TEXT_COLOR;
-
-        // Position arrays for each value.
-        let positions: Vec<(f32, f32)> = match value {
-            1 => vec![(cx, cy)],
-            2 => vec![(cx - off, cy - off), (cx + off, cy + off)],
-            3 => vec![(cx - off, cy - off), (cx, cy), (cx + off, cy + off)],
-            4 => vec![
-                (cx - off, cy - off),
-                (cx + off, cy - off),
-                (cx - off, cy + off),
-                (cx + off, cy + off),
-            ],
-            5 => vec![
-                (cx - off, cy - off),
-                (cx + off, cy - off),
-                (cx, cy),
-                (cx - off, cy + off),
-                (cx + off, cy + off),
-            ],
-            6 => vec![
-                (cx - off, cy - off),
-                (cx + off, cy - off),
-                (cx - off, cy),
-                (cx + off, cy),
-                (cx - off, cy + off),
-                (cx + off, cy + off),
-            ],
-            _ => vec![],
-        };
-
-        for (px, py) in positions {
-            cmds.push(RenderCommand::FillRect {
-                x: px - DICE_DOT_RADIUS,
-                y: py - DICE_DOT_RADIUS,
-                width: dot_size,
-                height: dot_size,
-                color: dot_color,
-                corner_radii: CornerRadii::all(DICE_DOT_RADIUS),
-            });
-        }
-    }
-
-    fn render_button(&self, cmds: &mut Vec<RenderCommand>) {
-        let dice_y = PADDING + HEADER_HEIGHT + 10.0;
-        let btn_x = PADDING;
-        let btn_y = dice_y + DICE_SIZE + 30.0;
-
-        let (btn_color, btn_text) = if self.phase == GamePhase::GameOver {
-            (GREEN, "New Game (N)")
-        } else if self.roll_number >= MAX_ROLLS {
-            (OVERLAY0, "No Rolls Left")
-        } else {
-            (BLUE, "Roll (R)")
-        };
-
-        cmds.push(RenderCommand::FillRect {
-            x: btn_x,
-            y: btn_y,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: btn_color,
-            corner_radii: CornerRadii::all(6.0),
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: btn_x + 10.0,
-            y: btn_y + 9.0,
-            text: String::from(btn_text),
-            color: if self.roll_number >= MAX_ROLLS && self.phase != GamePhase::GameOver {
-                SUBTEXT0
-            } else {
-                CRUST
-            },
-            font_size: BUTTON_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    fn render_controls_hint(&self, cmds: &mut Vec<RenderCommand>) {
-        let dice_y = PADDING + HEADER_HEIGHT + 10.0;
-        let hint_y = dice_y + DICE_SIZE + 30.0 + BUTTON_HEIGHT + 12.0;
-        let hints = [
-            "R: Roll  |  1-5: Hold/Release",
-            "Tab: Switch focus  |  Arrows: Navigate",
-            "Space/Enter: Hold die or Score category",
-            "N: New Game",
-        ];
-
-        for (i, hint) in hints.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: PADDING,
-                y: hint_y + i as f32 * 16.0,
+        for (i, hint) in HINTS.iter().enumerate() {
+            let line = l.small * 1.5;
+            let row = Rect::new(
+                hints.x,
+                hints.y + line * i as f32,
+                hints.w,
+                line.min(hints.h),
+            );
+            if row.bottom() > hints.bottom() + 0.01 {
+                // A line that does not fit is not drawn rather than drawn over
+                // the window's edge.
+                continue;
+            }
+            f.push(RenderCommand::Text {
+                x: row.x,
+                y: row.y,
                 text: String::from(*hint),
                 color: OVERLAY0,
-                font_size: INFO_FONT_SIZE - 2.0,
+                font_size: l.small,
                 font_weight: FontWeightHint::Light,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some(row.w),
+                overflow: TextOverflow::Ellipsis,
             });
+            f.hit(Target::Hint(i), row);
         }
     }
 
-    fn render_scorecard(&self, cmds: &mut Vec<RenderCommand>) {
-        let sc_x = self.scorecard_x();
-        let sc_y = PADDING + HEADER_HEIGHT + 10.0;
+    fn draw_die(&self, f: &mut Frame<Target>, l: &Layout, d: Dice, i: usize) {
+        let die = d.die(i);
+        if die.is_empty() {
+            return;
+        }
+        let held = self.held.get(i).copied().unwrap_or(false);
+        let selected = self.focus == FocusRegion::Dice && self.selected_die == i;
 
-        // Scorecard background.
-        let total_rows = NUM_CATEGORIES + 5; // categories + header + upper total + bonus + separator + lower label
-        let sc_height = (total_rows as f32 + 1.0) * SCORECARD_ROW_HEIGHT;
-        cmds.push(RenderCommand::FillRect {
-            x: sc_x - 4.0,
-            y: sc_y - 4.0,
-            width: SCORECARD_WIDTH + 8.0,
-            height: sc_height + 8.0,
-            color: MANTLE,
-            corner_radii: CornerRadii::all(8.0),
+        let border = if selected {
+            BLUE
+        } else if held {
+            PEACH
+        } else {
+            OVERLAY0
+        };
+        let ring = (d.side * 0.05).max(1.0);
+        f.push(RenderCommand::FillRect {
+            x: die.x - ring,
+            y: die.y - ring,
+            width: die.w + ring * 2.0,
+            height: die.h + ring * 2.0,
+            color: border,
+            corner_radii: CornerRadii::all(d.side * 0.14 + ring),
+        });
+        f.push(RenderCommand::FillRect {
+            x: die.x,
+            y: die.y,
+            width: die.w,
+            height: die.h,
+            color: if held { SURFACE1 } else { SURFACE0 },
+            corner_radii: CornerRadii::all(d.side * 0.14),
         });
 
-        // Header row.
-        cmds.push(RenderCommand::FillRect {
-            x: sc_x,
-            y: sc_y,
-            width: SCORECARD_WIDTH,
-            height: SCORECARD_ROW_HEIGHT,
-            color: SURFACE1,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: sc_x + 8.0,
-            y: sc_y + 6.0,
-            text: String::from("Category"),
-            color: TEXT_COLOR,
-            font_size: SCORE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        cmds.push(RenderCommand::Text {
-            x: sc_x + SCORECARD_WIDTH - 80.0,
-            y: sc_y + 6.0,
-            text: String::from("Score"),
-            color: TEXT_COLOR,
-            font_size: SCORE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        let mut row_y = sc_y + SCORECARD_ROW_HEIGHT;
-
-        // Upper section.
-        for i in 0..6 {
-            self.render_scorecard_row(cmds, sc_x, row_y, i);
-            row_y += SCORECARD_ROW_HEIGHT;
+        if self.roll_number > 0 {
+            let value = self.dice.get(i).copied().unwrap_or(1);
+            self.draw_pips(f, die, value);
         }
 
-        // Upper total row.
-        cmds.push(RenderCommand::FillRect {
-            x: sc_x,
-            y: row_y,
-            width: SCORECARD_WIDTH,
-            height: SCORECARD_ROW_HEIGHT,
-            color: SURFACE0,
-            corner_radii: CornerRadii::ZERO,
-        });
-        cmds.push(RenderCommand::Text {
-            x: sc_x + 8.0,
-            y: row_y + 6.0,
-            text: String::from("Upper Total"),
-            color: SUBTEXT0,
-            font_size: SCORE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        cmds.push(RenderCommand::Text {
-            x: sc_x + SCORECARD_WIDTH - 80.0,
-            y: row_y + 6.0,
-            text: format!("{} / {}", self.upper_total(), UPPER_BONUS_THRESHOLD),
-            color: if self.upper_total() >= UPPER_BONUS_THRESHOLD {
-                GREEN
-            } else {
-                SUBTEXT0
-            },
-            font_size: SCORE_FONT_SIZE,
+        // The die's number above it, and HELD below it when it is held.
+        f.push(RenderCommand::Text {
+            x: die.centre().0 - text::measure("5", l.small, FontWeightHint::Regular) / 2.0,
+            y: (die.y - l.small * 1.5).max(0.0),
+            text: format!("{}", i.saturating_add(1)),
+            color: OVERLAY0,
+            font_size: l.small,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        row_y += SCORECARD_ROW_HEIGHT;
-
-        // Bonus row.
-        cmds.push(RenderCommand::FillRect {
-            x: sc_x,
-            y: row_y,
-            width: SCORECARD_WIDTH,
-            height: SCORECARD_ROW_HEIGHT,
-            color: SURFACE0,
-            corner_radii: CornerRadii::ZERO,
-        });
-        cmds.push(RenderCommand::Text {
-            x: sc_x + 8.0,
-            y: row_y + 6.0,
-            text: String::from("Bonus"),
-            color: SUBTEXT0,
-            font_size: SCORE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        cmds.push(RenderCommand::Text {
-            x: sc_x + SCORECARD_WIDTH - 80.0,
-            y: row_y + 6.0,
-            text: if self.upper_bonus() > 0 {
-                format!("+{}", self.upper_bonus())
-            } else {
-                String::from("-")
-            },
-            color: if self.upper_bonus() > 0 {
-                GREEN
-            } else {
-                OVERLAY0
-            },
-            font_size: SCORE_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        row_y += SCORECARD_ROW_HEIGHT;
-
-        // Separator.
-        cmds.push(RenderCommand::Line {
-            x1: sc_x,
-            y1: row_y + SCORECARD_ROW_HEIGHT / 2.0,
-            x2: sc_x + SCORECARD_WIDTH,
-            y2: row_y + SCORECARD_ROW_HEIGHT / 2.0,
-            color: SURFACE1,
-            width: 1.0,
-        });
-        row_y += SCORECARD_ROW_HEIGHT;
-
-        // Lower section.
-        for i in 6..NUM_CATEGORIES {
-            self.render_scorecard_row(cmds, sc_x, row_y, i);
-            row_y += SCORECARD_ROW_HEIGHT;
-        }
-
-        // Yahtzee bonus row (if any bonuses earned).
-        if self.yahtzee_bonus_count > 0 {
-            cmds.push(RenderCommand::FillRect {
-                x: sc_x,
-                y: row_y,
-                width: SCORECARD_WIDTH,
-                height: SCORECARD_ROW_HEIGHT,
-                color: SURFACE0,
-                corner_radii: CornerRadii::ZERO,
-            });
-            cmds.push(RenderCommand::Text {
-                x: sc_x + 8.0,
-                y: row_y + 6.0,
-                text: format!("Yahtzee Bonus (x{})", self.yahtzee_bonus_count),
-                color: MAUVE,
-                font_size: SCORE_FONT_SIZE,
+        if held {
+            let label_w = text::measure("HELD", l.small, FontWeightHint::Bold);
+            f.push(RenderCommand::Text {
+                x: die.centre().0 - label_w / 2.0,
+                y: die.bottom() + l.small * 0.4,
+                text: String::from("HELD"),
+                color: PEACH,
+                font_size: l.small,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
-            cmds.push(RenderCommand::Text {
-                x: sc_x + SCORECARD_WIDTH - 80.0,
-                y: row_y + 6.0,
-                text: format!("+{}", self.yahtzee_bonus_total()),
-                color: MAUVE,
-                font_size: SCORE_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+        }
+
+        f.hit(Target::Die(i), die);
+    }
+
+    /// The pips of one die face, sized and spaced as a share of the die.
+    fn draw_pips(&self, f: &mut Frame<Target>, die: Rect, value: u8) {
+        let (cx, cy) = die.centre();
+        let r = die.w * 0.09;
+        let off = die.w * 0.25;
+        // The layouts are written as which of the three columns and three rows
+        // each face lights, so a face is a picture rather than a list of
+        // hand-added offsets.
+        let spots: &[(f32, f32)] = match value {
+            1 => &[(0.0, 0.0)],
+            2 => &[(-1.0, -1.0), (1.0, 1.0)],
+            3 => &[(-1.0, -1.0), (0.0, 0.0), (1.0, 1.0)],
+            4 => &[(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)],
+            5 => &[
+                (-1.0, -1.0),
+                (1.0, -1.0),
+                (0.0, 0.0),
+                (-1.0, 1.0),
+                (1.0, 1.0),
+            ],
+            6 => &[
+                (-1.0, -1.0),
+                (1.0, -1.0),
+                (-1.0, 0.0),
+                (1.0, 0.0),
+                (-1.0, 1.0),
+                (1.0, 1.0),
+            ],
+            _ => &[],
+        };
+        for &(sx, sy) in spots {
+            f.push(RenderCommand::FillRect {
+                x: cx + sx * off - r,
+                y: cy + sy * off - r,
+                width: r * 2.0,
+                height: r * 2.0,
+                color: TEXT_COLOR,
+                corner_radii: CornerRadii::all(r),
             });
         }
     }
 
-    fn render_scorecard_row(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        cat_index: usize,
-    ) {
-        let cat = Category::ALL[cat_index];
-        let is_selected =
-            self.focus == FocusRegion::Scorecard && self.selected_category == cat_index;
-        let is_filled = self.scores[cat_index].is_some();
-
-        // Row background.
-        let bg_color = if is_selected {
-            SURFACE1
-        } else if cat_index.is_multiple_of(2) {
-            CRUST
-        } else {
-            MANTLE
+    fn draw_button(&self, f: &mut Frame<Target>, l: &Layout, band: Rect, d: Dice) {
+        if band.is_empty() {
+            return;
+        }
+        let (fill, label) = match self.phase() {
+            GamePhase::GameOver => (GREEN, "New Game (N)"),
+            GamePhase::MustScore => (OVERLAY0, "No Rolls Left"),
+            GamePhase::Rolling => (BLUE, "Roll (R)"),
         };
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: SCORECARD_WIDTH,
-            height: SCORECARD_ROW_HEIGHT,
-            color: bg_color,
-            corner_radii: CornerRadii::ZERO,
+        // The button is as wide as its widest legend rather than a constant, so
+        // "No Rolls Left" cannot spill out of a box sized for "Roll (R)".
+        let widest = ["New Game (N)", "No Rolls Left", "Roll (R)"]
+            .into_iter()
+            .map(|s| text::measure(s, l.font, FontWeightHint::Bold))
+            .fold(0.0f32, f32::max);
+        let width = (widest + l.pad * 3.0).min(band.w);
+        // The button is centred on the dice rather than on the band, so it sits
+        // under the row it rolls however much slack the band has beside it.
+        let row = d.row();
+        let x = (row.centre().0 - width / 2.0).clamp(band.x, (band.right() - width).max(band.x));
+        let button = Rect::new(x, band.y, width, band.h);
+        f.push(RenderCommand::FillRect {
+            x: button.x,
+            y: button.y,
+            width: button.w,
+            height: button.h,
+            color: fill,
+            corner_radii: CornerRadii::all(button.h * 0.2),
         });
+        let label_w = text::measure(label, l.font, FontWeightHint::Bold);
+        f.push(RenderCommand::Text {
+            x: button.centre().0 - label_w / 2.0,
+            y: button.centre().1 - l.font * 0.6,
+            text: String::from(label),
+            color: if self.phase() == GamePhase::MustScore {
+                SUBTEXT0
+            } else {
+                CRUST
+            },
+            font_size: l.font,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(button.w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.hit(Target::RollButton, button);
+    }
 
-        // Selection indicator.
-        if is_selected {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y,
-                width: 3.0,
-                height: SCORECARD_ROW_HEIGHT,
-                color: BLUE,
+    /// The scorecard: one row per entry in [`Yahtzee::rows`].
+    fn draw_scorecard(&self, f: &mut Frame<Target>, l: &Layout) {
+        let area = inset(l.card, l.pad);
+        if area.is_empty() {
+            return;
+        }
+        let rows = self.rows();
+        let count = rows.len().max(1) as f32;
+        // The rows share the column's height, capped so that a tall window
+        // gets a readable card rather than rows the height of a hand.
+        let row_h = (area.h / count).min(l.font * 2.2);
+        let card_h = row_h * count;
+
+        f.push(RenderCommand::FillRect {
+            x: area.x,
+            y: area.y,
+            width: area.w,
+            height: card_h.min(area.h),
+            color: MANTLE,
+            corner_radii: CornerRadii::all(row_h * 0.3),
+        });
+        f.hit(Target::Scorecard, Rect::new(area.x, area.y, area.w, card_h));
+
+        for (n, row) in rows.iter().enumerate() {
+            let band = Rect::new(area.x, area.y + row_h * n as f32, area.w, row_h);
+            if band.bottom() > area.bottom() + 0.01 {
+                // The card ran out of window. A row drawn past the bottom edge
+                // is a row painted over whatever the compositor puts there.
+                break;
+            }
+            self.draw_row(f, l, band, *row);
+        }
+    }
+
+    fn draw_row(&self, f: &mut Frame<Target>, l: &Layout, band: Rect, row: Row) {
+        // The score column is a share of the row rather than a fixed 80 pixels
+        // from its right edge, which at a narrow card left the name and the
+        // number on top of one another.
+        let score_w = (band.w * 0.32).min(band.w);
+        let name_x = band.x + l.pad * 0.6;
+        let score_x = band.right() - score_w;
+        let text_y = band.y + (band.h - l.font).max(0.0) / 2.0;
+        let pad = l.pad * 0.6;
+
+        let fill = |f: &mut Frame<Target>, color: Color| {
+            f.push(RenderCommand::FillRect {
+                x: band.x,
+                y: band.y,
+                width: band.w,
+                height: band.h,
+                color,
                 corner_radii: CornerRadii::ZERO,
             });
-        }
+        };
+        let write = |f: &mut Frame<Target>,
+                     x: f32,
+                     w: f32,
+                     s: String,
+                     color: Color,
+                     weight: FontWeightHint,
+                     size: f32| {
+            f.push(RenderCommand::Text {
+                x,
+                y: text_y,
+                text: s,
+                color,
+                font_size: size,
+                font_weight: weight,
+                max_width: Some((w - pad).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        };
 
-        // Category name.
-        cmds.push(RenderCommand::Text {
-            x: x + 8.0,
-            y: y + 6.0,
-            text: String::from(cat.name()),
-            color: if is_filled { SUBTEXT0 } else { TEXT_COLOR },
-            font_size: SCORE_FONT_SIZE,
-            font_weight: if is_selected {
-                FontWeightHint::Bold
-            } else {
-                FontWeightHint::Regular
-            },
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Score value.
-        let score_text;
-        let score_color;
-        if let Some(s) = self.scores[cat_index] {
-            score_text = format!("{s}");
-            score_color = if s > 0 { GREEN } else { RED };
-        } else if self.roll_number > 0 {
-            // Show potential score.
-            let pot = potential_score(&self.dice, cat);
-            score_text = format!("({pot})");
-            score_color = if pot > 0 { TEAL } else { OVERLAY0 };
-        } else {
-            score_text = String::from("-");
-            score_color = OVERLAY0;
-        }
-
-        cmds.push(RenderCommand::Text {
-            x: x + SCORECARD_WIDTH - 80.0,
-            y: y + 6.0,
-            text: score_text,
-            color: score_color,
-            font_size: SCORE_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    fn render_grand_total(&self, cmds: &mut Vec<RenderCommand>) {
-        let sc_x = self.scorecard_x();
-        // Position below the scorecard.
-        let total_rows = NUM_CATEGORIES + 5;
-        let sc_y = PADDING + HEADER_HEIGHT + 10.0;
-        let total_y = sc_y + (total_rows as f32 + 1.0) * SCORECARD_ROW_HEIGHT + 16.0;
-
-        cmds.push(RenderCommand::FillRect {
-            x: sc_x - 4.0,
-            y: total_y - 4.0,
-            width: SCORECARD_WIDTH + 8.0,
-            height: SCORECARD_ROW_HEIGHT + 8.0,
-            color: SURFACE1,
-            corner_radii: CornerRadii::all(6.0),
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: sc_x + 8.0,
-            y: total_y + 6.0,
-            text: String::from("GRAND TOTAL"),
-            color: TEXT_COLOR,
-            font_size: SCORE_FONT_SIZE + 2.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: sc_x + SCORECARD_WIDTH - 80.0,
-            y: total_y + 6.0,
-            text: format!("{}", self.grand_total()),
-            color: YELLOW,
-            font_size: SCORE_FONT_SIZE + 2.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    // ── Event dispatch ─────────────────────────────────────────────
-
-    fn handle_event(&mut self, event: &Event) {
-        match event {
-            Event::Key(ke) => self.handle_key(ke.key, ke.pressed),
-            Event::Mouse(me) => {
-                if let MouseEventKind::Press(MouseButton::Left) = me.kind {
-                    self.handle_mouse_click(me.x, me.y);
-                }
+        match row {
+            Row::Head => {
+                fill(f, SURFACE1);
+                write(
+                    f,
+                    name_x,
+                    score_x - name_x,
+                    String::from("Category"),
+                    TEXT_COLOR,
+                    FontWeightHint::Bold,
+                    l.font,
+                );
+                write(
+                    f,
+                    score_x,
+                    score_w,
+                    String::from("Score"),
+                    TEXT_COLOR,
+                    FontWeightHint::Bold,
+                    l.font,
+                );
             }
-            _ => {}
+            Row::Cat(i) => {
+                let Some(cat) = Category::at(i) else { return };
+                let selected = self.focus == FocusRegion::Scorecard && self.selected_category == i;
+                let filled = self.score_at(i);
+                fill(
+                    f,
+                    if selected {
+                        SURFACE1
+                    } else if i.is_multiple_of(2) {
+                        CRUST
+                    } else {
+                        MANTLE
+                    },
+                );
+                if selected {
+                    f.push(RenderCommand::FillRect {
+                        x: band.x,
+                        y: band.y,
+                        width: (band.w * 0.012).max(2.0),
+                        height: band.h,
+                        color: BLUE,
+                        corner_radii: CornerRadii::ZERO,
+                    });
+                }
+                write(
+                    f,
+                    name_x,
+                    score_x - name_x,
+                    String::from(cat.name()),
+                    if filled.is_some() {
+                        SUBTEXT0
+                    } else {
+                        TEXT_COLOR
+                    },
+                    if selected {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    l.font,
+                );
+                let (s, color) = match filled {
+                    Some(v) => (format!("{v}"), if v > 0 { GREEN } else { RED }),
+                    None if self.roll_number > 0 => {
+                        let pot = potential_score(&self.dice, cat);
+                        (format!("({pot})"), if pot > 0 { TEAL } else { OVERLAY0 })
+                    }
+                    None => (String::from("-"), OVERLAY0),
+                };
+                write(
+                    f,
+                    score_x,
+                    score_w,
+                    s,
+                    color,
+                    FontWeightHint::Regular,
+                    l.font,
+                );
+                f.hit(Target::Category(i), band);
+            }
+            Row::UpperTotal => {
+                fill(f, SURFACE0);
+                write(
+                    f,
+                    name_x,
+                    score_x - name_x,
+                    String::from("Upper Total"),
+                    SUBTEXT0,
+                    FontWeightHint::Bold,
+                    l.font,
+                );
+                let total = self.upper_total();
+                write(
+                    f,
+                    score_x,
+                    score_w,
+                    format!("{total} / {UPPER_BONUS_THRESHOLD}"),
+                    if total >= UPPER_BONUS_THRESHOLD {
+                        GREEN
+                    } else {
+                        SUBTEXT0
+                    },
+                    FontWeightHint::Regular,
+                    l.font,
+                );
+                f.hit(Target::Tally(Row::UpperTotal), band);
+            }
+            Row::Bonus => {
+                fill(f, SURFACE0);
+                write(
+                    f,
+                    name_x,
+                    score_x - name_x,
+                    String::from("Bonus"),
+                    SUBTEXT0,
+                    FontWeightHint::Bold,
+                    l.font,
+                );
+                let bonus = self.upper_bonus();
+                write(
+                    f,
+                    score_x,
+                    score_w,
+                    if bonus > 0 {
+                        format!("+{bonus}")
+                    } else {
+                        String::from("-")
+                    },
+                    if bonus > 0 { GREEN } else { OVERLAY0 },
+                    FontWeightHint::Regular,
+                    l.font,
+                );
+                f.hit(Target::Tally(Row::Bonus), band);
+            }
+            Row::Rule => {
+                f.push(RenderCommand::Line {
+                    x1: band.x,
+                    y1: band.centre().1,
+                    x2: band.right(),
+                    y2: band.centre().1,
+                    color: SURFACE1,
+                    width: 1.0,
+                });
+                f.hit(Target::Tally(Row::Rule), band);
+            }
+            Row::YahtzeeBonus => {
+                fill(f, SURFACE0);
+                write(
+                    f,
+                    name_x,
+                    score_x - name_x,
+                    format!("Yahtzee Bonus (x{})", self.yahtzee_bonus_count),
+                    MAUVE,
+                    FontWeightHint::Bold,
+                    l.font,
+                );
+                write(
+                    f,
+                    score_x,
+                    score_w,
+                    format!("+{}", self.yahtzee_bonus_total()),
+                    MAUVE,
+                    FontWeightHint::Regular,
+                    l.font,
+                );
+                f.hit(Target::Tally(Row::YahtzeeBonus), band);
+            }
+            Row::GrandTotal => {
+                fill(f, SURFACE1);
+                write(
+                    f,
+                    name_x,
+                    score_x - name_x,
+                    String::from("GRAND TOTAL"),
+                    TEXT_COLOR,
+                    FontWeightHint::Bold,
+                    l.font,
+                );
+                write(
+                    f,
+                    score_x,
+                    score_w,
+                    format!("{}", self.grand_total()),
+                    YELLOW,
+                    FontWeightHint::Bold,
+                    l.font,
+                );
+                f.hit(Target::Tally(Row::GrandTotal), band);
+            }
         }
+    }
+}
+
+// ── What a click can land on ────────────────────────────────────────
+
+/// Everything the drawing pass records a box for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    Title,
+    Turn,
+    High,
+    Die(usize),
+    RollButton,
+    Hint(usize),
+    Category(usize),
+    /// A scorecard row that is a tally rather than a box the player can spend.
+    Tally(Row),
+    /// The card behind the rows, so a click in its margin is not read as the
+    /// row nearest to it.
+    Scorecard,
+}
+
+// ── Event dispatch ──────────────────────────────────────────────────
+
+fn handle_event(game: &mut Yahtzee, event: &Event) -> EventResult {
+    match event {
+        Event::Key(key) => game.handle_key(key),
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }) => game.click(*x, *y, *button),
+        Event::Resize { width, height } => {
+            game.resize(f32_from_u32(*width), f32_from_u32(*height));
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+impl App for Yahtzee {
+    fn title(&self) -> String {
+        "Yahtzee".to_string()
+    }
+
+    fn app_id(&self) -> String {
+        "yahtzee".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        // Converted from the float pair rather than written out again: two
+        // spellings of one size are two things that can drift apart.
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against, which is the only reason it is stored at all.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for Yahtzee {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
     }
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
 
-fn main() {
-    let _app = Yahtzee::new();
+fn main() -> ExitCode {
+    let mut game = Yahtzee::new();
+    app::launch("yahtzee", &mut game)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1278,7 +1682,23 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod tests {
+    // A test that indexes past the end, or unwraps a `None`, is a test that
+    // has already failed; panicking is the reporting mechanism, not a fault.
+    #![allow(
+        clippy::arithmetic_side_effects,
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::float_cmp,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::too_many_lines,
+        clippy::unwrap_used
+    )]
+
     use super::*;
+    use guitk::event::Modifiers;
 
     /// Helper: create a game with a fixed seed for deterministic tests.
     fn test_game() -> Yahtzee {
@@ -1294,14 +1714,14 @@ mod tests {
     }
 
     /// Helper: simulate a key press.
-    fn press_key(game: &mut Yahtzee, key: Key) {
+    fn press_key(game: &mut Yahtzee, key: Key) -> EventResult {
         let event = Event::Key(KeyEvent {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
             text: String::new(),
         });
-        game.handle_event(&event);
+        handle_event(game, &event)
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1810,7 +2230,7 @@ mod tests {
     #[test]
     fn test_initial_phase_rolling() {
         let g = test_game();
-        assert_eq!(g.phase, GamePhase::Rolling);
+        assert_eq!(g.phase(), GamePhase::Rolling);
     }
 
     #[test]
@@ -1887,7 +2307,7 @@ mod tests {
         g.roll();
         g.roll();
         g.roll();
-        assert_eq!(g.phase, GamePhase::MustScore);
+        assert_eq!(g.phase(), GamePhase::MustScore);
     }
 
     #[test]
@@ -1912,7 +2332,7 @@ mod tests {
     #[test]
     fn test_cannot_roll_when_game_over() {
         let mut g = test_game();
-        g.phase = GamePhase::GameOver;
+        g.turn_number = NUM_TURNS;
         assert!(!g.roll());
     }
 
@@ -2036,7 +2456,7 @@ mod tests {
             g.roll_number = 1;
             g.score_category(i);
         }
-        assert_eq!(g.phase, GamePhase::GameOver);
+        assert_eq!(g.phase(), GamePhase::GameOver);
         assert_eq!(g.turn_number, NUM_TURNS);
     }
 
@@ -2295,9 +2715,9 @@ mod tests {
     #[test]
     fn test_new_game_resets_phase() {
         let mut g = test_game();
-        g.phase = GamePhase::GameOver;
+        g.turn_number = NUM_TURNS;
         g.new_game();
-        assert_eq!(g.phase, GamePhase::Rolling);
+        assert_eq!(g.phase(), GamePhase::Rolling);
     }
 
     #[test]
@@ -2484,7 +2904,7 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         });
-        g.handle_event(&event);
+        handle_event(&mut g, &event);
         assert_eq!(g.roll_number, 0);
     }
 
@@ -2506,46 +2926,9 @@ mod tests {
     // Mouse input
     // ════════════════════════════════════════════════════════════════
 
-    #[test]
-    fn test_mouse_click_on_die() {
-        let mut g = game_with_dice([1, 2, 3, 4, 5]);
-        let die_x = PADDING + DICE_SIZE / 2.0;
-        let die_y = PADDING + HEADER_HEIGHT + 10.0 + DICE_SIZE / 2.0;
-        let event = Event::Mouse(MouseEvent {
-            x: die_x,
-            y: die_y,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        });
-        g.handle_event(&event);
-        assert!(g.held[0]);
-    }
-
     // ════════════════════════════════════════════════════════════════
     // Rendering
     // ════════════════════════════════════════════════════════════════
-
-    #[test]
-    fn test_render_produces_commands() {
-        let g = test_game();
-        let cmds = g.render(800.0, 600.0);
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_after_roll_produces_commands() {
-        let mut g = test_game();
-        g.roll();
-        let cmds = g.render(800.0, 600.0);
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_game_over_produces_commands() {
-        let mut g = test_game();
-        g.phase = GamePhase::GameOver;
-        let cmds = g.render(800.0, 600.0);
-        assert!(!cmds.is_empty());
-    }
 
     // ════════════════════════════════════════════════════════════════
     // Category metadata
@@ -2743,7 +3126,7 @@ mod tests {
             // Score in the current turn's category.
             assert!(g.score_category(turn));
         }
-        assert_eq!(g.phase, GamePhase::GameOver);
+        assert_eq!(g.phase(), GamePhase::GameOver);
         assert!(g.grand_total() > 0);
     }
 
@@ -2776,7 +3159,7 @@ mod tests {
     #[test]
     fn test_score_category_after_game_over() {
         let mut g = test_game();
-        g.phase = GamePhase::GameOver;
+        g.turn_number = NUM_TURNS;
         g.roll_number = 1;
         // Cannot score after game over because score_category checks roll_number > 0
         // but the category check should still prevent invalid scoring.
@@ -2787,31 +3170,5 @@ mod tests {
         // The turn advancement code will see turn_number == 1 which is < NUM_TURNS so
         // it sets phase to Rolling. This is an edge case, but it should not crash.
         assert!(result);
-    }
-
-    #[test]
-    fn test_roll_button_area_click() {
-        let mut g = test_game();
-        let btn_x = PADDING + 5.0;
-        let btn_y = PADDING + HEADER_HEIGHT + 10.0 + DICE_SIZE + 35.0;
-        let event = Event::Mouse(MouseEvent {
-            x: btn_x,
-            y: btn_y,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        });
-        g.handle_event(&event);
-        assert_eq!(g.roll_number, 1);
-    }
-
-    #[test]
-    fn test_right_click_ignored() {
-        let mut g = test_game();
-        let event = Event::Mouse(MouseEvent {
-            x: PADDING + 5.0,
-            y: PADDING + HEADER_HEIGHT + 15.0,
-            kind: MouseEventKind::Press(MouseButton::Right),
-        });
-        g.handle_event(&event);
-        assert_eq!(g.roll_number, 0); // Nothing happened.
     }
 }

@@ -3343,6 +3343,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_header_is_a_share_of_the_height_not_the_width() {
+        // A window twice as wide does not need a taller score bar. The test
+        // above cannot say so: measuring the header against `w` still leaves
+        // a taller window of the same width giving all its extra pixels to
+        // the playfield, because the header does not change either way. So
+        // the width has to be the thing that varies.
+        //
+        // What is compared is the *band*, `header.h + pad`, not the drawn
+        // rectangle. The padding is `min(w, h) * 0.014`, so it does depend on
+        // the width, quite deliberately -- a narrow window gets a tighter
+        // margin -- and the rectangle it is taken out of therefore changes
+        // with width too. Asserting on `header.h` alone fails on correct
+        // code, which is how that came to light: 46.92px at 500 wide against
+        // 44.48px at 1900, from the padding and not from the band.
+        let h = 674.0;
+        let reference = {
+            let l = Layout::new(824.0, h);
+            l.header.h + l.pad
+        };
+        for w in [300.0, 500.0, 1200.0, 1900.0] {
+            let l = Layout::new(w, h);
+            let band = l.header.h + l.pad;
+            assert!(
+                (band - reference).abs() < 0.01,
+                "the header band was {band}px in a {w}x{h} window and {reference}px \
+                 in an 824x{h} one, which is the same height"
+            );
+        }
+    }
+
     // ── The field ───────────────────────────────────────────────────
 
     #[test]
@@ -3426,6 +3457,19 @@ mod tests {
         let (sx, _) = small.to_screen(mid);
         let (bx, _) = big.to_screen(mid);
         assert!(bx - big.rect.x > sx - small.rect.x);
+
+        // And a *length*, which is a different function. Positions go through
+        // `to_screen` and sizes -- radii, line widths, the ship's outline --
+        // go through `scaled`; a `scaled` that handed back its argument
+        // unchanged drew every asteroid at its game size in a window of any
+        // size, and nothing above noticed, because nothing above calls it.
+        let len = ASTEROID_LARGE_RADIUS;
+        assert!(
+            big.scaled(len) > small.scaled(len),
+            "a {len}-unit length was drawn {}px in a 1600x1300 window and {}px in a 500x420 one",
+            big.scaled(len),
+            small.scaled(len)
+        );
     }
 
     #[test]
@@ -3669,6 +3713,21 @@ mod tests {
             assert!(
                 (cx - gx).abs() < 0.01 && (cy - gy).abs() < 0.01,
                 "asteroid {i}'s hit box is not where the field puts it"
+            );
+
+            // And on the field, which is a fact about `to_screen` that
+            // `to_screen` is not asked for. The assertion above puts the same
+            // function on both sides of the comparison, so a `to_screen` that
+            // scaled the position but forgot to move it to where the field is
+            // agreed with itself exactly: every asteroid drawn in the
+            // window's top-left corner, every centre matching to the last
+            // decimal. Only an expectation the mutated code does not compute
+            // can see that -- and every position in the world is inside the
+            // world, so every asteroid must be inside the field.
+            assert!(
+                field.rect.contains(gx, gy),
+                "asteroid {i} was drawn at ({gx}, {gy}), off the field at {:?}",
+                field.rect
             );
         }
     }
@@ -4126,10 +4185,16 @@ mod tests {
 
     #[test]
     fn keys_reach_the_app_through_the_window() {
+        // Through `App::on_event`, which is the path the window actually
+        // uses, rather than the `handle_event` underneath it. Going through
+        // the inner one asserted an `EventResult` and so said nothing about
+        // the `Response` the window is handed: a build that answered `Idle`
+        // to every change -- a game that never repainted -- passed this test
+        // while its name claimed to cover the window path.
         let mut app = test_app();
         assert_eq!(
-            probe::key(&mut app, &probe::press(Key::Left)),
-            EventResult::Consumed
+            app.on_event(&Event::Key(probe::press(Key::Left))),
+            Response::Redraw
         );
         assert!(app.input.left);
     }

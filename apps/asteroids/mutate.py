@@ -21,7 +21,12 @@ MUTATIONS = [
         "the header is given a share of the width instead of the height",
         "        let header_h = (h * 0.08).clamp(20.0, 56.0).min(h);",
         "        let header_h = (w * 0.08).clamp(20.0, 56.0).min(h);",
-        ["a_taller_window_gives_the_playfield_the_extra_room"],
+        # Not `a_taller_window_gives_the_playfield_the_extra_room`, which this
+        # row named at first and which does not fail: it holds the width fixed,
+        # and a header measured against a fixed width does not change, so the
+        # taller window's extra pixels still all go to the playfield. The
+        # window has to get *wider* for the fault to show.
+        ["the_header_is_a_share_of_the_height_not_the_width"],
     ),
     (
         "the header is allowed to be taller than the window",
@@ -202,8 +207,27 @@ MUTATIONS = [
     ),
     (
         "the playfield's hit box is recorded last and swallows everything",
-        "        f.hit(Target::Field, field.rect);\n\n        draw_stars(&mut f, &field);",
-        "        draw_stars(&mut f, &field);",
+        # Moved, not deleted. Written as a deletion this row did fail tests --
+        # but the ones that fail when the field has no hit box at all
+        # (`a_click_during_play_does_nothing`, which clicks it), not the one
+        # that owns the *ordering*. The name is a claim about order, so the
+        # mutation has to be a reordering: the hit goes to the end, after the
+        # asteroids and the ship, where `hit_test`'s reverse search finds it
+        # first and it swallows everything drawn inside it.
+        "        f.hit(Target::Field, field.rect);\n\n"
+        "        draw_stars(&mut f, &field);\n"
+        "        self.draw_particles(&mut f, &field);\n"
+        "        self.draw_asteroids(&mut f, &field);\n"
+        "        self.draw_bullets(&mut f, &field);\n"
+        "        if self.ship_alive {\n"
+        "            self.draw_ship(&mut f, &field);\n        }",
+        "        draw_stars(&mut f, &field);\n"
+        "        self.draw_particles(&mut f, &field);\n"
+        "        self.draw_asteroids(&mut f, &field);\n"
+        "        self.draw_bullets(&mut f, &field);\n"
+        "        if self.ship_alive {\n"
+        "            self.draw_ship(&mut f, &field);\n        }\n"
+        "        f.hit(Target::Field, field.rect);",
         ["an_asteroid_wins_the_hit_test_over_the_playfield_behind_it"],
     ),
     (

@@ -2306,6 +2306,38 @@ mod tests {
     }
 
     #[test]
+    fn the_rows_are_wide_enough_for_a_name_and_a_score() {
+        // The score sat a flat 80 pixels from the right edge of a card a flat
+        // 320 wide. Narrow the window and the 80 was more than half the row,
+        // so the number climbed onto the name. Read off the painted text
+        // rather than restating the share the layout uses, since a test that
+        // recomputes the formula agrees with any formula at all.
+        for size in SIZES {
+            let g = test_game();
+            for (i, band) in category_boxes(&g, size) {
+                let mut xs: Vec<f32> = painted_text(&g, size)
+                    .into_iter()
+                    .filter(|(_, x, y)| {
+                        *x >= band.x - EPS
+                            && *x <= band.right() + EPS
+                            && *y >= band.y - EPS
+                            && *y <= band.bottom() + EPS
+                    })
+                    .map(|(_, x, _)| x)
+                    .collect();
+                assert_eq!(xs.len(), 2, "{size:?}: row {i} paints {} strings", xs.len());
+                xs.sort_by(f32::total_cmp);
+                let name_col = xs[1] - band.x;
+                let score_col = band.right() - xs[1];
+                assert!(
+                    name_col >= score_col - EPS,
+                    "{size:?}: row {i} gives the name {name_col} and the score {score_col}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_rows_stay_inside_the_scorecard_column() {
         for (w, h) in SIZES {
             let l = Layout::solve(w, h);

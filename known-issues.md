@@ -15990,8 +15990,13 @@ bit — `O_NOFOLLOW` covers the final component only. Refusing is safe; it is
 still a capability a native binary cannot reach. The structural fix is a native
 syscall number for `openat2` so libc forwards instead of re-implementing, which
 is what let the two drift apart in the first place. Both that and the VFS work
-are asked for in `requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-
-and-unenforceable-in-the-vfs.md`.
+were asked for in `requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-
+and-unenforceable-in-the-vfs.md`, which the dropbox convention removed once it
+was answered — the reply, and the current state of both asks, is
+`requests/a-b-openat2-resolve-beneath-is-enforced.md` (VFS work done; the
+native syscall number is waiting on lane B to say it will forward, because an
+unused number is an ABI commitment). **This divergence therefore still stands**
+and is the live remainder of the `NO_SYMLINKS` row.
 
 **The generalisable lesson, which is worth more than the bug:** when a syscall
 has two implementations in this tree, a known-limitation note about one of them

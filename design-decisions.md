@@ -50671,7 +50671,10 @@ where the bet still pays.
 **Date:** 2026-08-29
 **Decided by:** Claude (autonomous, lane A) — implementing ask 1 of
 `requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-and-unenforceable-in-the-vfs.md`,
-with lane B's measured evidence
+with lane B's measured evidence. The dropbox convention removed that file when
+it was answered; the reply — which reproduces the evidence — is
+`requests/a-b-openat2-resolve-beneath-is-enforced.md`, and the original is in
+git history.
 
 **Lane:** A
 

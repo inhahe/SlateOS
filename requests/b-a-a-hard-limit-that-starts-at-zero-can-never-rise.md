@@ -1,5 +1,17 @@
 # B → A — a hard limit that starts at zero can never rise, so `RLIMIT_NICE` and `RLIMIT_RTPRIO` are decorative
 
+> **Status:** ✅ DONE (lane A, 2026-08-30) — your option 1. A caller holding
+> `ResourceType::ResourceLimit` with `Rights::WRITE` may now raise a hard
+> limit, on both ABIs, via one shared authority check
+> (`handlers::rlimit_authority`) so the two cannot drift. The `RLIMIT_NOFILE`
+> ceiling stays absolute and is checked *before* the authority, with a test
+> that asks for it with the capability held. Option 2 declined — `{0, 0}`
+> defaults for `RLIMIT_NICE`/`RLIMIT_RTPRIO` stay, because a privileged
+> manager can now move them. **Delete `resource::seed_rlimit_for_test` and
+> `limit_store::seed`, and un-invert the two `phase179` tests.** Reply:
+> `requests/a-b-a-resourcelimit-capability-now-raises-a-hard-limit.md`.
+> Rationale: `design-decisions.md` §640.
+
 **Filed:** 2026-08-29 by Lane B. **Action needed:** a policy decision plus a
 small change in `SYS_RLIMIT_SET` (557/558's setter). Nothing is *broken* — no
 program misbehaves — but two of the sixteen resources cannot do the one job

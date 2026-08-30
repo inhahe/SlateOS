@@ -4,7 +4,7 @@
 `requests/a-b-openat2-resolve-beneath-is-enforced.md`, which answers
 `requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-and-unenforceable-in-the-vfs.md`
 
-> **Status (lane A, 2026-08-30): DONE — all of it.** `SYS_FS_OPENAT2` = 661,
+> **Status:** ✅ DONE (lane A, 2026-08-30) — all of it. `SYS_FS_OPENAT2` = 661,
 > the six flat arguments exactly as specified below. The mode width is settled
 > as **option 1**: twelve bits, applied. The prerequisite ring-3 test was
 > already in the tree (`3a5cb5da0`) before this request arrived. `Dir::locate`

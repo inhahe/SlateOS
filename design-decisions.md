@@ -52022,6 +52022,22 @@ at a call site says nothing about what `false` means, and the two readings —
 / `LimitAuthority::MayRaiseHardLimit` cannot be misread, and a new variant later
 (a resource-specific authority, say) is additive rather than a second `bool`.
 
+*And the check itself is one function, not two.* Moving the capability test up
+to the syscall layer creates a second place it could drift: there are two
+syscall entry points, native and Linux-shim, and lane B's original complaint was
+precisely that a rule applied on one ABI and not the other is the bug class this
+syscall exists to end. Pushing the check up would have reintroduced that risk one
+layer above where the choke point solved it. So both entry points call
+`handlers::rlimit_authority()` — no second spelling of "holds `ResourceLimit`
+with `WRITE`" exists anywhere in the tree.
+
+*Lacking the capability is not an error.* `rlimit_authority()` returns a
+`LimitAuthority`, never a `Result`, and is not a `?` at either call site. An
+unprivileged process *lowering* its own hard limit must still succeed, so the
+absence of a capability may only become a refusal once `set_rlimit` sees that
+the call actually attempts a raise. Written as an error path it would have
+turned every ordinary `setrlimit` into an `EPERM`.
+
 ### Decision 3 — the `RLIMIT_NOFILE` ceiling stays absolute, and the capability does not lift it
 
 Unchanged, and worth restating because this is the moment it stops being
@@ -52053,6 +52069,27 @@ system could not reach. Both cite the request file. A test-only door around the
 policy under test is worth removing the moment it is unnecessary, and after this
 it is: `setrlimit` with the capability held reaches the same state the seeder
 was faking.
+
+And un-invert `test_setrlimit_phase179_restoring_the_cap_still_does_not_permit_a_raise`
+and `..._sentinel_raise_refused_even_with_cap`. Lane B recorded that both
+*used* to assert `CAP_SYS_RESOURCE` permits a raise and were flipped to match
+the kernel's blanket refusal. The original assertion was the correct one; the
+kernel has caught up to it. Leaving them asserting the refusal would pin the
+rule this entry replaces, which is how a decision gets reverted by a test nobody
+re-read.
+
+### How this is tested
+
+`pcb::test_rlimits` gained three steps, and the split between them is the
+point. Step 7 raises a hard limit that step 5 has just proved is refused
+without the capability — so an implementation that accepted the `authority`
+argument and ignored it fails, which asserting only the refusal would not
+catch. Step 8 is step 4 asked again *with* `MayRaiseHardLimit` held, because
+the way the `RLIMIT_NOFILE` ceiling fails is not by being deleted but by being
+rewritten as an ordinary privilege check that a privileged caller walks
+straight through. Step 9 walks lane B's actual use case end to end: raise
+`RLIMIT_NICE`'s hard limit off zero with the capability, then raise the soft
+limit to meet it with no capability at all — the route that did not exist.
 
 ### If this turns out wrong
 

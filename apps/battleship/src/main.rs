@@ -133,30 +133,42 @@ impl Layout {
     fn solve(w: f32, h: f32) -> Self {
         let w = w.max(0.0);
         let h = h.max(0.0);
-        // The padding is a share of the *shorter* side and is capped at half of
-        // it, so a window one pixel wide cannot be given a margin wider than
-        // the window it is a margin inside.
-        let pad = (w.min(h) * 0.02).min(w.min(h) / 2.0);
+        // A floor so a small window is not margined by a fraction of a pixel,
+        // a ceiling so a 4K one is not margined by thirty, and a cap at half
+        // the shorter side so a window narrower than twice its own margin is
+        // not given a margin wider than the window it is a margin inside.
+        //
+        // The cap needs the floor to mean anything: at a bare 2% of the
+        // shorter side it could never bind -- 2% of a length is always less
+        // than half of it -- and deleting it changed nothing any window could
+        // show, which is how it was found.
+        let pad = (w.min(h) * 0.02).clamp(2.0, 24.0).min(w.min(h) / 2.0);
         let title = (h * 0.031).clamp(9.0, 30.0);
         let font = (h * 0.021).clamp(8.0, 20.0);
         let small = (h * 0.018).clamp(7.0, font);
 
-        let header_h = (h * 0.075).min(h);
-        let message_h = ((h - header_h) * 0.055).max(0.0);
-        let stats_h = ((h - header_h - message_h) * 0.14).max(0.0);
-        let help_h = ((h - header_h - message_h - stats_h) * 0.06).max(0.0);
+        // Each band takes a share of what the bands before it left, and the
+        // body is what is left when all four have taken theirs. Written this
+        // way the five heights sum to exactly `h`, every one of them is
+        // non-negative, and they cannot come out of order -- so none of them
+        // needs a guard saying so. The previous spelling measured the lower
+        // two back from the bottom and clamped them against the body: three
+        // `max` guards for a case the arithmetic could not produce, and
+        // deleting any of the three changed no window at any size.
+        let header_h = h * 0.075;
+        let rest = h - header_h;
+        let message_h = rest * 0.055;
+        let rest = rest - message_h;
+        let stats_h = rest * 0.14;
+        let rest = rest - stats_h;
+        let help_h = rest * 0.06;
+        let body_h = rest - help_h;
 
         let header = Rect::new(0.0, 0.0, w, header_h);
         let message = Rect::new(0.0, header.bottom(), w, message_h);
-        let body_y = message.bottom();
-        // The lower bands are measured back from the bottom and never allowed
-        // above the body, so a window too short for all four leaves the body
-        // empty rather than stacking the bands out of order.
-        let help_y = (h - help_h).max(body_y);
-        let stats_y = (help_y - stats_h).max(body_y);
-        let body = Rect::new(0.0, body_y, w, (stats_y - body_y).max(0.0));
-        let stats = Rect::new(0.0, stats_y, w, (help_y - stats_y).max(0.0));
-        let help = Rect::new(0.0, help_y, w, (h - help_y).max(0.0));
+        let body = Rect::new(0.0, message.bottom(), w, body_h);
+        let stats = Rect::new(0.0, body.bottom(), w, stats_h);
+        let help = Rect::new(0.0, stats.bottom(), w, help_h);
 
         Self {
             window: Rect::new(0.0, 0.0, w, h),
@@ -718,8 +730,15 @@ impl BattleshipApp {
     /// ships stood in the same five places on every machine and in every
     /// session for ever. The doc comment was right about the intent and wrong
     /// about the code, which is the worst of the two ways for them to disagree.
+    ///
+    /// The fallback is not that constant. Where there is no kernel randomness
+    /// to open there is one fixed board and nothing to be done about it, but
+    /// making it *the* board the old code shipped would have left every
+    /// machine without a kernel source playing the same five ships the bug
+    /// gave them -- the fault moved rather than fixed, and invisible to a test
+    /// run anywhere the fallback is what answers.
     fn new() -> Self {
-        Self::with_seed(randrange::seed_from_system(0xDEAD_BEEF_CAFE_1234))
+        Self::with_seed(randrange::seed_from_system(0x4241_5454_4C45_5348))
     }
 
     /// The same game from a stated seed, so a test can name the board it means.
@@ -2897,6 +2916,62 @@ mod tests {
     }
 
     #[test]
+    fn the_bands_are_shares_of_the_height_not_the_width() {
+        // A band measured against the width grows when the window is widened,
+        // which is how a header comes to eat the board on a wide, short
+        // screen. The bands still tile the window when this is wrong, so the
+        // test that they tile it cannot see the mistake.
+        let narrow = Layout::solve(400.0, 720.0);
+        let wide = Layout::solve(1600.0, 720.0);
+        for (name, a, b) in [
+            ("header", narrow.header.h, wide.header.h),
+            ("message", narrow.message.h, wide.message.h),
+            ("body", narrow.body.h, wide.body.h),
+            ("stats", narrow.stats.h, wide.stats.h),
+            ("help", narrow.help.h, wide.help.h),
+        ] {
+            assert!(
+                (a - b).abs() < 0.001,
+                "the {name} band is {a} tall in a 400-wide window and {b} in a 1600-wide one"
+            );
+        }
+    }
+
+    #[test]
+    fn the_padding_never_vanishes_never_runs_away_and_never_outgrows_the_window() {
+        for (w, h) in [
+            (0.0, 0.0),
+            (1.0, 400.0),
+            (400.0, 1.0),
+            (3.0, 3.0),
+            (200.0, 150.0),
+        ] {
+            let l = Layout::solve(w, h);
+            assert!(l.pad >= 0.0, "a {w}x{h} window was padded by {}", l.pad);
+            assert!(
+                l.pad <= w.min(h) / 2.0 + 0.001,
+                "a {w}x{h} window was padded by {}, wider than half of it",
+                l.pad
+            );
+        }
+
+        // The floor and the ceiling the cap above is measured against. A bare
+        // 2% margin is a fifth of a pixel on a small window and thirty on a
+        // 4K one -- and without the floor the cap is unreachable, since 2% of
+        // a length is always less than half of it.
+        assert!(
+            (Layout::solve(60.0, 60.0).pad - 2.0).abs() < 0.001,
+            "a small window's margin thinned away to {}",
+            Layout::solve(60.0, 60.0).pad
+        );
+        assert!(
+            (Layout::solve(4000.0, 3000.0).pad - 24.0).abs() < 0.001,
+            "a 4K window's margin ran away to {}",
+            Layout::solve(4000.0, 3000.0).pad
+        );
+    }
+
+    #[test]
     fn a_bigger_window_gets_bigger_cells() {
         // The point of solving the layout each frame rather than reading it
         // off a `const CELL_SIZE: f32 = 36.0`: the same board at two sizes is
@@ -2987,9 +3062,16 @@ mod tests {
                 g.caption_y,
                 g.own.1
             );
+            // A whole caption line of clearance, not merely "not above the
+            // caption". Asserted the loose way, a layout reserving *no* room
+            // for the caption satisfies it exactly -- the caption line and the
+            // label line are the same height, so dropping the caption from the
+            // grid's top leaves the two sides of the inequality equal.
             assert!(
-                g.own.1 - g.label >= g.caption_y - 0.001,
-                "the 1-10 row sits on top of the caption at {w}x{h}"
+                g.own.1 - g.label >= g.caption_y + g.label - 0.001,
+                "the 1-10 row at {} leaves no line for the caption at {} at {w}x{h}",
+                g.own.1 - g.label,
+                g.caption_y
             );
         }
     }
@@ -3116,7 +3198,18 @@ mod tests {
             for r in 0..GRID_SIZE {
                 for c in 0..GRID_SIZE {
                     let drawn = box_of(&app, cell_of(r, c));
-                    let want = g.cell_rect(origin, r, c);
+                    // Worked out here rather than asked of `cell_rect`: a test
+                    // whose expectation comes from the function it is testing
+                    // agrees with that function however wrong it is. Swapping
+                    // the row and the column inside `cell_rect` -- which on a
+                    // square board transposes every cell -- passed cleanly
+                    // until this was written out.
+                    let want = Rect::new(
+                        origin.0 + f32_from_usize(c) * g.step,
+                        origin.1 + f32_from_usize(r) * g.step,
+                        g.cell,
+                        g.cell,
+                    );
                     // Within a pixel rather than to the bit: the recorded box
                     // is the drawn one intersected with the window's clip, and
                     // that intersection is two more float operations on the
@@ -3146,6 +3239,21 @@ mod tests {
         let f = app.draw(SIZE);
         let g = Layout::solve(SIZE.0, SIZE.1).grids();
         for (origin, board) in [(g.own, Target::OwnBoard), (g.ocean, Target::OceanBoard)] {
+            // The mat has to reach past the last cell it is a mat for. It is
+            // measured in whole steps, gap included; measured in drawn squares
+            // instead it stops six percent of a board short, and the far corner
+            // becomes a strip of grid answering as nothing at all.
+            let mat = g.board_rect(origin);
+            let last = g.cell_rect(origin, LAST_CELL, LAST_CELL);
+            assert!(
+                mat.right() >= last.right() - 0.001 && mat.bottom() >= last.bottom() - 0.001,
+                "{board:?} ends at {},{} short of its last cell at {},{}",
+                mat.right(),
+                mat.bottom(),
+                last.right(),
+                last.bottom()
+            );
+
             let first = g.cell_rect(origin, 0, 0);
             let x = first.right() + (g.step - g.cell) / 2.0;
             let y = first.centre().1;
@@ -3306,6 +3414,19 @@ mod tests {
             "a sixth ship was placed in the middle of the battle"
         );
         assert_eq!(firing.player_shots, 0, "clicking one's own grid fired");
+
+        // The phase and the placement index are two fields that agree only
+        // because nothing has ever set them apart, so a fleet already placed
+        // is not what makes the click on one's own grid harmless in the
+        // battle -- the phase guard is. Set the two fields against each other
+        // and the guard is the only thing left standing.
+        let mut adrift = BattleshipApp::with_seed(11);
+        adrift.phase = GamePhase::Firing;
+        probe::click(&mut adrift, Target::Own(0, 0));
+        assert!(
+            adrift.player_fleet.ships.is_empty(),
+            "a ship was placed by a click on a board whose phase says the placing is done"
+        );
     }
 
     #[test]
@@ -3414,10 +3535,16 @@ mod tests {
         let shots = app.player_shots;
         let ships = app.player_fleet.ships.clone();
 
-        assert_eq!(
-            app.key_at(&probe::press(Key::Escape), SIZE),
-            EventResult::Ignored,
-            "Escape was taken for something"
+        // Asked of `on_event`, which is where Escape is answered. Asked of
+        // `key_at` it reaches `handle_key`, and `handle_key` has had no Escape
+        // arm since the reset was taken out of it -- so the reset could come
+        // back in `on_event` and a test aimed at `handle_key` would not see it.
+        assert!(
+            matches!(
+                app.on_event(&Event::Key(probe::press(Key::Escape))),
+                Response::Exit
+            ),
+            "Escape did something other than close the window"
         );
         assert_eq!(app.phase, GamePhase::Firing, "Escape reset the game");
         assert_eq!(app.player_shots, shots, "Escape threw away the score");
@@ -3470,12 +3597,45 @@ mod tests {
             app.key_at(&probe::press(Key::Z), SIZE),
             EventResult::Ignored
         );
+        // Every phase, not the one that happened to be to hand: the three
+        // phases route a key through three different arms, and an arm that
+        // swallows what it cannot use is invisible from the other two.
+        let mut placing = BattleshipApp::with_seed(5);
+        assert_eq!(
+            placing.key_at(&probe::press(Key::Z), SIZE),
+            EventResult::Ignored,
+            "an unused key was swallowed while ships were being placed"
+        );
+
         let mut over = firing_app();
         over.phase = GamePhase::GameOver;
         assert_eq!(
             over.key_at(&probe::press(Key::Enter), SIZE),
             EventResult::Ignored,
             "Enter did something on a finished board"
+        );
+    }
+
+    #[test]
+    fn a_launch_does_not_place_the_one_fleet_that_was_hardcoded() {
+        // `new` wrote `SeededRng::new(0xDEAD_BEEF_CAFE_1234)` under a doc
+        // comment saying the seed came from the system, so the AI's five
+        // ships stood in the same five places on every machine and in every
+        // session for ever. Every other test names its own seed and so cannot
+        // see what `new` does; this one calls `new`.
+        //
+        // Two `new()` games cannot be compared with each other here: off
+        // Slate OS there is no kernel randomness to open, so `seed_from_system`
+        // answers with its fallback and the two would agree for a reason that
+        // has nothing to do with this program. What can be checked is that the
+        // fleet is no longer the one that constant placed.
+        let fresh = BattleshipApp::new().opponent_fleet.ships;
+        let old = BattleshipApp::with_seed(0xDEAD_BEEF_CAFE_1234)
+            .opponent_fleet
+            .ships;
+        assert_ne!(
+            fresh, old,
+            "a fresh game still places the AI's fleet where the hardcoded seed put it"
         );
     }
 
@@ -3983,6 +4143,32 @@ mod tests {
                             "{kind:?} {orientation:?} from {row},{col} was left off the board"
                         );
                     }
+                }
+            }
+        }
+
+        // And through the key that rotates. A rotation moves the ship's far
+        // end without moving its origin, which is the one change that can
+        // carry a ship off the board while the cursor stays where it was --
+        // so a rotation that returns before the clamp is a rotation no
+        // cursor-driven check can catch.
+        for kind in FLEET {
+            for row in 0..GRID_SIZE {
+                for col in 0..GRID_SIZE {
+                    let mut app = BattleshipApp::with_seed(3);
+                    app.placement_index = FLEET
+                        .iter()
+                        .position(|k| *k == kind)
+                        .expect("a ship not in the fleet");
+                    app.placement_row = row;
+                    app.placement_col = col;
+                    app.clamp_placement();
+                    app.handle_placement_key(Key::R);
+                    let ship = app.placement_preview_ship().expect("nothing to place");
+                    assert!(
+                        ship.is_within_bounds(),
+                        "{kind:?} rotated at {row},{col} was left off the board"
+                    );
                 }
             }
         }

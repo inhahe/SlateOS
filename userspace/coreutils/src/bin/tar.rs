@@ -474,7 +474,10 @@ struct TarArgs {
     /// Which operation was asked for, as one setting rather than three flags.
     /// See [`Mode`].
     mode: Mode,
-    verbose: bool,
+    /// GNU's one verbosity counter, not a flag: `-v` bumps it and so does
+    /// `-t`/`--list`, which is why `tar -tt` is `tar -tv`. See [`Verbose`] for
+    /// what each level renders.
+    verbose: u8,
     /// `-p`, `--same-permissions`: restore the stored mode exactly, umask and
     /// setuid bits included. Without it a non-root extraction applies
     /// `mode & 0o777 & !umask`, which is what GNU does and what this tar did
@@ -487,6 +490,28 @@ struct TarArgs {
     archive_file: Option<OsString>,
     directory: Option<OsString>,
     files: Vec<OsString>,
+}
+
+impl TarArgs {
+    /// `-t` / `--list`: choose list mode **and** bump the verbosity counter.
+    ///
+    /// The two go together in GNU's own handler, and separating them here would
+    /// be a silent divergence rather than a tidier design — `tar -tt` and
+    /// `tar --list --list` print the long listing precisely because the second
+    /// one bumped a counter that the first had already bumped. A helper rather
+    /// than two statements in each arm, so the short and long spellings cannot
+    /// drift apart.
+    ///
+    /// # Errors
+    ///
+    /// The conflict from [`Mode::choose`] when another mode was already named.
+    /// The counter is left alone in that case, which is moot — the error is
+    /// fatal — but keeps the failure from being half-applied.
+    fn list(&mut self) -> Result<(), getopt::Error> {
+        self.mode.choose(Mode::List)?;
+        self.verbose = self.verbose.saturating_add(1);
+        Ok(())
+    }
 }
 
 /// Which of tar's operations the command line asked for.
@@ -707,8 +732,12 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // *different* ones an error and repeating one harmless. See [`Mode`].
             Opt::Short(b'c', _) => out.mode.choose(Mode::Create)?,
             Opt::Short(b'x', _) => out.mode.choose(Mode::Extract)?,
-            Opt::Short(b't', _) => out.mode.choose(Mode::List)?,
-            Opt::Short(b'v', _) => out.verbose = true,
+            // `-t` bumps the verbosity counter as well as choosing the mode.
+            // That is not a quirk to work around — it is the whole reason
+            // `tar -tt` and `tar --list --list` print the long listing. See
+            // [`Verbose`].
+            Opt::Short(b't', _) => out.list()?,
+            Opt::Short(b'v', _) => out.verbose = out.verbose.saturating_add(1),
             Opt::Short(b'p', _) => out.same_permissions = true,
             Opt::Short(b'k', _) => out.old_files.choose(OldFiles::Keep)?,
             Opt::Short(b'U', _) => out.old_files.choose(OldFiles::UnlinkFirst)?,
@@ -730,8 +759,8 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 // matches on names; they converge here — which is why `tar -x
                 // --get` is accepted and `tar -x --list` is not.
                 "extract" | "get" => out.mode.choose(Mode::Extract)?,
-                "list" => out.mode.choose(Mode::List)?,
-                "verbose" => out.verbose = true,
+                "list" => out.list()?,
+                "verbose" => out.verbose = out.verbose.saturating_add(1),
                 "preserve-permissions" | "same-permissions" => out.same_permissions = true,
                 "file" => out.archive_file = value,
                 "directory" => out.directory = value,
@@ -1001,11 +1030,7 @@ fn main() {
             // The one case where the member list is a diagnostic rather than
             // output: with no `-f`, the archive itself is on stdout, and a name
             // printed there would be a block of the archive.
-            let verbose = match (parsed.verbose, parsed.archive_file.is_some()) {
-                (false, _) => Verbose::Off,
-                (true, true) => Verbose::Stdout,
-                (true, false) => Verbose::Stderr,
-            };
+            let verbose = Verbose::new(parsed.verbose, parsed.archive_file.is_none());
             #[cfg(unix)]
             {
                 do_create(parsed.archive_file.as_deref(), &parsed.files, verbose)
@@ -1020,11 +1045,9 @@ fn main() {
         Mode::Extract => do_extract(
             parsed.archive_file.as_deref(),
             parsed.directory.as_deref(),
-            if parsed.verbose {
-                Verbose::Stdout
-            } else {
-                Verbose::Off
-            },
+            // Extraction never writes the archive to stdout, so the list always
+            // goes there.
+            Verbose::new(parsed.verbose, false),
             &parsed.files,
             parsed.same_permissions,
             parsed.old_files,
@@ -1312,27 +1335,66 @@ impl TarHeader {
     }
 }
 
-/// Where `-v` writes its running list of member names.
+/// How much `-v` says, and where it says it.
+///
+/// # How much: GNU keeps one counter, and `-t` bumps it
+///
+/// There is no `verbose` *flag* in GNU tar — there is a single integer,
+/// `verbose_option`, that `-v` increments. So does `-t`/`--list`, which is why
+/// `tar -tt` prints the same long listing as `tar -tv` and why `--list --list`
+/// does too. `-c` and `-x` do not bump it. Rendering is then uniform across all
+/// three modes, and saturates at two:
+///
+/// | Level | Reached by | Prints |
+/// |---|---|---|
+/// | 0 | nothing | nothing |
+/// | 1 | `-cv`, `-xv`, `-t` | member names |
+/// | 2+ | `-cvv`, `-xvv`, `-tv`, `-tt` | the long `ls -l`-ish line |
+///
+/// All measured against GNU tar 1.35 (`tar-verbose1.sh`, `tar-verbose2.sh`);
+/// `-vvv` renders exactly as `-vv`. Ours had a boolean per mode, so `-cvv` and
+/// `-xvv` printed bare names and `-tt` printed names where GNU printed the long
+/// form.
+///
+/// # Where: stdout, except when the archive is already there
 ///
 /// This used to be "stderr, always", which is wrong in the ordinary case and
 /// right in exactly one unusual one. GNU writes the list to **stdout**, because
 /// it is output, not a diagnostic: `tar -cvf a.tar d > manifest` is how you get
 /// a manifest, and ours produced an empty `manifest` and printed the names past
 /// the redirection onto the terminal. The single exception is an archive being
-/// written *to* stdout — `tar -cvf - d` — where the names would be interleaved
+/// written *to* stdout — `tar -cv - d` — where the names would be interleaved
 /// with the archive bytes and ruin both; there, and only there, they go to
-/// stderr.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Verbose {
-    /// No `-v`: say nothing.
-    Off,
-    /// The usual case.
-    Stdout,
-    /// `-cv` with the archive itself on stdout.
-    Stderr,
+/// stderr. Measured for the long form too: `tar -cvv t > /dev/null` puts every
+/// long line on stderr.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+struct Verbose {
+    /// GNU's counter, saturated at 2 — nothing above that renders differently,
+    /// and saturating here is what keeps `-vvvv` from overflowing a `u8`.
+    level: u8,
+    /// The archive itself is on stdout, so the listing must not be.
+    to_stderr: bool,
 }
 
 impl Verbose {
+    /// The counter as parsing produced it, and where this mode sends its list.
+    fn new(level: u8, to_stderr: bool) -> Self {
+        Self {
+            level: level.min(2),
+            to_stderr,
+        }
+    }
+
+    /// Says nothing at all — no `-v`, and not a mode that bumps the counter.
+    fn silent(self) -> bool {
+        self.level == 0
+    }
+
+    /// Level 2 or more: the long line rather than the bare name.
+    fn long(self) -> bool {
+        self.level >= 2
+    }
+
     /// Announce one member name, rendered exactly as a diagnostic would render
     /// it.
     ///
@@ -1353,13 +1415,21 @@ impl Verbose {
         let mut line = Vec::with_capacity(shown.len().saturating_add(1));
         line.extend_from_slice(shown.as_bytes());
         line.push(b'\n');
-        match self {
-            Self::Off => {}
+        self.write(&line);
+    }
+
+    /// Emit an already-rendered line, newline included.
+    fn write(self, line: &[u8]) {
+        if self.silent() {
+            return;
+        }
+        if self.to_stderr {
+            stdfd::diag_bytes(line);
+        } else {
             // Unbuffered, by fd. Nothing else in `-c`/`-x` writes to stdout, so
             // there is no ordering to keep with a `BufWriter`, and a failure to
             // write the listing must not abort the archive.
-            Self::Stdout => drop(stdfd::write_all(1, &line)),
-            Self::Stderr => stdfd::diag_bytes(&line),
+            drop(stdfd::write_all(1, line));
         }
     }
 }
@@ -1664,6 +1734,12 @@ struct Creator<'a> {
     /// The passwd/group database and the answers already taken from it, for the
     /// `uname`/`gname` header fields. See [`OwnerNames`].
     owners: OwnerNames,
+    /// The running column maximum `-cvv`'s long lines are laid out against, and
+    /// the timezone their timestamps are rendered in. Both are unused at lower
+    /// verbosity; the zone is read once so that a long run cannot straddle a
+    /// zone change mid-archive.
+    ugswidth: usize,
+    zone: localtime::Zone,
     /// How much has already been stripped from a member name and from a hard
     /// link's target, so that the notice is issued once per *longer* prefix.
     /// This is why `tar -c ..` produces two lines, ``Removing leading `..'``
@@ -1686,6 +1762,61 @@ struct Creator<'a> {
 impl Creator<'_> {
     fn fail(&mut self) {
         self.status = EXIT_FATAL;
+    }
+
+    /// Say that this member went in, at whatever length `-v` was asked for.
+    ///
+    /// `shown` is the name **as the user gave it**, not as it was stored: `-cv`
+    /// on `/etc` lists `/etc/...` while the archive holds `etc/...`, and
+    /// measurement (`tar-cvv1.sh`) says `-cvv` does the same — the long line for
+    /// `tar -cvvf a.tar /tmp/x/a` names `/tmp/x/a`. So the long line is *not*
+    /// simply the `-tv` line of the archive we just wrote; every other column is,
+    /// which is why it goes through the same [`long_line`].
+    ///
+    /// The `Member` here is a description of the member just written, assembled
+    /// from the same `stat` the header was, rather than the header read back.
+    /// Both would render the same today. This one cannot drift into rendering a
+    /// *stored* name, which is the difference the paragraph above turns on.
+    fn announce(&mut self, shown: &[u8], meta: &fs::Metadata, typeflag: u8, linkname: &[u8]) {
+        use std::os::unix::fs::MetadataExt;
+        if self.verbose.silent() {
+            return;
+        }
+        if !self.verbose.long() {
+            self.verbose.line(shown);
+            return;
+        }
+        // Borrowed out first: the two lookups take `&mut self`, and the struct
+        // literal below borrows it again.
+        let uname = self.owners.user(meta.uid()).to_vec();
+        let gname = self.owners.group(meta.gid()).to_vec();
+        // ustar leaves these blank for every type but a device, and `long_line`
+        // reads them only for `3`/`4`, so the `rdev` of a plain file is not
+        // merely unused — asking for it would be meaningless.
+        let (devmajor, devminor) = if typeflag == b'3' || typeflag == b'4' {
+            split_dev(meta.rdev())
+        } else {
+            (0, 0)
+        };
+        let member = Member {
+            name: shown.to_vec(),
+            mode: meta.mode() & 0o7777,
+            uid: meta.uid(),
+            gid: meta.gid(),
+            // Trusted only for the types that carry data; `long_line` prints 0
+            // for the rest, which is why a hard link's `st_size` — the size of
+            // the file it names, not of the member — cannot leak into the line.
+            size: meta.len(),
+            mtime: meta.mtime(),
+            typeflag,
+            linkname: linkname.to_vec(),
+            devmajor,
+            devminor,
+            uname,
+            gname,
+        };
+        let line = long_line(&member, linkname, &mut self.ugswidth, &self.zone);
+        self.verbose.write(&line);
     }
 
     fn write(&mut self, buf: &[u8]) -> bool {
@@ -1867,7 +1998,7 @@ impl Creator<'_> {
         }
         header.compute_checksum();
         if self.write(header.as_bytes()) {
-            self.verbose.line(name);
+            self.announce(name, meta, typeflag, target);
         }
     }
 
@@ -1885,7 +2016,7 @@ impl Creator<'_> {
         }
         header.compute_checksum();
         if self.write(header.as_bytes()) {
-            self.verbose.line(name);
+            self.announce(name, meta, typeflag, b"");
         }
     }
 
@@ -1917,7 +2048,7 @@ impl Creator<'_> {
             return;
         }
 
-        self.verbose.line(name);
+        self.announce(name, meta, b'0', b"");
 
         let mut remaining = declared;
         let mut buf = [0u8; BLOCK_SIZE];
@@ -1990,7 +2121,7 @@ impl Creator<'_> {
         // /etc` lists `/etc/...` while the archive holds `etc/...`. Measured.
         let mut shown = name.to_vec();
         shown.push(b'/');
-        self.verbose.line(&shown);
+        self.announce(&shown, meta, b'5', b"");
 
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
@@ -2064,6 +2195,8 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
         status: 0,
         links: BTreeMap::new(),
         owners: OwnerNames::load(),
+        ugswidth: UGSWIDTH_MIN,
+        zone: localtime::Zone::from_env(),
         prefixes: PrefixNotice::new(),
         archive_id,
         writable: true,
@@ -4042,6 +4175,11 @@ fn do_extract(
     let mut prefixes = PrefixNotice::new();
     let mut selector = Selector::new(members);
     let umask = read_umask();
+    // Only `-xvv` uses these, but both are cheap and reading `TZ` once up front
+    // is what stops a long extraction from straddling a zone change mid-file —
+    // the same reason `do_list_main` resolves it before the first member.
+    let mut ugswidth = UGSWIDTH_MIN;
+    let zone = localtime::Zone::from_env();
     // Directory metadata is applied last, in reverse order. It has to be: a
     // directory's mtime is bumped by every child written into it, and a
     // directory whose stored mode has no write bit cannot receive children at
@@ -4052,7 +4190,7 @@ fn do_extract(
     // The same for every member except the directories, which flip one field.
     let ovw = Overwriting {
         old_files,
-        verbose: verbose != Verbose::Off,
+        verbose: !verbose.silent(),
         directory_member: false,
     };
 
@@ -4089,7 +4227,16 @@ fn do_extract(
         // `.` member of an archive made with `tar -cf x.tar .`. No slash is
         // appended for a directory either — a type-`5` member stored without
         // one is announced without one (`tar-rules3.sh`).
-        if verbose != Verbose::Off {
+        //
+        // At level 2 — `-xvv` — it is the same long line `-tv` prints, from the
+        // same renderer and the same header. That is not an assumption: measured
+        // (`tar-verbose2.sh`), `tar -xvvf a.tar` and `tar -tvf a.tar` produce
+        // byte-identical listings, column arithmetic included, which is why the
+        // running `ugswidth` maximum lives beside the walk here exactly as it
+        // does in `list_archive`.
+        if verbose.long() {
+            verbose.write(&long_line(member, &link_target, &mut ugswidth, &zone));
+        } else {
             verbose.line(raw_name);
         }
 
@@ -4560,7 +4707,7 @@ fn extract_regular_file(
     true
 }
 
-fn do_list_main(archive_file: Option<&OsStr>, verbose: bool, members: &[OsString]) -> i32 {
+fn do_list_main(archive_file: Option<&OsStr>, verbose: u8, members: &[OsString]) -> i32 {
     let mut input: Box<dyn Read> = match archive_file {
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
@@ -4626,10 +4773,15 @@ const UGSWIDTH_MIN: usize = 18;
 /// both the bytes written and *why* the read ended — the old version returned
 /// `io::Result<()>` and answered `Ok(())` for a truncated archive, a corrupt
 /// one, and a file that was never an archive alike.
+///
+/// `verbose` is the counter, not a flag. Listing is the mode where that matters
+/// most: `-t` alone is already level 1 because `-t` bumps it, so the interesting
+/// threshold here is 2 — reached by `-tv`, and equally by `-tt`. See
+/// [`Verbose`].
 fn list_archive(
     input: &mut dyn Read,
     out: &mut dyn Write,
-    verbose: bool,
+    verbose: u8,
     selector: &mut Selector,
     zone: &localtime::Zone,
 ) -> (Stop, Option<io::Error>) {
@@ -4668,7 +4820,7 @@ fn list_archive(
         // feedable back to `tar -x`, so the bytes must survive — was wrong on
         // its own terms: GNU's output is not feedable back either, and a name
         // containing a newline would put two lines in the manifest.
-        let line = if verbose {
+        let line = if verbose >= 2 {
             long_line(member, &link_target, &mut ugswidth, zone)
         } else {
             let mut l = escape(&member.name).into_bytes();
@@ -4914,17 +5066,21 @@ mod tests {
     /// reason it stopped. The zone is UTC rather than the machine's so that a
     /// timestamp assertion means the same thing on every machine that runs the
     /// suite.
+    ///
+    /// Level 1 is what a bare `-t` produces: `-t` bumps the counter once, so
+    /// the plain listing is level 1, not level 0 (which is silent).
     fn list_names(input: &[u8], out: &mut Vec<u8>) -> Stop {
         let mut sel = Selector::new(&[]);
-        let (stop, err) = list_archive(&mut &input[..], out, false, &mut sel, &Zone::utc());
+        let (stop, err) = list_archive(&mut &input[..], out, 1, &mut sel, &Zone::utc());
         assert!(err.is_none(), "unexpected write error listing to a Vec");
         stop
     }
 
-    /// As [`list_names`], in the long (`-tv`) form.
+    /// As [`list_names`], in the long (`-tv`) form — level 2, the counter's
+    /// ceiling.
     fn list_long(input: &[u8], out: &mut Vec<u8>) -> Stop {
         let mut sel = Selector::new(&[]);
-        let (stop, err) = list_archive(&mut &input[..], out, true, &mut sel, &Zone::utc());
+        let (stop, err) = list_archive(&mut &input[..], out, 2, &mut sel, &Zone::utc());
         assert!(err.is_none(), "unexpected write error listing to a Vec");
         stop
     }
@@ -4981,7 +5137,7 @@ mod tests {
         // -cvf out.tar a -- the f consumes the next argv element.
         let a = run_args(&s(&["-cvf", "out.tar", "a"])).unwrap();
         assert_eq!(a.mode, Mode::Create);
-        assert!(a.verbose);
+        assert_eq!(a.verbose, 1);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.files, s(&["a"]));
     }
@@ -5096,7 +5252,8 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(a.mode, Mode::Create);
-        assert!(a.verbose && a.same_permissions);
+        assert_eq!(a.verbose, 1);
+        assert!(a.same_permissions);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.directory.as_deref(), Some(OsStr::new("/tmp")));
         assert_eq!(a.files, s(&["x"]));
@@ -5208,6 +5365,57 @@ mod tests {
     }
 
     #[test]
+    fn verbosity_is_one_counter_that_t_bumps_as_well_as_v() {
+        // GNU's `verbose_option` is an `int` that `-v` increments — and so does
+        // `-t`/`--list`, because listing *is* the first level of verbosity.
+        // `-c` and `-x` do not. Measured, `tar-verbose1.sh`: `tar -tt` prints
+        // the same long lines as `tar -tv`, and `tar --list --list` likewise.
+        for (argv, want) in [
+            (s(&["-c"]), 0u8),
+            (s(&["-x"]), 0),
+            (s(&["-cc"]), 0),
+            (s(&["-cv"]), 1),
+            (s(&["-t"]), 1),
+            (s(&["--list"]), 1),
+            (s(&["-tt"]), 2),
+            (s(&["--list", "--list"]), 2),
+            (s(&["-tv"]), 2),
+            (s(&["-cvv"]), 2),
+            (s(&["-xvv"]), 2),
+        ] {
+            assert_eq!(
+                run_args(&argv).unwrap().verbose,
+                want,
+                "verbosity of {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn verbosity_past_two_still_renders_as_two() {
+        // The counter keeps climbing in GNU, but nothing reads a third level:
+        // `-vvv` and `-vvvvv` print exactly what `-vv` prints. Saturating in
+        // `Verbose::new` rather than in the parser keeps the *parsed* count
+        // faithful to argv — which is what the parser tests above assert — while
+        // giving the renderer a value it can compare against a fixed ceiling.
+        assert_eq!(run_args(&s(&["-cvvv"])).unwrap().verbose, 3);
+        assert_eq!(run_args(&s(&["-cvvvvv"])).unwrap().verbose, 5);
+        assert_eq!(Verbose::new(3, false).level, 2);
+        assert_eq!(Verbose::new(255, false).level, 2);
+        assert_eq!(Verbose::new(2, false), Verbose::new(9, false));
+    }
+
+    #[test]
+    fn the_verbosity_levels_are_silent_then_names_then_long() {
+        let silent = Verbose::new(0, false);
+        assert!(silent.silent() && !silent.long());
+        let names = Verbose::new(1, false);
+        assert!(!names.silent() && !names.long());
+        let long = Verbose::new(2, false);
+        assert!(!long.silent() && long.long());
+    }
+
+    #[test]
     fn parse_takes_each_member_of_the_overwrite_family() {
         for (argv, want) in [
             (s(&["-x"]), OldFiles::Replace),
@@ -5279,7 +5487,7 @@ mod tests {
         // word after the whole cluster, not after the `f`.
         let a = run_args(&s(&["cvf", "a.tar", "dir"])).unwrap();
         assert_eq!(a.mode, Mode::Create);
-        assert!(a.verbose);
+        assert_eq!(a.verbose, 1);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("a.tar")));
         assert_eq!(a.files, s(&["dir"]));
     }
@@ -5336,7 +5544,7 @@ mod tests {
         // that knows about old options.
         let a = run_args(&s(&["cf", "a.tar", "--verbose", "dir"])).unwrap();
         assert_eq!(a.mode, Mode::Create);
-        assert!(a.verbose);
+        assert_eq!(a.verbose, 1);
         assert_eq!(a.files, s(&["dir"]));
 
         let a = run_args(&s(&["cf", "a.tar", "--", "-dir"])).unwrap();
@@ -5422,7 +5630,7 @@ mod tests {
         // reaches the match arm, so no arm needs to know about abbreviations.
         let a = run_args(&s(&["--extr", "--verbo"])).unwrap();
         assert_eq!(a.mode, Mode::Extract);
-        assert!(a.verbose);
+        assert_eq!(a.verbose, 1);
     }
 
     #[test]
@@ -5438,7 +5646,7 @@ mod tests {
             err.sentence,
             "option '--verb' is ambiguous; possibilities: '--verbose' '--verbatim-files-from'"
         );
-        assert!(run_args(&s(&["--verbo"])).unwrap().verbose);
+        assert_eq!(run_args(&s(&["--verbo"])).unwrap().verbose, 1);
     }
 
     #[test]
@@ -5542,7 +5750,7 @@ mod tests {
         // `o`: `invalid option -- 'o'`.
         let a = run_args(&s(&["-cvfout.tar", "x"])).unwrap();
         assert_eq!(a.mode, Mode::Create);
-        assert!(a.verbose);
+        assert_eq!(a.verbose, 1);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.files, s(&["x"]));
     }
@@ -5550,10 +5758,12 @@ mod tests {
     #[test]
     fn parse_permutes_options_after_operands() {
         // Measured: `tar -tf t.tar a --verbose` gives a long listing, so an
-        // option after an operand is still an option.
+        // option after an operand is still an option. It is *long* rather than
+        // plain because `-t` bumps the counter too: one from the `-t`, one from
+        // the `--verbose`, which is level 2.
         let a = run_args(&s(&["-tf", "t.tar", "a", "--verbose"])).unwrap();
         assert_eq!(a.mode, Mode::List);
-        assert!(a.verbose);
+        assert_eq!(a.verbose, 2);
         assert_eq!(a.files, s(&["a"]));
     }
 

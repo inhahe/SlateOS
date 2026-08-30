@@ -927,6 +927,34 @@ fi
 create_case 'verbose create'  -v tree
 plain_case  'verbose extract' -xvf ref.tar -C od
 
+# Verbosity is one *counter*, not a flag, and it is shared by all three modes:
+# 0 prints nothing, 1 prints member names, 2 or more prints the long `-tv`
+# line. `-v` bumps it — and so does `-t`, which is why `-tt` is a long listing.
+# `-c` and `-x` do not bump it. Measured, `tar-verbose1.sh`/`tar-verbose2.sh`.
+#
+# The second level is the case that matters here, because it is the one that
+# needs a whole formatter rather than a name: at level 2 a create prints for
+# each member the same line `-tv` would print for it afterwards — except that
+# the *name* is the one the user typed, not the stripped one that goes in the
+# archive. `create_case` compares the archive and both streams, so it checks
+# the two against each other in a single case.
+create_case 'create, twice verbose'          -vv tree
+create_case 'create, three times verbose'    -vvv tree
+create_case 'create -vv over every type'     -vv special
+create_case 'create -vv over a long name'    -vv long
+# The unstripped name: what is announced is `$PWD/tree/a.txt`, what is stored
+# is `<pwd>/tree/a.txt` without the leading slash. Only a level-2 create can
+# show that the two differ, because level 1 prints the same name either way.
+create_case 'create -vv strips for the archive but not for the line' -vv "$work/tree/a.txt"
+
+plain_case 'extract, twice verbose'          -xvvf ref.tar -C od
+plain_case 'extract, three times verbose'    -xvvvf ref.tar -C od
+
+list_case 'a repeated -t is a long listing'  -tt -f ref.tar
+list_case 'the same, spelled long'           --list --list -f ref.tar
+list_case '-t and -v reach the same level'   -tvf ref.tar
+list_case 'past two is still two'            -tvvvf ref.tar
+
 # ===========================================================================
 # 6. diagnostics
 # ===========================================================================
@@ -954,10 +982,13 @@ plain_case 'two modes, an alias'         --create --get
 # conflict: the test is whether the value would change. These have to actually
 # *run*, so they are given a real archive.
 #
-# `-t` is deliberately absent from this group: repeating it is accepted, but it
-# also bumps the verbosity counter, so `-tt` prints the *long* listing and the
-# case would be testing two things at once. The counter has its own cases.
+#
+# `-t` is here too, even though repeating it does one thing more than the
+# others — it also bumps the verbosity counter, so `-tt` lists in the long
+# form. That second effect is section 5's subject; what this case asserts is
+# only that the repeat is *accepted*, which is the mode rule and is separable.
 plain_case 'the same mode twice'         -c -cf o.tar tree/a.txt
+plain_case 'the same mode twice (-t)'    -t -tf ref.tar
 plain_case 'one mode under two names'    -x --get -f ref.tar -C od
 plain_case 'a mode and its alias'        --extract --get -f ref.tar -C od
 

@@ -272,8 +272,13 @@ impl Layout {
         // both must fit inside the padded board.
         let inner = inset(board, pad);
         let (_, _, span_w, span_h) = turtle_extent();
+        // No `.max(0.0)` on the ratio: `inset` never returns a negative side,
+        // so neither ratio can be negative. It was here, and the sweep could
+        // not make it bind -- a floor that never floors is a floor no test can
+        // check, and it invited the reader to believe `inner` might be
+        // negative, which is the thing `inset` exists to rule out.
         let tile_w = if span_w > 0.0 && span_h > 0.0 {
-            (inner.w / span_w).min(inner.h / span_h).max(0.0)
+            (inner.w / span_w).min(inner.h / span_h)
         } else {
             0.0
         };
@@ -2357,6 +2362,26 @@ mod tests {
     }
 
     #[test]
+    fn the_turtle_fits_inside_the_board_at_every_size() {
+        // The tile is solved from whichever side has *less* room, and that is
+        // the whole reason for the `min`. Centring cannot carry this claim --
+        // a turtle too big for the board is still centred in it, with equal
+        // slack of a negative sign on both sides -- so it is stated here.
+        for (w, h) in SIZES.iter().copied().chain(SQUEEZED) {
+            let l = Layout::solve(w, h);
+            let inner = inset(l.board, l.pad);
+            assert!(
+                l.turtle.x >= inner.x - 0.01
+                    && l.turtle.y >= inner.y - 0.01
+                    && l.turtle.right() <= inner.right() + 0.01
+                    && l.turtle.bottom() <= inner.bottom() + 0.01,
+                "at {w}x{h} the turtle {:?} is outside the padded board {inner:?}",
+                l.turtle
+            );
+        }
+    }
+
+    #[test]
     fn the_tile_grows_with_the_window() {
         // The whole point of solving for the size rather than fixing it at
         // 42x54. A constant would satisfy every containment test above.
@@ -2479,6 +2504,29 @@ mod tests {
             "the gap is {gap}, not the {} a tile's width asks for",
             l.tile_w * TILE_GAP_SHARE
         );
+
+        // The rows need the same check and were not getting it. A tile is one
+        // unit wide but `TILE_ASPECT` units tall, so a row pitch measured in
+        // tile *widths* leaves the rows overlapping by the difference -- and
+        // the sweep made exactly that substitution without a test noticing,
+        // because every tile this test looked at was on the same row.
+        let c = l.tile_rect(TilePos {
+            layer: 0,
+            row: 1,
+            col: 0,
+        });
+        let row_gap = c.y - a.bottom();
+        assert!(
+            row_gap > 0.0,
+            "the rows overlap: one ends at {} and the next starts at {}",
+            a.bottom(),
+            c.y
+        );
+        assert!(
+            (row_gap - l.tile_w * TILE_GAP_SHARE).abs() < 0.01,
+            "the row gap is {row_gap}, not the {} a tile's width asks for",
+            l.tile_w * TILE_GAP_SHARE
+        );
     }
 
     #[test]
@@ -2512,6 +2560,52 @@ mod tests {
                 above > 0 && above < below,
                 "layer {layer} has {above} tiles against {below} on layer {}",
                 layer - 1
+            );
+        }
+
+        // Counting is not narrowing, and the sweep said so: widening layer 2
+        // to layer 1's full six columns still leaves it with fewer tiles,
+        // because it spans fewer rows -- and a layer as wide as the one below
+        // it covers that layer's edge tiles for the whole game. Check the
+        // footprint, in both directions, not the population.
+        let span = |layer: usize| {
+            positions
+                .iter()
+                .filter(|p| p.layer == layer)
+                .fold(None, |acc: Option<(usize, usize, usize, usize)>, p| {
+                    Some(match acc {
+                        None => (p.col, p.col, p.row, p.row),
+                        Some((c0, c1, r0, r1)) => {
+                            (c0.min(p.col), c1.max(p.col), r0.min(p.row), r1.max(p.row))
+                        }
+                    })
+                })
+                .expect("a layer with no tiles")
+        };
+        for layer in 1..=top {
+            let (ac0, ac1, ar0, ar1) = span(layer);
+            let (bc0, bc1, br0, br1) = span(layer - 1);
+            assert!(
+                ac0 >= bc0 && ac1 <= bc1 && ar0 >= br0 && ar1 <= br1,
+                "layer {layer} spans cols {ac0}..={ac1} rows {ar0}..={ar1}, \
+                 outside layer {}'s cols {bc0}..={bc1} rows {br0}..={br1}",
+                layer - 1
+            );
+            // Both axes, not either: widening layer 2 to layer 1's full six
+            // columns still leaves it two rows shorter, so "narrower in some
+            // direction" was satisfied by the mutant that squared it off. The
+            // deal nests strictly on both axes at every level -- 14x7, 5x5,
+            // 3x3, 1x1, 0x0 -- which is what "nested strictly inside" in
+            // `turtle_layout` means, so that is what is asserted.
+            assert!(
+                ac1 - ac0 < bc1 - bc0 && ar1 - ar0 < br1 - br0,
+                "layer {layer} spans {}x{} against layer {}'s {}x{}, so it does not \
+                 nest strictly inside it and the tiles under its edges stay covered",
+                ac1 - ac0,
+                ar1 - ar0,
+                layer - 1,
+                bc1 - bc0,
+                br1 - br0
             );
         }
     }
@@ -3587,6 +3681,20 @@ mod tests {
         assert!(
             !f.hits().iter().any(|(t, _)| matches!(t, Target::Tile(_))),
             "a window with no room for a tile still recorded tile boxes"
+        );
+        // The hit boxes alone cannot carry this claim, and the sweep proved
+        // it: deleting the guard in `draw_board` outright left this test
+        // green, because `Frame::hit` drops an empty rect on its own -- so the
+        // absence of a box is evidence about the toolkit, not about us. The
+        // 144 zero-sized fills and 144 labels the guard exists to suppress
+        // would all still have been pushed. Ask about the painting instead.
+        assert!(
+            !fills(&f).iter().any(|&(_, c)| c == TILE_BG
+                || c == TILE_BG_FREE
+                || c == TILE_SELECTED
+                || c == TILE_HINT
+                || c == TILE_SHADOW),
+            "a window with no room for a tile still painted tiles"
         );
     }
     // ════════════════════════════════════════════════════════════════

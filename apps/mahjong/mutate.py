@@ -231,10 +231,16 @@ MUTATIONS = [
         ],
     ),
     (
-        "a window with no room left draws tiles of a negative size",
-        "            (inner.w / span_w).min(inner.h / span_h).max(0.0)",
+        # Was "a window with no room left draws tiles of a negative size",
+        # deleting a `.max(0.0)` on the ratio. It could not be made to bind:
+        # `inset` returns no negative side, so neither ratio is ever negative.
+        # The floor is gone from the program rather than left as a guard no
+        # test can reach. What is worth mutating here is the choice of the
+        # *smaller* ratio, which is what keeps the turtle inside the board.
+        "the tile is solved from whichever side has more room, so the turtle overflows",
         "            (inner.w / span_w).min(inner.h / span_h)",
-        ["a_window_with_no_room_for_a_tile_draws_no_tiles_rather_than_zero_sized_ones"],
+        "            (inner.w / span_w).max(inner.h / span_h)",
+        ["the_turtle_fits_inside_the_board_at_every_size"],
     ),
     (
         "the tile is square, so its face is not a mahjong tile",
@@ -270,9 +276,14 @@ MUTATIONS = [
         ["the_turtle_box_is_exactly_the_tiles_it_contains"],
     ),
     (
-        "the tiles are not shifted back to the turtle's own top edge",
+        # Not `self.turtle.y + y * self.tile_w`, which was the first try: the
+        # topmost tile in this deal is layer 0 row 0, whose offset is zero, so
+        # `min_y` is zero and deleting the subtraction changes nothing. It
+        # survived by being equivalent. Subtracting the *other* axis's minimum
+        # is the same mistake with a number that is not zero.
+        "the tiles are shifted back by the wrong axis's minimum",
         "            self.turtle.y + (y - min_y) * self.tile_w,",
-        "            self.turtle.y + y * self.tile_w,",
+        "            self.turtle.y + (y - min_x) * self.tile_w,",
         ["the_turtle_box_is_exactly_the_tiles_it_contains"],
     ),
     (

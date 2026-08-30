@@ -840,7 +840,21 @@ struct DirRecord {
 // coarse round-trip battery in `kernel/src/fs/zip.rs::self_test`, because
 // `kernel/Cargo.toml` sets `test = false` and the boot battery is the only
 // thing that exercises this code linked against the kernel's allocator.
+//
+// The lint allowances are the ones `deflate/src/lib.rs` carries, for the same
+// reason: a test asserts on data it built itself, so indexing it, slicing it and
+// unwrapping it *are* the assertion — a `.get()?` that returned early instead of
+// panicking would turn a failing test into a passing one. This block was simply
+// never added here, which left 76 warnings standing in a workspace whose value
+// depends on a warning meaning something.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use alloc::vec;

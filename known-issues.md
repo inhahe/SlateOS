@@ -98333,7 +98333,7 @@ section, alongside 26 other `h`/`H` cases.)
 
 ---
 
-## TD-B-sh-IS-NOT-A-SHELL — `if`, `while`, `case`, functions, `$(())`, globs, here-docs and backticks are all absent, non-ASCII text is corrupted, and `yes | head -2` hangs forever (lane B, 2026-08-30) — **OPEN**
+## TD-B-sh-IS-NOT-A-SHELL — `if`, `while`, `case`, functions, `$(())`, globs, here-docs and backticks are all absent, non-ASCII text is corrupted, and `yes | head -2` hangs forever (lane B, 2026-08-30) — **FIXED 2026-08-30**
 
 **In short:** `userspace/coreutils/src/bin/sh.rs` is the program that ships as
 `sh` — the thing an init script, a `Makefile` recipe and a `system()` call all
@@ -98445,3 +98445,46 @@ bash-superset shell. Small, therefore — but a shell that cannot run
 | The line-scanner | same file, `execute_script`, `execute_if`, `execute_while`, `execute_for` |
 | The umbrella | `TD-B-ARGV-IS-DECODED-AS-UTF-8-AND-A-BAD-BYTE-IS-A-PANIC`, `scripts/argv-utf8-baseline.txt` |
 | The reference | `dash` under WSL; harness to be `scripts/sh-diff.sh` |
+
+### Fixed 2026-08-30 — `5ae8dfc41` (the rewrite) and `44027020a` (the certification)
+
+The file is now ~6,000 lines built as the four classical stages: `Lexer` →
+`Parser` → `Shell::expand_word` → `Shell::run_list`, in `&[u8]` from `args_os`
+to the `exec`. Every row of the measured table above passes, and so does the
+whole of what the header advertised.
+
+**The evidence is `scripts/sh-diff.sh`**, written for this and now the standing
+gate. It runs ours and dash over ~225 cases and compares **four** things byte
+for byte — stdout, exit status, stderr, and the files the case left on disk —
+and reports `217 passed, 0 differed, 8 differ on purpose`. `OURS=/bin/dash`
+runs it against itself, which is what keeps the two normalisations honest: it
+must report zero differences, and it does.
+
+Only two fields are normalised away, both on dash's side only, because neither
+is comparable and neither is ours to imitate: the `sh: <line>: ` prefix dash
+puts on a diagnostic, and dash's private abbreviated `strerror` table, which
+says `No such file` where every other program on the system — and POSIX — says
+`No such file or directory`. The normaliser runs over stdout and the disk files
+as well as stderr, since `2>&1`, `2>err` and `exec 2>log` move a diagnostic
+between all three.
+
+**The eight deliberate differences** are `trap`, `getopts`, aliases, `times`,
+`readonly` and `local` (absent by scope — `design-decisions.md` §72 puts them
+in `osh`), plus two wordings where dash is the outlier and we follow bash and
+ksh: `echo $(( ))` is `0` here where dash calls it a syntax error, and a failed
+`cd` names the errno (`cd: /nonexistent-dir: No such file or directory`) rather
+than dash's `cd: can't cd to …`.
+
+**Three limitations remain**, all documented in the module header and none
+reachable by a harness case:
+
+| | |
+|---|---|
+| `&` backgrounds only a single *external* command | no `fork`; a builtin, function or compound after `&` runs in the foreground and reports 0 (`Shell::run_background`) |
+| descriptors above 2 reach an external child on unix only | `Command` names three, the rest are installed between fork and exec by `extra_fds`, which has no Windows counterpart. In-process builtins see them everywhere |
+| `n>&-` hands a child the null device | not a genuinely closed descriptor, so a write is discarded rather than returning `EBADF` (`stdio_for`) |
+
+Both `argv-utf8` findings are gone with it — `sh.rs` is out of
+`scripts/argv-utf8-baseline.txt`, and `python scripts/argv-utf8.py --check`
+now prints **5 findings across 5 files** (`diff fetch logger patch ps`), down
+from 7 across 6.

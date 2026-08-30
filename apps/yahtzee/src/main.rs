@@ -397,6 +397,16 @@ fn f32_from_u32(v: u32) -> f32 {
     v as f32
 }
 
+/// The share of a scorecard row given over to the score column.
+///
+/// `Layout::solve` floors the card by inverting this, so the constant has to be
+/// the one `draw_row` actually uses -- two copies of `0.32` that drifted apart
+/// would floor the card for a column width the card does not have.
+const SCORE_SHARE: f32 = 0.32;
+
+/// The share of a scorecard row left for the category's name.
+const NAME_SHARE: f32 = 1.0 - SCORE_SHARE;
+
 /// The bands the window is divided into, solved from its live size.
 #[derive(Clone, Copy, Debug)]
 struct Layout {
@@ -434,8 +444,21 @@ impl Layout {
 
         // The scorecard is floored so its longest row -- a name, a gap and a
         // score -- still fits, and capped at half the window so it can never
-        // crowd the dice off a narrow one.
-        let card_w = (w * 0.44).clamp(170.0, 380.0).min(w / 2.0);
+        // crowd the dice off a narrow one. The floor is *measured* from the
+        // longest category name at the font this window actually uses. It used
+        // to be the constant 170, which is a number that was right for one
+        // font size and silently wrong for every other: a mutation replacing
+        // the whole clamp with the bare share went unnoticed, because at every
+        // size the app was tested at the `.min(w / 2.0)` cap won and the floor
+        // never applied at all.
+        let longest = Category::ALL
+            .iter()
+            .map(|c| text::measure(c.name(), font, FontWeightHint::Bold))
+            .fold(0.0_f32, f32::max);
+        // Invert `draw_row`: the name gets `NAME_SHARE` of the row, less the
+        // row's own inset on each side; the row is the card less its padding.
+        let needed = (longest + pad * 1.2) / NAME_SHARE + pad * 2.0;
+        let card_w = (w * 0.44).clamp(needed, needed * 1.6).min(w / 2.0);
         let left = Rect::new(body.x, body.y, (body.w - card_w).max(0.0), body.h);
         let card = Rect::new(left.right(), body.y, card_w.min(body.w), body.h);
 
@@ -1345,7 +1368,7 @@ impl Yahtzee {
         // The score column is a share of the row rather than a fixed 80 pixels
         // from its right edge, which at a narrow card left the name and the
         // number on top of one another.
-        let score_w = (band.w * 0.32).min(band.w);
+        let score_w = (band.w * SCORE_SHARE).min(band.w);
         let name_x = band.x + l.pad * 0.6;
         let score_x = band.right() - score_w;
         let text_y = band.y + (band.h - l.font).max(0.0) / 2.0;
@@ -1737,12 +1760,18 @@ mod tests {
 
     /// Shapes the layout has to survive: the default, a small window, a large
     /// one, a tall narrow one and a wide short one.
-    const SIZES: [(f32, f32); 5] = [
+    /// The last entry is the shape where the scorecard's *floor* is the
+    /// binding constraint: at 350 wide the share `w * 0.44` gives 154, the
+    /// half-window cap allows 175, and the measured floor is 171. Every other
+    /// size here is decided by the share or the cap, so without this one the
+    /// floor is dead code no test can see.
+    const SIZES: [(f32, f32); 6] = [
         (WINDOW_WIDTH, WINDOW_HEIGHT),
         (400.0, 300.0),
         (1600.0, 1000.0),
         (300.0, 900.0),
         (1200.0, 260.0),
+        (350.0, 1000.0),
     ];
 
     /// Floating point slack: a pixel is the smallest thing anyone can see, so
@@ -1985,6 +2014,13 @@ mod tests {
             let boxes = die_boxes(&test_game(), size);
             let first_gap = boxes[1].x - boxes[0].right();
             assert!(first_gap > -EPS, "{size:?}: the dice overlap");
+            // "Not overlapping" is not "spaced": edge-to-edge dice satisfy a
+            // zero gap and read as one long block with lines drawn on it.
+            assert!(
+                first_gap >= boxes[0].w * 0.1 - EPS,
+                "{size:?}: the dice are {first_gap} apart and {} wide, so they touch",
+                boxes[0].w
+            );
             for i in 1..NUM_DICE {
                 let gap = boxes[i].x - boxes[i - 1].right();
                 assert!(
@@ -2015,6 +2051,58 @@ mod tests {
                 row.bottom() <= band.bottom() + EPS,
                 "{w}x{h}: the row {row:?} runs below its band {band:?}"
             );
+        }
+    }
+
+    #[test]
+    fn the_dice_are_centred_in_their_band() {
+        // The row is narrower than its band whenever the band's height is what
+        // limits the die, which is most shapes. Pinned to the left it leaves
+        // all of the slack on one side, and the roll button -- which centres
+        // itself on the row -- goes with it.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            let (band, _, _) = l.left_bands();
+            let boxes = die_boxes(&test_game(), (w, h));
+            let left = boxes[0].x - band.x;
+            let right = band.right() - boxes[NUM_DICE - 1].right();
+            assert!(
+                (left - right).abs() < 1.0,
+                "{w}x{h}: {left} of slack to the left of the dice and {right} to the right"
+            );
+        }
+    }
+
+    #[test]
+    fn the_held_label_under_a_die_stays_inside_the_dice_band() {
+        // `Dice::fit` keeps 3.4 label-heights of the band back for the number
+        // above a die and the "HELD" under it. Fit the die to the whole band
+        // and the die still sits inside it -- but its "HELD" is painted below
+        // the band, on top of the roll button.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            let (band, _, _) = l.left_bands();
+            let mut g = test_game();
+            g.held = [true; NUM_DICE];
+            let labels: Vec<f32> = painted_text(&g, (w, h))
+                .into_iter()
+                .filter(|(t, _, _)| t == "HELD")
+                .map(|(_, _, y)| y)
+                .collect();
+            assert_eq!(
+                labels.len(),
+                NUM_DICE,
+                "{w}x{h}: {} dice are held but {} say so",
+                NUM_DICE,
+                labels.len()
+            );
+            for y in labels {
+                assert!(
+                    y + l.small <= band.bottom() + EPS,
+                    "{w}x{h}: a HELD label runs to {} past the dice band {band:?}",
+                    y + l.small
+                );
+            }
         }
     }
 
@@ -2064,9 +2152,22 @@ mod tests {
             })
             .collect();
         for (i, die) in die_boxes(&g, SIZES[0]).into_iter().enumerate() {
-            let (cx, cy) = die.centre();
+            // The claim has to be a fill that fits *inside* the die, not one
+            // that merely covers its centre: the window paints its own
+            // background across the whole screen first, so "a fill covers this
+            // point" is true of every point in the app and says nothing at all
+            // about the die. A die that draws nothing then passes a test whose
+            // whole purpose is to notice that it drew nothing.
+            let grown = Rect::new(die.x - 1.0, die.y - 1.0, die.w + 2.0, die.h + 2.0);
             assert!(
-                filled.iter().any(|r| r.contains(cx, cy)),
+                filled.iter().any(|r| {
+                    r.w > 0.0
+                        && r.h > 0.0
+                        && r.x >= grown.x
+                        && r.y >= grown.y
+                        && r.right() <= grown.right()
+                        && r.bottom() <= grown.bottom()
+                }),
                 "die {i} has a hit box at {die:?} and nothing painted in it"
             );
         }
@@ -2091,6 +2192,16 @@ mod tests {
             assert!(
                 turn.right() <= high.x + EPS,
                 "{size:?}: the counter {turn:?} runs into the high score {high:?}"
+            );
+            // "Does not overlap" is only half of the claim. A counter placed a
+            // fixed 130 from the left edge does not overlap a title that
+            // happens to be shorter than that at every size the app was tried
+            // at -- it just leaves a hole after the title that grows and
+            // shrinks with the font. The counter follows the title.
+            let gap = turn.x - title.right();
+            assert!(
+                gap < Layout::solve(size.0, size.1).pad * 3.0,
+                "{size:?}: {gap} of empty header between the title {title:?} and the counter {turn:?}"
             );
         }
     }
@@ -2177,6 +2288,26 @@ mod tests {
     }
 
     #[test]
+    fn the_button_grows_with_its_text() {
+        // Both windows are the same width, so the only thing that differs is
+        // the font the layout picks for the height. A constant-width button
+        // passes "wide enough for its widest legend" at every size the app is
+        // tried at -- 140 pixels happens to be enough for all of them -- and
+        // still be wrong, because it is wide enough by luck rather than by
+        // measurement. This is the claim that says it was measured.
+        let short = probe::rect_of_sized(&test_game(), Target::RollButton, (820.0, 400.0))
+            .expect("a button");
+        let tall = probe::rect_of_sized(&test_game(), Target::RollButton, (820.0, 1000.0))
+            .expect("a button");
+        assert!(
+            tall.w > short.w + 1.0,
+            "the button is {} wide at an 8.8pt font and {} at a 17pt one",
+            short.w,
+            tall.w
+        );
+    }
+
+    #[test]
     fn the_button_is_the_same_box_whatever_it_says() {
         // A button that moves under the cursor between the second roll and the
         // third is a button the player misses.
@@ -2250,25 +2381,42 @@ mod tests {
 
     #[test]
     fn every_category_has_a_box_of_its_own() {
-        let g = test_game();
-        let boxes = category_boxes(&g, SIZES[0]);
-        assert_eq!(boxes.len(), NUM_CATEGORIES, "{boxes:?}");
-        for (n, (i, _)) in boxes.iter().enumerate() {
-            assert_eq!(*i, n, "the categories are not in order: {boxes:?}");
+        // Checked at every size, not just the default one. The rows' height is
+        // a share of the card so that all thirteen fit; a fixed row height
+        // fits them in a 700-tall window and drops the last four in a 300-tall
+        // one, and the card's own "do not draw past the bottom" guard means it
+        // does that silently -- nothing overlaps, there are simply fewer
+        // categories to play.
+        for size in SIZES {
+            let g = test_game();
+            let boxes = category_boxes(&g, size);
+            assert_eq!(boxes.len(), NUM_CATEGORIES, "{size:?}: {boxes:?}");
+            for (n, (i, _)) in boxes.iter().enumerate() {
+                assert_eq!(
+                    *i, n,
+                    "{size:?}: the categories are out of order: {boxes:?}"
+                );
+            }
         }
     }
 
     #[test]
     fn every_category_box_carries_that_category_s_name() {
         // A row is not the row it claims to be unless its name is in it.
+        //
+        // The expected name is indexed straight out of `Category::ALL` rather
+        // than fetched through `Category::at`, which is the function the
+        // drawing pass uses. Asking the same function the same question gives
+        // the same wrong answer: an `at` that returned the *next* category
+        // relabelled every row and this test agreed with it, because the test
+        // had shifted by one too.
         let g = test_game();
         for (i, band) in category_boxes(&g, SIZES[0]) {
-            let cat = Category::at(i).expect("a category");
+            let name = Category::ALL[i].name();
             let found = texts_within(&g, SIZES[0], band);
             assert!(
-                found.iter().any(|t| t == cat.name()),
-                "box {i} should be {:?} and reads {found:?}",
-                cat.name()
+                found.iter().any(|t| t == name),
+                "box {i} should be {name:?} and reads {found:?}"
             );
         }
     }
@@ -2335,6 +2483,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn no_category_name_is_painted_into_a_box_too_narrow_to_show_it() {
+        // This is the claim the scorecard's floor exists to make, and the one
+        // the floor's old magic 170 could not make: at 350x1000 the share
+        // gives the card 154, which is 17 short of the room "Sm. Straight"
+        // needs, and the name would be ellipsised down to "Sm. Str...".
+        //
+        // Each name is checked against the `max_width` *it was painted with*
+        // and the size and weight *it was painted at*, so nothing here
+        // restates the layout's arithmetic.
+        //
+        // Sizes where the half-window cap is what decided the card are
+        // skipped: on those the window is genuinely too narrow for a full
+        // card and cutting the name is the right answer, not a bug.
+        let names: Vec<&str> = Category::ALL.iter().map(|c| c.name()).collect();
+        let mut checked = 0_usize;
+        for (w, h) in SIZES {
+            if Layout::solve(w, h).card.w + EPS >= w / 2.0 {
+                continue;
+            }
+            for c in test_game().draw((w, h)).commands() {
+                let RenderCommand::Text {
+                    text,
+                    font_size,
+                    font_weight,
+                    max_width: Some(max_width),
+                    ..
+                } = c
+                else {
+                    continue;
+                };
+                if !names.contains(&text.as_str()) {
+                    continue;
+                }
+                let need = text::measure(text, *font_size, *font_weight);
+                assert!(
+                    *max_width >= need - EPS,
+                    "{w}x{h}: {text:?} needs {need} but is painted into {max_width}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no category name was painted at any size");
     }
 
     #[test]
@@ -2550,6 +2743,14 @@ mod tests {
         let mut g = game_with_dice([5, 5, 5, 2, 1]);
         let fives = Category::Fives.index();
         probe::click(&mut g, Target::Category(fives));
+        // Scoring ends the turn, which zeroes the roll counter -- and a box
+        // cannot be spent before the dice have been rolled at all. Without
+        // this the second click was refused by the "you have not rolled yet"
+        // guard and the "already spent" guard was never reached, so deleting
+        // the spent check outright left the test still passing. Roll again,
+        // and a *different* hand, so a second score would be visible.
+        g.dice = [5, 5, 5, 5, 5];
+        g.roll_number = 1;
         let before = g.scores;
         assert_eq!(
             probe::click(&mut g, Target::Category(fives)),

@@ -31,21 +31,45 @@ MUTATIONS = [
     # mutations is a faithful restoration of what the file said before.
     (
         "the scorecard is a fixed width again, so it swallows a narrow window",
-        "        let card_w = (w * 0.44).clamp(170.0, 380.0).min(w / 2.0);",
+        "        let card_w = (w * 0.44).clamp(needed, needed * 1.6).min(w / 2.0);",
         "        let card_w = 320.0;",
         ["the_scorecard_never_takes_more_than_half_the_window"],
     ),
     (
         "the scorecard is never capped, so it crowds the dice out",
-        "        let card_w = (w * 0.44).clamp(170.0, 380.0).min(w / 2.0);",
-        "        let card_w = (w * 0.44).clamp(170.0, 380.0);",
+        "        let card_w = (w * 0.44).clamp(needed, needed * 1.6).min(w / 2.0);",
+        "        let card_w = (w * 0.44).clamp(needed, needed * 1.6);",
         ["the_scorecard_never_takes_more_than_half_the_window"],
     ),
     (
         "the card is never floored, so a narrow window gets a sliver of a card",
+        "        let card_w = (w * 0.44).clamp(needed, needed * 1.6).min(w / 2.0);",
+        "        let card_w = (w * 0.44).min(needed * 1.6).min(w / 2.0);",
+        ["no_category_name_is_painted_into_a_box_too_narrow_to_show_it"],
+    ),
+    (
+        "the card's floor is the old magic constant rather than a measurement",
+        "        let card_w = (w * 0.44).clamp(needed, needed * 1.6).min(w / 2.0);",
         "        let card_w = (w * 0.44).clamp(170.0, 380.0).min(w / 2.0);",
-        "        let card_w = (w * 0.44).min(380.0).min(w / 2.0);",
-        ["the_rows_are_wide_enough_for_a_name_and_a_score"],
+        ["no_category_name_is_painted_into_a_box_too_narrow_to_show_it"],
+    ),
+    (
+        "the floor forgets the row's own inset, so the longest name is clipped",
+        "        let needed = (longest + pad * 1.2) / NAME_SHARE + pad * 2.0;",
+        "        let needed = longest / NAME_SHARE + pad * 2.0;",
+        ["no_category_name_is_painted_into_a_box_too_narrow_to_show_it"],
+    ),
+    (
+        "the floor forgets the card's padding, so the longest name is clipped",
+        "        let needed = (longest + pad * 1.2) / NAME_SHARE + pad * 2.0;",
+        "        let needed = (longest + pad * 1.2) / NAME_SHARE;",
+        ["no_category_name_is_painted_into_a_box_too_narrow_to_show_it"],
+    ),
+    (
+        "the floor is measured from the shortest name rather than the longest",
+        "            .fold(0.0_f32, f32::max);",
+        "            .fold(f32::INFINITY, f32::min);",
+        ["no_category_name_is_painted_into_a_box_too_narrow_to_show_it"],
     ),
     (
         "the two columns are laid out independently, so they overlap",
@@ -60,10 +84,18 @@ MUTATIONS = [
         ["the_header_sits_above_both_columns_and_never_overlaps_them"],
     ),
     (
-        "the padding is a share of the width alone, so a short window loses its height to it",
+        "the padding is a share of the width alone, so a short window loses its header to it",
         "        let pad = (w.min(h) * 0.02).clamp(2.0, 16.0).min(w.min(h) / 2.0);",
         "        let pad = w * 0.02;",
-        ["the_dice_the_button_and_the_help_stack_without_overlapping"],
+        # Named for the header, not the left column, because that is what the
+        # break actually costs.  At 1200x260 the width-only padding is 24 and
+        # the header is 23.4 tall, so insetting it leaves nothing and the
+        # title, the turn and the high score are not painted at all.  The left
+        # column survives the same padding: its bands are stacked through
+        # `.max()` guards that collapse to zero height rather than overlapping,
+        # which is the behaviour that band-stacking test asserts and it keeps
+        # on asserting it.
+        ["the_header_boxes_stay_within_the_header_band"],
     ),
     # -- The left column -----------------------------------------------
     #
@@ -126,7 +158,7 @@ MUTATIONS = [
         "the row leaves no room for the labels above and below a die",
         "        let by_h = (area.h - label * 3.4).max(0.0);",
         "        let by_h = area.h;",
-        ["the_dice_stay_inside_the_band_the_layout_gave_them"],
+        ["the_held_label_under_a_die_stays_inside_the_dice_band"],
     ),
     (
         "the gap is a constant, so five dice in a narrow window are swallowed by it",
@@ -144,7 +176,11 @@ MUTATIONS = [
         "the row is pinned to the left of its band rather than centred",
         "                area.x + (area.w - row_w).max(0.0) / 2.0,",
         "                area.x,",
-        ["the_button_sits_under_the_dice_it_rolls"],
+        # Not the button test, though that was the first guess: the button
+        # centres itself on the dice *row*, so pinning the row left carries
+        # the button along with it and the two stay lined up.  Only a test
+        # that measures the row against its band can see this.
+        ["the_dice_are_centred_in_their_band"],
     ),
     (
         "a die is drawn as wide as its band, so the five overlap",
@@ -261,10 +297,14 @@ MUTATIONS = [
         ["the_rows_are_the_same_height_and_do_not_overlap"],
     ),
     (
-        "the rows are a fixed height, so a short card draws past its bottom",
+        "the rows are a fixed height, so a short card drops the last categories",
         "        let row_h = (area.h / count).clamp(l.small, l.font * 2.2);",
         "        let row_h = 28.0;",
-        ["the_rows_stay_inside_the_scorecard_column"],
+        # Not "draws past its bottom", which was the first guess: the card's
+        # own guard stops drawing once a row would fall off the end, so the
+        # damage is silent rather than visible.  At 400x300 exactly nine of the
+        # eighteen rows fit and the player simply cannot reach Yahtzee.
+        ["every_category_has_a_box_of_its_own"],
     ),
     (
         "the row height has no floor, so a short window squeezes them flat",
@@ -284,7 +324,7 @@ MUTATIONS = [
     ),
     (
         "the score column is a fixed 80 pixels, so a narrow card overlaps the name",
-        "        let score_w = (band.w * 0.32).min(band.w);",
+        "        let score_w = (band.w * SCORE_SHARE).min(band.w);",
         "        let score_w = 80.0;",
         ["the_rows_are_wide_enough_for_a_name_and_a_score"],
     ),
@@ -335,14 +375,27 @@ MUTATIONS = [
         ["clicking_the_button_after_the_last_box_starts_a_new_game"],
     ),
     (
+        # Splitting the variant out of the ignore group rather than deleting it
+        # from the group: deleting a variant from a `match` arm leaves the
+        # `match` non-exhaustive, and a mutation that will not compile tests
+        # nothing.  The arm has to still be there and do the wrong thing.
         "a click on a tally row spends the category nearest it",
-        "            | Target::Tally(_)",
-        "            | Target::Hint(9)",
+        "            Target::Title\n            | Target::Turn",
+        "            Target::Tally(_) => {\n"
+        "                let _spent = self.score_category(self.selected_category);\n"
+        "                EventResult::Consumed\n"
+        "            }\n"
+        "            Target::Title\n"
+        "            | Target::Turn",
         ["every_tally_row_is_read_only"],
     ),
     (
         "a click on the title is taken for a move",
         "            Target::Title\n            | Target::Turn",
+        "            Target::Title => {\n"
+        "                let _rolled = self.roll();\n"
+        "                EventResult::Consumed\n"
+        "            }\n"
         "            Target::Turn",
         ["clicking_the_furniture_is_not_a_move"],
     ),

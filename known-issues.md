@@ -96819,3 +96819,257 @@ hard error is a user-visible ABI change for callers outside lane A. Any
 existing userspace passing a special bit succeeds today and would begin
 failing. That makes it lane B and lane C's business too, so it goes to them
 with the `SYS_FS_OPENAT2` reply rather than being changed unilaterally.
+
+---
+
+## A-FILE-HANDLES-ARE-SEQUENTIAL-AND-UNOWNED-SO-ANY-PROCESS-CAN-READ-ANY-OPEN-FILE
+
+**Status:** OPEN · **Lane:** A · **Filed:** 2026-08-30 · **Severity:** high
+(cross-process confidentiality and integrity)
+
+**In short:** When a program opens a file, the kernel hands it back a number —
+a "handle" — and the program uses that number to read and write the file.
+Those numbers are handed out in plain counting order: 1, 2, 3, and so on, for
+the whole machine rather than per program. Nothing checks that the program
+using a number is the one that was given it. So any program can simply try
+number 1, number 2, number 3, and read — or overwrite, or truncate — whatever
+files other programs happen to have open, including files it would never have
+been allowed to open itself.
+
+**Why the design says this must not happen.** `CLAUDE.md` states the rule as
+"capability-based security from day one. Every kernel object accessed via
+unforgeable handles. No ambient authority." A small counting number that any
+program can guess is the textbook example of a *forgeable* handle, and being
+able to act on it merely by naming it is the textbook example of *ambient
+authority* (permission you get by existing, rather than by holding a token
+someone gave you).
+
+**The kernel already knows this rule and already applies it — just not here.**
+`pcb::owns_ipc_handle` (`kernel/src/proc/pcb.rs:6430`) exists precisely for
+this, and its own doc comment states the premise the file path violates:
+
+> Most IPC handle values in this kernel are treated as self-authorising — the
+> handle *is* the capability — **which is sound when the value is
+> unguessable.** It is not sound for a `ResourceType::Pty` handle, whose raw
+> form is `(tty_id << 1) | end` and therefore trivially enumerable […]
+
+That reasoning is exactly right, and it transfers verbatim to files. A pty
+handle is enumerable because it is derived from a small id. A **file** handle
+is enumerable because `NEXT_HANDLE` (`kernel/src/fs/handle.rs:191`) is an
+`AtomicU64::new(1)` advanced by `fetch_add(1)` — it is *literally* a counter.
+The stated soundness condition ("unguessable") is not met, so the
+self-authorising treatment is not justified for `ResourceType::File`.
+
+**Measured scope.** No fs syscall that consumes a handle checks either
+ownership or a capability. Audited across `kernel/src/syscall/handlers.rs`:
+
+| Syscall | capability check | ownership check |
+|---|---|---|
+| `sys_fs_read` | no | no |
+| `sys_fs_write` | no | no |
+| `sys_fs_close` | no | no |
+| `sys_fs_seek` | no | no |
+| `sys_fs_fstat` | no | no |
+| `sys_fs_ftruncate` | no | no |
+| `sys_fs_dup` | no | no |
+
+`grep -rn "owns_ipc_handle" kernel/src | grep -i file` returns nothing: the
+predicate is used for `Pty` (`handlers.rs:5684`, `spawn.rs:32064`) and in
+`spawn.rs:1675`, and never for files.
+
+**The `require_cap_type` gate does not cover this**, which is the part most
+likely to be misread. `sys_fs_open_mode` does gate on
+`require_cap_type(File, READ)` — but that gates *opening*. An attacker
+exercising this bug never opens anything; it calls `sys_fs_read` directly on a
+guessed number, and `sys_fs_read` has no gate at all. So holding no File
+capability whatsoever is not a defence.
+
+**Reproduce:** from a ring-3 program, loop `h` over 1..64 calling
+`SYS_FS_READ(h, buf, 64)` and print every handle that returns > 0. Any file a
+service left open — a config, a key, a log being appended — reads back. The
+same loop with `SYS_FS_WRITE` or `SYS_FS_FTRUNCATE` corrupts them. (No such
+test exists yet; writing it is part of the fix, and it belongs in ring 3 for
+the same reason the `openat2` test does — kernel context has no fd table.)
+
+**Proper fix:** gate every handle-consuming fs syscall on
+`pcb::owns_ipc_handle(pid, ResourceType::File, handle)`, returning
+`InvalidHandle` (**not** `PermissionDenied`) on failure, so the reply cannot be
+used to distinguish "someone else's live handle" from "no such handle" — the
+same reasoning that puts `beneath_fragment_ok` before the dirfd lookup in
+`sys_openat_beneath`. The check must be conditional on `caller_pid()` being
+`Some`, because kernel-context callers legitimately hold handles that were
+never registered to a pid.
+
+**Why it is not a one-line change**, and what has to be verified first: the
+ownership records must already be complete on every path that legitimately
+transfers a handle, or the gate will break working programs. Specifically
+`fork` (`pcb::snapshot_ipc_handles` refcount-duplicates — looks correct),
+`spawn`'s `fd_map`, and `sys_fs_dup` (which returns a *new* handle and must
+register it to the caller — worth checking that it does). Each needs
+confirming before the gate goes in, and the whole change needs a boot test,
+since a false refusal here breaks every program in lanes B and C at once.
+
+**Relationship to `SYS_FS_OPENAT2`** (lane B's pending request): this bug is
+load-bearing on that design. Its `dirfd` argument is the *containment base* for
+`RESOLVE_BENEATH`, so an unowned handle means a walk confined under a directory
+the caller was never granted — which succeeds, returns a valid descriptor, and
+looks exactly like working confinement. That is the identical failure mode lane
+B asked for the ring-3 marshalling test to rule out, arriving through a
+different door. The gate should therefore land before, or with, that syscall.
+
+---
+
+## A-SYS-FS-DUP-NEVER-REGISTERS-ITS-NEW-HANDLE-SO-EVERY-DUP-LEAKS-ONE
+
+**Status:** OPEN · **Lane:** A · **Filed:** 2026-08-30 · **Severity:** medium
+(unbounded resource leak; also blocks the fix for
+`A-FILE-HANDLES-ARE-SEQUENTIAL-AND-UNOWNED-…`)
+
+**In short:** Duplicating an open file — what a program does when it wants a
+second, independent way to refer to the same file — creates a brand-new
+bookkeeping entry in the kernel, but the kernel never writes down which process
+owns it. Cleanup when a program exits works by walking the list of things that
+program was recorded as owning, so a duplicate is never on that list and is
+never cleaned up. Every duplicate a program makes therefore stays behind after
+it exits, for as long as the machine is up.
+
+**The chain, with the specific lines:**
+
+1. `sys_fs_dup` (`kernel/src/syscall/handlers.rs`) calls
+   `crate::fs::handle::dup(handle)` and returns the result. It does **not**
+   call `pcb::register_ipc_handle` — compare `sys_fs_open_mode`, which does.
+2. `fs::handle::dup` (`kernel/src/fs/handle.rs`) is not a refcounting dup: it
+   reads the source entry, drops the lock, and calls `allocate_handle` /
+   `allocate_dir_handle`, both of which take a fresh number from `NEXT_HANDLE`.
+   So the returned value is a genuinely new `OPEN_FILES` entry, not another
+   reference to an existing one.
+3. Exit cleanup (`pcb.rs:6241-6249`) does
+   `core::mem::take(&mut proc.ipc_handles)` and hands *that list* to
+   `ipc::cleanup_handles`. Nothing else closes handles at exit.
+
+An entry that was never added at step 1 is not in the list at step 3. It is
+therefore never closed, and `OPEN_FILES` grows monotonically across the boot.
+
+**Note the contrast that shows this is an oversight rather than a policy:**
+`sys_fs_close` deliberately calls `pcb::deregister_ipc_handle`, with a comment
+explaining it is "so the handle is not double-closed by `cleanup_handles` on
+process exit." The close path is written with full awareness that
+`ipc_handles` drives exit cleanup. The dup path simply never got the matching
+registration.
+
+**A second consequence beyond the leak:** the duplicate also survives its
+creator, so its number stays live and readable by anyone — which makes this
+strictly worse under
+`A-FILE-HANDLES-ARE-SEQUENTIAL-AND-UNOWNED-SO-ANY-PROCESS-CAN-READ-ANY-OPEN-FILE`.
+A leaked handle to a file a now-dead privileged service had open is exactly
+the thing that bug lets an unprivileged process find by counting.
+
+**Proper fix:** in `sys_fs_dup`, register the returned handle to
+`caller_pid()` exactly as `sys_fs_open_mode` does:
+
+```rust
+if let Some(pid) = caller_pid() {
+    pcb::register_ipc_handle(pid, ResourceType::File, new_handle);
+}
+```
+
+Conditional on `caller_pid()` because kernel-context callers have no pid, which
+is the same condition the open path uses.
+
+**Why this must land before the ownership gate**, not after: with the gate in
+and this unfixed, a dup'd handle would be unowned and so the very next
+`SYS_FS_READ` on it would be refused — turning a leak into a visible breakage
+of every program that dups. Fixing the registration first makes the gate a
+no-op for correct programs.
+
+**Also unaudited on the same axis:** `SYS_FS_HANDLE_PATH` consumes a handle
+with no ownership check and returns the file's full VFS path, which discloses
+the path of any open file in the system even to a caller that cannot read it.
+Covered by the gate in the other entry; noted here because it is a disclosure
+in its own right, not merely a missing check.
+
+### Correction (2026-08-30, same day): libc does not route `dup(2)` through this
+
+Checked after filing. `posix/src/fdtable.rs` (lane B) implements the whole
+POSIX dup family in its own fd table — a new fd entry pointing at the *same*
+kernel handle — and its module doc states outright that "the kernel's
+`SYS_FS_DUP`, which mints a fresh handle with an independent cursor, is
+reserved for cases that genuinely need a separate description; the POSIX dup
+family does not use it."
+
+Two things follow, and they cut in opposite directions:
+
+- **Severity is lower than filed.** No libc caller reaches `SYS_FS_DUP`, so
+  the leak is currently latent rather than active. Downgrade from medium to
+  **low-but-real**: it is a live trap for the first native caller, not a leak
+  happening today.
+- **The independent cursor is deliberate, not a bug.** My first reading was
+  that `sys_fs_dup` calling `dup` instead of `dup_shared` broke POSIX `dup(2)`
+  offset sharing. It does not, because it is not what implements `dup(2)`.
+  `SYS_FS_DUP` is a "clone this open file with a fresh cursor" primitive and is
+  correct as such. Recording this explicitly so the next reader does not
+  "fix" it by switching to `dup_shared` and silently changing its meaning.
+
+**The fix is unchanged and still worth making** — one `register_ipc_handle`
+call — because the leak is a property of the syscall, not of who calls it, and
+because it must be in place before the ownership gate lands or that gate will
+refuse the first native dup'd handle.
+
+**Worth noting for whoever implements a shared-description dup later:** neither
+existing primitive can serve a userspace `dup(2)` on its own. `dup` gives a new
+id but an independent cursor; `dup_shared` shares the cursor but returns *the
+same id*, which cannot be a distinct fd. A native shared-description dup would
+need a new id mapping to an existing `OpenFile` — an id → description
+indirection that `OPEN_FILES` (keyed handle → `OpenFile` directly) does not
+have today, even though `OpenFile.refcount` is documented for exactly that
+sharing. Lane B's fd table sidesteps this by keeping the indirection in
+userspace, which is why the gap has not bitten.
+
+### Addendum (2026-08-30): `spawn`'s `fd_map` reasons about this explicitly and gets files wrong
+
+The strongest single piece of evidence that this is a defect rather than a
+deliberate trust model is in `kernel/src/proc/spawn.rs:1615-1692`, where an
+`fd_map` entry `(fd_num, handle_type, parent_handle)` is duplicated into a
+child. The `PTY` arm gates on the parent's ownership and explains why:
+
+> A pty end is the one handle family in this loop whose raw value is
+> *guessable*: it is `(tty_id << 1) | end`, so without an ownership check any
+> process could name `2` and have the kernel hand its child a live master […]
+> Every `SYS_PTY_*` handler gates on `owns_ipc_handle` for exactly this
+> reason, and spawn is another way to obtain the handle, so it gates too.
+
+The `FILE` arm, twenty lines above it, is:
+
+```rust
+fd_handle_type::FILE => {
+    // Duplicate the file handle — child gets an independent copy.
+    crate::fs::handle::dup(parent_handle)
+}
+```
+
+No check. The claim "the one handle family in this loop whose raw value is
+guessable" is false: a `FILE` handle is `NEXT_HANDLE.fetch_add(1)` starting at
+1, which is *more* predictable than `(tty_id << 1) | end`, not less. So
+`spawn` with `fd_map = [(0, FILE, 3)]` hands a child a duplicate of whatever
+open file handle 3 happens to be, no matter which process owns it — a second
+route to the same authority, reachable by a caller that never issues a single
+`SYS_FS_*` call.
+
+This matters for how the fix is scoped: gating the seven fs syscalls is not
+sufficient. `spawn`'s `FILE` arm needs the same `options.parent != 0 &&
+!owns_ipc_handle(options.parent, ResourceType::File, parent_handle)` guard the
+`PTY` arm already has, and the pty comment needs correcting so it stops
+asserting files are safe.
+
+**Prerequisite audit is now complete** (the "must be verified first" list in
+the main entry above):
+
+| Path that transfers a File handle | Registers to the receiver? |
+|---|---|
+| `sys_fs_open` / `sys_fs_open_mode` | yes — `register_ipc_handle` on success |
+| `fork` (`fork.rs:494-524`) | yes — snapshot, `dup_one` each, `fork_create` takes ownership |
+| `spawn` `fd_map` (`spawn.rs:1716`) | yes — `register_ipc_handle(pid, rt, child_handle)` before push |
+| `sys_fs_dup` | **no** — see the sibling entry |
+
+So the ownership gate is safe to add once `sys_fs_dup` is fixed: three of the
+four transfer paths already maintain the records the gate would read.

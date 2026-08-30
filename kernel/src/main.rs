@@ -1962,6 +1962,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 coverage of openat2's dirfd marshalling and RESOLVE_BENEATH
+    // containment.  This has to be a ring-3 test: kernel context has no fd
+    // table, so the in-kernel openat self-test gets EBADF before
+    // dirfd_to_guest_dir translates anything.  See self_test_openat2_beneath
+    // for why the probes assert on file *content* rather than on success.
+    if let Err(e) = proc::spawn::self_test_openat2_beneath() {
+        serial_println!(
+            "WARNING: openat2 RESOLVE_BENEATH (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     {
         #[inline(never)]
         fn case() {

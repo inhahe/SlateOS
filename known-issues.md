@@ -96953,8 +96953,35 @@ with the `SYS_FS_OPENAT2` reply rather than being changed unilaterally.
 
 ## A-FILE-HANDLES-ARE-SEQUENTIAL-AND-UNOWNED-SO-ANY-PROCESS-CAN-READ-ANY-OPEN-FILE
 
-**Status:** OPEN · **Lane:** A · **Filed:** 2026-08-30 · **Severity:** high
+**Status:** FIXED 2026-08-30 (`b51e2d237` the gate, `e601c5bc5` the probe's
+buffer) · **Lane:** A · **Filed:** 2026-08-30 · **Severity:** high
 (cross-process confidentiality and integrity)
+
+**How it was fixed.** `require_file_handle_owner` in `syscall/handlers.rs`
+checks `pcb::owns_ipc_handle(caller, ResourceType::File, handle)` and is
+applied to all eight consumers (`read`, `write`, `close`, `seek`, `fstat`,
+`ftruncate`, `handle_path`, `dup`) plus `spawn`'s `fd_map` FILE arm. The
+refusal is `InvalidHandle`, deliberately not `PermissionDenied`, so the errno
+cannot be used as an oracle for "is some other process holding handle N?".
+Kernel callers (`caller_pid() == None`) bypass, because they hold handles
+that were never registered against a pid and no user process is claiming
+authority — the same condition the pty arm uses.
+
+**How we know it is actually fixed**, rather than merely that a refusal was
+added: `proc::spawn::self_test_file_handle_ownership` performs the attack
+from ring 3 over the native ABI against a handle the kernel holds, and
+carries a *control* — it reads its own file first and checks the byte — so a
+kernel that refused everything would fail the test rather than pass it. Exit
+code `1` is reserved for "the foreign read succeeded" so the security failure
+can never be confused with a fixture problem. Verified green on the
+2026-08-30 boot: `[spawn]   file handle ownership (ring 3: foreign handle
+refused InvalidHandle, own handle still works, fd_map arm gated): OK`, with
+process 162 exiting 0 and process 163 logging `Failed to dup handle 59
+(type=0) for fd 0: InvalidHandle`.
+
+**The gate has to be a ring-3 test.** It is a deliberate no-op when
+`caller_pid()` is `None`, so a kernel-context test would exercise only the
+bypass and pass unconditionally.
 
 **In short:** When a program opens a file, the kernel hands it back a number —
 a "handle" — and the program uses that number to read and write the file.
@@ -97050,9 +97077,25 @@ different door. The gate should therefore land before, or with, that syscall.
 
 ## A-SYS-FS-DUP-NEVER-REGISTERS-ITS-NEW-HANDLE-SO-EVERY-DUP-LEAKS-ONE
 
-**Status:** OPEN · **Lane:** A · **Filed:** 2026-08-30 · **Severity:** medium
-(unbounded resource leak; also blocks the fix for
+**Status:** FIXED 2026-08-30 (`b51e2d237`) · **Lane:** A · **Filed:**
+2026-08-30 · **Severity:** medium, downgraded to low by the Correction below
+(unbounded resource leak; also blocked the fix for
 `A-FILE-HANDLES-ARE-SEQUENTIAL-AND-UNOWNED-…`)
+
+**How it was fixed.** `sys_fs_dup` now calls
+`pcb::register_ipc_handle(pid, ResourceType::File, new_handle)` on the
+duplicate, which is the missing half of the pair `sys_fs_close` already
+completes by deregistering. Exit cleanup walks `proc.ipc_handles`, so the
+duplicate is now reachable by it.
+
+Note this stopped being merely a leak the moment the ownership gate landed in
+the same commit: an unregistered handle is one the *caller itself* cannot
+use, so `dup` would have returned a handle that every subsequent `read` on it
+refused with `InvalidHandle`. That is why the two fixes had to ship together
+and why this entry was recorded as blocking the other.
+
+The independent cursor is still deliberate — see the Correction below before
+anyone "fixes" this by switching to `dup_shared`.
 
 **In short:** Duplicating an open file — what a program does when it wants a
 second, independent way to refer to the same file — creates a brand-new

@@ -82315,8 +82315,79 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **189 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **131 of 800 remain**
 
+> **Burn-down log.** 2026-08-30 (forty-second batch): the **two**-site
+> functions, alphabetically as far as `cmd_netns` — twenty-nine of the
+> forty-nine. 189 → 131 across 140 → 111 functions: `cmd_audio`, `cmd_audit`,
+> `cmd_backupsched`, `cmd_cal`, `cmd_cgroup`,
+> `cmd_clipsync`, `cmd_cursorsettings`, `cmd_deskicons`, `cmd_dmastat`,
+> `cmd_drvmon`, `cmd_entropy`, `cmd_envvars`, `cmd_eyeprotect`,
+> `cmd_filetransfer`, `cmd_fwupdate`, `cmd_gamemode`, `cmd_hdrdisplay`,
+> `cmd_hexdump`, `cmd_hwrng`, `cmd_iolatency`, `cmd_iotdevice`, `cmd_kbmacro`,
+> `cmd_ksmstat`, `cmd_lavg`, `cmd_mdns`, `cmd_mediakeys`, `cmd_netdiag`,
+> `cmd_netlat` and `cmd_netns` left the ledger entirely. Pinned by self-test
+> rung 109.
+>
+> **Unlike batches 40 and 41, this one does not exhaust its tier**, and the
+> distinction is worth keeping rather than tidying away: twenty two-site
+> functions remain (`cmd_netthrottle` through `tokenize_arith`), so the ledger
+> is 20×2 + 91×1. Batch 43 is those twenty, after which the tier really is
+> empty and every remaining function carries exactly one site. Recording the
+> cut-off by *name* rather than as "the two-site batch" is what stops the next
+> reader trusting the tier header over the ledger — the ledger is the count,
+> and it says forty sites are still there.
+>
+> **This batch changed the shared printer, which no previous batch had to.**
+> `cal` and `hexdump -n` take their operands *directly*: there is no subcommand
+> word between the command and the number. Passing `""` as the subcommand
+> printed `cal: : \`1O' is not a month`, an empty middle field that reads as a
+> defect in the shell rather than as an absence. All ten family printers now go
+> through one `refuse_operand(cmd, sub, format_args!(…))` that collapses the
+> field when there is no subcommand. Recorded as design-decisions.md §644,
+> which also covers the two changes this forced on
+> `scripts/check-selftest-wording.py`: `format_args!` had to join its list of
+> print macros (a deferred print is still a print, and without it ~40 *correct*
+> rungs were reported as failures), and five older needles that spanned both
+> halves of the message were shortened to the body-only form the other ~40
+> refusal rungs already use — rather than teaching the gate to compose across a
+> helper boundary, which its own header forbids.
+>
+> **Two new shapes, on the "where the guess ends up" axis:**
+>
+> * **A sentinel chosen because it "cannot exist" — which the operator then
+>   reads.** `mdns unregister <idx>` guessed `usize::MAX`, and the not-found
+>   path printed it: *"Service #18446744073709551615 not found or inactive"*.
+>   `netns ifconfig <ns>` did the same with `u32::MAX`. The sentinel is picked
+>   to be unmistakable *to the code*, and it is — but nothing stops it reaching
+>   the screen, where it is a number the operator never typed and cannot map
+>   back to what they did type.
+> * **The different combinator: `filter_map(…ok())`, which drops rather than
+>   guesses.** `iotdevice group <name> 1,2,e` built a group of two devices from
+>   a list of three and reported success. It is the same defect one step
+>   further along — the unreadable word does not become a wrong value, it
+>   becomes *no* value, and the resulting object is quietly short. Nothing in
+>   `unwrap_or` grep-space would have found it; it was next to a site that was
+>   in the ledger. The whole list now fails if any member is unreadable.
+>
+> **The sharpest single site was `fwupdate apply <id>`**, which guessed device
+> `0`, flashed it, and printed "Reboot required". Firmware written to the wrong
+> device on a typo is the one consequence in forty-two batches that is worse
+> than `directio`'s overwritten file head, because it is not confined to a
+> filesystem.
+>
+> **Also in the batch, on the earlier axes:** *filed as a measurement* —
+> `lavg update` (folded into a moving average that outlives the command),
+> `netlat rtt`/`proc` (fabricated samples folded into percentiles),
+> `entropy add`/`drain` (over-credits, then spends, the entropy pool);
+> *binds a resource* — `mdns register <port>` advertised a guessed port to the
+> whole link; *acts on the wrong object* — `dmastat register`, `ksmstat
+> register` (pid 0 is the kernel's own), `envvars expand`, `eyeprotect
+> enable`/`disable`, `iotdevice set`, `kbmacro event key`. `mediakeys register`
+> defaulted to **pid 1**, init — the one process on the machine that is never a
+> media player. `cgroup io-limit`'s guessed `0` was the *unlimited* sentinel, so
+> a typo did not set a wrong cap, it removed the cap.
+>
 > **Burn-down log.** 2026-08-30 (forty-first batch): every function carrying
 > **three** sites, which is now none. 267 → 189 across 166 → 140 functions;
 > twenty-six functions left the ledger entirely — `cmd_audioeq`,

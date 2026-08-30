@@ -77,11 +77,14 @@
 //! written. Export now writes the JSON to a file and says on the status line
 //! whether it worked, and Import is gone until there is something behind it.
 //!
-//! **Eighteen blanket `#![allow(...)]` sat at the top of the file**,
-//! `dead_code` among them — which is what let a program whose `main` discards
-//! its own render compile without a word of complaint, along with the six
-//! `edit_*` fields and the `editing` flag of an editor that could not be
-//! entered, and `apply_template`, which nothing but a test has ever called.
+//! **Seventeen lints were blanket-allowed at the top of the file**, in sixteen
+//! `#![allow(...)]`, `dead_code` among them — which is what let a program whose
+//! `main` discards its own render compile without a word of complaint, along
+//! with the six `edit_*` fields and the `editing` flag of an editor that could
+//! not be entered, `modified_at` (set to the same value as `created_at` at the
+//! one site that set either, then never read, never exported and never updated,
+//! because nothing in the program can modify a snippet), and `apply_template`,
+//! which nothing but a test has ever called.
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -156,13 +159,6 @@ const SEARCH_MAX: f32 = 420.0;
 const OVERLAY_SHARE: f32 = 0.8;
 /// How many languages the overlay lists. The rest are in the counts above it.
 const LANGUAGES_ON_OVERLAY: usize = 6;
-
-/// How deep the folder tree is walked before it stops.
-///
-/// A folder's parent is an id, and nothing stops a cycle being built out of
-/// two ids that name each other, so the walk needs an end that does not
-/// depend on the data being sound.
-const MAX_FOLDER_DEPTH: usize = 8;
 
 /// How many tags a snippet row shows before the rest are left off. The row is
 /// one line and a title has to fit on it too.
@@ -1928,11 +1924,23 @@ impl App {
     }
 
     /// Move the selection `delta` rows down the list on show.
+    ///
+    /// `.min(last)` is what makes a walk that has reached an end still *do*
+    /// something: it re-picks the row already picked, and the
+    /// `scroll_row_into_view` below then brings it back on screen. That is the
+    /// only case it has — without it the walk names a row past the end,
+    /// `ids.get` refuses and the key does nothing at all — and it is invisible
+    /// unless the row it re-picks is somewhere the user cannot see
+    /// (`known-issues.md` lesson 70).
+    ///
+    /// There used to be a `checked_sub(1)` early return above this for the
+    /// empty list. Nothing could reach it: with no rows, `selected_row` is
+    /// `None`, both remaining arms name row 0, and `ids.get(0)` of an empty
+    /// list refuses — so it was a guard in front of a rule that already held
+    /// (lesson 51), and no test could tell it from its own absence.
     fn move_selection(&mut self, delta: isize) -> EventResult {
         let ids = self.filtered_ids();
-        let Some(last) = ids.len().checked_sub(1) else {
-            return EventResult::Ignored;
-        };
+        let last = ids.len().saturating_sub(1);
         let next = match self.selected_row() {
             Some(row) => scroll_window::shift(row, delta).min(last),
             // Nothing picked yet: down takes the first row and up the last,
@@ -3431,13 +3439,24 @@ impl App {
         depth: usize,
         out: &mut Vec<(FolderId, usize)>,
     ) {
-        // A folder that is its own ancestor would walk for ever. Nothing here
-        // builds one today, but `parent_id` is a plain field and the recursion
-        // is the one place a cycle turns into a hang rather than a wrong
-        // answer.
-        if depth >= MAX_FOLDER_DEPTH {
-            return;
-        }
+        // There used to be a `depth >= MAX_FOLDER_DEPTH` bail-out here, put in
+        // against a folder that is its own ancestor. It could not do that job,
+        // and it did real damage instead.
+        //
+        // Why it could not: a folder has *one* parent, and this walk only ever
+        // enters from `None`. So a folder is reached only if its parent chain
+        // ends at `None`, and every folder in a cycle has a chain that never
+        // does — the cycle is a separate component the walk never enters. The
+        // same argument bounds the recursion: a reached folder's chain is
+        // finite and cannot repeat a folder (a repeat *is* a cycle, so it
+        // would not have been reached), hence depth is at most `folders.len()`
+        // and the walk ends on any data at all.
+        //
+        // What it did instead: truncate. A ninth level of nesting — which the
+        // New Folder button will happily build, since it files the new folder
+        // under whichever one is picked — vanished from the tree, with the
+        // snippets in it. That is a guard in front of a rule that already
+        // holds, paid for in lost data (`known-issues.md` lesson 51).
         for folder in self.folders.iter().filter(|f| f.parent_id == parent) {
             out.push((folder.id, depth));
             if folder.expanded {
@@ -3733,6 +3752,18 @@ impl Probe for App {
         self.resize(size.0, size.1);
         handle_event(self, &Event::Key(key.clone()))
     }
+
+    fn scroll_at(&mut self, x: f32, y: f32, dy: f32, size: (f32, f32)) -> Option<Self::Outcome> {
+        self.resize(size.0, size.1);
+        Some(handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            }),
+        ))
+    }
 }
 
 fn main() -> ExitCode {
@@ -3756,7 +3787,7 @@ mod tests {
     use super::*;
     use guitk::probe::{
         bare_point, click, click_background, click_matching, control_names, ctrl, key, press,
-        rect_of, shift, type_str,
+        rect_of, release, scroll_at_point, shift, type_str,
     };
 
     // ── Helpers ─────────────────────────────────────────────────────────
@@ -4367,13 +4398,35 @@ mod tests {
     fn the_editor_parts_survive_an_editor_with_no_room_in_it() {
         // A window short enough that the header alone would overflow: the
         // parts must still be inside the column rather than upside down.
-        let l = Layout::new(1000.0, 100.0);
+        let l = Layout::new(1000.0, 50.0);
         let a = app();
         let p = a.editor_parts(&l);
+        // The fixture only tests what it is named for while the header really
+        // does fill the column — at 100px tall it did not, and the clamps
+        // below it were never reached.
+        assert!(
+            (p.header.h - l.editor.h).abs() < 0.01,
+            "the window is not short enough: header {} of column {}",
+            p.header.h,
+            l.editor.h
+        );
         for r in [p.header, p.code, p.status] {
             assert!(r.w >= 0.0 && r.h >= 0.0, "{r:?}");
+            assert!(r.y >= l.editor.y - 0.01, "{r:?} starts above the column");
             assert!(r.bottom() <= l.editor.bottom() + 0.01, "{r:?}");
         }
+        // Still stacked, in order, when there is no room for the stack. Every
+        // part staying inside the column is not enough: with no height left
+        // over, a status bar given its full height sits *on top of* the header
+        // — inside the column, drawn over the title.
+        assert!(
+            p.code.y >= p.header.bottom() - 0.01,
+            "the code panel climbed into the header: {p:?}"
+        );
+        assert!(
+            p.status.y >= p.code.bottom() - 0.01,
+            "the status bar climbed into the code panel: {p:?}"
+        );
     }
 
     #[test]
@@ -4789,7 +4842,11 @@ mod tests {
     #[test]
     fn a_folder_cycle_does_not_hang_the_tree() {
         // Nothing stops two folders naming each other as parent, and the walk
-        // must end on the data it is given rather than on the data it hopes for.
+        // must end on the data it is given rather than on the data it hopes
+        // for. It ends because a cycle is *unreachable* from the roots, not
+        // because a depth counter cuts it off — so the thing to assert is that
+        // the walk returns and that the two folders in the cycle are simply
+        // not in the tree, rather than a bound on how many rows came back.
         let mut a = app();
         let (a_id, b_id) = (a.folders[0].id, a.folders[1].id);
         a.folders[0].parent_id = Some(b_id);
@@ -4797,7 +4854,50 @@ mod tests {
         for f in &mut a.folders {
             f.expanded = true;
         }
-        assert!(a.folder_rows().len() <= a.folders.len() * MAX_FOLDER_DEPTH);
+        let rows = a.folder_rows();
+        assert!(
+            !rows.iter().any(|&(id, _)| id == a_id || id == b_id),
+            "a folder with no way up to the root was shown anyway"
+        );
+        assert_eq!(
+            rows.len(),
+            a.folders.len().saturating_sub(2),
+            "every other folder is still in the tree exactly once"
+        );
+    }
+
+    #[test]
+    fn a_deeply_nested_folder_is_still_in_the_tree() {
+        // The fault a depth cap caused: past its limit the tree stopped, and
+        // the folders below it — and the snippets filed in them — were gone
+        // from the sidebar with nothing said. The New Folder button files a
+        // new folder under the picked one, so a user can build a chain this
+        // long by clicking it.
+        let mut a = app();
+        let mut parent = a.folders[0].id;
+        let mut chain = vec![parent];
+        for i in 0..20 {
+            a.selected_folder_id = Some(parent);
+            parent = a
+                .create_folder(&format!("deep{i}"))
+                .expect("a named folder is made");
+            chain.push(parent);
+        }
+        for f in &mut a.folders {
+            f.expanded = true;
+        }
+        let rows = a.folder_rows();
+        for (want_depth, id) in chain.iter().enumerate() {
+            let (_, got) = rows
+                .iter()
+                .find(|&&(row_id, _)| row_id == *id)
+                .copied()
+                .unwrap_or_else(|| panic!("the folder {want_depth} deep is not in the tree"));
+            assert_eq!(
+                got, want_depth,
+                "the folder is in the tree at the wrong indent"
+            );
+        }
     }
 
     #[test]
@@ -5002,20 +5102,79 @@ mod tests {
 
     #[test]
     fn walking_the_list_scrolls_the_row_into_view() {
+        // The walk has to be a *walk*. End reaches the same row, but through
+        // `select_end`, which brings the row into view with a call of its own,
+        // so a test that pressed End could not tell whether `move_selection`
+        // had kept its call or dropped it.
         let names: Vec<String> = (0..80).map(|i| format!("s{i:02}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut a = app_with(&refs);
-        key(&mut a, &press(Key::End));
-        let row = a.selected_row().unwrap();
         let l = a.layout();
         let capacity = scroll_window::capacity(l.list_row, a.list_body(&l).h);
+        assert!(
+            (2..80).contains(&capacity),
+            "the fixture needs a window shorter than the list and taller than \
+             two rows; it holds {capacity}"
+        );
+        // The first Down picks row 0, so `capacity + 1` of them land on row
+        // `capacity` — the first row past the screen the walk started on.
+        for _ in 0..=capacity {
+            key(&mut a, &press(Key::Down));
+        }
+        let row = a.selected_row().expect("the walk picked a row");
+        assert_eq!(
+            row, capacity,
+            "the walk did not reach the row past the screen"
+        );
         assert!(row >= a.list_scroll, "row {row} is above the window");
         assert!(
-            row < a.list_scroll + capacity,
+            row < a.list_scroll.saturating_add(capacity),
             "row {row} is below a window of {capacity} starting at {}",
             a.list_scroll
         );
         assert!(rect_of(&a, Target::Row(a.selected_snippet_id.unwrap())).is_some());
+        // Brought to the *bottom* edge, not the top: a walk that steps one row
+        // off the screen scrolls by one row, and the row it stepped off is
+        // still on show. Anchoring the row at the top instead would throw away
+        // the whole page the user had just walked through.
+        assert_eq!(
+            a.list_scroll,
+            row.saturating_add(1).saturating_sub(capacity),
+            "the row was not brought to the bottom edge"
+        );
+        let before = a.filtered_ids()[row.saturating_sub(1)];
+        assert!(
+            rect_of(&a, Target::Row(before)).is_some(),
+            "the row walked from was scrolled away"
+        );
+    }
+
+    #[test]
+    fn walking_past_the_end_brings_the_end_back_on_screen() {
+        // The only case in which clamping the walk to the last row does
+        // anything: press Down on the last row and the row it re-picks is the
+        // one already picked, so nothing is observable — unless that row has
+        // been scrolled out of sight, when re-picking it is what fetches it
+        // back (`known-issues.md` lesson 70).
+        let names: Vec<String> = (0..80).map(|i| format!("s{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut a = app_with(&refs);
+        key(&mut a, &press(Key::End));
+        let last = a.selected_snippet_id.expect("End picks the last row");
+        for _ in 0..40 {
+            scroll_at_point(&mut a, Target::Code, 10.0);
+        }
+        a.list_scroll = 0;
+        assert!(
+            rect_of(&a, Target::Row(last)).is_none(),
+            "the last row is still on screen, so there is nothing to fetch back"
+        );
+        assert_eq!(key(&mut a, &press(Key::Down)), EventResult::Consumed);
+        assert_eq!(a.selected_snippet_id, Some(last), "the selection moved");
+        assert!(
+            rect_of(&a, Target::Row(last)).is_some(),
+            "Down on the last row did not bring it back on screen"
+        );
     }
 
     #[test]
@@ -5146,6 +5305,24 @@ mod tests {
         assert_eq!(key(&mut a, &press(Key::F9)), EventResult::Ignored);
     }
 
+    #[test]
+    fn a_key_coming_back_up_is_not_a_second_keystroke() {
+        // Both halves of a keystroke arrive. Acting on the release too would
+        // run every shortcut twice — Tab would step two views on, Delete would
+        // take two snippets — so the release has to do nothing at all.
+        let mut a = app();
+        let before = a.sidebar_view;
+        assert_eq!(key(&mut a, &release(Key::Tab)), EventResult::Ignored);
+        assert_eq!(a.sidebar_view, before, "the release stepped the view on");
+        assert_eq!(key(&mut a, &release(Key::Slash)), EventResult::Ignored);
+        assert!(!a.search_focus, "the release opened the search box");
+        // And with the box open, where a different handler reads the key.
+        key(&mut a, &press(Key::Slash));
+        assert!(a.search_focus);
+        assert_eq!(key(&mut a, &release(Key::Escape)), EventResult::Ignored);
+        assert!(a.search_focus, "the release shut the search box");
+    }
+
     // ── The search box ──────────────────────────────────────────────────
 
     #[test]
@@ -5162,6 +5339,38 @@ mod tests {
         let mut a = app();
         key(&mut a, &press(Key::Slash));
         assert!(a.search_query.is_empty(), "got {:?}", a.search_query);
+    }
+
+    #[test]
+    fn the_search_box_takes_the_text_a_key_types_and_not_the_rest() {
+        // A keystroke carries the text the layout produced, which for Tab,
+        // Escape and the rest is a control character rather than nothing at
+        // all. A box that appended whatever arrived would fill with characters
+        // that are invisible on screen and match no snippet — and would claim
+        // the keystroke while doing it.
+        let mut a = app_with(&["alpha"]);
+        click(&mut a, Target::Search);
+        type_str(&mut a, "al");
+        a.list_scroll = 3;
+
+        let mut tab = press(Key::Tab);
+        tab.text = "\t".into();
+        assert_eq!(
+            key(&mut a, &tab),
+            EventResult::Ignored,
+            "a keystroke that types nothing was claimed anyway"
+        );
+        assert_eq!(a.search_query, "al", "a control character reached the box");
+        assert_eq!(a.list_scroll, 3, "the list was scrolled back for nothing");
+
+        // The same key with a real character on it does reach the box.
+        let mut letter = press(Key::Tab);
+        letter.text = "p\u{7}".into();
+        assert_eq!(key(&mut a, &letter), EventResult::Consumed);
+        assert_eq!(
+            a.search_query, "alp",
+            "the bell character was taken along with the letter"
+        );
     }
 
     #[test]
@@ -5267,14 +5476,60 @@ mod tests {
 
     // ── The wheel ───────────────────────────────────────────────────────
 
+    /// A point in the list panel that no row covers.
+    ///
+    /// `capacity` is a floor, so the rows never quite fill the panel: what is
+    /// left below the last one is the strip `Target::List` exists to catch. The
+    /// strip is why the panel records a hit box at all, and it is the only place
+    /// in the window where that box is what `hit_test` answers — everywhere else
+    /// a row, drawn after it, is on top.
+    fn point_below_the_last_row(a: &App) -> (f32, f32) {
+        let l = a.layout();
+        let body = a.list_body(&l);
+        let rows = scroll_window::capacity(l.list_row, body.h);
+        let used = l.list_row * rows as f32;
+        assert!(
+            body.h - used > 1.0,
+            "no strip below the last row at this size: body {:.2} holds {rows} rows of {:.2}",
+            body.h,
+            l.list_row
+        );
+        (body.x + body.w / 2.0, body.bottom() - 0.5)
+    }
+
     #[test]
     fn the_wheel_over_the_list_scrolls_the_list_and_not_the_code() {
         let names: Vec<String> = (0..80).map(|i| format!("s{i:02}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut a = app_with(&refs);
-        assert_eq!(a.scroll(Target::List, -3.0), EventResult::Consumed);
+        // Over a *row*, not through `scroll` with the answer already in hand:
+        // the routing is half of what the wheel does, and a test that supplies
+        // the target has tested only the other half.
+        let row = rect_of(&a, Target::Row(id_of(&a, "s00"))).expect("the first row is drawn");
+        let (rx, ry) = row.centre();
+        assert_eq!(
+            a.scroll_at(rx, ry, -3.0, App::SIZE),
+            Some(EventResult::Consumed)
+        );
         assert!(a.list_scroll > 0, "the list did not move");
         assert_eq!(a.code_scroll, 0, "the code moved instead");
+    }
+
+    #[test]
+    fn the_wheel_below_the_last_row_still_scrolls_the_list() {
+        // The panel's own hit box, which nothing else in the window can reach.
+        // Deleting `f.hit(Target::List, body)` left every other wheel test
+        // passing, because each of them went in over a row.
+        let names: Vec<String> = (0..80).map(|i| format!("s{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut a = app_with(&refs);
+        let (x, y) = point_below_the_last_row(&a);
+        assert_eq!(a.draw(App::SIZE).hit_test(x, y), Some(Target::List));
+        assert_eq!(
+            a.scroll_at(x, y, -3.0, App::SIZE),
+            Some(EventResult::Consumed)
+        );
+        assert!(a.list_scroll > 0, "the list did not move");
     }
 
     #[test]
@@ -5282,7 +5537,10 @@ mod tests {
         let mut a = app_with(&["long"]);
         a.snippets[0].content = numbered_lines(400);
         a.select(id_of(&a, "long"));
-        assert_eq!(a.scroll(Target::Code, -3.0), EventResult::Consumed);
+        assert_eq!(
+            scroll_at_point(&mut a, Target::Code, -3.0),
+            EventResult::Consumed
+        );
         assert!(a.code_scroll > 0, "the code did not move");
         assert_eq!(a.list_scroll, 0, "the list moved instead");
     }

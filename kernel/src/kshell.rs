@@ -21276,6 +21276,73 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!(
+        "  kshell::self_test 108: `groupmgr delete' refuses a system group by type \
+         rather than by GID, `groupmgr create ... system' cannot mint one, and an \
+         ordinary group is still both creatable and deletable"
+    );
+    {
+        // Rung 108 -- the operation batch 21 left behind. Refusing an unreadable
+        // GID stopped `groupmgr delete 1O` from destroying `root`, but a
+        // correctly typed `groupmgr delete 0` still did, because
+        // `groupmgr::delete_group` was a bare `retain` that never read
+        // `group_type`. The guard is on the type, so this rung asserts GID 1
+        // (`wheel`) as well: a guard written against the literal 0 would pass
+        // the first case and fail the second, which is exactly the shape of
+        // fix known-issues.md argued against.
+        //
+        // `delete` and `get` do not open the table themselves -- only `list`
+        // and `create` call `init_defaults` -- so an unopened table would
+        // answer `NotSupported` and this rung would be asserting against the
+        // wrong refusal. `list` first makes the state explicit.
+        let out = capture_command("groupmgr list");
+        assert_output_contains("the group table is open", &out, b"group(s):");
+
+        let out = capture_command("groupmgr delete 0");
+        assert_output_contains(
+            "deleting the root group is refused, and says why",
+            &out,
+            b"is a system group",
+        );
+        assert_eq!(last_exit(), 1, "`groupmgr delete 0` errors");
+        assert_output_lacks("and is not reported as done", &out, b"Deleted group");
+        let out = capture_command("groupmgr get 0");
+        assert_output_contains("and the root group is still there", &out, b"Group: root");
+
+        let out = capture_command("groupmgr delete 1");
+        assert_output_contains(
+            "`wheel` is protected by the same rule, not by a GID-0 special case",
+            &out,
+            b"is a system group",
+        );
+        assert_eq!(last_exit(), 1, "`groupmgr delete 1` errors");
+        let out = capture_command("groupmgr get 1");
+        assert_output_contains("and wheel is still there", &out, b"Group: wheel");
+
+        // Undeletable groups that anyone may create are a slot leak against
+        // MAX_GROUPS, so the label is reserved at the creating end too.
+        let out = capture_command("groupmgr create 4243 zzsysgrp system");
+        assert_output_contains(
+            "a system group cannot be created from the shell",
+            &out,
+            b"cannot be created here",
+        );
+        assert_eq!(last_exit(), 1, "`groupmgr create ... system` errors");
+        assert_output_lacks("and is not reported as created", &out, b"Created group");
+        let out = capture_command("groupmgr get 4243");
+        assert_output_contains("and no such group exists", &out, b"Group not found");
+
+        // The same GID and name as a service group: it is the label that is
+        // reserved, and an ordinary group is still deletable afterwards -- the
+        // guard must not have made the whole table read-only.
+        let out = capture_command("groupmgr create 4243 zzsysgrp service");
+        assert_eq!(last_exit(), 0, "a service group is created");
+        assert_output_contains("and reported", &out, b"Created group");
+        let out = capture_command("groupmgr delete 4243");
+        assert_eq!(last_exit(), 0, "and what may be created may be deleted");
+        assert_output_contains("and reported", &out, b"Deleted group 4243");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -96206,6 +96273,16 @@ fn cmd_groupmgr(args: &str) {
             };
             match groupmgr::create_group(gid, name, gtype, "User-created group") {
                 Ok(()) => shell_println!("Created group '{}' (GID {})", name, gid),
+                // `system` is still spelled out in the usage line and still
+                // parses, because refusing the *word* would leave the operator
+                // guessing which of the three types they may use and why. What
+                // they get instead is the reason.
+                Err(crate::error::KernelError::PermissionDenied) => {
+                    shell_println!(
+                        "groupmgr: create: system groups are defined at startup and cannot be created here"
+                    );
+                    set_exit(1);
+                }
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
                     set_exit(1);
@@ -96224,15 +96301,20 @@ fn cmd_groupmgr(args: &str) {
             // superuser. Every unwrap_or(0) in this function names root or the
             // root group, on whichever axis it sits.
             //
-            // Refusing the word does not make the operation safe: a correctly
-            // typed `groupmgr delete 0` still destroys `root`. That is a
-            // separate defect, filed as
-            // `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING`.
+            // Refusing the word did not, on its own, make the operation safe:
+            // a correctly typed `groupmgr delete 0` still destroyed `root`.
+            // That second defect is now fixed in `groupmgr::delete_group`,
+            // which refuses any `GroupType::System` group — by type, so `wheel`
+            // at GID 1 is covered by the same rule as `root` at GID 0.
             let Some(gid) = required_num::<u32>(&parts, 1, "groupmgr", sub, "group id") else {
                 return;
             };
             match groupmgr::delete_group(gid) {
                 Ok(()) => shell_println!("Deleted group {}.", gid),
+                Err(crate::error::KernelError::PermissionDenied) => {
+                    shell_println!("groupmgr: delete: group {} is a system group", gid);
+                    set_exit(1);
+                }
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
                     set_exit(1);

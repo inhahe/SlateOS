@@ -1113,6 +1113,18 @@ mod tests {
     /// state. `cargo test` runs the suite on several threads, and two of these
     /// would otherwise flush each other's buffer out from under the assertion.
     /// Everything else here works on descriptor -1 and needs no guard.
+    ///
+    /// **The rule is "hold this if you touch descriptor 1 *or* descriptor 2",
+    /// not "hold this if you assert on descriptor 1".** A write to descriptor 2
+    /// reaches descriptor 1 through [`before_diagnostic`], which flushes stdout
+    /// so a diagnostic cannot overtake the output it comes after — the feature
+    /// under test in two of these, and the hazard in a third. Stated the
+    /// narrower way, `a_lost_diagnostic_is_remembered_and_a_delivered_one_is_not`
+    /// looked exempt (it reads no descriptor-1 state) while its `diag_to(2, …)`
+    /// calls were emptying the buffer those two had just filled. That failed
+    /// once in a whole-workspace run and never in an isolated one; lane C
+    /// tracked it down and filed
+    /// `requests/c-b-the-lost-diagnostic-test-flushes-the-two-flush-order-tests-buffer.md`.
     static SHARED: Mutex<()> = Mutex::new(());
 
     fn shared() -> std::sync::MutexGuard<'static, ()> {
@@ -1182,8 +1194,15 @@ mod tests {
     ///
     /// Descriptor -1 rather than 2, so that a diagnostic the test *wants* to
     /// fail does not have to be printed at the runner to fail.
+    ///
+    /// It still takes [`shared`], for the reason written there: its two
+    /// `diag_to(2, …)` calls flush descriptor 1's buffer, which is the very
+    /// thing the flush-ordering tests are mid-assertion about. Serialising
+    /// costs this test nothing — it is the only reader of the sticky flag, so
+    /// no outcome it asserts depends on the order.
     #[test]
     fn a_lost_diagnostic_is_remembered_and_a_delivered_one_is_not() {
+        let _shared = shared();
         assert!(!super::diagnostic_lost(), "nothing has failed to write yet");
         super::diag_to(2, b"");
         assert!(

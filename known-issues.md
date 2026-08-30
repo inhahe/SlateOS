@@ -98013,7 +98013,17 @@ belongs inside a change whose job was to stop refusing `RESOLVE_BENEATH`;
 shipping a cwd-semantics change hidden inside an `openat2` change is how the
 next entry above this one gets written. Filed as
 `requests/b-a-the-kernels-cwd-and-libcs-cwd-are-two-different-directories.md`.
-### C-COREUTILS-STDFD-FLUSH-ORDER-TESTS-RACE — 2026-08-30 — LANE C reporting, lane B's tree, OPEN
+
+### C-COREUTILS-STDFD-FLUSH-ORDER-TESTS-RACE — 2026-08-30 — LANE C reporting, lane B's tree — **FIXED 2026-08-30 (lane B)**
+
+**Fixed as filed, and the diagnosis was right in every particular.**
+`a_lost_diagnostic_is_remembered_and_a_delivered_one_is_not` now takes
+`shared()` like the other five. The `shared()` doc comment carries the widened
+rule — *hold this if you touch descriptor 1 **or** descriptor 2*, because a
+write to 2 reaches 1 through `before_diagnostic` — and the test's own comment
+records why serialising it costs nothing. `stderr_is_unbuffered` is left
+unguarded, also as filed: `Stream::new` does not write, so it cannot flush.
+The original report follows.
 
 `cargo test --workspace` came back red on an otherwise-green tree with one
 failure in a crate `lane-c` has never touched:

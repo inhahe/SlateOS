@@ -1075,6 +1075,23 @@ fn main() {
     // after writing half an archive is worse than one that fails outright:
     // the script that invoked it deletes the source and moves on.
     let status = match parsed.mode {
+        // An archive of nothing is almost always a mistyped command line, and
+        // GNU declines to write one rather than truncate whatever `-f` names.
+        // The check is on argv alone and comes before everything else: measured,
+        // `tar -cf /nosuchdir/o.tar` and `tar -cf o.tar -C nosuchdir` both print
+        // exactly this and say nothing about the path or the directory, so the
+        // archive is not opened and the `-C` chain is not entered.
+        //
+        // GNU's one legitimate way to reach create mode with an empty operand
+        // list is `-T`/`--files-from`, which exits 0 having written an empty
+        // 10240-byte archive. This tar rejects that option as unsupported, so
+        // there is no case here to except; when it gains one, this arm needs the
+        // guard that GNU has.
+        Mode::Create if parsed.files.is_empty() => {
+            diag!("tar: Cowardly refusing to create an empty archive");
+            diag!("{TRY_HELP}");
+            EXIT_FATAL
+        }
         Mode::Create => {
             // The one case where the member list is a diagnostic rather than
             // output: with no `-f`, the archive itself is on stdout, and a name
@@ -2842,37 +2859,60 @@ fn skip_data(input: &mut dyn Read, size: u64) -> bool {
 /// which is not a cosmetic difference: it writes files the caller did not ask
 /// for, over whatever was already there.
 struct Selector {
-    /// Each operand, trailing slashes trimmed, paired with "did anything match
-    /// it". The flag is what makes `NAME: Not found in archive` possible.
-    wanted: Vec<(Vec<u8>, bool)>,
+    /// Each operand: the name with trailing slashes trimmed, the number of
+    /// `-C`s written before it, and "did anything match it". The flag is what
+    /// makes `NAME: Not found in archive` possible; the count is what sends
+    /// `-C d1 A -C d2 B` to two different destinations.
+    wanted: Vec<(Vec<u8>, usize, bool)>,
+    /// The `-C` level every member gets when there are no operands at all.
+    ///
+    /// The end of the chain, because with nothing to be "after" every `-C` is
+    /// in force — `tar -xf a.tar -C d1 -C d2` unpacks into `d1/d2`.
+    default_dir: usize,
 }
 
 impl Selector {
-    fn new(members: &[Operand]) -> Self {
+    fn new(members: &[Operand], default_dir: usize) -> Self {
         Self {
             wanted: members
                 .iter()
-                .map(|m| (trim_slashes(&os_bytes(&m.name)).to_vec(), false))
+                .map(|m| (trim_slashes(&os_bytes(&m.name)).to_vec(), m.dir, false))
                 .collect(),
+            default_dir,
         }
     }
 
-    /// Does the caller want the member named `name`? Records the match.
-    fn wants(&mut self, name: &[u8]) -> bool {
+    /// Does the caller want the member named `name`, and if so under which
+    /// `-C` level? Records the match.
+    ///
+    /// Every matching operand is marked, so that `report_missing` stays right,
+    /// but the level returned is the **first** match's. That only matters when
+    /// two operands at different levels both cover one member — `-C d1 t -C d2
+    /// t/a.txt`. GNU's answer there is not a second destination but a mess: it
+    /// walks its name list with a cursor rather than testing every operand, and
+    /// measured on 1.35 the line above extracts everything into `d1` while
+    /// complaining `t/sub/b.bin: Cannot open: File exists` and `t/a.txt: Not
+    /// found in archive`. That is not behaviour worth reproducing, and
+    /// reproducing it would mean giving up the operand model this tar uses
+    /// everywhere else, so the first match wins and the member is extracted
+    /// once.
+    fn wants(&mut self, name: &[u8]) -> Option<usize> {
         if self.wanted.is_empty() {
-            return true;
+            return Some(self.default_dir);
         }
         // The stored name of a directory ends in `/` and the operand normally
         // does not, so both sides are trimmed before they are compared.
         let n = trim_slashes(name);
-        let mut hit = false;
-        for (w, matched) in &mut self.wanted {
+        let mut hit = None;
+        for (w, dir, matched) in &mut self.wanted {
             let under = n.len() > w.len()
                 && n.get(..w.len()) == Some(w.as_slice())
                 && n.get(w.len()) == Some(&b'/');
             if n == w.as_slice() || under {
                 *matched = true;
-                hit = true;
+                if hit.is_none() {
+                    hit = Some(*dir);
+                }
             }
         }
         hit
@@ -2883,7 +2923,7 @@ impl Selector {
     /// `tar -xf a.tar typo` succeed while extracting nothing.
     fn report_missing(&self) -> i32 {
         let mut status = 0;
-        for (w, matched) in &self.wanted {
+        for (w, _dir, matched) in &self.wanted {
             if !matched {
                 diag!("tar: {}: Not found in archive", escape(w));
                 status = EXIT_FATAL;
@@ -4299,6 +4339,93 @@ fn keeps_newer(root: &Dir, name: &[u8], member_mtime: i64) -> bool {
     newer
 }
 
+/// One destination per `-C` level, opened as the chain is walked.
+///
+/// A single root would do if `-C` chose one destination for the whole run, and
+/// it does not: `-C d1 A -C d2 B` sends `A` to `d1` and `B` to `d1/d2`, and the
+/// order the two are *met* in is the archive's, not the command line's.
+/// Measured on GNU 1.35, `-C d1 z.txt -C d2 a.txt` against an archive holding
+/// `a.txt` first enters `d1/d2` to place `a.txt` and then places `z.txt` back
+/// up in `d1` — so the destination has to be revisitable in both directions.
+///
+/// A process has one working directory, so "back up" cannot be another chdir
+/// without re-resolving a path that may have been renamed underneath us. Held
+/// descriptors solve it: the cwd only ever walks forward, one `-C` at a time,
+/// and every level it passes through is captured on the way. That also keeps
+/// the guarantee the single root had — a destination renamed mid-extraction
+/// carries the extraction with it instead of spilling into whatever took the
+/// old name.
+struct Roots {
+    /// `dirs[k]` is the destination after the first `k` `-C`s. `dirs[0]` is the
+    /// directory tar started in, so this is never empty.
+    dirs: Vec<Dir>,
+}
+
+impl Roots {
+    /// Open the starting directory. No `-C` has been entered yet.
+    ///
+    /// # Errors
+    ///
+    /// The process exit status, already reported, if `.` cannot be opened.
+    fn new() -> Result<Self, i32> {
+        match Dir::open_root(Path::new(".")) {
+            Ok(root) => Ok(Self { dirs: vec![root] }),
+            Err(e) => {
+                diag!("tar: {}: Cannot open: {}", escape(b"."), strerror(&e));
+                Err(fatal())
+            }
+        }
+    }
+
+    /// The destination for level `want`, entering whatever part of the chain
+    /// has not been reached yet.
+    ///
+    /// Lazy, as GNU is: a `-C` is entered when a member that belongs to it is
+    /// met, so one naming a missing directory is reported at that point and the
+    /// members already extracted stay extracted. Measured — `-C d1 a.txt -C d2
+    /// z.txt` with `d1/d2` absent leaves `a.txt` in `d1` and *then* says
+    /// `d2: Cannot open`.
+    ///
+    /// # Errors
+    ///
+    /// The process exit status, already reported, if a directory in the chain
+    /// cannot be entered or the destination cannot be opened.
+    fn at(&mut self, chdirs: &[OsString], want: usize) -> Result<&Dir, i32> {
+        while self.dirs.len() <= want {
+            // One behind the level being opened: `dirs` always holds level 0.
+            let Some(dir) = chdirs.get(self.dirs.len().saturating_sub(1)) else {
+                break;
+            };
+            if let Err(e) = env::set_current_dir(dir) {
+                diag!("tar: {}: Cannot open: {}", escape_os(dir), strerror(&e));
+                return Err(fatal());
+            }
+            match Dir::open_root(Path::new(".")) {
+                Ok(root) => self.dirs.push(root),
+                Err(e) => {
+                    diag!("tar: {}: Cannot open: {}", escape_os(dir), strerror(&e));
+                    return Err(fatal());
+                }
+            }
+        }
+        // `want` is an operand's `-C` count and so never exceeds `chdirs.len()`,
+        // which means the loop always reaches it. `last()` is a fallback that
+        // cannot be taken, preferred over indexing so that no `unwrap` is
+        // needed to say so.
+        //
+        // `ok_or_else`, not `ok_or`: the latter builds its argument before it
+        // looks at the `Option`, and `fatal()` *prints*. Written that way it put
+        // `Error is not recoverable: exiting now` on stderr once per member of
+        // every successful extraction — caught by the differential harness, and
+        // the reason a fallible-looking accessor on a hot path is worth reading
+        // twice.
+        self.dirs
+            .get(want)
+            .or_else(|| self.dirs.last())
+            .ok_or_else(fatal)
+    }
+}
+
 /// Replace every placeholder with the symlink it stood for.
 ///
 /// A placeholder that is no longer the file this run created is left alone and
@@ -4309,8 +4436,26 @@ fn keeps_newer(root: &Dir, name: &[u8], member_mtime: i64) -> bool {
 /// The location is resolved afresh rather than held from the first pass. Holding
 /// one would mean an open descriptor per delayed link for the length of the
 /// extraction, and an archive is free to contain as many of them as it likes.
-fn apply_delayed_links(root: &Dir, links: Vec<DelayedLink>, status: &mut i32) {
+///
+/// Each link is resolved under the destination its own member went to, which is
+/// not necessarily the last one: `-C d1 s/abs -C d2 s/f` holds `s/abs` back to
+/// the end and must still create it in `d1`. Every level named here was already
+/// entered during the walk, so `Roots::at` cannot fail — but it is a `Result`
+/// all the same, and a failure is reported rather than assumed away.
+fn apply_delayed_links(
+    roots: &mut Roots,
+    chdirs: &[OsString],
+    links: Vec<DelayedLink>,
+    status: &mut i32,
+) {
     for link in links {
+        let root = match roots.at(chdirs, link.dir) {
+            Ok(root) => root,
+            Err(rc) => {
+                *status = rc;
+                continue;
+            }
+        };
         let Ok(at) = root.locate(&link.name) else {
             // The name resolved when the placeholder was made. That it does not
             // now means something moved underneath us, which is exactly the
@@ -4371,43 +4516,33 @@ fn do_extract(
         None => Box::new(io::stdin()),
     };
 
-    // How far down the `-C` chain to go. With no member operands the whole
-    // archive is wanted and the destination is the end of the chain -- that is
-    // the ordinary `tar -xf a.tar -C dest`. With operands, a `-C` that no
-    // operand follows is never reached: measured, `tar -xf o.tar -C g2 one -C
-    // nosuchdir` extracts `one` into `g2` and exits **0**, where the same
-    // trailing `-C` under `-c` is fatal. Extraction treats `-C` as a
-    // destination for the members after it; creation treats it as a step in a
-    // sequence, and executes every step.
-    let want = if members.is_empty() {
-        chdirs.len()
-    } else {
-        members.iter().map(|m| m.dir).max().unwrap_or(0)
+    // Each member goes to the destination *its own operand* named, so the chain
+    // is walked lazily as members are met rather than folded into one place
+    // first. Extraction therefore never reaches a `-C` that no operand follows:
+    // measured, `tar -xf o.tar -C g2 one -C nosuchdir` extracts `one` into `g2`
+    // and exits **0**, where the same trailing `-C` under `-c` is fatal. `-C` is
+    // a destination for the members after it here; under `-c` it is a step in a
+    // sequence and every step runs.
+    let mut roots = match Roots::new() {
+        Ok(roots) => roots,
+        Err(rc) => return rc,
     };
-    let mut entered = 0usize;
-    if let Err(rc) = enter_chdirs(chdirs, &mut entered, want) {
+    // The one eager case. With no operands every `-C` is in force, and GNU
+    // enters the whole chain up front rather than on the first member — so
+    // `tar -xf not-an-archive -C nosuchdir` reports the directory, not the
+    // archive. Lazy walking alone would report them the other way round.
+    if members.is_empty()
+        && let Err(rc) = roots.at(chdirs, chdirs.len())
+    {
         return rc;
     }
-
-    // After the chdir, not before: `-C` chooses the destination, and the
-    // destination is the boundary every member is resolved beneath. Held open
-    // for the whole extraction, so that a rename of the destination underneath
-    // us moves the extraction with it rather than spilling into whatever took
-    // the old name.
-    let root = match Dir::open_root(Path::new(".")) {
-        Ok(root) => root,
-        Err(e) => {
-            diag!("tar: {}: Cannot open: {}", escape(b"."), strerror(&e));
-            return fatal();
-        }
-    };
 
     let mut status = 0;
     // A hard link's target gets its own notice, separate from the member-name
     // one: an archive can hold `/etc/passwd` as a target without holding it as
     // a name, and GNU prints the two lines independently.
     let mut prefixes = PrefixNotice::new();
-    let mut selector = Selector::new(members);
+    let mut selector = Selector::new(members, chdirs.len());
     let umask = read_umask();
     // Only `-xvv` uses these, but both are cheap and reading `TZ` once up front
     // is what stops a long extraction from straddling a zone change mid-file —
@@ -4419,7 +4554,11 @@ fn do_extract(
     // directory whose stored mode has no write bit cannot receive children at
     // all. GNU defers both for the same reason, which is why `tar -xf` restores
     // a 0500 directory's mode *and* its timestamp, and ours restored neither.
-    let mut pending_dirs: Vec<(Vec<u8>, u32, i64)> = Vec::new();
+    // The `-C` level travels with the name: a directory member and a file member
+    // can belong to different destinations, and the stamp has to be applied under
+    // the one that member was written into. Measured — `-C d1 t/sub -C d2 t/a.txt`
+    // restores `d1/t/sub`'s 0500 mode and its stored mtime, not `d1/d2`'s.
+    let mut pending_dirs: Vec<(usize, Vec<u8>, u32, i64)> = Vec::new();
     let mut delayed: Vec<DelayedLink> = Vec::new();
     // Type flag `7` is announced once per *run*, not once per member, and the
     // line names no member — unlike the unknown-flag warning below, which does
@@ -4451,9 +4590,18 @@ fn do_extract(
         // is written, which is why this test comes first. `tar -xf a.tar one`
         // used to unpack the whole archive. The operand is matched against the
         // name as *stored*, which is what the caller read out of `tar -t`.
-        if !selector.wants(raw_name) {
+        //
+        // Selecting also decides *where*: the answer is the number of `-C`s
+        // that preceded the operand which matched, so `-C d1 a -C d2 b` sends
+        // `a` to `d1` and `b` to `d1/d2` whichever order the archive holds them
+        // in. The chain is entered here, on first need, and never left.
+        let Some(level) = selector.wants(raw_name) else {
             return Handled::Skip;
-        }
+        };
+        let root = match roots.at(chdirs, level) {
+            Ok(root) => root,
+            Err(rc) => return Handled::Stop(rc),
+        };
 
         // Nothing below may use `raw_name` as a path. It is attacker-chosen,
         // and stripping a prefix does not make a `..` in the middle safe.
@@ -4488,7 +4636,7 @@ fn do_extract(
         // in the way (`tar-knf2.sh`). It is also below the `-v` name line,
         // which is where GNU prints its notice — `a` then `tar: Current ‘a’ is
         // newer or same age`, in that order.
-        if old_files == OldFiles::KeepNewer && keeps_newer(&root, trim_slashes(&name), member.mtime)
+        if old_files == OldFiles::KeepNewer && keeps_newer(root, trim_slashes(&name), member.mtime)
         {
             return Handled::Skip;
         }
@@ -4525,7 +4673,7 @@ fn do_extract(
                     OldFiles::Keep | OldFiles::Skip | OldFiles::KeepNewer => Located::mkdir,
                     _ => Located::mkdir_member,
                 };
-                match create_at(&root, &name, ovw, &mut status, create) {
+                match create_at(root, &name, ovw, &mut status, create) {
                     Err(NotCreated::Failed(e)) => {
                         diag!("tar: {}: Cannot mkdir: {}", escape(&name), strerror(&e));
                         status = EXIT_FATAL;
@@ -4545,6 +4693,7 @@ fn do_extract(
                     Err(NotCreated::Silent) => {}
                     Ok(_) => {
                         pending_dirs.push((
+                            level,
                             name,
                             extraction_mode(member.mode, same_permissions, umask),
                             member.mtime,
@@ -4566,7 +4715,7 @@ fn do_extract(
                     diag!("tar: Extracting contiguous files as regular files");
                 }
                 let mode = extraction_mode(member.mode, same_permissions, umask);
-                extract_plain(&root, input, &name, member, mode, ovw, &mut status)
+                extract_plain(root, input, &name, member, mode, ovw, &mut status)
             }
             b'2' if is_delayed_target(&member.linkname) => {
                 // A symlink out of the destination — absolute, or climbing —
@@ -4584,12 +4733,13 @@ fn do_extract(
                 // returns, so a second archive would meet a real symlink. What
                 // stops that one is [`Dir::locate`], which refuses to walk
                 // through it however it got there.
-                match make_placeholder(&root, &name, ovw, &mut status) {
+                match make_placeholder(root, &name, ovw, &mut status) {
                     Ok(id) => delayed.push(DelayedLink {
                         name: name.clone(),
                         target: member.linkname.clone(),
                         mtime: member.mtime,
                         id,
+                        dir: level,
                     }),
                     Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         // `Cannot open`, not `Cannot create symlink`: at this
@@ -4607,7 +4757,7 @@ fn do_extract(
             }
             b'2' => {
                 let create = |at: &Located| at.make_symlink(&member.linkname);
-                match create_at(&root, &name, ovw, &mut status, create) {
+                match create_at(root, &name, ovw, &mut status, create) {
                     Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         diag!(
                             "tar: {}: Cannot create symlink to {}: {}",
@@ -4645,7 +4795,7 @@ fn do_extract(
                     at.hard_link_to(&target)
                 };
                 if let Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) =
-                    create_at(&root, &name, ovw, &mut status, create)
+                    create_at(root, &name, ovw, &mut status, create)
                 {
                     // The one place in this program that quotes with `‘…’`
                     // instead of tar's escape style, because it is the one
@@ -4666,7 +4816,7 @@ fn do_extract(
             }
             b'6' => {
                 let mode = extraction_mode(member.mode, same_permissions, umask);
-                match create_at(&root, &name, ovw, &mut status, |at| at.make_fifo(mode)) {
+                match create_at(root, &name, ovw, &mut status, |at| at.make_fifo(mode)) {
                     Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         diag!("tar: {}: Cannot mkfifo: {}", escape(&name), strerror(&e));
                         status = EXIT_FATAL;
@@ -4683,7 +4833,7 @@ fn do_extract(
                 let block = member.typeflag == b'4';
                 let create =
                     |at: &Located| at.make_device(mode, block, member.devmajor, member.devminor);
-                match create_at(&root, &name, ovw, &mut status, create) {
+                match create_at(root, &name, ovw, &mut status, create) {
                     Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         // `Operation not permitted` for everyone but root, and
                         // that is the point rather than a shortcoming: an
@@ -4718,10 +4868,22 @@ fn do_extract(
                     escape(&[other])
                 );
                 let mode = extraction_mode(member.mode, same_permissions, umask);
-                extract_plain(&root, input, &name, member, mode, ovw, &mut status)
+                extract_plain(root, input, &name, member, mode, ovw, &mut status)
             }
         }
     });
+
+    // A `-C` that could not be entered is fatal *where it is met*: GNU prints
+    // `Error is not recoverable: exiting now` and exits on the spot, so none of
+    // what normally rounds off a run happens — not the delayed links, not the
+    // directory stamps, not the `Not found in archive` notices for operands the
+    // archive had not reached yet. Measured: `-C nosuchdir t/a.txt -C d1
+    // t/z.txt` says only `nosuchdir: Cannot open`, never a word about `t/z.txt`.
+    if let Stop::Handler(rc) = stop
+        && rc != 0
+    {
+        return rc;
+    }
 
     // Links before directories, because creating one bumps the mtime of the
     // directory it lands in. GNU reaches the same place by a longer route — it
@@ -4729,12 +4891,22 @@ fn do_extract(
     // applies the links, then fixes the ancestors — and the observable result
     // is identical: measured, an archive whose only member under `sub/` is a
     // symlink to an absolute path leaves `sub`'s stored mtime intact.
-    apply_delayed_links(&root, delayed, &mut status);
+    apply_delayed_links(&mut roots, chdirs, delayed, &mut status);
 
     // Deepest first: `pending_dirs` is in archive order, which is parents
     // before children, so the reverse leaves a parent's timestamp untouched by
     // work still to be done inside it.
-    for (name, mode, mtime) in pending_dirs.into_iter().rev() {
+    for (level, name, mode, mtime) in pending_dirs.into_iter().rev() {
+        // Every level recorded here was entered during the walk, so this cannot
+        // fail; it is a `Result` all the same, and a failure is reported rather
+        // than assumed away.
+        let root = match roots.at(chdirs, level) {
+            Ok(root) => root,
+            Err(rc) => {
+                status = rc;
+                continue;
+            }
+        };
         match root.locate(&name) {
             Ok(at) => restore_metadata(&at, &name, mode, mtime, &mut status),
             Err(e) => {
@@ -4827,6 +4999,10 @@ struct DelayedLink {
     name: Vec<u8>,
     target: Vec<u8>,
     mtime: i64,
+    /// Which `-C` level the member belonged to, so the link is created under
+    /// the destination its placeholder went to rather than under whichever one
+    /// happened to be current when the archive ended. See [`Roots`].
+    dir: usize,
     /// `(dev, ino)` of the placeholder as created. Checked again before the
     /// placeholder is removed, so that a link is never made to a path that has
     /// become something else in the meantime.
@@ -4981,27 +5157,38 @@ fn do_list_main(
     // nosuchdir` prints `nosuchdir: Cannot open` and exits 2 rather than
     // listing the archive. Ignoring `-C` here, which is what this tar did until
     // 2026-08-30, turned a command the user got wrong into a silent success.
-    // The `want` rule is the extraction one, for the same reason: see
-    // `do_extract`.
-    let want = if members.is_empty() {
-        chdirs.len()
-    } else {
-        members.iter().map(|m| m.dir).max().unwrap_or(0)
-    };
+    //
+    // Entered lazily, member by member, exactly as extraction does — measured:
+    // `tar -tf ref.tar -C d1 t/a.txt -C nosuchdir t/z.txt` prints `t/a.txt`
+    // *first* and only then reports `nosuchdir`, and the same command naming a
+    // member the archive does not hold never reports `nosuchdir` at all.
     let mut entered = 0usize;
-    if let Err(rc) = enter_chdirs(chdirs, &mut entered, want) {
+    // The one eager case, as in `do_extract`: with no operands every `-C` is in
+    // force and GNU enters the chain before reading the archive, so a bad
+    // directory outranks a bad archive.
+    if members.is_empty()
+        && let Err(rc) = enter_chdirs(chdirs, &mut entered, chdirs.len())
+    {
         return rc;
     }
 
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
-    let mut selector = Selector::new(members);
+    let mut selector = Selector::new(members, chdirs.len());
     // Read once, before any member is printed. `-tv` renders every timestamp in
     // the machine's zone, and re-resolving `TZ` per member would let a listing
     // straddle a zone change mid-file.
     let zone = localtime::Zone::from_env();
 
-    let (stop, write_err) = list_archive(input.as_mut(), &mut out, verbose, &mut selector, &zone);
+    let (stop, write_err) = list_archive(
+        input.as_mut(),
+        &mut out,
+        verbose,
+        &mut selector,
+        &zone,
+        chdirs,
+        &mut entered,
+    );
 
     let flush_err = out.flush().err();
     if let Some(e) = write_err.or(flush_err) {
@@ -5012,6 +5199,13 @@ fn do_list_main(
         }
         diag!("tar: 'standard output': Cannot write: {}", strerror(&e));
         return fatal();
+    }
+
+    // A `-C` that could not be entered exits on the spot; see `do_extract`.
+    if let Stop::Handler(rc) = stop
+        && rc != 0
+    {
+        return rc;
     }
 
     // Order matters: a member the caller named and the archive does not hold is
@@ -5058,6 +5252,8 @@ fn list_archive(
     verbose: u8,
     selector: &mut Selector,
     zone: &localtime::Zone,
+    chdirs: &[OsString],
+    entered: &mut usize,
 ) -> (Stop, Option<io::Error>) {
     let mut ugswidth = UGSWIDTH_MIN;
     let mut write_err: Option<io::Error> = None;
@@ -5081,8 +5277,18 @@ fn list_archive(
         let link_target = strip_link_target(member, &mut prefixes, &mut || {
             drop(out.flush());
         });
-        if !selector.wants(&member.name) {
+        let Some(level) = selector.wants(&member.name) else {
             return Handled::Skip;
+        };
+        // A listing has no destination, but the chdir still happens and can
+        // still fail — and it happens *here*, after the members before it have
+        // already been printed. The buffer is flushed first so that the failure
+        // does not surface above the lines it followed.
+        if *entered < level {
+            drop(out.flush());
+            if let Err(rc) = enter_chdirs(chdirs, entered, level) {
+                return Handled::Stop(rc);
+            }
         }
         // Listing shows the name as stored, not the sanitized one: the point
         // of `tar -t` is to tell you what is in the archive, and a member
@@ -5315,6 +5521,18 @@ mod tests {
             .collect()
     }
 
+    /// [`ops`] for names no `&str` can hold. See [`b`].
+    #[cfg(unix)]
+    fn bops(items: &[&[u8]]) -> Vec<Operand> {
+        items
+            .iter()
+            .map(|x| Operand {
+                name: os_from_bytes(x),
+                dir: 0,
+            })
+            .collect()
+    }
+
     /// Build an argv out of raw byte strings, so a test can pass an argument
     /// that no `&str` can hold.
     ///
@@ -5372,8 +5590,17 @@ mod tests {
     /// Level 1 is what a bare `-t` produces: `-t` bumps the counter once, so
     /// the plain listing is level 1, not level 0 (which is silent).
     fn list_names(input: &[u8], out: &mut Vec<u8>) -> Stop {
-        let mut sel = Selector::new(&[]);
-        let (stop, err) = list_archive(&mut &input[..], out, 1, &mut sel, &Zone::utc());
+        let mut sel = Selector::new(&[], 0);
+        let mut entered = 0usize;
+        let (stop, err) = list_archive(
+            &mut &input[..],
+            out,
+            1,
+            &mut sel,
+            &Zone::utc(),
+            &[],
+            &mut entered,
+        );
         assert!(err.is_none(), "unexpected write error listing to a Vec");
         stop
     }
@@ -5381,8 +5608,17 @@ mod tests {
     /// As [`list_names`], in the long (`-tv`) form — level 2, the counter's
     /// ceiling.
     fn list_long(input: &[u8], out: &mut Vec<u8>) -> Stop {
-        let mut sel = Selector::new(&[]);
-        let (stop, err) = list_archive(&mut &input[..], out, 2, &mut sel, &Zone::utc());
+        let mut sel = Selector::new(&[], 0);
+        let mut entered = 0usize;
+        let (stop, err) = list_archive(
+            &mut &input[..],
+            out,
+            2,
+            &mut sel,
+            &Zone::utc(),
+            &[],
+            &mut entered,
+        );
         assert!(err.is_none(), "unexpected write error listing to a Vec");
         stop
     }
@@ -7370,9 +7606,11 @@ mod tests {
 
     #[test]
     fn selector_with_no_operands_wants_everything() {
-        let mut sel = Selector::new(&[]);
-        assert!(sel.wants(b"anything"));
-        assert!(sel.wants(b"a/b/c"));
+        // Every `-C` is in force when no operand names one, so the level a
+        // wanted member reports is the end of the whole chain.
+        let mut sel = Selector::new(&[], 2);
+        assert_eq!(sel.wants(b"anything"), Some(2));
+        assert_eq!(sel.wants(b"a/b/c"), Some(2));
         assert_eq!(sel.report_missing(), 0);
     }
 
@@ -7380,36 +7618,83 @@ mod tests {
     fn selector_matches_a_named_member_and_its_subtree() {
         // `tar -xf a.tar dir` unpacks the subtree, not the bare entry -- and
         // with no selector at all this used to unpack the whole archive.
-        let mut sel = Selector::new(&ops(&["t/sub"]));
-        assert!(sel.wants(b"t/sub/"));
-        assert!(sel.wants(b"t/sub/b.bin"));
-        assert!(!sel.wants(b"t/a.txt"));
+        let mut sel = Selector::new(&ops(&["t/sub"]), 0);
+        assert_eq!(sel.wants(b"t/sub/"), Some(0));
+        assert_eq!(sel.wants(b"t/sub/b.bin"), Some(0));
+        assert_eq!(sel.wants(b"t/a.txt"), None);
         // Not a prefix match on bytes: `t/subterranean` is a different name.
-        assert!(!sel.wants(b"t/subterranean"));
+        assert_eq!(sel.wants(b"t/subterranean"), None);
         assert_eq!(sel.report_missing(), 0);
     }
 
     #[test]
     fn selector_ignores_trailing_slashes_on_either_side() {
-        let mut sel = Selector::new(&ops(&["t/sub/"]));
-        assert!(sel.wants(b"t/sub"));
-        assert!(sel.wants(b"t/sub/b.bin"));
+        let mut sel = Selector::new(&ops(&["t/sub/"]), 0);
+        assert_eq!(sel.wants(b"t/sub"), Some(0));
+        assert_eq!(sel.wants(b"t/sub/b.bin"), Some(0));
     }
 
     #[test]
     fn selector_reports_an_operand_that_matched_nothing() {
-        let mut sel = Selector::new(&ops(&["present", "absent"]));
-        assert!(sel.wants(b"present"));
+        let mut sel = Selector::new(&ops(&["present", "absent"]), 0);
+        assert_eq!(sel.wants(b"present"), Some(0));
         assert_eq!(sel.report_missing(), EXIT_FATAL);
     }
 
     #[test]
     #[cfg(unix)] // see `b()`
     fn selector_takes_an_operand_that_is_not_utf8() {
-        let mut sel = Selector::new(&b(&[b"caf\xe9"]));
-        assert!(sel.wants(b"caf\xe9"));
-        assert!(sel.wants(b"caf\xe9/inside"));
-        assert!(!sel.wants(b"cafe"));
+        let mut sel = Selector::new(&bops(&[b"caf\xe9"]), 0);
+        assert_eq!(sel.wants(b"caf\xe9"), Some(0));
+        assert_eq!(sel.wants(b"caf\xe9/inside"), Some(0));
+        assert_eq!(sel.wants(b"cafe"), None);
+        assert_eq!(sel.report_missing(), 0);
+    }
+
+    #[test]
+    fn selector_gives_each_member_the_level_of_its_own_operand() {
+        // `-C d1 t/z.txt -C d2 t/a.txt`. The archive holds `t/a.txt` first, so
+        // the levels come back out of order — which is the whole point: the
+        // destination follows the operand, not the archive.
+        let mut sel = Selector::new(
+            &[
+                Operand {
+                    name: OsString::from("t/z.txt"),
+                    dir: 1,
+                },
+                Operand {
+                    name: OsString::from("t/a.txt"),
+                    dir: 2,
+                },
+            ],
+            2,
+        );
+        assert_eq!(sel.wants(b"t/a.txt"), Some(2));
+        assert_eq!(sel.wants(b"t/z.txt"), Some(1));
+        assert_eq!(sel.report_missing(), 0);
+    }
+
+    #[test]
+    fn selector_takes_the_first_operand_that_matches() {
+        // One member under two operands at different levels. GNU's own answer
+        // here is incoherent (it extracts into the first and then complains the
+        // member is both already present and not in the archive); ours is the
+        // first operand's level, which is at least the one the user wrote first.
+        let mut sel = Selector::new(
+            &[
+                Operand {
+                    name: OsString::from("t"),
+                    dir: 1,
+                },
+                Operand {
+                    name: OsString::from("t/a.txt"),
+                    dir: 2,
+                },
+            ],
+            2,
+        );
+        assert_eq!(sel.wants(b"t/a.txt"), Some(1));
+        // Both operands are satisfied by that one member, so neither is missing.
         assert_eq!(sel.report_missing(), 0);
     }
 

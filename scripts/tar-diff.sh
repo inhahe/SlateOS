@@ -479,6 +479,19 @@ touch -d '2020-01-02 03:04:05' "long/$LONGDIR/$LONGFILE" "long/$LONGDIR" long
 create_case 'a name too long for the name field' long
 interop_case 'a name too long for the name field' long
 
+# An archive of nothing. GNU declines rather than truncating whatever `-f`
+# names, and the check runs on argv alone -- before the archive is opened and
+# before any `-C` is entered, which is what the second and third cases pin down:
+# neither the unopenable path nor the missing directory is mentioned. Ours wrote
+# a valid 10240-byte archive of no members and exited 0.
+plain_case 'no operands at all'            -cf o.tar
+plain_case 'no operands, spelled long'     --create --file=o.tar
+plain_case 'no operands and -v'            -cvf o.tar
+plain_case 'no operands, unwritable -f'    -cf /nosuchdir/o.tar
+plain_case 'no operands, only a -C'        -cf o.tar -C tree
+plain_case 'no operands, only a missing -C' -cf o.tar -C nosuchdir
+plain_case 'no operands, to stdout'        -c
+
 # ===========================================================================
 # 2. GNU reading what we wrote
 # ===========================================================================
@@ -1224,6 +1237,49 @@ PREP=prep_two_dirs extract_case 'a trailing -C that does not exist' ref.tar \
   -C d1 tree/a.txt -C nosuchdir
 extract_case 'a -C that does not exist' ref.tar -C nosuchdir
 extract_case 'a -C naming a plain file' ref.tar -C ../ref.tar
+
+# Each member goes where *its own* operand said, which is not the same as
+# folding the chain into one destination: `-C d1 A -C d2 B` leaves `A` in `d1`
+# and `B` in `d1/d2`. Only these two cases tell the two readings apart, and the
+# difference is visible only in where the files land -- so they are
+# `extract_case`, which compares the unpacked tree, not just the output.
+PREP=prep_two_dirs extract_case 'two -C, one before each member' ref.tar \
+  -C d1 tree/a.txt -C d2 tree/zero.txt
+# The archive holds `tree/a.txt` before `tree/zero.txt`, so naming the *later*
+# member first makes the levels come back out of archive order: this one has to
+# come back *up* from `d1/d2` to `d1` partway through, which a single cwd that
+# only ever walks forward cannot do.
+PREP=prep_two_dirs extract_case 'two -C, the deeper one named first' ref.tar \
+  -C d1/d2 tree/zero.txt -C .. tree/a.txt
+# The lazy half of the same rule: a `-C` is entered when a member that belongs
+# to it is met, so the members before it are already extracted when it fails,
+# and the operands after it are never reported missing -- GNU exits on the spot.
+prep_one_dir() { mkdir -p d1; }
+PREP=prep_one_dir extract_case 'a second -C that does not exist' ref.tar \
+  -C d1 tree/a.txt -C nosuchdir tree/zero.txt
+# ...and it is never entered at all when no member matches the operand that
+# follows it, which is why this says only `Not found in archive`.
+PREP=prep_one_dir extract_case 'a second -C whose member is not in the archive' \
+  ref.tar -C d1 tree/a.txt -C nosuchdir tree/nope
+# Listing is lazy in exactly the same way, and the ordering shows it: `tree/a.txt`
+# is printed *before* the directory that could not be entered is reported. (These
+# are `plain_case`, which does not honour `$PREP` -- but a listing writes nothing,
+# so the destination only has to exist.)
+mkdir -p d1
+plain_case 'a second -C that does not exist (-t)' \
+  -tf ref.tar -C d1 tree/a.txt -C nosuchdir tree/zero.txt
+plain_case 'a second -C whose member is not in the archive (-t)' \
+  -tf ref.tar -C d1 tree/a.txt -C nosuchdir tree/nope
+# A directory member and a file member in different destinations: `tree/sub` is
+# stored 0700, and its deferred mode/mtime restore has to happen under the
+# directory member's own root rather than under whichever one the run ended in.
+PREP=prep_two_dirs extract_case 'a directory member and a file member split apart' \
+  ref.tar -C d1 tree/sub -C d2 tree/a.txt
+# A symlink held back to the end of the run, in a destination that is not the
+# last one: `./abs` points at `/etc/passwd`, so it is stood up as a placeholder
+# and only becomes a symlink after the archive is read -- in `d1`, not `d1/d2`.
+PREP=prep_two_dirs extract_case 'a delayed symlink in a non-final destination' \
+  spec.tar -C d1 ./abs -C d2 ./f
 
 # ===========================================================================
 # 9. the known divergences

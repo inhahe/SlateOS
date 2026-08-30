@@ -204,6 +204,13 @@ characters after `**Status:**` and looks for one of these:
 | still work | `open` `reopened` `partial` `partially` `in progress` `blocked` `pending` `not started` |
 | finished | `done` `landed` `fixed` `implemented` `delivered` `resolved` `answered` `folded in` `closed` `declined` `withdrawn` `obsolete` `superseded` `fulfilled` `consumed` `wontfix` |
 
+**The stamp glyphs count as words.** `✅` reads as *finished*, `⏳` and `⛔` as
+*still work*, ranked exactly like the table above — so `✅ … ⏳ ask 2 blocked`
+is open, and a tick alone is enough when the sentence after it uses a verb the
+table does not have (`✅ **TAKEN by lane A**` was read as unrecognised for
+weeks). Prefer a table word *and* the glyph; the glyph is the safety net, not
+the substitute.
+
 Anything else — `**Status:** needs a decision from you first` was a real one —
 reads as *unrecognised*, which counts as open but tells the reader nothing.
 A negated done word (`not fixed`, `never landed`) counts as open; a heading like

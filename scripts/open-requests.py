@@ -174,6 +174,40 @@ OPEN_WORDS = (
 DONE_WORD_RE = re.compile(rf"(?<!\w)({DONE_WORDS})(?![\w-])", re.IGNORECASE)
 OPEN_WORD_RE = re.compile(rf"(?<!\w)({OPEN_WORDS})(?![\w-])", re.IGNORECASE)
 
+# The glyphs. This dropbox does not only stamp statuses in words -- 149 of the
+# status blocks in 192 files open with `✅`, and `roadmap.md` rule 2 *instructs*
+# the lanes to write `**Status:** ⏳ ask 1 landed …; ask 2 blocked on lane <x>`.
+# The script read none of them, so a status whose meaning was carried by the
+# glyph and whose words happened to fall outside the vocabulary was reported
+# unrecognised, and an unrecognised status is one the reader learns to skim.
+#
+# Three files were being reported open on that basis, each stamped with a tick
+# and a word the list does not have: `✅ **TAKEN by lane A.**`,
+# `✅ **ACKNOWLEDGED … the argument is accepted.**`, `✅ **REBUILT … twice**`.
+# All three were checked by hand and all three are genuinely finished.
+#
+# The glyph is a better signal than those words would be, which is why this is
+# the fix and widening DONE_WORDS is not. `taken`, `acknowledged` and `accepted`
+# all have a live reading -- "seen, not yet done" -- so putting them in the done
+# list would clear requests that are still work. The tick has no such reading:
+# nobody stamps `✅` on something they have not finished. Measured over the
+# whole dropbox the two agree 97.7% of the time (129 status blocks carry a tick,
+# 126 already read done from their words), and every one of the three
+# disagreements is a case where the tick is right.
+#
+# The open glyphs change no verdict today -- all three files that use one also
+# say `blocked` in words. They are here because the rule the roadmap gives the
+# lanes is "put the glyph in the status", and a lane that follows it without
+# also writing `blocked` would otherwise get a false clear on the `landed` in
+# the same sentence. Reading the marker the convention asks for costs nothing
+# and closes that hole before someone falls in it.
+#
+# Only U+2705 is listed for done, because only U+2705 is used: a survey of every
+# non-ASCII character inside a status window found ✅ 149 times and no other
+# tick -- no ✔, no ✔️, so no variation-selector case to get wrong.
+DONE_MARK_RE = re.compile("\u2705")  # ✅
+OPEN_MARK_RE = re.compile("[\u23f3\u26d4]")  # ⏳ ⛔
+
 # A done word with a negator just before it is not a completion. Before this
 # guard, `**Status:** not yet resolved` and `**Status:** never landed` were both
 # reported *done* -- a status line saying in plain English that the work is
@@ -212,7 +246,7 @@ def status_verdict(text: str) -> tuple[bool, str, bool] | None:
     stamp and an appended reply section has two, and the reader wants the answer
     that accounts for both. Open wins over done for the reason in NEGATOR_RE.
 
-    `decisive` says whether a vocabulary word was actually matched, as opposed
+    `decisive` says whether a vocabulary word or glyph was actually matched, as opposed
     to the fallback below where a `**Status:**` block exists but says nothing
     this function recognises. Both cases report open, so the flag makes no
     difference to *this* function's answer -- it exists so `classify()` can tell
@@ -226,10 +260,18 @@ def status_verdict(text: str) -> tuple[bool, str, bool] | None:
     blocks = [m.group(1)[:STATUS_WINDOW] for m in STATUS_BLOCK_RE.finditer(text)]
     done_hit: str | None = None
     for block in blocks:
-        if OPEN_WORD_RE.search(block):
+        if OPEN_WORD_RE.search(block) or OPEN_MARK_RE.search(block):
             return (True, f"**Status:**{block}".strip()[:80], True)
-        for m in DONE_WORD_RE.finditer(block):
-            if not NEGATOR_RE.search(block[: m.start()]):
+        # Words and glyphs are one vocabulary, ranked the same way: open beats
+        # done, and a done hit is only a hit if no negator precedes it. Merging
+        # the positions rather than checking the two regexes in sequence keeps
+        # that true of `✅ not fixed yet` as well as of `not fixed yet`.
+        starts = sorted(
+            [m.start() for m in DONE_WORD_RE.finditer(block)]
+            + [m.start() for m in DONE_MARK_RE.finditer(block)]
+        )
+        for start in starts:
+            if not NEGATOR_RE.search(block[:start]):
                 done_hit = done_hit or f"**Status:**{block}".strip()[:80]
     if done_hit is not None:
         return (False, done_hit, True)

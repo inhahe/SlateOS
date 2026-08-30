@@ -336,6 +336,133 @@ def test_the_roadmap_vocabulary_table_matches_the_code(mod):
               int(stated.group(1)), mod.STATUS_WINDOW)
 
 
+def test_the_status_glyphs_are_documented_and_classify(mod):
+    """The glyph rule must be in rule 2, and must be the glyphs the code reads.
+
+    Same contract as the word table, for the same reason: a marker the tool
+    honours in silence is a marker only its author can use. It is checked
+    separately because the glyphs are prose in rule 2 rather than a table row --
+    a tick is not a "word" and putting it in the table would make the word test
+    assert that `✅` normalises like `landed`.
+
+    The two directions are asserted against the *coded* regexes, not against a
+    second copy of the list, so adding a glyph to the code without documenting
+    it fails here rather than passing quietly.
+    """
+    with open(ROADMAP, encoding="utf-8") as fh:
+        roadmap = fh.read()
+    anchor = roadmap.find(ROADMAP_ANCHOR)
+    if not check("roadmap rule 2 is still findable", anchor >= 0, True):
+        return
+    region = roadmap[anchor:anchor + 1500]
+
+    if not check("rule 2 documents the glyphs at all",
+                 "glyphs count as words" in region, True):
+        return
+
+    # Every glyph quoted in the paragraph, and every glyph the code knows.
+    documented = set(re.findall(r"[\u2705\u23f3\u26d4]", region))
+    coded = {"\u2705", "\u23f3", "\u26d4"}
+    check("no coded glyph is missing from rule 2",
+          sorted(coded - documented), [])
+    check("no glyph in rule 2 is unknown to the code",
+          sorted(documented - coded), [])
+
+    # And they classify the way the paragraph says they do. Asserting through
+    # the classifier is the half that matters: the paragraph could name the
+    # right glyph and still describe the wrong verdict.
+    for glyph, want in (("\u2705", "done"), ("\u23f3", "open"),
+                        ("\u26d4", "open")):
+        check(f"a bare {glyph!r} status classifies as {want}",
+              verdict(mod, f"**Status:** {glyph} TAKEN by lane A."), want)
+        check(f"{glyph!r} is matched by the coded regex",
+              bool((mod.DONE_MARK_RE if want == "done"
+                    else mod.OPEN_MARK_RE).search(glyph)), True)
+
+
+def test_a_tick_is_read_when_the_words_around_it_are_not(mod):
+    """The three real statuses this rule was added for.
+
+    Each is a genuine completion stamped with a verb the table does not have --
+    `TAKEN`, `ACKNOWLEDGED`, `REBUILT`. All three were verified by hand against
+    the tree before the rule was added; all three were reported open for weeks
+    on the strength of the missing word, with the tick sitting right there.
+
+    They are quoted rather than paraphrased because the point is not that a tick
+    works in the abstract -- `test_the_status_glyphs_...` covers that -- but that
+    it works on the sentences the lanes actually wrote, punctuation and bold
+    markers included.
+    """
+    for text in (
+        f"**Status:** {CHECK} **TAKEN by lane A.** `ere = {{ path = \"..\" }}`"
+        " is in the workspace.",
+        f"**Status:** {CHECK} **ACKNOWLEDGED 2026-08-17 by lane B \u2014 the"
+        " argument is accepted.**",
+        f"**Status:** {CHECK} **REBUILT 2026-08-21 by lane B**, twice \u2014"
+        " `b405fc5c6` cleared the drift you reported.",
+    ):
+        check(f"tick carries: {text[12:46]!r}", verdict(mod, text), "done")
+
+
+def test_the_widened_vocabulary_did_not_widen_to_the_words(mod):
+    """`taken`/`acknowledged`/`accepted` must NOT be done words on their own.
+
+    This is the test that keeps the fix honest. The cheap version of it was to
+    add those three verbs to `DONE_WORDS`, and it would have passed every test
+    above -- while clearing requests that are still work, because all three
+    have a live reading. `**Status:** acknowledged, fix scheduled for next
+    week` is not done, and neither is `TAKEN -- I own it now, starting
+    Monday`. The tick has no such reading, which is the whole reason the glyph
+    is the marker and the verb is not.
+
+    So: a tick with those words is done (above), and the same words without a
+    tick are open (here). If someone later "simplifies" this by moving the
+    verbs into the word list, this fails.
+    """
+    for text in (
+        "**Status:** TAKEN by lane A, starting once the sysroot lands.",
+        "**Status:** ACKNOWLEDGED \u2014 I agree with the argument.",
+        "**Status:** accepted, scheduled behind the ext4 port.",
+    ):
+        check(f"no tick, no clear: {text[12:46]!r}", verdict(mod, text), "open")
+
+
+def test_an_open_glyph_outranks_a_tick_in_the_same_status(mod):
+    """`✅ ask 1 landed … ⏳ ask 2 blocked` is open, exactly like the words.
+
+    Rule 2 tells the lanes to write a half-done status this way, so the ranking
+    that makes it safe has to hold for glyphs and not only for the vocabulary.
+    Both orders are checked: the merge in `status_verdict` sorts done positions
+    but returns on the first open hit anywhere in the block, so a tick that
+    comes *first* must still lose.
+    """
+    check("tick then hourglass is open",
+          verdict(mod, f"**Status:** {CHECK} ask 1 landed; \u23f3 ask 2 sits"
+                       " with lane C."),
+          "open")
+    check("hourglass then tick is open",
+          verdict(mod, f"**Status:** \u23f3 ask 2 sits with lane C; {CHECK}"
+                       " ask 1 landed."),
+          "open")
+    check("a lone tick with no open glyph is still done",
+          verdict(mod, f"**Status:** {CHECK} ask 1 landed."), "done")
+
+
+def test_a_negated_tick_is_not_a_clear(mod):
+    """`not ✅` reads as open, like every other done marker.
+
+    The glyph goes through the same negator guard as the words, which is why
+    `status_verdict` merges the two sets of match positions instead of running
+    the tick regex as a separate short-circuit. A separate check would have
+    skipped the guard and made the tick the one done marker that cannot be
+    negated -- in the direction that loses work.
+    """
+    check("a negated tick does not clear",
+          verdict(mod, f"**Status:** not {CHECK} yet \u2014 waiting on the"
+                       " sysroot."),
+          "open")
+
+
 def test_no_status_line_at_all_is_open(mod):
     """Absence is not evidence of completion."""
     check("a file with no **Status:** is open",

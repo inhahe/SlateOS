@@ -239,8 +239,14 @@ impl Layout {
         // that happens to be big enough at 700 pixels.
         let header_h = (title + status + pad * 3.0).min(h);
         let header = Rect::new(0.0, 0.0, w, header_h);
+        // The help bar takes what the header left and no more, which is what
+        // keeps it off the header: `help_h <= h - header_h`, so `h - help_h`
+        // is already at or below `header_h`. An earlier draft wrote
+        // `(h - help_h).max(header.bottom())` on top of that, and mutation
+        // testing showed the `max` could not be made to bind by any window --
+        // a guard whose losing side never loses is a guard no test can check.
         let help_h = (small + pad * 2.0).min((h - header_h).max(0.0));
-        let help = Rect::new(0.0, (h - help_h).max(header.bottom()), w, help_h);
+        let help = Rect::new(0.0, h - help_h, w, help_h);
 
         let middle = Rect::new(0.0, header.bottom(), w, (help.y - header.bottom()).max(0.0));
 
@@ -366,12 +372,16 @@ fn fit_tile_font(tile_w: f32, tile_h: f32) -> f32 {
 
 /// Shrink a rectangle by `by` on every side, never past nothing.
 fn inset(r: Rect, by: f32) -> Rect {
-    Rect::new(
-        r.x + by,
-        r.y + by,
-        (r.w - by * 2.0).max(0.0),
-        (r.h - by * 2.0).max(0.0),
-    )
+    // Inset by at most half of each side. A rect thinner than `by * 2` cannot
+    // give `by` away at both edges, and the first draft clamped only the
+    // *size* while moving the origin in by the full amount regardless -- which
+    // puts the "inset" rect outside the rect it came from. Mahjong's 200x20
+    // window is where that showed: the middle band is zero-tall there, so the
+    // padded board came back starting two pixels below the window's bottom
+    // edge, and the whole turtle was solved from it.
+    let dx = by.clamp(0.0, r.w / 2.0);
+    let dy = by.clamp(0.0, r.h / 2.0);
+    Rect::new(r.x + dx, r.y + dy, r.w - dx * 2.0, r.h - dy * 2.0)
 }
 
 // ── LCG random number generator ────────────────────────────────────
@@ -1804,6 +1814,23 @@ mod tests {
         (360.0, 700.0),
     ];
 
+    /// Windows smaller than the layout's own furniture.
+    ///
+    /// Every font and every padding has a floor, so below roughly 24 pixels of
+    /// height the header alone wants more room than the whole window has. Not
+    /// one of `SIZES` is that small, and mutation testing found what that cost:
+    /// the `.min(h)` that keeps the header inside the window, and the guards
+    /// that stop the board solving a negative tile, could all be deleted
+    /// without a single test noticing. A compositor hands out sizes like these
+    /// during a drag, so they are not hypothetical.
+    const SQUEEZED: [(f32, f32); 5] = [
+        (200.0, 20.0),
+        (20.0, 200.0),
+        (30.0, 30.0),
+        (1.0, 1.0),
+        (0.0, 0.0),
+    ];
+
     // ════════════════════════════════════════════════════════════════
     // The window: every coordinate solved from the live size
     // ════════════════════════════════════════════════════════════════
@@ -1838,6 +1865,79 @@ mod tests {
                 l.help.bottom() <= h + 0.01,
                 "at {w}x{h} the help bar ends at {} past the window",
                 l.help.bottom()
+            );
+        }
+    }
+
+    #[test]
+    fn an_inset_never_leaves_the_rect_it_came_from() {
+        // Checked here rather than through the layout, because through the
+        // layout it cannot be checked: a negative height and an origin pushed
+        // too far in are the same two pixels with opposite signs, and by the
+        // time the turtle is centred in the result they have cancelled. The
+        // helper is where the claim is small enough to state.
+        for (w, h) in [
+            (100.0, 100.0),
+            (10.0, 3.0),
+            (3.0, 80.0),
+            (1.0, 1.0),
+            (0.0, 0.0),
+        ] {
+            let r = Rect::new(5.0, 7.0, w, h);
+            let i = inset(r, 4.0);
+            assert!(i.w >= 0.0 && i.h >= 0.0, "inset of {r:?} is {i:?}");
+            assert!(
+                i.x >= r.x - 0.01
+                    && i.y >= r.y - 0.01
+                    && i.right() <= r.right() + 0.01
+                    && i.bottom() <= r.bottom() + 0.01,
+                "inset of {r:?} is {i:?}, which is not inside it"
+            );
+        }
+        // And on a rect with room to spare it is a real inset, not a no-op.
+        assert_eq!(
+            inset(Rect::new(5.0, 7.0, 100.0, 100.0), 4.0),
+            Rect::new(9.0, 11.0, 92.0, 92.0)
+        );
+    }
+
+    #[test]
+    fn a_window_smaller_than_its_own_furniture_still_solves_a_sane_layout() {
+        // The window is the only thing whose size is not ours to choose, and a
+        // drag past the minimum hands us these. Nothing may be negative,
+        // nothing may hang outside the window, and the bands must still stack.
+        for (w, h) in SQUEEZED {
+            let l = Layout::solve(w, h);
+            for (name, r) in [
+                ("header", l.header),
+                ("help", l.help),
+                ("legend", l.legend),
+                ("board", l.board),
+                ("turtle", l.turtle),
+            ] {
+                assert!(r.w >= 0.0 && r.h >= 0.0, "at {w}x{h} the {name} is {r:?}");
+                assert!(
+                    r.x >= -0.01 && r.y >= -0.01,
+                    "at {w}x{h} the {name} starts outside the window at {r:?}"
+                );
+                assert!(
+                    r.right() <= w + 0.01 && r.bottom() <= h + 0.01,
+                    "at {w}x{h} the {name} runs to {}x{} past the window",
+                    r.right(),
+                    r.bottom()
+                );
+            }
+            assert!(
+                l.help.y >= l.header.bottom() - 0.01,
+                "at {w}x{h} the help bar at {} is drawn over the header ending at {}",
+                l.help.y,
+                l.header.bottom()
+            );
+            assert!(
+                l.tile_w >= 0.0 && l.tile_h >= 0.0,
+                "at {w}x{h} the tiles are {}x{}",
+                l.tile_w,
+                l.tile_h
             );
         }
     }
@@ -1898,6 +1998,28 @@ mod tests {
             small.title,
             large.header.h,
             large.title
+        );
+
+        // "It grows" on its own is not the claim the name makes, and mutation
+        // testing said so: a header sized at `h * 0.11` also grows with every
+        // one of the windows above, because the fonts are themselves derived
+        // from `h`. Varying only the input that both the right and the wrong
+        // formula depend on cannot tell them apart. What separates them is the
+        // clamp: the fonts stop at 26pt and 18pt, and a share of the height
+        // never stops. So take two windows tall enough that both fonts and the
+        // padding have all hit their ceilings, and require the header to have
+        // stopped with them.
+        let tall = Layout::solve(1000.0, 1000.0);
+        let taller = Layout::solve(1000.0, 1400.0);
+        assert_eq!(
+            (tall.title, tall.status, tall.pad),
+            (taller.title, taller.status, taller.pad),
+            "the fixture is broken: the fonts are still growing at 1000 and 1400 tall"
+        );
+        assert_eq!(
+            tall.header.h, taller.header.h,
+            "the fonts stopped growing at 1000 tall but the header kept going, \
+             so it is sized from the window and not from what it holds"
         );
     }
 

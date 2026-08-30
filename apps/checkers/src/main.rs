@@ -2108,6 +2108,46 @@ mod tests {
     }
 
     #[test]
+    fn widening_the_window_moves_the_board_rather_than_the_gap_beside_it() {
+        // The board is square and the room it is given usually is not, so one
+        // axis has slack, and the board is centred in it. Pinning the board to
+        // the corner of that room instead passes every other geometry test here
+        // -- the squares still tile, still stay in the window, still miss the
+        // panel -- and looks wrong on screen: the board shoved against the left
+        // edge with all the empty space in one stripe down the right.
+        //
+        // Stated as an absolute this is awkward, because neither edge of the
+        // room is recorded in the frame: the left edge is the window's less the
+        // padding, and the right edge is the panel band's plus it. Stated as a
+        // difference the padding cancels. Both sizes below are 400 tall, so the
+        // padding, the fonts and the height-limited square size are identical
+        // at each, and the only thing that changes is how much room there is
+        // across. Half of that extra room should end up on the board's left.
+        let app = app();
+        let narrow = (1200.0, 400.0);
+        let wide = (1600.0, 400.0);
+
+        let a = box_at(&app, Target::Board, narrow);
+        let b = box_at(&app, Target::Board, wide);
+        assert!(
+            (a.w - b.w).abs() < 0.01,
+            "the premise is wrong: the board is {} across at {narrow:?} and {} at {wide:?}",
+            a.w,
+            b.w
+        );
+
+        let extra = box_at(&app, Target::Panel, wide).x - box_at(&app, Target::Panel, narrow).x;
+        assert!(extra > 1.0, "the wider window gave the board no extra room");
+        assert!(
+            ((b.x - a.x) - extra / 2.0).abs() < 0.01,
+            "the window grew by {extra} across and the board moved {} right; \
+             centred, it should have moved {}",
+            b.x - a.x,
+            extra / 2.0
+        );
+    }
+
+    #[test]
     fn a_click_in_a_square_reaches_that_square() {
         // The whole point of the rewrite: the click is resolved against the box
         // the drawing pass recorded, so this cannot pass by agreeing with a
@@ -2171,9 +2211,15 @@ mod tests {
         // The frame's hit map has no cast to get wrong -- but a box recorded
         // wider than the square it stands for would have the same symptom, so
         // the check is still worth making.
+        // The cursor is walked off a1 before each click. It starts on a1, and
+        // a1 is also the first square any "resolve a miss to *something*"
+        // mistake lands on -- `hit_test(..).unwrap_or(Target::Square(0, 0))` --
+        // so a version of this test that clicked from the opening cursor could
+        // not tell a click that was ignored from a click that was misread.
         let size = CheckersApp::SIZE;
         let board = box_of(&app(), Target::Board);
-        let start = app().cursor;
+        let elsewhere = Pos::new(3, 3);
+        let perch = box_of(&app(), Target::Square(elsewhere.row, elsewhere.col)).centre();
         for (x, y) in [
             (board.x - 4.0, board.centre().1),
             (board.right() + 4.0, board.centre().1),
@@ -2181,9 +2227,15 @@ mod tests {
             (board.centre().0, board.bottom() + 4.0),
         ] {
             let mut app = app();
+            tap(&mut app, perch.0, perch.1, size);
+            assert_eq!(
+                app.cursor, elsewhere,
+                "the cursor would not move to d4 to begin with"
+            );
+
             tap(&mut app, x, y, size);
             assert_eq!(
-                app.cursor, start,
+                app.cursor, elsewhere,
                 "a click at ({x}, {y}), outside the board at {board:?}, moved the cursor"
             );
         }
@@ -2430,6 +2482,14 @@ mod tests {
         // The companion to the two tests either side: they permit a panel to
         // omit a row, and this is what stops it omitting rows it has room for.
         // Every size the app is meant to be used at holds the whole panel.
+        //
+        // A recorded box is not enough. `panel_row` returns the rect whether or
+        // not it drew in it, and the caller hands that rect to `f.hit` either
+        // way -- so a panel that recorded all five boxes and painted no text in
+        // any of them would satisfy a test that only asked whether the boxes
+        // were there. That is a panel which answers clicks and shows nothing,
+        // and it is what the mutation sweep produced. So each box is also
+        // required to contain the origin of a line of text.
         for size in [
             CheckersApp::SIZE,
             (640.0, 480.0),
@@ -2437,6 +2497,15 @@ mod tests {
             (400.0, 900.0),
         ] {
             let app = app();
+            let f = app.draw(size);
+            let text: Vec<(f32, f32)> = f
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { x, y, .. } => Some((*x, *y)),
+                    _ => None,
+                })
+                .collect();
             for target in [
                 Target::NewGame,
                 Target::Captures,
@@ -2444,9 +2513,15 @@ mod tests {
                 Target::History,
                 Target::Help,
             ] {
+                let Some(r) = probe::rect_of_sized(&app, target, size) else {
+                    panic!("{target:?} was not drawn at {size:?}, which has room for it");
+                };
                 assert!(
-                    probe::rect_of_sized(&app, target, size).is_some(),
-                    "{target:?} was not drawn at {size:?}, which has room for it"
+                    text.iter().any(|&(x, y)| x >= r.x - 0.01
+                        && x <= r.right() + 0.01
+                        && y >= r.y - 0.01
+                        && y <= r.bottom() + 0.01),
+                    "{target:?} at {size:?} recorded the box {r:?} and wrote nothing in it"
                 );
             }
         }
@@ -2543,6 +2618,77 @@ mod tests {
             "the window asks for a size the natural-size constants do not name"
         );
         assert_eq!(CheckersApp::SIZE, (WINDOW_WIDTH, WINDOW_HEIGHT));
+    }
+
+    #[test]
+    fn the_window_is_asked_to_redraw_only_when_something_changed() {
+        // `handle_event` says whether the app used the event; `on_event` turns
+        // that into what the window should do about it. Answering `Redraw` to
+        // everything is invisible in a test of `handle_event` alone, and on
+        // screen it is a repaint per key release and per mouse button the app
+        // does not use -- the whole board redrawn to change nothing.
+        let mut closing = app();
+        assert_eq!(
+            closing.on_event(&Event::CloseRequested),
+            Response::Exit,
+            "the close button did not close the window"
+        );
+
+        let mut app = app();
+        assert_eq!(
+            app.on_event(&Event::Key(probe::press(Key::Right))),
+            Response::Redraw,
+            "moving the cursor did not ask for a repaint"
+        );
+        assert_eq!(
+            app.on_event(&Event::Key(probe::release(Key::Right))),
+            Response::Idle,
+            "letting a key up repainted the window"
+        );
+        assert_eq!(
+            app.on_event(&Event::Key(probe::press(Key::Tab))),
+            Response::Idle,
+            "a key the game does not use repainted the window"
+        );
+        assert_eq!(
+            app.on_event(&Event::Mouse(MouseEvent {
+                x: -50.0,
+                y: -50.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            })),
+            Response::Idle,
+            "a click outside the window repainted it"
+        );
+    }
+
+    #[test]
+    fn the_render_pass_draws_at_the_size_the_window_hands_it() {
+        // Every other drawing test in this file goes through `Probe::draw`,
+        // which calls `frame` directly. `App::render` is the path the real
+        // window uses and the only one that can be wrong on its own: remember
+        // the new size, then hand `frame` the old one, and the app resizes its
+        // hit boxes while drawing the previous size's picture -- a board that
+        // does not follow the window, and clicks that land on nothing.
+        //
+        // The background is the first thing drawn and is the full window, so
+        // the size the pass actually used is readable off command zero.
+        let mut app = app();
+        for (w, h) in [
+            (1200.0, 900.0),
+            (640.0, 480.0),
+            (WINDOW_WIDTH, WINDOW_HEIGHT),
+        ] {
+            let tree = app.render(w, h);
+            let first = tree.commands.first().expect("render drew nothing at all");
+            let RenderCommand::FillRect { width, height, .. } = first else {
+                panic!("the first thing drawn is no longer the background: {first:?}");
+            };
+            assert!(
+                (width - w).abs() < 0.01 && (height - h).abs() < 0.01,
+                "asked to render at {w}x{h}, the pass painted a {width}x{height} background"
+            );
+            assert_eq!(app.size, (w, h), "the render pass did not remember {w}x{h}");
+        }
     }
 
     #[test]
@@ -2742,8 +2888,8 @@ mod tests {
 
     #[test]
     fn the_header_counts_the_pieces_each_side_has_left() {
-        let app = app();
-        let f = app.draw(CheckersApp::SIZE);
+        let opening = app();
+        let f = opening.draw(CheckersApp::SIZE);
         let drawn: Vec<&String> = f
             .commands()
             .iter()
@@ -2760,6 +2906,74 @@ mod tests {
             drawn.iter().any(|t| t.as_str() == "Black: 12"),
             "the header does not report Black's twelve pieces"
         );
+
+        // The opening is twelve against twelve, so a header that reported each
+        // side the *other* side's count would read correctly there and be
+        // wrong for the rest of the game. Take three black pieces off and the
+        // two counts stop agreeing.
+        let mut app = app();
+        for col in [0i8, 2, 4] {
+            app.board.set(Pos::new(7, col + 1), None);
+        }
+        let f = app.draw(CheckersApp::SIZE);
+        let drawn: Vec<&String> = f
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(app.board.count_pieces(Side::Red), 12);
+        assert_eq!(app.board.count_pieces(Side::Black), 9);
+        assert!(
+            drawn.iter().any(|t| t.as_str() == "Red: 12"),
+            "Red still has twelve, and the header says otherwise: {drawn:?}"
+        );
+        assert!(
+            drawn.iter().any(|t| t.as_str() == "Black: 9"),
+            "Black is down to nine, and the header says otherwise: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn the_piece_counts_follow_the_title_rather_than_a_fixed_offset() {
+        // The chips used to start at a hand-counted offset from the header's
+        // left edge, chosen to clear the title at one font size. The title
+        // scales with the window, so at a large enough one the chips slid under
+        // it and at a small enough one they floated off on their own.
+        for size in SIZES {
+            let app = app();
+            let Some(title) = probe::rect_of_sized(&app, Target::Title, size) else {
+                continue;
+            };
+            let Some(red) = probe::rect_of_sized(&app, Target::Count(Side::Red), size) else {
+                continue;
+            };
+            assert!(
+                red.x > title.right(),
+                "at {size:?} the Red count starts at {} and the title runs to {}",
+                red.x,
+                title.right()
+            );
+            // And not so far past it that the gap is unrelated to the title:
+            // a fixed offset clears a small title by an arbitrary margin.
+            assert!(
+                red.x - title.right() < title.w,
+                "at {size:?} the gap between the title and the Red count is {}, \
+                 wider than the {} title it is supposed to be clearing",
+                red.x - title.right(),
+                title.w
+            );
+            if let Some(black) = probe::rect_of_sized(&app, Target::Count(Side::Black), size) {
+                assert!(
+                    black.x > red.right(),
+                    "at {size:?} the Black count at {} overlaps the Red one ending at {}",
+                    black.x,
+                    red.right()
+                );
+            }
+        }
     }
 
     #[test]

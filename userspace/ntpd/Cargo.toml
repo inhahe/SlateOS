@@ -1,6 +1,0 @@
-[package]
-name = "ntpd"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS ntpd/ntpdate - NTP time synchronization"
-[dependencies]

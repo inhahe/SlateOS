@@ -1,6 +1,0 @@
-[package]
-name = "ss"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS ss - socket statistics (ss/sockstat)"
-[dependencies]

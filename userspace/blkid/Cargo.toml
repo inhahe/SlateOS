@@ -1,6 +1,0 @@
-[package]
-name = "blkid"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS blkid - block device identification (blkid/findfs/lsblk2)"
-[dependencies]

@@ -22,12 +22,9 @@
 # ## Normalising GNU, and why each flag is fair
 #
 # GNU tar's defaults produce its own extended format, which ours does not claim
-# to write. Three flags bring it to the format ours does claim:
+# to write. Two flags bring it to the format ours does claim:
 #
 #   --format=ustar        ustar is what `tar.rs` implements and says it does.
-#   --blocking-factor=1   GNU pads the archive to a 10 KiB record; ours ends
-#                         after the two zero blocks that ustar requires. The
-#                         padding is a tape-drive artefact, not a format rule.
 #   --sort=name           GNU walks a directory in whatever order `readdir`
 #                         returns; ours sorts, so that archiving the same tree
 #                         twice gives the same bytes. ustar imposes no order at
@@ -41,7 +38,12 @@
 # backup exists to preserve. `--numeric-owner` used to be in that list, to keep
 # ours leaving uname/gname empty from masking every other difference in the same
 # 512 bytes; it came out when ours started filling them, so the owner names are
-# now compared like everything else.
+# now compared like everything else. `--blocking-factor=1` used to be in it too,
+# to hide that GNU pads the archive up to a 10 KiB record and ours stopped after
+# the two zero blocks that ustar requires; that came out when ours started
+# padding, so the archive *length* is now compared like everything else — which
+# is the whole point, since a short archive has a different checksum from a
+# padded one even when every header in it is identical.
 #
 # Run `OURS=/usr/bin/tar ./scripts/tar-diff.sh` to confirm the harness still
 # discriminates: it should report every xfail as XPASS and nothing else. (The
@@ -57,7 +59,7 @@ DIFF_NEED='find stat cmp od sha256sum touch ln readlink mkfifo'
 pass=0; fail=0; xfail=0; xpass=0
 
 # GNU's format normalisation. See the header.
-GNUFMT="--format=ustar --blocking-factor=1 --sort=name"
+GNUFMT="--format=ustar --sort=name"
 
 work=$DIFF_TMP/work
 mkdir -p "$work"
@@ -187,11 +189,25 @@ settle() {
 # saying only "they differ". The first differing 512-byte block is what a tar
 # bug is almost always confined to, and the header layout is fixed, so an
 # offset within it identifies the field.
+#
+# Two archives can disagree in two quite different ways, and one sentence cannot
+# describe both. A *differing byte* is a header bug and wants the offset; a
+# common prefix that simply runs out is a *length* bug — the padding, an archive
+# truncated by a fatal error — and wants the two sizes instead. `cmp` already
+# separates them: it names a differing byte on stdout, and reports the shorter
+# file only as `cmp: EOF on X after byte N` on stderr. So an empty match on the
+# stdout form is the signal that this is the length case, not the byte case.
 archive_delta() {
   local a=$1 b=$2
   if cmp -s "$a" "$b"; then printf 'same'; return; fi
   local off
-  off=$(cmp "$a" "$b" 2>/dev/null | sed 's/.*byte \([0-9]*\),.*/\1/')
+  off=$(cmp "$a" "$b" 2>/dev/null | sed -n 's/^.* differ: byte \([0-9][0-9]*\),.*$/\1/p')
+  if [ -z "$off" ]; then
+    printf 'agree then one ends: ours %s bytes, gnu %s bytes' \
+      "$(stat -c %s "$a" 2>/dev/null || printf 'absent')" \
+      "$(stat -c %s "$b" 2>/dev/null || printf 'absent')"
+    return
+  fi
   printf 'differ at byte %s (block %s, offset %s: %s)' \
     "$off" "$(( (off-1) / 512 ))" "$(( (off-1) % 512 ))" \
     "$(header_field $(( (off-1) % 512 )))"
@@ -491,6 +507,67 @@ plain_case 'no operands, unwritable -f'    -cf /nosuchdir/o.tar
 plain_case 'no operands, only a -C'        -cf o.tar -C tree
 plain_case 'no operands, only a missing -C' -cf o.tar -C nosuchdir
 plain_case 'no operands, to stdout'        -c
+
+# ---------------------------------------------------------------------------
+# the record size — how far the archive is padded past its last member
+# ---------------------------------------------------------------------------
+# Every `create_case` above is now also a test of this, because the default
+# record came out of GNUFMT: an archive that stops after the two zero blocks is
+# a *prefix* of the one GNU writes, and `archive_delta` says so. The cases here
+# are for the knob itself.
+#
+# `-b`/`--blocking-factor` counts 512-byte blocks and `--record-size` counts
+# bytes, but they are one setting and not two: the last one on the line wins,
+# whichever spelling it used. Two independent fields would make `-b 3
+# --record-size=1024` mean 1536 and it means 1024.
+create_case 'a one-block record'         -b 1 tree
+create_case 'a three-block record'       -b 3 tree
+create_case 'a record bigger than the archive' -b 40 tree
+create_case 'the record size in bytes'   --record-size=1024 tree
+create_case 'a record size below the archive' --record-size=1536 tree/a.txt
+create_case 'record size wins when it is last' -b 3 --record-size=1024 tree
+create_case 'blocking factor wins when it is last' --record-size=1024 -b 3 tree
+# The suffix letters are a tape utility's, not `du`'s: `b` is a 512-byte block
+# and `B` is 1024, so these two differ by a factor of two. A tar that reached
+# for the familiar `1K = 1024, 1b = 1` reading would write the same bytes for
+# both.
+create_case 'a record size with a 512-byte suffix'  --record-size=3b tree
+create_case 'a record size with a 1024-byte suffix' --record-size=3B tree
+create_case 'a record size in KiB'                  --record-size=2K tree/a.txt
+
+# Refusing a value. There are three sentences and they are not interchangeable:
+# a blocking factor that will not parse names itself, a record size that will
+# not parse names itself with different wording, and a record size that parses
+# but is not a multiple of 512 names nothing at all. Which one you get is
+# decided by whether it *parsed*, not by whether it was sane -- 2^64-1 parses
+# and takes the multiple-of-512 sentence, 2^64 does not and takes the other.
+plain_case 'a blocking factor of zero'     -b 0 -cf o.tar tree
+plain_case 'a blocking factor past INT_MAX' -b 2147483648 -cf o.tar tree
+plain_case 'a blocking factor that is not a number' -b abc -cf o.tar tree
+plain_case 'a blocking factor in hex'      -b 0x10 -cf o.tar tree
+plain_case 'a blocking factor with a suffix' -b 3b -cf o.tar tree
+plain_case 'a record size that is not a multiple of 512' --record-size=1000 -cf o.tar tree
+plain_case 'a record size of 2^64-1'       --record-size=18446744073709551615 -cf o.tar tree
+plain_case 'a record size of 2^64'         --record-size=18446744073709551616 -cf o.tar tree
+plain_case 'a record size with two suffix letters' --record-size=1kB -cf o.tar tree
+plain_case 'a record size with a suffix we lack' --record-size=1E -cf o.tar tree
+# `strtoul`'s grammar, not a trim: leading space and a leading `+` are skipped,
+# trailing space is not, and the base is ten however the digits look.
+plain_case 'a blocking factor with a leading space' -b ' 3' -cf o.tar tree
+plain_case 'a blocking factor with a leading plus'  -b '+3' -cf o.tar tree
+plain_case 'a blocking factor with a trailing space' -b '3 ' -cf o.tar tree
+plain_case 'a blocking factor with a leading zero'  -b 0010 -cf o.tar tree
+
+# Zero is refused by both spellings, but not at the same moment. `-b 0` is the
+# parser's refusal and beats everything, `--record-size=0` gets through the
+# parser and is refused by the run -- after the check for no mode at all, and
+# after the refusal to archive nothing, but before `-f` is opened.
+plain_case 'a record size of zero'         --record-size=0 -cf o.tar tree
+plain_case 'a record size of zero and no mode'  --record-size=0 -f o.tar
+plain_case 'a record size of zero and no operands' --record-size=0 -cf o.tar
+plain_case 'a record size of zero, unwritable -f' --record-size=0 -cf /nosuchdir/o.tar tree
+plain_case 'a record size of zero and a missing -C' --record-size=0 -cf o.tar -C nosuchdir tree
+plain_case 'a blocking factor of zero and no mode' -b 0 -f o.tar
 
 # ===========================================================================
 # 2. GNU reading what we wrote
@@ -1222,6 +1299,17 @@ create_case 'a trailing --directory'         -C tree a.txt --directory=sub
 mkdir -p "cd-$NONUTF8"
 create_case 'a trailing -C that is not UTF-8' tree/a.txt -C "cd-$NONUTF8"
 plain_case 'a trailing -C that does not exist' -cf o.tar -C tree a.txt -C nosuchdir
+
+# ...and this is the one case in the whole harness that can see *when* a record
+# is written, because it is the one that dies with a partly-filled one and never
+# pads it. `a.txt` hands 1024 bytes to a 512-byte record and 512 of them reach
+# the file: a record is spilled when the *next* write needs the room, not when
+# the byte that fills it arrives. Flushing eagerly would leave 1024 here, and
+# writing straight through would leave 1024 at every record size. At the default
+# 10240 nothing is spilled at all and the file is empty, which is the other half
+# of the same statement.
+create_case 'a fatal trailing -C, one-block record'  -b 1 -C tree a.txt -C nosuchdir
+create_case 'a fatal trailing -C, default record'    -C tree a.txt -C nosuchdir
 
 # ...and all of that is create-only. Under `-x` a `-C` that no member operand
 # follows is never reached at all -- not executed, not complained about, exit 0.

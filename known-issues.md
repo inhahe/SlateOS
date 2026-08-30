@@ -96773,9 +96773,36 @@ escape the base directory.
 
 ---
 
-## TD-B-TAR-DOES-NOT-PAD-ARCHIVES-TO-THE-BLOCKING-FACTOR
+## TD-B-TAR-DOES-NOT-PAD-ARCHIVES-TO-THE-BLOCKING-FACTOR — **Status: FIXED** 2026-08-30
 
-**Status:** open. Measured 2026-08-30 against GNU tar 1.35.
+**Fixed** the same day it was filed. `do_create` now writes through a
+`RecordWriter` that buffers whole records and pads the last one, and both of
+GNU's knobs for the record size exist: `-b` / `--blocking-factor=BLOCKS` in
+512-byte units and `--record-size=NUMBER` in bytes, which are one setting with
+two spellings — last one on the line wins — complete with GNU's tape-suffix
+table (`b` is 512 while `B` is 1024, `P` is a suffix and `p` is not, there is no
+`E`/`Z`/`Y`) and `strtoul`'s grammar rather than a trim.
+
+Two things beyond the padding came out of the measurement and are pinned by
+tests rather than left to be rediscovered. The **buffering rule** is observable:
+a record reaches the stream when the *next* write needs the room, not when the
+byte that fills it arrives — which is why `tar -b 1 -cf o.tar -C tree a.txt -C
+nosuchdir` leaves 512 of the 1024 bytes it was handed, and why
+`std::io::BufWriter` (which bypasses its buffer for a write at least as large as
+its capacity) would have been wrong. And **zero is refused twice, differently**:
+`-b 0` is the parser's refusal and beats even `--help`, while `--record-size=0`
+gets through the parser and is refused by the run — after the no-mode check and
+after the refusal to archive nothing, but before `-f` is opened.
+
+`scripts/tar-diff.sh` no longer normalises GNU with `--blocking-factor=1`, so
+all ~30 create cases now compare the archive's length as well as its contents,
+and § 1 gained twenty-odd cases for the knob itself; `archive_delta` grew a
+sentence for a length difference, which it previously could not describe.
+`design-decisions.md` § 712 records the three choices. Thirteen unit tests in
+`tar.rs` cover the parsers and the writer; each was mutation-checked.
+
+The entry as filed follows.
+
 **Where:** `userspace/coreutils/src/bin/tar.rs` — `do_create`, and the two
 end-of-archive zero blocks it writes. (Also true of `userspace/tar`, which is
 where this entry originally pointed; that crate is dead, and the gap being real

@@ -143,7 +143,7 @@ const TAR: Program = Program::new("tar", EXIT_USAGE);
 /// the short form `-?`, and `tar -?` prints the help and exits 0. The shared
 /// parser looks the letter up by byte and has no special case for `?`, so
 /// listing it is all that is needed.
-const SHORT_OPTIONS: &str = "cxtvpkUf:C:?";
+const SHORT_OPTIONS: &str = "cxtvpkUf:C:b:?";
 
 /// Every long option GNU tar 1.35 has — all 172 — in argp's own table order.
 ///
@@ -437,6 +437,20 @@ fn fatal() -> i32 {
     EXIT_FATAL
 }
 
+/// A command line that parsed but asked for something tar will not do.
+///
+/// [`EXIT_FATAL`] (2) rather than [`EXIT_USAGE`] (64) for the reason set out at
+/// [`Mode::choose`]: this is tar's own `USAGE_ERROR`, not argp's complaint about
+/// its option table. `referral: None` because `main` prints [`TRY_HELP`] itself
+/// — the getopt module's one-command referral is the wrong sentence for tar.
+fn usage_error(sentence: String) -> getopt::Error {
+    getopt::Error {
+        sentence,
+        referral: None,
+        status: EXIT_FATAL,
+    }
+}
+
 // ============================================================================
 // argv parsing — pure, cross-platform
 // ============================================================================
@@ -477,7 +491,6 @@ enum Request {
     Run(TarArgs),
 }
 
-#[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct TarArgs {
     /// Which operation was asked for, as one setting rather than three flags.
@@ -509,6 +522,44 @@ struct TarArgs {
     chdirs: Vec<OsString>,
     /// The non-option operands, each tagged with the directory it belongs to.
     files: Vec<Operand>,
+    /// The archive's record size in bytes — what `-b` / `--blocking-factor` and
+    /// `--record-size` both set, and what a created archive is padded out to a
+    /// whole number of. Defaults to [`DEFAULT_RECORD_SIZE`].
+    ///
+    /// **One field for two options**, because GNU has one variable and the fact
+    /// is observable: measured, `-b 3 --record-size=1024` writes 1024-byte
+    /// records and `--record-size=1024 -b 3` writes 1536-byte ones. Last one
+    /// wins, in argv order — which two independent fields could not express
+    /// without also recording which was written later.
+    ///
+    /// Zero is representable and is an error, but not the *parser's* error:
+    /// `-b 0` is refused where it is written, while `--record-size=0` is
+    /// accepted here and refused by `main` after two other checks have had their
+    /// turn. See [`parse_record_size`].
+    record_size: u64,
+}
+
+impl Default for TarArgs {
+    /// Every field's own default except [`TarArgs::record_size`], which is
+    /// twenty blocks and not zero.
+    ///
+    /// Written out rather than derived for that one field: a derived `Default`
+    /// would make "no `-b` given" mean a record size of nothing, which `main`
+    /// refuses as `Invalid value for record_size`. Listing the fields also means
+    /// a new one cannot be forgotten here — it is a compile error rather than a
+    /// silent zero.
+    fn default() -> Self {
+        Self {
+            mode: Mode::default(),
+            verbose: 0,
+            same_permissions: false,
+            old_files: OldFiles::default(),
+            archive_file: None,
+            chdirs: Vec::new(),
+            files: Vec::new(),
+            record_size: DEFAULT_RECORD_SIZE,
+        }
+    }
 }
 
 /// A non-option operand, and which of [`TarArgs::chdirs`] was in force where it
@@ -723,6 +774,166 @@ impl OldFiles {
     }
 }
 
+/// The record size a tar with neither `-b` nor `--record-size` writes: twenty
+/// 512-byte blocks.
+///
+/// Padding an archive out to a whole number of records is a **tape** artefact,
+/// not a rule of the format — nothing in ustar requires it, and this tar read
+/// padded archives for months before it wrote them. It is reproduced because the
+/// size of an archive is observable by anyone who compares two backups, or two
+/// tars: a 4096-byte file where GNU wrote 10240 is a difference in every
+/// checksum, every `ls -l` and every differential test.
+const DEFAULT_RECORD_SIZE: u64 = 20 * BLOCK_SIZE as u64;
+
+/// The largest `-b` GNU accepts, measured at both ends: `-b 2147483647` is taken
+/// and `-b 2147483648` is `2147483648: Invalid blocking factor`.
+///
+/// It is `INT_MAX` because GNU keeps the blocking factor in an `int`. The
+/// resulting record — a terabyte — is not usable on any machine; the bound is
+/// reproduced anyway, because *which* values are refused is the observable part
+/// and a tar that accepted one more than GNU would diverge on the message rather
+/// than on the archive.
+const MAX_BLOCKING_FACTOR: u64 = 2_147_483_647;
+
+/// A non-negative decimal integer, in the grammar C's `strtoul` accepts.
+///
+/// Leading whitespace is skipped and a leading `+` allowed, because `strtoul`
+/// does both and tar hands it the option's value unexamined. Measured, and the
+/// asymmetry is the proof that it is `strtoul` rather than a trim: `-b ' 3'` is
+/// a blocking factor of three, while `-b '3 '` is `3 : Invalid blocking factor`
+/// — the space *before* the digits is consumed and the space after is not.
+///
+/// Base ten only, and that is `strtoul (…, 10)` rather than `strtoul (…, 0)`:
+/// `0x10` is refused outright, and `0777` is seven hundred and seventy-seven
+/// rather than five hundred and eleven. Both measured.
+///
+/// The whitespace set is C's `isspace` in the C locale — space, `\t`, `\n`,
+/// `\v`, `\f`, `\r` — and **not** [`u8::is_ascii_whitespace`], which omits the
+/// vertical tab. Measured: all five control characters are accepted ahead of the
+/// digits, the vertical tab included.
+fn parse_decimal(value: &[u8]) -> Option<u64> {
+    let mut rest = value;
+    while let [first, tail @ ..] = rest
+        && matches!(first, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+    {
+        rest = tail;
+    }
+    if let [b'+', tail @ ..] = rest {
+        rest = tail;
+    }
+    if rest.is_empty() || !rest.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut n: u64 = 0;
+    for digit in rest {
+        n = n
+            .checked_mul(10)?
+            .checked_add(u64::from(digit.saturating_sub(b'0')))?;
+    }
+    Some(n)
+}
+
+/// `-b` / `--blocking-factor=BLOCKS`: the record size, written in 512-byte
+/// blocks.
+///
+/// # Errors
+///
+/// `<value>: Invalid blocking factor` at status 2 for anything outside
+/// `1 ..=` [`MAX_BLOCKING_FACTOR`] or outside [`parse_decimal`]'s grammar —
+/// including the empty value, which GNU reports as `tar: : Invalid blocking
+/// factor`. The value is escaped as every other untrusted string in a
+/// diagnostic is: measured, a `-b` of the bytes `caf\351` prints `caf\351`.
+///
+/// The refusal happens **in the parser**, where the option is written, and so
+/// beats everything else on the command line: measured, `tar -b 0 --help`
+/// prints this rather than the help, and `tar -b 1 -b 0 …` fails on the second
+/// one though the first was fine.
+fn parse_blocking_factor(value: &OsStr) -> Result<u64, getopt::Error> {
+    match parse_decimal(&os_bytes(value)) {
+        Some(blocks) if (1..=MAX_BLOCKING_FACTOR).contains(&blocks) => {
+            Ok(blocks.saturating_mul(BLOCK_SIZE as u64))
+        }
+        _ => Err(usage_error(format!(
+            "{}: Invalid blocking factor",
+            escape_os(value)
+        ))),
+    }
+}
+
+/// What a one-letter suffix on `--record-size` multiplies by.
+///
+/// GNU's set exactly, enumerated by putting `1<letter>` to the binary for every
+/// letter in both cases: `bBcGgKkMmPTtw`, and nothing else. Note what is *not*
+/// there — `1E`, an exabyte to `du -h` and to `--tape-length`, is
+/// `1E: Invalid record size` here, and lower-case `p` is not a suffix though
+/// upper-case `P` is.
+///
+/// The values are a tape utility's rather than a file utility's: `b` is a
+/// *block* (512 bytes) and `B` is a kilobyte, `c` is one character and `w` a
+/// two-byte word. Everything larger is a binary power. The two that could not be
+/// told apart by inspection were measured: `--record-size=3b` writes 1536-byte
+/// records and `--record-size=3B` writes 3072-byte ones.
+fn suffix_multiplier(letter: u8) -> Option<u64> {
+    Some(match letter {
+        b'c' => 1,
+        b'w' => 2,
+        b'b' => 512,
+        b'B' | b'K' | b'k' => 1024,
+        b'M' | b'm' => 1024 * 1024,
+        b'G' | b'g' => 1024 * 1024 * 1024,
+        b'T' | b't' => 1024 * 1024 * 1024 * 1024,
+        b'P' => 1024 * 1024 * 1024 * 1024 * 1024,
+        _ => return None,
+    })
+}
+
+/// `--record-size=NUMBER`: the record size in bytes, with an optional
+/// [`suffix_multiplier`].
+///
+/// The same setting as [`parse_blocking_factor`], reached the other way round,
+/// which is why both write one field: measured, `-b 3 --record-size=1024` writes
+/// 1024-byte records and `--record-size=1024 -b 3` writes 1536-byte ones.
+///
+/// # Errors
+///
+/// Two different sentences, and which one applies is not a detail — one names
+/// the value and one does not, so a script matching on the text sees a
+/// difference:
+///
+/// * `<value>: Invalid record size` — not a number, negative, or too large for
+///   a `u64`. Measured: `--record-size=18446744073709551616` (2⁶⁴) gets this.
+/// * `Record size must be a multiple of 512.` — a number, but not a multiple.
+///   Measured: `--record-size=18446744073709551615` (2⁶⁴−1) gets *this* one,
+///   because it parses.
+///
+/// **Zero is not an error here**, though it is one. `--record-size=0` is
+/// accepted by the parser and refused by `main`, after the mode check and after
+/// the empty-archive refusal; see there. That is GNU's ordering, measured three
+/// ways, and it is why this returns a size rather than a validated non-zero.
+fn parse_record_size(value: &OsStr) -> Result<u64, getopt::Error> {
+    let raw = os_bytes(value);
+    let invalid = || usage_error(format!("{}: Invalid record size", escape_os(value)));
+    // The suffix is the last byte, and only when it is not a digit. `1024` has
+    // none, `1k` has one, and `1kB` has two — which is not a suffix at all, so
+    // the whole word is invalid rather than the `B` being quietly ignored.
+    // Measured: `1kB` and `1KB` are both `Invalid record size`.
+    let (digits, scale) = match raw.split_last() {
+        Some((last, head)) if !last.is_ascii_digit() => {
+            (head, suffix_multiplier(*last).ok_or_else(invalid)?)
+        }
+        _ => (&raw[..], 1),
+    };
+    let size = parse_decimal(digits)
+        .and_then(|n| n.checked_mul(scale))
+        .ok_or_else(invalid)?;
+    if size % BLOCK_SIZE as u64 != 0 {
+        return Err(usage_error(
+            "Record size must be a multiple of 512.".to_string(),
+        ));
+    }
+    Ok(size)
+}
+
 /// Parse tar's argv: short options, long options, and operands.
 ///
 /// The walk itself is [`coreutils::getopt`], which is `getopt_long`'s rules
@@ -789,6 +1000,14 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // Pushed, not assigned: see [`TarArgs::chdirs`]. `value` is
             // `Required` in both tables, so `None` cannot reach here.
             Opt::Short(b'C', value) => out.chdirs.extend(value),
+            // `-b` and `--record-size` set one field and the last one written
+            // wins; see [`TarArgs::record_size`]. `unwrap_or_default` is
+            // unreachable — the letter is `b:` in `SHORT_OPTIONS`, so a value is
+            // always present — and is a total arm rather than a panic, in
+            // keeping with the `Opt::Short(other, …)` arm below.
+            Opt::Short(b'b', value) => {
+                out.record_size = parse_blocking_factor(&value.unwrap_or_default())?;
+            }
             // Unreachable while this arm and `SHORT_OPTIONS` agree, since the
             // parser rejects any letter the string does not list. It is a
             // refusal rather than a panic so that adding a letter to
@@ -810,6 +1029,14 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 "preserve-permissions" | "same-permissions" => out.same_permissions = true,
                 "file" => out.archive_file = value,
                 "directory" => out.chdirs.extend(value),
+                // Both spellings of the record size. See
+                // [`TarArgs::record_size`] for why they share a field.
+                "blocking-factor" => {
+                    out.record_size = parse_blocking_factor(&value.unwrap_or_default())?;
+                }
+                "record-size" => {
+                    out.record_size = parse_record_size(&value.unwrap_or_default())?;
+                }
                 // The overwrite-control family. Every one of them assigns to
                 // the same setting, through the check that makes naming two of
                 // them an error. See [`OldFiles`].
@@ -984,6 +1211,11 @@ Examples:
                              silently skip over them
   -U, --unlink-first         remove each file prior to extracting over it
 
+ Device blocking:
+
+  -b, --blocking-factor=BLOCKS   BLOCKS x 512 bytes per record
+      --record-size=NUMBER   NUMBER of bytes per record, multiple of 512
+
  Informational options:
 
   -?, --help                 give this help list
@@ -1016,15 +1248,20 @@ instead of doing something else and reporting success.
 /// out after the cluster. Measured from `tar --usage`, whose first line is
 /// `[-AcdrtuxGnSkUWOmpsMBiajJzZhPlRvwo?] [-g FILE] [-C DIR] …`: strike the
 /// letters this tar does not have and `ctxkUpv?` is what is left, `p` before
-/// `v` and `k` before `U`. The long names come from the same line and put the
-/// overwrite family between `--directory` and `--preserve-permissions`, which is
-/// where argp's table has it and *not* where the help text does.
+/// `v` and `k` before `U`. The value-taking letters follow in GNU's order too —
+/// `[-C DIR] [-T FILE] [-X FILE] [-f ARCHIVE] [-F NAME] [-L NUMBER] [-b BLOCKS]`
+/// there, so `-b` goes after `-f` here. The long names come from the same line
+/// and put the overwrite family between `--directory` and
+/// `--preserve-permissions`, which is where argp's table has it and *not* where
+/// the help text does; the two record-size spellings likewise follow
+/// `--file=ARCHIVE` and precede `--verbose`.
 fn usage_text() -> String {
     "\
-Usage: tar [-ctxkUpv?] [-C DIR] [-f ARCHIVE] [--create] [--list] [--extract]
-            [--get] [--directory=DIR] [--keep-newer-files] [--keep-old-files]
-            [--overwrite] [--skip-old-files] [--unlink-first]
-            [--preserve-permissions] [--same-permissions] [--file=ARCHIVE]
+Usage: tar [-ctxkUpv?] [-C DIR] [-f ARCHIVE] [-b BLOCKS] [--create] [--list]
+            [--extract] [--get] [--directory=DIR] [--keep-newer-files]
+            [--keep-old-files] [--overwrite] [--skip-old-files]
+            [--unlink-first] [--preserve-permissions] [--same-permissions]
+            [--file=ARCHIVE] [--blocking-factor=BLOCKS] [--record-size=NUMBER]
             [--verbose] [--help] [--usage] [--version] [FILE]...
 "
     .to_string()
@@ -1092,6 +1329,29 @@ fn main() {
             diag!("{TRY_HELP}");
             EXIT_FATAL
         }
+        // A record size of zero is refused *here* rather than by the parser,
+        // because here is where GNU refuses it, and the ordering is the whole of
+        // what this arm's position encodes. Measured, all three rows:
+        //
+        // | Command line | GNU says |
+        // |---|---|
+        // | `tar --record-size=0` | `You must specify one of the '-Acdtrux'…` |
+        // | `tar --record-size=0 -cf o.tar` | `Cowardly refusing to create an empty archive` |
+        // | `tar --record-size=0 -cf o.tar tree` | `Invalid value for record_size` |
+        //
+        // and it precedes opening `-f` and entering any `-C`:
+        // `--record-size=0 -cf /nosuchdir/o.tar tree` says nothing about the
+        // path. It is also `fatal()`'s two-line ending rather than `TRY_HELP`,
+        // which is the one command-line complaint in tar that is not a usage
+        // error — the number was well formed, and only the archive geometry it
+        // asks for is impossible.
+        //
+        // `-b 0` cannot reach here: it is a parse error where it is written. So
+        // this arm is `--record-size`'s alone. See [`parse_record_size`].
+        _ if parsed.record_size == 0 && parsed.mode != Mode::Unset => {
+            diag!("tar: Invalid value for record_size");
+            fatal()
+        }
         Mode::Create => {
             // The one case where the member list is a diagnostic rather than
             // output: with no `-f`, the archive itself is on stdout, and a name
@@ -1104,6 +1364,7 @@ fn main() {
                     &parsed.chdirs,
                     &parsed.files,
                     verbose,
+                    parsed.record_size,
                 )
             }
             #[cfg(not(unix))]
@@ -2341,18 +2602,137 @@ fn enter_chdirs(chdirs: &[OsString], entered: &mut usize, want: usize) -> Result
     Ok(())
 }
 
+/// The output side of `-c`, buffered into whole **records**.
+///
+/// A tar *archive* is a stream of 512-byte blocks; a tar *file* is a stream of
+/// records of `-b` blocks each, with the last one padded out with zeros. This is
+/// what turns the one into the other, and it sits between [`Creator`] and the
+/// file so that nothing above it has to know a record exists.
+///
+/// Two details are reproduced from GNU rather than chosen, and both are
+/// observable:
+///
+/// * **A full record is not written until the next byte needs the room.** The
+///   only path that can see the difference is one that dies mid-archive, and
+///   there is one: a `-C` after the last operand that cannot be entered exits on
+///   the spot, leaving whatever had reached the file. Measured, on a member of
+///   1024 bytes — `tar -b 1 -cf o.tar -C tree a.txt -C nosuchdir` leaves **512**
+///   bytes behind, and the same command with the default factor leaves **0**.
+///   Flushing on the byte that fills a record would give 1024 and 0; flushing
+///   every write would give 1024 and 1024. Only "flush when the next write needs
+///   the space" gives 512 and 0.
+/// * **There is no `Drop`.** The tail is meant to be lost on those paths, so
+///   finishing is [`RecordWriter::finish`] — an explicit call the error paths do
+///   not make. A `Drop` that flushed would quietly repair the artefact above
+///   into a 1024-byte file, and would do it from a context that cannot report a
+///   write error.
+#[cfg_attr(not(unix), allow(dead_code))]
+struct RecordWriter<'a> {
+    inner: &'a mut dyn Write,
+    /// The record in hand.
+    ///
+    /// Grown on demand and never allowed past `record`. Not
+    /// `Vec::with_capacity(record)`: `-b 100000` is a legal 51 MB record and
+    /// `-b 2147483647` a legal 1 TB one, and reserving either up front would
+    /// fail on a command that only ever writes a few kilobytes. GNU allocates
+    /// eagerly and is killed by the OOM killer for the second one; growing on
+    /// demand costs what the archive costs, and still pads to the full record at
+    /// the end, so the file that comes out is the same file.
+    buf: Vec<u8>,
+    record: usize,
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+impl<'a> RecordWriter<'a> {
+    fn new(inner: &'a mut dyn Write, record: usize) -> Self {
+        Self {
+            inner,
+            buf: Vec::new(),
+            record,
+        }
+    }
+
+    /// Hand the record in hand to the stream and start a new one.
+    fn spill(&mut self) -> io::Result<()> {
+        self.inner.write_all(&self.buf)?;
+        self.buf.clear();
+        Ok(())
+    }
+
+    /// Write the last record, padded out to the full record length, and flush.
+    ///
+    /// The pad is *written*, not seeked over: a sparse tail would give the same
+    /// `stat` size and a different file on any tool that reads it, and the
+    /// archive may be a pipe, where seeking is not available at all.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the underlying stream gives. The caller reports it as
+    /// `Cannot write:` — this is the point at which the bytes that make the file
+    /// a valid archive reach the disk, so a failure here loses exactly those.
+    fn finish(&mut self) -> io::Result<()> {
+        if !self.buf.is_empty() {
+            let pad = self.record.saturating_sub(self.buf.len());
+            self.spill()?;
+            // In chunks from a fixed buffer rather than a `vec![0; pad]`: the
+            // record may be gigabytes, and materialising the pad would ask the
+            // allocator for all of it to write nothing.
+            let zeros = [0u8; BLOCK_SIZE * 16];
+            let mut left = pad;
+            while left > 0 {
+                let take = left.min(zeros.len());
+                let Some(chunk) = zeros.get(..take) else {
+                    break;
+                };
+                self.inner.write_all(chunk)?;
+                left = left.saturating_sub(take);
+            }
+        }
+        self.inner.flush()
+    }
+}
+
+impl Write for RecordWriter<'_> {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        // The spill happens *before* the append and not after it. See the type's
+        // doc comment: this is the measured behaviour, not an implementation
+        // detail, and swapping the two lines changes the bytes on disk.
+        if self.buf.len() >= self.record {
+            self.spill()?;
+        }
+        let take = self.record.saturating_sub(self.buf.len()).min(data.len());
+        let Some(head) = data.get(..take) else {
+            return Ok(0);
+        };
+        self.buf.extend_from_slice(head);
+        Ok(take)
+    }
+
+    /// Flush the *stream*, not the record.
+    ///
+    /// A partial record is not archive data until it has been padded, so this
+    /// deliberately leaves it alone; [`RecordWriter::finish`] is what ends an
+    /// archive. Nothing in create mode calls this — the end of `do_create` calls
+    /// `finish` — and it is implemented faithfully rather than as a no-op so
+    /// that it stays correct if something ever does.
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 #[cfg(unix)]
 fn do_create(
     archive_file: Option<&OsStr>,
     chdirs: &[OsString],
     files: &[Operand],
     verbose: Verbose,
+    record_size: u64,
 ) -> i32 {
     // Identified by inode, not by name: `tar -cf ./b.tar .` and `tar -cf b.tar
     // .` name the archive differently and it is the same file both times, and
     // comparing the strings would catch neither.
     let mut archive_id = None;
-    let mut out: Box<dyn Write> = match archive_file {
+    let mut sink: Box<dyn Write> = match archive_file {
         Some(path) => match File::create(path) {
             Ok(f) => {
                 use std::os::unix::fs::MetadataExt;
@@ -2370,6 +2750,14 @@ fn do_create(
         },
         None => Box::new(io::stdout()),
     };
+
+    // A record larger than a `usize` cannot be buffered, and cannot be asked for
+    // either on the hosts this runs on: `--record-size` accepts up to 2⁶⁴−512,
+    // and `usize` is 64 bits wide here too. Saturating rather than panicking so
+    // that a 32-bit build writes *something* — a wrong record size — instead of
+    // aborting on a command line GNU accepts.
+    let record = usize::try_from(record_size).unwrap_or(usize::MAX);
+    let mut out = RecordWriter::new(&mut *sink, record);
 
     let mut creator = Creator {
         out: &mut out,
@@ -2410,9 +2798,15 @@ fn do_create(
     let zero_block = [0u8; BLOCK_SIZE];
     let _ = creator.write(&zero_block) && creator.write(&zero_block);
     let mut status = creator.status;
-    // The end-of-archive marker is the last thing written, so a flush that
-    // fails here loses precisely the bytes that make the file a valid archive.
-    if let Err(e) = out.flush() {
+    // Read out before the borrow of `out` ends, and checked before finishing:
+    // once a write has failed there is nothing to gain by writing the pad, and
+    // something to lose — a second `Cannot write:` for one broken stream, where
+    // GNU reports it once.
+    let writable = creator.writable;
+    // The end-of-archive marker and the pad after it are the last things
+    // written, so a failure here loses precisely the bytes that make the file a
+    // valid archive.
+    if writable && let Err(e) = out.finish() {
         diag!("tar: Cannot write: {}", strerror(&e));
         status = EXIT_FATAL;
     }
@@ -6185,7 +6579,7 @@ mod tests {
         }
         // Spelled out as well as derived, so that a letter silently gaining or
         // losing a `:` is a test failure and not a test that agrees with it.
-        assert_eq!(expected, b"fC");
+        assert_eq!(expected, b"fCb");
         assert!(!takes_a_value(b'Q'));
     }
 
@@ -6417,6 +6811,260 @@ mod tests {
             format!("option '--=x' is ambiguous; possibilities:{expected}")
         );
         assert_eq!(err.status, EXIT_USAGE);
+    }
+
+    // ---------------- -b, --blocking-factor, --record-size ----------------
+    //
+    // Every row here was measured against GNU tar 1.35 before it was written.
+    // The archive *sizes* the padding produces are checked by
+    // `scripts/tar-diff.sh`, which compares whole archives byte for byte; these
+    // are about the grammar and the two error sentences, which a byte
+    // comparison of a successful run can never reach.
+
+    /// The record size a command line asks for, or the sentence refusing it.
+    fn record_of(args: &[&str]) -> Result<u64, String> {
+        run_args(&s(args)).map(|a| a.record_size).map_err(|e| {
+            assert_eq!(e.status, EXIT_FATAL, "tar's own usage status, not argp's");
+            e.sentence
+        })
+    }
+
+    #[test]
+    fn the_default_record_is_twenty_blocks() {
+        // The number that makes `tar -cf a.tar tree` write a 10240-byte file
+        // where the archive is 4096 bytes of blocks. It lives in `Default`
+        // rather than in a derive; see `TarArgs::default`.
+        assert_eq!(record_of(&["-cf", "a.tar", "t"]), Ok(10240));
+        assert_eq!(TarArgs::default().record_size, 10240);
+    }
+
+    #[test]
+    fn blocking_factor_is_blocks_and_record_size_is_bytes() {
+        assert_eq!(record_of(&["-b", "1"]), Ok(512));
+        assert_eq!(record_of(&["-b", "3"]), Ok(1536));
+        assert_eq!(record_of(&["--blocking-factor=7"]), Ok(3584));
+        assert_eq!(record_of(&["--record-size=5120"]), Ok(5120));
+        // Attached, separated, and through the old option style — the last of
+        // which only works because `b` carries a `:` in `SHORT_OPTIONS`.
+        // Measured: `tar cbf 2 o.tar tree` creates a 1024-byte-record archive.
+        assert_eq!(record_of(&["-b3"]), Ok(1536));
+        assert_eq!(record_of(&["cbf", "2", "o.tar", "t"]), Ok(1024));
+    }
+
+    #[test]
+    fn the_two_spellings_share_one_setting_and_the_last_one_wins() {
+        // Measured both ways round. Two independent fields could not express
+        // this without also recording which was written later; see
+        // `TarArgs::record_size`.
+        assert_eq!(record_of(&["-b", "3", "--record-size=1024"]), Ok(1024));
+        assert_eq!(record_of(&["--record-size=1024", "-b", "3"]), Ok(1536));
+    }
+
+    #[test]
+    fn an_invalid_blocking_factor_names_the_value() {
+        for bad in ["0", "-1", "abc", "1x", "3.0", "0x10", "", " ", "3 "] {
+            assert_eq!(
+                record_of(&["-b", bad]),
+                Err(format!("{bad}: Invalid blocking factor")),
+                "-b {bad:?}"
+            );
+        }
+        // The bound is INT_MAX, measured at both ends.
+        assert_eq!(record_of(&["-b", "2147483647"]), Ok(1_099_511_627_264));
+        assert_eq!(
+            record_of(&["-b", "2147483648"]),
+            Err("2147483648: Invalid blocking factor".to_string())
+        );
+        assert_eq!(
+            record_of(&["-b", "99999999999999999999"]),
+            Err("99999999999999999999: Invalid blocking factor".to_string())
+        );
+    }
+
+    #[test]
+    fn a_blocking_factor_takes_strtouls_grammar_and_not_a_trim() {
+        // The asymmetry is the whole point: `strtoul` skips leading whitespace
+        // and stops at trailing whitespace, so one of these is a number and the
+        // other is not. Both measured.
+        assert_eq!(record_of(&["-b", " 3"]), Ok(1536));
+        assert_eq!(record_of(&["-b", "\x0b3"]), Ok(1536));
+        assert_eq!(record_of(&["-b", "+3"]), Ok(1536));
+        assert!(record_of(&["-b", "3 "]).is_err());
+        // Base ten, not base zero: `0777` is not five hundred and eleven.
+        assert_eq!(record_of(&["-b", "0777"]), Ok(777 * 512));
+    }
+
+    #[test]
+    fn record_size_takes_a_tape_suffix() {
+        for (arg, want) in [
+            ("512c", 512u64),
+            ("256w", 512),
+            ("1b", 512),
+            ("3b", 1536),
+            ("1B", 1024),
+            ("3B", 3072),
+            ("1K", 1024),
+            ("4k", 4096),
+            ("1M", 1024 * 1024),
+            ("1G", 1024 * 1024 * 1024),
+            ("1T", 1024 * 1024 * 1024 * 1024),
+            ("1P", 1024 * 1024 * 1024 * 1024 * 1024),
+        ] {
+            assert_eq!(
+                record_of(&[&format!("--record-size={arg}")]),
+                Ok(want),
+                "--record-size={arg}"
+            );
+        }
+    }
+
+    #[test]
+    fn record_size_has_two_different_refusals() {
+        // Not a number: the value is named.
+        for bad in ["abc", "-512", "1E", "1kB", "1 K", "1024.0", "0x200", "1w2"] {
+            assert_eq!(
+                record_of(&[&format!("--record-size={bad}")]),
+                Err(format!("{bad}: Invalid record size")),
+                "--record-size={bad}"
+            );
+        }
+        // A number, but not a multiple of 512: the value is *not* named. The
+        // difference matters to anyone matching on the text, and 2⁶⁴−1 is the
+        // measured proof that the split is "did it parse" and not "is it sane".
+        for bad in ["511", "1c", "1w", "18446744073709551615"] {
+            assert_eq!(
+                record_of(&[&format!("--record-size={bad}")]),
+                Err("Record size must be a multiple of 512.".to_string()),
+                "--record-size={bad}"
+            );
+        }
+        // 2⁶⁴ itself does not parse, so it takes the other sentence.
+        assert_eq!(
+            record_of(&["--record-size=18446744073709551616"]),
+            Err("18446744073709551616: Invalid record size".to_string())
+        );
+    }
+
+    #[test]
+    fn a_record_size_of_zero_survives_the_parser_and_a_blocking_factor_of_zero_does_not() {
+        // The asymmetry is GNU's, and it is what puts one refusal in the parser
+        // and the other in `main`: measured, `tar -b 0 --help` refuses while
+        // `tar --record-size=0 --help` prints the help.
+        assert_eq!(record_of(&["--record-size=0"]), Ok(0));
+        assert_eq!(record_of(&["--record-size=0K"]), Ok(0));
+        assert_eq!(
+            record_of(&["-b", "0"]),
+            Err("0: Invalid blocking factor".to_string())
+        );
+        assert_eq!(
+            parse_args(&s(&["--record-size=0", "--help"])),
+            Ok(Request::Help)
+        );
+        assert!(parse_args(&s(&["-b", "0", "--help"])).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)] // see `b()`
+    fn a_value_that_is_not_utf8_is_escaped_in_both_refusals() {
+        // Measured: GNU's `caf\351` for a `-b` of those four bytes. The value is
+        // argv, so it can hold any byte, and a diagnostic that wrote it raw
+        // would let whoever chose it forge lines on tar's error stream.
+        let err = run_args(&b(&[b"-b", b"caf\xe9"])).unwrap_err();
+        assert_eq!(err.sentence, "caf\\351: Invalid blocking factor");
+        let err = run_args(&b(&[b"--record-size=caf\xe9"])).unwrap_err();
+        assert_eq!(err.sentence, "caf\\351: Invalid record size");
+    }
+
+    // ---------------- RecordWriter ----------------
+
+    /// Feed `writes` to a record writer of `record` bytes and report what
+    /// reached the stream — with `finish` called, and without.
+    fn recorded(record: usize, writes: &[&[u8]]) -> (usize, usize) {
+        let mut unfinished = Vec::new();
+        {
+            let mut w = RecordWriter::new(&mut unfinished, record);
+            for chunk in writes {
+                w.write_all(chunk).unwrap();
+            }
+        }
+        let mut finished = Vec::new();
+        {
+            let mut w = RecordWriter::new(&mut finished, record);
+            for chunk in writes {
+                w.write_all(chunk).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        (unfinished.len(), finished.len())
+    }
+
+    #[test]
+    fn a_finished_archive_is_padded_up_to_a_whole_record() {
+        // Eight blocks of content — what `tar -cf o.tar tree` produces for the
+        // two-file tree the measurements used. Every size here was measured
+        // from GNU with that tree.
+        let content: Vec<&[u8]> = vec![&[0u8; 512]; 8];
+        for (record, want) in [
+            (512usize, 4096usize),
+            (1024, 4096),
+            (1536, 4608),
+            (3584, 7168),
+            (5120, 5120),
+            (10240, 10240),
+        ] {
+            assert_eq!(recorded(record, &content).1, want, "record {record}");
+        }
+    }
+
+    #[test]
+    fn a_full_record_waits_for_the_byte_that_needs_the_room() {
+        // The artefact that fixes the buffering rule. Two blocks handed in, then
+        // the run dies without finishing: with 512-byte records one record has
+        // been spilled and one is still in hand, and with the default record
+        // nothing has left at all. Measured from GNU on the one command line
+        // that can observe it — `tar -b 1 -cf o.tar -C tree a.txt -C nosuchdir`
+        // leaves 512 bytes, and the same with no `-b` leaves 0.
+        let two_blocks: Vec<&[u8]> = vec![&[0u8; 512]; 2];
+        assert_eq!(recorded(512, &two_blocks).0, 512);
+        assert_eq!(recorded(1024, &two_blocks).0, 0);
+        assert_eq!(recorded(10240, &two_blocks).0, 0);
+        // Finishing the same runs pads them out, so the rule costs nothing on
+        // the path that completes.
+        assert_eq!(recorded(512, &two_blocks).1, 1024);
+        assert_eq!(recorded(1024, &two_blocks).1, 1024);
+        assert_eq!(recorded(10240, &two_blocks).1, 10240);
+    }
+
+    #[test]
+    fn a_write_larger_than_a_record_is_split_across_records() {
+        // `Creator` writes a block at a time today, but file data need not be
+        // block-sized forever, and `write_all` is what makes a partial return
+        // safe. An 8192-byte write into 512-byte records is sixteen records.
+        let big = vec![b'x'; 8192];
+        assert_eq!(recorded(512, &[&big]).1, 8192);
+        assert_eq!(recorded(1536, &[&big]).1, 9216);
+        // And the content is the content, not just the length.
+        let mut out = Vec::new();
+        {
+            let mut w = RecordWriter::new(&mut out, 1536);
+            w.write_all(&big).unwrap();
+            w.finish().unwrap();
+        }
+        assert_eq!(out.get(..8192), Some(&big[..]));
+        assert!(
+            out.get(8192..)
+                .is_some_and(|tail| tail.iter().all(|&b| b == 0))
+        );
+    }
+
+    #[test]
+    fn an_empty_archive_writes_nothing_at_all() {
+        // No member, no end-of-archive blocks, nothing buffered: `finish` has
+        // no partial record to pad, so it must not invent one. This is not a
+        // reachable command line — `-c` with no operands is refused — but it is
+        // the boundary the padding arithmetic is most likely to get wrong.
+        assert_eq!(recorded(10240, &[]), (0, 0));
+        assert_eq!(recorded(512, &[b""]), (0, 0));
     }
 
     // ---------------- --help, --usage, --version ----------------

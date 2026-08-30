@@ -27,6 +27,23 @@
 # directory is the only thing that does. Run one before committing a
 # change that touches a cfg(unix) arm.
 #
+# THE OTHER DIRECTION HAS ONE CHECK AND ONLY ONE:
+#
+#     cargo check --workspace --target x86_64-pc-windows-gnu
+#
+# Nothing else in the tree compiles a `cfg(not(unix))` arm of a file in
+# this zone — the zone build is `unix`, and `cargo test` from the
+# workspace root builds the same host target that check does. So that
+# command is load-bearing, and it is also the check whose own breakage
+# hides the fact that it is broken: once one binary fails to compile
+# there, every test in it stops running and nobody sees a red line for
+# the ones that would fail. Measured 2026-08-30 — `tar` had been failing
+# it on `main`, and behind that failure sat six tests asserting about a
+# byte that a Windows `OsString` cannot hold. Run it before committing a
+# change that touches a `cfg(not(unix))` arm, and treat a failure in
+# *anyone's* binary as a reason to fix that binary rather than to skip
+# the run.
+#
 # build-std is set here (not at the workspace root) because cargo
 # *appends* arrays during config merge — if the parent set build-std,
 # the kernel build (which runs from kernel/ and would inherit the

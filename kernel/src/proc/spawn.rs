@@ -3533,8 +3533,11 @@ pub fn self_test_file_handle_ownership() -> KernelResult<()> {
                     serial_println!(
                         "[spawn]   FAIL: file handle ownership — probe exited {other:?}; \
                          expected 0. 2 = refused with the wrong errno (must be InvalidHandle, \
-                         so the reply is not an oracle for other processes' handles), \
-                         0xFC/0xFD/0xFE = the probe's *own* open/read failed, which means the \
+                         so the reply is not an oracle for other processes' handles). \
+                         251 (0xFB) = the kernel REFUSED a read on a handle the probe opened \
+                         itself — either a harness fault (bad buffer pointer) or the ownership \
+                         gate misfiring on a legitimately-owned handle, which would be a real \
+                         regression. 252/253/254 = the probe's own open/read failed, so the \
                          control never ran and a refusal would prove nothing."
                     );
                 }

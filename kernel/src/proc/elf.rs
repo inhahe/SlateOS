@@ -4542,9 +4542,17 @@ pub fn build_linux_execveat_test_elf(
 /// | `0` | pass — own read worked, foreign read refused with `InvalidHandle` |
 /// | `1` | **the vulnerability** — the foreign read *succeeded* |
 /// | `2` | foreign read failed, but with some error other than `InvalidHandle` |
+/// | `0xFB` | own read was *refused* (negative rax) — see below |
 /// | `0xFC` | own read returned the wrong byte (fixture is not what we think) |
-/// | `0xFD` | own read did not return exactly 1 byte |
+/// | `0xFD` | own read returned a non-negative count that was not 1 |
 /// | `0xFE` | own open failed — no `File` capability, or a missing fixture |
+///
+/// `0xFB` is the one to read carefully: it means the kernel rejected a read
+/// on a handle this process opened itself, which is either a harness fault
+/// (a bad buffer pointer — the mistake that cost the first run of this test
+/// a boot) or the ownership gate misfiring on a legitimately-owned handle.
+/// The latter would be a real regression, and lumping it in with `0xFD`
+/// would have hidden it behind a "short read".
 ///
 /// `1` and `2` are kept apart on purpose: `1` is a security failure, while
 /// `2` is most likely the gate returning the wrong errno, which is a
@@ -4584,6 +4592,20 @@ pub fn build_native_handle_ownership_test_elf(
         code.extend_from_slice(&[0x0F, 0x05]);
     }
 
+    // --- 0. claim a byte of stack to read into --------------------------
+    // Entry `rsp` is the stack *top*, which is exclusive: the first mapped
+    // byte is below it.  A Linux-ABI binary never notices, because
+    // `build_linux_sysv_stack` pushes argv/envp and hands control over with
+    // rsp already moved down (0x7fffffff0000 -> 0x7ffffffefec0 in the boot
+    // log).  A native-ABI binary gets no such construction and starts
+    // exactly at the top, so `mov rsi, rsp` would hand the kernel a
+    // one-past-the-end pointer.  That does not fault -- `sys_fs_read`
+    // validates the user buffer and returns `InvalidAddress` -- so the
+    // symptom is a read that returns -101 instead of 1, i.e. an
+    // indistinguishable-looking 0xFD "short read".  Cost a boot to find;
+    // hence the comment rather than a bare `sub`.
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x20]); // sub rsp, 32
+
     // --- 1. open our own file ------------------------------------------
     code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
     let path_imm = code.len();
@@ -4610,6 +4632,21 @@ pub fn build_native_handle_ownership_test_elf(
     code.push(0xB8); // mov eax, SYS_FS_READ
     code.extend_from_slice(&SYS_FS_READ.to_le_bytes());
     code.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // Split "the read was refused" from "the read returned the wrong count"
+    // before comparing to 1.  Both are `rax != 1`, but they mean opposite
+    // things: a negative rax is the kernel rejecting the call (a bad buffer
+    // pointer, a missing capability, the ownership gate itself misfiring on
+    // a handle we *do* own), while a non-negative one that is not 1 is a
+    // genuine short read.  Folding them together is what made the first
+    // run of this test report 0xFD for what was actually `InvalidAddress`.
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x79, 0x00]); // jns .nonneg
+    let jns_read = code.len() - 1;
+    exit_with(&mut code, 0xFB);
+    let nonneg = code.len();
+    code[jns_read] = ((nonneg as isize) - (jns_read as isize + 1)) as u8;
+
     code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x01]); // cmp rax, 1
     code.extend_from_slice(&[0x74, 0x00]); // je .read_ok
     let je_read = code.len() - 1;

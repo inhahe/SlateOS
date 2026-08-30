@@ -95632,6 +95632,171 @@ visit: sudoku's pencil-mark grid, chess's move history, checkers' capture
 panel, and every app that reserves room for a scrollback it never fills in a
 test.
 
+**Addendum (lane C, 2026-08-30, `apps/yahtzee`).** The same shape appears one
+step worse when the losing side is a *magic constant* and a later operation can
+override it. `apps/yahtzee`'s scorecard was
+`(w * 0.44).clamp(170.0, 380.0).min(w / 2.0)` — which reads as three
+constraints and was two. At every window shape the app was tried at, either the
+share or the half-window cap decided the width; the 170 floor never applied
+once, so a mutation deleting it changed nothing anywhere. Two remedies, and
+both are needed: (a) **derive the bound from the thing it exists to protect**
+rather than writing a number — the floor is now the longest category name
+measured at the font this window actually uses, widened back through the row's
+own name/score split; and (b) **add a fixture at the shape where the bound is
+the binding one**, which for yahtzee is 350x1000 and is nowhere near any of the
+five shapes chosen to be "small, large, tall, wide, default". A bound nothing
+binds at is not tested by *any* number of window sizes chosen for variety; it
+is tested by one window size chosen by solving for it.
+
+### Lesson 83: the window's own background makes "something is drawn here" true everywhere (lane C, 2026-08-30)
+
+**In short:** Lesson 81 said a recorded hit box is not evidence anything was
+drawn in it, and prescribed the obvious remedy — look for a paint command that
+covers the box. That remedy is vacuous in every app in this campaign, because
+the first thing every drawing pass does is fill the entire window with the
+background colour. "Some `FillRect` covers this point" is therefore true of
+*every point in the app*, including the middle of a widget that drew nothing at
+all. `apps/yahtzee`'s `something_is_painted_inside_every_die_box` asked exactly
+that question, and a mutation that recorded each die's hit box and then returned
+before painting a single pixel of it walked straight past — past the one test
+whose entire stated purpose was to notice a box with nothing in it.
+
+**The rule.** Containment has to run the other way. Do not ask whether a paint
+command *contains* the widget's centre; ask whether some paint command *fits
+inside* the widget's box (grown by a pixel or two of slack). A full-window
+background can never satisfy that, and a widget that drew itself always does,
+because a widget that draws itself draws inside itself.
+
+```rust
+// vacuous — the background satisfies it for every point in the window
+filled.iter().any(|r| r.contains(cx, cy))
+
+// has teeth — nothing that isn't inside the die can satisfy it
+let grown = Rect::new(die.x - 1.0, die.y - 1.0, die.w + 2.0, die.h + 2.0);
+filled.iter().any(|r| {
+    r.w > 0.0 && r.h > 0.0
+        && r.x >= grown.x && r.y >= grown.y
+        && r.right() <= grown.right() && r.bottom() <= grown.bottom()
+})
+```
+
+**The tell.** Any assertion of the form "a command covers this point", in any
+app whose `draw` opens with a background fill — which is all of them. The same
+trap catches text: "some string was painted inside this rect" is nearly
+vacuous for a rect that spans a column, because the neighbouring row's label
+often has its origin on the boundary.
+
+**Where else to look.** Every app in the campaign that has a
+`something_is_painted_*` or `*_is_actually_drawn` test written after Lesson 81:
+checkers, solitaire, mandelbrot, and the seven `is_some()`-only visibility
+assertions Lesson 81 already lists as suspect. Lesson 81's "where else to look"
+should be read as pointing at this remedy, not the point-containment one.
+
+### Lesson 84: a test that computes its expectation with the function under test agrees with any bug in it (lane C, 2026-08-30)
+
+**In short:** `apps/yahtzee`'s `every_category_box_carries_that_category_s_name`
+checked that row *i* of the scorecard has category *i*'s name painted in it. It
+got the expected name by calling `Category::at(i)` — which is the same function
+the drawing pass calls to decide what to paint. A mutation making `at` return
+the category *after* the one asked for relabelled every row in the game, and the
+test passed, because the test's expectation shifted by one in lockstep with the
+picture. The suite had two copies of the same wrong answer and compared them to
+each other.
+
+**The rule.** The expectation must come from somewhere the code under test
+cannot reach. `Category::ALL[i]` is the data; `Category::at(i)` is the lookup
+being tested. Index the data. More generally: when a `Probe` test needs to know
+what *should* be on screen, spell it out from the rules of the game or from the
+raw table, never from the accessor, formatter or index-mapper the drawing pass
+uses. If spelling it out is inconvenient, that inconvenience is the test doing
+its job.
+
+**The tell.** Any `assert` whose left and right sides both contain a call into
+the production module — especially a helper with "index", "at", "for", "of" or
+"row" in its name, which is what a second description of an order looks like.
+Also any test that reads `l.something` out of a `Layout` and then compares it to
+a rect the same `Layout` produced: that is the same fault wearing geometry.
+
+**Where else to look.** Every app in this campaign routes its tests through
+`Probe`, and the natural way to write "the right thing is here" is to ask
+production what the right thing is. Grep each suite's test module for calls to
+production accessors inside `assert!`/`assert_eq!` arguments. The safe shape is
+the one `clicking_a_category_lands_on_that_category_and_no_other` already
+uses — click box *i*, then assert the set of filled boxes is exactly `{i}`,
+which names no production helper at all.
+
+### Lesson 85: "big enough for its contents" is a one-sided claim, and a constant can satisfy it forever (lane C, 2026-08-30)
+
+**In short:** a test that says a box is *at least* as big as what goes in it can
+never fail on a box that is *too big*. A hard-coded size that happens to clear
+the bar at every window the app is tried at therefore passes such a test at
+every size — not because it is right, but because the test only looks in one
+direction. Both halves of yahtzee's second mutation sweep were this, and one of
+them was a fault I had already "fixed" once.
+
+**The two cases, both found by re-sweeping after a fix.**
+
+1. **The scorecard's width floor.** Fault (11) in the roadmap entry: the floor
+   was the magic constant `170` and never applied, because at every window shape
+   tried either `w * 0.44` or the `w / 2` cap decided the width. The fix
+   replaced it with a floor measured from the longest category name at the
+   font *this* window uses, and added a sixth test window (350x1000) chosen as
+   the one shape where the floor binds. **The re-sweep showed that was not
+   enough.** At 17pt the measured floor comes out at 171 — so the old 170 was
+   within one pixel of right *at that font*, and a card one pixel narrow still
+   shows every name comfortably, because the measurement deliberately includes
+   `pad * 1.2` of breathing room. The mutation survived a fixture built
+   specifically for it.
+
+   What the constant actually cannot do is **shrink**. Between 170 and 380 the
+   share decided the width at every font, so a card whose rows are 8.8pt was the
+   same 361 pixels as one whose rows are 17pt. The claim that catches it is
+   `the_scorecard_is_sized_to_the_font_it_is_drawn_at`: two windows of one
+   width and different heights, and the card must be narrower at the smaller
+   font. Same shape as `the_button_grows_with_its_text`.
+
+2. **The roll button's width.** `the_button_is_wide_enough_for_its_widest_legend`
+   is a correct and useful claim — and it can never fail on the constant 140,
+   because the font is capped at 17pt and the longest legend measures about 121
+   there. The mutation that pins the width to 140 is caught only by
+   `the_button_grows_with_its_text`, so that is the test it is now named for.
+   Naming it for the legibility check was a lie the first sweep happened not to
+   expose.
+
+**The tell.** A test whose assertion is `actual >= needed` (or `<=`, or "fits
+inside", or "does not overlap") where `needed` is computed from the content. It
+constrains one side of the value and leaves the whole of the other side free. If
+the quantity is *derived*, that is usually fine; if a mutation can replace it
+with a constant and still pass, the claim was never about the derivation.
+
+**Two remedies, and they are different.**
+
+- **Pair every "big enough" with a "sized to".** Draw the same widget at two
+  sizes that differ only in the input the size is supposed to depend on, and
+  assert it *moves*. This is the only claim that distinguishes a measurement
+  from a constant that happens to clear the bar.
+- **Do not accept a fixture that makes a branch bind by a hair.** A fixture is
+  only a fixture if the branch binds by more than the slack the code
+  deliberately leaves — here, `pad * 1.2` of padding meant a floor that bound by
+  1 pixel was invisible. *Solve* for a shape where the difference exceeds the
+  slack, or find a different claim; do not pick a size, see the branch taken,
+  and call it covered.
+
+**And the process lesson underneath both: re-run the sweep after remediating
+it.** Every one of these was a fix that looked right, was committed, and was
+wrong — and the only thing that said so was running the same 68 mutations
+again against the fixed tree. A mutation sweep is not a report you act on once;
+it is the check that your action worked.
+
+**Where else to look.** Grep every app's suite for `>=` / `<=` assertions
+against a measured requirement — `is_wide_enough`, `fits`, `stays_inside`,
+`no_..._is_painted_into_a_box_too_narrow` are all this shape — and ask of each:
+*would a constant pass this at every size in `SIZES`?* Where the answer is yes,
+add the two-size "sized to" partner. `apps/yahtzee` now has two of these
+(`the_button_grows_with_its_text`,
+`the_scorecard_is_sized_to_the_font_it_is_drawn_at`); every other app in the
+campaign has fitted widgets and, so far, none.
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print
@@ -99263,3 +99428,74 @@ Both `argv-utf8` findings are gone with it — `sh.rs` is out of
 `scripts/argv-utf8-baseline.txt`, and `python scripts/argv-utf8.py --check`
 now prints **5 findings across 5 files** (`diff fetch logger patch ps`), down
 from 7 across 6.
+
+---
+
+## TD-B-more-HAS-NO-INTERACTIVE-COMMANDS-BEYOND-SPACE-ENTER-AND-q (lane B, 2026-08-30)
+
+**In short:** `more` is the pager — the program that shows a long file one
+screen at a time and waits for you to press something. It now accepts every
+*command-line option* util-linux's `more` accepts, but once it is on screen the
+only keys it understands are **space** (next screenful), **Enter** (one more
+line) and **q** (quit). util-linux understands about a dozen more, including
+searching. Nothing is broken; a keystroke it does not know is simply treated as
+"next screenful". The gap is that a user who types `/error` to search will get
+a page turn instead of a search, with no message saying why.
+
+**Where.** `userspace/coreutils/src/bin/more.rs` — `read_key`, and the `Key`
+enum it returns. `page` consumes exactly the three variants.
+
+**What util-linux has that we do not**, measured against util-linux 2.39.3:
+
+| key | what it does there |
+|---|---|
+| `/pattern` | search forward for a basic regular expression; `Pattern not found` in reverse video if it misses |
+| `n` | repeat the last `/` search |
+| `b`, `Ctrl-B` | back up one screenful (needs the file to be seekable) |
+| `=` | print the current line number |
+| `:f` | print the file name and line number |
+| `h`, `?` | the help screen listing all of these |
+| `!cmd` | run `cmd` through the shell |
+| `v` | open the file at the current line in `$VISUAL`/`$EDITOR` |
+| `.` | repeat the previous command |
+| `'` | return to where the last search started |
+| `:n`, `:p` | next / previous file when several were named |
+| a digit prefix | argument to the next command — `10<space>` shows ten more lines, `3b` backs up three screens |
+| `Ctrl-L` | redraw |
+
+**Why it is not simply "finish it".** Three of those need machinery this
+program does not have and cannot fake:
+
+- **`b`, `'` and `:p` need to go backwards**, and `page` reads forwards through
+  a `BufRead` that may be a pipe. util-linux handles this by writing stdin to a
+  temporary file when it is not seekable (`more.c`, `cache_stdin`). That is a
+  real design choice with a cost — an unbounded temp file for `cat big | more`
+  — and it should be decided deliberately rather than acquired by accident.
+- **`!cmd` and `v` shell out**, which means `more` grows a dependency on a
+  shell and on `$VISUAL`/`$EDITOR`, and inherits the whole quoting question.
+- **`/pattern` interactively** needs a line editor on the prompt row
+  (backspace, kill, ESC to cancel), which is a second input mode, not a key.
+
+`=`, `:f`, `h`, `.`, `:n`, digit prefixes and `Ctrl-L` need none of that and are
+the sensible first tranche.
+
+**Proper fix.** Widen `Key` from three variants to a parsed
+`(count: Option<usize>, command: Command)` read through a small state machine,
+so a digit prefix is accumulated rather than discarded, and `page` grows a
+`lines_remaining` budget it decrements instead of the current
+`rows = lines_per_page - 1` special case. Do the seekable/temp-file decision
+first — it determines whether `Command::Back` can exist at all, and it is the
+one part of this that belongs in `open-questions.md` rather than being settled
+in the code.
+
+**Not a regression.** Before 2026-08-30 this program had *no* options at all
+(`more -n 3 f` treated `-n` as a file name) and no prompt; the interactive set
+was the same three keys. This entry records the gap that remains after that
+work, not one it introduced.
+
+**`-e` and `-u` are accepted and do nothing, on purpose.** util-linux's own
+manual documents both as no-ops retained for compatibility: `-e` (exit on EOF)
+is unconditional there since 2.39, and `-u` (suppress underlining) has no
+effect because the program no longer emits underlining. Ours accepts both so a
+script written for util-linux runs, and ignores both because there is nothing
+to do. This is *not* an unimplemented option.

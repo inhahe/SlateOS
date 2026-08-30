@@ -585,6 +585,12 @@ PREP=prep_dir_over_file extract_case 'a directory member over a plain file' spec
 #     message on either side says so; only the manifest's mode and mtime do.
 # ---------------------------------------------------------------------------
 for ovw in --overwrite -k --skip-old-files -U --keep-newer-files; do
+  # Nothing in the way at all -- except the destination itself, which `spec.tar`
+  # carries a `.` member for. Three of the five treat an existing directory as
+  # something to remove before creating, and the destination root is the one
+  # directory that cannot be removed, so this is where an option that reaches
+  # for `rmdir` too eagerly fails on an empty destination.
+  extract_case "nothing in the way, $ovw" spec.tar "$ovw"
   PREP=prep_existing extract_case "over existing entries, $ovw" spec.tar "$ovw"
   # `-v` is not cosmetic for three of these: `--skip-old-files` prints its
   # notice *only* under it, and `--keep-newer-files` prints one whose position

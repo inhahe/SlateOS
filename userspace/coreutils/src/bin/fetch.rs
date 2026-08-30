@@ -515,7 +515,7 @@ fn read_response(conn: &mut net::Connection) -> Result<HttpResponse, String> {
     loop {
         let n = conn
             .read_some(&mut buf)
-            .map_err(|e| format!("read error: {e}"))?;
+            .map_err(|e| format!("read error: {}", strerror(&e)))?;
         if n == 0 {
             return Err("connection closed before headers received".to_string());
         }
@@ -613,7 +613,7 @@ fn read_fixed_body(
     while body.len() < total {
         let n = conn
             .read_some(&mut buf)
-            .map_err(|e| format!("read error: {e}"))?;
+            .map_err(|e| format!("read error: {}", strerror(&e)))?;
         if n == 0 {
             break;
         }
@@ -636,7 +636,7 @@ fn read_chunked_body(conn: &mut net::Connection, initial: &[u8]) -> Result<Vec<u
             ChunkParse::NeedMore => {
                 let n = conn
                     .read_some(&mut buf)
-                    .map_err(|e| format!("read error: {e}"))?;
+                    .map_err(|e| format!("read error: {}", strerror(&e)))?;
                 if n == 0 {
                     // Connection closed; return what we have.
                     break;
@@ -652,7 +652,7 @@ fn read_chunked_body(conn: &mut net::Connection, initial: &[u8]) -> Result<Vec<u
                 while raw.len() < needed {
                     let n = conn
                         .read_some(&mut buf)
-                        .map_err(|e| format!("read error: {e}"))?;
+                        .map_err(|e| format!("read error: {}", strerror(&e)))?;
                     if n == 0 {
                         break;
                     }
@@ -713,7 +713,7 @@ fn read_until_close(conn: &mut net::Connection, initial: &[u8]) -> Result<Vec<u8
     loop {
         let n = conn
             .read_some(&mut buf)
-            .map_err(|e| format!("read error: {e}"))?;
+            .map_err(|e| format!("read error: {}", strerror(&e)))?;
         if n == 0 {
             break;
         }
@@ -757,8 +757,15 @@ fn fetch_url(config: &Config, url_bytes: &[u8], out: &mut stdfd::Stream) -> u8 {
 
     let mut current_url = match ParsedUrl::parse(url_bytes) {
         Ok(u) => u,
-        Err(e) => {
-            diag!("fetch: invalid URL {}: {e}", escape_unprintable(url_bytes));
+        // Bound as `why`, not `e`: `ParsedUrl::parse` returns our own sentence
+        // about the URL's shape, not an `io::Error` whose text is the host's.
+        // The name is what `scripts/host-errmsg.py` reads to tell the two
+        // apart, and here it is simply the accurate one.
+        Err(why) => {
+            diag!(
+                "fetch: invalid URL {}: {why}",
+                escape_unprintable(url_bytes)
+            );
             return EXIT_BAD_ARGS;
         }
     };
@@ -877,9 +884,12 @@ fn fetch_url(config: &Config, url_bytes: &[u8], out: &mut stdfd::Stream) -> u8 {
                         redirects_remaining = redirects_remaining.saturating_sub(1);
                         continue;
                     }
-                    Err(e) => {
+                    // `why` for the same reason as at the first parse above:
+                    // this is our sentence about the URL, not the host's
+                    // wording for an errno.
+                    Err(why) => {
                         diag!(
-                            "fetch: invalid redirect URL {}: {e}",
+                            "fetch: invalid redirect URL {}: {why}",
                             escape_unprintable(location)
                         );
                         return EXIT_HTTP_ERROR;

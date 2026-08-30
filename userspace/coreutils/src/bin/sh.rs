@@ -4413,8 +4413,9 @@ impl Shell {
         match cmd.spawn() {
             Ok(child) => Some(child),
             Err(e) => {
+                let why = coreutils::errmsg::strerror(&e);
                 diag!(
-                    "sh: {}: {e}",
+                    "sh: {}: {why}",
                     coreutils::quote::quotef(argv.first().map_or(b"", Vec::as_slice))
                 );
                 self.status = if e.kind() == std::io::ErrorKind::NotFound {
@@ -5255,8 +5256,9 @@ impl Shell {
         {
             use std::os::unix::process::CommandExt;
             let e = cmd.exec();
+            let why = coreutils::errmsg::strerror(&e);
             diag!(
-                "sh: exec: {}: {e}",
+                "sh: exec: {}: {why}",
                 coreutils::quote::quotef(args.first().map_or(b"", Vec::as_slice))
             );
             Err(Flow::Exit(if e.kind() == std::io::ErrorKind::NotFound {

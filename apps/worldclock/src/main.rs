@@ -2706,8 +2706,21 @@ mod tests {
             text_containing(&narrow, "UTC 12:").is_none(),
             "the readout should be gone, not drawn under a button"
         );
-        // …but every button is still there.
-        assert!(narrow.rect_of(|t| *t == Target::AddCity).is_some());
+        // …but every button is still there. "There" means drawn, not merely
+        // clickable: a hit box would survive a label that had been squeezed
+        // out of existence, and a blue rectangle with nothing written on it
+        // is not a button the user can find.
+        let add = narrow
+            .rect_of(|t| *t == Target::AddCity)
+            .expect("the Add City button lost its hit box");
+        assert!(
+            narrow.commands().iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, x, y, .. }
+                    if text == "+ Add City" && add.contains(*x, *y)
+            )),
+            "the Add City button is clickable but unlabelled"
+        );
     }
 
     fn text_containing(frame: &Frame, needle: &str) -> Option<String> {

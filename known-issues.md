@@ -99566,3 +99566,63 @@ there is no test, because there is no difference.
 deletion changes nothing: correctness that rests on `0.0 / 0.0` producing a
 value that fails every comparison is correctness by accident, and the next edit
 to the arithmetic takes it away silently.
+
+### Lesson 81 audit closed: 15 of the 55 sites were faults, 40 were the right assertion (lane C, 2026-08-30)
+
+**In short:** the previous addendum counted 55 `rect_of(...).is_some()` sites
+across 20 apps and said the audit had to be per-site because the form is only
+wrong when the test's claim is about *visibility*. Every site has now been read.
+**Fifteen** were genuine — a test that said "drawn", "still there", "on screen"
+or "appeared" while proving only that a click would land somewhere — and have
+been given a paint assertion. **Forty** were already correct: they claim
+*clickability*, and for that claim a recorded box is the evidence, not a proxy
+for it.
+
+**The fifteen that were fixed**, and the word in each that gave it away:
+
+| app | test | the word that made it a visibility claim |
+|---|---|---|
+| checkers | the board's squares are reachable | "reachable" over a drawn board |
+| memory | a face-down card is still a card | "still a card" |
+| nim | every heap offers a row to click | "offers" |
+| tictactoe | an empty cell is clickable | the empty cell draws nothing else |
+| stickynotes | a note is where its own text is | "is where" |
+| snippets | a twisty is drawn only where there is something to open | "is drawn" |
+| snippets | a row is where its own title is drawn | "is drawn" |
+| snippets | every control the toolbar draws can be clicked | "the toolbar draws" |
+| sokoban | the menu scrolls the cursor into view | "into view" |
+| vpnmanager | the selected row must be one the user can see | "can see" |
+| charmap | the End key scrolls the last character onto the screen | "onto the screen" |
+| netmanager | the switch moved but Apply never appeared | "appeared" |
+| netmanager | add profile is reachable when there are no profiles yet | the fault was *nothing drawn* |
+| breakout | the buttons offer every action the keys do | "has no button" |
+| worldclock | a narrow window drops the UTC readout before a button | "every button is still there" |
+
+**Three patterns account for all 40 that were right.**
+
+1. **Paired with an `is_none()`.** The pair is the whole test: the target is
+   dropped in one state and recorded in the other. Both halves are about the
+   hit box, and a paint assertion on the `is_some()` half would be testing a
+   different thing than the `is_none()` half denies. `pdfviewer`'s six sites,
+   `netmanager`'s DNS up/down buttons, `taskscheduler`'s selection-gated
+   toolbar, `credmanager`'s buttons left of the fold, `sokoban`'s menu-versus-
+   warehouse buttons and `vpnmanager`'s reconnect are all this.
+2. **The test name says "clickable", "reachable" or "records".**
+   `diskanalyzer`'s `every_control_is_still_reachable_in_a_narrow_window` and
+   `sokoban`'s `a_button_the_screen_does_not_show_is_not_clickable` name the hit
+   box outright. Strengthening those would not sharpen the claim, it would
+   replace it.
+3. **A companion test already proves the paint.** `snippets`' four scroll-window
+   sites lean on `a_row_is_where_its_own_title_is_drawn`, which — now that it is
+   one of the fifteen — establishes that a row's box is where its title lands.
+   Once that is proved once, the scroll tests may ask about the box alone.
+   `mahjong`'s two sites sit directly after a `text_saying(...)` in the same
+   test, which is the same argument in one file.
+
+**The general shape, for the next audit of this kind.** A grep gives sites, not
+faults; the fault rate here was 27%. The discriminator is a single question
+asked of the test's *name and message*, not of its body: does it promise the
+user can **see** this, or that a click **reaches** it? Fixing the 40 would have
+been worse than leaving them — a clickability test with a paint assertion bolted
+on fails for the wrong reason and teaches the next reader that the two claims
+are one.

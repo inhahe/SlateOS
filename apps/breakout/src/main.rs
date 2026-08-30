@@ -2879,10 +2879,22 @@ mod tests {
     #[test]
     fn the_buttons_offer_every_action_the_keys_do() {
         let app = windowed();
-        for (action, _) in BUTTONS {
+        let cmds = app.frame(SIZE.0, SIZE.1).commands().to_vec();
+        for (action, body) in BUTTONS {
+            let r = probe::rect_of(&app, Target::Button(action))
+                .unwrap_or_else(|| panic!("{action:?} has no button"));
+            // A hit box is not a button: it proves a click lands somewhere,
+            // not that anything was painted there for the player to aim at.
+            // The label is what makes it a button, so require it inside the
+            // box the click uses.
+            let wanted = app.button_label(action, body);
             assert!(
-                probe::rect_of(&app, Target::Button(action)).is_some(),
-                "{action:?} has no button"
+                cmds.iter().any(|c| matches!(
+                    c,
+                    RenderCommand::Text { text, x, y, .. }
+                        if text.as_str() == wanted && r.contains(*x, *y)
+                )),
+                "{action:?} is clickable but its label {wanted:?} is not drawn inside it"
             );
         }
     }

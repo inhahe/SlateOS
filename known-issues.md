@@ -82315,8 +82315,79 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **131 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **95 of 800 remain**
 
+> **Burn-down log.** 2026-08-30 (forty-third batch, part a): the rest of the
+> **two**-site functions except the expression evaluator's. 131 → 95 across
+> 111 → 93 functions: `cmd_netthrottle`, `cmd_pmcstat`, `cmd_policyengine`,
+> `cmd_prefetch`, `cmd_printmgr`, `cmd_progmgr`, `cmd_reclaim`, `cmd_seq`,
+> `cmd_strings`, `cmd_svcstart`, `cmd_telnetd`, `cmd_tracemon`, `cmd_vmfrag`,
+> `cmd_vmguest`, `cmd_volumeosd`, `cmd_wifiscan`, `cmd_windowrules` and
+> `cmd_writeback` left the ledger entirely. Pinned by self-test rung 110.
+>
+> **The tier is now `eval_test 2` + `tokenize_arith 2` and nothing else**, so
+> the ledger is 2×2 + 91×1. Those four are batch 43b and are deliberately not
+> in this one: they are all inside `eval_arithmetic`, which returns a bare
+> `i64` and has eleven call sites, so fixing them is an interface change to
+> the shell's expression evaluator rather than a call-site edit like the other
+> thirty-six. Splitting the batch keeps a mechanical change and a design
+> change out of one commit.
+>
+> **Seven of the defects fixed here had no `.parse()` in them at all, and so
+> were never in the ledger.** They are `match` arms on a *word*, ending
+> `_ => SomeDefault`, where the arm for "the operand was absent" and the arm
+> for "the operand was misspelled" are the same arm. The gate keys on
+> `.parse()` and `from_str_radix`, so it cannot see them; they were found by
+> reading the code *around* flagged sites. This is a third, structural reason
+> the ledger total is a floor rather than a measurement — the header of
+> `scripts/option-refusal-ledger.txt` already records two historical
+> under-counts, and this one is different in kind from both: it is not a
+> detector bug that can be fixed, it is the detector looking at the wrong
+> syntax for this half of the defect family. **The fix pattern** is to spell
+> the default out as its own arm and give `_`/`other` a `refuse_operand` that
+> lists the valid words, so that absence and unreadability stop sharing a
+> branch. Where they were:
+>
+> | Site | What the `_` arm did |
+> |---|---|
+> | `wifiscan discover` security | a typo for `wep` filed an unprotected access point as **WPA2-PSK**, and the listing showed it as protected |
+> | `wifiscan discover` band | filed the network on **5 GHz**, next to a channel number that band does not have |
+> | `progmgr uninstall` option | did a **Full** uninstall — deleting the files the operator had just asked to keep |
+> | `progmgr snap` scope | took a **full** snapshot where `settings` or `data` was asked for |
+> | `policyengine add` effect | **Allow** — a security policy that fails open and reports success |
+> | `policyengine add` category | filed the rule under **System**, where it never matches the requests it was written for and may match ones it was not |
+> | `pmcstat sample` event | filed the reading against **Cycles** whatever counter was named |
+>
+> `policyengine`'s is recorded in the code with its own reasoning: the obvious
+> "safer" repair is to flip the fallback to `Deny`, and that is rejected there,
+> because it would still act on a word nobody typed, and a policy engine that
+> quietly denies is a machine that mysteriously stops working.
+>
+> **Three older shapes recurred, and two guards-by-luck were retired.**
+> `telnetd kick` was batch 42's `usize::MAX` sentinel again, reaching the
+> operator as *"Session #18446744073709551615 not found or inactive"*.
+> `tracemon read` was a limit that truncates evidence — `read 5O` returned
+> twenty events and printed `Trace events (20):`, so the count in the header
+> was the guess, not the buffer. `vmfrag update` and `writeback dirty` were
+> measurements being filed: both write a number the operator supplied into a
+> statistics table, where an invented one is indistinguishable from a reading
+> the kernel took itself, and `vmfrag`'s guess of `0` means *no
+> fragmentation*. The guards-by-luck were `telnetd port` and `vmguest resize`,
+> where the guessed `0` happened to be the one value a following range check
+> rejects — a refusal nobody designed, and the identical line in a command
+> whose default is a *valid* number would have gone through silently.
+>
+> **`windowrules action` is the batch's sharpest number**, because its meaning
+> is decided by the *previous* word: `p1` is an x-coordinate for `position`
+> and a percentage for `opacity`, so guessing `0` snapped a window to the
+> screen corner in one case and made it invisible in the other — and the rule
+> fires later, when nobody is watching the shell. The same arm also answered a
+> mistyped *rule id* by reprinting the syntax, which tells an operator who got
+> the syntax right to go and re-read it; absence still gets the usage block,
+> and an unreadable word is now named. `cmd_seq` had the same split, twelve
+> lines apart: `seq 1O` refused while `seq 1 1O` guessed `1` and printed one
+> line, so `for i in $(seq 1 $n)` ran once with nothing on stderr to say why.
+>
 > **Burn-down log.** 2026-08-30 (forty-second batch): the **two**-site
 > functions, alphabetically as far as `cmd_netns` — twenty-nine of the
 > forty-nine. 189 → 131 across 140 → 111 functions: `cmd_audio`, `cmd_audit`,

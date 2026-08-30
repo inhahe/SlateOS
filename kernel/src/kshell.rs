@@ -21440,6 +21440,104 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_lacks("and no sample was filed", &out, b"Load average updated");
     }
 
+    serial_println!(
+        "  kshell::self_test 110: a mistyped *word* is refused too -- a Wi-Fi \
+         security type, an uninstall option and a policy effect are no longer \
+         guessed, and neither are the numbers that flash a port, aim a window \
+         rule or file a fragmentation reading"
+    );
+    {
+        // Rung 110 -- batch 43a of the design-decisions.md §600 burn-down: the
+        // last of the two-site functions (18 of them, 36 sites), leaving only
+        // the expression evaluator's four. Seven of the defects fixed in this
+        // batch had *no `.parse()` at all* and so were invisible to
+        // `scripts/check-option-refusal.py`: they are `match` arms on a word,
+        // ending `_ => SomeDefault`, where the absent-operand default and the
+        // misspelled-word case shared one arm. They were found by reading
+        // around flagged sites, not by the gate -- which is the concrete
+        // reason the ledger's total is a floor and not a measurement, on top
+        // of the two historical under-counts its header already records.
+        //
+        // The cases below are one per consequence, not one per command:
+        //
+        //   * `wifiscan discover` is the sharpest word-default in the tree:
+        //     the guessed field is the *security* of the network, so a typo
+        //     for `wep` filed an unprotected access point as WPA2-PSK and the
+        //     listing showed it as protected. A scan whose purpose is to find
+        //     open networks answered that there were none.
+        //   * `progmgr uninstall` guessed `full`, which is the option that
+        //     deletes the user's files. Every other guess in this family costs
+        //     a re-run.
+        //   * `policyengine add` guessed `Allow` for an effect it could not
+        //     read -- a security policy that fails open, and reports success.
+        //   * `windowrules action` guessed 0 for a parameter whose meaning the
+        //     *action* decides: 0 is a screen corner for `position` and full
+        //     transparency for `opacity`. The rule then fires later, when
+        //     nobody is watching the shell.
+        //   * `telnetd kick` is batch 42's sentinel shape again: `usize::MAX`
+        //     was picked as an index that "cannot exist", and it reached the
+        //     operator as a sentence about session #18446744073709551615.
+
+        // A word, not a number: the old `_ => Wpa2Psk` arm.
+        let out = capture_command("wifiscan discover zzrungssid aa:bb:cc:dd:ee:ff wep2 5 36");
+        assert_output_contains(
+            "a misspelled security type is named, not filed as WPA2",
+            &out,
+            b"is not a security type",
+        );
+        assert_eq!(last_exit(), 1, "`wifiscan discover ... wep2 ...` errors");
+        assert_output_lacks("and no network was recorded", &out, b"Network #");
+
+        // The guess that deletes files.
+        let out = capture_command("progmgr uninstall zzrungpkg keepfilez");
+        assert_output_contains(
+            "a misspelled uninstall option does not fall back to `full'",
+            &out,
+            b"is not an uninstall option",
+        );
+        assert_eq!(last_exit(), 1, "`progmgr uninstall ... keepfilez` errors");
+        assert_output_lacks("and nothing was uninstalled", &out, b"Uninstalled '");
+
+        // The guess that fails open.
+        let out = capture_command("policyengine add zzrungrule security app open /tmp allo");
+        assert_output_contains(
+            "a misspelled effect is not silently Allow",
+            &out,
+            b"is not a policy effect",
+        );
+        assert_eq!(last_exit(), 1, "`policyengine add ... allo` errors");
+        assert_output_lacks("and no rule was added", &out, b"Added rule #");
+
+        // A number whose meaning the preceding word decides.
+        let out = capture_command("windowrules action 1 opacity 8O");
+        assert_output_contains(
+            "an unreadable action parameter is not guessed as 0",
+            &out,
+            b"`8O' is not a first action parameter",
+        );
+        assert_eq!(last_exit(), 1, "`windowrules action 1 opacity 8O` errors");
+        assert_output_lacks("and no action was attached", &out, b"added to rule");
+
+        // The sentinel that got printed at the operator.
+        let out = capture_command("telnetd kick 1O");
+        assert_output_contains(
+            "an unreadable session number is named",
+            &out,
+            b"`1O' is not a session number",
+        );
+        assert_eq!(last_exit(), 1, "`telnetd kick 1O` errors");
+        // The old output was `Session #18446744073709551615 not found or
+        // inactive`. Asserting the *sentence* is absent rather than the
+        // sentinel digits is the stronger of the two: it proves the refusal
+        // happened before `disconnect_session` was consulted at all, whereas
+        // the digits would only prove that one particular sentinel is gone.
+        assert_output_lacks(
+            "and no sentence is printed about a session that cannot exist",
+            &out,
+            b"not found or inactive",
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -22183,14 +22281,34 @@ fn cmd_strings(args: &str) {
     let mut min_len: usize = 4;
     let mut path_arg = "";
 
+    // Both spellings of `-n` guessed 4 for a word they could not read, and 4
+    // is also the value the flag exists to change -- so `strings -n 1O f` and
+    // `strings -n1O f` did exactly what plain `strings f` does, and the
+    // operator's evidence for "there are no long strings in this binary" was a
+    // scan they never actually ran.  A separated `-n` with nothing after it
+    // was silent in the same way; GNU strings answers that with `option
+    // requires an argument -- 'n'`, and so does this now.  `strings` has no
+    // subcommand, so these are callers of `refuse_operand`'s collapsed prefix.
     let mut words = args.split_whitespace();
     while let Some(w) = words.next() {
         if w == "-n" {
-            if let Some(n_str) = words.next() {
-                min_len = n_str.parse::<usize>().unwrap_or(4);
-            }
+            let Some(n_str) = words.next() else {
+                refuse_operand(
+                    "strings",
+                    "",
+                    format_args!("-n needs a minimum length after it"),
+                );
+                return;
+            };
+            let Some(n) = readable_num::<usize>(n_str, "strings", "", "minimum length") else {
+                return;
+            };
+            min_len = n;
         } else if let Some(n_str) = w.strip_prefix("-n") {
-            min_len = n_str.parse::<usize>().unwrap_or(4);
+            let Some(n) = readable_num::<usize>(n_str, "strings", "", "minimum length") else {
+                return;
+            };
+            min_len = n;
         } else {
             path_arg = w;
         }
@@ -28611,8 +28729,31 @@ fn cmd_reclaim(args: &str) {
                 set_exit(1);
                 return;
             }
-            let hi = parts[1].parse::<u64>().unwrap_or(90);
-            let lo = parts[2].parse::<u64>().unwrap_or(80);
+            // The guessed values were 90 and 80 -- the very pair the usage line
+            // offers as its example -- so `reclaim watermark 9O 8O` cleared the
+            // `lo < hi` guard and printed "Watermarks set: high=90% low=80%".
+            // Every visible sign said it worked, including the numbers echoed
+            // back, and the operator's memory of what they typed is the only
+            // thing that could have caught it.
+            let Some(hi) =
+                required_num::<u64>(&parts, 1, "reclaim", "watermark", "high watermark percent")
+            else {
+                return;
+            };
+            let Some(lo) =
+                required_num::<u64>(&parts, 2, "reclaim", "watermark", "low watermark percent")
+            else {
+                return;
+            };
+            // Both are percentages of memory in use. Nothing rejected 900
+            // before, and a high watermark above 100 is not a wrong threshold
+            // but an unreachable one: reclamation would simply never run again,
+            // silently, with `reclaim status` still reporting it enabled.
+            if hi > 100 || lo > 100 {
+                shell_println!("reclaim: watermark: watermarks are percentages, so at most 100");
+                set_exit(1);
+                return;
+            }
             if lo >= hi {
                 shell_println!("Error: LOW must be < HIGH");
                 set_exit(1);
@@ -32402,8 +32543,20 @@ fn cmd_prefetch(args: &str) {
                 return;
             }
             let path = resolve_path(parts[1]);
-            let offset: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let len: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            // `prefetch load big.img 1OO000 4096` warmed the cache from offset
+            // 0 instead of the offset asked for, and then reported the byte
+            // count it did fetch -- so the command looks like it worked and the
+            // measurement afterwards is of the wrong region of the file. A
+            // prefetch is only ever run to observe its effect, which makes a
+            // silently relocated one worse than a failed one.
+            let Some(offset) = optional_num::<u64>(&parts, 2, "prefetch", sub, "byte offset", 0)
+            else {
+                return;
+            };
+            let Some(len) = optional_num::<u64>(&parts, 3, "prefetch", sub, "length in bytes", 0)
+            else {
+                return;
+            };
             match prefetch::prefetch(&path, offset, len) {
                 Ok(r) => shell_println!(
                     "Prefetched {} bytes from {}",
@@ -44810,10 +44963,16 @@ fn cmd_progmgr(args: &str) {
                     shell_println!("Usage: progmgr register <app_id> <name> <install_dir> [size]");
                     set_exit(1);
                 } else {
-                    let size = parts
-                        .get(4)
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(0);
+                    // The recorded install size is what every later disk-usage
+                    // view of this app reports, so a guessed 0 makes the app
+                    // invisible to exactly the question the registry exists to
+                    // answer. `sub` is not in scope inside these `fn case`
+                    // helpers, so the subcommand is named literally.
+                    let Some(size) =
+                        optional_num::<u64>(parts, 4, "progmgr", "register", "size in bytes", 0)
+                    else {
+                        return;
+                    };
                     match progmgr::register(parts[1], parts[2], "1.0.0", parts[3], size) {
                         Ok(()) => shell_println!("Registered '{}'", parts[1]),
                         Err(e) => {
@@ -44834,11 +44993,32 @@ fn cmd_progmgr(args: &str) {
                     );
                     set_exit(1);
                 } else {
+                    // Not a ledger site -- there is no `.parse()` here -- but the
+                    // same defect with the worst consequence in the shell: the
+                    // `_` arm meant `progmgr uninstall myapp keepfilez` did a
+                    // **Full** uninstall, deleting the files the operator had
+                    // just asked to keep. Every other guess in this campaign
+                    // reports a wrong number; this one destroys data, and
+                    // nothing about "Uninstalled 'myapp'" says which of the four
+                    // things it did. `full` keeps its place as the default for
+                    // an *absent* word, spelled as its own arm so the default
+                    // and the typo stop sharing one branch.
                     let opt = match parts.get(2).copied().unwrap_or("full") {
+                        "full" => progmgr::UninstallOption::Full,
                         "keepfiles" | "keep-files" => progmgr::UninstallOption::KeepFiles,
                         "keepsettings" | "keep-settings" => progmgr::UninstallOption::KeepSettings,
                         "keepall" | "keep-all" => progmgr::UninstallOption::KeepAll,
-                        _ => progmgr::UninstallOption::Full,
+                        other => {
+                            refuse_operand(
+                                "progmgr",
+                                "uninstall",
+                                format_args!(
+                                    "`{}' is not an uninstall option (full, keepfiles, keepsettings, keepall)",
+                                    other
+                                ),
+                            );
+                            return;
+                        }
                     };
                     match progmgr::uninstall(parts[1], opt) {
                         Ok(()) => shell_println!("Uninstalled '{}'", parts[1]),
@@ -45136,15 +45316,36 @@ fn cmd_progmgr(args: &str) {
                     );
                     set_exit(1);
                 } else {
+                    // The mirror image of `uninstall`'s guess: a mistyped scope
+                    // captured *more* than was asked for rather than less. Not
+                    // destructive, but it makes the snapshot a different object
+                    // from the one the operator believes they took, which they
+                    // find out when they restore it.
                     let scope = match parts.get(3).copied().unwrap_or("full") {
+                        "full" => progmgr::SnapshotScope::Full,
                         "settings" => progmgr::SnapshotScope::SettingsOnly,
                         "data" => progmgr::SnapshotScope::DataOnly,
-                        _ => progmgr::SnapshotScope::Full,
+                        other => {
+                            refuse_operand(
+                                "progmgr",
+                                "snap",
+                                format_args!(
+                                    "`{}' is not a snapshot scope (full, settings, data)",
+                                    other
+                                ),
+                            );
+                            return;
+                        }
                     };
-                    let parent = parts
-                        .get(4)
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(0);
+                    // Parent 0 is the "no parent" sentinel, so an unreadable
+                    // parent id did not build a wrong chain -- it silently made
+                    // the snapshot a root, detaching the history the operator
+                    // was trying to extend.
+                    let Some(parent) =
+                        optional_num::<u64>(parts, 4, "progmgr", "snap", "parent snapshot id", 0)
+                    else {
+                        return;
+                    };
                     match progmgr::create_snapshot(parts[1], parts[2], scope, parent) {
                         Ok(id) => shell_println!("Created snapshot {} for '{}'", id, parts[1]),
                         Err(e) => {
@@ -56995,14 +57196,18 @@ fn cmd_printmgr(args: &str) {
         "print" => {
             // lp print <document> [pages] [copies]
             if let Some(doc) = parts.get(1) {
-                let pages = parts
-                    .get(2)
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(1);
-                let copies = parts
-                    .get(3)
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(1);
+                // The one arm in this batch whose guess consumes a physical
+                // resource: `lp print report.pdf 12 1O` printed one copy rather
+                // than ten, and the confirmation line echoed "1 copies" -- the
+                // number the shell invented, not the one that was typed. The
+                // operator's recourse is to walk to the printer and count.
+                let Some(pages) = optional_num::<u32>(&parts, 2, "lp", sub, "page count", 1) else {
+                    return;
+                };
+                let Some(copies) = optional_num::<u32>(&parts, 3, "lp", sub, "copy count", 1)
+                else {
+                    return;
+                };
                 if let Some(def) = printmgr::default_printer() {
                     match printmgr::submit_job(def.id, doc, pages, copies, 0) {
                         Ok(job_id) => shell_println!(
@@ -66241,22 +66446,41 @@ fn cmd_svcstart(args: &str) {
                 let sock_type_str = parts.get(2).copied().unwrap_or("tcp");
                 let port_or_path = parts.get(3).copied().unwrap_or("0");
                 if let Ok(svc_id) = svc_id_str.parse::<u32>() {
+                    // Port 0 is this module's *no port* value -- the `sockets`
+                    // listing renders it as `-`.  So `svcstart addsock 3 tcp
+                    // 8O80` did not bind the wrong port, it registered a TCP
+                    // activation with no port at all and answered "Socket
+                    // activation entry N registered".  The service then never
+                    // woke on a connection, and the only trace was a dash in a
+                    // column where the operator remembered typing a number.
+                    // design-decisions.md §600's "binds a resource" axis.
                     let (socket_type, port, path) = match sock_type_str {
-                        "tcp" => (
-                            SocketType::Tcp,
-                            port_or_path.parse::<u16>().unwrap_or(0),
-                            String::new(),
-                        ),
-                        "udp" => (
-                            SocketType::Udp,
-                            port_or_path.parse::<u16>().unwrap_or(0),
-                            String::new(),
-                        ),
+                        "tcp" => {
+                            let Some(port) =
+                                readable_num::<u16>(port_or_path, "svcstart", sub, "port number")
+                            else {
+                                return;
+                            };
+                            (SocketType::Tcp, port, String::new())
+                        }
+                        "udp" => {
+                            let Some(port) =
+                                readable_num::<u16>(port_or_path, "svcstart", sub, "port number")
+                            else {
+                                return;
+                            };
+                            (SocketType::Udp, port, String::new())
+                        }
                         "unix" => (SocketType::Unix, 0u16, String::from(port_or_path)),
                         "ipc" => (SocketType::IpcChannel, 0u16, String::from(port_or_path)),
-                        _ => {
-                            shell_println!("Unknown socket type: {}", sock_type_str);
-                            set_exit(1);
+                        other => {
+                            refuse_operand(
+                                "svcstart",
+                                sub,
+                                format_args!(
+                                    "`{other}' is not a socket type (tcp, udp, unix, ipc)"
+                                ),
+                            );
                             return;
                         }
                     };
@@ -67626,11 +67850,26 @@ fn cmd_vmguest(args: &str) {
                 shell_println!("Usage: vmguest resize <width> <height>");
                 set_exit(1);
             } else {
-                let w: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                let h: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                // Another guard that worked by luck -- 0 is both the guess and
+                // the one value rejected below, so `vmguest resize 192O 1080`
+                // reached "Invalid dimensions" without anyone deciding it
+                // should.  Name the word instead: the operator who typed a
+                // letter O into a resolution needs to be told *which* of the
+                // two numbers the shell could not read.
+                let Some(w) = required_num::<u32>(&parts, 1, "vmguest", sub, "width in pixels")
+                else {
+                    return;
+                };
+                let Some(h) = required_num::<u32>(&parts, 2, "vmguest", sub, "height in pixels")
+                else {
+                    return;
+                };
                 if w == 0 || h == 0 {
-                    shell_println!("Invalid dimensions");
-                    set_exit(1);
+                    refuse_operand(
+                        "vmguest",
+                        sub,
+                        format_args!("a display is at least 1x1, so 0 is not a dimension"),
+                    );
                 } else {
                     let (ew, eh) = vmguest::request_display_resize(w, h);
                     shell_println!("Requested: {}x{}, effective: {}x{}", w, h, ew, eh);
@@ -69059,10 +69298,23 @@ fn cmd_telnetd(args: &str) {
             if port_str.is_empty() {
                 shell_println!("Listening port: {}", telnet::stats().port);
             } else {
-                let port: u16 = port_str.parse().unwrap_or(0);
+                // A guard that worked by luck: 0 was both the guess and the
+                // one value the check below rejects, so `telnetd port 8O80`
+                // did reach "Invalid port" -- but only because the sentinel
+                // happened to collide with the invalid case.  Nothing said
+                // which word was unreadable, and the identical line in a
+                // command whose guess landed on a *valid* number would have
+                // gone through silently.  design-decisions.md §600.
+                let Some(port) = readable_num::<u16>(port_str, "telnetd", sub, "port number")
+                else {
+                    return;
+                };
                 if port == 0 {
-                    shell_println!("Invalid port");
-                    set_exit(1);
+                    refuse_operand(
+                        "telnetd",
+                        sub,
+                        format_args!("port 0 is not a listening port"),
+                    );
                 } else {
                     telnet::set_port(port);
                     shell_println!("Port set to {} (restart server to apply)", port);
@@ -69104,7 +69356,15 @@ fn cmd_telnetd(args: &str) {
                 set_exit(1);
                 return;
             }
-            let idx: usize = idx_str.parse().unwrap_or(usize::MAX);
+            // The sentinel was chosen as a number that "cannot exist", which
+            // is exactly what made it reach the operator: `telnetd kick 1O`
+            // printed `Session #18446744073709551615 not found or inactive`,
+            // a sentence about a session nobody asked about.  The operator's
+            // question was "why is #10 still connected", and the answer given
+            // was about #18446744073709551615.  design-decisions.md §600.
+            let Some(idx) = readable_num::<usize>(idx_str, "telnetd", sub, "session number") else {
+                return;
+            };
             if telnet::disconnect_session(idx) {
                 shell_println!("Disconnected session #{}", idx);
             } else {
@@ -75594,18 +75854,29 @@ fn cmd_netthrottle(args: &str) {
         }
         "add" | "rule" => {
             let app = parts.get(1).copied().unwrap_or("");
-            let down = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let up = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
             if app.is_empty() {
                 shell_println!("Usage: nthrottle add <app> [max_down_bps] [max_up_bps]");
                 set_exit(1);
             } else {
+                // Both rates defaulted to 0, and 0 is this module's *unlimited*
+                // sentinel -- so `nthrottle add zoom 1OOOOOO` did not throttle
+                // zoom to a wrong rate, it left zoom unthrottled and said
+                // "Added rule N", which is the one outcome the operator would
+                // not think to re-check. Same shape as `cgroup io-limit` in
+                // batch 42: the guess does not set a wrong cap, it removes the
+                // cap. The app name is checked first so that a bare
+                // `nthrottle add` still gets the synopsis rather than a
+                // complaint about a rate it never typed.
+                let Some(down) =
+                    optional_num::<u64>(&parts, 2, "nthrottle", sub, "download limit in bps", 0)
+                else {
+                    return;
+                };
+                let Some(up) =
+                    optional_num::<u64>(&parts, 3, "nthrottle", sub, "upload limit in bps", 0)
+                else {
+                    return;
+                };
                 match netthrottle::add_rule(app, down, up, netthrottle::QosPriority::Normal) {
                     Ok(id) => shell_println!("Added rule {} for '{}'", id, app),
                     Err(e) => {
@@ -78553,10 +78824,15 @@ fn cmd_volumeosd(args: &str) {
             }
         }
         "volume" | "vol" => {
-            let level = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(50);
+            // "Echoed back as confirmation" at its most convincing: 50 is a
+            // plausible reading, and the command's whole output is the number
+            // it just made up -- `volumeosd volume 8O` drew the bar at 50% and
+            // printed `OSD 4 - Volume 50%`, which is a receipt for a setting
+            // nobody chose.  Both this arm and `brightness` below did it.
+            let Some(level) = optional_num::<u32>(&parts, 1, "volumeosd", sub, "level percent", 50)
+            else {
+                return;
+            };
             let muted = parts.get(2).copied() == Some("mute");
             match volumeosd::show_volume(level, muted) {
                 Ok(id) => shell_println!(
@@ -78572,10 +78848,10 @@ fn cmd_volumeosd(args: &str) {
             }
         }
         "bright" | "brightness" => {
-            let level = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(50);
+            let Some(level) = optional_num::<u32>(&parts, 1, "volumeosd", sub, "level percent", 50)
+            else {
+                return;
+            };
             match volumeosd::show_brightness(level) {
                 Ok(id) => shell_println!("OSD {} — Brightness {}%", id, level),
                 Err(e) => {
@@ -85288,30 +85564,68 @@ fn cmd_windowrules(args: &str) {
             }
         }
         "action" => {
-            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
-            let action = parts.get(2).and_then(|s| parse_rule_action(s));
-            let p1 = parts
-                .get(3)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(0);
-            let p2 = parts
-                .get(4)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(0);
-            if let (Some(id), Some(act)) = (id, action) {
-                match windowrules::add_action(id, act, p1, p2) {
-                    Ok(()) => shell_println!("Action {} added to rule {}.", act.label(), id),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
+            // Absence and unreadability were answered identically here: a
+            // missing operand and a mistyped one both landed in the same
+            // `else`, which reprints the syntax.  That tells an operator who
+            // got the syntax right -- `windowrules action 1O position 10 20`
+            // -- to go and re-read it.  Below, absence keeps the usage block
+            // (it is the right answer to "what do I type?") and a word that
+            // cannot be read is named instead.
+            let Some(id_word) = parts.get(1).copied() else {
                 shell_println!("Usage: windowrules action <rule_id> <action> [p1] [p2]");
                 shell_println!("  Actions: position, size, workspace, ontop, onbottom, opacity,");
                 shell_println!("           nodecor, maximized, minimized, fullscreen, skiptask,");
                 shell_println!("           skippager, pinall, center");
                 set_exit(1);
+                return;
+            };
+            let Some(id) = readable_num::<u32>(id_word, "windowrules", sub, "rule id") else {
+                return;
+            };
+            let Some(action_word) = parts.get(2).copied() else {
+                shell_println!("Usage: windowrules action <rule_id> <action> [p1] [p2]");
+                shell_println!("  Actions: position, size, workspace, ontop, onbottom, opacity,");
+                shell_println!("           nodecor, maximized, minimized, fullscreen, skiptask,");
+                shell_println!("           skippager, pinall, center");
+                set_exit(1);
+                return;
+            };
+            let Some(act) = parse_rule_action(action_word) else {
+                refuse_operand(
+                    "windowrules",
+                    sub,
+                    format_args!(
+                        "`{action_word}' is not an action (position, size, workspace, ontop, \
+                         onbottom, opacity, nodecor, maximized, minimized, fullscreen, skiptask, \
+                         skippager, pinall, center)"
+                    ),
+                );
+                return;
+            };
+            // p1/p2 mean whatever the action says they mean -- x/y for
+            // `position`, width/height for `size`, a percentage for
+            // `opacity`.  Guessing 0 therefore did not misplace a window by a
+            // little: `windowrules action 3 position 10O 200` filed a rule
+            // that snaps the window to the screen corner, `... opacity 8O`
+            // filed one that makes it invisible, and both answered "Action
+            // Position added to rule 3." as though nothing had gone wrong.
+            // The rule then fires later, when nobody is watching the shell.
+            let Some(p1) =
+                optional_num::<i32>(&parts, 3, "windowrules", sub, "first action parameter", 0)
+            else {
+                return;
+            };
+            let Some(p2) =
+                optional_num::<i32>(&parts, 4, "windowrules", sub, "second action parameter", 0)
+            else {
+                return;
+            };
+            match windowrules::add_action(id, act, p1, p2) {
+                Ok(()) => shell_println!("Action {} added to rule {}.", act.label(), id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
@@ -89433,12 +89747,20 @@ fn cmd_policyengine(args: &str) {
                 set_exit(1);
                 return;
             }
-            let cat = parse_policy_category(parts[2]);
-            let effect = parse_policy_effect(parts[6]);
-            let priority = parts
-                .get(7)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(50);
+            let Some(cat) = parse_policy_category(parts[2], sub) else {
+                return;
+            };
+            let Some(effect) = parse_policy_effect(parts[6], sub) else {
+                return;
+            };
+            // Priority decides which rule wins when two match, so a guessed 50
+            // does not make the rule inert -- it silently reorders the policy
+            // set around it, and the rule that loses is the one nobody looks at.
+            let Some(priority) =
+                optional_num::<u32>(&parts, 7, "policyengine", sub, "rule priority", 50)
+            else {
+                return;
+            };
             match policyengine::add_rule(
                 parts[1], cat, parts[3], parts[4], parts[5], effect, priority,
             ) {
@@ -89501,10 +89823,15 @@ fn cmd_policyengine(args: &str) {
             }
         }
         "audit" => {
-            let max = parts
-                .get(1)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(10);
+            // A limit that truncates evidence, and this is the audit log: an
+            // operator who asks for 100 entries and mistypes the count is shown
+            // ten, with no sign that the other ninety were not printed because
+            // the number was rejected rather than because they do not exist.
+            let Some(max) =
+                optional_num::<usize>(&parts, 1, "policyengine", sub, "entry count", 10)
+            else {
+                return;
+            };
             let log = policyengine::get_audit_log(max);
             if log.is_empty() {
                 shell_println!("No audit entries");
@@ -89538,7 +89865,9 @@ fn cmd_policyengine(args: &str) {
         }
         "default" => {
             if let Some(v) = parts.get(1) {
-                let effect = parse_policy_effect(v);
+                let Some(effect) = parse_policy_effect(v, sub) else {
+                    return;
+                };
                 match policyengine::set_default(effect) {
                     Ok(()) => shell_println!("Default effect: {}", effect.label()),
                     Err(e) => {
@@ -89584,9 +89913,16 @@ fn cmd_policyengine(args: &str) {
     }
 }
 
-fn parse_policy_category(s: &str) -> crate::fs::policyengine::PolicyCategory {
+/// Read a policy category, or refuse the word.
+///
+/// `None` means the word was not a category and the caller has already printed
+/// why. Every caller passes a *mandatory* operand, so there is no "absent" case
+/// for a default to serve: the old `_ => System` arm existed only to swallow
+/// words this shell does not know, and it filed the rule under the widest
+/// category there is.
+fn parse_policy_category(s: &str, sub: &str) -> Option<crate::fs::policyengine::PolicyCategory> {
     use crate::fs::policyengine::PolicyCategory;
-    match s.to_lowercase().as_str() {
+    Some(match s.to_lowercase().as_str() {
         "security" | "sec" => PolicyCategory::Security,
         "privacy" | "priv" => PolicyCategory::Privacy,
         "network" | "net" => PolicyCategory::Network,
@@ -89594,19 +89930,52 @@ fn parse_policy_category(s: &str) -> crate::fs::policyengine::PolicyCategory {
         "hardware" | "hw" => PolicyCategory::Hardware,
         "storage" | "stor" => PolicyCategory::Storage,
         "system" | "sys" => PolicyCategory::System,
-        _ => PolicyCategory::System,
-    }
+        _ => {
+            refuse_operand(
+                "policyengine",
+                sub,
+                format_args!(
+                    "`{}' is not a policy category (security, privacy, network, application, hardware, storage, system)",
+                    s
+                ),
+            );
+            return None;
+        }
+    })
 }
 
-fn parse_policy_effect(s: &str) -> crate::fs::policyengine::Effect {
+/// Read a policy effect, or refuse the word.
+///
+/// This one was the worst guess in the shell. The old `_ => Effect::Allow` arm
+/// meant `policyengine add r1 sec alice read /etc/shadow denyy` -- one letter
+/// off `deny` -- installed an **Allow** rule, and `policyengine default denyy`
+/// set the engine-wide fallback for every request matching no rule to Allow.
+/// A mistyped word did not merely record a wrong value, it inverted a security
+/// decision to permit, which is the one direction a fallback must never take.
+///
+/// Choosing `Deny` as a fail-safe default instead would have been worse, not
+/// better: it would still act on a word nobody typed, and a policy engine that
+/// quietly denies is a machine that mysteriously stops working. The only sound
+/// answer to an unreadable effect is to install no rule at all.
+fn parse_policy_effect(s: &str, sub: &str) -> Option<crate::fs::policyengine::Effect> {
     use crate::fs::policyengine::Effect;
-    match s.to_lowercase().as_str() {
+    Some(match s.to_lowercase().as_str() {
         "allow" => Effect::Allow,
         "deny" | "block" => Effect::Deny,
         "audit" | "log" => Effect::Audit,
         "allowaudit" | "allow+audit" => Effect::AllowWithAudit,
-        _ => Effect::Allow,
-    }
+        _ => {
+            refuse_operand(
+                "policyengine",
+                sub,
+                format_args!(
+                    "`{}' is not a policy effect (allow, deny, audit, allowaudit)",
+                    s
+                ),
+            );
+            return None;
+        }
+    })
 }
 
 /// `fontpreview` / `fprev` — font preview and comparison.
@@ -89859,13 +90228,25 @@ fn cmd_wifiscan(args: &str) {
                 set_exit(1);
                 return;
             }
-            let security = parse_wifi_security(parts[3]);
-            let band = parse_wifi_band(parts[4]);
-            let channel = parts[5].parse::<u8>().unwrap_or(1);
-            let signal = parts
-                .get(6)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(-60);
+            let Some(security) = parse_wifi_security(parts[3], sub) else {
+                return;
+            };
+            let Some(band) = parse_wifi_band(parts[4], sub) else {
+                return;
+            };
+            // Channel 1 exists on 2.4 GHz and nowhere else, so a mistyped
+            // channel did not merely record the wrong number -- on a 5 GHz
+            // network it recorded a channel that band does not have, and the
+            // listing printed `ch1` beside `5GHz` as though that were a fact.
+            let Some(channel) = readable_num::<u8>(parts[5], "wifiscan", sub, "channel number")
+            else {
+                return;
+            };
+            let Some(signal) =
+                optional_num::<i32>(&parts, 6, "wifiscan", sub, "signal strength in dBm", -60)
+            else {
+                return;
+            };
             match wifiscan::discover(parts[1], parts[2], security, band, channel, signal) {
                 Ok(id) => shell_println!(
                     "Network #{}: {} ({} {} ch{} {}dBm)",
@@ -89993,9 +90374,18 @@ fn cmd_wifiscan(args: &str) {
     }
 }
 
-fn parse_wifi_security(s: &str) -> crate::fs::wifiscan::SecurityType {
+/// Read a Wi-Fi security type, or refuse and return `None`.
+///
+/// The old fallback was `_ => Wpa2Psk`, which is design-decisions.md §600's
+/// guessed value wearing a `match` instead of a `.parse()` -- and the worst
+/// possible instance of it, because the guessed field is the *security* of
+/// the network.  `wifiscan discover Cafe aa:.. wep2 5 36` (a typo for `wep`)
+/// filed an unencrypted-in-practice access point as WPA2-PSK, and the listing
+/// then showed it as protected.  Every other guess in this family costs an
+/// operator a re-run; this one costs them the reason they were scanning.
+fn parse_wifi_security(s: &str, sub: &str) -> Option<crate::fs::wifiscan::SecurityType> {
     use crate::fs::wifiscan::SecurityType;
-    match s.to_lowercase().as_str() {
+    Some(match s.to_lowercase().as_str() {
         "open" | "none" => SecurityType::Open,
         "wep" => SecurityType::Wep,
         "wpa" | "wpapsk" => SecurityType::WpaPsk,
@@ -90003,18 +90393,40 @@ fn parse_wifi_security(s: &str) -> crate::fs::wifiscan::SecurityType {
         "wpa3" | "wpa3psk" | "sae" => SecurityType::Wpa3Psk,
         "wpa2e" | "wpa2enterprise" => SecurityType::Wpa2Enterprise,
         "wpa3e" | "wpa3enterprise" => SecurityType::Wpa3Enterprise,
-        _ => SecurityType::Wpa2Psk,
-    }
+        other => {
+            refuse_operand(
+                "wifiscan",
+                sub,
+                format_args!(
+                    "`{other}' is not a security type (open, wep, wpa, wpa2, wpa3, wpa2e, wpa3e)"
+                ),
+            );
+            return None;
+        }
+    })
 }
 
-fn parse_wifi_band(s: &str) -> crate::fs::wifiscan::Band {
+/// Read a Wi-Fi band, or refuse and return `None`.
+///
+/// Same shape as `parse_wifi_security` above: the fallback was `_ =>
+/// Band5Ghz`, so a network discovered on a mistyped band was filed on 5 GHz
+/// and the channel number recorded next to it no longer belonged to the band
+/// it was listed under.
+fn parse_wifi_band(s: &str, sub: &str) -> Option<crate::fs::wifiscan::Band> {
     use crate::fs::wifiscan::Band;
-    match s.to_lowercase().as_str() {
+    Some(match s.to_lowercase().as_str() {
         "2.4" | "2g" | "24" | "24ghz" => Band::Band24Ghz,
         "5" | "5g" | "5ghz" => Band::Band5Ghz,
         "6" | "6g" | "6ghz" | "6e" => Band::Band6Ghz,
-        _ => Band::Band5Ghz,
-    }
+        other => {
+            refuse_operand(
+                "wifiscan",
+                sub,
+                format_args!("`{other}' is not a band (2.4, 5, 6)"),
+            );
+            return None;
+        }
+    })
 }
 
 /// `splitview` / `split` — multi-pane window management.
@@ -98126,8 +98538,14 @@ fn cmd_tracemon(args: &str) {
             }
         }
         "read" => {
-            let n_str = parts.get(1).copied().unwrap_or("20");
-            let n = n_str.parse::<usize>().unwrap_or(20);
+            // "Limits that truncate evidence": `tracemon read 5O` read 20
+            // events, printed `Trace events (20):`, and left the operator to
+            // conclude the ring buffer holds twenty -- the count in the header
+            // is the guess, not the buffer.
+            let Some(n) = optional_num::<usize>(&parts, 1, "tracemon", sub, "event count", 20)
+            else {
+                return;
+            };
             tracemon::init_defaults();
             let events = tracemon::read_buffer(n);
             shell_println!("Trace events ({}):", events.len());
@@ -98164,7 +98582,14 @@ fn cmd_tracemon(args: &str) {
                     }
                 }
             } else {
-                let pid = pid_str.parse::<u32>().unwrap_or(0);
+                // PID 0 is the idle task, which emits nothing -- so `tracemon
+                // filter 12O4` did not filter to the wrong process, it filtered
+                // to a process that never appears, printed "Filtering to PID 0"
+                // as confirmation, and every subsequent `read` came back empty.
+                // An empty trace reads as "the tracepoint never fired".
+                let Some(pid) = readable_num::<u32>(pid_str, "tracemon", sub, "process id") else {
+                    return;
+                };
                 match tracemon::set_filter_pid(Some(pid)) {
                     Ok(()) => shell_println!("Filtering to PID {}", pid),
                     Err(e) => {
@@ -101204,12 +101629,20 @@ fn cmd_writeback(args: &str) {
         }
         "dirty" => {
             let dev = parts.get(1).copied().unwrap_or("sda");
-            let pages = parts
-                .get(2)
-                .copied()
-                .unwrap_or("100")
-                .parse::<u64>()
-                .unwrap_or(100);
+            // A double guess: the absent operand became the *string* "100",
+            // which was then parsed, and an unreadable word became the
+            // *number* 100 -- two spellings of the same default on one
+            // expression, so a reader checking "what happens if it is
+            // missing" found an answer that also silently covered "what
+            // happens if it is wrong".  `optional_num` separates them: the
+            // default applies only to absence.  This is also a measurement
+            // being filed -- `record_dirty` writes the number into the
+            // device's statistics, where it is indistinguishable from a
+            // reading the kernel took itself.
+            let Some(pages) = optional_num::<u64>(&parts, 2, "writeback", sub, "page count", 100)
+            else {
+                return;
+            };
             match writeback::record_dirty(dev, pages) {
                 Ok(()) => shell_println!("Recorded {} dirty pages on {}", pages, dev),
                 Err(e) => {
@@ -101230,7 +101663,14 @@ fn cmd_writeback(args: &str) {
         }
         "threshold" => {
             if let Some(pct) = parts.get(1) {
-                let v = pct.parse::<u32>().unwrap_or(20);
+                // `writeback threshold 4O` set the threshold to 20% and
+                // confirmed "Dirty threshold set to 20%" -- a tuning knob
+                // moved to a value the operator did not choose, on a machine
+                // they were tuning precisely because the default was wrong.
+                let Some(v) = readable_num::<u32>(pct, "writeback", sub, "threshold percent")
+                else {
+                    return;
+                };
                 match writeback::set_threshold(v) {
                     Ok(()) => shell_println!("Dirty threshold set to {}%", v),
                     Err(e) => {
@@ -103960,11 +104400,26 @@ fn cmd_pmcstat(args: &str) {
             shell_println!("pmcstat: initialized");
         }
         "sample" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // All three operands were guessed, and each guess lands somewhere
+            // different: the cpu attributes the sample to the wrong core, the
+            // event files it under the wrong counter, and the value is the
+            // reading itself. A performance counter reading is the "filed as a
+            // measurement" shape at its purest -- once `record_sample` accepts
+            // it, nothing downstream can tell an invented number from a
+            // measured one, and every later `pmcstat stats` is wrong by that
+            // much with no trace of why.
+            let Some(cpu) = optional_num::<u32>(&parts, 1, "pmcstat", sub, "cpu number", 0) else {
+                return;
+            };
+            // The `_` arm used to be reached by two different things: the
+            // operand being *absent* (legitimately "cycles") and the operand
+            // being a word this shell does not know. `pmcstat sample 0 insn
+            // 500` -- one letter short of `insns` -- was filed as cycles, and
+            // the success line then printed "cycles=500" back, so the output
+            // confirmed the guess. Spelling "cycles" out as its own arm is what
+            // lets the default stay and the typo be refused.
             let event = match parts.get(2).copied().unwrap_or("cycles") {
+                "cycles" => pmcstat::PmcEvent::Cycles,
                 "insns" | "instructions" => pmcstat::PmcEvent::Instructions,
                 "cache-miss" | "cmiss" => pmcstat::PmcEvent::CacheMisses,
                 "cache-ref" | "cref" => pmcstat::PmcEvent::CacheReferences,
@@ -103972,12 +104427,23 @@ fn cmd_pmcstat(args: &str) {
                 "br-insn" | "binsn" => pmcstat::PmcEvent::BranchInstructions,
                 "bus" => pmcstat::PmcEvent::BusCycles,
                 "stall" => pmcstat::PmcEvent::StalledCyclesFrontend,
-                _ => pmcstat::PmcEvent::Cycles,
+                other => {
+                    refuse_operand(
+                        "pmcstat",
+                        sub,
+                        format_args!(
+                            "`{}' is not a counter event (cycles, insns, cache-miss, cache-ref, br-miss, br-insn, bus, stall)",
+                            other
+                        ),
+                    );
+                    return;
+                }
             };
-            let value = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1000);
+            let Some(value) =
+                optional_num::<u64>(&parts, 3, "pmcstat", sub, "counter reading", 1000)
+            else {
+                return;
+            };
             match pmcstat::record_sample(cpu, event, value) {
                 Ok(()) => shell_println!("pmcstat: cpu={} {}={}", cpu, event.label(), value),
                 Err(e) => {
@@ -107361,14 +107827,22 @@ fn cmd_vmfrag(args: &str) {
         }
         "update" => {
             let name = parts.get(1).copied().unwrap_or("");
-            let order = parts
-                .get(2)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-            let index = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // "A measurement being filed": index 0 is *no fragmentation*, so
+            // `vmfrag update dma32 3 85O` recorded a perfectly-compact zone
+            // and confirmed it back as `index=0.0`.  The stored reading was
+            // not wrong by a little -- it was invented, and it then sat in the
+            // table looking exactly like a real one.  A missing operand filed
+            // the same fiction, so both are required rather than defaulted:
+            // there is no sensible default for a number being *reported*.
+            let Some(order) = required_num::<usize>(&parts, 2, "vmfrag", sub, "allocation order")
+            else {
+                return;
+            };
+            let Some(index) =
+                required_num::<u32>(&parts, 3, "vmfrag", sub, "fragmentation index in tenths")
+            else {
+                return;
+            };
             match vmfrag::update_index(name, order, index) {
                 Ok(()) => shell_println!(
                     "vmfrag: {} order {} index={}.{}",
@@ -122091,21 +122565,33 @@ fn cmd_source(args: &str) {
 fn cmd_seq(args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
 
+    // Both arms below take the same kind of word, and until now they disagreed
+    // about what to do with an unreadable one: `seq 1O` refused, while
+    // `seq 1 1O` guessed 1 and printed a single line -- design-decisions.md
+    // §600's "strict and guessing inside one function", twelve lines apart.
+    // A pipeline written as `for i in $(seq 1 $n)` then ran once instead of n
+    // times with nothing on stderr to say why.
+    //
+    // The one-argument arm also used to answer a mistyped *number* by
+    // reprinting the *syntax*, which tells an operator who got the syntax right
+    // to go and re-read it. GNU seq names the word instead -- `seq: invalid
+    // floating point argument: '1O'` -- and so does this now, in the family's
+    // wording, since kshell's seq is integer-only. `seq` has no subcommand, so
+    // this is the third caller of `refuse_operand`'s collapsed prefix.
     let (start, end) = match parts.len() {
         1 => {
-            let n = match parts[0].parse::<i64>() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Usage: seq N [M]");
-                    set_exit(1);
-                    return;
-                }
+            let Some(n) = readable_num::<i64>(parts[0], "seq", "", "number") else {
+                return;
             };
             (1i64, n)
         }
         2 => {
-            let a = parts[0].parse::<i64>().unwrap_or(1);
-            let b = parts[1].parse::<i64>().unwrap_or(1);
+            let Some(a) = readable_num::<i64>(parts[0], "seq", "", "number") else {
+                return;
+            };
+            let Some(b) = readable_num::<i64>(parts[1], "seq", "", "number") else {
+                return;
+            };
             (a, b)
         }
         _ => {

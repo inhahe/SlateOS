@@ -96602,3 +96602,70 @@ path, so no attacker-supplied bytes reach it. The bomb hole that made the
 decompressor urgent has no analogue on this side. The cost is maintenance —
 a bug fixed in `deflate`'s encoder does not reach `zip` — and it does not
 worsen with time.
+
+---
+
+## TD-B-TAR-IGNORES-MEMBER-NAME-FILTERS-ON-EXTRACT-AND-LIST
+
+**Status:** open. Found 2026-08-30 while making `-C` positional (`c3844c749`).
+**Where:** `userspace/tar/src/main.rs` — `extract_archive`, `list_archive`.
+
+**In short:** `tar -xf a.tar one two` should extract only the members named
+`one` and `two`. Ours extracts the whole archive and ignores the names
+entirely. Same for `-t`. Nothing warns; the user gets *more* than they asked
+for and no indication that the filter was dropped.
+
+The names are parsed and reach us fine — `Options.operands` now carries them
+in order as `Operand::Member` — the two functions simply never consult them.
+Create mode is the only mode that reads them.
+
+**The fix.** Both functions need a member-name filter: collect the
+`Operand::Member` entries, and if the list is non-empty, skip any archive
+member that neither equals a listed name nor lies beneath one as a directory
+prefix (GNU matches `dir` against `dir/sub/file`). GNU also warns
+`tar: one: Not found in archive` and exits 2 when a requested name matched
+nothing, which is the part most likely to be forgotten — a silent zero-match
+extraction is exactly the failure this entry describes, one level down.
+
+**The interaction to get right.** With `-C` now positional, GNU allows
+`tar -xf o.tar -C d1 one -C ../d2 two`: the *filter* and the *destination*
+vary together down the operand list, so each matched member goes to the
+directory current at the point its name appeared. That cannot be expressed by
+the single folded base directory `resolve_chdir_chain` returns today — it
+needs the chdir chain evaluated per member, which is why the filter work and
+the per-member destination work are one task and not two.
+
+**What is NOT at risk.** Extracting too much is a usability failure, not a
+security one: `sanitize_member_name` still runs on every member, so the extra
+members land under the destination like the requested ones. Nothing here can
+escape the base directory.
+
+---
+
+## TD-B-TAR-DOES-NOT-PAD-ARCHIVES-TO-THE-BLOCKING-FACTOR
+
+**Status:** open. Measured 2026-08-30 against GNU tar 1.35.
+**Where:** `userspace/tar/src/main.rs` — `create_archive`, and the two
+end-of-archive zero blocks it writes.
+
+**In short:** GNU writes archives in units of 20 × 512 = 10240 bytes, padding
+the last unit with zeros. We stop after the two zero blocks. The same
+one-file archive is 10240 bytes from GNU and 3072 from us. Both are valid tar
+and both read back correctly — in either implementation — so this is a
+fidelity gap, not a bug.
+
+**How it surfaced.** Not by looking for it. A failed `-C` mid-create leaves
+an archive behind in both implementations (proving `-f` resolved before the
+chdir), but GNU's is 0 bytes and ours is 1024 — because GNU had the first
+member sitting in its 10240-byte buffer, unflushed, when it exited. So the
+buffering is observable on the error path as well as in the file size.
+
+**Where it would actually bite:** writing to a tape device or a pipe expecting
+fixed-size records, and any test that byte-compares our archive against a
+GNU-produced one.
+
+**The fix.** Buffer output in 10240-byte records and pad the final one, then
+add `-b, --blocking-factor=N` (GNU's knob for it, in 512-byte units) so the
+constant is not baked in. Reading is unaffected: we already scan block by
+block and stop at two consecutive zero blocks, which is why a GNU archive's
+trailing padding has never bothered us.

@@ -215,9 +215,21 @@ parse is a status that only works on the day you write it.
 `scripts/check-requests-not-deleted.py` compares `requests/` against the merge
 base with `origin/main` and refuses the build if a file that existed there is
 gone. It runs in `pre-boot.py` and in `boot-test.sh`. Renames pass (fixing a slug, or an archive sweep);
-`requests/.deletions-allowed` waives a basename with a stated reason. The gate
-exists because this rule was enforced by attention and attention lost **four
-times in the two weeks after it was written** — `d30e2a5ca` (A, 108 minutes
+`requests/.deletions-allowed` waives a basename with a stated reason.
+
+It runs a third time at the push boundary, as gate 9 of `scripts/hooks/pre-push`
+— and there it is invoked with `--head <sha>` for each ref being pushed, which
+matters. Without `--head` the checker diffs the merge base against the *working
+tree*, which is right for a build gate and wrong here in the dangerous
+direction: a commit that deletes a request passes as soon as the file has been
+restored and staged, so the deletion is published while every local check reads
+green. `--head` judges the commit that is actually being sent. The gate
+self-tests the checker (`--selftest`) before believing it, because every one of
+the checker's own failure modes returns "no deletions found", which is
+byte-identical to a healthy repo. Bypass: `ALLOW_REQUEST_DELETION=1`.
+
+The gate exists because this rule was enforced by attention and attention lost
+**four times in the two weeks after it was written** — `d30e2a5ca` (A, 108 minutes
 after the rule landed), `57d21b4ee`, `cd23f2f97` (C — and the reply lane C
 filed the same day cites the deleted file by name in its own first line), and
 `dd4e34fd9` (A, in a commit whose own message asserted the *opposite* rule).

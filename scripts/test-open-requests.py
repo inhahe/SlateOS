@@ -356,6 +356,65 @@ def test_unrecognised_wording_is_open_and_says_so(mod):
           got[1].startswith("unrecognised status:"), True)
 
 
+def test_the_unrecognised_hint_names_the_coded_vocabulary(mod):
+    """The hint must list the words the matcher honours, and only those.
+
+    It is derived from `DONE_WORDS` rather than typed out, so this test is a
+    guard on the derivation, not a fourth copy of the list. The failure it
+    exists to catch is specific and nasty: a hint that names a word the
+    classifier does not know is worse than no hint, because the reader obeys it
+    in good faith and the request then stays open forever *because* they took
+    the tool's advice. `roadmap.md`'s table is pinned to the code for the same
+    reason one test up; this closes the same hole in the tool's own output.
+    """
+    text = " ".join(mod.UNRECOGNISED_HINT)
+    body = text.split("finished: ")[1].split(". Reword")[0]
+    # Raw and normalised are both needed, exactly as in the roadmap-table test:
+    # set comparison wants `folded in` collapsed to `foldedin`, but *classifying*
+    # it wants the space back, because the matcher spells it with one.
+    raw = [w.strip() for w in body.split(",")]
+    listed = {_normalise(w) for w in raw}
+    coded = {_normalise(w) for w in mod.DONE_WORDS.split("|")}
+    check("the hint parsed to something", len(listed) >= 10, True)
+    check("no coded done-word is missing from the hint",
+          sorted(coded - listed), [])
+    check("the hint names no word the code does not know",
+          sorted(listed - coded), [])
+    # And every word it names really does classify as done, so the hint is
+    # checked against behaviour and not merely against another list.
+    wrong = [w for w in raw if verdict(mod, f"**Status:** {w}") != "done"]
+    check("every word the hint names really classifies as done", wrong, [])
+
+
+def test_everything_the_report_prints_survives_a_cp1252_console(mod):
+    """Hard-coded output is ASCII too, not just the text read from files.
+
+    `elide()` forced ASCII because a request title contains an emoji and
+    `UnicodeEncodeError` on a cp1252 console kills the report mid-listing --
+    silent under-reporting from the one tool whose job is the opposite. But the
+    guard lived inside `elide`, so it only covered text that happened to be
+    elided; the first hard-coded line added afterwards contained a tick mark and
+    crashed on exactly the path `elide`'s docstring describes. Hence
+    `ascii_only()` as its own function, and hence this test over the strings the
+    script prints without going near a file.
+    """
+    check("ascii_only replaces rather than raising",
+          mod.ascii_only("done \u2705 landed"), "done ? landed")
+    check("elide still forces ASCII",
+          mod.elide("a \u2014 b"), "a ? b")
+    for i, line in enumerate(mod.UNRECOGNISED_HINT):
+        check(f"hint line {i} is encodable on a cp1252 console",
+              _encodable(line), True)
+
+
+def _encodable(text):
+    try:
+        text.encode("cp1252")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 # --------------------------------------------------------------------------
 # Where in the file the classifier looks
 # --------------------------------------------------------------------------

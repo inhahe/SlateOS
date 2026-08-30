@@ -63,6 +63,7 @@ import argparse
 import os
 import re
 import sys
+import textwrap
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -372,19 +373,77 @@ def collect() -> list[tuple[str, str, Path, bool, str, str]]:
     return out
 
 
-def elide(text: str, width: int = 96) -> str:
-    """Collapse whitespace, cut to `width`, and force ASCII.
+def ascii_only(text: str) -> str:
+    """Force ASCII, replacing anything else with `?`.
 
-    The ASCII step is not cosmetic: this prints to a Windows console whose code
-    page is cp1252, and a single emoji in a request title (there is one) raises
-    `UnicodeEncodeError` and kills the whole report mid-listing -- turning a tool
-    whose entire job is "do not silently under-report" into one that silently
-    under-reports.
+    Not cosmetic: this prints to a Windows console whose code page is cp1252,
+    and a single emoji (request titles contain them, and so did an early draft
+    of `UNRECOGNISED_HINT`) raises `UnicodeEncodeError` and kills the whole
+    report mid-listing -- turning a tool whose entire job is "do not silently
+    under-report" into one that silently under-reports.
+
+    Separated from `elide` because the constraint is the console's, so it
+    applies to *everything* this script prints, including its own hard-coded
+    strings. Folded into `elide` it only protected the text that happened to be
+    elided, and the first hard-coded line added afterwards crashed on the tick
+    mark it contained.
     """
+    return text.encode("ascii", "replace").decode("ascii")
+
+
+def elide(text: str, width: int = 96) -> str:
+    """Collapse whitespace, cut to `width`, and force ASCII."""
     text = " ".join(text.split())
     if len(text) > width:
         text = text[: width - 3] + "..."
-    return text.encode("ascii", "replace").decode("ascii")
+    return ascii_only(text)
+
+
+# Printed once, at the end, and only if something was reported as
+# `unrecognised status`. The vocabulary is deliberately narrow -- see the
+# asymmetry argument on NEGATOR_RE -- which means a writer *will* occasionally
+# stamp a request with a perfectly clear English word this list does not hold
+# ("ACKNOWLEDGED", "REBUILT" were the two that prompted this). Without the hint,
+# fixing that requires reading this file to discover what the accepted words
+# are; with it, the report says so where the complaint is.
+#
+# A hint rather than a wider vocabulary because the two are not equivalent. Some
+# of the words that show up here are genuinely ambiguous -- "acknowledged" can
+# mean "received, work pending" as easily as "agreed, nothing to do" -- and
+# admitting one costs an open request vanishing from the only report that looks
+# for it. Rewording one stamp is cheap; a done-word that sometimes means open is
+# not.
+def vocabulary_prose(alternation: str) -> str:
+    """Render a regex alternation as a readable, de-duplicated word list.
+
+    Derived, not restated. This list already exists twice -- as `DONE_WORDS`
+    here and as the table in `roadmap.md` rule 2 -- and the two are held equal
+    by `test-open-requests.py`. A third copy typed into a hint string would be
+    the one nothing checks, so it would be the one that ends up naming a word
+    the matcher does not know: a reader is told to write "acknowledged", writes
+    it, and the request stays open forever with the hint itself as the cause.
+    That is the failure the roadmap-table test was written to prevent, and
+    hand-copying the list again would reintroduce it one layer down.
+    """
+    seen: dict[str, str] = {}
+    for word in alternation.split("|"):
+        # `wont ?fix` / `won't ?fix` are one word to a reader and to the
+        # matcher; `_normalise` in the test suite collapses them the same way.
+        pretty = word.replace(" ?", "").replace("?", "").replace("'", "")
+        seen.setdefault(pretty.lower(), pretty)
+    return ", ".join(seen.values())
+
+
+UNRECOGNISED_HINT = tuple(
+    textwrap.wrap(
+        "hint: a `**Status:**` line is classified by its wording, not by the "
+        "tick mark. Words read as finished: "
+        f"{vocabulary_prose(DONE_WORDS)}. Reword the stamp to use one of them "
+        "-- the rest of the line is free text -- rather than widening the "
+        "list, which is how a word that sometimes means open gets in.",
+        width=78,
+    )
+)
 
 
 def report(entries, *, lane: str, outgoing: bool, show_all: bool) -> None:
@@ -393,6 +452,7 @@ def report(entries, *, lane: str, outgoing: bool, show_all: bool) -> None:
     else:
         groups = [lane]
 
+    saw_unrecognised = False
     for to in groups:
         if outgoing:
             selected = [e for e in entries if e[0] == to]
@@ -403,10 +463,16 @@ def report(entries, *, lane: str, outgoing: bool, show_all: bool) -> None:
         open_ones = [e for e in selected if e[3]]
         print(f"=== requests {title}: {len(open_ones)} unresolved of {len(selected)} ===")
         for frm, _to, path, _is_open, reason, h1 in open_ones:
+            saw_unrecognised = saw_unrecognised or reason.startswith("unrecognised")
             print(f"  [{frm}->{_to}] {path.name}  ({elide(reason, 40)})")
             print(f"           {elide(h1)}")
         if not open_ones and selected:
             print("  (none open)")
+        print()
+
+    if saw_unrecognised:
+        for line in UNRECOGNISED_HINT:
+            print(ascii_only(line))
         print()
 
 

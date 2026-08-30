@@ -94574,6 +94574,74 @@ of them. (The four unwired apps that match a grep for `Target::Overlay` —
 fileassoc, startupmanager, taskscheduler, vpnmanager — are false positives:
 `Overlay0`/`Overlay1` there are Catppuccin *colour* names, not hit targets.)
 
+### Lesson 77: an expectation the code under test computes is not an expectation (lane C, 2026-08-30)
+
+**In short:** asteroids' `every_asteroid_is_drawn_where_the_field_puts_it` took
+each asteroid's hit box, asked `Field::to_screen` where that asteroid ought to
+be, and asserted the two agreed to within a hundredth of a pixel. Both sides of
+that comparison come from `to_screen`. Deleting the part of `to_screen` that
+moves a scaled point onto the field — so every asteroid is drawn up in the
+window's top-left corner, off the playfield entirely — left the test green: the
+drawing pass and the expectation were wrong *in the same way*, and matched
+perfectly. The picture would have been visibly broken and the suite silent.
+
+**The rule.** At least one side of an assertion must be arrived at by a route
+the code under test does not take: a constant, a hand-worked number, a property
+(*inside* the field, *bigger* than before, *ordered* this way), or a second
+implementation written from the specification rather than from the code. A test
+whose expected value is a call into the subject asserts self-consistency, which
+every deterministic function has for free.
+
+**The tell.** The expected value in the assertion is produced by the same
+function, or the same struct's method, that produced the actual value. In this
+codebase that reads as `let (cx, cy) = field.to_screen(...)` sitting three lines
+above `let (gx, gy) = rect.centre()` — and it looks *rigorous*, because it is
+exact to two decimal places. Exactness is the disguise: a self-referential
+assertion is always exact.
+
+**The cheap fix is usually a property, not a second implementation.** Here it
+was one line — every position in the world is inside the world, so every
+asteroid must land inside `field.rect`. That is a fact about `to_screen` that
+`to_screen` is never asked for, and the mutation cannot satisfy it. Reach for
+the independent-implementation version (as tictactoe's negamax solver does) only
+when no property is sharp enough.
+
+**Where else to look.** Any `apps/**` test that computes a screen position, a
+scale, a colour or a size by calling the drawing code's own helper and compares
+it against what was drawn. Grep for a test body that calls `to_screen`,
+`scaled`, `Layout::new` or a `*_rect()` helper and then asserts against a hit
+box: if the helper is what the mutation would break, the test cannot see it.
+
+### Lesson 78: a probe helper that sets the state itself tests everything except the code that sets it (lane C, 2026-08-30)
+
+**In short:** `Probe::click_at` in asteroids calls `self.resize(w, h)` before
+delivering the click, because a click has to be read against *some* size and the
+probe has to supply it. That made
+`a_click_lands_where_the_window_it_was_resized_to_put_the_control` — the test
+named for resizing — blind to a `handle_event` that threw `Event::Resize` away
+entirely, since the helper had already applied the resize by another door. The
+app would have ignored every real resize the compositor sent, and the test that
+exists to catch exactly that stayed green.
+
+**The rule.** When the property under test *is* "the app noticed X", the test
+must deliver X the way the window delivers it — as the event — and must not use
+a probe helper that also performs X. Probe helpers are for setting up the state
+a test is not about; the moment that state is what the test is about, drop to
+`handle_event`/`on_event` and send the real thing.
+
+**The tell.** A test whose name contains the name of an event (`resized`,
+`focused`, `closed`, `scrolled`) but whose body never constructs that event.
+`keys_reach_the_app_through_the_window` had the same shape from the other side:
+it went through `handle_event` rather than `App::on_event`, so it asserted an
+`EventResult` and never saw the `Response` — a build that answered `Idle` to
+every change, and so never repainted, passed a test whose name says "through the
+window".
+
+**Where else to look.** Every `impl Probe` in `apps/**` whose `click_at` or
+`key_at` calls `resize` (most do — it is the documented way to pass a size), and
+every test named for an event. Two questions: does the test build the event, and
+does it assert the type the window is actually handed?
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print

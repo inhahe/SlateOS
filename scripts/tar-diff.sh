@@ -942,7 +942,86 @@ plain_case '-f with no argument'         -cf
 plain_case '-C with no argument'         -xC
 
 # ===========================================================================
-# 7. the known divergences
+# 7. the old option style
+# ===========================================================================
+# `tar cvf a.tar dir` — no dash anywhere. It predates getopt, it is how most
+# people write tar, and it is a *splice* rather than a mode: a dash-less first
+# argument is a run of option letters, each letter that takes a value takes the
+# next argv word **in letter order**, and the rewritten argv then goes through
+# the ordinary parser. So everything downstream still has to work afterwards,
+# which is half of what these cases check.
+#
+# The other half is the argument hand-out, and it needs a case that can tell
+# `cfC a.tar dir x` from `cCf dir a.tar x`. Those are the same three words; only
+# the letter order decides which is the archive and which the directory. A case
+# that compared messages alone would pass under a "first value goes to `-f`"
+# misreading, so what is compared is which archive came out and what is in it.
+#
+# The archive is compared by its member *list*, read back by GNU, and not by
+# its bytes: the bytes differ for uname/gname reasons that have nothing to do
+# with parsing (see the xfail at the bottom), and `create_case` is already the
+# place that holds the bytes to account.
+
+# What an old-style run left behind: every archive in the directory, listed by
+# GNU so that both sides are read by one reader.
+old_made() {
+  ( cd "$1" 2>/dev/null || return 0
+    find . -name '*.tar' | LC_ALL=C sort | while IFS= read -r a; do
+      printf '%s[%s]' "$a" \
+        "$("$gnu_real" -tf "$a" 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')"
+    done )
+}
+
+# old_case LABEL ARGS...  — the whole argv, verbatim, on both sides.
+old_case() {
+  local label="$1"; shift
+  local o_rc g_rc d
+  rm -rf od gd
+  for d in od gd; do
+    mkdir -p "$d/src" "$d/other"
+    printf 'A\n' > "$d/src/a"
+    touch -d '2020-01-02 03:04:05' "$d/src/a" "$d/src" "$d/other"
+  done
+  ( cd od && diff_run env PATH="$bindir/ours" tar "$@" \
+      </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err" ); o_rc=$?
+  ( cd gd && diff_run env PATH="$bindir/gnu" tar "$@" \
+      </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err" ); g_rc=$?
+  settle "$o_rc" "$g_rc" "made:$(old_made od)" "made:$(old_made gd)"
+  report "old option: tar $* ($label)"
+}
+
+old_case 'the way most people write tar'   cf o.tar src
+old_case 'with -v, whose names go to stdout' cvf o.tar src
+# Reading, not writing: the mode letter need not be `c`.
+old_case 'listing'                         tvf ../ref.tar
+# Letters that run out of words. The *first* short letter is the one named, so
+# `Cf` says `C` even though `f` is short too, and the status is tar's 2 rather
+# than the 64 getopt uses for a missing option argument.
+old_case 'no words at all for the letters' cf
+old_case 'one word short'                  fC o.tar
+old_case 'the first short letter is named' Cf
+# The cluster reaches the ordinary parser, so an unknown letter is getopt's
+# complaint at getopt's status, and a long option or `--` after it still works.
+old_case 'an unknown letter in the cluster' cQf o.tar src
+old_case 'a long option after the cluster'  cf o.tar --verbose src
+old_case 'a -- after the cluster'           cf o.tar -- src
+# Only the first argument. A cluster later on is a file name, and a dash-less
+# word after a *dashed* first argument is an operand — which is what stops
+# `tar -c f o.tar` from quietly becoming `-c -f o.tar`.
+old_case 'a cluster that is not first'      cf o.tar src cvf
+old_case 'a dash-less word, not first'      -c f o.tar
+old_case 'a dashed first argument'          -cf o.tar src
+# An empty first argument is a cluster of *no* letters, so it consumes nothing
+# and disappears. Not a special case in the code — it falls out of the rule —
+# but it is the edge a caller hits by accident, from an unset shell variable.
+old_case 'an empty first argument'          '' -cf o.tar src
+old_case 'an empty first argument, alone'   ''
+# `--` is a dash, so it disqualifies the cluster and the cluster becomes an
+# operand rather than options.
+old_case 'a -- before the cluster'          -- cf o.tar src
+
+# ===========================================================================
+# 8. the known divergences
 # ===========================================================================
 plain_xcase \
   "GNU's -Z is compression, which this tar does not implement; the message is a refusal either way, and the wording of a refusal for an option we do not have is not something to copy" \

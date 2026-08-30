@@ -14,6 +14,11 @@
 //! load-bearing rather than decorative, and [`unsupported`] for why refusing
 //! beats the two cheaper answers.
 //!
+//! The dash-less spelling works too — `tar cvf a.tar dir` is how most people
+//! write tar, and it is older than getopt. A first argument with no leading
+//! dash is a run of option letters whose value-taking letters take the argv
+//! words that follow, in letter order; see [`explode_old_option`].
+//!
 //! Supports basic POSIX/ustar tar format (uncompressed).
 //! Files > 8GB and paths > 255 chars are not supported.
 //!
@@ -69,9 +74,12 @@ use coreutils::getopt::{self, Opt, Program, Takes};
 // diagnostic now comes from `coreutils::getopt`, which does its own rendering
 // (glibc's straight-marked style, not gnulib's locale-aware one).
 use coreutils::quote::{escape, escape_os, os_bytes, quote};
-// Only the non-unix twin of `Dir` builds a path out of a member's bytes; on
-// unix every component is handed to `openat` as it stands.
-#[cfg(any(not(unix), test))]
+// Used on every host by [`explode_old_option`], which has to build `-<byte>`
+// out of one byte of the old-style cluster and cannot go through `char`: a
+// cluster is argv, so it may hold any byte, and `0xE9 as char` would widen to
+// the two UTF-8 bytes of `é` and change which letter got refused. Beyond that
+// it is the non-unix twin of `Dir` that needs it, to build a path out of a
+// member's bytes; on unix every component is handed to `openat` as it stands.
 use coreutils::quote::os_from_bytes;
 use coreutils::stdfd;
 #[cfg(unix)]
@@ -624,6 +632,8 @@ impl OldFiles {
 /// panicking, and a long name that is not UTF-8 can match no option and so
 /// takes the `unrecognized option` path rather than failing some third way.
 fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+    let exploded = explode_old_option(args)?;
+    let args: &[OsString] = &exploded;
     let mut out = TarArgs::default();
 
     for item in TAR.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
@@ -680,6 +690,101 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     }
 
     Ok(Request::Run(out))
+}
+
+/// tar's "old option style": rewrite a dash-less first argument into ordinary
+/// options before the parser ever sees it.
+///
+/// `tar cvf a.tar dir` is how most people write tar, and it predates getopt. A
+/// first argument that does not begin with `-` is not an operand: it is a run
+/// of option **letters**, and the letters that take a value take it from the
+/// argv words that follow, **in the order the letters appear**. So
+/// `tar cfC a.tar dir x` means `-c -f a.tar -C dir x`, while `tar cCf dir a.tar
+/// x` means `-c -C dir -f a.tar x` — the same three words, handed out
+/// differently because the letters are in a different order. Measured,
+/// `tar-old1.sh`.
+///
+/// It is a **splice, not a flag**: GNU builds a new argv (`decode_options` in
+/// `tar.c`) and runs the ordinary parser over it, which is why every other rule
+/// still applies afterwards — `tar cf a.tar --verbose dir` takes the long
+/// option, and `tar cQf …` reports `invalid option -- 'Q'` with argp's status
+/// 64 rather than anything about old options. Doing the same here means the
+/// permutation, the `--` handling and the abbreviation matching are all
+/// inherited rather than reimplemented for this path.
+///
+/// Three consequences worth stating, each measured:
+///
+/// * **Only the first argument.** `tar cf a.tar dir cvf` archives a file named
+///   `cvf`, and `tar -c f a.tar dir` treats `f` as a file name.
+/// * **Anything that is not a dash starts a cluster**, however unlike an option
+///   it looks. `tar src -cf a.tar` reads `src` as `-s -r -c` and fails with
+///   `You may not specify more than one '-Acdtrux' …` — not as a file name.
+/// * **An empty first argument is a cluster of no letters**, so it consumes
+///   nothing and disappears: `tar '' -tf a.tar` lists the archive. That falls
+///   out of the rule rather than being a case in it, and GNU behaves the same
+///   way for the same reason.
+///
+/// Which letters take a value is read from [`SHORT_OPTIONS`] rather than
+/// written out again, so a letter added there cannot be forgotten here. GNU's
+/// equivalent list also holds letters this tar does not implement; for those,
+/// not consuming a value is right, because the letter is going to be refused as
+/// unknown either way.
+///
+/// # Errors
+///
+/// `Old option 'f' requires an argument.` — tar's own sentence, with its
+/// trailing period, naming the first letter that ran out. It is a
+/// `USAGE_ERROR`, so the status is [`EXIT_FATAL`] (2) and not [`EXIT_USAGE`]
+/// (64): measured, `tar cf` is 2 where `tar -cf` is 64, because the second is
+/// getopt reporting a missing option argument and the first is tar reporting
+/// that it could not even build the argv.
+fn explode_old_option(args: &[OsString]) -> Result<Vec<OsString>, getopt::Error> {
+    let Some(first) = args.first() else {
+        return Ok(args.to_vec());
+    };
+    let letters = os_bytes(first);
+    let letters: &[u8] = &letters;
+    if letters.first() == Some(&b'-') {
+        return Ok(args.to_vec());
+    }
+    let mut out = Vec::with_capacity(args.len() + letters.len());
+    let mut rest = args[1..].iter();
+    for &letter in letters {
+        out.push(os_from_bytes(&[b'-', letter]));
+        if !takes_a_value(letter) {
+            continue;
+        }
+        let Some(value) = rest.next() else {
+            // `escape` and not `letter as char`, even though only an ASCII
+            // letter can reach here — the letters that take a value are exactly
+            // the ones [`SHORT_OPTIONS`] lists, and all of those are ASCII, so
+            // the two spellings agree today. The conversion is the one that
+            // stays right if that ever stops being true: `0xE9 as char` widens
+            // to the two bytes of `é`, where GNU's `%c` writes the one byte.
+            return Err(getopt::Error {
+                sentence: format!("Old option '{}' requires an argument.", escape(&[letter])),
+                referral: None,
+                status: EXIT_FATAL,
+            });
+        };
+        out.push(value.clone());
+    }
+    out.extend(rest.cloned());
+    Ok(out)
+}
+
+/// Does this short option letter take a value, according to [`SHORT_OPTIONS`]?
+///
+/// A letter takes one when a `:` follows it. The `::` of an optional value is
+/// not a case here — tar has no such letter — and would answer "yes", which is
+/// the wrong answer for an optional value but is unreachable rather than a
+/// latent bug: a `::` letter added to [`SHORT_OPTIONS`] would fail the test
+/// that walks it.
+fn takes_a_value(letter: u8) -> bool {
+    let spec = SHORT_OPTIONS.as_bytes();
+    spec.iter()
+        .position(|&b| b == letter)
+        .is_some_and(|i| spec.get(i + 1) == Some(&b':'))
 }
 
 /// The full option list, on stdout, for `-?` and `--help`.
@@ -4926,6 +5031,147 @@ mod tests {
                 .sentence,
             "'--overwrite' cannot be used with '--keep-newer-files'"
         );
+    }
+
+    #[test]
+    fn the_old_option_style_is_the_way_most_people_write_tar() {
+        // `tar cvf a.tar dir` — no dash anywhere, and the `f`'s value is the
+        // word after the whole cluster, not after the `f`.
+        let a = run_args(&s(&["cvf", "a.tar", "dir"])).unwrap();
+        assert!(a.create && a.verbose);
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("a.tar")));
+        assert_eq!(a.files, s(&["dir"]));
+    }
+
+    #[test]
+    fn old_option_values_are_handed_out_in_letter_order() {
+        // The same three words either way; which letter gets which depends only
+        // on the order the letters are written in. This is the whole of the
+        // old style's argument rule, and the pair of cases is the only way to
+        // state it — either alone passes under a "first value goes to `-f`"
+        // misreading. Measured against GNU: `tar-old1.sh`.
+        let a = run_args(&s(&["cfC", "a.tar", "dir", "x"])).unwrap();
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("a.tar")));
+        assert_eq!(a.directory.as_deref(), Some(OsStr::new("dir")));
+        assert_eq!(a.files, s(&["x"]));
+
+        let a = run_args(&s(&["cCf", "dir", "a.tar", "x"])).unwrap();
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("a.tar")));
+        assert_eq!(a.directory.as_deref(), Some(OsStr::new("dir")));
+        assert_eq!(a.files, s(&["x"]));
+    }
+
+    #[test]
+    fn only_the_first_argument_is_an_old_option_cluster() {
+        // A cluster later on is a file name, and a dash-less word after a
+        // *dashed* first argument is likewise. Both measured; the second is
+        // what stops `tar -c f a.tar` from quietly becoming `-c -f a.tar`.
+        let a = run_args(&s(&["cf", "a.tar", "dir", "cvf"])).unwrap();
+        assert_eq!(a.files, s(&["dir", "cvf"]));
+
+        let a = run_args(&s(&["-c", "f", "a.tar", "dir"])).unwrap();
+        assert!(a.archive_file.is_none());
+        assert_eq!(a.files, s(&["f", "a.tar", "dir"]));
+    }
+
+    #[test]
+    fn an_empty_first_argument_is_a_cluster_of_no_letters() {
+        // It consumes nothing and disappears, so what follows parses as if it
+        // had been alone. Not a special case in the code — it falls out of the
+        // rule — but it is the one edge a caller hits by accident, from an
+        // unset shell variable. Measured: `tar '' -tf a.tar` lists.
+        let a = run_args(&s(&["", "-tf", "a.tar"])).unwrap();
+        assert!(a.list);
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("a.tar")));
+        assert!(a.files.is_empty());
+    }
+
+    #[test]
+    fn an_old_option_cluster_still_goes_through_the_ordinary_parser() {
+        // The transform is a splice into argv, not a mode the parser enters, so
+        // everything downstream still applies: a long option after the cluster,
+        // `--` after it, and an unknown letter reported by getopt in getopt's
+        // words (`invalid option -- 'Q'`, status 64) rather than by anything
+        // that knows about old options.
+        let a = run_args(&s(&["cf", "a.tar", "--verbose", "dir"])).unwrap();
+        assert!(a.create && a.verbose);
+        assert_eq!(a.files, s(&["dir"]));
+
+        let a = run_args(&s(&["cf", "a.tar", "--", "-dir"])).unwrap();
+        assert_eq!(a.files, s(&["-dir"]));
+
+        let e = run_args(&s(&["cQf", "a.tar", "dir"])).unwrap_err();
+        assert_eq!(e.sentence, "invalid option -- 'Q'");
+        assert_eq!(e.status, EXIT_USAGE);
+    }
+
+    #[test]
+    fn an_old_option_letter_that_runs_out_of_words_is_tars_own_error() {
+        // tar's sentence, with its trailing period, naming the *first* letter
+        // that ran out — and at status 2, not the 64 getopt uses for a missing
+        // option argument, because tar could not even finish building the argv.
+        // Measured: `tar cf` is 2 where `tar -cf` is 64.
+        let e = run_args(&s(&["cf"])).unwrap_err();
+        assert_eq!(e.sentence, "Old option 'f' requires an argument.");
+        assert_eq!(e.status, EXIT_FATAL);
+
+        // `Cf` names `C`: the letters are served in order, so the first one
+        // short of a word is the one reported even though `f` is short too.
+        let e = run_args(&s(&["Cf"])).unwrap_err();
+        assert_eq!(e.sentence, "Old option 'C' requires an argument.");
+    }
+
+    #[test]
+    fn takes_a_value_reads_the_short_option_table() {
+        // The point of deriving it: a letter added to `SHORT_OPTIONS` cannot be
+        // forgotten in the old-option path. Walk the whole table so the pair
+        // stays in step, and assert the shape the doc comment relies on — no
+        // `::` (an optional value, which `takes_a_value` would answer wrongly)
+        // and no leading `:` or `+`/`-` mode character, which would be read as
+        // a letter here.
+        let spec = SHORT_OPTIONS.as_bytes();
+        assert!(!matches!(spec.first(), Some(b':' | b'+' | b'-')));
+        let mut expected: Vec<u8> = Vec::new();
+        for (i, &c) in spec.iter().enumerate() {
+            if c == b':' {
+                assert_ne!(
+                    spec.get(i + 1),
+                    Some(&b':'),
+                    "an optional value in {SHORT_OPTIONS}"
+                );
+                continue;
+            }
+            if spec.get(i + 1) == Some(&b':') {
+                expected.push(c);
+            }
+            assert_eq!(
+                takes_a_value(c),
+                spec.get(i + 1) == Some(&b':'),
+                "letter {}",
+                c as char
+            );
+        }
+        // Spelled out as well as derived, so that a letter silently gaining or
+        // losing a `:` is a test failure and not a test that agrees with it.
+        assert_eq!(expected, b"fC");
+        assert!(!takes_a_value(b'Q'));
+    }
+
+    #[test]
+    fn an_old_option_cluster_may_hold_bytes_that_are_not_utf8() {
+        // A cluster is argv, so it can hold any byte, and the byte has to reach
+        // the parser as itself. Going through `char` would widen `0xE9` into
+        // the two UTF-8 bytes of `é` and refuse the wrong letter — so this
+        // asserts on the reported byte, which is where that bug would show.
+        //
+        // The *spelling* is a deliberate, getopt-wide divergence: GNU's `%c`
+        // writes the raw `0xE9` to the terminal, and `getopt::named` escapes it
+        // instead (`\351`). Measured both, `tar-old-byte.sh`; the choice is
+        // documented at `getopt::named` and asserted there too, so this test is
+        // about *which byte* is named, not about how it is rendered.
+        let e = run_args(&b(&[b"c\xe9f", b"a.tar"])).unwrap_err();
+        assert_eq!(e.sentence, "invalid option -- '\\351'");
+        assert_eq!(e.status, EXIT_USAGE);
     }
 
     #[test]

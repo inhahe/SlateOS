@@ -144,9 +144,21 @@ WORD = re.compile(r'"([a-z0-9_.:+-]+)"')
 
 # Everything whose first argument reaches the user's terminal or the serial
 # log. `serial_*` is included because a rung may assert on either.
+#
+# `format_args!` is here because it is a *deferred* print: it does not print,
+# it hands a `core::fmt::Arguments` to something that does, and the literal it
+# was written with is user-visible text exactly as if it had been passed to
+# `shell_println!` directly. kshell's operand-refusal helpers use it to split
+# one message across two functions -- `readable_num` formats the body,
+# `refuse_operand` decides whether the prefix is `cmd: sub: ` or, for a command
+# with no subcommand, just `cmd: `. Without `format_args` in this list the
+# bodies vanished from every pool and this gate reported ~40 correct rungs as
+# "the rung fails a correct kernel", which is the pool-too-small direction its
+# own `Closure` docstring names as the one that gets a gate switched off.
 PRINT = re.compile(
     r"\b(?:shell_println|shell_print|console_println|console_print"
-    r"|serial_println|serial_print|println|print|write|writeln)\s*!\s*\("
+    r"|serial_println|serial_print|println|print|write|writeln"
+    r"|format_args)\s*!\s*\("
 )
 # `re.DOTALL` is load-bearing, and its absence was this gate's own blind spot.
 #
@@ -270,6 +282,19 @@ ALLOWED: dict[tuple[str, bytes], str] = {
         "The literal frame between them is one space and the two letters `GB`, "
         "which is under the fixed-run floor `producible` needs to tell a real "
         "match from a placeholder swallowing the whole fragment"
+    ),
+    ("cal", b"cal: :"): (
+        "a *lacks* fragment, and the one entry here that is unreachable by "
+        "design rather than merely underivable. `refuse_operand`'s three-field "
+        "literal `\"{}: {}: {}\"` IS in cal's pool -- the call graph reaches it "
+        "through `readable_num` -- and `cal: :` is exactly that literal with an "
+        "empty subcommand in the middle, which is what the code printed before "
+        "batch 42 and what the rung exists to keep it from printing again. The "
+        "gate cannot see it because `producible` requires a placeholder to "
+        "cover at least one byte, and relaxing that rule globally would let a "
+        "`{}` swallow any fragment and mask the typos this file is for. So the "
+        "conservatism is right and the assertion is right, and this entry is "
+        "where they are reconciled"
     ),
 }
 

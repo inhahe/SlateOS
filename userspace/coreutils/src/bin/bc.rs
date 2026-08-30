@@ -1410,7 +1410,12 @@ impl Interpreter {
                 // `break`, `continue` or `return` outside any enclosing
                 // construct ends the program, as there is nothing to return to.
                 Ok(_) => return Session::Continue,
-                Err(e) => diag!("Runtime error: {e}"),
+                // Bound as `why`, not `e`: this is bc's own [`RuntimeError`]
+                // and its own wording, not an `io::Error` whose text the host
+                // chose. The name is what `scripts/host-errmsg.py` reads to
+                // tell those apart, and the file stays under that gate — a
+                // whole-file exemption would hide the next real site here.
+                Err(why) => diag!("Runtime error: {why}"),
             }
         }
         Session::Continue

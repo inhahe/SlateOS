@@ -208,14 +208,14 @@ MUTATIONS = [
     # -- The turtle ----------------------------------------------------
     (
         "the tile is a fixed size again, so it overflows a small window",
-        "            (inner.w / span_w).min(inner.h / span_h).max(0.0)",
+        "            (inner.w / span_w).min(inner.h / span_h)",
         "            42.0",
         ["every_tile_lands_inside_the_board_band"],
     ),
     (
         "the tile is sized by the width alone, so a short window overflows",
-        "            (inner.w / span_w).min(inner.h / span_h).max(0.0)",
-        "            (inner.w / span_w).max(0.0)",
+        "            (inner.w / span_w).min(inner.h / span_h)",
+        "            inner.w / span_w",
         [
             "every_tile_lands_inside_the_board_band",
             "the_binding_side_is_whichever_runs_out_first",
@@ -223,8 +223,8 @@ MUTATIONS = [
     ),
     (
         "the tile is sized by the height alone, so a narrow window overflows",
-        "            (inner.w / span_w).min(inner.h / span_h).max(0.0)",
-        "            (inner.h / span_h).max(0.0)",
+        "            (inner.w / span_w).min(inner.h / span_h)",
+        "            inner.h / span_h",
         [
             "every_tile_lands_inside_the_board_band",
             "the_binding_side_is_whichever_runs_out_first",

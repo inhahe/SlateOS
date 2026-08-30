@@ -99463,3 +99463,106 @@ after a `text_saying(&f, ...)` that has already established the paint, so the
 name before touching the assertion; the fix for a genuine one is Lesson 83's
 containment-the-other-way (a paint command that *fits inside* the box), not a
 point-containment check, which the background fill makes vacuous.
+
+### Lesson 86: a two-window comparison cannot separate two formulas that both scale with the window (lane C, 2026-08-30)
+
+**In short:** the standard test for "this measurement is derived from the window
+rather than hard-coded" is to draw the app at two sizes and require the
+measurement to differ. That test is only as good as the *difference* between
+the right formula and the wrong one. If the wrong formula also grows with the
+window — or worse, if it produces the very same answer at both sizes tried —
+the comparison passes and proves nothing. Mahjong's sweep produced five of
+these in one run.
+
+**The three shapes it takes.**
+
+1. **The wrong formula grows too, for a different reason.**
+   `the_legend_column_widens_with_the_font_it_is_drawn_at` compared a 1400x420
+   window with a 1400x1400 one. The column is `widest + font + pad * 3`, and
+   between those two heights the *padding* grows from 6.3 to 14 — so the column
+   widened by the padding alone, and a mutant that measured the legend's text at
+   a fixed 12pt was invisible. The fix is to hold the confounder still and say
+   so in the test: both windows are now past the padding's ceiling, and the
+   fixture asserts `short.pad == tall.pad` before it compares widths.
+
+2. **The two sizes chosen straddle nothing.** `the_small_font_never_outgrows_
+   the_font_above_it` swept a fixture whose tallest window is 1000 pixels.
+   `status` stops climbing at 783 and `small` only reaches `status`'s ceiling at
+   1058, so a ceiling written as a constant instead of as `status` is wrong only
+   *above* 1058 — the fixture stopped 58 pixels short of where the bug lives. A
+   growth test needs a size on each side of every plateau in the function.
+
+3. **The quantity under test is scale-invariant, so no pair of sizes can
+   differ.** The arrow-key search divides every tile offset by the tile width,
+   and the test for it pressed the same keys in a 700x500 window and a 1900x1300
+   one and required the same tile. That comparison *can never fail*: every
+   distance in the search is a ratio of two lengths that scale together, so the
+   winner is the same tile at any size whether the unit is a tile or a pixel.
+   What the unit actually changes is the direction *threshold* — a tenth of a
+   tile, which a layer's stagger does not clear, versus a tenth of a pixel,
+   which every stagger clears. The test that catches it is not about size at
+   all: it is a two-tile board where the only candidate to the right is one
+   layer down in the same column, and the arrow must find nothing.
+
+**The tell.** Any test of the form "draw at size A, draw at size B, assert the
+numbers differ". Before trusting it, write down what the mutant computes at A
+and at B. If those two numbers also differ, the test is satisfied by the mutant.
+If they are *equal to the real ones*, the quantity is scale-invariant and the
+whole approach is wrong — find the observable the parameter actually controls.
+
+### Lesson 87: a bound that restates a clamp's own range is satisfied by every constant inside it (lane C, 2026-08-30)
+
+**In short:** if the code says `x.clamp(1.0, 4.0)` and the test says
+`assert!((1.0..=4.0).contains(&x))`, the test has restated the code. It cannot
+fail on `let x = 2.0;`, which is the exact bug — a hard-coded size — that the
+derivation was written to remove.
+
+Mahjong's cursor border is `(tile_w * 0.05).clamp(1.0, 4.0)`, and its test
+asserted the value lay between one and four pixels and was less than half a
+tile. Both are true of a flat `2.0` at every window the app is drawn at, so the
+old fixed border — which vanished on a large window and swallowed the tile on a
+small one — passed the test written to catch it. The bounds are worth keeping;
+what had to be added is a *comparison* the constant cannot satisfy: the border
+at 1600x1000 must be strictly thicker than at 360x700.
+
+**The tell.** Read the assertion and the expression side by side. If the
+assertion's constants are the expression's constants, the test is a tautology.
+This is Lesson 85's one-sidedness with both sides present and still saying
+nothing, and it generalises past `clamp`: a `.min(c)` invites `assert!(x <= c)`,
+a `.max(c)` invites `assert!(x >= c)`, and neither is evidence of derivation.
+
+### Lesson 88: a mutant can survive by being equivalent, and the table has to say which (lane C, 2026-08-30)
+
+**In short:** a surviving mutation means one of two very different things —
+either the tests missed a real change in behaviour, or the "change" was not one.
+An equivalent mutant is not a coverage hole and cannot be fixed by writing a
+test; chasing it as though it were wastes the sweep's most valuable signal.
+Eight of mahjong's 25 first-run survivors were equivalent, and the honest fix is
+to record *why* in the row and mutate something that can actually break.
+
+**The kinds seen so far.**
+
+| Kind | Example |
+|---|---|
+| The mutant computes the same number | `small = (h*0.017).clamp(7.0, 18.0)` where the real ceiling is `status`, whose own ceiling is 18.0 |
+| The guard can never bind | `.max(0.0)` on a ratio whose inputs `inset` already guarantees non-negative; `.max(header.bottom())` on a height already capped at `h - header_h` |
+| The term is zero | deleting `- min_y` when the topmost tile is layer 0 row 0 |
+| One side already implies the other | `remaining() == 0` widened to `&& find_hint().is_none()`: an empty board has no hint |
+| The change is a relabelling | `seed.wrapping_add(1)` permutes the seeds without merging any two, so one seed still gives one game |
+| Both branches return the same thing | `_ => return EventResult::Ignored` rewritten as `_ => false`, which reaches the same `Ignored` two lines later |
+| The comparison is always true | `let moved = self.cursor.tile_idx != Some(bi)` where the search has already skipped that tile |
+| **Arithmetic accident** | deleting the `tile_w <= 0.0` guard: a zero unit makes every delta `0.0 / 0.0`, and NaN fails every comparison the direction test makes, so the search falls through to the same answer |
+
+**What to do with each.** If the mutant is equivalent because the *program* has
+dead code, delete the dead code — three of mahjong's did, and the removals are
+the real value of the finding. If it is equivalent because the *mutation* was
+badly chosen, pick a different one that expresses the same fault: mutate the
+answer the guard gives rather than deleting the guard, subtract the other axis's
+minimum rather than one that is zero, ignore the seed rather than shifting it.
+The one thing not to do is leave the row in place and go looking for a test —
+there is no test, because there is no difference.
+
+**The last row deserves care.** The NaN case is the reason to keep a guard whose
+deletion changes nothing: correctness that rests on `0.0 / 0.0` producing a
+value that fails every comparison is correctness by accident, and the next edit
+to the arithmetic takes it away silently.

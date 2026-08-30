@@ -94609,6 +94609,131 @@ assertion has slack) but not the same fault — there the tolerance is written
 into the assertion, here it is the size of the control being clicked, which
 nobody wrote down at all.
 
+### Lesson 76: a hit box for the whole sheet is not "anywhere on the sheet" — its own contents beat it (lane C, 2026-08-30)
+
+**In short:** asteroids' game-over sheet dims the whole playfield and records
+`Target::Overlay` over it, then draws a box in the middle holding the title, the
+final score, the high score, the wave reached, and the "Press N" line — each
+with a hit box of its own. `handle_mouse` had an arm for `Target::Overlay` and
+an arm for `Target::NewGame`, which *reads* as "a click anywhere on the sheet
+starts a new game". It was not. `Frame::hit_test` searches the recorded hits
+**backwards** — last one wins, which is what makes a thing drawn on top
+clickable — so the box's own lines, recorded after the overlay's, took every
+click aimed at the middle. A click on "GAME OVER", or on the score the player
+had just earned, did nothing; a click on the dim margin *around* the box started
+a new game. The dead zone was precisely the part of the sheet a person looks at,
+and the only part that worked was the part nobody aims for.
+
+**The rule.** An arm that names a container's target has covered the container's
+*margin*, not the container. Either name every child target in the same arm, or
+record no child hit boxes at all. Whichever you pick, say which in a comment —
+the two-arm version is the one that looks right, so the next reader will
+otherwise simplify it back.
+
+**How it was nearly missed.** The pause sheet has the same structure and did
+*not* have the bug — because its middle line happens to be `Resume`, which had
+an arm of its own doing the same thing. One sheet was correct by accident and
+the other was wrong, from identical code. A suite that exercised only the pause
+sheet would have concluded the pattern was sound.
+
+**How it was found.** By a test that clicked `Target::Overlay` through the
+probe. `probe::click` aims at the *centre* of the named rect, which for a
+full-field overlay is exactly where the box is — so the click never reached the
+target it asked for. That is lesson 74's family (the event is delivered past the
+code that picks the target) turned inside out: there the test supplied the
+answer and hid a routing bug, here the test aimed honestly and the *program*
+routed it elsewhere, which is the failure the test existed to find. But note it
+was findable only by luck of geometry — the box happens to sit at the centre.
+The follow-up test names `OverlayTitle` and each `FinalStat` directly, so a
+sheet whose box is off-centre is still asked the question.
+
+**Where else to look.** Every overlay, dialog, sheet, tooltip, popup and context
+menu in `apps/**` and `gui/**` that records a hit box for its backdrop *and* for
+its contents. The tell is a match arm naming a backdrop target with no sibling
+arm naming what is drawn on it.
+
+**Swept 2026-08-30, and it comes back clean — for the right reason.** The other
+three wired games with a real backdrop hit box (breakout `main.rs:1362`, pong
+`main.rs:902`, tetris `main.rs:1727`) all draw their overlay's lines with
+`centred`, which pushes text and records *no* hit box, so `Target::Overlay` is
+the only hit in that region and a one-target arm really does mean "anywhere on
+the sheet". That is the second of the two remedies above, arrived at by accident
+rather than by decision — none of the three says so. Asteroids was the only app
+that gave its overlay lines targets of their own, and giving them targets is
+what turned the accident into a bug. So the risk here is not in the three that
+are correct today; it is in the next person who adds one clickable line to one
+of them. (The four unwired apps that match a grep for `Target::Overlay` —
+fileassoc, startupmanager, taskscheduler, vpnmanager — are false positives:
+`Overlay0`/`Overlay1` there are Catppuccin *colour* names, not hit targets.)
+
+### Lesson 77: an expectation the code under test computes is not an expectation (lane C, 2026-08-30)
+
+**In short:** asteroids' `every_asteroid_is_drawn_where_the_field_puts_it` took
+each asteroid's hit box, asked `Field::to_screen` where that asteroid ought to
+be, and asserted the two agreed to within a hundredth of a pixel. Both sides of
+that comparison come from `to_screen`. Deleting the part of `to_screen` that
+moves a scaled point onto the field — so every asteroid is drawn up in the
+window's top-left corner, off the playfield entirely — left the test green: the
+drawing pass and the expectation were wrong *in the same way*, and matched
+perfectly. The picture would have been visibly broken and the suite silent.
+
+**The rule.** At least one side of an assertion must be arrived at by a route
+the code under test does not take: a constant, a hand-worked number, a property
+(*inside* the field, *bigger* than before, *ordered* this way), or a second
+implementation written from the specification rather than from the code. A test
+whose expected value is a call into the subject asserts self-consistency, which
+every deterministic function has for free.
+
+**The tell.** The expected value in the assertion is produced by the same
+function, or the same struct's method, that produced the actual value. In this
+codebase that reads as `let (cx, cy) = field.to_screen(...)` sitting three lines
+above `let (gx, gy) = rect.centre()` — and it looks *rigorous*, because it is
+exact to two decimal places. Exactness is the disguise: a self-referential
+assertion is always exact.
+
+**The cheap fix is usually a property, not a second implementation.** Here it
+was one line — every position in the world is inside the world, so every
+asteroid must land inside `field.rect`. That is a fact about `to_screen` that
+`to_screen` is never asked for, and the mutation cannot satisfy it. Reach for
+the independent-implementation version (as tictactoe's negamax solver does) only
+when no property is sharp enough.
+
+**Where else to look.** Any `apps/**` test that computes a screen position, a
+scale, a colour or a size by calling the drawing code's own helper and compares
+it against what was drawn. Grep for a test body that calls `to_screen`,
+`scaled`, `Layout::new` or a `*_rect()` helper and then asserts against a hit
+box: if the helper is what the mutation would break, the test cannot see it.
+
+### Lesson 78: a probe helper that sets the state itself tests everything except the code that sets it (lane C, 2026-08-30)
+
+**In short:** `Probe::click_at` in asteroids calls `self.resize(w, h)` before
+delivering the click, because a click has to be read against *some* size and the
+probe has to supply it. That made
+`a_click_lands_where_the_window_it_was_resized_to_put_the_control` — the test
+named for resizing — blind to a `handle_event` that threw `Event::Resize` away
+entirely, since the helper had already applied the resize by another door. The
+app would have ignored every real resize the compositor sent, and the test that
+exists to catch exactly that stayed green.
+
+**The rule.** When the property under test *is* "the app noticed X", the test
+must deliver X the way the window delivers it — as the event — and must not use
+a probe helper that also performs X. Probe helpers are for setting up the state
+a test is not about; the moment that state is what the test is about, drop to
+`handle_event`/`on_event` and send the real thing.
+
+**The tell.** A test whose name contains the name of an event (`resized`,
+`focused`, `closed`, `scrolled`) but whose body never constructs that event.
+`keys_reach_the_app_through_the_window` had the same shape from the other side:
+it went through `handle_event` rather than `App::on_event`, so it asserted an
+`EventResult` and never saw the `Response` — a build that answered `Idle` to
+every change, and so never repainted, passed a test whose name says "through the
+window".
+
+**Where else to look.** Every `impl Probe` in `apps/**` whose `click_at` or
+`key_at` calls `resize` (most do — it is the documented way to pass a size), and
+every test named for an event. Two questions: does the test build the event, and
+does it assert the type the window is actually handed?
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print
@@ -95817,6 +95942,14 @@ string — a compatibility divergence noticed while reading the 17, not fixed
 here because it needs bash's arithmetic-context rules rather than a guess at
 them.
 
+**The second of those is now closed** (2026-08-29): the rules were measured
+against bash rather than guessed, and turned out to cover *four* divergences
+rather than the one noticed here, all failing in the same direction — see
+`A-KSHELL-SUBSTRING-OPERANDS-WERE-PARSED-NOT-EVALUATED` at the end of this
+file. Worth recording that the deferral was the right call and not merely a
+cautious one: the guess anyone would have made — "treat a non-numeric length as
+zero" — fixes the reported row and none of the other three.
+
 ### A sixth blindness, in the rung rather than the gate — and this one is not fixable by a gate
 
 The boot that verified this batch passed, and rung 103's six assertions all
@@ -96343,3 +96476,86 @@ the rest of the line.
 too — a diagnostic that a `2>&1` took into the capture must **not** appear in
 the recording, or the panic message would quote back a message the test had
 deliberately collected itself.
+
+---
+
+### A-KSHELL-SUBSTRING-OPERANDS-WERE-PARSED-NOT-EVALUATED. `${x:off:len}` read its two operands with `parse::<i64>()` instead of evaluating them, and indexed by byte — **Status: FIXED** 2026-08-29 (boot test green, rung 105 present in the serial log; merged to `main` 2026-08-30)
+
+**In short:** the shell's "give me part of this string" syntax got the wrong
+part in six different situations. `${x:0:n}` — take the first `n` characters,
+the most ordinary use there is — ignored `n` entirely and returned the whole
+string; `${x:1+1:2}` returned nothing at all; and on any string containing a
+non-ASCII character, cutting it usually produced nothing. Every one of these
+was silent: no message, no failure status, just a different answer.
+
+**Where:** `kernel/src/kshell.rs` — one arm of `expand_brace_expr`'s
+eleven-arm operator chain, now split out as `expand_substring`.
+
+**What was wrong.** Bash evaluates both operands as *arithmetic expressions*,
+in the same context `$(( ))` uses: a bare name is that variable's value, an
+unset name is `0`, an empty expression is `0`. Ours called
+`parse::<i64>()` / `parse::<usize>()` on them, which is correct on every
+literal and wrong on every name — which is exactly why it lasted. With
+`x=abcdefgh`:
+
+| Expression | bash | ours | direction |
+|---|---|---|---|
+| `${x:1:abc}` | `` (unset name ⇒ 0) | `bcdefgh` | too much |
+| `${x:0:n}`, `n=3` | `abc` | `abcdefgh` | too much |
+| `${x:2:-2}` | `cdef` | `cdefgh` | too much |
+| `${x: -3:-1}` | `fg` | `fgh` | too much |
+| `${x:1+1:2}` | `cd` | `` | too little |
+| `${x:abc}` | `abcdefgh` (offset 0) | `` | too little |
+| `${x:2}`, `x=héllo` | `llo` | `` | too little |
+| `${x:7:-2}` | error, `` | `h` | too much |
+
+**Which way it failed depended on which operand it could not read**, and that
+is worth stating plainly because the tempting summary — "it returned too much"
+— would send the next reader looking for a clamp. An unreadable *length* left
+`end` at its initialiser, "the rest of the string"; an unreadable *offset*
+skipped the whole `if let Ok` and pushed nothing.
+
+The `-2` rows are a rule rather than an off-by-one: **a negative length is an
+offset from the end of the whole value, not a count**, so `${x:2:-2}` means
+"from character 2 up to two from the end". `parse::<usize>()` rejected it and
+the code fell through to "the rest of the string" — the exact opposite of
+dropping the tail. A negative length landing *before* the offset is the single
+case bash diagnoses (`substring expression < 0`); an out-of-range *offset* it
+silently expands to nothing. That asymmetry is bash's and is kept.
+
+The `héllo` row is separate and was not in the original report. Indices were
+**byte** offsets, so a cut landing inside a UTF-8 sequence made `str::get`
+return `None`, which `.unwrap_or("")` turned into the empty string — silently,
+with no diagnostic and no failure status. `${#x}` had the matching fault in the
+other direction: it reported `6` for a five-character string.
+
+**The fix.** Both operands now go through `eval_arithmetic`, the same evaluator
+`$(( ))` uses, so a name, an expression and an empty string all mean what they
+mean everywhere else in the shell. Indices count **characters**: that is what
+SlateOS's real shell does (`userspace/oils`, see `TD-OILS-STRLEN-CHARS` in this
+file) and what bash does in a UTF-8 locale, which is the only locale this OS
+has — a debug shell that disagreed with the system shell about `${x:1:2}` would
+be its own trap. `${#NAME}` was changed to count characters in the same commit,
+because a shell that measures a string one way and cuts it another makes
+`${x:0:${#x}}` an expression whose two halves disagree about what a unit is.
+
+**How it was found:** by reading, not by a failure. It was noticed while
+auditing the 17 false positives of the option-refusal gate's D1 shape (see the
+batch-40 section above, where it is recorded as deferred) and deferred there on
+the grounds that fixing it needed bash's actual arithmetic-context rules rather
+than a guess at them. Those rules were then measured against bash directly —
+each row of the table above is an observed result, not a reading of the manual.
+
+**Pinned by** self-test rung 105, which asserts every row of the table plus the
+`substring expression < 0` diagnostic, the silent-empty out-of-range cases, and
+that `${#x}` and a cut of that exact length agree. The error case is captured
+around `expand_vars` rather than around a command: the diagnostic belongs to the
+expander, not to any command, and `check-selftest-wording.py` correctly refused
+the first draft, which had asserted it against `echo`.
+
+**Still divergent, deliberately not fixed here:** `${x:}` — an empty spec — is
+`bad substitution` in bash and expands to the variable's value here, because
+the substring arm is guarded by `rest.len() > 1`. That is a question about the
+shell's error *reporting* (kshell has no "bad substitution" concept at all),
+not about substring arithmetic, and folding it in would have made this commit
+two changes.

@@ -341,8 +341,27 @@ def sweep(src, mutations, crate, timeout=240, only=None):
                 continue
             compiled, ran, failed, timed_out, crashed, out = run_tests(crate, timeout)
             if timed_out:
+                # A timeout is scored `[ok]`, so it is the one verdict that can
+                # award coverage to a test that did nothing -- and the clock is
+                # not evidence on its own.  Three lanes share this machine: on
+                # 2026-08-30 a lane-C asteroids build sat at 300s with its own
+                # rustc using 26 MB while lane A's kernel rustc held 2.4 GB and
+                # the CPU.  Builds survive that, being outside the timed window
+                # (`build_tests`), but the test run is not, and asteroids' suite
+                # finishes in 0.7s -- so the 240s budget is a ~340x margin that
+                # a kernel build can plausibly eat.  A starved run scored "caught
+                # by a hang" retires the row's coverage in silence, which is the
+                # exact failure `build_tests`' own comment calls the worst kind.
+                #
+                # So confirm it.  A genuine unbounded loop hangs every time it
+                # is asked; contention almost never repeats on demand.  This
+                # costs one extra run per timeout, and timeouts are rare -- the
+                # price is paid only where the verdict was going to be doubtful.
+                print(f"[....] {name}: timed out; re-running to tell a hang from a slow machine")
+                compiled, ran, failed, timed_out, crashed, out = run_tests(crate, timeout)
+            if timed_out:
                 verdicts.append((name, "caught by a hang"))
-                print(f"[ok]   {name}: caught \u2014 the suite hung")
+                print(f"[ok]   {name}: caught \u2014 the suite hung twice")
             elif not compiled:
                 verdicts.append((name, "SKIP did not compile"))
                 print(f"[skip] {name}: mutant did not compile")

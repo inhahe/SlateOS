@@ -49895,6 +49895,28 @@ have it, the skip path is dead code that costs nothing to leave in.
 doing once it is confirmed all three lanes have the binary — at that point the
 skip protects nobody and only hides a regression in the tool's installation.
 
+**REVERSED 2026-08-29 (lane A, Claude autonomous), on the trigger above.** The
+precondition was *verified rather than assumed*: the tool is present in all
+three lane worktrees, and `shellcheck-all.sh warning` exits 0 with zero findings
+over 79/80/79 scripts in each. So no lane is blocked by the change, and from
+here an exit 2 means the binary was **removed** — which must stop the build
+rather than be waved through.
+
+What tipped it was not just the precondition being met but what the intervening
+weeks showed: this is the first of **five** gates since found blind (the D1
+rustfmt-wrapped chain, D1's `from_str_radix`, the wording gate's wrapped
+literals, and D4's brace miscount are the others), and the only one whose
+blindness was *designed in on purpose*. Every one of the other four was
+discovered after it had already cost something. Leaving a deliberate blind spot
+in place, in a file whose other gates now all fail closed, was the least
+defensible of the five.
+
+Small confirmation that the reversal has teeth: the very first run under it
+failed the build, on a comment in the new arm that opened with the tool's own
+name — a `# shellcheck …` line is parsed as a *directive*, and an unparseable
+directive is itself an error (SC1072/SC1073). Under the old arm that would have
+depended on the tool being installed to be noticed at all.
+
 **Where it is:** `check_shellcheck` in `scripts/boot-test.sh`, immediately after
 `check_orphan_modules`. Fulfils
 `requests/b-a-two-cd-calls-ignore-failure-in-shared-scripts.md`, which is also
@@ -50281,6 +50303,195 @@ behind a comment citing *this* section rather than gnulib, delete
 and the `--output=source` xfail back into ordinary cases — they should then
 pass unmodified, which is the check that the change was complete.
 
+## 701. `tar` renders every name in gnulib's `escape` style, not the tree's usual `quotef` — including its listings, which used to print raw bytes
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** When a program has to print the name of a file, it has to decide
+what to do about names that contain awkward things — a newline, a space, a byte
+that is not a letter in any alphabet. Almost every utility in this tree wraps
+such a name in shell quotes, so `my notes.txt` prints as `'my notes.txt'`. GNU
+`tar` does something different: it puts a backslash escape in place of the
+awkward byte and adds no quotes at all, so the same name prints as `my
+notes.txt` and a name holding a raw byte 0xE9 prints as `caf\351.txt`. This
+section is the decision to follow `tar` rather than the tree, and — the part
+that is a real change rather than a matter of taste — to apply it to `tar -t`
+and `tar -cv`/`-xv` output as well as to error messages.
+
+**Glossary.** *Quoting style* — the rule a program uses for turning a file name
+into displayable text. *`quotef`* — the tree's usual one (gnulib's
+`shell-escape`: shell quotes, `$'\n'` for a newline). *`escape`* — gnulib's
+other one (C escapes, octal for anything that decodes to no character, no
+quotes). *Listing* — the lines `tar -t` prints, one per member of the archive.
+
+### The measurement
+
+GNU tar calls `set_quoting_style (NULL, escape_quoting_style)` once at startup,
+which changes the *default* for every later `quotearg` call. The effect is that
+its diagnostics and its listings agree with each other. Measured against GNU
+tar 1.35 (`/tmp/gnuref/tar-quote.sh`, `tar-quote2.sh`):
+
+| name | `tar -t` prints | `tar: … Not found in archive` says |
+|---|---|---|
+| `with space` | `with space` | `with space` |
+| `it's` | `it's` | `it's` |
+| `with<TAB>tab` | `with\ttab` | `with\ttab` |
+| `caf<0xE9>` (invalid UTF-8) | `caf\351` | `caf\351` |
+| `café` (valid UTF-8) | `café` | `café` |
+| `back\slash` | `back\\slash` | `back\\slash` |
+
+`--show-defaults` confirms it in one line: `--quoting-style=escape`. The rule
+is locale-sensitive at the last row but one — under `LC_ALL=C` even `café`
+becomes `caf\303\251`, because no byte over 0x7F is part of a character there.
+We implement the UTF-8 answer, which is the one this system's paths are.
+
+### What changed on our side
+
+Two things, and only the second is a behaviour change a user would notice:
+
+1. **Diagnostics** moved from `quotef` to `escape`. Cosmetic; the wording was
+   already GNU's.
+2. **Listings and `-v` output** moved from *raw bytes* to `escape`. The
+   previous code wrote the member name's bytes to stdout unaltered, with a
+   comment defending it: a listing is output rather than a message, and `tar
+   -tf a.tar` ought to be feedable to whatever extracts the archive, so the
+   bytes should survive.
+
+That defence does not hold up, for two reasons found by measuring rather than
+by reasoning about it:
+
+- **GNU's output is not feedable back either.** It escapes, so a round trip
+  through `tar -t | xargs tar -x` is already broken for exactly the names the
+  raw version was protecting. Being the only tar that preserves the bytes buys
+  nothing, because nothing downstream expects it.
+- **A raw name can forge lines.** A member called `a` + newline + `b` printed
+  raw makes `tar -t` report two members, the second of which does not exist.
+  That is the same class of problem the quoting module exists to prevent on
+  stderr; there is no reason stdout should be exempt, and the argument that "it
+  is content, like `cat`" is wrong — `cat` prints a file's *contents*, whereas
+  a listing is tar's own structured report *about* a file.
+
+### The cost, stated plainly
+
+The rendering is not reversible. A member whose name really does contain a
+backslash lists with it doubled, and there is no flag here (yet) to turn that
+off — GNU has `--quoting-style=literal` for it. If a caller ever needs the
+bytes, the fix is to add that option, not to change the default; the default
+has to be the safe one because it is what an unattended script gets.
+
+### Why this did not become an `open-questions.md` entry
+
+There is a genuine tradeoff (round-trippable output vs. forgery-proof output),
+but it is not an open one: the reference implementation resolved it decades
+ago, in the direction that is also the safe one, and `tar-diff.sh` measures the
+difference on every run. Deviating would mean carrying a difference from GNU
+forever in exchange for a round trip that no consumer performs.
+
+### Consequence for the `quoting` crate
+
+`escape` and `escape_os` are new public functions there — gnulib's
+`quotearg_style (escape_quoting_style, …)` — sitting beside `quotef`/`quoteaf`.
+They return `String` rather than `Vec<u8>` (which `Style::Escape` returns)
+because the style's output is always valid UTF-8 by construction, and a caller
+that must format it into a message should not have to prove that again.
+`ls -b`, `du` and `df` select the same style upstream and can use them.
+
+## 702. `tar` emulates `RESOLVE_BENEATH` in userspace rather than waiting for the VFS to enforce it
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** Unpacking an archive must put files under the directory you
+unpacked it in and nowhere else. The obstacle is a *symbolic link* — a name
+that stands for another location, like a shortcut — that already sits somewhere
+along a member's path and points outside. Linux has a kernel feature that
+enforces "stay under this directory" for you (`RESOLVE_BENEATH`, a flag to the
+`openat2` system call), and neither of the two systems this program is built for
+actually enforces it. The choice was: ask lane A to build kernel support and
+leave `tar` exploitable until it lands, or do the walk by hand in `tar` itself
+out of parts that already work everywhere. This is the second.
+
+**The alternatives**
+
+1. **Wait for the kernel.** File a request with lane A to make the SlateOS VFS
+   honour `openat2`'s `RESOLVE_*` flags, and use `openat2` once it does.
+   * *For:* one enforcement point, shared by every program that ever needs it —
+     `cp -r`, `unzip`, an installer, anything that writes a tree it did not
+     author. Kernel-side resolution is inherently free of the check-then-use
+     races userspace has to design around.
+   * *Against:* it is a lane A change to a subsystem lane B does not own, on
+     nobody's schedule, and `tar` is exploitable in the meantime with a
+     two-archive attack that needs no privileges. It also does not help the
+     **host** build at all: this binary is built and differentially tested
+     against GNU tar on Linux/glibc, and glibc exports no `openat2` wrapper, so
+     that side would need `syscall(437, …)` by number regardless. A fix that
+     only works on one of the two targets cannot be verified by the harness that
+     verifies everything else here.
+
+2. **Emulate the walk in `tar`.** Hold the destination open, open each parent
+   component with `O_DIRECTORY|O_NOFOLLOW` from the descriptor above it, read
+   any symlink component with `readlinkat` and judge its target by GNU's rule,
+   and keep the descriptors on a stack so `..` pops one and popping the root is
+   the refusal. Create the leaf with an `*at()` call through the descriptor that
+   came back.
+   * *For:* buildable today out of primitives both targets already have
+     (`openat`, `readlinkat`, `mkdirat`, `symlinkat`, `linkat`, `mkfifoat`,
+     `mknodat`, `unlinkat`, `fchmodat`, `utimensat` — all present in
+     `posix/src/file.rs` and in glibc), verifiable today against the real GNU
+     binary, and **race-free** for the same reason the kernel version is: the
+     caller creates relative to the descriptor the walk returned, so there is no
+     second resolution for an attacker to interleave with. It is also GNU's own
+     architecture — GNU tar does not use `openat2` either, which is why its
+     `mkdir`, `symlink` and `mkfifo` refusals all report `EXDEV`: none of
+     `mkdirat`/`symlinkat`/`linkat` takes a resolve flag, so the restriction can
+     only live in the resolution of the parent.
+   * *Against:* it is ~200 lines of resolution logic living in one utility
+     rather than in the kernel, and the next program with the same requirement
+     will have to have it again. `O_NOFOLLOW` must genuinely be honoured by the
+     VFS for it to hold on SlateOS (it is — `kernel/src/fs/handle.rs`,
+     `OpenFlags::NOFOLLOW`). Off unix there is no `openat` to build it from at
+     all, so that twin resolves lexically and is weaker.
+
+**Chosen: 2**, with a request filed for 1 as the eventual replacement rather
+than the prerequisite. The deciding fact is that the exploit is live and the
+kernel work is not, and that option 1 would leave the host build — the only one
+the differential harness can run — unfixed either way. The emulation is not a
+stopgap that will need unpicking: it is what GNU does, it is measured to match
+GNU on all ten rows of the rule table, and if the VFS later enforces
+`RESOLVE_BENEATH` the walk can be replaced by a single `openat2` behind the
+same `Dir::locate` signature without any caller changing.
+
+**Not decided here:** whether the emulation should be lifted out of `tar.rs`
+into a shared helper for the other tree-writing utilities. It should not be
+until there is a second caller — one caller is not a pattern, and the exact
+shape of the second one's needs (does it want to *follow* in-tree links? does it
+need the parent descriptor back, or only a result?) is what should determine the
+interface. Recorded in `todo.txt`.
+
+**Amended the same day, and it sharpens option 1 rather than changing the
+choice.** Writing the lane-A request this entry promises meant re-reading both
+implementations of `openat2`, and they did not agree. The kernel's
+`sys_openat2` *refuses* `RESOLVE_BENEATH` with `EXDEV` — safe. libc's
+`posix/src/file.rs::openat2` validated the `resolve` word, discarded it, and
+delegated to plain `openat`, so a caller asking to be confined received a
+working descriptor and no confinement at all. Fail-open, on the side a SlateOS
+program actually reaches. Fixed immediately — libc now refuses every
+restriction it cannot enforce, with the kernel's exact errnos, pinned by seven
+tests; written up in `known-issues.md` → `TD-OPENAT2-BENEATH-INROOT` and filed
+as `requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-and-unenforceable-in-the-vfs.md`.
+
+The bearing on this decision: option 1 was *worse* than it is scored above.
+The text says the `RESOLVE_*` flags are "accepted but not enforced" — that was
+the libc doc comment's own wording, and it is what made the gap sound like one
+subsystem waiting on lane A. In fact the ABI had two implementations
+disagreeing about a security promise, so "use `openat2` once the VFS honours
+it" would have had to reconcile them first and would *still* have left the host
+build — the only one the differential harness can run — unaddressed. Nothing
+here argues for revisiting **2**; it removes the last reason to have hesitated
+over it.
 
 ---
 
@@ -50356,3 +50567,282 @@ so the ledger would have to be edited back in step. There is no reason to.
 `scripts/option-refusal-ledger.txt` (four entries removed);
 `kernel/src/kshell.rs` (`required_hex`, `required_key`, and the eight `cmd_*`
 functions listed in the thirty-eighth burn-down entry); self-test rung 102.
+
+
+## 635. A new gate is narrowed until it can start at zero, rather than broadened and given a backlog
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous, lane A)
+**Lane:** A
+
+**In short:** we found a new kind of shell bug — a command that reads a number
+you typed, cannot make sense of it, and then does *nothing at all*: no message,
+no error status, no action, so it looks exactly like success. To stop it coming
+back we added an automatic check. The check could either be written broadly (it
+would catch all 22 real bugs, plus 17 places where the same code shape is
+perfectly correct, so it would have to ship with a 17-line list of exceptions),
+or narrowly (it catches 20 of the 22 and none of the 17, and needs no exception
+list at all). I chose narrow. A check that starts clean stays meaningful; a
+check that starts with a list of exceptions teaches everyone to add to the list.
+
+**The defect.** `if let Ok(id) = w.parse::<u32>()` nested inside
+`if let Some(w) = parts.get(1)` with no `else` on the inner test. The `else`
+that exists belongs to the *outer* test, so it covers the missing argument only.
+An unreadable one falls out of both branches. `ptime enable zzz` printed
+nothing and exited 0.
+
+**Why the obvious detector cannot be used.** The bare shape — "`if let Ok` on a
+parse, with no `else`" — matched 39 sites in `kshell.rs`. Only 22 were defects.
+The other 17 were the same shape used *correctly*, to try one reading and fall
+through to another:
+
+| Site | Falls through to |
+|---|---|
+| `resolve_container_ref` | a numeric reference, else a container name |
+| `parse_datetime_to_ns` | epoch seconds, else `YYYY-MM-DD` |
+| `cmd_useracct info`, `cmd_template` | a uid/id, else a name — as its usage line offers |
+| `execute_select` | POSIX `select`: non-numeric input leaves the variable empty |
+| `expand_brace_expr` | bash's own `${x:abc}` |
+
+Nothing about the syntax distinguishes these. Only the *destination* of the
+fall-through does.
+
+### Decision
+
+D4 requires the nesting **and** that the inner `if let Ok` be the **sole**
+statement of the `if let Some(w) = parts.get(N)` block. Soleness is a
+mechanical stand-in for "the fall-through has nowhere to go": if there is
+anything after the inner block, the code is trying an alternative; if there is
+not, control leaves the command having done nothing.
+
+*What changes:* the gate reports 20 of the 22 defects, 0 of the 17 correct
+sites, and carries no exception list.
+
+### Alternatives considered
+
+**Broad detector plus a 17-entry allowlist.** Would have caught all 22 and the
+two `container create` sites D4 cannot reach. Rejected because the allowlist is
+the failure mode, not the cost: this file already carries a 332-line ledger for
+D1, and the reason that ledger is tolerable is that it was inherited, not
+created. A *new* gate arriving with 17 pre-granted exceptions establishes the
+exception as the normal way to interact with it. The first person to hit a
+false positive adds an eighteenth entry; nobody re-reads the first seventeen.
+
+**No gate at all, on the grounds that the 22 sites are fixed.** Rejected for the
+reason §600's whole burn-down exists: this defect was written 22 times by the
+same hand that knew better each time. Shapes recur.
+
+### The part that generalises
+
+**D4's first zero was a false one, and only a fixture could say so.** It landed
+at zero on `kshell.rs` immediately — while being broken. `close_brace` counted
+braces per line, so `} else {` netted zero, a block with an `else` never
+appeared to close, and the detector was silently skipping most of what it
+targets. The file's own green output could not distinguish "nothing to find"
+from "cannot find anything", and never will be able to; that is §634's
+corollary. The self-test fixture reported it in the first second it existed:
+two defective fixtures unreported, one correct fixture reported.
+
+So the rule this adds to §634: **write the fixture before trusting the zero,
+not after the blindness costs something.** Four of the five gates found blind
+here in four days were found afterwards, by someone going to look at a specific
+function. D4 was found before shipping, by a fixture that took ten minutes.
+
+### Where it lives
+
+`scripts/check-option-refusal.py` — `D4_OUTER`, `D4_INNER`,
+`silent_operand_sites`, `close_brace`, and `--self-test` with `_D4_FIXTURE`
+(three defective shapes, five correct ones);
+`kernel/src/kshell.rs` — `readable_num`/`readable_hex` and self-test rung 103.
+
+### How to reverse
+
+Widen `D4_INNER`/`D4_OUTER` and add an `ALLOWED` entry per false positive. The
+two `container create` sites are the honest argument for doing so: they are real
+instances of the defect that D4 does not reach, because their word comes from
+`strip_prefix` inside a loop rather than from `parts.get`, leaving no positional
+nesting and so no soleness test. If a third such site appears outside the
+`parts.get` shape, that is the trigger to reconsider — the narrowing is a bet
+that the defect concentrates in positional operands, and two known exceptions is
+where the bet still pays.
+
+## 703. `tar` carries every one of GNU's long-option names but performs twelve — a recognised name it cannot honour is refused, not ignored
+
+> The counts written into the body below — 171 names, nine performed — were both
+> corrected within the day; see the two amendments at the end. The real figures
+> are **172 names, twelve performed**. The body is left as written because the
+> second amendment is about *how* the wrong number was arrived at, which is the
+> part worth not losing.
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** GNU's `tar` accepts about 171 spelled-out options (`--verbose`,
+`--exclude`, …); ours does the work of nine of them. The question is what to do
+with the other 162 when someone types one. Ignoring them is dangerous — a
+backup that was told to leave files out would quietly include them and report
+success. So this `tar` now knows all 171 names, and answers the 162 it cannot
+perform with "recognised but not implemented" and a failure status, which stops
+a script instead of misleading it. Knowing the names it does not implement also
+turns out to be *required* for the nine it does, for the reason in the second
+half below.
+
+**The decision, in two parts.**
+
+1. **The name table lists every option GNU has, not every option we perform.**
+2. **A name in the table that we do not perform is a usage error** —
+   `tar: option '--exclude' is recognised but not implemented by this tar`,
+   status 64 — rather than being silently dropped or reported as unknown.
+
+**Why part 1 is not optional.** An abbreviation is legal if it is a prefix of
+exactly one option, so the *set of names* decides what a prefix means. With a
+nine-name table, `--ex` is a unique prefix of `--extract` and would extract;
+GNU calls it ambiguous and lists fourteen candidates. The sharpest case is
+`--verb`, which is ambiguous only because of `--verbatim-files-from` — an option
+this `tar` will likely never implement, and whose sole function here is to make
+`--verb` an error, exactly as GNU does. A table trimmed to what we implement
+does not merely produce a worse message; it silently runs a *different command*
+than the same argv would run under GNU. The shared `coreutils::getopt` module
+already says this in its own words, so part 1 is house doctrine rather than a
+judgement call — it is recorded here only because the 162 dead entries look like
+dead weight to a future reader who might tidy them away.
+
+**Why part 2, and what was rejected.**
+
+| Answer | Cost |
+|---|---|
+| **Refuse (chosen)** | Diverges from GNU visibly: a command GNU runs, we decline. A script using an unimplemented option stops with a clear reason. |
+| Ignore it | *What changes:* `tar -cf a.tar --exclude '*.o' src` silently archives the `.o` files and exits 0. The failure is silent, in the direction of doing more than asked, and is discovered when the archive is restored. |
+| Report `unrecognized option` | *What changes:* the message says `--exclude` is not a `tar` option. It is; we just don't do it. That sends the reader to check a spelling that was already right. |
+
+Refusing is the only one of the three whose failure mode is a stopped script
+rather than a wrong archive, and it is the only one that tells the truth about
+why. The divergence from GNU is real and is the price.
+
+**A note on what this replaced, because it makes the stakes concrete.** Before
+this change `tar` had *no* long options at all: `--anything` fell through to the
+operand branch and became a file name. So `tar -cf a.tar --exclude '*.o' src`
+did not ignore the option — it tried to archive two files called `--exclude` and
+`*.o`, complained they did not exist, and produced an archive that both lacked
+the exclusion and contained a spurious member. The same fall-through also meant
+`--` was not an end-of-options marker but a member name to look for, so
+`tar -xf t.tar -- a` failed with `tar: --: Not found in archive` where GNU
+exits 0.
+
+**How the table was established, and why that matters for maintenance.** The
+names, their argument classes, and their *order* were all measured from GNU
+1.35 rather than transcribed, then checked exhaustively: every one of the 1381
+distinct prefixes of the 171 names was put to the real binary and its verdict
+compared against this table's — resolved, unrecognised, or ambiguous, with the
+candidate list in order — for **zero** mismatches. That sweep is also what
+established that `tar` needs plain name-based resolution rather than the
+alias-aware variant: `tar` does have alias pairs (`--extract`/`--get`,
+`--preserve-permissions`/`--same-permissions`), but no two aliases share a
+prefix, so nothing is made unabbreviatable by keying on names. If a future
+change adds a name, that assumption is the one to re-test.
+
+**The order is observable output and must not be alphabetised.** `getopt_long`
+lists an ambiguous prefix's candidates in table order, so `--extract` must
+precede `--exclude`. It was obtained by asking the binary one question per
+letter — every candidate for an ambiguous prefix necessarily shares its first
+letter, so 36 queries fix the whole array and cross-letter order is
+unobservable. That sweep is also what turned up `--program-name`, which appears
+in no `--help` output because argp hides it, and which is therefore in the table
+on the authority of the ambiguity lists alone.
+
+**Two amendments, both the same day (2026-08-29).**
+
+1. `--help`, `--usage` and `--version` moved from the refused group into the
+   performed one — see 704 — so the counts read *twelve performed*.
+2. **The table is 172 names, not 171, and the paragraph above is wrong about
+   the order.** The push-time gate `scripts/getopt-ambiguity-check.py` — which
+   this entry did not know existed — reads GNU's table with one measurement the
+   per-letter sweep cannot match: `tar --=x`. The empty name is a prefix of
+   *every* entry, so the ambiguity list is the whole table, in declaration
+   order, in one line. Two things fell out. First, it found `--HANG`, a hidden
+   debug option that sleeps forever and the only name beginning with a capital
+   — invisible to a sweep over `--a … --z`, and therefore missed above. Second,
+   the claim that "cross-letter order is unobservable" is false: this one case
+   observes all of it, and the real order is argp's grouping by function, not
+   the letter-grouped reconstruction that was committed. Both are fixed, the
+   exemption that had kept `tar` out of the gate is deleted, and `tar --=x` is
+   now byte-identical to GNU's (2806 bytes, exit 64). Nothing else in this entry
+   changes — the per-letter order happened to be right *within* each letter, so
+   every diagnostic it was reasoned about stayed the same. The lesson worth
+   carrying: **enumerate from the utility's own output, never from an alphabet
+   you chose**, and check whether the repository already has a gate for what you
+   are about to measure by hand.
+
+## 704. `tar --help` prints this tar's twelve options, not GNU's 172 — and, like GNU, does not check that the write landed
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** After 703 gave `tar` long options, its own error messages ended
+with `Try 'tar --help' or 'tar --usage' for more information.` — while both of
+those commands answered "recognised but not implemented". A program that
+directs you to two commands it refuses is worse than one with no help at all,
+so `-?`/`--help`, `--usage` and `--version` are now implemented. Two things
+about *how* were genuine choices rather than obvious: the help text is written
+for this tar instead of copied from GNU's, and a failed write of it is ignored
+rather than reported.
+
+**Decision 1: the help text describes this tar.**
+
+| Answer | *What changes* |
+|---|---|
+| **Write our own (chosen)** | `tar --help` lists twelve long options. A user who has read GNU's help gets a shorter, unfamiliar page — but everything on it works. |
+| Reproduce GNU's help verbatim | `tar --help` lists 172 options, 160 of which the same program then refuses. The page is instantly familiar and is a lie in 159 places. |
+
+Copying GNU's page is the more *compatible* answer and the wrong one, for the
+reason 703 already settled about options generally: help text is read
+specifically to find out what is available, so an over-broad page fails at the
+one job it has. It would also read as a bug rather than a policy — someone who
+follows the program's own help into `--exclude` and is told it is not
+implemented has been sent there by the program.
+
+The page keeps argp's *shape* — the `Usage:` line, an examples block, operation
+modes separated from modifiers, informational options last — because that is
+what a `tar` user recognises, and closes with the two facts that distinguish
+this tar from the one the reader has used before: ustar only, and unimplemented
+names refuse rather than being ignored. Without the second sentence a refusal
+looks like breakage. A unit test asserts both directions: every performed
+option appears, and a sample of refused ones does not.
+
+**Decision 2: the write is unchecked, which diverges from the house rule.**
+
+Measured: `tar --help >&-` prints nothing and exits **0**, where
+`wc --help >&-` reports `write error: Bad file descriptor` and exits 1. argp
+writes help to a `FILE*` and never asks whether it landed; coreutils utilities
+run `close_stdout` at exit and do.
+
+| Answer | *What changes* |
+|---|---|
+| **Match GNU — ignore (chosen)** | `tar --help \| head -20` exits 0 quietly, as it does everywhere else. A genuinely undeliverable help page fails silently. |
+| Apply the coreutils rule — report | `tar --help \| head -20` can print `tar: write error: Broken pipe` and exit 1, which no other `tar` does. |
+
+Help is most often read through a pager or `head`, so the second column's
+failure mode is common and the first's is nearly unreachable — nobody is
+depending on the exit status of a help page. This tar has no `close_stdout`
+discipline on any of its other stdout paths either, so matching GNU here is also
+the internally consistent choice; adopting the rule would mean adopting it for
+listing output too, which is a separate change with its own measurements to do.
+
+**Precedence was measured, not assumed,** and is the reason `parse_args`
+returns its answer from *inside* the parse loop rather than validating argv
+first:
+
+| Command line | Result | Why |
+|---|---|---|
+| `tar --help --frobnicate` | help, exit 0 | `--help` came first |
+| `tar --frobnicate --help` | `unrecognized option`, exit 64 | the bad one came first |
+| `tar -c --help` | help, exit 0 | `--help` wins over doing the work |
+| `tar --file --help` | `You must specify one of…`, exit 2 | `--help` was eaten as `--file`'s value |
+
+All four are GNU's, and all four fall out of first-one-wins iteration. A parser
+that checked the whole command line before returning would fail row 1; one that
+scanned for `--help` up front would fail rows 2 and 4. A 19-case shape
+differential against the real binary — exit status, which stream, which class of
+message — found zero differences.

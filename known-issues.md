@@ -15946,7 +15946,8 @@ which we should only do if a real port needs it.
 
 ### TD-OPENAT2-BENEATH-INROOT. `openat2` `RESOLVE_BENEATH`/`RESOLVE_IN_ROOT` are safely refused, not implemented — ACCEPTED LIMITATION 2026-07-22
 
-**Where:** `kernel/src/syscall/linux.rs::sys_openat2` (the resolve-flag gates).
+**Where:** `kernel/src/syscall/linux.rs::sys_openat2` (the resolve-flag gates)
+and, since 2026-08-29, `posix/src/file.rs::openat2` step 7.
 
 **What it is:** `openat2`'s `RESOLVE_BENEATH` (forbid the walk from escaping
 the `dirfd` directory via `..`/absolute paths/escaping symlinks) returns
@@ -15967,6 +15968,42 @@ This must be containment-checked per hop (not just on the input path) to be
 safe against symlinks that point outside the base. Deferred until a real
 consumer (container runtime / sandbox) needs beneath/in-root resolution;
 the current refusal is safe in the meantime.
+
+**Amended 2026-08-29 — "the current refusal is safe" was only ever true of
+half of it.** This entry scoped itself to `kernel/src/syscall/linux.rs`, and
+the ABI has *two* implementations in this tree. libc's `posix/src/file.rs::
+openat2` validated the `resolve` word, discarded it, and delegated to plain
+`openat` — so a native caller asking for `RESOLVE_BENEATH` got a working
+descriptor and no confinement whatsoever, while a Linux-ABI caller making the
+identical request got `EXDEV`. Fail-open on one side, fail-closed on the other,
+for as long as both have existed. Fixed the same day: libc now refuses every
+restriction it cannot enforce, with the kernel's exact errnos (`EAGAIN` /
+`EOPNOTSUPP` / `EXDEV`), so the two agree. Seven tests pin it, each asserting
+the refusal errno *differs from the unrestricted call's* so they cannot pass
+vacuously against a deleted gate.
+
+One deliberate residual divergence: `RESOLVE_NO_SYMLINKS` is **enforced** by
+the kernel (threaded to the VFS resolver as `OpenFlags::NO_SYMLINKS`) but
+**refused** by libc, because libc's `openat` flattens `dirfd` + `path` into one
+absolute path and calls `open`, whose flag word has no per-component no-follow
+bit — `O_NOFOLLOW` covers the final component only. Refusing is safe; it is
+still a capability a native binary cannot reach. The structural fix is a native
+syscall number for `openat2` so libc forwards instead of re-implementing, which
+is what let the two drift apart in the first place. Both that and the VFS work
+are asked for in `requests/b-a-openat2-resolve-beneath-is-fail-open-in-libc-
+and-unenforceable-in-the-vfs.md`.
+
+**The generalisable lesson, which is worth more than the bug:** when a syscall
+has two implementations in this tree, a known-limitation note about one of them
+is not a note about the syscall. Nobody re-read the libc side because this
+entry read as though it covered `openat2` rather than `sys_openat2`. The ABI
+surface is exactly where we keep having two implementations.
+
+**Consumer note:** `TD` above says this is deferred "until a real consumer
+needs beneath/in-root resolution". One now does — `userspace/coreutils/src/bin/
+tar.rs` emulates `RESOLVE_BENEATH` in userspace (`Dir::locate`) because neither
+target could supply it. See `design-decisions.md` §702 for why emulating beat
+waiting. The emulation is correct and race-free, so this is still not urgent.
 
 ### D-NETSTACK-TCP-MINIMAL. Userspace `netstack` TCP client is minimal (slirp-only correctness) — DEBT 2026-07-14
 
@@ -81827,8 +81864,74 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **335 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **267 of 800 remain**
 
+> **Burn-down log.** 2026-08-29 (fortieth batch): every function carrying
+> **four** sites, which is now none. 332 → 267 across 185 → 166 functions;
+> nineteen functions left the ledger entirely. `cmd_webcam`, `cmd_vmzone`,
+> `cmd_bpfstat`, `cmd_defaultapps`, `cmd_diskstat`, `cmd_displayarrange`,
+> `cmd_epollstat`, `cmd_eventlog`, `cmd_kbsettings`, `cmd_kthread`,
+> `cmd_netqueue`, `cmd_netsyslog`, `cmd_procstat`, `cmd_sysresource`,
+> `cmd_upnp`, plus the pid arms of `cmd_filelock`, `cmd_netsock`,
+> `cmd_pipestat`, `cmd_schedclass` and `cmd_taskstats`, which share the
+> statement text. Pinned by self-test rung 104.
+>
+> Three shapes recur often enough to be worth naming for whoever takes the
+> next batch:
+>
+> * **Guards that worked by luck.** `netsyslog port`, `procstat get`/`register`
+>   and `upnp add` *did* reject a mistyped number — but only because the
+>   guessed default was `0` and a separate guard rejects `0`. That collision is
+>   accidental. The same code with a legal default (say `514`) would have
+>   accepted the typo in silence, and the shared message named neither mistake.
+>   A site that looks defended is not necessarily defended *on purpose*, and
+>   the gate cannot tell the difference — it counts the `unwrap_or`, not the
+>   guard three lines down.
+>
+> * **Strict and guessing on the same line.** `kthread state <id> <running|…>`
+>   refused an unrecognised state word while silently rewriting the id beside
+>   it to 0. `netsyslog forward <ip> [port]` parsed and refused a malformed
+>   address, then invented the port and printed it back as confirmation — so
+>   the one operand the caller could check against the output was the one that
+>   had been made up. Where one operand is strict, the reader assumes the arm
+>   is strict.
+>
+> * **Limits that truncate evidence.** `eventlog recent/errors/source/category`,
+>   `netsyslog recent`, `procstat topcpu/topmem`, `sysresource avg/history`. A
+>   short list reads exactly like a complete one, and `sysresource avg` printed
+>   the invented window size into its own caption ("Average CPU (last 10
+>   samples)"). These read as harmless — nothing is written — but they are the
+>   sites most likely to be believed.
+>
+> And, as in batch 39, several operands here are not settings but
+> **measurements being filed**: `diskstat read/write`, `netqueue rx/tx`,
+> `sysresource sample`, `bpfstat run`. Each is added to a cumulative counter
+> and read back later as though observed, so a guessed number is
+> indistinguishable from a real one the moment it lands. Refusing the typo is
+> the last point at which the difference still exists.
+>
+> **The batch also produced a defect of its own, and a gate for it** — see
+> `A-KSHELL-A-DIAGNOSTIC-CAN-NAME-A-COMMAND-IT-DID-NOT-COME-FROM` below. Five
+> of the twenty functions were converted by a whole-file search-and-replace of
+> a statement that was not unique to the function being edited.
+>
+> **Burn-down log.** 2026-08-29 (thirty-ninth batch): the batch that was not
+> about this defect at all, and moved its count anyway. Batch 39 went after a
+> *third* shape of §600 — an operand read as a number and dropped in **silence**
+> when the word would not read, with no message, no default and no non-zero
+> exit — tracked separately as
+> `A-KSHELL-AN-OPERAND-READ-AS-A-NUMBER-AND-DROPPED-IN-SILENCE`. 22 sites
+> converted there. Three of them turned out to *also* carry a guessed value in
+> the same few lines (`mlink battery`'s percentage, `qs set`'s two operands), so
+> this heading fell 335 → 332 across 186 → 185 functions as a side-effect.
+>
+> The general point is worth more than the three sites: **the shapes co-locate.**
+> An arm careless enough to drop one word silently is the same arm that guesses
+> at the next one, so reading an arm to fix either shape tends to surface the
+> other. That argues for finishing this backlog arm-by-arm rather than
+> pattern-by-pattern — the gate can only sort by pattern, but the defects are
+> distributed by author attention.
+>
 > **Burn-down log.** 2026-08-29 (thirty-eighth batch): `cmd_iomem` (5),
 > `cmd_ioport` (6), `cmd_vmmap` (6), `cmd_kprobes` (4), `cmd_pciids` (4),
 > `cmd_usbpolicy` (3), `cmd_sysrq` (1) and `cmd_gpu` (1) cleared — 30 sites
@@ -95078,6 +95181,181 @@ ESC[K`) and ours writes a plain
 pager. The decision to pause, and the keystroke handling, are covered by unit
 tests in `more.rs` instead.
 
+## `B-tar-WALKS-THROUGH-A-PRE-EXISTING-SYMLINK-AND-WRITES-OUTSIDE-THE-DESTINATION` (lane B, 2026-08-29) -- **fixed 2026-08-29**, security
+
+**In short:** unpacking an archive is supposed to put files *under* the
+directory you unpacked it in, and nowhere else. Ours does not guarantee that.
+If a symbolic link (a name that stands for another location, like a shortcut)
+already exists in the destination and points somewhere outside it, our `tar`
+happily follows it and writes the archive's files at the far end -- outside the
+directory, possibly anywhere on the disk. GNU tar refuses. Two archives are
+enough to exploit it: the first plants the link, the second writes through it.
+
+### Measured, both sides
+
+Destination `d` contains a pre-existing `x -> ../out`; the archive holds one
+member `x/pwned`:
+
+```
+gnu : rc=2  tar: x/pwned: Cannot open: Invalid cross-device link
+            out holds: []
+ours: rc=0  (silent)
+            out holds: [pwned]
+```
+
+And the two-step attack, which needs no pre-existing anything -- archive 1 holds
+the single member `x -> ../out`, archive 2 holds `x/pwned`:
+
+```
+gnu : rc=2  tar: x/pwned: Cannot open: Invalid cross-device link   out: []
+ours: rc=0  (silent)                                              out: [pwned]
+```
+
+`scripts/tar-diff.sh` does not catch it: its `prep_symlink_out` fixture puts a
+symlink *at* a member's own path, where both tars replace it. Nothing in the
+harness puts one on a member's **ancestor**, which is the only position from
+which a link is followed rather than replaced.
+
+### What we already defend against, and why it is not this
+
+`tar.rs` implements GNU's *delayed-link* rule: a symlink member whose target is
+absolute or contains `..` is not created when it is read, it is stood up as an
+empty placeholder file and turned into a symlink after the last member. So an
+archive holding `x -> /etc` followed by `x/passwd` writes nothing to `/etc` --
+at the moment `x/passwd` is opened, `x` is a regular file.
+
+That defence covers exactly one run. It says nothing about a link that was
+already on disk when tar started, and -- since the placeholder *is* replaced by
+the real symlink at the end of the run -- it says nothing about the second run
+either. The first archive of the two-step attack is not even hostile-looking:
+it is one ordinary symlink member, created exactly as GNU creates it.
+
+### GNU's rule, measured exactly
+
+It is `openat2(RESOLVE_BENEATH)` semantics, component by component -- **not**
+"canonicalise and check the prefix". With a pre-existing ancestor `d/x` and
+member `x/pwned`, extracting into `d`:
+
+| `d/x` points at | verdict |
+|---|---|
+| `sub` (relative, inside) | allowed |
+| `deep/../sub` (`..` that never leaves) | allowed |
+| `deep/er/../..` (`..` back to the root itself) | allowed |
+| `/abs/path/d/sub` (absolute, **inside**) | **refused** |
+| `/abs/path/d` (absolute, the destination root itself) | **refused** |
+| `../d/sub` (up and straight back in) | **refused** |
+| `../out`, `/tmp` (escapes) | **refused** |
+| `x -> y`, `y -> sub` (chain, both hops inside) | allowed |
+| `x -> y`, `y -> ../out` **or** `y -> /abs/d/sub` | **refused** |
+
+So: an **absolute** symlink target is refused whatever it points at, even at the
+destination root; a relative one is refused the moment the walk would step
+above the root, even if a later component comes back in; chains are followed
+and every hop is judged by the same rule. That is precisely `RESOLVE_BENEATH`,
+which is why the errno is the otherwise-inexplicable `EXDEV`.
+
+`--overwrite` does not change it. Every member type is refused, each with its
+own wording and all with the same errno:
+
+```
+tar: x/pwned: Cannot open: Invalid cross-device link
+tar: x/sl: Cannot create symlink to 'elsewhere': Invalid cross-device link
+tar: x/p: Cannot mkfifo: Invalid cross-device link
+tar: x/d: Cannot mkdir: Invalid cross-device link
+```
+
+all followed by `Exiting with failure status due to previous errors`, rc 2.
+
+It is tar's own doing and not the environment: `tar-sanity.sh` writes through
+the very same link with a shell redirect and with `cp`, both fine. Measured
+against tar 1.35 on kernel 6.6.87.2-microsoft-standard-WSL2; probes
+`tar-rules12.sh` through `tar-rules16.sh` and `tar-sanity.sh` in the scratch
+reference directory.
+
+Note that `tar-rules14.sh`'s first table is **not** evidence for the absolute
+rule and was misread once: its "absolute, in tree" and "up and back in" targets
+were written as `$PWD/x/sub` and `../x/sub`, which pass back *through* `x`, the
+link under test -- resolution loops, refused for a reason that has nothing to do
+with the rule. `tar-rules16.sh` re-runs the table with targets that never
+re-enter the link, and that is what distinguishes `RESOLVE_BENEATH` from
+canonicalisation: canonicalisation would allow absolute-but-inside and
+`../d/sub`, and GNU refuses both.
+
+### The proper fix
+
+Resolve every member's **parent directory** beneath the destination root, and
+create the leaf with an `*at()` call relative to the resulting descriptor --
+which is GNU's architecture, and the reason its `mkdir`, `symlink` and `mkfifo`
+failures all report `EXDEV` too: none of `mkdirat`/`symlinkat`/`linkat` takes a
+resolve flag, so the restriction can only live in the resolution of the parent.
+
+`openat2(RESOLVE_BENEATH)` cannot be the mechanism here:
+
+* on the **SlateOS** target, `posix/src/file.rs` has `openat2` and the
+  `RESOLVE_*` constants, but -- in its own words -- "delegates the actual open
+  to regular `openat` once validation passes; the `resolve` flags are accepted
+  but not enforced (our VFS doesn't support the RESOLVE_* restrictions yet)".
+  Enforcing them is a VFS change, and the VFS is lane A's.
+* on the **host** build, glibc exports no `openat2` wrapper at all, so it would
+  mean `syscall(437, ...)` by number.
+
+Neither is needed. The restriction is emulable in userspace, race-free, out of
+primitives that both targets already have (`openat`, `readlinkat`, `mkdirat`,
+`symlinkat`, `linkat`, `mkfifoat`, `mknodat`, `unlinkat`, `fchmodat`,
+`fchownat`, `utimensat` -- all present in `posix/src/file.rs` and in glibc):
+walk the parent's components from a held root descriptor, opening each with
+`O_DIRECTORY|O_NOFOLLOW` so a symlink component fails rather than being
+followed; on that failure `readlinkat` it, refuse an absolute target outright,
+and splice a relative one's components into the walk under a loop counter;
+keep the descriptors in a stack so `..` pops it and popping the root is the
+refusal. Holding a descriptor per level is what makes it race-free -- a
+check-then-create by path would be correct on a quiet disk and defeatable by
+an attacker who swaps a component in between.
+
+### Fixed
+
+Done as described. `tar.rs` gained `Dir` (the destination, held open) and
+`Located` (a parent descriptor plus the one component naming the member in it);
+`Dir::locate` is the walk above and every creation, stamp and removal in the
+extraction path is now an `*at()` call through the descriptor `locate` returned.
+`create_at` replaces `create_recovering`: it resolves the parent first and only
+invents ancestors on the `ENOENT` that says one is genuinely absent, so the
+`mkdir -p` that used to run ahead of the open -- and would have made a directory
+where a withheld symlink's placeholder stood -- is gone.
+
+All ten rows of the table above now match GNU exactly, refusals and permissions
+alike, with the same errno and the same per-type wording; so does the hard
+link whose *target* escapes, which is refused because `link_target` is resolved
+through the same `locate`. `scripts/tar-diff.sh` carries twelve new fixtures
+(`an ancestor symlink ...`, `a chain whose second hop escapes`, `a symlink
+planted by an earlier archive`, `a hard link target reached through an escape`)
+and its existing "nothing was written outside the destination" check now runs
+unconditionally rather than only when python3 was available to forge headers.
+Verified to discriminate: rebuilt against the pre-fix `tar.rs`, eight of the
+twelve fail and the leak check reports `escape/pwned escape/sl escape/p
+escape/dir`. 90 pass, 0 differ, 3 differ on purpose.
+
+Two things found along the way, both fixed here:
+
+* `identity()` was `openat(O_RDONLY|O_NOFOLLOW)` + `File::metadata`, chosen to
+  avoid declaring a `struct stat` by hand. That breaks the delayed-symlink
+  placeholder outright: the placeholder is created **mode 0**, and an
+  unprivileged process cannot open a mode-0 file even when it owns it, so every
+  archive containing an absolute or climbing symlink failed with
+  `tar: x: Cannot open: Permission denied`. It is `fstatat(AT_SYMLINK_NOFOLLOW)`
+  now. `posix/src/stat.rs` documents its `Stat` as matching Linux x86-64's, so
+  one declaration serves both targets; a `const` assertion on its size fails the
+  build if that ever drifts.
+* `locate` returned `EINVAL` for a name with no components, which is what
+  `tar -cf x.tar .` stores (`./`). The destination is a location, not an error:
+  the leaf is `.` relative to the root's own descriptor, and `mkdirat`/`openat`/
+  `linkat` then produce GNU's `EEXIST`/`EEXIST`/`EPERM` of their own accord.
+
+Off unix there is a twin that resolves lexically and creates by path. It is a
+genuinely weaker guarantee -- a member cannot be *named* outside the
+destination, but a link planted between the check and the creation would not be
+caught -- and it is documented as such at the type. That platform cannot create
+a symlink, a fifo or a device node in the first place.
 
 ## `A-THE-WORDING-GATE-CANNOT-SEE-A-MESSAGE-RUSTFMT-WRAPPED` (lane A, 2026-08-29) — **FIXED 2026-08-29**, one character
 
@@ -95165,3 +95443,255 @@ not see. This is design-decisions.md §634's corollary landing for the third
 time: **a gate's own output cannot audit its coverage.** The only method that
 has ever worked on this project is the one used both times — name a specific
 thing you believe the gate should catch, and check that it agrees.
+
+
+## A-KSHELL-AN-OPERAND-READ-AS-A-NUMBER-AND-DROPPED-IN-SILENCE (lane A, 2026-08-29) — **FIXED 2026-08-29**, 22 sites
+
+**In short:** twenty-two shell subcommands took a number as an argument, and
+when the word you typed was not a number they did *nothing at all* — no
+message, no error status, no action. `ptime enable zzz` printed nothing and
+exited 0, which looks exactly like a configuration that really had been
+enabled. A script checking the exit status could not tell the difference; nor
+could a person reading the screen. All twenty-two now name the word they could
+not read and exit non-zero.
+
+**Where.** `kernel/src/kshell.rs`, in the shape
+
+```rust
+if let Some(id_str) = parts.get(1) {
+    if let Ok(id) = id_str.parse::<u32>() {
+        act_on(id);
+    }
+} else {
+    shell_println!("Usage: ptime enable <id>");
+    set_exit(1);
+}
+```
+
+The `else` belongs to the *outer* `if let`, so it covers the absent operand
+only. An unreadable one falls out of both branches.
+
+**Why this is worse than the guessed value.** This is the third shape of
+design-decisions.md §600, and the burn-down found it last because it is the
+only one that leaves no trace. A guessed value (`…parse().ok().unwrap_or(0)`,
+the 332 sites still in the ledger) at least *does* something and leaves a wrong
+number on screen for someone to notice. A catch-all match arm installs a
+visibly-wrong rule. This one produces a clean, empty, successful-looking
+non-event.
+
+**The helper.** Neither existing helper fitted. `required_num` refuses an
+absent operand, but for several of these the absence is legitimate and means
+something different — `mkeys play` acts on the active session, `mkeys play 3`
+on session 3. `optional_num` has a default to substitute, and here the absent
+case is not a value at all but a different action. So `readable_num` /
+`readable_hex` were added: *present, and must be readable*.
+
+**Three neighbouring defects were fixed with them,** each found only because
+the arm had to be read closely to convert it, and each capable of surviving a
+fix that addressed only the visible half:
+
+| Where | What it did |
+|---|---|
+| `ptime enable/disable` | `set_active(id, true).ok()` discarded the `Result`, so a readable id naming no config was still announced as "Config 999 enabled." |
+| `qs set` | guessed both operands as `0`, then reused the id's guess as the sentinel for "absent" — so `qs set 3 xyz` set the tile to 0% and reported "Set to 0%", and tile 0 was unreachable |
+| `container create net=…,gw=<typo>` | assigned `parse_ipv4_octets`'s `None` straight into the field, so a mistyped gateway did not fail to take effect, it **removed** the gateway |
+
+**Resolution.** 22 sites converted (`ptime`, `mkeys`, `cam`, `speech`, `mlink`,
+`store`, `slock`, `qs`, `container create`). Self-test rung 103 pins six of
+them with *paired* assertions — the refusal named, and the success message
+asserted absent — because checking only the refusal would pass against code
+that refuses and then acts anyway. D1's ledger fell 335 → 332 as a side-effect.
+
+**The measurement worth keeping: this shape is 56% precise, and the other 44%
+had to be read.** The raw pattern matched 39 sites; 17 were correct code doing
+something the shape cannot distinguish — trying one reading and falling through
+to another:
+
+| Site | The alternative it falls through to |
+|---|---|
+| `resolve_container_ref` | a numeric reference, else a container *name* |
+| `parse_datetime_to_ns` | epoch seconds, else `YYYY-MM-DD` |
+| `cmd_useracct info`, `cmd_template` ×2 | a uid/id, else a name — as the usage line offers |
+| `cmd_queryable` | "auto-detect type: try int first, then text" |
+| `execute_select` | POSIX `select`: non-numeric input leaves the variable empty |
+| `expand_brace_expr` ×3 | bash's own `${x:abc}` and `${arr[abc]}` |
+| `cmd_fsearch` | a max size, else a root path |
+| `parse_sed_command`, `awk_eval_expr`, `cmd_unset`, `cmd_appdefaults` | a later arm, or an `Err` the caller reports |
+
+None of these was excluded by a heuristic. Each was opened and read. That is
+the cost of the shape, and it is the reason the gate below is narrower than the
+shape.
+
+**The gate.** `scripts/check-option-refusal.py` gained **D4**, which requires
+the nesting *and* that the inner `if let Ok` be the **sole** statement of the
+`if let Some(w) = parts.get(N)` block. Soleness is exactly what separates the
+22 from the 17: a fall-through that reaches more code is an alternative being
+tried; a block that ends right there has nowhere for the word to go. So D4
+sits at **zero with no ledger entry** — a gate that starts green with no
+allowlist, rather than one that starts with a 22-line backlog.
+
+**And D4's first zero was a false one, which is the part worth keeping.** It
+landed at zero on `kshell.rs` immediately — and for the wrong reason:
+`close_brace` counted braces per line, so `} else {` netted zero, a block with
+an `else` never appeared to close, and D4 was skipping most of the sites it
+exists for. The file's own output could not say this; a fixture could, and did,
+the moment it was written (two defective fixtures unreported, one correct one
+reported). `close_brace` is now character-level, and running D4 against the
+pre-fix tree reports 20 sites in 8 functions and none of the 17 lookalikes.
+
+This is design-decisions.md §634's corollary applied to a gate written the day
+after it — *a gate's own output cannot audit its coverage* — and it is now the
+**fifth** time in four days that a gate here was found blind:
+
+| Gate | Blind to | Hid |
+|---|---|---|
+| `check-shell-portability.sh` (§630) | anything, if shellcheck was absent | the whole bug class |
+| `check-option-refusal.py` D1 | a chain rustfmt wrapped | 466 sites |
+| `check-option-refusal.py` D1 | `from_str_radix` | 19 sites |
+| `check-selftest-wording.py` `LITERAL` | a message rustfmt wrapped | 61 literals |
+| `check-option-refusal.py` D4 | any block with an `else` | 20 of the 20 sites it targets |
+
+Four of the five were found by naming a specific thing the gate should catch
+and checking that it agreed. The fifth (D4) was found by writing that check
+down as a fixture *before* trusting the zero. The fixture is the cheaper method
+and the only one that keeps working.
+
+The first row is now **closed** (2026-08-29): §630's missing-tool arm was the
+only blindness in the table that was *designed in on purpose*, and its stated
+reversal trigger — all three lanes confirmed to have the binary — was verified
+and acted on the same day. `check_shellcheck` now exits 1 rather than returning
+0 when the tool is absent, so a removed binary stops the build instead of
+quietly restoring the blindness.
+
+**Two things this leaves.** D4 does not reach `container create`'s `cpu=`/
+`mem=` options, whose word comes from `strip_prefix` inside a loop rather than
+from `parts.get`, so there is no positional nesting and no soleness test to
+distinguish defect from alternative; those two sites are fixed but ungated.
+And `${x:1:abc}` expands to the rest of the string where bash gives the empty
+string — a compatibility divergence noticed while reading the 17, not fixed
+here because it needs bash's arithmetic-context rules rather than a guess at
+them.
+
+### A sixth blindness, in the rung rather than the gate — and this one is not fixable by a gate
+
+The boot that verified this batch passed, and rung 103's six assertions all
+ran and all held. But the rung was **invisible in the log**: the block was
+committed with no `serial_println!` banner, so the serial output went straight
+from rung 102 to `kshell::self_test PASSED`. Deleting the entire rung would
+have left the log byte-identical.
+
+That is the same shape as the defect the rung was written to pin, one level up.
+The batch-39 bug was a command that did its work and said nothing; this was a
+*test* that did its work and said nothing. In both cases the thing that was
+supposed to make an event observable was the thing that was missing, and in
+both cases the surviving evidence — exit 0, `PASSED` — was indistinguishable
+from success.
+
+**It is not statically detectable, and the attempt is documented so nobody
+repeats it.** The obvious rule — every top-level brace-block containing
+assertions must be preceded by a banner — cannot be written, because a sibling
+rung missing its banner and a legitimate *scoping* sub-block are the same
+syntax. `self_test` has two real scoping blocks (one saves and restores
+`KSHELL_SELFTEST_VAR`, one shadows a `PrintfSpec`), and nothing separates them
+from an unbannered rung without reading intent. Numbering does not help either:
+with no banner at all, the numbering stayed a clean contiguous 1..102.
+
+So what was gated is the invariant that *is* mechanical, and it starts at zero:
+`scripts/check-selftest-rung-numbers.py` requires the banner numbers to be
+unique, contiguous from 1, and in file order — 103 rungs, 1..103, clean. Its
+value is a different failure that is likelier than this one and equally
+invisible: **two batches taking the same next-free number against the same
+tip.** Both compile, both run, both pass, and a report naming "rung 103" then
+points at either — the reference that was supposed to locate a failure is what
+makes it ambiguous. Only a reading of all 103 banners finds that.
+
+For the unbannered rung itself the mitigation is not a gate but a habit: after
+adding a rung, **read the boot's serial output and confirm the new banner is
+there.** This one was caught that way — by checking the log for rung 103 before
+pushing, rather than by trusting that a green boot meant the rung had run.
+
+## `A-KSHELL-A-DIAGNOSTIC-CAN-NAME-A-COMMAND-IT-DID-NOT-COME-FROM` (lane A, 2026-08-29) — **fixed, and gated**
+
+**In short:** the shell's error messages start with the name of the command
+that produced them — `epollstat: pid: 'x' is not a pid`. That name is typed
+into the source by hand, next to the code that uses it, and nothing checks it
+against the command it is actually written in. Copy a few lines from one
+command into another and the copy keeps saying the *first* command's name. The
+message is then fluent, specific, correct in every other respect, and about the
+wrong program — which sends whoever reads it to the wrong file. It has now been
+made impossible: a build-time check compares each name against the shell's own
+dispatch table.
+
+**How it happened, which is the interesting half.** Batch 40 of the §600
+guess-a-value burn-down converted twenty functions in one sitting. Several were
+done with a whole-file search-and-replace of an identical statement:
+
+```rust
+let pid = parts.get(1).copied().unwrap_or("0").parse::<u32>().unwrap_or(0);
+```
+
+That statement was **not unique to the function being edited**. Seven arms
+across `cmd_filelock`, `cmd_netsock`, `cmd_pipestat`, `cmd_schedclass`,
+`cmd_taskstats`, `cmd_hdrdisplay` and `cmd_dpiscaling` were rewritten too. The
+rewrite was *correct in substance* — each of those arms documents its operand
+as required and each was guessing at it — so the conversions were kept. What
+was wrong was one string: they announced themselves as `epollstat` and
+`displayarrange`.
+
+**Nothing downstream noticed, and it is worth being precise about why:**
+
+| Check | Verdict | Why it could not see it |
+|---|---|---|
+| `cargo build` | clean | the literal is a `&str`; every `&str` is a valid `&str` |
+| `cargo fmt` | clean | formatting is unaffected by a string's contents |
+| `check-option-refusal.py` | **counted them as fixed** | by its own measure they *were* fixed — the `unwrap_or` was gone |
+| self-test rungs | silent | no rung asserted on those arms' text |
+
+So the single visible trace was in the wording of a message that no test reads,
+in code that every gate had just scored as an improvement.
+
+**Why this is the same defect one level up.** The whole point of the operand
+helpers is to stop the shell answering a question it could not read with a
+confident, specific, invented answer. A diagnostic that names the wrong command
+*is* a confident, specific, invented answer — about provenance instead of about
+a value. The fix reproduced the bug it was fixing, inside its own machinery.
+
+**The gate: `scripts/check-shell-message-names.py`.** Decidable rather than
+heuristic, because the shell already writes down the answer. `kshell.rs`
+dispatches on the typed word:
+
+```rust
+"webcam" | "cam" => cmd_webcam(args),
+```
+
+so the set of names a function may legitimately call itself is exactly the set
+of literals in its own dispatch arm. That is also why the obvious rule — "the
+literal must equal the `cmd_` suffix" — is wrong: `cmd_vdesktop` correctly says
+`vd` and `cmd_webcam` correctly says `cam`, because those are the short names
+their usage lines use, and both are in the arm.
+
+It checks `required_num`, `optional_num`, `readable_num`, `readable_hex` and
+`end_help_arm`, and it **starts at zero** — 523 name-bearing calls across 749
+dispatch entries, no mismatch once the seven were corrected. Per
+design-decisions.md §635 that is the bar for a new gate; had it needed a
+baseline, it would have been narrowed until it did not. A `cmd_` function with
+no dispatch arm is reported too: a name-bearing call there has no set of
+legitimate names to be checked against, and was almost certainly copied in.
+
+Wired into `scripts/boot-test.sh` fixture-first, like its siblings — the four
+fixtures (a clean tree with aliases, a name copied from another command, a name
+that dispatches to nothing, a function with no dispatch arm) are graded by
+`--self-test` before the real file is inspected, so a collapsed checker cannot
+report a clean tree in the same words as a clean tree.
+
+**The lesson that generalises past this file.** A whole-file `replace_all` is
+safe only if the text is unique to the target, and *the way to find out is to
+count the matches first* — which is cheap, and which was done for four of the
+six replacements in that batch and skipped for two. The two that were skipped
+are the two that leaked. More generally: when a mechanical edit carries a
+*name* along with the code, the name is the part that will be wrong, because it
+is the only part the compiler is not reading.
+
+Self-test rung 104 asserts the corrected case in the serial log as well
+(`filelock pid 1O` must name `filelock` and must not contain `epollstat`), so
+the invariant is pinned both statically and at runtime.

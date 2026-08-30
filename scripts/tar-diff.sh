@@ -941,6 +941,28 @@ plain_case 'no mode given'
 plain_case '-f with no argument'         -cf
 plain_case '-C with no argument'         -xC
 
+# More than one mode. This one is not cosmetic: three independent booleans let
+# the last letter win, so `tar -cxf a.tar dir` *created* the archive it was
+# meant to unpack. The archive is named but does not exist, because the refusal
+# happens while the arguments are still being read — if either side ever gets
+# as far as opening it, the case is already wrong.
+plain_case 'two modes, clustered'        -cx
+plain_case 'two modes, separate'         -c -x
+plain_case 'two modes, the other order'  -x -c
+plain_case 'two modes and a file'        -cxf nosuch.tar tree
+plain_case 'two modes, long'             --create --extract
+plain_case 'two modes, an alias'         --create --get
+# Repeating one mode, or naming it twice under its two names, is not a
+# conflict: the test is whether the value would change. These have to actually
+# *run*, so they are given a real archive.
+#
+# `-t` is deliberately absent from this group: repeating it is accepted, but it
+# also bumps the verbosity counter, so `-tt` prints the *long* listing and the
+# case would be testing two things at once. The counter has its own cases.
+plain_case 'the same mode twice'         -c -cf o.tar tree/a.txt
+plain_case 'one mode under two names'    -x --get -f ref.tar -C od
+plain_case 'a mode and its alias'        --extract --get -f ref.tar -C od
+
 # ===========================================================================
 # 7. the old option style
 # ===========================================================================

@@ -471,9 +471,9 @@ enum Request {
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct TarArgs {
-    create: bool,
-    extract: bool,
-    list: bool,
+    /// Which operation was asked for, as one setting rather than three flags.
+    /// See [`Mode`].
+    mode: Mode,
     verbose: bool,
     /// `-p`, `--same-permissions`: restore the stored mode exactly, umask and
     /// setuid bits included. Without it a non-root extraction applies
@@ -487,6 +487,67 @@ struct TarArgs {
     archive_file: Option<OsString>,
     directory: Option<OsString>,
     files: Vec<OsString>,
+}
+
+/// Which of tar's operations the command line asked for.
+///
+/// **One setting, not three booleans**, for the same reason [`OldFiles`] is one
+/// setting: the difference is observable. GNU refuses a second, *different*
+/// mode with `You may not specify more than one '-Acdtrux', '--delete' or
+/// '--test-label' option` at exit 2, while repeating the same one — `tar -x -x`,
+/// or `-x --get`, which are two spellings of one mode — is fine. Independent
+/// flags give neither behaviour: they silently let the last letter win, which
+/// is what this tar used to do. `tar -cxf a.tar dir` **created** an archive
+/// where GNU refuses the command line, so a mistyped `-cxf` for `-xf` destroyed
+/// the archive it was meant to unpack. Measured, `tar-mode1.sh`.
+///
+/// The letters GNU lists that this tar does not implement — `-A`, `-r`, `-u`,
+/// `-d`, `--delete`, `--test-label` — are not modes here. They are refused by
+/// name as unimplemented (see [`unsupported`]), so `tar -c --delete` says
+/// `--delete` rather than GNU's sentence about two modes. Both refuse; naming
+/// the option the caller actually typed is the more useful of the two, and
+/// pretending to have a mode in order to reproduce a conflict message about it
+/// would be the wrong trade.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+enum Mode {
+    /// No mode letter was given. `tar -f a.tar` is this, and it is an error —
+    /// but a different one, reported by `main` rather than by the parser.
+    #[default]
+    Unset,
+    /// `-c`, `--create`.
+    Create,
+    /// `-x`, `--extract`, `--get`.
+    Extract,
+    /// `-t`, `--list`.
+    List,
+}
+
+impl Mode {
+    /// Adopt `wanted`, or report the conflict with what was already chosen.
+    ///
+    /// The sentence is GNU's verbatim, **double space and all**: it reads
+    /// `… '--delete' or  '--test-label' option`, with two spaces after `or`,
+    /// because that is what is in tar's source string and a differential
+    /// harness compares bytes. Measured, `tar-mode1.sh`.
+    ///
+    /// The status is [`EXIT_FATAL`] (2) rather than [`EXIT_USAGE`] (64) for the
+    /// reason set out at [`OldFiles::choose`]: this is tar's own `USAGE_ERROR`,
+    /// not argp's complaint about its option table.
+    fn choose(&mut self, wanted: Self) -> Result<(), getopt::Error> {
+        if *self != Self::Unset && *self != wanted {
+            return Err(getopt::Error {
+                sentence:
+                    "You may not specify more than one '-Acdtrux', '--delete' or  '--test-label' \
+                     option"
+                        .to_string(),
+                referral: None,
+                status: EXIT_FATAL,
+            });
+        }
+        *self = wanted;
+        Ok(())
+    }
 }
 
 /// What extraction does about an entry that is *already there*.
@@ -642,9 +703,11 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // `tar --help --frobnicate` print help and `tar --frobnicate
             // --help` an error. See [`Request`].
             Opt::Short(b'?', _) => return Ok(Request::Help),
-            Opt::Short(b'c', _) => out.create = true,
-            Opt::Short(b'x', _) => out.extract = true,
-            Opt::Short(b't', _) => out.list = true,
+            // The three mode letters, through the check that makes naming two
+            // *different* ones an error and repeating one harmless. See [`Mode`].
+            Opt::Short(b'c', _) => out.mode.choose(Mode::Create)?,
+            Opt::Short(b'x', _) => out.mode.choose(Mode::Extract)?,
+            Opt::Short(b't', _) => out.mode.choose(Mode::List)?,
             Opt::Short(b'v', _) => out.verbose = true,
             Opt::Short(b'p', _) => out.same_permissions = true,
             Opt::Short(b'k', _) => out.old_files.choose(OldFiles::Keep)?,
@@ -661,12 +724,13 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // Long names, as the *table* spells them: an abbreviation has
             // already been resolved, so `--extr` arrives here as `extract`.
             Opt::Long(name, value) => match name {
-                "create" => out.create = true,
+                "create" => out.mode.choose(Mode::Create)?,
                 // GNU's own alias pair for `-x`, and likewise `-p` below. Both
                 // spellings are separate table entries because `getopt_long`
-                // matches on names; they converge here.
-                "extract" | "get" => out.extract = true,
-                "list" => out.list = true,
+                // matches on names; they converge here — which is why `tar -x
+                // --get` is accepted and `tar -x --list` is not.
+                "extract" | "get" => out.mode.choose(Mode::Extract)?,
+                "list" => out.mode.choose(Mode::List)?,
                 "verbose" => out.verbose = true,
                 "preserve-permissions" | "same-permissions" => out.same_permissions = true,
                 "file" => out.archive_file = value,
@@ -932,27 +996,28 @@ fn main() {
     // "some members failed" survives to the caller. A tool that reports 0
     // after writing half an archive is worse than one that fails outright:
     // the script that invoked it deletes the source and moves on.
-    let status = if parsed.create {
-        // The one case where the member list is a diagnostic rather than
-        // output: with no `-f`, the archive itself is on stdout, and a name
-        // printed there would be a block of the archive.
-        let verbose = match (parsed.verbose, parsed.archive_file.is_some()) {
-            (false, _) => Verbose::Off,
-            (true, true) => Verbose::Stdout,
-            (true, false) => Verbose::Stderr,
-        };
-        #[cfg(unix)]
-        {
-            do_create(parsed.archive_file.as_deref(), &parsed.files, verbose)
+    let status = match parsed.mode {
+        Mode::Create => {
+            // The one case where the member list is a diagnostic rather than
+            // output: with no `-f`, the archive itself is on stdout, and a name
+            // printed there would be a block of the archive.
+            let verbose = match (parsed.verbose, parsed.archive_file.is_some()) {
+                (false, _) => Verbose::Off,
+                (true, true) => Verbose::Stdout,
+                (true, false) => Verbose::Stderr,
+            };
+            #[cfg(unix)]
+            {
+                do_create(parsed.archive_file.as_deref(), &parsed.files, verbose)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = verbose;
+                diag!("tar: create mode is unix-only on this build");
+                EXIT_FATAL
+            }
         }
-        #[cfg(not(unix))]
-        {
-            let _ = verbose;
-            diag!("tar: create mode is unix-only on this build");
-            EXIT_FATAL
-        }
-    } else if parsed.extract {
-        do_extract(
+        Mode::Extract => do_extract(
             parsed.archive_file.as_deref(),
             parsed.directory.as_deref(),
             if parsed.verbose {
@@ -963,23 +1028,30 @@ fn main() {
             &parsed.files,
             parsed.same_permissions,
             parsed.old_files,
-        )
-    } else if parsed.list {
-        do_list_main(
+        ),
+        Mode::List => do_list_main(
             parsed.archive_file.as_deref(),
             parsed.verbose,
             &parsed.files,
-        )
-    } else {
-        // GNU's own sentence, listing options this tar does not have. That is
-        // deliberate: the message tells the reader what the *format* accepts,
-        // and a user who reaches for `-r` after reading it gets a specific
-        // `invalid option` rather than being told twice that they typed
-        // nothing. The status is 2, not argp's 64 — this is not a malformed
-        // command line, it is a well-formed one that asked for no operation.
-        diag!("tar: You must specify one of the '-Acdtrux', '--delete' or '--test-label' options");
-        diag!("{TRY_HELP}");
-        EXIT_FATAL
+        ),
+        Mode::Unset => {
+            // GNU's own sentence, listing options this tar does not have. That
+            // is deliberate: the message tells the reader what the *format*
+            // accepts, and a user who reaches for `-r` after reading it gets a
+            // specific `invalid option` rather than being told twice that they
+            // typed nothing. The status is 2, not argp's 64 — this is not a
+            // malformed command line, it is a well-formed one that asked for no
+            // operation.
+            //
+            // Note the single space before `'--test-label'` here where
+            // [`Mode::choose`]'s sentence has two. Both are copied from GNU as
+            // they stand; the doubled space is in the other string only.
+            diag!(
+                "tar: You must specify one of the '-Acdtrux', '--delete' or '--test-label' options"
+            );
+            diag!("{TRY_HELP}");
+            EXIT_FATAL
+        }
     };
 
     process::exit(status);
@@ -4806,7 +4878,7 @@ mod tests {
     #[test]
     fn parse_create_with_file() {
         let a = run_args(&s(&["-c", "-f", "out.tar", "a", "b"])).unwrap();
-        assert!(a.create);
+        assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.files, s(&["a", "b"]));
     }
@@ -4815,7 +4887,7 @@ mod tests {
     fn parse_clustered_create_verbose_file() {
         // -cvf out.tar a -- the f consumes the next argv element.
         let a = run_args(&s(&["-cvf", "out.tar", "a"])).unwrap();
-        assert!(a.create);
+        assert_eq!(a.mode, Mode::Create);
         assert!(a.verbose);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.files, s(&["a"]));
@@ -4824,7 +4896,7 @@ mod tests {
     #[test]
     fn parse_extract_with_directory() {
         let a = run_args(&s(&["-x", "-C", "/tmp", "-f", "in.tar"])).unwrap();
-        assert!(a.extract);
+        assert_eq!(a.mode, Mode::Extract);
         assert_eq!(a.directory.as_deref(), Some(OsStr::new("/tmp")));
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("in.tar")));
     }
@@ -4832,7 +4904,7 @@ mod tests {
     #[test]
     fn parse_list() {
         let a = run_args(&s(&["-tf", "x.tar"])).unwrap();
-        assert!(a.list);
+        assert_eq!(a.mode, Mode::List);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("x.tar")));
     }
 
@@ -4865,7 +4937,7 @@ mod tests {
     fn parse_files_with_dashes_handled() {
         // Bare positional arg starting with non-dash is a file.
         let a = run_args(&s(&["-c", "f1", "f2"])).unwrap();
-        assert!(a.create);
+        assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.files, s(&["f1", "f2"]));
     }
 
@@ -4878,7 +4950,7 @@ mod tests {
     #[test]
     fn parse_keeps_an_operand_that_is_not_utf8() {
         let a = run_args(&b(&[b"-c", b"caf\xe9", b"ok"])).unwrap();
-        assert!(a.create);
+        assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.files, b(&[b"caf\xe9", b"ok"]));
         // Not merely "did not crash": the bytes are the ones passed in, so the
         // file that gets archived is the file that was named.
@@ -4895,7 +4967,7 @@ mod tests {
     #[test]
     fn parse_keeps_a_dash_c_value_that_is_not_utf8() {
         let a = run_args(&b(&[b"-x", b"-C", b"/tmp/d\x80r"])).unwrap();
-        assert!(a.extract);
+        assert_eq!(a.mode, Mode::Extract);
         let d = a.directory.unwrap();
         assert_eq!(os_bytes(&d).as_ref(), b"/tmp/d\x80r");
     }
@@ -4930,7 +5002,8 @@ mod tests {
             "x",
         ]))
         .unwrap();
-        assert!(a.create && a.verbose && a.same_permissions);
+        assert_eq!(a.mode, Mode::Create);
+        assert!(a.verbose && a.same_permissions);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.directory.as_deref(), Some(OsStr::new("/tmp")));
         assert_eq!(a.files, s(&["x"]));
@@ -4945,7 +5018,7 @@ mod tests {
             s(&["--extract", "--file", "in.tar"]),
         ] {
             let a = run_args(&argv).unwrap();
-            assert!(a.extract);
+            assert_eq!(a.mode, Mode::Extract);
             assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("in.tar")));
         }
     }
@@ -4953,8 +5026,8 @@ mod tests {
     #[test]
     fn parse_accepts_gnus_alias_spellings() {
         // Two names, one option, in both of GNU's pairs.
-        assert!(run_args(&s(&["--get"])).unwrap().extract);
-        assert!(run_args(&s(&["--extract"])).unwrap().extract);
+        assert_eq!(run_args(&s(&["--get"])).unwrap().mode, Mode::Extract);
+        assert_eq!(run_args(&s(&["--extract"])).unwrap().mode, Mode::Extract);
         assert!(
             run_args(&s(&["--same-permissions"]))
                 .unwrap()
@@ -4965,6 +5038,80 @@ mod tests {
                 .unwrap()
                 .same_permissions
         );
+    }
+
+    #[test]
+    fn naming_two_different_modes_is_a_usage_error() {
+        // The bug this replaced: three independent booleans let the last letter
+        // win, so `tar -cxf a.tar dir` *created* the archive it was meant to
+        // unpack. GNU refuses the command line instead, and the wording is the
+        // one thing here worth reading twice — it carries a double space after
+        // `or`, which is in GNU's source string and so is in ours.
+        const CONFLICT: &str =
+            "You may not specify more than one '-Acdtrux', '--delete' or  '--test-label' option";
+        for argv in [
+            s(&["-cx"]),
+            s(&["-c", "-x"]),
+            s(&["-x", "-c"]),
+            s(&["-ct"]),
+            s(&["-tx"]),
+            s(&["-cxf", "a.tar", "dir"]),
+            s(&["--create", "--extract"]),
+            s(&["--create", "--get"]),
+            s(&["-x", "--list"]),
+            // The old style reaches the same check, since it is a splice into
+            // argv and not a path of its own.
+            s(&["cxf", "a.tar", "dir"]),
+        ] {
+            let e = run_args(&argv).unwrap_err();
+            assert_eq!(e.sentence, CONFLICT, "{argv:?}");
+            // tar's own USAGE_ERROR, so 2 rather than argp's 64.
+            assert_eq!(e.status, EXIT_FATAL, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn naming_one_mode_twice_or_by_two_names_is_allowed() {
+        // The test is whether the *value* would change, not whether a letter
+        // was seen twice — the same rule the overwrite family follows, and the
+        // reason both are one setting rather than a set of flags. `-x --get` is
+        // the case that shows it is about the value: two different spellings,
+        // one mode, accepted.
+        assert_eq!(run_args(&s(&["-x", "-x"])).unwrap().mode, Mode::Extract);
+        assert_eq!(
+            run_args(&s(&["-x", "-x", "-x"])).unwrap().mode,
+            Mode::Extract
+        );
+        assert_eq!(run_args(&s(&["-x", "--get"])).unwrap().mode, Mode::Extract);
+        assert_eq!(
+            run_args(&s(&["--extract", "--get"])).unwrap().mode,
+            Mode::Extract
+        );
+        assert_eq!(
+            run_args(&s(&["-c", "--create"])).unwrap().mode,
+            Mode::Create
+        );
+    }
+
+    #[test]
+    fn a_second_mode_is_refused_before_help_is_reached() {
+        // `--help` and `--version` return the moment they are parsed, so what
+        // decides is argv order — and GNU agrees: `tar -cx --help` is the
+        // conflict, not the help text. Measured, `tar-mode1.sh`.
+        assert!(run_args(&s(&["-cx", "--help"])).is_err());
+        assert!(run_args(&s(&["-cx", "--version"])).is_err());
+        assert!(matches!(
+            parse_args(&s(&["--help", "-cx"])),
+            Ok(Request::Help)
+        ));
+    }
+
+    #[test]
+    fn no_mode_at_all_is_not_the_parsers_error() {
+        // It is a well-formed command line that asked for no operation, so the
+        // parser accepts it and `main` reports it — with a *different* sentence
+        // (`You must specify one of …`, single-spaced) from the conflict one.
+        assert_eq!(run_args(&s(&["-f", "a.tar"])).unwrap().mode, Mode::Unset);
     }
 
     #[test]
@@ -5038,7 +5185,8 @@ mod tests {
         // `tar cvf a.tar dir` — no dash anywhere, and the `f`'s value is the
         // word after the whole cluster, not after the `f`.
         let a = run_args(&s(&["cvf", "a.tar", "dir"])).unwrap();
-        assert!(a.create && a.verbose);
+        assert_eq!(a.mode, Mode::Create);
+        assert!(a.verbose);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("a.tar")));
         assert_eq!(a.files, s(&["dir"]));
     }
@@ -5081,7 +5229,7 @@ mod tests {
         // rule — but it is the one edge a caller hits by accident, from an
         // unset shell variable. Measured: `tar '' -tf a.tar` lists.
         let a = run_args(&s(&["", "-tf", "a.tar"])).unwrap();
-        assert!(a.list);
+        assert_eq!(a.mode, Mode::List);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("a.tar")));
         assert!(a.files.is_empty());
     }
@@ -5094,7 +5242,8 @@ mod tests {
         // words (`invalid option -- 'Q'`, status 64) rather than by anything
         // that knows about old options.
         let a = run_args(&s(&["cf", "a.tar", "--verbose", "dir"])).unwrap();
-        assert!(a.create && a.verbose);
+        assert_eq!(a.mode, Mode::Create);
+        assert!(a.verbose);
         assert_eq!(a.files, s(&["dir"]));
 
         let a = run_args(&s(&["cf", "a.tar", "--", "-dir"])).unwrap();
@@ -5179,7 +5328,8 @@ mod tests {
         // `--extr` is a prefix of `--extract` alone. The resolved name is what
         // reaches the match arm, so no arm needs to know about abbreviations.
         let a = run_args(&s(&["--extr", "--verbo"])).unwrap();
-        assert!(a.extract && a.verbose);
+        assert_eq!(a.mode, Mode::Extract);
+        assert!(a.verbose);
     }
 
     #[test]
@@ -5280,7 +5430,7 @@ mod tests {
         // branch and was looked for inside the archive, so this exited 2 with
         // `tar: --: Not found in archive` where GNU exits 0.
         let a = run_args(&s(&["-xf", "t.tar", "--", "a"])).unwrap();
-        assert!(a.extract);
+        assert_eq!(a.mode, Mode::Extract);
         assert_eq!(a.files, s(&["a"]));
     }
 
@@ -5289,7 +5439,7 @@ mod tests {
         // The point of the terminator: a member really called `--exclude` is
         // archivable, and a member called `-c` does not turn on create.
         let a = run_args(&s(&["-c", "--", "--exclude", "-c"])).unwrap();
-        assert!(a.create);
+        assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.files, s(&["--exclude", "-c"]));
     }
 
@@ -5298,7 +5448,8 @@ mod tests {
         // `-fout.tar` used to be read as more option letters and failed on the
         // `o`: `invalid option -- 'o'`.
         let a = run_args(&s(&["-cvfout.tar", "x"])).unwrap();
-        assert!(a.create && a.verbose);
+        assert_eq!(a.mode, Mode::Create);
+        assert!(a.verbose);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.files, s(&["x"]));
     }
@@ -5308,7 +5459,8 @@ mod tests {
         // Measured: `tar -tf t.tar a --verbose` gives a long listing, so an
         // option after an operand is still an option.
         let a = run_args(&s(&["-tf", "t.tar", "a", "--verbose"])).unwrap();
-        assert!(a.list && a.verbose);
+        assert_eq!(a.mode, Mode::List);
+        assert!(a.verbose);
         assert_eq!(a.files, s(&["a"]));
     }
 

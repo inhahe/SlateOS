@@ -1,48 +1,43 @@
-#![allow(dead_code)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(unused_imports)]
-
-//! Slate OS Reversi (Othello) — a full Reversi game with AI opponent.
+//! Slate OS Reversi (Othello) -- a full game against an AI opponent.
 //!
-//! Features an 8x8 board with standard rules, legal move validation,
-//! piece flipping in all 8 directions, pass detection, game end detection,
-//! a minimax AI with alpha-beta pruning and positional evaluation,
-//! score display, move history, and a classic green board rendered with
-//! Catppuccin Mocha theming.
+//! An 8x8 board with the standard rules: legal-move validation, flipping in
+//! all eight directions, passing when a player has no move, game end and
+//! scoring. The opponent is a minimax search with alpha-beta pruning and a
+//! positional evaluation. Alongside the board sit the score, the move count,
+//! the last move and a scrolling history.
+//!
+//! The whole picture is solved from the size the window reports each frame:
+//! there is no built-in size the drawing falls back on, and every box a click
+//! is tested against is one the drawing pass recorded. Every square is
+//! clickable as well as reachable by the arrow keys.
+//!
+//! Themed with the Catppuccin Mocha palette.
+
+use std::cmp::Ordering;
+use std::process::ExitCode;
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
+use oswindow::app::{self, App, Response};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
 const SURFACE0: Color = Color::from_hex(0x313244);
 const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
 const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
 const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
 const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
 
-// ── Board colors (classic Othello green) ────────────────────────────
+// ── Board colours ───────────────────────────────────────────────────
 const BOARD_GREEN: Color = Color::from_hex(0x2E7D32);
 const BOARD_GREEN_LIGHT: Color = Color::from_hex(0x388E3C);
 const BOARD_BORDER: Color = Color::from_hex(0x1B5E20);
@@ -54,22 +49,31 @@ const WHITE_PIECE: Color = Color::from_hex(0xE8E8E8);
 const BLACK_PIECE_BORDER: Color = Color::from_hex(0x000000);
 const WHITE_PIECE_BORDER: Color = Color::from_hex(0xBBBBBB);
 
-// ── Layout constants ────────────────────────────────────────────────
-const CELL_SIZE: f32 = 60.0;
-const BOARD_OFFSET_X: f32 = 40.0;
-const BOARD_OFFSET_Y: f32 = 70.0;
-const BOARD_SIZE: usize = 8;
-const PANEL_X: f32 = BOARD_OFFSET_X + BOARD_PIXEL_SIZE + 30.0;
-const TITLE_FONT_SIZE: f32 = 22.0;
-const INFO_FONT_SIZE: f32 = 16.0;
-const LABEL_FONT_SIZE: f32 = 14.0;
-const PIECE_RADIUS: f32 = 22.0;
-const DOT_RADIUS: f32 = 6.0;
+// ── The board's dimensions ──────────────────────────────────────────
 
-// ── AI search depth ─────────────────────────────────────────────────
+/// Squares along one side.
+const BOARD_SIZE: usize = 8;
+
+/// The same count, as the signed type the row and column arithmetic uses.
+///
+/// Two spellings of one number is exactly the hazard this file was full of, so
+/// `the_two_spellings_of_the_board_size_agree` pins them together rather than
+/// a cast doing it silently: `BOARD_SIZE as i32` would need a suppressed lint
+/// here and would still be a second place the size is written.
+const SIDE: i32 = 8;
+
+/// The highest legal row or column index.
+const LAST: i32 = SIDE - 1;
+
+/// How deep the search looks.
 const AI_DEPTH: i32 = 4;
 
-// ── Directions for flipping (row_delta, col_delta) ──────────────────
+/// The size the window asks for when it opens. Everything afterwards comes
+/// from the size the window reports, not from this.
+const WINDOW_WIDTH: f32 = 900.0;
+const WINDOW_HEIGHT: f32 = 640.0;
+
+/// The eight directions a flank can run in.
 const DIRECTIONS: [(i32, i32); 8] = [
     (-1, -1),
     (-1, 0),
@@ -81,23 +85,245 @@ const DIRECTIONS: [(i32, i32); 8] = [
     (1, 1),
 ];
 
-// ── Positional weights for AI evaluation ────────────────────────────
-// Corners are extremely valuable, edges are good, squares adjacent to
-// corners (X-squares and C-squares) are dangerous.
+/// How much each square is worth to the evaluation.
+///
+/// Corners are unflippable and so are worth most; the squares diagonally
+/// inside them hand a corner to the opponent and are worth least.
 const POSITION_WEIGHTS: [[i32; 8]; 8] = [
-    [120, -20, 20, 5, 5, 20, -20, 120],
-    [-20, -40, -5, -5, -5, -5, -40, -20],
-    [20, -5, 15, 3, 3, 15, -5, 20],
-    [5, -5, 3, 3, 3, 3, -5, 5],
-    [5, -5, 3, 3, 3, 3, -5, 5],
-    [20, -5, 15, 3, 3, 15, -5, 20],
-    [-20, -40, -5, -5, -5, -5, -40, -20],
-    [120, -20, 20, 5, 5, 20, -20, 120],
+    [100, -20, 10, 5, 5, 10, -20, 100],
+    [-20, -50, -2, -2, -2, -2, -50, -20],
+    [10, -2, -1, -1, -1, -1, -2, 10],
+    [5, -2, -1, -1, -1, -1, -2, 5],
+    [5, -2, -1, -1, -1, -1, -2, 5],
+    [10, -2, -1, -1, -1, -1, -2, 10],
+    [-20, -50, -2, -2, -2, -2, -50, -20],
+    [100, -20, 10, 5, 5, 10, -20, 100],
 ];
 
-// ── Cell state ──────────────────────────────────────────────────────
+// ── What a click can land on ────────────────────────────────────────
 
-/// Represents the state of a single board cell.
+/// Everything the drawing pass records a box for.
+///
+/// A click is answered by asking the frame what was drawn where the pointer
+/// is, so a control that moves cannot leave its hit box behind. Before this
+/// existed the board's screen position and the click arithmetic were two
+/// copies of the same constants, kept in step by nothing but care.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    /// One square, by row and column.
+    Square(u8, u8),
+    /// The whole board, behind its squares.
+    Board,
+    /// A column's `a`-`h` letter, by column.
+    ColLabel(u8),
+    /// A row's `1`-`8` number, by row.
+    RowLabel(u8),
+    Title,
+    BlackScore,
+    WhiteScore,
+    Panel,
+    Turn,
+    ScoreBar,
+    Moves,
+    EmptyCount,
+    LastMove,
+    History,
+    Help,
+    Status,
+}
+
+// ── Layout ──────────────────────────────────────────────────────────
+
+/// Where everything goes, solved from the size the window reports.
+///
+/// Every measurement below is a share of the window. The old drawing had
+/// `CELL_SIZE: f32 = 60.0`, `BOARD_OFFSET_X: f32 = 40.0` and a dozen more
+/// like them, and the window was whatever those constants happened to add up
+/// to -- which is to say the board was the wrong size at every window size but
+/// one, and unreachable off the bottom of anything shorter.
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    window: Rect,
+    header: Rect,
+    board_area: Rect,
+    panel: Rect,
+    status: Rect,
+    pad: f32,
+    title: f32,
+    font: f32,
+    small: f32,
+}
+
+impl Layout {
+    fn solve(w: f32, h: f32) -> Self {
+        let w = w.max(0.0);
+        let h = h.max(0.0);
+        // A floor so a small window is not margined by a fraction of a pixel,
+        // a ceiling so a 4K one is not margined by thirty, and a cap at half
+        // the shorter side so a window narrower than twice its own margin is
+        // not given a margin wider than the window it is a margin inside.
+        let pad = (w.min(h) * 0.02).clamp(2.0, 20.0).min(w.min(h) / 2.0);
+        let title = (h * 0.034).clamp(10.0, 30.0);
+        let font = (h * 0.025).clamp(8.0, 20.0);
+        let small = (h * 0.019).clamp(7.0, font);
+
+        // Each band takes a share of what the bands before it left, and the
+        // body is what is left when both have taken theirs. Written this way
+        // the three heights sum to exactly `h` and none of them can come out
+        // negative, so none of them needs a guard saying so.
+        let header_h = h * 0.09;
+        let rest = h - header_h;
+        let status_h = rest * 0.08;
+        let body_h = rest - status_h;
+
+        let header = Rect::new(0.0, 0.0, w, header_h);
+        let body = Rect::new(0.0, header.bottom(), w, body_h);
+        let status = Rect::new(0.0, body.bottom(), w, status_h);
+
+        // The panel is a share of the width, floored so its lines are still
+        // legible on a narrow window, capped so a wide one does not hand a
+        // quarter of the screen to six short lines, and then capped again at
+        // half the window so it can never be wider than the board it is
+        // beside.
+        let panel_w = (w * 0.26).clamp(110.0, 260.0).min(w / 2.0);
+        let board_area = Rect::new(body.x, body.y, (body.w - panel_w).max(0.0), body.h);
+        let panel = Rect::new(board_area.right(), body.y, panel_w.min(body.w), body.h);
+
+        Self {
+            window: Rect::new(0.0, 0.0, w, h),
+            header,
+            board_area,
+            panel,
+            status,
+            pad,
+            title,
+            font,
+            small,
+        }
+    }
+}
+
+// ── Board geometry ──────────────────────────────────────────────────
+
+/// Where the eight-by-eight grid is drawn, fitted to the room it was given.
+///
+/// Where a square is painted and which square a click lands in used to be
+/// computed by two copies of the same arithmetic. They are one thing here, and
+/// the drawing pass hands the result to the frame as a hit box, so the board a
+/// player sees is by construction the board a click resolves against.
+#[derive(Debug, Clone, Copy)]
+struct Grid {
+    /// The top-left of square (0, 0).
+    origin: (f32, f32),
+    /// The side of one square.
+    step: f32,
+    /// Room reserved to the left of and above the squares for a-h and 1-8.
+    label: f32,
+}
+
+impl Grid {
+    /// Fit a labelled 8x8 board into `area`.
+    ///
+    /// The square is taken from *both* axes: the room has to hold the board
+    /// and its labels either way round. Fitting to width alone is what let the
+    /// old fixed layout run the board off the bottom of any window shorter
+    /// than the one it was written for.
+    fn fit(area: Rect, label_font: f32) -> Self {
+        let side = f32_from_usize(BOARD_SIZE);
+        let label = label_font * 1.7;
+        let step = ((area.w - label).max(0.0) / side)
+            .min((area.h - label).max(0.0) / side)
+            .max(0.0);
+        let board = step * side;
+        // The labelled board, centred in what it was fitted to.
+        let left = area.x + (area.w - board - label).max(0.0) / 2.0;
+        let top = area.y + (area.h - board - label).max(0.0) / 2.0;
+        Self {
+            origin: (left + label, top + label),
+            step,
+            label,
+        }
+    }
+
+    /// The square at `(row, col)`.
+    fn square(self, row: i32, col: i32) -> Rect {
+        Rect::new(
+            self.origin.0 + f32_from_i32(col) * self.step,
+            self.origin.1 + f32_from_i32(row) * self.step,
+            self.step,
+            self.step,
+        )
+    }
+
+    /// The middle of the square at `(row, col)`, where its piece is drawn.
+    fn centre(self, row: i32, col: i32) -> (f32, f32) {
+        let r = self.square(row, col);
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// The whole board, edge to edge.
+    fn board_rect(self) -> Rect {
+        let board = self.step * f32_from_usize(BOARD_SIZE);
+        Rect::new(self.origin.0, self.origin.1, board, board)
+    }
+}
+
+/// `usize` to `f32` without a lint-suppressed cast at every call site.
+///
+/// The count of squares on a board is far below `f32`'s exact-integer range,
+/// so the conversion is lossless here; it is written once so that is stated
+/// once.
+fn f32_from_usize(v: usize) -> f32 {
+    f32::from(u16::try_from(v).unwrap_or(u16::MAX))
+}
+
+/// `i32` to `f32`, for row and column indices.
+fn f32_from_i32(v: i32) -> f32 {
+    f32::from(i16::try_from(v).unwrap_or(i16::MAX))
+}
+
+/// `u32` to `f32`, for the size a resize event reports.
+fn f32_from_u32(v: u32) -> f32 {
+    f32::from(u16::try_from(v).unwrap_or(u16::MAX))
+}
+
+/// A non-negative float to a count of rows, saturating rather than wrapping.
+///
+/// The ceiling is the number of squares on the board, which is the most moves
+/// a game can hold; a panel tall enough to want more rows than that is a panel
+/// asking for rows that do not exist.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "clamped to 0..=64 either side of the cast"
+)]
+fn count_from_f32(v: f32) -> usize {
+    let clamped = v.floor().clamp(0.0, 64.0);
+    clamped as usize
+}
+
+/// A byte index for a `Target`, saturating rather than wrapping.
+fn byte(v: i32) -> u8 {
+    u8::try_from(v).unwrap_or(u8::MAX)
+}
+
+/// `rect` shrunk by `pad` on every side, and never inside out.
+///
+/// A window narrower than twice its own padding would otherwise produce a
+/// negative width, which is not a smaller box but a box that starts to the
+/// right of where it ends.
+fn inset(rect: Rect, pad: f32) -> Rect {
+    Rect::new(
+        rect.x + pad,
+        rect.y + pad,
+        (rect.w - pad * 2.0).max(0.0),
+        (rect.h - pad * 2.0).max(0.0),
+    )
+}
+
+// ── Cells and positions ─────────────────────────────────────────────
+
+/// The state of a single square.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cell {
     Empty,
@@ -106,7 +332,7 @@ enum Cell {
 }
 
 impl Cell {
-    /// Return the opposite color, or `Empty` if empty.
+    /// The opposite colour, or `Empty` if empty.
     fn opponent(self) -> Self {
         match self {
             Cell::Black => Cell::White,
@@ -115,15 +341,13 @@ impl Cell {
         }
     }
 
-    /// Whether this cell is occupied by a piece.
+    /// Whether this square is occupied.
     fn is_piece(self) -> bool {
         self != Cell::Empty
     }
 }
 
-// ── Board position ──────────────────────────────────────────────────
-
-/// A position on the board (row, col), each in 0..8.
+/// A position on the board, each coordinate in `0..8`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Pos {
     row: i32,
@@ -135,205 +359,148 @@ impl Pos {
         Self { row, col }
     }
 
-    /// Whether this position is within the 8x8 board.
+    /// Whether this position is on the board.
     fn in_bounds(self) -> bool {
-        self.row >= 0 && self.row < 8 && self.col >= 0 && self.col < 8
+        (0..SIDE).contains(&self.row) && (0..SIDE).contains(&self.col)
     }
 }
 
-// ── Board geometry ────────────────────────────────────
-//
-// Where a cell is painted and which cell a click lands in were computed
-// independently, from the same arithmetic copied out at a dozen sites. Nothing
-// but care kept the board a player sees in the same place as the board a click
-// resolves against; these three functions are the one place it is written.
-
-/// Distance across the whole board, in pixels.
-///
-/// Reversi pieces sit *inside* the cells, so unlike go the board spans the full
-/// `BOARD_SIZE` cells rather than one less.
-const BOARD_PIXEL_SIZE: f32 = CELL_SIZE * BOARD_SIZE as f32;
-
-/// Screen coordinates of the top-left corner of a cell.
-///
-/// Row 0 is the top of the window, and that is also row *1* of the board:
-/// Othello numbers its ranks downward from the top, so `a1` is the upper-left
-/// square. Chess and go both run the other way. Because the screen and the
-/// notation agree here there is no flip to apply, and nothing for the inverse
-/// below to undo -- which is exactly why a reader might "fix" it into the chess
-/// convention, and why `the_board_is_lettered_and_numbered_the_othello_way`
-/// pins it to the published rules rather than to this comment.
-fn cell_origin(pos: Pos) -> (f32, f32) {
-    (
-        BOARD_OFFSET_X + pos.col as f32 * CELL_SIZE,
-        BOARD_OFFSET_Y + pos.row as f32 * CELL_SIZE,
-    )
-}
-
-/// Screen coordinates of the middle of a cell, where its piece is drawn.
-fn cell_center(pos: Pos) -> (f32, f32) {
-    let (x, y) = cell_origin(pos);
-    (x + CELL_SIZE / 2.0, y + CELL_SIZE / 2.0)
-}
-
-/// The cell a click at `(x, y)` lands in, or `None` if the click is off the
-/// board.
-///
-/// The bounds are checked *before* the cast rather than after: a float-to-
-/// integer cast in Rust truncates toward zero, so a point a little to the left
-/// of the board comes out as column `0` rather than as `-1`, and an "is this
-/// index in range" test performed afterwards would wave it through.
-fn cell_at(x: f32, y: f32) -> Option<Pos> {
-    let bx = x - BOARD_OFFSET_X;
-    let by = y - BOARD_OFFSET_Y;
-    if bx < 0.0 || by < 0.0 || bx >= BOARD_PIXEL_SIZE || by >= BOARD_PIXEL_SIZE {
-        return None;
-    }
-    // Truncation is the intent here -- the fraction is the position within the
-    // cell -- and the guard above is what makes the cast safe.
-    Some(Pos::new((by / CELL_SIZE) as i32, (bx / CELL_SIZE) as i32))
+/// Every position on the board, once each, in reading order.
+fn all_positions() -> impl Iterator<Item = Pos> {
+    (0..SIDE).flat_map(|row| (0..SIDE).map(move |col| Pos::new(row, col)))
 }
 
 // ── Board ───────────────────────────────────────────────────────────
 
 /// The 8x8 Reversi board.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Board {
-    cells: [[Cell; 8]; 8],
+    cells: [[Cell; BOARD_SIZE]; BOARD_SIZE],
 }
 
 impl Board {
-    /// Create a new board with the standard starting position.
+    /// The standard Othello opening: White on d4/e5, Black on d5/e4.
     fn new() -> Self {
-        let mut cells = [[Cell::Empty; 8]; 8];
-        // Standard Othello opening: White on d4/e5, Black on d5/e4
-        cells[3][3] = Cell::White;
-        cells[3][4] = Cell::Black;
-        cells[4][3] = Cell::Black;
-        cells[4][4] = Cell::White;
-        Self { cells }
+        let mut board = Self::empty();
+        board.set(Pos::new(3, 3), Cell::White);
+        board.set(Pos::new(3, 4), Cell::Black);
+        board.set(Pos::new(4, 3), Cell::Black);
+        board.set(Pos::new(4, 4), Cell::White);
+        board
     }
 
-    /// Create an empty board (for tests).
+    /// A board with nothing on it.
     fn empty() -> Self {
         Self {
-            cells: [[Cell::Empty; 8]; 8],
+            cells: [[Cell::Empty; BOARD_SIZE]; BOARD_SIZE],
         }
     }
 
-    /// Get the cell at a position.
+    /// What is on `pos`, or `Empty` for anything off the board.
     fn get(&self, pos: Pos) -> Cell {
-        if pos.in_bounds() {
-            self.cells[pos.row as usize][pos.col as usize]
-        } else {
-            Cell::Empty
-        }
+        let (Ok(r), Ok(c)) = (usize::try_from(pos.row), usize::try_from(pos.col)) else {
+            return Cell::Empty;
+        };
+        self.cells
+            .get(r)
+            .and_then(|row| row.get(c))
+            .copied()
+            .unwrap_or(Cell::Empty)
     }
 
-    /// Set the cell at a position.
-    fn set(&mut self, pos: Pos, cell: Cell) {
-        if pos.in_bounds() {
-            self.cells[pos.row as usize][pos.col as usize] = cell;
-        }
-    }
-
-    /// Count pieces of a given color.
-    fn count(&self, color: Cell) -> i32 {
-        let mut total = 0;
-        for row in &self.cells {
-            for &cell in row {
-                if cell == color {
-                    total += 1;
-                }
-            }
-        }
-        total
-    }
-
-    /// Count total occupied cells.
-    fn total_pieces(&self) -> i32 {
-        self.count(Cell::Black) + self.count(Cell::White)
-    }
-
-    /// Count empty cells.
-    fn empty_count(&self) -> i32 {
-        64 - self.total_pieces()
-    }
-
-    /// Check how many pieces would be flipped in a given direction
-    /// when `color` places a piece at `pos`.
+    /// Put `cell` on `pos`, or do nothing if `pos` is off the board.
     ///
-    /// Returns the list of positions that would be flipped.
+    /// The bounds check is the lookup itself rather than an `in_bounds` call
+    /// before it: a second place that knows how big the board is, is a second
+    /// place that can be wrong about it.
+    fn set(&mut self, pos: Pos, cell: Cell) {
+        let (Ok(r), Ok(c)) = (usize::try_from(pos.row), usize::try_from(pos.col)) else {
+            return;
+        };
+        if let Some(slot) = self.cells.get_mut(r).and_then(|row| row.get_mut(c)) {
+            *slot = cell;
+        }
+    }
+
+    /// How many squares hold `color`.
+    fn count(&self, color: Cell) -> i32 {
+        let n = self
+            .cells
+            .iter()
+            .flat_map(|row| row.iter())
+            .filter(|&&cell| cell == color)
+            .count();
+        i32::try_from(n).unwrap_or(i32::MAX)
+    }
+
+    /// How many squares are still empty.
+    ///
+    /// Counted, not subtracted. It used to be `64 - total_pieces()`, with the
+    /// 64 written out as a literal and `total_pieces` existing for no other
+    /// purpose -- a third place that knew how big the board is, and a helper
+    /// that only served it.
+    fn empty_count(&self) -> i32 {
+        self.count(Cell::Empty)
+    }
+
+    /// The opponent pieces `color` would flank by playing `pos`, walking one
+    /// direction only.
+    ///
+    /// Empty when the walk runs off the board or reaches an empty square: a
+    /// run of opponent pieces is only flanked if one's own piece closes it.
     fn flips_in_direction(&self, pos: Pos, color: Cell, dr: i32, dc: i32) -> Vec<Pos> {
         let opponent = color.opponent();
         let mut flipped = Vec::new();
-        let mut r = pos.row + dr;
-        let mut c = pos.col + dc;
+        let mut at = Pos::new(pos.row.saturating_add(dr), pos.col.saturating_add(dc));
 
-        // Walk in the direction, collecting opponent pieces
-        while (0..8).contains(&r) && (0..8).contains(&c) {
-            let current = self.cells[r as usize][c as usize];
+        while at.in_bounds() {
+            let current = self.get(at);
             if current == opponent {
-                flipped.push(Pos::new(r, c));
+                flipped.push(at);
             } else if current == color {
-                // Found our own piece — these opponents are flanked
+                // Our own piece closes the run: everything between is flanked.
                 return flipped;
             } else {
-                // Empty cell — no flank
                 break;
             }
-            r += dr;
-            c += dc;
+            at = Pos::new(at.row.saturating_add(dr), at.col.saturating_add(dc));
         }
 
-        // Ran off the board or hit empty — no valid flank
         Vec::new()
     }
 
-    /// Get all positions that would be flipped if `color` places at `pos`.
+    /// Everything `color` would flip by playing `pos`, in all eight
+    /// directions.
     fn get_flips(&self, pos: Pos, color: Cell) -> Vec<Pos> {
         if !pos.in_bounds() || self.get(pos) != Cell::Empty {
             return Vec::new();
         }
-
-        let mut all_flips = Vec::new();
-        for &(dr, dc) in &DIRECTIONS {
-            let mut flips = self.flips_in_direction(pos, color, dr, dc);
-            all_flips.append(&mut flips);
-        }
-        all_flips
+        DIRECTIONS
+            .iter()
+            .flat_map(|&(dr, dc)| self.flips_in_direction(pos, color, dr, dc))
+            .collect()
     }
 
-    /// Check whether placing `color` at `pos` is a legal move.
+    /// Whether `color` may play `pos`: an empty square that flips something.
     fn is_legal_move(&self, pos: Pos, color: Cell) -> bool {
         if !pos.in_bounds() || self.get(pos) != Cell::Empty {
             return false;
         }
-        // Must flip at least one opponent piece
-        for &(dr, dc) in &DIRECTIONS {
-            if !self.flips_in_direction(pos, color, dr, dc).is_empty() {
-                return true;
-            }
-        }
-        false
+        DIRECTIONS
+            .iter()
+            .any(|&(dr, dc)| !self.flips_in_direction(pos, color, dr, dc).is_empty())
     }
 
-    /// Get all legal moves for a color.
+    /// Every square `color` may play.
     fn legal_moves(&self, color: Cell) -> Vec<Pos> {
-        let mut moves = Vec::new();
-        for row in 0..8 {
-            for col in 0..8 {
-                let pos = Pos::new(row, col);
-                if self.is_legal_move(pos, color) {
-                    moves.push(pos);
-                }
-            }
-        }
-        moves
+        all_positions()
+            .filter(|&pos| self.is_legal_move(pos, color))
+            .collect()
     }
 
-    /// Place a piece and flip all flanked opponent pieces.
-    /// Returns the number of pieces flipped, or 0 if the move is illegal.
+    /// Play `pos` and flip what it flanks, returning how many pieces turned.
+    ///
+    /// Zero, and nothing changed, if the move is illegal.
     fn make_move(&mut self, pos: Pos, color: Cell) -> i32 {
         let flips = self.get_flips(pos, color);
         if flips.is_empty() {
@@ -343,88 +510,90 @@ impl Board {
         for flip_pos in &flips {
             self.set(*flip_pos, color);
         }
-        flips.len() as i32
+        i32::try_from(flips.len()).unwrap_or(i32::MAX)
     }
 
-    /// Whether the given color has any legal move.
+    /// Whether `color` has any move at all.
     fn has_legal_move(&self, color: Cell) -> bool {
-        for row in 0..8 {
-            for col in 0..8 {
-                if self.is_legal_move(Pos::new(row, col), color) {
-                    return true;
-                }
-            }
-        }
-        false
+        all_positions().any(|pos| self.is_legal_move(pos, color))
     }
 
-    /// Whether the game is over (neither player can move).
+    /// Whether neither player can move, which is how Reversi ends.
     fn is_game_over(&self) -> bool {
         !self.has_legal_move(Cell::Black) && !self.has_legal_move(Cell::White)
     }
 
-    /// Determine the winner. Returns `Cell::Empty` for a tie.
+    /// Who has more pieces, or `Cell::Empty` for a tie.
     fn winner(&self) -> Cell {
-        let black = self.count(Cell::Black);
-        let white = self.count(Cell::White);
-        if black > white {
-            Cell::Black
-        } else if white > black {
-            Cell::White
-        } else {
-            Cell::Empty
+        match self.count(Cell::Black).cmp(&self.count(Cell::White)) {
+            Ordering::Greater => Cell::Black,
+            Ordering::Less => Cell::White,
+            Ordering::Equal => Cell::Empty,
         }
     }
 }
 
 // ── AI ──────────────────────────────────────────────────────────────
 
-/// Evaluate the board from the perspective of `color`.
+/// The four corners, which are the squares that can never be flipped back.
+fn corners() -> [Pos; 4] {
+    [
+        Pos::new(0, 0),
+        Pos::new(0, LAST),
+        Pos::new(LAST, 0),
+        Pos::new(LAST, LAST),
+    ]
+}
+
+/// Score the board from `color`'s point of view: material, position,
+/// mobility, corners.
+///
+/// Every term saturates. The honest bound is far below `i32`'s range -- 64
+/// squares of at most 100 each, plus 64 moves of 5, plus four corners of 50 --
+/// but saturating says so in the code rather than in a comment nobody has to
+/// keep true.
 fn evaluate(board: &Board, color: Cell) -> i32 {
     let opponent = color.opponent();
-    let mut score = 0;
+    let mut score = board
+        .count(color)
+        .saturating_sub(board.count(opponent))
+        .saturating_mul(10);
 
-    // Piece count difference
-    let my_pieces = board.count(color);
-    let opp_pieces = board.count(opponent);
-    score += (my_pieces - opp_pieces) * 10;
-
-    // Positional weights
-    for (row, weights_row) in POSITION_WEIGHTS.iter().enumerate().take(8) {
-        for (col, &w) in weights_row.iter().enumerate().take(8) {
-            let cell = board.cells[row][col];
-            if cell == color {
-                score += w;
-            } else if cell == opponent {
-                score -= w;
-            }
+    for pos in all_positions() {
+        let Some(w) = weight_at(pos) else { continue };
+        let cell = board.get(pos);
+        if cell == color {
+            score = score.saturating_add(w);
+        } else if cell == opponent {
+            score = score.saturating_sub(w);
         }
     }
 
-    // Mobility: having more moves is advantageous
-    let my_moves = board.legal_moves(color).len() as i32;
-    let opp_moves = board.legal_moves(opponent).len() as i32;
-    score += (my_moves - opp_moves) * 5;
+    let my_moves = i32::try_from(board.legal_moves(color).len()).unwrap_or(i32::MAX);
+    let opp_moves = i32::try_from(board.legal_moves(opponent).len()).unwrap_or(i32::MAX);
+    score = score.saturating_add(my_moves.saturating_sub(opp_moves).saturating_mul(5));
 
-    // Corner occupancy bonus
-    let corners = [
-        Pos::new(0, 0),
-        Pos::new(0, 7),
-        Pos::new(7, 0),
-        Pos::new(7, 7),
-    ];
-    for &corner in &corners {
-        if board.get(corner) == color {
-            score += 50;
-        } else if board.get(corner) == opponent {
-            score -= 50;
+    for corner in corners() {
+        let cell = board.get(corner);
+        if cell == color {
+            score = score.saturating_add(50);
+        } else if cell == opponent {
+            score = score.saturating_sub(50);
         }
     }
 
     score
 }
 
-/// Minimax with alpha-beta pruning.
+/// What `pos` is worth positionally, or `None` if it is off the board.
+fn weight_at(pos: Pos) -> Option<i32> {
+    let (Ok(r), Ok(c)) = (usize::try_from(pos.row), usize::try_from(pos.col)) else {
+        return None;
+    };
+    POSITION_WEIGHTS.get(r).and_then(|row| row.get(c)).copied()
+}
+
+/// Minimax with alpha-beta pruning, `depth` plies from here.
 fn minimax(
     board: &Board,
     depth: i32,
@@ -433,7 +602,7 @@ fn minimax(
     maximizing: bool,
     ai_color: Cell,
 ) -> i32 {
-    if depth == 0 || board.is_game_over() {
+    if depth <= 0 || board.is_game_over() {
         return evaluate(board, ai_color);
     }
 
@@ -444,87 +613,70 @@ fn minimax(
     };
 
     let moves = board.legal_moves(current_color);
-
     if moves.is_empty() {
-        // Current player must pass — switch to opponent
-        return minimax(board, depth - 1, alpha, beta, !maximizing, ai_color);
+        // A player with no move passes; the ply is still spent, which is what
+        // stops a board where both sides can pass from recursing forever.
+        return minimax(
+            board,
+            depth.saturating_sub(1),
+            alpha,
+            beta,
+            !maximizing,
+            ai_color,
+        );
     }
 
-    if maximizing {
-        let mut best = i32::MIN;
-        for mv in &moves {
-            let mut new_board = board.clone();
-            new_board.make_move(*mv, current_color);
-            let val = minimax(&new_board, depth - 1, alpha, beta, false, ai_color);
-            if val > best {
-                best = val;
-            }
-            if best > alpha {
-                alpha = best;
-            }
-            if alpha >= beta {
-                break;
-            }
+    let mut best = if maximizing { i32::MIN } else { i32::MAX };
+    for mv in &moves {
+        let mut next = board.clone();
+        next.make_move(*mv, current_color);
+        let val = minimax(
+            &next,
+            depth.saturating_sub(1),
+            alpha,
+            beta,
+            !maximizing,
+            ai_color,
+        );
+        if maximizing {
+            best = best.max(val);
+            alpha = alpha.max(best);
+        } else {
+            best = best.min(val);
+            beta = beta.min(best);
         }
-        best
-    } else {
-        let mut best = i32::MAX;
-        for mv in &moves {
-            let mut new_board = board.clone();
-            new_board.make_move(*mv, current_color);
-            let val = minimax(&new_board, depth - 1, alpha, beta, true, ai_color);
-            if val < best {
-                best = val;
-            }
-            if best < beta {
-                beta = best;
-            }
-            if alpha >= beta {
-                break;
-            }
+        if alpha >= beta {
+            break;
         }
-        best
     }
+    best
 }
 
-/// Find the best move for the AI using minimax with alpha-beta pruning.
+/// The move the search likes best, or `None` if there is no legal move.
 fn ai_best_move(board: &Board, ai_color: Cell) -> Option<Pos> {
-    let moves = board.legal_moves(ai_color);
-    if moves.is_empty() {
-        return None;
-    }
-
-    let mut best_score = i32::MIN;
-    let mut best_move = moves[0];
-
-    for mv in &moves {
-        let mut new_board = board.clone();
-        new_board.make_move(*mv, ai_color);
+    let mut best: Option<(i32, Pos)> = None;
+    for mv in board.legal_moves(ai_color) {
+        let mut next = board.clone();
+        // The count is not the question here -- `legal_moves` already said the
+        // move is legal -- but discarding it silently is how a caller that
+        // *did* care came to ignore an illegal move. Naming it says which.
+        let _flipped = next.make_move(mv, ai_color);
         let score = minimax(
-            &new_board,
-            AI_DEPTH - 1,
+            &next,
+            AI_DEPTH.saturating_sub(1),
             i32::MIN,
             i32::MAX,
             false,
             ai_color,
         );
-        if score > best_score {
-            best_score = score;
-            best_move = *mv;
+        if best.is_none_or(|(seen, _)| score > seen) {
+            best = Some((score, mv));
         }
     }
-
-    Some(best_move)
+    best.map(|(_, mv)| mv)
 }
 
 // ── Game state ──────────────────────────────────────────────────────
-
-/// Who is playing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Player {
-    Human, // Black
-    Ai,    // White
-}
 
 /// The game phase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -534,7 +686,7 @@ enum Phase {
 }
 
 /// A record of a single move.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct MoveRecord {
     pos: Pos,
     color: Cell,
@@ -542,107 +694,158 @@ struct MoveRecord {
 }
 
 impl MoveRecord {
-    /// Format as algebraic-like notation: column letter + row number.
+    /// Othello notation: column letter, row number, and the count turned.
     fn notation(&self) -> String {
-        let col_char = (b'a' + self.pos.col as u8) as char;
-        let row_num = self.pos.row + 1;
         let color_str = match self.color {
             Cell::Black => "B",
             Cell::White => "W",
             Cell::Empty => "?",
         };
         format!(
-            "{color_str}:{col_char}{row_num}(+{flipped})",
-            flipped = self.flipped
+            "{color_str}:{}{}(+{})",
+            column_letter(self.pos.col),
+            self.pos.row.saturating_add(1),
+            self.flipped
         )
     }
 }
 
-// ── Reversi App ─────────────────────────────────────────────────────
+/// The `a`-`h` that names a column, or `?` for a column off the board.
+fn column_letter(col: i32) -> char {
+    u8::try_from(col)
+        .ok()
+        .and_then(|c| b'a'.checked_add(c))
+        .filter(|_| (0..SIDE).contains(&col))
+        .map_or('?', char::from)
+}
 
 /// Main application state.
 struct ReversiApp {
     board: Board,
     current_turn: Cell,
     phase: Phase,
-    cursor_row: i32,
-    cursor_col: i32,
+    cursor: Pos,
     last_move: Option<Pos>,
     move_history: Vec<MoveRecord>,
-    pass_count: i32,
-    message: String,
+    /// Something out of the ordinary to say instead of the standing status
+    /// line: an illegal move, or a player who had to pass.
+    ///
+    /// The old code kept a `message: String` that every turn-handling branch
+    /// wrote to in turn, and the last writer won. Two of the lines it composed
+    /// -- the pass notice and "AI thinking (White)..." -- were overwritten
+    /// before any frame could be drawn, so no player ever saw either of them.
+    /// Deriving the standing line and keeping only the exception fixes that at
+    /// the root: there is nothing left to overwrite.
+    notice: Option<String>,
+    /// The size the last frame was drawn at, which is the size the next click
+    /// is read against.
+    size: (f32, f32),
 }
 
 impl ReversiApp {
     fn new() -> Self {
         Self {
             board: Board::new(),
-            current_turn: Cell::Black, // Black (human) goes first
+            current_turn: Cell::Black, // Black, the human, opens.
             phase: Phase::Playing,
-            cursor_row: 3,
-            cursor_col: 3,
+            cursor: Pos::new(3, 3),
             last_move: None,
             move_history: Vec::new(),
-            pass_count: 0,
-            message: String::from("Your turn (Black). Arrow keys to move, Enter to place."),
+            notice: None,
+            size: (WINDOW_WIDTH, WINDOW_HEIGHT),
         }
     }
 
-    /// Handle a key event.
-    fn handle_key(&mut self, event: &KeyEvent) {
-        if !event.pressed {
-            return;
-        }
+    /// Deal a new game without forgetting how big the window is.
+    ///
+    /// `*self = Self::new()` was the whole of the old new-game handler, and
+    /// with the window size now living in the state that would have snapped
+    /// the board back to its opening size on every new game.
+    fn restart(&mut self) {
+        let size = self.size;
+        *self = Self::new();
+        self.size = size;
+    }
 
+    /// Note the size a frame was drawn at.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.size = (width.max(0.0), height.max(0.0));
+    }
+
+    /// Handle a key press.
+    fn handle_key(&mut self, key: Key) -> EventResult {
         match self.phase {
-            Phase::Playing => self.handle_playing_key(event),
-            Phase::GameOver => self.handle_game_over_key(event),
+            Phase::Playing => self.handle_playing_key(key),
+            Phase::GameOver => self.handle_game_over_key(key),
         }
     }
 
-    /// Handle keys during gameplay.
-    fn handle_playing_key(&mut self, event: &KeyEvent) {
-        // Only allow human input when it's human's turn
+    /// Keys during play.
+    fn handle_playing_key(&mut self, key: Key) -> EventResult {
+        // The AI answers inside the same event that provokes it, so it is
+        // always the human's turn by the time a key arrives. The guard stays
+        // because "always" here is a property of `do_ai_move`, not of the
+        // keyboard.
         if self.current_turn != Cell::Black {
-            return;
+            return EventResult::Ignored;
         }
 
-        match event.key {
-            Key::Up if self.cursor_row > 0 => {
-                self.cursor_row -= 1;
-            }
-            Key::Down if self.cursor_row < 7 => {
-                self.cursor_row += 1;
-            }
-            Key::Left if self.cursor_col > 0 => {
-                self.cursor_col -= 1;
-            }
-            Key::Right if self.cursor_col < 7 => {
-                self.cursor_col += 1;
-            }
+        match key {
+            Key::Up => self.move_cursor(-1, 0),
+            Key::Down => self.move_cursor(1, 0),
+            Key::Left => self.move_cursor(0, -1),
+            Key::Right => self.move_cursor(0, 1),
             Key::Enter | Key::Space => {
                 self.try_place_piece();
+                EventResult::Consumed
             }
             Key::N => {
-                // New game
-                *self = Self::new();
+                self.restart();
+                EventResult::Consumed
             }
-            _ => {}
+            _ => EventResult::Ignored,
         }
     }
 
-    /// Handle keys when the game is over.
-    fn handle_game_over_key(&mut self, event: &KeyEvent) {
-        if event.key == Key::N || event.key == Key::Enter {
-            *self = Self::new();
+    /// Keys once the game is over.
+    fn handle_game_over_key(&mut self, key: Key) -> EventResult {
+        if key == Key::N || key == Key::Enter {
+            self.restart();
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
         }
     }
 
-    /// Attempt to place a piece at the cursor position.
+    /// Walk the cursor, and refuse to walk it off the board.
+    ///
+    /// The old spelling put the bound in the match arm's guard
+    /// (`Key::Up if self.cursor_row > 0`), which made a press at the edge fall
+    /// through to the catch-all and read as a key the game has no use for.
+    /// Four copies of one bound, and a keypress that meant two things.
+    fn move_cursor(&mut self, dr: i32, dc: i32) -> EventResult {
+        let want = Pos::new(
+            self.cursor.row.saturating_add(dr),
+            self.cursor.col.saturating_add(dc),
+        );
+        if want.in_bounds() && want != self.cursor {
+            self.cursor = want;
+            EventResult::Consumed
+        } else {
+            // The key was for us and we could not act on it; the window still
+            // has no reason to redraw.
+            EventResult::Ignored
+        }
+    }
+
+    /// Try to play the square under the cursor.
     fn try_place_piece(&mut self) {
-        let pos = Pos::new(self.cursor_row, self.cursor_col);
+        self.notice = None;
+        let pos = self.cursor;
         if !self.board.is_legal_move(pos, self.current_turn) {
-            self.message = String::from("Illegal move! Must flip at least one piece.");
+            self.notice = Some(String::from(
+                "Illegal move -- a move must flip at least one piece.",
+            ));
             return;
         }
 
@@ -653,50 +856,56 @@ impl ReversiApp {
             color: self.current_turn,
             flipped,
         });
-        self.pass_count = 0;
-
-        // Switch turns and handle pass logic
         self.advance_turn();
     }
 
-    /// Advance to the next turn, handling passes and game-over.
+    /// Hand the turn on, passing or ending the game as the rules require.
+    ///
+    /// The old version kept a `pass_count`, incremented it, and tested it
+    /// against 2 -- a value it could not reach, since every path into this
+    /// function had just reset it to 0. The counter was read nowhere else, so
+    /// the whole field was a guard for a case that could not arise. What
+    /// actually ends the game is that neither player can move, which is what
+    /// is asked here.
     fn advance_turn(&mut self) {
         let next = self.current_turn.opponent();
 
-        if self.board.is_game_over() {
+        if self.board.has_legal_move(next) {
+            self.current_turn = next;
+        } else if self.board.has_legal_move(self.current_turn) {
+            self.notice = Some(format!(
+                "{} cannot move -- {} plays again.",
+                color_name(next),
+                color_name(self.current_turn)
+            ));
+        } else {
             self.phase = Phase::GameOver;
-            self.message = self.game_over_message();
             return;
         }
 
-        if self.board.has_legal_move(next) {
-            self.current_turn = next;
-            self.pass_count = 0;
-        } else {
-            // Next player has no moves — they pass
-            self.pass_count += 1;
-            if self.pass_count >= 2 || !self.board.has_legal_move(self.current_turn) {
-                // Both players passed or neither can move
-                self.phase = Phase::GameOver;
-                self.message = self.game_over_message();
-                return;
-            }
-            // Current player keeps the turn
-            self.message = format!("{} has no legal moves — turn passes!", color_name(next));
-            // current_turn stays the same
-        }
-
-        self.update_message();
-
-        // If it's AI's turn, make the AI move
-        if self.current_turn == Cell::White && self.phase == Phase::Playing {
+        if self.current_turn == Cell::White {
             self.do_ai_move();
         }
     }
 
-    /// Execute the AI's move.
+    /// Play White's reply, and keep playing while Black has no answer.
+    ///
+    /// A loop rather than the recursion it replaces: a run of forced passes
+    /// can be sixty plies long near the end of a game, and a stack that deep
+    /// is a stack that can be made deeper by a board rather than by a bug.
     fn do_ai_move(&mut self) {
-        if let Some(mv) = ai_best_move(&self.board, Cell::White) {
+        loop {
+            let Some(mv) = ai_best_move(&self.board, Cell::White) else {
+                // Every caller checks `has_legal_move(White)` first, so this
+                // is the search failing rather than the rules. Handing the
+                // turn back is the only answer that leaves the game playable:
+                // the old code returned silently and left White to move
+                // forever, with no key or click that could unstick it.
+                self.current_turn = Cell::Black;
+                self.notice = Some(String::from("White did not move."));
+                return;
+            };
+
             let flipped = self.board.make_move(mv, Cell::White);
             self.last_move = Some(mv);
             self.move_history.push(MoveRecord {
@@ -704,544 +913,491 @@ impl ReversiApp {
                 color: Cell::White,
                 flipped,
             });
-            self.pass_count = 0;
-
-            // After AI moves, check if game is over or if human can play
             self.current_turn = Cell::Black;
 
-            if self.board.is_game_over() {
+            if self.board.has_legal_move(Cell::Black) {
+                return;
+            }
+            if !self.board.has_legal_move(Cell::White) {
                 self.phase = Phase::GameOver;
-                self.message = self.game_over_message();
                 return;
             }
-
-            if !self.board.has_legal_move(Cell::Black) {
-                // Human can't move — pass back to AI
-                self.message = String::from("Black has no legal moves — turn passes to White!");
-                self.current_turn = Cell::White;
-                if self.board.has_legal_move(Cell::White) {
-                    self.do_ai_move();
-                } else {
-                    self.phase = Phase::GameOver;
-                    self.message = self.game_over_message();
-                }
-                return;
-            }
-
-            self.update_message();
+            self.notice = Some(String::from("Black cannot move -- White plays again."));
+            self.current_turn = Cell::White;
         }
     }
 
-    /// Update the status message based on current state.
-    fn update_message(&mut self) {
+    /// The line along the bottom of the window.
+    ///
+    /// Derived rather than stored. Everything in it -- whose turn it is, the
+    /// score, the result -- is already on the board, so a copy kept in a field
+    /// could only be a copy that went stale.
+    fn status(&self) -> String {
         if self.phase == Phase::GameOver {
-            self.message = self.game_over_message();
-            return;
+            return self.game_over_message();
         }
-        let black_count = self.board.count(Cell::Black);
-        let white_count = self.board.count(Cell::White);
-        if self.current_turn == Cell::Black {
-            self.message = format!("Your turn (Black). B:{black_count} W:{white_count}");
-        } else {
-            self.message = format!("AI thinking (White)... B:{black_count} W:{white_count}");
+        if let Some(notice) = &self.notice {
+            return notice.clone();
         }
+        let black = self.board.count(Cell::Black);
+        let white = self.board.count(Cell::White);
+        format!("Your turn (Black). B:{black} W:{white}")
     }
 
-    /// Build the game-over message.
+    /// What the bottom line says once neither player can move.
     fn game_over_message(&self) -> String {
-        let black_count = self.board.count(Cell::Black);
-        let white_count = self.board.count(Cell::White);
+        let black = self.board.count(Cell::Black);
+        let white = self.board.count(Cell::White);
         let result = match self.board.winner() {
             Cell::Black => "Black wins!",
             Cell::White => "White wins!",
             Cell::Empty => "It's a tie!",
         };
-        format!("Game Over! {result} (B:{black_count} W:{white_count}) Press N for new game.")
+        format!("Game Over! {result} (B:{black} W:{white}) Press N for a new game.")
     }
 
-    /// Handle a mouse click.
-    fn handle_mouse(&mut self, event: &MouseEvent) {
-        if self.phase != Phase::Playing || self.current_turn != Cell::Black {
-            return;
+    /// Act on a click, by asking the frame what was drawn there.
+    ///
+    /// An 8x8 board is the most click-natural thing a program can put on a
+    /// screen. This one *was* clickable, but against arithmetic of its own
+    /// rather than against anything the drawing pass had recorded, so the
+    /// squares it answered were only ever accidentally the squares on screen.
+    fn click(&mut self, x: f32, y: f32, button: MouseButton) -> EventResult {
+        if button != MouseButton::Left {
+            return EventResult::Ignored;
         }
-
-        if let MouseEventKind::Press(MouseButton::Left) = event.kind {
-            if let Some(pos) = cell_at(event.x, event.y) {
-                self.cursor_row = pos.row;
-                self.cursor_col = pos.col;
+        let (w, h) = self.size;
+        let Some(target) = self.frame(w, h).hit_test(x, y) else {
+            return EventResult::Ignored;
+        };
+        match target {
+            Target::Square(row, col)
+                if self.phase == Phase::Playing && self.current_turn == Cell::Black =>
+            {
+                // One action rather than two: the cursor goes to the square
+                // and the move is attempted, exactly as arrows-then-Enter
+                // would have done. An illegal square is refused with the same
+                // notice the keys get, so a mis-click costs nothing.
+                self.cursor = Pos::new(i32::from(row), i32::from(col));
                 self.try_place_piece();
+                EventResult::Consumed
             }
+            // Every other box is answered and does nothing. A click on the
+            // board once the game is over must not fall through to the
+            // window, which would treat it as a click on nothing at all.
+            _ => EventResult::Consumed,
         }
     }
 
-    /// Handle a general event.
-    fn handle_event(&mut self, event: &Event) {
-        match event {
-            Event::Key(ke) => self.handle_key(ke),
-            Event::Mouse(me) => self.handle_mouse(me),
-            _ => {}
-        }
-    }
+    // ── Drawing ─────────────────────────────────────────────────────
 
-    /// Generate render commands for the current frame.
-    fn render(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-
-        // Background
-        cmds.push(RenderCommand::FillRect {
+    /// One frame at the given size: what to draw, and what a click there hits.
+    fn frame(&self, w: f32, h: f32) -> Frame<Target> {
+        let l = Layout::solve(w, h);
+        let mut f = Frame::new(l.window.w, l.window.h);
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: PANEL_X + 250.0,
-            height: BOARD_OFFSET_Y + BOARD_PIXEL_SIZE + 60.0,
+            width: l.window.w,
+            height: l.window.h,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
+        // A window too small for its contents crops them rather than painting
+        // over its neighbours.
+        f.clip(l.window);
+        self.draw_header(&l, &mut f);
+        self.draw_board(&l, &mut f);
+        self.draw_panel(&l, &mut f);
+        self.draw_status(&l, &mut f);
+        f.unclip();
+        f
+    }
 
-        // Title
-        cmds.push(RenderCommand::Text {
-            x: BOARD_OFFSET_X,
-            y: 30.0,
-            text: String::from("Reversi"),
-            color: LAVENDER,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+    /// The title, and the two score chips beside it.
+    fn draw_header(&self, l: &Layout, f: &mut Frame<Target>) {
+        let band = inset(l.header, l.pad);
+        let title_ink = Ink::new(l.title, FontWeightHint::Bold, LAVENDER);
+        let title = label_in(f, band, "Reversi", title_ink);
+        f.hit(Target::Title, title);
 
-        // Score display next to title
-        let black_count = self.board.count(Cell::Black);
-        let white_count = self.board.count(Cell::White);
-        cmds.push(RenderCommand::Text {
-            x: BOARD_OFFSET_X + 120.0,
-            y: 32.0,
-            text: format!("\u{25CF} {black_count}"),
-            color: TEXT_COLOR,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        cmds.push(RenderCommand::Text {
-            x: BOARD_OFFSET_X + 180.0,
-            y: 32.0,
-            text: format!("\u{25CB} {white_count}"),
-            color: TEXT_COLOR,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        // The chips follow the title's *measured* width. They used to sit at
+        // `BOARD_OFFSET_X + 120.0` and `+ 180.0`, two numbers that were right
+        // for one font at one size and silently overlapped the title at any
+        // other.
+        let ink = Ink::new(l.font, FontWeightHint::Bold, TEXT_COLOR);
+        let gap = l.pad * 1.5;
+        let mut x = title.right() + gap;
+        for (target, text) in [
+            (
+                Target::BlackScore,
+                format!("\u{25CF} {}", self.board.count(Cell::Black)),
+            ),
+            (
+                Target::WhiteScore,
+                format!("\u{25CB} {}", self.board.count(Cell::White)),
+            ),
+        ] {
+            let width = ink.width(&text);
+            let area = Rect::new(x, band.y, width, band.h);
+            let drawn = label_in(f, area, &text, ink);
+            f.hit(target, drawn);
+            x = area.right() + gap;
+        }
+    }
 
-        // Board border
-        cmds.push(RenderCommand::FillRect {
-            x: BOARD_OFFSET_X - 3.0,
-            y: BOARD_OFFSET_Y - 3.0,
-            width: BOARD_PIXEL_SIZE + 6.0,
-            height: BOARD_PIXEL_SIZE + 6.0,
+    /// The board: its border, its squares, the pieces on them, and its a-h
+    /// and 1-8.
+    fn draw_board(&self, l: &Layout, f: &mut Frame<Target>) {
+        let g = Grid::fit(inset(l.board_area, l.pad), l.small);
+        let board = g.board_rect();
+
+        let edge = (g.step * 0.06).max(1.0);
+        f.push(RenderCommand::FillRect {
+            x: board.x - edge,
+            y: board.y - edge,
+            width: board.w + edge * 2.0,
+            height: board.h + edge * 2.0,
             color: BOARD_BORDER,
-            corner_radii: CornerRadii::all(4.0),
+            corner_radii: CornerRadii::all(edge),
         });
+        // Recorded before the squares so a click that lands between them --
+        // there is nothing between them, but the frame answers with whatever
+        // was recorded last -- reaches the board rather than the window.
+        f.hit(Target::Board, board);
 
-        // Board cells
-        let valid_moves = if self.phase == Phase::Playing {
+        let legal = if self.phase == Phase::Playing {
             self.board.legal_moves(self.current_turn)
         } else {
             Vec::new()
         };
 
-        for row in 0..8 {
-            for col in 0..8 {
-                let pos = Pos::new(row, col);
-                let (x, y) = cell_origin(pos);
+        for pos in all_positions() {
+            let square = g.square(pos.row, pos.col);
+            let shade = if (pos.row.saturating_add(pos.col)) % 2 == 0 {
+                BOARD_GREEN
+            } else {
+                BOARD_GREEN_LIGHT
+            };
+            f.push(RenderCommand::FillRect {
+                x: square.x,
+                y: square.y,
+                width: square.w,
+                height: square.h,
+                color: shade,
+                corner_radii: CornerRadii::ZERO,
+            });
 
-                // Cell background (slight alternation for visual interest)
-                let cell_color = if (row + col) % 2 == 0 {
-                    BOARD_GREEN
-                } else {
-                    BOARD_GREEN_LIGHT
-                };
-                cmds.push(RenderCommand::FillRect {
-                    x,
-                    y,
-                    width: CELL_SIZE,
-                    height: CELL_SIZE,
-                    color: cell_color,
-                    corner_radii: CornerRadii::ZERO,
-                });
-
-                // Last move highlight
-                if self.last_move == Some(pos) {
-                    cmds.push(RenderCommand::FillRect {
-                        x,
-                        y,
-                        width: CELL_SIZE,
-                        height: CELL_SIZE,
-                        color: LAST_MOVE_HIGHLIGHT,
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                }
-
-                // Cursor highlight
-                if row == self.cursor_row
-                    && col == self.cursor_col
-                    && self.phase == Phase::Playing
-                    && self.current_turn == Cell::Black
-                {
-                    cmds.push(RenderCommand::StrokeRect {
-                        x: x + 2.0,
-                        y: y + 2.0,
-                        width: CELL_SIZE - 4.0,
-                        height: CELL_SIZE - 4.0,
-                        color: CURSOR_COLOR,
-                        line_width: 3.0,
-                        corner_radii: CornerRadii::all(2.0),
-                    });
-                }
-
-                // Pieces
-                let cell = self.board.get(pos);
-                if cell.is_piece() {
-                    let (cx, cy) = cell_center(pos);
-                    self.render_piece(&mut cmds, cx, cy, cell);
-                }
-
-                // Valid move dots
-                if self.current_turn == Cell::Black
-                    && self.phase == Phase::Playing
-                    && valid_moves.contains(&pos)
-                    && cell == Cell::Empty
-                {
-                    let (mid_x, mid_y) = cell_center(pos);
-                    let cx = mid_x - DOT_RADIUS;
-                    let cy = mid_y - DOT_RADIUS;
-                    cmds.push(RenderCommand::FillRect {
-                        x: cx,
-                        y: cy,
-                        width: DOT_RADIUS * 2.0,
-                        height: DOT_RADIUS * 2.0,
-                        color: VALID_MOVE_DOT,
-                        corner_radii: CornerRadii::all(DOT_RADIUS),
-                    });
-                }
-
-                // Grid lines
-                cmds.push(RenderCommand::StrokeRect {
-                    x,
-                    y,
-                    width: CELL_SIZE,
-                    height: CELL_SIZE,
-                    color: BOARD_BORDER,
-                    line_width: 1.0,
+            if self.last_move == Some(pos) {
+                f.push(RenderCommand::FillRect {
+                    x: square.x,
+                    y: square.y,
+                    width: square.w,
+                    height: square.h,
+                    color: LAST_MOVE_HIGHLIGHT,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
+
+            if pos == self.cursor && self.phase == Phase::Playing {
+                let ring = (g.step * 0.05).max(1.0);
+                f.push(RenderCommand::StrokeRect {
+                    x: square.x + ring,
+                    y: square.y + ring,
+                    width: (square.w - ring * 2.0).max(0.0),
+                    height: (square.h - ring * 2.0).max(0.0),
+                    color: CURSOR_COLOR,
+                    line_width: ring,
+                    corner_radii: CornerRadii::all(ring),
+                });
+            }
+
+            let cell = self.board.get(pos);
+            if cell.is_piece() {
+                let (cx, cy) = g.centre(pos.row, pos.col);
+                draw_piece(f, cx, cy, g.step * 0.37, cell);
+            } else if self.phase == Phase::Playing
+                && self.current_turn == Cell::Black
+                && legal.contains(&pos)
+            {
+                let (cx, cy) = g.centre(pos.row, pos.col);
+                let r = g.step * 0.1;
+                f.push(RenderCommand::FillRect {
+                    x: cx - r,
+                    y: cy - r,
+                    width: r * 2.0,
+                    height: r * 2.0,
+                    color: VALID_MOVE_DOT,
+                    corner_radii: CornerRadii::all(r),
+                });
+            }
+
+            f.push(RenderCommand::StrokeRect {
+                x: square.x,
+                y: square.y,
+                width: square.w,
+                height: square.h,
+                color: BOARD_BORDER,
+                line_width: 1.0,
+                corner_radii: CornerRadii::ZERO,
+            });
+            f.hit(Target::Square(byte(pos.row), byte(pos.col)), square);
         }
 
-        // Row/column labels
-        for i in 0..8 {
-            // Column labels (a-h)
-            let col_label = String::from((b'a' + i as u8) as char);
-            cmds.push(RenderCommand::Text {
-                x: cell_center(Pos::new(0, i)).0 - 4.0,
-                y: BOARD_OFFSET_Y - 14.0,
-                text: col_label,
-                color: SUBTEXT0,
-                font_size: LABEL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            // Row labels (1-8)
-            cmds.push(RenderCommand::Text {
-                x: BOARD_OFFSET_X - 18.0,
-                y: cell_center(Pos::new(i, 0)).1 - 6.0,
-                text: format!("{}", i + 1),
-                color: SUBTEXT0,
-                font_size: LABEL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+        // Row 0 is the top of the window and also rank *1*: Othello numbers
+        // its ranks downward from the top, so `a1` is the upper-left square.
+        // Chess and go both run the other way, which is why
+        // `the_board_is_lettered_and_numbered_the_othello_way` pins this to
+        // the published rules rather than to this comment.
+        let ink = Ink::new(l.small, FontWeightHint::Regular, SUBTEXT0);
+        for i in 0..SIDE {
+            let square = g.square(i, i);
+            let letter = column_letter(i).to_string();
+            let lw = ink.width(&letter);
+            let drawn = label(
+                f,
+                square.x + (g.step - lw) / 2.0,
+                board.y - g.label + (g.label - ink.height()) / 2.0,
+                &letter,
+                ink,
+            );
+            f.hit(Target::ColLabel(byte(i)), drawn);
+
+            let number = format!("{}", i.saturating_add(1));
+            let nw = ink.width(&number);
+            let drawn = label(
+                f,
+                board.x - g.label + (g.label - nw) / 2.0,
+                square.y + (g.step - ink.height()) / 2.0,
+                &number,
+                ink,
+            );
+            f.hit(Target::RowLabel(byte(i)), drawn);
+        }
+    }
+
+    /// The side panel: turn, score bar, counts, last move, history, help.
+    ///
+    /// Every line is placed by walking a cursor down the panel, so the panel
+    /// says as much as it has room for and no more. The old spelling put each
+    /// line at a hand-counted offset from the panel's top -- `+ 55.0`,
+    /// `+ 72.0`, `+ 110.0`, `+ 155.0`, `+ 205.0` -- and drew a fixed twelve
+    /// history rows whatever the window's height, which a short window ran
+    /// straight through its own help text.
+    fn draw_panel(&self, l: &Layout, f: &mut Frame<Target>) {
+        let band = inset(l.panel, l.pad);
+        f.push(RenderCommand::FillRect {
+            x: band.x,
+            y: band.y,
+            width: band.w,
+            height: band.h,
+            color: SURFACE0,
+            corner_radii: CornerRadii::all(l.pad),
+        });
+        f.hit(Target::Panel, band);
+
+        let inner = inset(band, l.pad);
+        let label_ink = Ink::new(l.small, FontWeightHint::Bold, SUBTEXT0);
+        let body_ink = Ink::new(l.font, FontWeightHint::Regular, TEXT_COLOR);
+        let mut y = inner.y;
+
+        // Whose turn.
+        let (turn_text, turn_color) = match (self.phase, self.current_turn) {
+            (Phase::GameOver, _) => ("Game Over", RED),
+            (Phase::Playing, Cell::White) => ("White to move", PEACH),
+            (Phase::Playing, _) => ("Your turn (Black)", BLUE),
+        };
+        let drawn = panel_row(
+            f,
+            inner,
+            &mut y,
+            turn_text,
+            Ink::new(l.font, FontWeightHint::Bold, turn_color),
+        );
+        f.hit(Target::Turn, drawn);
+        y += l.small * 0.6;
+
+        // The score, as a bar split in proportion to the two counts.
+        panel_row(f, inner, &mut y, "Score", label_ink);
+        let black = self.board.count(Cell::Black);
+        let white = self.board.count(Cell::White);
+        let bar_h = l.font * 1.4;
+        let bar = Rect::new(inner.x, y, inner.w, bar_h);
+        f.push(RenderCommand::FillRect {
+            x: bar.x,
+            y: bar.y,
+            width: bar.w,
+            height: bar.h,
+            color: SURFACE1,
+            corner_radii: CornerRadii::all(bar_h / 4.0),
+        });
+        let total = f32_from_i32(black.saturating_add(white)).max(1.0);
+        let black_w = f32_from_i32(black) / total * bar.w;
+        if black > 0 {
+            f.push(RenderCommand::FillRect {
+                x: bar.x,
+                y: bar.y,
+                width: black_w,
+                height: bar.h,
+                color: BLACK_PIECE,
+                corner_radii: CornerRadii {
+                    top_left: bar_h / 4.0,
+                    bottom_left: bar_h / 4.0,
+                    top_right: if white == 0 { bar_h / 4.0 } else { 0.0 },
+                    bottom_right: if white == 0 { bar_h / 4.0 } else { 0.0 },
+                },
             });
         }
+        let chip = Ink::new(l.small, FontWeightHint::Bold, TEXT_COLOR);
+        let b_text = format!("B: {black}");
+        let w_text = format!("W: {white}");
+        let chip_y = bar.y + (bar.h - chip.height()) / 2.0;
+        label(f, bar.x + l.pad / 2.0, chip_y, &b_text, chip);
+        // Right-aligned by measurement rather than by `px + 160.0`, which was
+        // a number chosen for one font size and wrong at every other.
+        label(
+            f,
+            (bar.right() - l.pad / 2.0 - chip.width(&w_text)).max(bar.x),
+            chip_y,
+            &w_text,
+            chip,
+        );
+        f.hit(Target::ScoreBar, bar);
+        y = bar.bottom() + l.small * 0.6;
 
-        // Side panel
-        self.render_panel(&mut cmds);
+        let drawn = panel_row(
+            f,
+            inner,
+            &mut y,
+            &format!("Moves: {}", self.move_history.len()),
+            body_ink,
+        );
+        f.hit(Target::Moves, drawn);
+        let drawn = panel_row(
+            f,
+            inner,
+            &mut y,
+            &format!("Empty: {}", self.board.empty_count()),
+            body_ink,
+        );
+        f.hit(Target::EmptyCount, drawn);
+        y += l.small * 0.6;
 
-        // Status message at bottom
-        cmds.push(RenderCommand::Text {
-            x: BOARD_OFFSET_X,
-            y: BOARD_OFFSET_Y + BOARD_PIXEL_SIZE + 20.0,
-            text: self.message.clone(),
-            color: if self.phase == Phase::GameOver {
+        if let Some(last) = self.move_history.last() {
+            panel_row(f, inner, &mut y, "Last Move", label_ink);
+            let drawn = panel_row(
+                f,
+                inner,
+                &mut y,
+                &last.notation(),
+                Ink::new(l.font, FontWeightHint::Regular, PEACH),
+            );
+            f.hit(Target::LastMove, drawn);
+            y += l.small * 0.6;
+        }
+
+        // The help sits on the floor of the panel, and the history fills
+        // whatever is between the cursor and it -- so the two cannot collide
+        // however long the game runs or however short the window is.
+        let help_ink = Ink::new(l.small, FontWeightHint::Regular, OVERLAY0);
+        let help_h = help_ink.height() * 2.0;
+        let help_top = (inner.bottom() - help_h).max(y);
+
+        let heading = panel_row(f, inner, &mut y, "History", label_ink);
+        let row_ink = Ink::new(l.small, FontWeightHint::Regular, TEXT_COLOR);
+        let rows = count_from_f32((help_top - y) / row_ink.height());
+        let start = self.move_history.len().saturating_sub(rows);
+        let mut history_box = Rect::new(heading.x, heading.y, heading.w, heading.h);
+        for (idx, record) in self.move_history.iter().enumerate().skip(start) {
+            let ink = Ink::new(
+                l.small,
+                FontWeightHint::Regular,
+                if record.color == Cell::Black {
+                    BLUE
+                } else {
+                    PEACH
+                },
+            );
+            let text = format!("{}. {}", idx.saturating_add(1), record.notation());
+            let drawn = panel_row(f, inner, &mut y, &text, ink);
+            history_box = union(history_box, drawn);
+        }
+        f.hit(Target::History, history_box);
+
+        let mut help_y = help_top;
+        let first = panel_row(
+            f,
+            inner,
+            &mut help_y,
+            "Arrows: move   Enter: place",
+            help_ink,
+        );
+        let second = panel_row(
+            f,
+            inner,
+            &mut help_y,
+            "N: new game   Click: place",
+            help_ink,
+        );
+        f.hit(Target::Help, union(first, second));
+    }
+
+    /// The line along the bottom of the window.
+    fn draw_status(&self, l: &Layout, f: &mut Frame<Target>) {
+        let band = inset(l.status, l.pad);
+        let ink = Ink::new(
+            l.font,
+            FontWeightHint::Regular,
+            if self.phase == Phase::GameOver {
                 PEACH
             } else {
                 TEXT_COLOR
             },
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(BOARD_PIXEL_SIZE + 250.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        cmds
-    }
-
-    /// Render a disc piece (as a filled rounded rect that approximates a circle).
-    fn render_piece(&self, cmds: &mut Vec<RenderCommand>, cx: f32, cy: f32, cell: Cell) {
-        let (fill, border) = match cell {
-            Cell::Black => (BLACK_PIECE, BLACK_PIECE_BORDER),
-            Cell::White => (WHITE_PIECE, WHITE_PIECE_BORDER),
-            Cell::Empty => return,
-        };
-
-        // Piece shadow
-        cmds.push(RenderCommand::FillRect {
-            x: cx - PIECE_RADIUS + 2.0,
-            y: cy - PIECE_RADIUS + 2.0,
-            width: PIECE_RADIUS * 2.0,
-            height: PIECE_RADIUS * 2.0,
-            color: Color::rgba(0, 0, 0, 40),
-            corner_radii: CornerRadii::all(PIECE_RADIUS),
-        });
-
-        // Piece body
-        cmds.push(RenderCommand::FillRect {
-            x: cx - PIECE_RADIUS,
-            y: cy - PIECE_RADIUS,
-            width: PIECE_RADIUS * 2.0,
-            height: PIECE_RADIUS * 2.0,
-            color: fill,
-            corner_radii: CornerRadii::all(PIECE_RADIUS),
-        });
-
-        // Piece border
-        cmds.push(RenderCommand::StrokeRect {
-            x: cx - PIECE_RADIUS,
-            y: cy - PIECE_RADIUS,
-            width: PIECE_RADIUS * 2.0,
-            height: PIECE_RADIUS * 2.0,
-            color: border,
-            line_width: 1.5,
-            corner_radii: CornerRadii::all(PIECE_RADIUS),
-        });
-    }
-
-    /// Render the side information panel.
-    fn render_panel(&self, cmds: &mut Vec<RenderCommand>) {
-        let px = PANEL_X;
-        let py = BOARD_OFFSET_Y;
-
-        // Panel background
-        cmds.push(RenderCommand::FillRect {
-            x: px,
-            y: py,
-            width: 220.0,
-            height: BOARD_PIXEL_SIZE,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        // Turn indicator
-        let turn_text = if self.phase == Phase::GameOver {
-            String::from("Game Over")
-        } else if self.current_turn == Cell::Black {
-            String::from("Your Turn (Black)")
-        } else {
-            String::from("AI Turn (White)")
-        };
-        let turn_color = match self.current_turn {
-            Cell::Black => BLUE,
-            Cell::White => PEACH,
-            Cell::Empty => TEXT_COLOR,
-        };
-        cmds.push(RenderCommand::Text {
-            x: px + 15.0,
-            y: py + 20.0,
-            text: turn_text,
-            color: if self.phase == Phase::GameOver {
-                RED
-            } else {
-                turn_color
-            },
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(190.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Score section
-        cmds.push(RenderCommand::Text {
-            x: px + 15.0,
-            y: py + 55.0,
-            text: String::from("Score"),
-            color: SUBTEXT0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        let black_count = self.board.count(Cell::Black);
-        let white_count = self.board.count(Cell::White);
-
-        // Black score bar
-        cmds.push(RenderCommand::FillRect {
-            x: px + 15.0,
-            y: py + 72.0,
-            width: 190.0,
-            height: 20.0,
-            color: SURFACE1,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        let total = (black_count + white_count).max(1) as f32;
-        let black_bar_width = (black_count as f32 / total) * 190.0;
-        if black_count > 0 {
-            cmds.push(RenderCommand::FillRect {
-                x: px + 15.0,
-                y: py + 72.0,
-                width: black_bar_width,
-                height: 20.0,
-                color: Color::from_hex(0x45475A),
-                corner_radii: CornerRadii {
-                    top_left: 4.0,
-                    top_right: if white_count == 0 { 4.0 } else { 0.0 },
-                    bottom_right: if white_count == 0 { 4.0 } else { 0.0 },
-                    bottom_left: 4.0,
-                },
-            });
-        }
-        cmds.push(RenderCommand::Text {
-            x: px + 20.0,
-            y: py + 76.0,
-            text: format!("B: {black_count}"),
-            color: TEXT_COLOR,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        cmds.push(RenderCommand::Text {
-            x: px + 160.0,
-            y: py + 76.0,
-            text: format!("W: {white_count}"),
-            color: TEXT_COLOR,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Move count
-        cmds.push(RenderCommand::Text {
-            x: px + 15.0,
-            y: py + 110.0,
-            text: format!("Moves: {}", self.move_history.len()),
-            color: SUBTEXT0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Empty squares
-        cmds.push(RenderCommand::Text {
-            x: px + 15.0,
-            y: py + 130.0,
-            text: format!("Empty: {}", self.board.empty_count()),
-            color: SUBTEXT0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Last move
-        if let Some(last) = self.move_history.last() {
-            cmds.push(RenderCommand::Text {
-                x: px + 15.0,
-                y: py + 155.0,
-                text: String::from("Last Move"),
-                color: SUBTEXT0,
-                font_size: LABEL_FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cmds.push(RenderCommand::Text {
-                x: px + 15.0,
-                y: py + 175.0,
-                text: last.notation(),
-                color: PEACH,
-                font_size: INFO_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
-
-        // Move history (last few moves)
-        cmds.push(RenderCommand::Text {
-            x: px + 15.0,
-            y: py + 205.0,
-            text: String::from("History"),
-            color: SUBTEXT0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        let history_start = if self.move_history.len() > 12 {
-            self.move_history.len() - 12
-        } else {
-            0
-        };
-        for (idx, record) in self.move_history[history_start..].iter().enumerate() {
-            let move_num = history_start + idx + 1;
-            let move_color = if record.color == Cell::Black {
-                BLUE
-            } else {
-                PEACH
-            };
-            cmds.push(RenderCommand::Text {
-                x: px + 15.0,
-                y: py + 225.0 + idx as f32 * 18.0,
-                text: format!("{move_num}. {}", record.notation()),
-                color: move_color,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(190.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        // Controls help at bottom of panel
-        let help_y = py + BOARD_PIXEL_SIZE - 40.0;
-        cmds.push(RenderCommand::Text {
-            x: px + 15.0,
-            y: help_y,
-            text: String::from("Arrows: Move  Enter: Place"),
-            color: OVERLAY0,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(190.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cmds.push(RenderCommand::Text {
-            x: px + 15.0,
-            y: help_y + 16.0,
-            text: String::from("N: New Game  Click: Place"),
-            color: OVERLAY0,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(190.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        );
+        let drawn = label_in(f, band, &self.status(), ink);
+        f.hit(Target::Status, drawn);
     }
 }
 
-/// Get a display name for a color.
+/// A disc, drawn as a fully-rounded rect.
+///
+/// A free function rather than a method: it read `&self` and used nothing from
+/// it, which is a method only in spelling.
+fn draw_piece(f: &mut Frame<Target>, cx: f32, cy: f32, radius: f32, cell: Cell) {
+    let (fill, border) = match cell {
+        Cell::Black => (BLACK_PIECE, BLACK_PIECE_BORDER),
+        Cell::White => (WHITE_PIECE, WHITE_PIECE_BORDER),
+        Cell::Empty => return,
+    };
+    let shadow = (radius * 0.09).max(1.0);
+    f.push(RenderCommand::FillRect {
+        x: cx - radius + shadow,
+        y: cy - radius + shadow,
+        width: radius * 2.0,
+        height: radius * 2.0,
+        color: Color::rgba(0, 0, 0, 40),
+        corner_radii: CornerRadii::all(radius),
+    });
+    f.push(RenderCommand::FillRect {
+        x: cx - radius,
+        y: cy - radius,
+        width: radius * 2.0,
+        height: radius * 2.0,
+        color: fill,
+        corner_radii: CornerRadii::all(radius),
+    });
+    f.push(RenderCommand::StrokeRect {
+        x: cx - radius,
+        y: cy - radius,
+        width: radius * 2.0,
+        height: radius * 2.0,
+        color: border,
+        line_width: (radius * 0.07).max(1.0),
+        corner_radii: CornerRadii::all(radius),
+    });
+}
+
+/// A display name for a colour.
 fn color_name(cell: Cell) -> &'static str {
     match cell {
         Cell::Black => "Black",
@@ -1250,1465 +1406,197 @@ fn color_name(cell: Cell) -> &'static str {
     }
 }
 
-fn main() {
-    let _app = ReversiApp::new();
+// ── Drawing helpers ─────────────────────────────────────────────────
+
+/// A font size, weight and colour, together, because they always travel
+/// together.
+#[derive(Debug, Clone, Copy)]
+struct Ink {
+    size: f32,
+    weight: FontWeightHint,
+    color: Color,
 }
 
-// ── Tests ───────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    // A test that indexes past the end, or unwraps a `None`, is a test that
-    // has already failed; panicking is the reporting mechanism, not a fault.
-    #![allow(
-        clippy::arithmetic_side_effects,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::unwrap_used
-    )]
-
-    use super::*;
-
-    // ── Board setup helpers ─────────────────────────────────────────
-
-    /// Create a board with specific placements.
-    fn board_with(placements: &[(i32, i32, Cell)]) -> Board {
-        let mut board = Board::empty();
-        for &(row, col, cell) in placements {
-            board.set(Pos::new(row, col), cell);
-        }
-        board
-    }
-
-    // ── Initial position tests ──────────────────────────────────────
-
-    #[test]
-    fn test_initial_board_setup() {
-        let board = Board::new();
-        assert_eq!(board.get(Pos::new(3, 3)), Cell::White);
-        assert_eq!(board.get(Pos::new(3, 4)), Cell::Black);
-        assert_eq!(board.get(Pos::new(4, 3)), Cell::Black);
-        assert_eq!(board.get(Pos::new(4, 4)), Cell::White);
-    }
-
-    #[test]
-    fn test_initial_piece_count() {
-        let board = Board::new();
-        assert_eq!(board.count(Cell::Black), 2);
-        assert_eq!(board.count(Cell::White), 2);
-        assert_eq!(board.total_pieces(), 4);
-        assert_eq!(board.empty_count(), 60);
-    }
-
-    #[test]
-    fn test_initial_board_corners_empty() {
-        let board = Board::new();
-        assert_eq!(board.get(Pos::new(0, 0)), Cell::Empty);
-        assert_eq!(board.get(Pos::new(0, 7)), Cell::Empty);
-        assert_eq!(board.get(Pos::new(7, 0)), Cell::Empty);
-        assert_eq!(board.get(Pos::new(7, 7)), Cell::Empty);
-    }
-
-    #[test]
-    fn test_empty_board() {
-        let board = Board::empty();
-        assert_eq!(board.count(Cell::Black), 0);
-        assert_eq!(board.count(Cell::White), 0);
-        assert_eq!(board.empty_count(), 64);
-    }
-
-    // ── Cell tests ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_cell_opponent() {
-        assert_eq!(Cell::Black.opponent(), Cell::White);
-        assert_eq!(Cell::White.opponent(), Cell::Black);
-        assert_eq!(Cell::Empty.opponent(), Cell::Empty);
-    }
-
-    #[test]
-    fn test_cell_is_piece() {
-        assert!(Cell::Black.is_piece());
-        assert!(Cell::White.is_piece());
-        assert!(!Cell::Empty.is_piece());
-    }
-
-    // ── Position tests ──────────────────────────────────────────────
-
-    #[test]
-    fn test_pos_in_bounds() {
-        assert!(Pos::new(0, 0).in_bounds());
-        assert!(Pos::new(7, 7).in_bounds());
-        assert!(Pos::new(3, 4).in_bounds());
-        assert!(!Pos::new(-1, 0).in_bounds());
-        assert!(!Pos::new(0, -1).in_bounds());
-        assert!(!Pos::new(8, 0).in_bounds());
-        assert!(!Pos::new(0, 8).in_bounds());
-        assert!(!Pos::new(8, 8).in_bounds());
-    }
-
-    #[test]
-    fn test_board_get_out_of_bounds() {
-        let board = Board::new();
-        assert_eq!(board.get(Pos::new(-1, -1)), Cell::Empty);
-        assert_eq!(board.get(Pos::new(8, 8)), Cell::Empty);
-    }
-
-    // ── Legal move generation tests ─────────────────────────────────
-
-    #[test]
-    fn test_initial_legal_moves_black() {
-        let board = Board::new();
-        let moves = board.legal_moves(Cell::Black);
-        // Standard opening: Black can play at d3, c4, f5, e6
-        assert_eq!(moves.len(), 4);
-        assert!(moves.contains(&Pos::new(2, 3))); // d3
-        assert!(moves.contains(&Pos::new(3, 2))); // c4
-        assert!(moves.contains(&Pos::new(4, 5))); // f5
-        assert!(moves.contains(&Pos::new(5, 4))); // e6
-    }
-
-    #[test]
-    fn test_initial_legal_moves_white() {
-        let board = Board::new();
-        let moves = board.legal_moves(Cell::White);
-        assert_eq!(moves.len(), 4);
-        assert!(moves.contains(&Pos::new(2, 4))); // e3
-        assert!(moves.contains(&Pos::new(3, 5))); // f4
-        assert!(moves.contains(&Pos::new(4, 2))); // c5
-        assert!(moves.contains(&Pos::new(5, 3))); // d6
-    }
-
-    #[test]
-    fn test_no_legal_move_on_occupied() {
-        let board = Board::new();
-        assert!(!board.is_legal_move(Pos::new(3, 3), Cell::Black));
-        assert!(!board.is_legal_move(Pos::new(3, 4), Cell::Black));
-    }
-
-    #[test]
-    fn test_no_legal_move_on_non_flanking() {
-        let board = Board::new();
-        // Corner is not adjacent to any pieces at start
-        assert!(!board.is_legal_move(Pos::new(0, 0), Cell::Black));
-        // A cell next to own piece but not flanking
-        assert!(!board.is_legal_move(Pos::new(2, 4), Cell::Black));
-    }
-
-    #[test]
-    fn test_legal_move_requires_nonempty_flip() {
-        let board = Board::empty();
-        // Empty board — no flips possible anywhere
-        assert!(!board.is_legal_move(Pos::new(3, 3), Cell::Black));
-    }
-
-    // ── Flipping tests — all 8 directions ───────────────────────────
-
-    #[test]
-    fn test_flip_horizontal_right() {
-        // Black at (3,0), White at (3,1), place Black at (3,2)
-        let board = board_with(&[(3, 0, Cell::Black), (3, 1, Cell::White)]);
-        let flips = board.get_flips(Pos::new(3, 2), Cell::Black);
-        // No flip: Black at (3,0) flanks (3,1) if placed at (3,2)?
-        // Direction left (-0, -1) from (3,2): sees White at (3,1), then Black at (3,0). Yes!
-        assert_eq!(flips.len(), 1);
-        assert!(flips.contains(&Pos::new(3, 1)));
-    }
-
-    #[test]
-    fn test_flip_horizontal_left() {
-        let board = board_with(&[(3, 5, Cell::White), (3, 6, Cell::Black)]);
-        // Place Black at (3,4) — direction right: sees White at (3,5), then Black at (3,6)
-        let flips = board.get_flips(Pos::new(3, 4), Cell::Black);
-        assert_eq!(flips.len(), 1);
-        assert!(flips.contains(&Pos::new(3, 5)));
-    }
-
-    #[test]
-    fn test_flip_vertical_down() {
-        let board = board_with(&[(2, 3, Cell::Black), (3, 3, Cell::White)]);
-        // Place Black at (4,3) — direction up: sees White at (3,3), then Black at (2,3)
-        let flips = board.get_flips(Pos::new(4, 3), Cell::Black);
-        assert_eq!(flips.len(), 1);
-        assert!(flips.contains(&Pos::new(3, 3)));
-    }
-
-    #[test]
-    fn test_flip_vertical_up() {
-        let board = board_with(&[(4, 3, Cell::White), (5, 3, Cell::Black)]);
-        // Place Black at (3,3) — direction down: sees White at (4,3), then Black at (5,3)
-        let flips = board.get_flips(Pos::new(3, 3), Cell::Black);
-        assert_eq!(flips.len(), 1);
-        assert!(flips.contains(&Pos::new(4, 3)));
-    }
-
-    #[test]
-    fn test_flip_diagonal_down_right() {
-        let board = board_with(&[(2, 2, Cell::Black), (3, 3, Cell::White)]);
-        // Place Black at (4,4) — direction up-left: sees White at (3,3), then Black at (2,2)
-        let flips = board.get_flips(Pos::new(4, 4), Cell::Black);
-        assert_eq!(flips.len(), 1);
-        assert!(flips.contains(&Pos::new(3, 3)));
-    }
-
-    #[test]
-    fn test_flip_diagonal_up_left() {
-        let board = board_with(&[(4, 4, Cell::White), (5, 5, Cell::Black)]);
-        // Place Black at (3,3) — direction down-right: sees White at (4,4), then Black at (5,5)
-        let flips = board.get_flips(Pos::new(3, 3), Cell::Black);
-        assert_eq!(flips.len(), 1);
-        assert!(flips.contains(&Pos::new(4, 4)));
-    }
-
-    #[test]
-    fn test_flip_diagonal_down_left() {
-        let board = board_with(&[(2, 5, Cell::Black), (3, 4, Cell::White)]);
-        // Place Black at (4,3) — direction up-right: sees White at (3,4), then Black at (2,5)
-        let flips = board.get_flips(Pos::new(4, 3), Cell::Black);
-        assert_eq!(flips.len(), 1);
-        assert!(flips.contains(&Pos::new(3, 4)));
-    }
-
-    #[test]
-    fn test_flip_diagonal_up_right() {
-        let board = board_with(&[(4, 2, Cell::White), (5, 1, Cell::Black)]);
-        // Place Black at (3,3) — direction down-left: sees White at (4,2), then Black at (5,1)
-        let flips = board.get_flips(Pos::new(3, 3), Cell::Black);
-        assert_eq!(flips.len(), 1);
-        assert!(flips.contains(&Pos::new(4, 2)));
-    }
-
-    #[test]
-    fn test_flip_multiple_directions() {
-        // Set up a position where placing Black at (3,3) flips in two directions.
-        // Vertical: White at (2,3) flanked by Black at (1,3) (direction up from placement).
-        // Horizontal: White at (3,2) flanked by Black at (3,1) (direction left from placement).
-        let board = board_with(&[
-            (1, 3, Cell::Black), // anchor for vertical flank
-            (2, 3, Cell::White), // flanked vertically
-            (3, 1, Cell::Black), // anchor for horizontal flank
-            (3, 2, Cell::White), // flanked horizontally
-        ]);
-        let flips = board.get_flips(Pos::new(3, 3), Cell::Black);
-        assert_eq!(flips.len(), 2);
-        assert!(flips.contains(&Pos::new(2, 3)));
-        assert!(flips.contains(&Pos::new(3, 2)));
-    }
-
-    #[test]
-    fn test_flip_multiple_in_one_direction() {
-        // Chain: Black at (0,0), White at (0,1), White at (0,2), place Black at (0,3)
-        let board = board_with(&[
-            (0, 0, Cell::Black),
-            (0, 1, Cell::White),
-            (0, 2, Cell::White),
-        ]);
-        let flips = board.get_flips(Pos::new(0, 3), Cell::Black);
-        assert_eq!(flips.len(), 2);
-        assert!(flips.contains(&Pos::new(0, 1)));
-        assert!(flips.contains(&Pos::new(0, 2)));
-    }
-
-    #[test]
-    fn test_no_flip_with_gap() {
-        // Black at (0,0), Empty at (0,1), White at (0,2) — no flank because of gap
-        let board = board_with(&[(0, 0, Cell::Black), (0, 2, Cell::White)]);
-        let flips = board.get_flips(Pos::new(0, 3), Cell::Black);
-        // Direction left from (0,3): White at (0,2), then Empty at (0,1) — no flank
-        assert_eq!(flips.len(), 0);
-    }
-
-    #[test]
-    fn test_no_flip_same_color() {
-        // Black at (0,0), Black at (0,1) — can't flip own pieces
-        let board = board_with(&[(0, 0, Cell::Black), (0, 1, Cell::Black)]);
-        let flips = board.get_flips(Pos::new(0, 2), Cell::Black);
-        assert_eq!(flips.len(), 0);
-    }
-
-    #[test]
-    fn test_no_flip_edge_of_board() {
-        // White at (0,6), place Black at (0,7) — no Black beyond edge
-        let board = board_with(&[(0, 6, Cell::White)]);
-        let flips = board.get_flips(Pos::new(0, 7), Cell::Black);
-        assert_eq!(flips.len(), 0);
-    }
-
-    // ── Make move tests ─────────────────────────────────────────────
-
-    #[test]
-    fn test_make_move_basic() {
-        let mut board = Board::new();
-        // Black plays d3 (row 2, col 3)
-        let flipped = board.make_move(Pos::new(2, 3), Cell::Black);
-        assert_eq!(flipped, 1); // Flips white at d4 (3,3)
-        assert_eq!(board.get(Pos::new(2, 3)), Cell::Black);
-        assert_eq!(board.get(Pos::new(3, 3)), Cell::Black); // was White, now flipped
-        assert_eq!(board.count(Cell::Black), 4);
-        assert_eq!(board.count(Cell::White), 1);
-    }
-
-    #[test]
-    fn test_make_move_illegal() {
-        let mut board = Board::new();
-        let flipped = board.make_move(Pos::new(0, 0), Cell::Black);
-        assert_eq!(flipped, 0);
-        // Board unchanged
-        assert_eq!(board.count(Cell::Black), 2);
-        assert_eq!(board.count(Cell::White), 2);
-    }
-
-    #[test]
-    fn test_make_move_flips_multiple_directions() {
-        let mut board = board_with(&[
-            (1, 3, Cell::Black), // anchor for vertical flank
-            (2, 3, Cell::White), // flanked vertically
-            (3, 1, Cell::Black), // anchor for horizontal flank
-            (3, 2, Cell::White), // flanked horizontally
-        ]);
-        let flipped = board.make_move(Pos::new(3, 3), Cell::Black);
-        assert_eq!(flipped, 2);
-        assert_eq!(board.get(Pos::new(2, 3)), Cell::Black);
-        assert_eq!(board.get(Pos::new(3, 2)), Cell::Black);
-    }
-
-    #[test]
-    fn test_make_move_long_chain() {
-        let mut board = board_with(&[
-            (0, 0, Cell::Black),
-            (0, 1, Cell::White),
-            (0, 2, Cell::White),
-            (0, 3, Cell::White),
-            (0, 4, Cell::White),
-            (0, 5, Cell::White),
-        ]);
-        let flipped = board.make_move(Pos::new(0, 6), Cell::Black);
-        assert_eq!(flipped, 5);
-        for col in 0..7 {
-            assert_eq!(board.get(Pos::new(0, col)), Cell::Black);
+impl Ink {
+    const fn new(size: f32, weight: FontWeightHint, color: Color) -> Self {
+        Self {
+            size,
+            weight,
+            color,
         }
     }
 
-    // ── Pass detection tests ────────────────────────────────────────
-
-    #[test]
-    fn test_has_legal_move_initial() {
-        let board = Board::new();
-        assert!(board.has_legal_move(Cell::Black));
-        assert!(board.has_legal_move(Cell::White));
+    /// How wide `s` is when drawn in this ink.
+    fn width(self, s: &str) -> f32 {
+        text::measure(s, self.size, self.weight)
     }
 
-    #[test]
-    fn test_no_legal_move_empty_board() {
-        let board = Board::empty();
-        assert!(!board.has_legal_move(Cell::Black));
-        assert!(!board.has_legal_move(Cell::White));
+    /// How tall one line of this ink is.
+    fn height(self) -> f32 {
+        text::line_height(self.size, self.weight)
     }
+}
 
-    #[test]
-    fn test_pass_when_no_moves() {
-        // All cells one color except one corner of the other — no flanking possible
-        let mut board = Board::empty();
-        for row in 0..8 {
-            for col in 0..8 {
-                board.set(Pos::new(row, col), Cell::Black);
-            }
-        }
-        board.set(Pos::new(0, 0), Cell::White);
-        // White can't move because there's nowhere to place that would flank Black
-        // (all remaining cells are occupied)
-        assert!(!board.has_legal_move(Cell::White));
+/// Draw `s` at `(x, y)` and hand back the box its glyphs occupy.
+fn label(f: &mut Frame<Target>, x: f32, y: f32, s: &str, ink: Ink) -> Rect {
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: s.to_string(),
+        color: ink.color,
+        font_size: ink.size,
+        font_weight: ink.weight,
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+    Rect::new(x, y, ink.width(s), ink.height())
+}
+
+/// Draw `s` at the left of `area`, vertically centred, elided to fit.
+fn label_in(f: &mut Frame<Target>, area: Rect, s: &str, ink: Ink) -> Rect {
+    let y = area.y + (area.h - ink.height()).max(0.0) / 2.0;
+    f.push(RenderCommand::Text {
+        x: area.x,
+        y,
+        text: s.to_string(),
+        color: ink.color,
+        font_size: ink.size,
+        font_weight: ink.weight,
+        max_width: Some(area.w.max(0.0)),
+        overflow: TextOverflow::Ellipsis,
+    });
+    Rect::new(area.x, y, ink.width(s).min(area.w.max(0.0)), ink.height())
+}
+
+/// Draw one line at `*y` down the panel, and move the cursor past it.
+fn panel_row(f: &mut Frame<Target>, band: Rect, y: &mut f32, s: &str, ink: Ink) -> Rect {
+    let h = ink.height();
+    let drawn = label_in(f, Rect::new(band.x, *y, band.w, h), s, ink);
+    *y += h;
+    drawn
+}
+
+/// The smallest box holding both, ignoring an empty one.
+///
+/// A section's hit box is its heading plus its rows, and a section with no
+/// rows is its heading alone.
+fn union(a: Rect, b: Rect) -> Rect {
+    if a.is_empty() {
+        return b;
     }
-
-    // ── Game over detection tests ───────────────────────────────────
-
-    #[test]
-    fn test_game_over_full_board() {
-        let mut board = Board::empty();
-        for row in 0..8 {
-            for col in 0..8 {
-                board.set(Pos::new(row, col), Cell::Black);
-            }
-        }
-        assert!(board.is_game_over());
+    if b.is_empty() {
+        return a;
     }
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    Rect::new(
+        x,
+        y,
+        a.right().max(b.right()) - x,
+        a.bottom().max(b.bottom()) - y,
+    )
+}
 
-    #[test]
-    fn test_game_not_over_initial() {
-        let board = Board::new();
-        assert!(!board.is_game_over());
-    }
+// ── The window ──────────────────────────────────────────────────────
 
-    #[test]
-    fn test_game_over_neither_can_move() {
-        // Create a position where neither can move but board isn't full
-        // Isolated single pieces with no adjacent opponent pieces
-        let board = board_with(&[(0, 0, Cell::Black), (7, 7, Cell::White)]);
-        assert!(board.is_game_over());
-    }
-
-    // ── Winner detection tests ──────────────────────────────────────
-
-    #[test]
-    fn test_winner_black() {
-        let board = board_with(&[
-            (0, 0, Cell::Black),
-            (0, 1, Cell::Black),
-            (0, 2, Cell::Black),
-            (1, 0, Cell::White),
-        ]);
-        assert_eq!(board.winner(), Cell::Black);
-    }
-
-    #[test]
-    fn test_winner_white() {
-        let board = board_with(&[
-            (0, 0, Cell::White),
-            (0, 1, Cell::White),
-            (0, 2, Cell::Black),
-        ]);
-        assert_eq!(board.winner(), Cell::White);
-    }
-
-    #[test]
-    fn test_winner_tie() {
-        let board = board_with(&[(0, 0, Cell::Black), (0, 1, Cell::White)]);
-        assert_eq!(board.winner(), Cell::Empty);
-    }
-
-    #[test]
-    fn test_winner_all_black() {
-        let mut board = Board::empty();
-        for row in 0..8 {
-            for col in 0..8 {
-                board.set(Pos::new(row, col), Cell::Black);
-            }
-        }
-        assert_eq!(board.winner(), Cell::Black);
-        assert_eq!(board.count(Cell::Black), 64);
-    }
-
-    // ── AI tests ────────────────────────────────────────────────────
-
-    #[test]
-    fn test_ai_returns_legal_move() {
-        let board = Board::new();
-        let mv = ai_best_move(&board, Cell::White);
-        assert!(mv.is_some());
-        let mv = mv.unwrap();
-        assert!(board.is_legal_move(mv, Cell::White));
-    }
-
-    #[test]
-    fn test_ai_no_move_when_none_available() {
-        let board = Board::empty();
-        let mv = ai_best_move(&board, Cell::White);
-        assert!(mv.is_none());
-    }
-
-    #[test]
-    fn test_ai_takes_corner_when_available() {
-        // Set up a position where a corner is available and should be preferred
-        let board = board_with(&[
-            (0, 1, Cell::Black),
-            (1, 1, Cell::Black),
-            (1, 0, Cell::Black), // Adjacent to corner
-            // White pieces to make corner legal
-            (0, 2, Cell::White),
-            (0, 3, Cell::White),
-        ]);
-        // Check if corner (0,0) is legal for white
-        if board.is_legal_move(Pos::new(0, 0), Cell::White) {
-            let mv = ai_best_move(&board, Cell::White);
-            // The AI should strongly prefer the corner
-            assert!(mv.is_some());
-            // Corner should be very highly rated but we don't mandate
-            // it as the only choice since the AI also considers other factors
-        }
-    }
-
-    #[test]
-    fn test_ai_avoids_giving_corner() {
-        // Generally the AI should avoid X-squares (diagonal to corners)
-        // unless there's a compelling reason not to
-        let board = Board::new();
-        let mv = ai_best_move(&board, Cell::White);
-        assert!(mv.is_some());
-        // The initial moves should not be at X-squares
-        let mv = mv.unwrap();
-        let x_squares = [
-            Pos::new(1, 1),
-            Pos::new(1, 6),
-            Pos::new(6, 1),
-            Pos::new(6, 6),
-        ];
-        // AI should prefer non-X-square moves at the start
-        assert!(!x_squares.contains(&mv), "AI should avoid X-squares early");
-    }
-
-    #[test]
-    fn test_evaluate_prefers_more_pieces() {
-        let board_good = board_with(&[
-            (0, 0, Cell::White),
-            (0, 1, Cell::White),
-            (0, 2, Cell::White),
-            (1, 0, Cell::Black),
-        ]);
-        let board_bad = board_with(&[
-            (0, 0, Cell::White),
-            (0, 1, Cell::Black),
-            (0, 2, Cell::Black),
-            (1, 0, Cell::Black),
-        ]);
-        assert!(evaluate(&board_good, Cell::White) > evaluate(&board_bad, Cell::White));
-    }
-
-    #[test]
-    fn test_evaluate_prefers_corners() {
-        let board_corner = board_with(&[
-            (0, 0, Cell::White), // corner!
-            (3, 3, Cell::Black),
-        ]);
-        let board_center = board_with(&[
-            (3, 4, Cell::White), // center
-            (3, 3, Cell::Black),
-        ]);
-        assert!(evaluate(&board_corner, Cell::White) > evaluate(&board_center, Cell::White));
-    }
-
-    // ── Scoring tests ───────────────────────────────────────────────
-
-    #[test]
-    fn test_count_after_move() {
-        let mut board = Board::new();
-        board.make_move(Pos::new(2, 3), Cell::Black);
-        // After Black plays d3: 4 black, 1 white
-        assert_eq!(board.count(Cell::Black), 4);
-        assert_eq!(board.count(Cell::White), 1);
-        assert_eq!(board.total_pieces(), 5);
-    }
-
-    #[test]
-    fn test_count_after_two_moves() {
-        let mut board = Board::new();
-        board.make_move(Pos::new(2, 3), Cell::Black); // Black d3
-        board.make_move(Pos::new(2, 2), Cell::White); // White c3
-        assert_eq!(board.total_pieces(), 6);
-    }
-
-    // ── App tests ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_app_initial_state() {
-        let app = ReversiApp::new();
-        assert_eq!(app.current_turn, Cell::Black);
-        assert_eq!(app.phase, Phase::Playing);
-        assert_eq!(app.cursor_row, 3);
-        assert_eq!(app.cursor_col, 3);
-        assert!(app.last_move.is_none());
-        assert!(app.move_history.is_empty());
-    }
-
-    #[test]
-    fn test_app_cursor_movement() {
-        let mut app = ReversiApp::new();
-        app.handle_key(&KeyEvent {
-            key: Key::Down,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert_eq!(app.cursor_row, 4);
-
-        app.handle_key(&KeyEvent {
-            key: Key::Right,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert_eq!(app.cursor_col, 4);
-
-        app.handle_key(&KeyEvent {
-            key: Key::Up,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert_eq!(app.cursor_row, 3);
-
-        app.handle_key(&KeyEvent {
-            key: Key::Left,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert_eq!(app.cursor_col, 3);
-    }
-
-    #[test]
-    fn test_app_cursor_bounds() {
-        let mut app = ReversiApp::new();
-        app.cursor_row = 0;
-        app.cursor_col = 0;
-        app.handle_key(&KeyEvent {
-            key: Key::Up,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert_eq!(app.cursor_row, 0); // Stays at 0
-
-        app.handle_key(&KeyEvent {
-            key: Key::Left,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert_eq!(app.cursor_col, 0); // Stays at 0
-
-        app.cursor_row = 7;
-        app.cursor_col = 7;
-        app.handle_key(&KeyEvent {
-            key: Key::Down,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert_eq!(app.cursor_row, 7); // Stays at 7
-
-        app.handle_key(&KeyEvent {
-            key: Key::Right,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert_eq!(app.cursor_col, 7); // Stays at 7
-    }
-
-    #[test]
-    fn test_app_place_piece() {
-        let mut app = ReversiApp::new();
-        // Move cursor to d3 (row 2, col 3)
-        app.cursor_row = 2;
-        app.cursor_col = 3;
-        app.handle_key(&KeyEvent {
-            key: Key::Enter,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        // After human places, AI should also have moved
-        assert!(!app.move_history.is_empty());
-        assert_eq!(app.move_history[0].pos, Pos::new(2, 3));
-        assert_eq!(app.move_history[0].color, Cell::Black);
-    }
-
-    #[test]
-    fn test_app_illegal_move_rejected() {
-        let mut app = ReversiApp::new();
-        app.cursor_row = 0;
-        app.cursor_col = 0;
-        app.handle_key(&KeyEvent {
-            key: Key::Enter,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert!(app.move_history.is_empty());
-        assert!(app.message.contains("Illegal"));
-    }
-
-    #[test]
-    fn test_app_new_game() {
-        let mut app = ReversiApp::new();
-        // Make a move first
-        app.cursor_row = 2;
-        app.cursor_col = 3;
-        app.handle_key(&KeyEvent {
-            key: Key::Enter,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert!(!app.move_history.is_empty());
-
-        // Press N for new game
-        app.handle_key(&KeyEvent {
-            key: Key::N,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert!(app.move_history.is_empty());
-        assert_eq!(app.board.count(Cell::Black), 2);
-        assert_eq!(app.board.count(Cell::White), 2);
-    }
-
-    #[test]
-    fn test_app_ignores_key_release() {
-        let mut app = ReversiApp::new();
-        app.handle_key(&KeyEvent {
-            key: Key::Down,
-            pressed: false, // Release, not press
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert_eq!(app.cursor_row, 3); // Unchanged
-    }
-
-    #[test]
-    fn test_app_mouse_click_on_board() {
-        let mut app = ReversiApp::new();
-        // Click the middle of d3 -- column d, row 3, which in Othello's
-        // top-down numbering is the third row from the top.
-        let (x, y) = cell_center(Pos::new(2, 3));
-        app.handle_mouse(&MouseEvent {
+/// The one body every event goes through, whichever side it arrives from.
+///
+/// The window calls it and the tests call it, so a key the tests prove works
+/// is the same key the window delivers.
+fn handle_event(app: &mut ReversiApp, event: &Event) -> EventResult {
+    match event {
+        Event::Key(KeyEvent {
+            key, pressed: true, ..
+        }) => app.handle_key(*key),
+        Event::Mouse(MouseEvent {
             x,
             y,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        });
-        // Which square, not merely that *a* square was played: only four moves
-        // are legal from the opening position, so "some move happened" passed
-        // even for a hit test that transposed row and column. It has to be the
-        // *first* record -- `last_move` by now is the AI's reply, not the click.
-        assert_eq!(app.move_history[0].pos, Pos::new(2, 3));
-        assert_eq!(app.move_history[0].color, Cell::Black);
+            kind: MouseEventKind::Press(button),
+        }) => app.click(*x, *y, *button),
+        Event::Resize { width, height } => {
+            app.resize(f32_from_u32(*width), f32_from_u32(*height));
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+impl App for ReversiApp {
+    fn title(&self) -> String {
+        "Reversi".to_string()
     }
 
-    #[test]
-    fn test_app_mouse_click_outside_board() {
-        let mut app = ReversiApp::new();
-        app.handle_mouse(&MouseEvent {
-            x: 0.0,
-            y: 0.0,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        });
-        assert!(app.move_history.is_empty());
+    fn app_id(&self) -> String {
+        "reversi".to_string()
     }
 
-    // ── Board geometry tests ───────────────────────────────
-    //
-    // `cell_origin` and `cell_at` are each other's inverse, so a test that
-    // clicks where the code says it drew something agrees with any mapping,
-    // right or wrong. The checks that carry weight here are the ones whose
-    // expected value comes from somewhere else: the painted cells, the window,
-    // and the way an Othello board is lettered.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the natural size is two small positive whole numbers"
+    )]
+    fn initial_size(&self) -> (u32, u32) {
+        // Converted from the float pair rather than written out again: two
+        // spellings of one size are two things that can drift apart.
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
 
-    /// Top-left corners of the painted cell backgrounds, in the order the
-    /// renderer emitted them. Nothing here consults `cell_origin`, so these are
-    /// the squares a player actually sees.
-    fn painted_cells(commands: &[RenderCommand]) -> Vec<(f32, f32)> {
-        commands
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    x, y, width, color, ..
-                } if (*width - CELL_SIZE).abs() < 0.01
-                    && (*color == BOARD_GREEN || *color == BOARD_GREEN_LIGHT) =>
-                {
-                    Some((*x, *y))
-                }
-                _ => None,
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        if matches!(
+            event,
+            Event::Key(KeyEvent {
+                key: Key::Escape,
+                pressed: true,
+                ..
             })
-            .collect()
+        ) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
     }
 
-    /// The painted cell that contains `(x, y)`, if any. This is how a test says
-    /// "the same square the player is looking at" without asking `cell_origin`.
-    fn painted_cell_containing(cells: &[(f32, f32)], x: f32, y: f32) -> Option<(f32, f32)> {
-        cells
-            .iter()
-            .copied()
-            .find(|&(cx, cy)| x >= cx && x < cx + CELL_SIZE && y >= cy && y < cy + CELL_SIZE)
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against, which is the only reason it is stored at all.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for ReversiApp {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
     }
 
-    /// Centres of the pieces the renderer painted. The body is the fill in a
-    /// piece colour; the shadow behind it is a different colour, so it does not
-    /// match and is not counted twice.
-    fn painted_piece_centers(commands: &[RenderCommand]) -> Vec<(f32, f32)> {
-        commands
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    x, y, width, color, ..
-                } if (*width - PIECE_RADIUS * 2.0).abs() < 0.01
-                    && (*color == BLACK_PIECE || *color == WHITE_PIECE) =>
-                {
-                    Some((*x + PIECE_RADIUS, *y + PIECE_RADIUS))
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Where a coordinate label was drawn. Filtered by font size so the panel's
-    /// own text -- which includes bare digits, such as the score -- cannot be
-    /// mistaken for a row number.
-    fn label_pos(commands: &[RenderCommand], want: &str) -> Option<(f32, f32)> {
-        commands.iter().find_map(|c| match c {
-            RenderCommand::Text {
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
                 x,
                 y,
-                text,
-                font_size,
-                color,
-                ..
-            } if (*font_size - LABEL_FONT_SIZE).abs() < 0.01
-                && *color == SUBTEXT0
-                && text == want =>
-            {
-                Some((*x, *y))
-            }
-            _ => None,
-        })
+                kind: MouseEventKind::Press(button),
+            }),
+        )
     }
 
-    #[test]
-    fn the_painted_board_is_eight_cells_square_and_evenly_spaced() {
-        // Measured against the window and against itself, never against
-        // `cell_origin`: 64 cells on an 8x8 lattice, one cell apart, inside the
-        // window and clear of the side panel.
-        let app = ReversiApp::new();
-        let cells = painted_cells(&app.render());
-        assert_eq!(
-            cells.len(),
-            BOARD_SIZE * BOARD_SIZE,
-            "one painted cell each"
-        );
-
-        let mut xs: Vec<f32> = cells.iter().map(|c| c.0).collect();
-        let mut ys: Vec<f32> = cells.iter().map(|c| c.1).collect();
-        xs.sort_by(f32::total_cmp);
-        xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-        ys.sort_by(f32::total_cmp);
-        ys.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-        assert_eq!(xs.len(), BOARD_SIZE, "eight distinct columns");
-        assert_eq!(ys.len(), BOARD_SIZE, "eight distinct rows");
-
-        for pair in xs.windows(2) {
-            assert!(
-                (pair[1] - pair[0] - CELL_SIZE).abs() < 0.01,
-                "columns should be one cell apart, got {}",
-                pair[1] - pair[0]
-            );
-        }
-        for pair in ys.windows(2) {
-            assert!(
-                (pair[1] - pair[0] - CELL_SIZE).abs() < 0.01,
-                "rows should be one cell apart, got {}",
-                pair[1] - pair[0]
-            );
-        }
-        assert!(
-            xs[0] > 0.0 && ys[0] > 0.0,
-            "the board starts inside the window"
-        );
-        assert!(
-            xs[BOARD_SIZE - 1] + CELL_SIZE <= PANEL_X,
-            "the board should not run under the side panel"
-        );
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
     }
+}
 
-    #[test]
-    fn every_point_in_a_painted_cell_resolves_to_that_cell() {
-        // Probed at nine points across each cell rather than only at its
-        // centre. A hit test that is off by a fraction of a cell still answers
-        // correctly dead centre, so the centre alone cannot tell a correct
-        // mapping from a shifted one; the corners can.
-        let app = ReversiApp::new();
-        let commands = app.render();
-        let cells = painted_cells(&commands);
-        let inset = 1.0;
-        for (i, &(cx, cy)) in cells.iter().enumerate() {
-            // Emission order is row-major, which is itself worth pinning: it is
-            // what makes "the nth painted cell" mean "(n / 8, n % 8)".
-            let want = Pos::new(i as i32 / BOARD_SIZE as i32, i as i32 % BOARD_SIZE as i32);
-            for dx in [inset, CELL_SIZE / 2.0, CELL_SIZE - inset] {
-                for dy in [inset, CELL_SIZE / 2.0, CELL_SIZE - inset] {
-                    assert_eq!(
-                        cell_at(cx + dx, cy + dy),
-                        Some(want),
-                        "({}, {}) is inside the cell painted at ({cx}, {cy})",
-                        cx + dx,
-                        cy + dy
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn the_board_edges_reject_clicks_alike_on_all_four_sides() {
-        // Unlike go, this board has no click slop -- a piece sits inside its
-        // cell, so the cell's rectangle is exactly what is clickable. What
-        // matters is that all four edges say so. The original chess and gomoku
-        // hit tests each got this wrong in one direction only, because a Rust
-        // float-to-integer cast truncates toward zero and so a bounds test
-        // applied *after* the cast is not symmetric.
-        let app = ReversiApp::new();
-        let cells = painted_cells(&app.render());
-        let left = cells.iter().map(|c| c.0).fold(f32::MAX, f32::min);
-        let right = cells.iter().map(|c| c.0).fold(f32::MIN, f32::max) + CELL_SIZE;
-        let top = cells.iter().map(|c| c.1).fold(f32::MAX, f32::min);
-        let bottom = cells.iter().map(|c| c.1).fold(f32::MIN, f32::max) + CELL_SIZE;
-        let mid_x = f32::midpoint(left, right);
-        let mid_y = f32::midpoint(top, bottom);
-
-        // Stated as the interval itself rather than as a mirror of one edge
-        // about the other: the board is the half-open box [left, right) x
-        // [top, bottom), so `left - d` and `right + d` are the matching pair
-        // and `left` and `right` themselves are not. Getting that reflection
-        // wrong is how the first draft of this test failed.
-        let mut d = 0.25f32;
-        while d < CELL_SIZE * 2.0 {
-            for (name, p) in [
-                ("left", (left - d, mid_y)),
-                ("right", (right + d, mid_y)),
-                ("top", (mid_x, top - d)),
-                ("bottom", (mid_x, bottom + d)),
-            ] {
-                assert_eq!(
-                    cell_at(p.0, p.1),
-                    None,
-                    "{d}px past the {name} edge, at ({}, {}), is off the board",
-                    p.0,
-                    p.1
-                );
-            }
-            if d < CELL_SIZE {
-                for (name, p) in [
-                    ("left", (left + d, mid_y)),
-                    ("right", (right - d, mid_y)),
-                    ("top", (mid_x, top + d)),
-                    ("bottom", (mid_x, bottom - d)),
-                ] {
-                    assert!(
-                        cell_at(p.0, p.1).is_some(),
-                        "{d}px inside the {name} edge, at ({}, {}), is on the board",
-                        p.0,
-                        p.1
-                    );
-                }
-            }
-            d += 0.25;
-        }
-    }
-
-    #[test]
-    fn nothing_outside_the_painted_board_lands_on_a_cell() {
-        // Swept far past every edge, because the faults this is looking for --
-        // a saturating cast, a wrap, a bounds test applied after the cast --
-        // all live beyond the board rather than just outside it.
-        let app = ReversiApp::new();
-        let cells = painted_cells(&app.render());
-        let far = BOARD_OFFSET_X + BOARD_PIXEL_SIZE + 200.0;
-        let mut x = -200.0;
-        while x < far {
-            let mut y = -200.0;
-            while y < far {
-                if let Some(pos) = cell_at(x, y) {
-                    assert!(
-                        pos.in_bounds(),
-                        "({x}, {y}) resolved to ({}, {}), which is off the board",
-                        pos.row,
-                        pos.col
-                    );
-                    assert!(
-                        painted_cell_containing(&cells, x, y).is_some(),
-                        "({x}, {y}) resolved to a cell but is not inside any painted one"
-                    );
-                }
-                y += 7.0;
-            }
-            x += 7.0;
-        }
-    }
-
-    #[test]
-    fn a_piece_is_painted_in_the_middle_of_the_cell_it_sits_on() {
-        // Measured against the painted cell that *contains* the piece, not
-        // against `cell_center`. Asking `cell_center` where the piece should be
-        // would agree with any renderer that used it, including one that put
-        // the piece in a corner: an inverse tells you which cell a point is in,
-        // never where in the cell it is. See design-decisions.md 483.
-        let mut app = ReversiApp::new();
-        app.board = board_with(&[
-            (0, 0, Cell::Black),
-            (3, 4, Cell::White),
-            (7, 7, Cell::Black),
-        ]);
-        let commands = app.render();
-        let cells = painted_cells(&commands);
-        let centers = painted_piece_centers(&commands);
-        assert_eq!(centers.len(), 3, "one piece painted per piece on the board");
-
-        for (x, y) in centers {
-            let (cx, cy) = painted_cell_containing(&cells, x, y)
-                .expect("a piece should be painted inside some cell");
-            let (want_x, want_y) = (cx + CELL_SIZE / 2.0, cy + CELL_SIZE / 2.0);
-            assert!(
-                (x - want_x).abs() < 0.01 && (y - want_y).abs() < 0.01,
-                "a piece at ({x}, {y}) is not centred in its cell at ({want_x}, {want_y})"
-            );
-        }
-    }
-
-    #[test]
-    fn the_board_is_lettered_and_numbered_the_othello_way() {
-        // Othello numbers its ranks *downward*: a1 is the upper-left square and
-        // h8 the lower-right. Chess and go both run the other way, so this is
-        // exactly the kind of convention a later reader might "correct". The
-        // outside opinion is the published rule, and the observable form of it
-        // is the window: the label "1" must sit above the label "8", while "a"
-        // sits left of "h".
-        let app = ReversiApp::new();
-        let commands = app.render();
-        let (_, y1) = label_pos(&commands, "1").expect("row 1 label");
-        let (_, y8) = label_pos(&commands, "8").expect("row 8 label");
-        assert!(
-            y1 < y8,
-            "Othello's row 1 is the top row; got 1 at {y1} and 8 at {y8}"
-        );
-
-        let (xa, _) = label_pos(&commands, "a").expect("column a label");
-        let (xh, _) = label_pos(&commands, "h").expect("column h label");
-        assert!(
-            xa < xh,
-            "column a should be drawn left of column h, got {xa} vs {xh}"
-        );
-    }
-
-    #[test]
-    fn the_labels_line_up_with_the_cells_they_name() {
-        // Pinned to the *painted* cells rather than recomputed, so labels that
-        // drift off the row or column they name are caught.
-        let app = ReversiApp::new();
-        let commands = app.render();
-        let cells = painted_cells(&commands);
-        for (i, name) in ["a", "d", "h"].iter().enumerate() {
-            let col = [0usize, 3, BOARD_SIZE - 1][i];
-            let (x, _) = label_pos(&commands, name).expect("column label");
-            let want = cells[col].0 + CELL_SIZE / 2.0;
-            assert!(
-                (x - want).abs() < CELL_SIZE / 2.0,
-                "label {name} sits at {x}, but its column is centred on {want}"
-            );
-        }
-        for (i, name) in ["1", "4", "8"].iter().enumerate() {
-            let row = [0usize, 3, BOARD_SIZE - 1][i];
-            let (_, y) = label_pos(&commands, name).expect("row label");
-            let want = cells[row * BOARD_SIZE].1 + CELL_SIZE / 2.0;
-            assert!(
-                (y - want).abs() < CELL_SIZE / 2.0,
-                "label {name} sits at {y}, but its row is centred on {want}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_border_sits_squarely_under_the_painted_cells() {
-        // The border is drawn from `BOARD_PIXEL_SIZE` and the cells from
-        // `cell_origin`. If those two disagree about how big the board is, the
-        // frame is off-centre -- and that is the only symptom, since every
-        // other part of the board is placed from `cell_origin` and just shifts
-        // along with it.
-        let app = ReversiApp::new();
-        let commands = app.render();
-        let cells = painted_cells(&commands);
-        let (bx, by, bw, bh) = commands
-            .iter()
-            .find_map(|c| match c {
-                RenderCommand::FillRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                    color,
-                    ..
-                } if *color == BOARD_BORDER => Some((*x, *y, *width, *height)),
-                _ => None,
-            })
-            .expect("the board border should be painted");
-
-        let left = cells.iter().map(|c| c.0).fold(f32::MAX, f32::min);
-        let right = cells.iter().map(|c| c.0).fold(f32::MIN, f32::max) + CELL_SIZE;
-        let top = cells.iter().map(|c| c.1).fold(f32::MAX, f32::min);
-        let bottom = cells.iter().map(|c| c.1).fold(f32::MIN, f32::max) + CELL_SIZE;
-        let margins = [
-            ("left", left - bx),
-            ("right", bx + bw - right),
-            ("top", top - by),
-            ("bottom", by + bh - bottom),
-        ];
-        for &(name, m) in &margins {
-            assert!(
-                m > 0.0,
-                "the {name} margin is {m}; the cells escape the border"
-            );
-        }
-        for pair in margins.windows(2) {
-            assert!(
-                (pair[0].1 - pair[1].1).abs() < 0.01,
-                "the {} margin is {} but the {} margin is {}",
-                pair[0].0,
-                pair[0].1,
-                pair[1].0,
-                pair[1].1
-            );
-        }
-    }
-
-    #[test]
-    fn a_legal_move_dot_marks_the_middle_of_a_legal_cell() {
-        // The dots are what a player aims at, so each one has to sit in the
-        // middle of a cell that a click on it would actually play.
-        let app = ReversiApp::new();
-        let commands = app.render();
-        let cells = painted_cells(&commands);
-        let legal = app.board.legal_moves(Cell::Black);
-        let dots: Vec<(f32, f32)> = commands
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect { x, y, color, .. } if *color == VALID_MOVE_DOT => {
-                    Some((*x + DOT_RADIUS, *y + DOT_RADIUS))
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(dots.len(), legal.len(), "one dot per legal move");
-
-        for (x, y) in dots {
-            let (cx, cy) = painted_cell_containing(&cells, x, y)
-                .expect("a dot should be painted inside some cell");
-            assert!(
-                (x - (cx + CELL_SIZE / 2.0)).abs() < 0.01
-                    && (y - (cy + CELL_SIZE / 2.0)).abs() < 0.01,
-                "a dot at ({x}, {y}) is not centred in its cell at ({cx}, {cy})"
-            );
-            let hit = cell_at(x, y).expect("a dot should sit on a clickable cell");
-            assert!(
-                legal.contains(&hit),
-                "the dot at ({x}, {y}) resolves to ({}, {}), which is not a legal move",
-                hit.row,
-                hit.col
-            );
-        }
-    }
-
-    // ── Rendering tests ─────────────────────────────────────────────
-
-    #[test]
-    fn test_render_produces_commands() {
-        let app = ReversiApp::new();
-        let cmds = app.render();
-        assert!(!cmds.is_empty());
-        // Should have at minimum: background, title, board cells, pieces, labels
-        assert!(cmds.len() > 64); // At least one cmd per cell + overhead
-    }
-
-    #[test]
-    fn test_render_contains_title() {
-        let app = ReversiApp::new();
-        let cmds = app.render();
-        let has_title = cmds.iter().any(|cmd| {
-            if let RenderCommand::Text { text, .. } = cmd {
-                text == "Reversi"
-            } else {
-                false
-            }
-        });
-        assert!(has_title);
-    }
-
-    #[test]
-    fn test_render_contains_pieces() {
-        let app = ReversiApp::new();
-        let cmds = app.render();
-        // Initial board has 4 pieces, each rendered as shadow + body + border = 12 fill/stroke cmds
-        let fill_count = cmds
-            .iter()
-            .filter(|cmd| matches!(cmd, RenderCommand::FillRect { .. }))
-            .count();
-        assert!(fill_count >= 64 + 4); // 64 cells + at least 4 piece bodies
-    }
-
-    #[test]
-    fn test_render_shows_valid_moves() {
-        let app = ReversiApp::new();
-        let cmds = app.render();
-        // Valid moves rendered as small rounded rectangles (dots)
-        // There are 4 valid moves initially for Black
-        let valid_dot_count = cmds
-            .iter()
-            .filter(|cmd| {
-                if let RenderCommand::FillRect {
-                    color,
-                    corner_radii,
-                    ..
-                } = cmd
-                {
-                    *color == VALID_MOVE_DOT && corner_radii.top_left > 0.0
-                } else {
-                    false
-                }
-            })
-            .count();
-        assert_eq!(valid_dot_count, 4);
-    }
-
-    #[test]
-    fn test_render_game_over() {
-        let mut app = ReversiApp::new();
-        app.phase = Phase::GameOver;
-        app.message = app.game_over_message();
-        let cmds = app.render();
-        let has_game_over = cmds.iter().any(|cmd| {
-            if let RenderCommand::Text { text, .. } = cmd {
-                text.contains("Game Over")
-            } else {
-                false
-            }
-        });
-        assert!(has_game_over);
-    }
-
-    #[test]
-    fn test_render_cursor_visible() {
-        let app = ReversiApp::new();
-        let cmds = app.render();
-        let has_cursor = cmds.iter().any(|cmd| {
-            if let RenderCommand::StrokeRect { color, .. } = cmd {
-                *color == CURSOR_COLOR
-            } else {
-                false
-            }
-        });
-        assert!(has_cursor);
-    }
-
-    #[test]
-    fn test_render_last_move_highlight() {
-        let mut app = ReversiApp::new();
-        app.last_move = Some(Pos::new(3, 3));
-        let cmds = app.render();
-        let has_highlight = cmds.iter().any(|cmd| {
-            if let RenderCommand::FillRect { color, .. } = cmd {
-                *color == LAST_MOVE_HIGHLIGHT
-            } else {
-                false
-            }
-        });
-        assert!(has_highlight);
-    }
-
-    #[test]
-    fn test_render_panel_score() {
-        let app = ReversiApp::new();
-        let cmds = app.render();
-        let has_score = cmds.iter().any(|cmd| {
-            if let RenderCommand::Text { text, .. } = cmd {
-                text.contains("Score")
-            } else {
-                false
-            }
-        });
-        assert!(has_score);
-    }
-
-    #[test]
-    fn test_render_panel_move_count() {
-        let app = ReversiApp::new();
-        let cmds = app.render();
-        let has_moves = cmds.iter().any(|cmd| {
-            if let RenderCommand::Text { text, .. } = cmd {
-                text.contains("Moves: 0")
-            } else {
-                false
-            }
-        });
-        assert!(has_moves);
-    }
-
-    // ── Move record notation tests ──────────────────────────────────
-
-    #[test]
-    fn test_move_notation() {
-        let record = MoveRecord {
-            pos: Pos::new(2, 3),
-            color: Cell::Black,
-            flipped: 1,
-        };
-        assert_eq!(record.notation(), "B:d3(+1)");
-    }
-
-    #[test]
-    fn test_move_notation_white() {
-        let record = MoveRecord {
-            pos: Pos::new(5, 0),
-            color: Cell::White,
-            flipped: 3,
-        };
-        assert_eq!(record.notation(), "W:a6(+3)");
-    }
-
-    // ── Edge case tests ─────────────────────────────────────────────
-
-    #[test]
-    fn test_full_row_flip() {
-        // Black at (0,0) and (0,7), White filling (0,1)-(0,6)
-        let mut board = Board::empty();
-        board.set(Pos::new(0, 0), Cell::Black);
-        for col in 1..7 {
-            board.set(Pos::new(0, col), Cell::White);
-        }
-        // Place Black at (0,7)
-        let flips = board.get_flips(Pos::new(0, 7), Cell::Black);
-        assert_eq!(flips.len(), 6);
-    }
-
-    #[test]
-    fn test_full_column_flip() {
-        let mut board = Board::empty();
-        board.set(Pos::new(0, 0), Cell::Black);
-        for row in 1..7 {
-            board.set(Pos::new(row, 0), Cell::White);
-        }
-        let flips = board.get_flips(Pos::new(7, 0), Cell::Black);
-        assert_eq!(flips.len(), 6);
-    }
-
-    #[test]
-    fn test_full_diagonal_flip() {
-        let mut board = Board::empty();
-        board.set(Pos::new(0, 0), Cell::Black);
-        for i in 1..7 {
-            board.set(Pos::new(i, i), Cell::White);
-        }
-        let flips = board.get_flips(Pos::new(7, 7), Cell::Black);
-        assert_eq!(flips.len(), 6);
-    }
-
-    #[test]
-    fn test_board_set_out_of_bounds() {
-        let mut board = Board::empty();
-        // Should not panic
-        board.set(Pos::new(-1, -1), Cell::Black);
-        board.set(Pos::new(8, 8), Cell::Black);
-        assert_eq!(board.count(Cell::Black), 0);
-    }
-
-    #[test]
-    fn test_flips_on_occupied_cell() {
-        let board = Board::new();
-        // Can't place on an occupied cell
-        let flips = board.get_flips(Pos::new(3, 3), Cell::Black);
-        assert!(flips.is_empty());
-    }
-
-    #[test]
-    fn test_flips_out_of_bounds() {
-        let board = Board::new();
-        let flips = board.get_flips(Pos::new(-1, -1), Cell::Black);
-        assert!(flips.is_empty());
-    }
-
-    #[test]
-    fn test_color_name() {
-        assert_eq!(color_name(Cell::Black), "Black");
-        assert_eq!(color_name(Cell::White), "White");
-        assert_eq!(color_name(Cell::Empty), "None");
-    }
-
-    #[test]
-    fn test_event_handling() {
-        let mut app = ReversiApp::new();
-        // Test Event::Key
-        app.handle_event(&Event::Key(KeyEvent {
-            key: Key::Down,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        }));
-        assert_eq!(app.cursor_row, 4);
-
-        // Test Event::Mouse (click outside board)
-        app.handle_event(&Event::Mouse(MouseEvent {
-            x: 0.0,
-            y: 0.0,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        }));
-        // No change since click is outside
-        assert!(app.move_history.is_empty());
-
-        // Test Event::Resize (ignored)
-        app.handle_event(&Event::Resize {
-            width: 800,
-            height: 600,
-        });
-        assert_eq!(app.cursor_row, 4); // Unchanged
-    }
-
-    #[test]
-    fn test_space_key_places_piece() {
-        let mut app = ReversiApp::new();
-        app.cursor_row = 2;
-        app.cursor_col = 3;
-        app.handle_key(&KeyEvent {
-            key: Key::Space,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert!(!app.move_history.is_empty());
-        assert_eq!(app.move_history[0].pos, Pos::new(2, 3));
-    }
-
-    #[test]
-    fn test_game_over_new_game_key() {
-        let mut app = ReversiApp::new();
-        app.phase = Phase::GameOver;
-        app.handle_key(&KeyEvent {
-            key: Key::Enter,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        assert_eq!(app.phase, Phase::Playing);
-        assert!(app.move_history.is_empty());
-    }
-
-    // ── Minimax correctness tests ───────────────────────────────────
-
-    #[test]
-    fn test_minimax_returns_finite() {
-        let board = Board::new();
-        let score = minimax(&board, 2, i32::MIN, i32::MAX, true, Cell::White);
-        assert!(score > i32::MIN);
-        assert!(score < i32::MAX);
-    }
-
-    #[test]
-    fn test_minimax_game_over_board() {
-        let mut board = Board::empty();
-        for row in 0..8 {
-            for col in 0..8 {
-                board.set(Pos::new(row, col), Cell::Black);
-            }
-        }
-        // Game is over — should return evaluation immediately
-        let score = minimax(&board, 4, i32::MIN, i32::MAX, true, Cell::White);
-        // White has 0 pieces, Black has 64 — very negative for White
-        assert!(score < 0);
-    }
-
-    #[test]
-    fn test_evaluate_symmetric() {
-        // A symmetric position should evaluate to 0 for either side
-        let board = Board::new();
-        let black_eval = evaluate(&board, Cell::Black);
-        let white_eval = evaluate(&board, Cell::White);
-        // Due to mobility differences, these might not be exactly zero,
-        // but they should be negatives of each other (approximately)
-        assert!((black_eval + white_eval).abs() <= 1);
-    }
+fn main() -> ExitCode {
+    let mut game = ReversiApp::new();
+    app::launch("reversi", &mut game)
 }

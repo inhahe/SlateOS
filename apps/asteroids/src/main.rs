@@ -1,16 +1,3 @@
-#![allow(dead_code)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(clippy::needless_range_loop)]
-#![allow(unused_imports)]
-
 //! Slate OS Asteroids -- classic space shooter arcade game.
 //!
 //! The player controls a triangular ship in the center of a wraparound
@@ -20,14 +7,32 @@
 //! collision. Clearing all asteroids advances the wave.
 //!
 //! Controls: Left/Right to rotate, Up to thrust, Space to shoot,
-//! P to pause, N for new game.
+//! P to pause, N for new game. While the game is paused or over, a click
+//! anywhere on the playfield does what the overlay says the keyboard does.
+//!
+//! ## What this program was
+//!
+//! `main` built an `AsteroidsApp` and dropped it. There was no window: the
+//! drawing pass returned a `Vec<RenderCommand>` measured against a window
+//! size the program worked out for itself from a fixed 800x600 playfield,
+//! and `handle_event` -- the only way in for a keystroke -- had no caller.
+//! Twelve blanket `#![allow(...)]` at the top of the file, `dead_code` and
+//! `unused_imports` among them, are what kept a compiler from saying so.
+//!
+//! It now opens a real window, lays every band out from the size that window
+//! reports each frame, records a hit box for everything it draws, and answers
+//! keys and clicks through one body that the tests drive too.
 
 use guitk::color::Color;
-use guitk::event::{Event, Key};
-#[cfg(test)]
-use guitk::event::{KeyEvent, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -42,19 +47,36 @@ const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
 
-// ── Layout constants ────────────────────────────────────────────────
+// ── World size ──────────────────────────────────────────────────────
+
+/// How wide the world is, in the units the game is played in.
+///
+/// This is a *game rule*, not a drawing size: it is how far a shot travels
+/// before it comes back round the other side. The window scales the world to
+/// fit and letterboxes what is left over, so a wider window shows the same
+/// game bigger rather than a bigger game.
 const FIELD_WIDTH: f32 = 800.0;
+/// How tall the world is. See [`FIELD_WIDTH`].
 const FIELD_HEIGHT: f32 = 600.0;
-const PADDING: f32 = 12.0;
-const HEADER_HEIGHT: f32 = 50.0;
-const WINDOW_WIDTH: f32 = FIELD_WIDTH + PADDING * 2.0;
-const WINDOW_HEIGHT: f32 = FIELD_HEIGHT + HEADER_HEIGHT + PADDING * 2.0;
-const HEADER_FONT_SIZE: f32 = 18.0;
-const TITLE_FONT_SIZE: f32 = 24.0;
-const OVERLAY_FONT_SIZE: f32 = 16.0;
-const SMALL_FONT_SIZE: f32 = 13.0;
+
+/// The window size the game opens at, and the size a test reads a click
+/// against unless it says otherwise: enough for the world at 1:1 plus the
+/// header band and its margins.
+const WINDOW_WIDTH: f32 = FIELD_WIDTH + 24.0;
+/// The height that goes with [`WINDOW_WIDTH`].
+const WINDOW_HEIGHT: f32 = FIELD_HEIGHT + 74.0;
+/// [`WINDOW_WIDTH`] as the window server wants it.
+const INITIAL_WINDOW_W: u32 = 824;
+/// [`WINDOW_HEIGHT`] as the window server wants it.
+const INITIAL_WINDOW_H: u32 = 674;
+
+/// How often the window is asked for a frame -- about sixty a second.
+///
+/// The game's motion is worked out from the elapsed time each tick reports,
+/// not from the tick count, so a slower or a jittery clock slows the frame
+/// rate without slowing the game.
+const TICK: Duration = Duration::from_millis(16);
 
 // ── Game constants ──────────────────────────────────────────────────
 const SHIP_RADIUS: f32 = 15.0;
@@ -82,6 +104,8 @@ const SCORE_SMALL: u32 = 100;
 
 const INITIAL_LIVES: u32 = 3;
 const INITIAL_ASTEROIDS: usize = 4;
+/// The most asteroids a wave will ever open with. See [`AsteroidsApp::advance_wave`].
+const MAX_WAVE_ASTEROIDS: usize = 12;
 const RESPAWN_DELAY: f32 = 2.0;
 const INVULNERABLE_TIME: f32 = 3.0;
 
@@ -139,8 +163,10 @@ fn random_angle(rng: &mut SeededRng) -> f32 {
 }
 
 // ── Vec2 ────────────────────────────────────────────────────────────
+
+/// A point, or a direction and a distance, in field coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Vec2 {
+pub struct Vec2 {
     x: f32,
     y: f32,
 }
@@ -156,10 +182,6 @@ impl Vec2 {
         (self.x * self.x + self.y * self.y).sqrt()
     }
 
-    fn length_sq(self) -> f32 {
-        self.x * self.x + self.y * self.y
-    }
-
     fn add(self, other: Self) -> Self {
         Self {
             x: self.x + other.x,
@@ -167,6 +189,15 @@ impl Vec2 {
         }
     }
 
+    /// One point taken from another.
+    ///
+    /// The game itself never wants a straight difference -- the field wraps,
+    /// so "which way is that asteroid" is always the wrapped answer, and a
+    /// straight one would send a ship the long way round. It is kept for the
+    /// tests, which work in a corner of the field where wrapping does not
+    /// come into it, and is compiled only for them so that it cannot quietly
+    /// become the wrong answer in the game.
+    #[cfg(test)]
     fn sub(self, other: Self) -> Self {
         Self {
             x: self.x - other.x,
@@ -181,6 +212,8 @@ impl Vec2 {
         }
     }
 
+    /// How far apart two points are, ignoring the wrap. See [`Vec2::sub`].
+    #[cfg(test)]
     fn distance_to(self, other: Self) -> f32 {
         self.sub(other).length()
     }
@@ -279,14 +312,6 @@ impl AsteroidSize {
             AsteroidSize::Small => None,
         }
     }
-
-    fn label(self) -> &'static str {
-        match self {
-            AsteroidSize::Large => "Large",
-            AsteroidSize::Medium => "Medium",
-            AsteroidSize::Small => "Small",
-        }
-    }
 }
 
 // ── Asteroid ────────────────────────────────────────────────────────
@@ -333,16 +358,15 @@ impl Asteroid {
     /// Get the polygon vertices for rendering (in world space).
     fn vertices(&self) -> Vec<Vec2> {
         let n = self.vertex_radii.len();
-        let mut verts = Vec::with_capacity(n);
-        for i in 0..n {
-            let a = self.angle + (i as f32 / n as f32) * TAU;
-            let r = self.vertex_radii[i];
-            verts.push(Vec2::new(
-                self.pos.x + cos_f32(a) * r,
-                self.pos.y + sin_f32(a) * r,
-            ));
-        }
-        verts
+        let turn = TAU / f32_from_usize(n).max(1.0);
+        self.vertex_radii
+            .iter()
+            .enumerate()
+            .map(|(i, &r)| {
+                let a = self.angle + f32_from_usize(i) * turn;
+                Vec2::new(self.pos.x + cos_f32(a) * r, self.pos.y + sin_f32(a) * r)
+            })
+            .collect()
     }
 }
 
@@ -477,12 +501,13 @@ impl Particle {
         self.lifetime -= dt;
     }
 
+    /// How solid the particle is, from full at birth to nothing at death.
     fn alpha(&self) -> u8 {
         if self.max_lifetime <= 0.0 {
             return 0;
         }
-        let ratio = self.lifetime / self.max_lifetime;
-        (ratio * 255.0) as u8
+        let ratio = (self.lifetime / self.max_lifetime).clamp(0.0, 1.0);
+        u8_from_f32(ratio * 255.0)
     }
 }
 
@@ -514,8 +539,189 @@ impl InputState {
     }
 }
 
+// ── Targets ─────────────────────────────────────────────────────────
+
+/// Everything the drawing pass records a hit box for.
+///
+/// The game itself is played with the keyboard -- a pointer cannot fly a ship
+/// -- so most of these exist to be *found* rather than clicked: a test that
+/// wants to know the ship is on screen, or that the third asteroid is inside
+/// the playfield, asks for its rectangle by name. The two that are clickable
+/// are the two the overlays already tell the player to press a key for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// The band along the top holding the score and the rest.
+    Header,
+    /// The game's name.
+    Title,
+    /// Points so far this game.
+    Score,
+    /// The best score this program has seen since it started.
+    HighScore,
+    /// Ships left after this one.
+    Lives,
+    /// Which wave is being flown.
+    Wave,
+    /// The line reminding the player which keys do what.
+    Controls,
+    /// The playfield: everything the game is played inside.
+    Field,
+    /// The player's ship, when it is on screen.
+    Ship,
+    /// One asteroid, by its index in the field.
+    Asteroid(usize),
+    /// One bullet, by its index in the field.
+    Bullet(usize),
+    /// The dimming sheet a pause or a game over lays over the field.
+    Overlay,
+    /// The word "PAUSED", or "GAME OVER".
+    OverlayTitle,
+    /// Carry on with the game that is already going.
+    Resume,
+    /// Throw the current game away and start another.
+    NewGame,
+    /// A line of the game-over box that only reports a number.
+    FinalStat(usize),
+}
+
+/// Whether an event changed anything the window would need to redraw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventResult {
+    Consumed,
+    Ignored,
+}
+
+// ── Layout ──────────────────────────────────────────────────────────
+
+/// Where the two bands go in a window of a given size.
+///
+/// The header gives up its height before the playfield does, so a window
+/// squashed from above loses the score before it loses the game.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    pub window: Rect,
+    /// Score, wave, lives, and the high score.
+    pub header: Rect,
+    /// What is left for the playfield to be fitted into.
+    pub body: Rect,
+    /// The header's type size.
+    pub head: f32,
+    /// Body text — the overlays.
+    pub font: f32,
+    /// The smallest type on show: the controls line.
+    pub small: f32,
+    /// The margin between a band and what is inside it.
+    pub pad: f32,
+}
+
+impl Layout {
+    /// Solve the bands for a window of this size.
+    #[must_use]
+    pub fn new(w: f32, h: f32) -> Self {
+        let w = w.max(0.0);
+        let h = h.max(0.0);
+        let pad = (w.min(h) * 0.014).clamp(2.0, 12.0);
+        let head = (h / 36.0).clamp(9.0, 20.0);
+        let font = (h / 30.0).clamp(10.0, 26.0);
+        let small = (h / 52.0).clamp(7.0, 14.0);
+
+        // A share of `h` clamped into a band, then held to what there is: a
+        // header taller than the window would leave the body a negative
+        // height, and a rectangle of negative height draws inside out.
+        let header_h = (h * 0.08).clamp(20.0, 56.0).min(h);
+        let header = Rect::new(
+            pad,
+            pad,
+            (w - pad * 2.0).max(0.0),
+            (header_h - pad).max(0.0),
+        );
+        let body_y = header.bottom() + pad;
+        Self {
+            window: Rect::new(0.0, 0.0, w, h),
+            header,
+            body: Rect::new(
+                pad,
+                body_y,
+                (w - pad * 2.0).max(0.0),
+                (h - body_y - pad).max(0.0),
+            ),
+            head,
+            font,
+            small,
+            pad,
+        }
+    }
+}
+
+/// Where the playfield goes, and how a position in it reaches the screen.
+///
+/// The playfield is not the window. Asteroids, bullets and the ship all wrap at
+/// [`FIELD_WIDTH`] and [`FIELD_HEIGHT`], so those two numbers are the *rules of
+/// the game*, not a drawing size: a window that changed them would change how
+/// far a shot travels before it comes back, and how much room there is to dodge
+/// in. So the field keeps its size in game terms and the window decides only
+/// how large it is drawn — the largest rectangle of the field's proportions
+/// that fits the space, centred, with the leftover left as margin.
+///
+/// One number is solved — `scale` — and every position, radius and line width
+/// follows from it, so the drawing pass and the hit test cannot disagree about
+/// where anything is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Field {
+    /// The space the field was given, which is usually bigger than the field.
+    pub area: Rect,
+    /// The field itself, centred in `area`.
+    pub rect: Rect,
+    /// Screen pixels per unit of field.
+    pub scale: f32,
+}
+
+impl Field {
+    /// Fit the playfield into `area`, centred.
+    #[must_use]
+    pub fn new(area: Rect) -> Self {
+        let scale = (area.w / FIELD_WIDTH).min(area.h / FIELD_HEIGHT).max(0.0);
+        let w = FIELD_WIDTH * scale;
+        let h = FIELD_HEIGHT * scale;
+        Self {
+            area,
+            rect: Rect::new(
+                area.x + (area.w - w) / 2.0,
+                area.y + (area.h - h) / 2.0,
+                w,
+                h,
+            ),
+            scale,
+        }
+    }
+
+    /// Where a position in the field lands on the screen.
+    #[must_use]
+    pub fn to_screen(&self, p: Vec2) -> (f32, f32) {
+        (
+            self.rect.x + p.x * self.scale,
+            self.rect.y + p.y * self.scale,
+        )
+    }
+
+    /// A length in the field, in screen pixels.
+    #[must_use]
+    pub fn scaled(&self, v: f32) -> f32 {
+        v * self.scale
+    }
+
+    /// A line width in the field, never thinner than the renderer can draw.
+    ///
+    /// A hairline that rounds away to nothing is a ship that vanishes in a
+    /// small window, so the scaled width has a floor rather than being trusted.
+    #[must_use]
+    pub fn stroke(&self, v: f32) -> f32 {
+        (v * self.scale).max(1.0)
+    }
+}
+
 // ── Main app struct ─────────────────────────────────────────────────
-struct AsteroidsApp {
+pub struct AsteroidsApp {
     ship: Ship,
     bullets: Vec<Bullet>,
     asteroids: Vec<Asteroid>,
@@ -532,6 +738,9 @@ struct AsteroidsApp {
     ship_alive: bool,
     rng: SeededRng,
     frame_counter: u64,
+    /// The size the last frame was drawn at, and so the size the next click
+    /// is read against.
+    size: (f32, f32),
 }
 
 impl AsteroidsApp {
@@ -557,9 +766,22 @@ impl AsteroidsApp {
             ship_alive: true,
             rng: SeededRng::new(seed),
             frame_counter: 0,
+            size: (WINDOW_WIDTH, WINDOW_HEIGHT),
         };
         app.spawn_wave(INITIAL_ASTEROIDS);
         app
+    }
+
+    /// The size the next frame will be drawn at, and the next click read
+    /// against.
+    pub fn resize(&mut self, width: f32, height: f32) {
+        self.size = (width.max(0.0), height.max(0.0));
+    }
+
+    /// The size the last frame was drawn at.
+    #[must_use]
+    pub const fn size(&self) -> (f32, f32) {
+        self.size
     }
 
     // ── Wave / asteroid spawning ────────────────────────────────────
@@ -660,73 +882,127 @@ impl AsteroidsApp {
 
     // ── New game / restart ──────────────────────────────────────────
 
+    /// Throw the game away and start another, keeping what is not part of it.
+    ///
+    /// The window is not part of the game: starting a new one must not put the
+    /// drawing back to the size the program guessed at startup, or the first
+    /// click after a restart would be read against a window that is not there.
     fn new_game(&mut self) {
         let high = self.high_score;
+        let size = self.size;
         let seed = self.rng.next_u64();
         *self = Self::with_seed(seed);
         self.high_score = high;
+        self.size = size;
     }
 
     // ── Input handling ──────────────────────────────────────────────
 
-    fn handle_key(&mut self, key: Key, pressed: bool) {
+    /// A key going down or coming back up.
+    ///
+    /// A key that is *released* still matters here -- that is how the ship
+    /// stops turning -- so unlike most programs this one cannot throw away
+    /// the up-stroke. What it must not do is act on an up-stroke as if it
+    /// were a press: a released `P` used to be handled only in `Playing`, so
+    /// it was already correct there, but the paused and game-over arms had to
+    /// be guarded by hand. They still are, in one place rather than three.
+    pub fn handle_key(&mut self, ev: &KeyEvent) -> EventResult {
         match self.state {
-            GameState::Playing => self.handle_key_playing(key, pressed),
-            GameState::Paused => {
-                if pressed {
-                    self.handle_key_paused(key);
-                }
-            }
-            GameState::GameOver => {
-                if pressed {
-                    self.handle_key_game_over(key);
-                }
-            }
+            GameState::Playing => self.handle_key_playing(ev.key, ev.pressed),
+            GameState::Paused if ev.pressed => self.handle_key_paused(ev.key),
+            GameState::GameOver if ev.pressed => self.handle_key_game_over(ev.key),
+            _ => EventResult::Ignored,
         }
     }
 
-    fn handle_key_playing(&mut self, key: Key, pressed: bool) {
+    fn handle_key_playing(&mut self, key: Key, pressed: bool) -> EventResult {
         match key {
             Key::Left | Key::A => self.input.left = pressed,
             Key::Right | Key::D => self.input.right = pressed,
             Key::Up | Key::W => self.input.thrust = pressed,
             Key::Space => self.input.shoot = pressed,
-            Key::P | Key::Escape if pressed => {
-                self.state = GameState::Paused;
-                // Release all input on pause.
-                self.input = InputState::new();
-            }
-            Key::N if pressed => {
-                self.new_game();
-            }
-            _ => {}
+            Key::P | Key::Escape if pressed => self.pause(),
+            Key::N if pressed => self.new_game(),
+            _ => return EventResult::Ignored,
         }
+        EventResult::Consumed
     }
 
-    fn handle_key_paused(&mut self, key: Key) {
+    fn handle_key_paused(&mut self, key: Key) -> EventResult {
         match key {
             Key::P | Key::Escape => self.state = GameState::Playing,
             Key::N => self.new_game(),
-            _ => {}
+            _ => return EventResult::Ignored,
         }
+        EventResult::Consumed
     }
 
-    fn handle_key_game_over(&mut self, key: Key) {
+    fn handle_key_game_over(&mut self, key: Key) -> EventResult {
         match key {
             Key::N | Key::Enter | Key::Space => self.new_game(),
-            _ => {}
+            _ => return EventResult::Ignored,
+        }
+        EventResult::Consumed
+    }
+
+    /// Stop the game where it is.
+    ///
+    /// The held keys are let go along with it. A player who paused mid-turn
+    /// and came back to a ship still turning would be right to call that a
+    /// bug: the key is not down any more, and the up-stroke that would have
+    /// cleared it went to whatever had the keyboard while the game was away.
+    fn pause(&mut self) {
+        self.state = GameState::Paused;
+        self.input = InputState::new();
+    }
+
+    /// A click, wherever it landed.
+    ///
+    /// The pointer does nothing during play -- there is nothing on the
+    /// playfield to click *at*. Over an overlay it does what the overlay says
+    /// the keyboard does, which is the only reason the overlay's lines are
+    /// hit boxes at all.
+    pub fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
+            return EventResult::Ignored;
+        }
+        let (w, h) = self.size();
+        let Some(target) = self.frame(w, h).hit_test(ev.x, ev.y) else {
+            return EventResult::Ignored;
+        };
+        match (self.state, target) {
+            (GameState::Paused, Target::Resume | Target::Overlay) => {
+                self.state = GameState::Playing;
+                EventResult::Consumed
+            }
+            (GameState::Paused | GameState::GameOver, Target::NewGame) => {
+                self.new_game();
+                EventResult::Consumed
+            }
+            (GameState::GameOver, Target::Overlay) => {
+                self.new_game();
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
         }
     }
 
     // ── Game tick ───────────────────────────────────────────────────
 
-    fn handle_tick(&mut self, elapsed_ms: u64) {
+    /// One frame of the game.
+    ///
+    /// A tick that arrives while the game is paused or over changes nothing,
+    /// and says so: the window is told `Idle` and does not redraw a frame
+    /// identical to the one on screen. That is the whole reason this returns
+    /// anything -- at sixty ticks a second, a paused game that answered
+    /// `Consumed` would repaint sixty times a second to no effect.
+    pub fn handle_tick(&mut self, elapsed_ms: u64) -> EventResult {
         if self.state != GameState::Playing {
-            return;
+            return EventResult::Ignored;
         }
 
-        let dt = elapsed_ms as f32 / 1000.0;
-        self.frame_counter += 1;
+        let dt = ms_to_seconds(elapsed_ms);
+        self.frame_counter = self.frame_counter.saturating_add(1);
 
         // Handle ship rotation.
         if self.ship_alive {
@@ -796,6 +1072,8 @@ impl AsteroidsApp {
         if self.asteroids.is_empty() {
             self.advance_wave();
         }
+
+        EventResult::Consumed
     }
 
     fn fire_bullet(&mut self) {
@@ -838,8 +1116,10 @@ impl AsteroidsApp {
         let mut spent_bullets: Vec<usize> = Vec::new();
 
         for &(bi, ai) in &hits {
-            let asteroid = &self.asteroids[ai];
-            score_gain += asteroid.size.score();
+            let Some(asteroid) = self.asteroids.get(ai) else {
+                continue;
+            };
+            score_gain = score_gain.saturating_add(asteroid.size.score());
             explosions.push((asteroid.pos, asteroid.size.color()));
             if let Some(child_size) = asteroid.size.child_size() {
                 children_to_spawn.push((asteroid.pos, asteroid.vel, child_size));
@@ -848,8 +1128,12 @@ impl AsteroidsApp {
             spent_bullets.push(bi);
         }
 
-        // Apply score.
-        self.score += score_gain;
+        // Apply score. A score that saturates is a score no player will reach
+        // -- four billion points is a hundred thousand hours of small
+        // asteroids -- but a score that *wraps* would put a champion back at
+        // nothing, which is the kind of thing that only ever shows up in a
+        // bug report.
+        self.score = self.score.saturating_add(score_gain);
         if self.score > self.high_score {
             self.high_score = self.score;
         }
@@ -917,18 +1201,37 @@ impl AsteroidsApp {
         self.invulnerable_timer = INVULNERABLE_TIME;
     }
 
+    /// Clear the field and send in the next wave: one more asteroid than the
+    /// last, up to a cap.
+    ///
+    /// The count used to be `INITIAL_ASTEROIDS + wave - 1` with nothing on the
+    /// end of it. A player good enough to reach wave two hundred would have
+    /// been sent two hundred and three asteroids, in a field eight hundred
+    /// units across -- which is not a harder game, it is a field with no gaps
+    /// left in it, and every one of them wants a spawn point at least
+    /// `SAFE_SPAWN_DISTANCE` from the ship. The arcade machine this copies
+    /// capped the count for the same reason.
     fn advance_wave(&mut self) {
-        self.wave += 1;
-        let count = INITIAL_ASTEROIDS + (self.wave as usize - 1);
+        self.wave = self.wave.saturating_add(1);
+        let extra = usize::try_from(self.wave.saturating_sub(1)).unwrap_or(usize::MAX);
+        let count = INITIAL_ASTEROIDS
+            .saturating_add(extra)
+            .min(MAX_WAVE_ASTEROIDS);
         self.spawn_wave(count);
     }
 
     // ── Queries ─────────────────────────────────────────────────────
 
+    /// How many asteroids are left. Nothing on screen reports this -- clearing
+    /// the field is what the player sees -- so it is compiled for the tests,
+    /// which is the only thing that reads it.
+    #[cfg(test)]
     fn asteroid_count(&self) -> usize {
         self.asteroids.len()
     }
 
+    /// How many shots are in the air. See [`AsteroidsApp::asteroid_count`].
+    #[cfg(test)]
     fn bullet_count(&self) -> usize {
         self.bullets.len()
     }
@@ -939,232 +1242,204 @@ impl AsteroidsApp {
 
     // ── Rendering ───────────────────────────────────────────────────
 
-    fn render(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+    /// The whole window, drawn for a window this size.
+    ///
+    /// Everything below comes from `width` and `height`. The program this
+    /// replaces drew against `WINDOW_WIDTH`/`WINDOW_HEIGHT` -- two constants
+    /// it worked out for itself from the 800x600 playfield -- so a window of
+    /// any other size showed a game drawn for a window that was not there.
+    #[must_use]
+    pub fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let mut f = Frame::new(width, height);
+        let l = Layout::new(width, height);
+        fill(&mut f, l.window, BASE, CornerRadii::ZERO);
+        self.draw_header(&mut f, &l);
 
-        // Background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
-            color: BASE,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        let field = Field::new(l.body);
+        fill(&mut f, field.rect, MANTLE, CornerRadii::all(4.0));
+        // Recorded before anything inside it, so the ship and the asteroids --
+        // which are drawn after -- win the hit test where they overlap it.
+        f.hit(Target::Field, field.rect);
 
-        // Header bar.
-        self.render_header(&mut cmds);
-
-        // Playfield background.
-        let fx = PADDING;
-        let fy = PADDING + HEADER_HEIGHT;
-        cmds.push(RenderCommand::FillRect {
-            x: fx,
-            y: fy,
-            width: FIELD_WIDTH,
-            height: FIELD_HEIGHT,
-            color: MANTLE,
-            corner_radii: CornerRadii::all(4.0),
-        });
-
-        // Stars (static background dots based on frame counter seed).
-        self.render_stars(&mut cmds, fx, fy);
-
-        // Particles.
-        self.render_particles(&mut cmds, fx, fy);
-
-        // Asteroids.
-        self.render_asteroids(&mut cmds, fx, fy);
-
-        // Bullets.
-        self.render_bullets(&mut cmds, fx, fy);
-
-        // Ship.
+        draw_stars(&mut f, &field);
+        self.draw_particles(&mut f, &field);
+        self.draw_asteroids(&mut f, &field);
+        self.draw_bullets(&mut f, &field);
         if self.ship_alive {
-            self.render_ship(&mut cmds, fx, fy);
+            self.draw_ship(&mut f, &field);
+        }
+        self.draw_overlay(&mut f, &l, &field);
+        f
+    }
+
+    /// The five readings along the top, in the order they are written.
+    fn readings(&self) -> [(Target, String, Color); 5] {
+        [
+            (Target::Title, String::from("Asteroids"), TEAL),
+            (Target::Score, format!("Score: {}", self.score), TEXT_COLOR),
+            (
+                Target::HighScore,
+                format!("Hi: {}", self.high_score),
+                YELLOW,
+            ),
+            (Target::Lives, format!("Lives: {}", self.lives), RED),
+            (Target::Wave, format!("Wave: {}", self.wave), LAVENDER),
+        ]
+    }
+
+    /// The band along the top: the readings, and the controls line under them.
+    ///
+    /// The readings used to be placed at 10, 120, 280, 420 and 560 pixels from
+    /// the left edge -- numbers that only line up under a 824-pixel window and
+    /// a score below five digits. They are now laid out by their own measured
+    /// widths, and one that will not fit is dropped rather than drawn over its
+    /// neighbour.
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.header.is_empty() {
+            return;
+        }
+        fill(f, l.header, MANTLE, CornerRadii::all(4.0));
+        f.hit(Target::Header, l.header);
+
+        let inner = Rect::new(
+            l.header.x + l.pad,
+            l.header.y + l.pad / 2.0,
+            (l.header.w - l.pad * 2.0).max(0.0),
+            (l.header.h - l.pad).max(0.0),
+        );
+        if inner.is_empty() {
+            return;
         }
 
-        // Overlay.
-        self.render_overlay(&mut cmds, fx, fy);
+        // The controls line is the first thing a squeezed header gives up: a
+        // reminder of which key turns left is worth less than the score, and
+        // stacking the two rows on top of each other would cost both.
+        let hint_h = text::line_height(l.small, FontWeightHint::Light);
+        let (readings, controls) = if inner.h >= hint_h * 2.0 {
+            (
+                Rect::new(inner.x, inner.y, inner.w, inner.h - hint_h),
+                Rect::new(inner.x, inner.bottom() - hint_h, inner.w, hint_h),
+            )
+        } else {
+            (inner, Rect::EMPTY)
+        };
 
-        cmds
-    }
+        let mut row = readings;
+        for (target, value, color) in self.readings() {
+            let weight = if target == Target::Title {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            };
+            let width = text::measure(&value, l.head, weight);
+            let r = take_left(&mut row, width, l.pad);
+            if r.is_empty() {
+                continue;
+            }
+            label_left(
+                f,
+                &Label {
+                    text: &value,
+                    size: l.head,
+                    weight,
+                    color,
+                },
+                r,
+            );
+            f.hit(target, r);
+        }
 
-    fn render_header(&self, cmds: &mut Vec<RenderCommand>) {
-        let header_w = WINDOW_WIDTH - PADDING * 2.0;
-
-        cmds.push(RenderCommand::FillRect {
-            x: PADDING,
-            y: PADDING,
-            width: header_w,
-            height: HEADER_HEIGHT - 4.0,
-            color: MANTLE,
-            corner_radii: CornerRadii::all(4.0),
-        });
-
-        // Title.
-        cmds.push(RenderCommand::Text {
-            x: PADDING + 10.0,
-            y: PADDING + 8.0,
-            text: String::from("Asteroids"),
-            color: TEAL,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Score.
-        cmds.push(RenderCommand::Text {
-            x: PADDING + 120.0,
-            y: PADDING + 8.0,
-            text: format!("Score: {}", self.score),
-            color: TEXT_COLOR,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // High score.
-        cmds.push(RenderCommand::Text {
-            x: PADDING + 280.0,
-            y: PADDING + 8.0,
-            text: format!("Hi: {}", self.high_score),
-            color: YELLOW,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Lives.
-        cmds.push(RenderCommand::Text {
-            x: PADDING + 420.0,
-            y: PADDING + 8.0,
-            text: format!("Lives: {}", self.lives),
-            color: RED,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Wave.
-        cmds.push(RenderCommand::Text {
-            x: PADDING + 560.0,
-            y: PADDING + 8.0,
-            text: format!("Wave: {}", self.wave),
-            color: LAVENDER,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Controls hint.
-        cmds.push(RenderCommand::Text {
-            x: PADDING + 10.0,
-            y: PADDING + 28.0,
-            text: String::from("Arrows: Move  Space: Shoot  P: Pause  N: New"),
-            color: OVERLAY0,
-            font_size: SMALL_FONT_SIZE,
-            font_weight: FontWeightHint::Light,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    fn render_stars(&self, cmds: &mut Vec<RenderCommand>, fx: f32, fy: f32) {
-        // Draw a static starfield using deterministic positions from a fixed seed.
-        let mut star_rng = SeededRng::new(999);
-        let star_color = Color::rgba(100, 100, 140, 60);
-        let star_bright = Color::rgba(150, 150, 200, 100);
-        for i in 0..40 {
-            let sx = star_rng.between_f32(4.0, FIELD_WIDTH - 4.0);
-            let sy = star_rng.between_f32(4.0, FIELD_HEIGHT - 4.0);
-            let size = if i % 5 == 0 { 2.0 } else { 1.5 };
-            let color = if i % 5 == 0 { star_bright } else { star_color };
-            cmds.push(RenderCommand::FillRect {
-                x: fx + sx,
-                y: fy + sy,
-                width: size,
-                height: size,
-                color,
-                corner_radii: CornerRadii::all(1.0),
-            });
+        if !controls.is_empty() {
+            label_left(
+                f,
+                &Label {
+                    text: "Arrows: Move  Space: Shoot  P: Pause  N: New",
+                    size: l.small,
+                    weight: FontWeightHint::Light,
+                    color: OVERLAY0,
+                },
+                controls,
+            );
+            f.hit(Target::Controls, controls);
         }
     }
 
-    fn render_particles(&self, cmds: &mut Vec<RenderCommand>, fx: f32, fy: f32) {
+    fn draw_particles(&self, f: &mut Frame<Target>, field: &Field) {
         for particle in &self.particles {
             let alpha = particle.alpha();
             if alpha == 0 {
                 continue;
             }
             let c = particle.color;
-            let color = Color::rgba(c.r, c.g, c.b, alpha);
-            let size = 2.0 + (alpha as f32 / 255.0) * 2.0;
-            cmds.push(RenderCommand::FillRect {
-                x: fx + particle.pos.x - size / 2.0,
-                y: fy + particle.pos.y - size / 2.0,
-                width: size,
-                height: size,
-                color,
-                corner_radii: CornerRadii::all(size / 2.0),
-            });
+            let size = field.scaled(2.0 + f32_from_u8(alpha) / 255.0 * 2.0);
+            let (x, y) = field.to_screen(particle.pos);
+            fill(
+                f,
+                Rect::new(x - size / 2.0, y - size / 2.0, size, size),
+                Color::rgba(c.r, c.g, c.b, alpha),
+                CornerRadii::all(size / 2.0),
+            );
         }
     }
 
-    fn render_asteroids(&self, cmds: &mut Vec<RenderCommand>, fx: f32, fy: f32) {
-        for asteroid in &self.asteroids {
+    fn draw_asteroids(&self, f: &mut Frame<Target>, field: &Field) {
+        for (index, asteroid) in self.asteroids.iter().enumerate() {
             let verts = asteroid.vertices();
             let color = asteroid.size.color();
+            let width = field.stroke(1.5);
 
-            // Draw the asteroid as line segments connecting vertices.
-            let n = verts.len();
-            for i in 0..n {
-                let v1 = &verts[i];
-                let v2 = &verts[(i + 1) % n];
-                cmds.push(RenderCommand::Line {
-                    x1: fx + v1.x,
-                    y1: fy + v1.y,
-                    x2: fx + v2.x,
-                    y2: fy + v2.y,
+            // Each vertex paired with the next, the last joined back to the
+            // first. `zip` against the finite list is what ends it, so the
+            // cycle cannot run away even for an asteroid with no vertices.
+            for (v1, v2) in verts.iter().zip(verts.iter().cycle().skip(1)) {
+                let (x1, y1) = field.to_screen(*v1);
+                let (x2, y2) = field.to_screen(*v2);
+                f.push(RenderCommand::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
                     color,
-                    width: 1.5,
+                    width,
                 });
             }
 
-            // Fill center slightly for visibility.
-            let fill_r = asteroid.radius() * 0.3;
-            let fill_color = Color::rgba(color.r, color.g, color.b, 40);
-            cmds.push(RenderCommand::FillRect {
-                x: fx + asteroid.pos.x - fill_r,
-                y: fy + asteroid.pos.y - fill_r,
-                width: fill_r * 2.0,
-                height: fill_r * 2.0,
-                color: fill_color,
-                corner_radii: CornerRadii::all(fill_r),
-            });
+            // A dot in the middle, so an asteroid whose outline crosses a
+            // dark part of the field is still visible as a thing.
+            let fill_r = field.scaled(asteroid.radius() * 0.3);
+            let (cx, cy) = field.to_screen(asteroid.pos);
+            fill(
+                f,
+                Rect::new(cx - fill_r, cy - fill_r, fill_r * 2.0, fill_r * 2.0),
+                Color::rgba(color.r, color.g, color.b, 40),
+                CornerRadii::all(fill_r),
+            );
+
+            let r = field.scaled(asteroid.radius());
+            f.hit(
+                Target::Asteroid(index),
+                Rect::new(cx - r, cy - r, r * 2.0, r * 2.0),
+            );
         }
     }
 
-    fn render_bullets(&self, cmds: &mut Vec<RenderCommand>, fx: f32, fy: f32) {
-        for bullet in &self.bullets {
-            cmds.push(RenderCommand::FillRect {
-                x: fx + bullet.pos.x - BULLET_RADIUS,
-                y: fy + bullet.pos.y - BULLET_RADIUS,
-                width: BULLET_RADIUS * 2.0,
-                height: BULLET_RADIUS * 2.0,
-                color: GREEN,
-                corner_radii: CornerRadii::all(BULLET_RADIUS),
-            });
+    fn draw_bullets(&self, f: &mut Frame<Target>, field: &Field) {
+        let r = field.scaled(BULLET_RADIUS);
+        for (index, bullet) in self.bullets.iter().enumerate() {
+            let (x, y) = field.to_screen(bullet.pos);
+            let box_ = Rect::new(x - r, y - r, r * 2.0, r * 2.0);
+            fill(f, box_, GREEN, CornerRadii::all(r));
+            f.hit(Target::Bullet(index), box_);
         }
     }
 
-    fn render_ship(&self, cmds: &mut Vec<RenderCommand>, fx: f32, fy: f32) {
-        // Blink during invulnerability.
+    /// The ship, if this is a frame it is showing on.
+    ///
+    /// A ship that has just respawned blinks, and on the frames it is not
+    /// drawn it records no hit box either -- so asking whether the ship is on
+    /// screen gets the answer the screen would give, not the answer the game
+    /// state would.
+    fn draw_ship(&self, f: &mut Frame<Target>, field: &Field) {
         if self.is_invulnerable() && self.frame_counter % 6 < 3 {
             return;
         }
@@ -1172,246 +1447,500 @@ impl AsteroidsApp {
         let nose = self.ship.nose();
         let lw = self.ship.left_wing();
         let rw = self.ship.right_wing();
+        let width = field.stroke(2.0);
 
-        let ship_color = BLUE;
+        for (a, b) in [(nose, lw), (lw, rw), (rw, nose)] {
+            let (x1, y1) = field.to_screen(a);
+            let (x2, y2) = field.to_screen(b);
+            f.push(RenderCommand::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                color: BLUE,
+                width,
+            });
+        }
 
-        // Draw the triangle as 3 lines.
-        cmds.push(RenderCommand::Line {
-            x1: fx + nose.x,
-            y1: fy + nose.y,
-            x2: fx + lw.x,
-            y2: fy + lw.y,
-            color: ship_color,
-            width: 2.0,
-        });
-        cmds.push(RenderCommand::Line {
-            x1: fx + lw.x,
-            y1: fy + lw.y,
-            x2: fx + rw.x,
-            y2: fy + rw.y,
-            color: ship_color,
-            width: 2.0,
-        });
-        cmds.push(RenderCommand::Line {
-            x1: fx + rw.x,
-            y1: fy + rw.y,
-            x2: fx + nose.x,
-            y2: fy + nose.y,
-            color: ship_color,
-            width: 2.0,
-        });
-
-        // Thrust flame.
         if self.ship.thrusting {
-            let exhaust = self.ship.exhaust_point();
-            let flame_tip = Vec2::new(
-                self.ship.pos.x - cos_f32(self.ship.angle) * SHIP_RADIUS * 1.2,
-                self.ship.pos.y - sin_f32(self.ship.angle) * SHIP_RADIUS * 1.2,
-            );
-            let flame_color = if self.frame_counter % 4 < 2 {
-                PEACH
-            } else {
-                YELLOW
-            };
-            cmds.push(RenderCommand::Line {
-                x1: fx + lw.x,
-                y1: fy + lw.y,
-                x2: fx + flame_tip.x,
-                y2: fy + flame_tip.y,
-                color: flame_color,
-                width: 1.5,
-            });
-            cmds.push(RenderCommand::Line {
-                x1: fx + rw.x,
-                y1: fy + rw.y,
-                x2: fx + flame_tip.x,
-                y2: fy + flame_tip.y,
-                color: flame_color,
-                width: 1.5,
-            });
+            self.draw_thrust(f, field, lw, rw);
+        }
 
-            // Inner flame (brighter, shorter).
-            let inner_tip = Vec2::new(
-                exhaust.x - cos_f32(self.ship.angle) * SHIP_RADIUS * 0.3,
-                exhaust.y - sin_f32(self.ship.angle) * SHIP_RADIUS * 0.3,
-            );
-            cmds.push(RenderCommand::Line {
-                x1: fx + exhaust.x + cos_f32(self.ship.angle + 1.0) * 3.0,
-                y1: fy + exhaust.y + sin_f32(self.ship.angle + 1.0) * 3.0,
-                x2: fx + inner_tip.x,
-                y2: fy + inner_tip.y,
-                color: YELLOW,
-                width: 1.0,
+        let r = field.scaled(SHIP_RADIUS);
+        let (cx, cy) = field.to_screen(self.ship.pos);
+        f.hit(Target::Ship, Rect::new(cx - r, cy - r, r * 2.0, r * 2.0));
+    }
+
+    fn draw_thrust(&self, f: &mut Frame<Target>, field: &Field, lw: Vec2, rw: Vec2) {
+        let angle = self.ship.angle;
+        let exhaust = self.ship.exhaust_point();
+        let flame_tip = Vec2::new(
+            self.ship.pos.x - cos_f32(angle) * SHIP_RADIUS * 1.2,
+            self.ship.pos.y - sin_f32(angle) * SHIP_RADIUS * 1.2,
+        );
+        let flame_color = if self.frame_counter % 4 < 2 {
+            PEACH
+        } else {
+            YELLOW
+        };
+        let outer = field.stroke(1.5);
+        for wing in [lw, rw] {
+            let (x1, y1) = field.to_screen(wing);
+            let (x2, y2) = field.to_screen(flame_tip);
+            f.push(RenderCommand::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                color: flame_color,
+                width: outer,
             });
-            cmds.push(RenderCommand::Line {
-                x1: fx + exhaust.x + cos_f32(self.ship.angle - 1.0) * 3.0,
-                y1: fy + exhaust.y + sin_f32(self.ship.angle - 1.0) * 3.0,
-                x2: fx + inner_tip.x,
-                y2: fy + inner_tip.y,
+        }
+
+        let inner_tip = Vec2::new(
+            exhaust.x - cos_f32(angle) * SHIP_RADIUS * 0.3,
+            exhaust.y - sin_f32(angle) * SHIP_RADIUS * 0.3,
+        );
+        let inner = field.stroke(1.0);
+        for spread in [1.0_f32, -1.0] {
+            let from = Vec2::new(
+                exhaust.x + cos_f32(angle + spread) * 3.0,
+                exhaust.y + sin_f32(angle + spread) * 3.0,
+            );
+            let (x1, y1) = field.to_screen(from);
+            let (x2, y2) = field.to_screen(inner_tip);
+            f.push(RenderCommand::Line {
+                x1,
+                y1,
+                x2,
+                y2,
                 color: YELLOW,
-                width: 1.0,
+                width: inner,
             });
         }
     }
 
-    fn render_overlay(&self, cmds: &mut Vec<RenderCommand>, fx: f32, fy: f32) {
+    fn draw_overlay(&self, f: &mut Frame<Target>, l: &Layout, field: &Field) {
         match self.state {
-            GameState::Paused => self.render_pause_overlay(cmds, fx, fy),
-            GameState::GameOver => self.render_game_over_overlay(cmds, fx, fy),
+            GameState::Paused => self.draw_pause_overlay(f, l, field),
+            GameState::GameOver => self.draw_game_over_overlay(f, l, field),
             GameState::Playing => {}
         }
     }
 
-    fn render_pause_overlay(&self, cmds: &mut Vec<RenderCommand>, fx: f32, fy: f32) {
-        // Semi-transparent overlay.
-        cmds.push(RenderCommand::FillRect {
-            x: fx,
-            y: fy,
-            width: FIELD_WIDTH,
-            height: FIELD_HEIGHT,
-            color: Color::rgba(17, 17, 27, 180),
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: fx + FIELD_WIDTH / 2.0 - 50.0,
-            y: fy + FIELD_HEIGHT / 2.0 - 20.0,
-            text: String::from("PAUSED"),
-            color: LAVENDER,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: fx + FIELD_WIDTH / 2.0 - 90.0,
-            y: fy + FIELD_HEIGHT / 2.0 + 10.0,
-            text: String::from("Press P or Esc to resume"),
-            color: SUBTEXT0,
-            font_size: OVERLAY_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: fx + FIELD_WIDTH / 2.0 - 80.0,
-            y: fy + FIELD_HEIGHT / 2.0 + 35.0,
-            text: String::from("Press N for new game"),
-            color: TEAL,
-            font_size: OVERLAY_FONT_SIZE - 2.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    fn render_game_over_overlay(&self, cmds: &mut Vec<RenderCommand>, fx: f32, fy: f32) {
-        // Dark overlay.
-        cmds.push(RenderCommand::FillRect {
-            x: fx,
-            y: fy,
-            width: FIELD_WIDTH,
-            height: FIELD_HEIGHT,
-            color: Color::rgba(17, 17, 27, 200),
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Game over box.
-        let box_w = 300.0;
-        let box_h = 180.0;
-        let box_x = fx + (FIELD_WIDTH - box_w) / 2.0;
-        let box_y = fy + (FIELD_HEIGHT - box_h) / 2.0;
-
-        cmds.push(RenderCommand::FillRect {
-            x: box_x,
-            y: box_y,
-            width: box_w,
-            height: box_h,
-            color: Color::from_hex(0x313244),
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        cmds.push(RenderCommand::StrokeRect {
-            x: box_x,
-            y: box_y,
-            width: box_w,
-            height: box_h,
-            color: RED,
-            line_width: 2.0,
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: box_x + 70.0,
-            y: box_y + 20.0,
-            text: String::from("GAME OVER"),
-            color: RED,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: box_x + 20.0,
-            y: box_y + 60.0,
-            text: format!("Score: {}", self.score),
-            color: TEXT_COLOR,
-            font_size: OVERLAY_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: box_x + 20.0,
-            y: box_y + 85.0,
-            text: format!("High Score: {}", self.high_score),
-            color: YELLOW,
-            font_size: OVERLAY_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: box_x + 20.0,
-            y: box_y + 110.0,
-            text: format!("Wave reached: {}", self.wave),
-            color: LAVENDER,
-            font_size: OVERLAY_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: box_x + 20.0,
-            y: box_y + 145.0,
-            text: String::from("Press N or Enter for new game"),
-            color: SUBTEXT0,
-            font_size: SMALL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    // ── Event dispatch ──────────────────────────────────────────────
-
-    fn handle_event(&mut self, event: Event) {
-        match event {
-            Event::Key(ke) => self.handle_key(ke.key, ke.pressed),
-            Event::Tick { elapsed_ms } => self.handle_tick(elapsed_ms),
-            _ => {}
+    fn draw_pause_overlay(&self, f: &mut Frame<Target>, l: &Layout, field: &Field) {
+        if field.rect.is_empty() {
+            return;
         }
+        fill(
+            f,
+            field.rect,
+            Color::rgba(17, 17, 27, 180),
+            CornerRadii::ZERO,
+        );
+        f.hit(Target::Overlay, field.rect);
+
+        let lines: [(Target, &str, f32, FontWeightHint, Color); 3] = [
+            (
+                Target::OverlayTitle,
+                "PAUSED",
+                l.font * 1.5,
+                FontWeightHint::Bold,
+                LAVENDER,
+            ),
+            (
+                Target::Resume,
+                "Press P or Esc to resume",
+                l.font,
+                FontWeightHint::Regular,
+                SUBTEXT0,
+            ),
+            (
+                Target::NewGame,
+                "Press N for new game",
+                l.font * 0.85,
+                FontWeightHint::Regular,
+                TEAL,
+            ),
+        ];
+        stack_centred(f, field.rect, l.pad, &lines);
+    }
+
+    fn draw_game_over_overlay(&self, f: &mut Frame<Target>, l: &Layout, field: &Field) {
+        if field.rect.is_empty() {
+            return;
+        }
+        fill(
+            f,
+            field.rect,
+            Color::rgba(17, 17, 27, 200),
+            CornerRadii::ZERO,
+        );
+        f.hit(Target::Overlay, field.rect);
+
+        // The box keeps its share of the world rather than a fixed 300x180,
+        // which in a half-size window would have covered twice the field it
+        // was drawn to cover.
+        let box_w = field.scaled(300.0).min(field.rect.w);
+        let box_h = field.scaled(200.0).min(field.rect.h);
+        let box_ = Rect::new(
+            field.rect.x + (field.rect.w - box_w) / 2.0,
+            field.rect.y + (field.rect.h - box_h) / 2.0,
+            box_w,
+            box_h,
+        );
+        fill(f, box_, Color::from_hex(0x0031_3244), CornerRadii::all(8.0));
+        stroke(f, box_, RED, field.stroke(2.0), CornerRadii::all(8.0));
+
+        let lines: [(Target, String, f32, FontWeightHint, Color); 5] = [
+            (
+                Target::OverlayTitle,
+                String::from("GAME OVER"),
+                l.font * 1.5,
+                FontWeightHint::Bold,
+                RED,
+            ),
+            (
+                Target::FinalStat(0),
+                format!("Score: {}", self.score),
+                l.font,
+                FontWeightHint::Regular,
+                TEXT_COLOR,
+            ),
+            (
+                Target::FinalStat(1),
+                format!("High Score: {}", self.high_score),
+                l.font,
+                FontWeightHint::Regular,
+                YELLOW,
+            ),
+            (
+                Target::FinalStat(2),
+                format!("Wave reached: {}", self.wave),
+                l.font,
+                FontWeightHint::Regular,
+                LAVENDER,
+            ),
+            (
+                Target::NewGame,
+                String::from("Press N or Enter for new game"),
+                l.small,
+                FontWeightHint::Regular,
+                SUBTEXT0,
+            ),
+        ];
+        let borrowed: Vec<(Target, &str, f32, FontWeightHint, Color)> = lines
+            .iter()
+            .map(|(t, s, size, w, c)| (*t, s.as_str(), *size, *w, *c))
+            .collect();
+        stack_centred(f, box_, l.pad / 2.0, &borrowed);
     }
 }
 
-fn main() {
-    let _app = AsteroidsApp::new();
+// ── Drawing helpers ─────────────────────────────────────────────────
+
+fn fill(f: &mut Frame<Target>, r: Rect, color: Color, corner_radii: CornerRadii) {
+    if r.is_empty() {
+        return;
+    }
+    f.push(RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii,
+    });
+}
+
+fn stroke(
+    f: &mut Frame<Target>,
+    r: Rect,
+    color: Color,
+    line_width: f32,
+    corner_radii: CornerRadii,
+) {
+    if r.is_empty() {
+        return;
+    }
+    f.push(RenderCommand::StrokeRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        line_width,
+        corner_radii,
+    });
+}
+
+/// The starfield: forty dots from a fixed seed, so they do not crawl.
+///
+/// They are placed in field coordinates and put on the screen through the
+/// same transform as everything else, so they scale with the field instead of
+/// bunching into one corner of a window that grew.
+fn draw_stars(f: &mut Frame<Target>, field: &Field) {
+    let mut rng = SeededRng::new(999);
+    let dim = Color::rgba(100, 100, 140, 60);
+    let bright = Color::rgba(150, 150, 200, 100);
+    for i in 0..40 {
+        let at = Vec2::new(
+            rng.between_f32(4.0, FIELD_WIDTH - 4.0),
+            rng.between_f32(4.0, FIELD_HEIGHT - 4.0),
+        );
+        let big = i % 5 == 0;
+        let size = field.scaled(if big { 2.0 } else { 1.5 });
+        let (x, y) = field.to_screen(at);
+        fill(
+            f,
+            Rect::new(x, y, size, size),
+            if big { bright } else { dim },
+            CornerRadii::all(size / 2.0),
+        );
+    }
+}
+
+/// One string and everything about how it looks, minus where it goes.
+struct Label<'a> {
+    text: &'a str,
+    size: f32,
+    weight: FontWeightHint,
+    color: Color,
+}
+
+/// The one place a `Text` command is built.
+fn push_text(f: &mut Frame<Target>, l: &Label, x: f32, y: f32, limit: f32) {
+    if l.text.is_empty() || limit <= 0.0 {
+        return;
+    }
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: l.text.to_string(),
+        color: l.color,
+        font_size: l.size,
+        font_weight: l.weight,
+        max_width: Some(limit),
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+/// Against the left edge of `r`, centred down it.
+fn label_left(f: &mut Frame<Target>, l: &Label, r: Rect) {
+    if r.is_empty() {
+        return;
+    }
+    let lh = text::line_height(l.size, l.weight);
+    push_text(f, l, r.x, r.y + (r.h - lh) / 2.0, r.w);
+}
+
+/// Centred in `r`, and limited to it.
+///
+/// The width that decides the centre is the width the renderer is told to
+/// stop at, so the two cannot disagree; and because it is never more than
+/// `r.w`, the offset is never negative, which is what keeps a string too wide
+/// for its box starting at the box rather than to the left of it.
+fn label_centred(f: &mut Frame<Target>, l: &Label, r: Rect) {
+    if r.is_empty() {
+        return;
+    }
+    let w = text::measure(l.text, l.size, l.weight).min(r.w);
+    let lh = text::line_height(l.size, l.weight);
+    push_text(f, l, r.x + (r.w - w) / 2.0, r.y + (r.h - lh) / 2.0, r.w);
+}
+
+/// Stack labels down the middle of `area`, each with its own hit box.
+///
+/// The block is centred vertically as a block, so an overlay in a short
+/// window loses as much off the bottom as off the top instead of running out
+/// through the floor. A line with no room left is dropped, not drawn on top
+/// of the one above it.
+fn stack_centred(
+    f: &mut Frame<Target>,
+    area: Rect,
+    gap: f32,
+    lines: &[(Target, &str, f32, FontWeightHint, Color)],
+) {
+    if area.is_empty() || lines.is_empty() {
+        return;
+    }
+    let heights: Vec<f32> = lines
+        .iter()
+        .map(|(_, _, size, weight, _)| text::line_height(*size, *weight))
+        .collect();
+    let total: f32 =
+        heights.iter().sum::<f32>() + gap * f32_from_usize(lines.len().saturating_sub(1));
+    let mut y = area.y + (area.h - total) / 2.0;
+
+    for ((target, value, size, weight, color), lh) in lines.iter().zip(heights) {
+        let row = Rect::new(area.x, y, area.w, lh);
+        if row.bottom() > area.bottom() {
+            break;
+        }
+        label_centred(
+            f,
+            &Label {
+                text: value,
+                size: *size,
+                weight: *weight,
+                color: *color,
+            },
+            row,
+        );
+        f.hit(*target, row);
+        y += lh + gap;
+    }
+}
+
+/// Take `w` off the left-hand end of `area`, leaving `gap` behind it.
+///
+/// Returns [`Rect::EMPTY`] and takes nothing if there is not room, so a row
+/// that runs out of space drops its right-hand items rather than drawing them
+/// past the end of the band.
+fn take_left(area: &mut Rect, w: f32, gap: f32) -> Rect {
+    if w <= 0.0 || area.w < w {
+        return Rect::EMPTY;
+    }
+    let taken = Rect::new(area.x, area.y, w, area.h);
+    area.x += w + gap;
+    area.w = (area.w - w - gap).max(0.0);
+    taken
+}
+
+// ── Casts, written out once ─────────────────────────────────────────
+
+/// A count as a length. Counts here are vertex and line counts, well under
+/// the 2^24 an `f32` counts exactly.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "vertex and line counts are single digits"
+)]
+fn f32_from_usize(v: usize) -> f32 {
+    v as f32
+}
+
+/// A window dimension as a length. Window sizes are pixel counts in the
+/// thousands.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a window dimension is orders of magnitude below 2^24"
+)]
+fn f32_from_u32(v: u32) -> f32 {
+    v as f32
+}
+
+/// An alpha as a fraction. Every `u8` is exact in an `f32`.
+fn f32_from_u8(v: u8) -> f32 {
+    f32::from(v)
+}
+
+/// A fraction of full opacity as an alpha.
+///
+/// The caller clamps to 0..=1 before multiplying by 255, so the value is in
+/// range; the saturating cast makes that true whatever the caller does.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "an `as` cast from f32 to u8 saturates at both ends, which is the wanted behaviour"
+)]
+fn u8_from_f32(v: f32) -> u8 {
+    v as u8
+}
+
+/// Milliseconds as seconds.
+///
+/// A tick interval is tens of milliseconds; the cast is written out so the
+/// lint does not have to be turned off across the file to allow it.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a tick interval is tens of milliseconds"
+)]
+fn ms_to_seconds(ms: u64) -> f32 {
+    ms as f32 / 1000.0
+}
+
+// ── Window plumbing ─────────────────────────────────────────────────
+
+/// The one body both the window and the test probe drive, so what a click
+/// does in a test is what it does on a screen.
+pub fn handle_event(app: &mut AsteroidsApp, event: &Event) -> EventResult {
+    match event {
+        Event::Key(ev) => app.handle_key(ev),
+        Event::Mouse(ev) => app.handle_mouse(ev),
+        Event::Tick { elapsed_ms } => app.handle_tick(*elapsed_ms),
+        Event::Resize { width, height } => {
+            app.resize(f32_from_u32(*width), f32_from_u32(*height));
+            EventResult::Consumed
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+impl App for AsteroidsApp {
+    fn title(&self) -> String {
+        "Asteroids".to_string()
+    }
+
+    fn app_id(&self) -> String {
+        "asteroids".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (INITIAL_WINDOW_W, INITIAL_WINDOW_H)
+    }
+
+    fn tick_interval(&self) -> Option<Duration> {
+        Some(TICK)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against, which is the only reason it is stored at all.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for AsteroidsApp {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
+    }
+}
+
+fn main() -> ExitCode {
+    let mut game = AsteroidsApp::new();
+    app::launch("asteroids", &mut game)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1419,16 +1948,48 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it -- that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects,
+        clippy::cast_precision_loss
+    )]
+
     use super::*;
+    use guitk::probe;
+
+    /// The size a test reads a click against, spelled once.
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
 
     /// Helper: create a game with a fixed seed for deterministic tests.
     fn test_app() -> AsteroidsApp {
         AsteroidsApp::with_seed(12345)
     }
 
+    /// The commands the app draws at its default size.
+    fn commands(app: &AsteroidsApp) -> Vec<RenderCommand> {
+        app.frame(SIZE.0, SIZE.1).commands().to_vec()
+    }
+
     /// Helper: advance the game by a given number of milliseconds.
     fn tick(app: &mut AsteroidsApp, ms: u64) {
         app.handle_tick(ms);
+    }
+
+    /// A key going down, and staying down.
+    fn key_down(app: &mut AsteroidsApp, key: Key) -> EventResult {
+        app.handle_key(&probe::press(key))
+    }
+
+    /// The same key coming back up.
+    fn key_up(app: &mut AsteroidsApp, key: Key) -> EventResult {
+        app.handle_key(&probe::release(key))
     }
 
     /// Helper: advance game by several small ticks totalling `total_ms`.
@@ -1447,8 +2008,8 @@ mod tests {
 
     /// Helper: press and release a key.
     fn press_key(app: &mut AsteroidsApp, key: Key) {
-        app.handle_key(key, true);
-        app.handle_key(key, false);
+        key_down(app, key);
+        key_up(app, key);
     }
 
     /// Helper: set up a scenario where ship is pointing right and a large
@@ -1579,12 +2140,6 @@ mod tests {
     fn test_vec2_length() {
         let v = Vec2::new(3.0, 4.0);
         assert!((v.length() - 5.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_vec2_length_sq() {
-        let v = Vec2::new(3.0, 4.0);
-        assert!((v.length_sq() - 25.0).abs() < 0.001);
     }
 
     #[test]
@@ -2229,30 +2784,30 @@ mod tests {
     #[test]
     fn test_left_key_sets_input() {
         let mut app = test_app();
-        app.handle_key(Key::Left, true);
+        key_down(&mut app, Key::Left);
         assert!(app.input.left);
-        app.handle_key(Key::Left, false);
+        key_up(&mut app, Key::Left);
         assert!(!app.input.left);
     }
 
     #[test]
     fn test_right_key_sets_input() {
         let mut app = test_app();
-        app.handle_key(Key::Right, true);
+        key_down(&mut app, Key::Right);
         assert!(app.input.right);
     }
 
     #[test]
     fn test_up_key_sets_thrust() {
         let mut app = test_app();
-        app.handle_key(Key::Up, true);
+        key_down(&mut app, Key::Up);
         assert!(app.input.thrust);
     }
 
     #[test]
     fn test_space_key_sets_shoot() {
         let mut app = test_app();
-        app.handle_key(Key::Space, true);
+        key_down(&mut app, Key::Space);
         assert!(app.input.shoot);
     }
 
@@ -2300,8 +2855,8 @@ mod tests {
     #[test]
     fn test_pause_releases_input() {
         let mut app = test_app();
-        app.handle_key(Key::Left, true);
-        app.handle_key(Key::Up, true);
+        key_down(&mut app, Key::Left);
+        key_down(&mut app, Key::Up);
         assert!(app.input.left);
         assert!(app.input.thrust);
         press_key(&mut app, Key::P);
@@ -2341,14 +2896,14 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let app = test_app();
-        let cmds = app.render();
+        let cmds = commands(&app);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_contains_background() {
         let app = test_app();
-        let cmds = app.render();
+        let cmds = commands(&app);
         // First command should be the background fill.
         matches!(&cmds[0], RenderCommand::FillRect { .. });
     }
@@ -2357,7 +2912,7 @@ mod tests {
     fn test_render_paused_overlay() {
         let mut app = test_app();
         app.state = GameState::Paused;
-        let cmds = app.render();
+        let cmds = commands(&app);
         let has_paused_text = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text == "PAUSED"
@@ -2372,7 +2927,7 @@ mod tests {
     fn test_render_game_over_overlay() {
         let mut app = test_app();
         app.state = GameState::GameOver;
-        let cmds = app.render();
+        let cmds = commands(&app);
         let has_game_over = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text == "GAME OVER"
@@ -2387,7 +2942,7 @@ mod tests {
     fn test_render_ship_lines() {
         let app = test_app();
         // Make sure ship is visible (not blinking off).
-        let cmds = app.render();
+        let cmds = commands(&app);
         let line_count = cmds
             .iter()
             .filter(|c| matches!(c, RenderCommand::Line { .. }))
@@ -2399,7 +2954,7 @@ mod tests {
     #[test]
     fn test_render_asteroid_lines() {
         let app = test_app();
-        let cmds = app.render();
+        let cmds = commands(&app);
         let line_count = cmds
             .iter()
             .filter(|c| matches!(c, RenderCommand::Line { .. }))
@@ -2415,7 +2970,7 @@ mod tests {
         app.asteroids.clear();
         app.input.shoot = true;
         tick(&mut app, 16);
-        let cmds = app.render();
+        let cmds = commands(&app);
         // Should have bullet fill rects.
         let fill_count = cmds
             .iter()
@@ -2428,7 +2983,7 @@ mod tests {
     fn test_render_header_shows_score() {
         let mut app = test_app();
         app.score = 42;
-        let cmds = app.render();
+        let cmds = commands(&app);
         let has_score = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text.contains("42")
@@ -2569,31 +3124,16 @@ mod tests {
     #[test]
     fn test_handle_event_key_down() {
         let mut app = test_app();
-        app.handle_event(Event::Key(KeyEvent {
-            key: Key::Left,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        }));
+        handle_event(&mut app, &Event::Key(probe::press(Key::Left)));
         assert!(app.input.left);
     }
 
     #[test]
     fn test_handle_event_key_up() {
         let mut app = test_app();
-        app.handle_event(Event::Key(KeyEvent {
-            key: Key::Left,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        }));
+        handle_event(&mut app, &Event::Key(probe::press(Key::Left)));
         assert!(app.input.left);
-        app.handle_event(Event::Key(KeyEvent {
-            key: Key::Left,
-            pressed: false,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        }));
+        handle_event(&mut app, &Event::Key(probe::release(Key::Left)));
         assert!(!app.input.left);
     }
 
@@ -2601,7 +3141,7 @@ mod tests {
     fn test_handle_event_tick() {
         let mut app = test_app();
         let old_pos = app.asteroids[0].pos;
-        app.handle_event(Event::Tick { elapsed_ms: 100 });
+        handle_event(&mut app, &Event::Tick { elapsed_ms: 100 });
         let new_pos = app.asteroids[0].pos;
         let moved = (new_pos.x - old_pos.x).abs() > 0.01 || (new_pos.y - old_pos.y).abs() > 0.01;
         assert!(moved);
@@ -2612,21 +3152,21 @@ mod tests {
     #[test]
     fn test_wasd_a_key() {
         let mut app = test_app();
-        app.handle_key(Key::A, true);
+        key_down(&mut app, Key::A);
         assert!(app.input.left);
     }
 
     #[test]
     fn test_wasd_d_key() {
         let mut app = test_app();
-        app.handle_key(Key::D, true);
+        key_down(&mut app, Key::D);
         assert!(app.input.right);
     }
 
     #[test]
     fn test_wasd_w_key() {
         let mut app = test_app();
-        app.handle_key(Key::W, true);
+        key_down(&mut app, Key::W);
         assert!(app.input.thrust);
     }
 

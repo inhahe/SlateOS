@@ -96636,8 +96636,33 @@ worsen with time.
 
 ## TD-B-TAR-IGNORES-MEMBER-NAME-FILTERS-ON-EXTRACT-AND-LIST
 
-**Status:** open. Found 2026-08-30 while making `-C` positional (`c3844c749`).
+**Status:** **withdrawn** 2026-08-30, the same day it was filed — it was never
+true of the `tar` that ships. Kept rather than deleted because *why* it was
+wrong is the useful part.
 **Where:** `userspace/tar/src/main.rs` — `extract_archive`, `list_archive`.
+
+**Why it is withdrawn.** That file is not the `tar` anyone runs. The shipped
+one is `userspace/coreutils/src/bin/tar.rs`, and it has had member-name filters
+all along, down to the details this entry predicted would be forgotten: it
+warns `tar: NAME: Not found in archive`, exits 2, and quotes the name in GNU's
+`\351` style rather than a shell's `$'\351'` (`tar.rs:65`, `:2753`).
+`scripts/tar-diff.sh` covers it with three cases — `extract: one member by
+name`, `a symlink alone, by name`, `a fifo alone, by name` — all of which have
+always passed. The gap described below was real, but only in a dead crate that
+nothing outside the `userspace/*` workspace glob references; see
+`B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES` for how that happened, and
+`design-decisions.md` §710 for the rule that stops it happening again.
+
+**The one part still worth acting on** was the `-C` interaction below — and it
+turned out to be a genuine, and much larger, divergence in the *shipped* tar:
+`-C` was stored as a single `Option<OsString>` and acted on in exactly one
+place, inside the extractor. So it was parsed and then silently discarded under
+`-c` and `-t`, and a second `-C` overwrote the first instead of being resolved
+relative to it. It is **fixed** rather than filed; `scripts/tar-diff.sh`
+section 8 holds the thirteen cases that now pin the behaviour down.
+
+Everything from here down is the entry as originally filed, against the dead
+crate.
 
 **In short:** `tar -xf a.tar one two` should extract only the members named
 `one` and `two`. Ours extracts the whole archive and ignores the names
@@ -96674,8 +96699,17 @@ escape the base directory.
 ## TD-B-TAR-DOES-NOT-PAD-ARCHIVES-TO-THE-BLOCKING-FACTOR
 
 **Status:** open. Measured 2026-08-30 against GNU tar 1.35.
-**Where:** `userspace/tar/src/main.rs` — `create_archive`, and the two
-end-of-archive zero blocks it writes.
+**Where:** `userspace/coreutils/src/bin/tar.rs` — `do_create`, and the two
+end-of-archive zero blocks it writes. (Also true of `userspace/tar`, which is
+where this entry originally pointed; that crate is dead, and the gap being real
+in the shipped one too is why the entry survived the correction rather than
+being withdrawn like the one above.)
+
+**Independently confirmed by the harness**, which is the strongest evidence
+here because it is not this entry's own measurement: `scripts/tar-diff.sh`
+normalises GNU with `--blocking-factor=1` precisely so the padding stops
+swamping every create case, and its header says why. Take that flag away and
+every `create_case` fails on trailing zeros alone.
 
 **In short:** GNU writes archives in units of 20 × 512 = 10240 bytes, padding
 the last unit with zeros. We stop after the two zero blocks. The same

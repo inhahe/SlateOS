@@ -98104,7 +98104,31 @@ state.
 
 ---
 
-## TD-B-ED-IS-MISSING-SEVEN-MORE-COMMANDS — `ed` answers `?` to `h`, `H`, `P`, `W`, `x`, `y` and `z` (lane B, 2026-08-30) — **open**
+## TD-B-ED-IS-MISSING-SEVEN-MORE-COMMANDS — `ed` answers `?` to `h`, `H`, `P`, `W`, `x`, `y` and `z` (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+> **FIXED 2026-08-30 (lane B).** All seven landed together with the cut-buffer
+> fills in `d`, `c`, `j` and `s`. `scripts/ed-diff.sh` is 507 cases, 0 differed,
+> 8 differ on purpose, **0 known bugs** — the `kbug_pipe` case is now an
+> ordinary `run_pipe` — and the file's command language is complete but for a
+> `+line` operand on the command line.
+>
+> **One thing the measurements above missed, which only the harness found.**
+> `z`'s default address is `.+1` *outside* a global and `.` *inside* one: GNU's
+> `check_second_addr( current_addr + !isglobal, … )`. It is the only default
+> address in ed that depends on where the command came from, and it is the
+> right quirk — the global has just put `.` on the selected line, so a
+> `g/RE/z` that started at `.+1` would page from the line after every match.
+> The case that caught it is `g/line0/z2` on thirty numbered lines; every
+> single-command probe agreed.
+>
+> **Two smaller corrections while in there.** `q`, `Q` and `u` were checking
+> their print suffix *before* refusing an address, so `1q9` said `Invalid
+> command suffix` where GNU says `Unexpected address`. That was invisible
+> before — both answers are a bare `?` — and `h` is exactly what makes it
+> visible, so the command that reports errors is also the command that found
+> two. And `W` shares the `w` arm rather than duplicating it, with `write`
+> taking an `append` flag; the byte count it prints is what *that* call wrote,
+> which for an append is not the file's new size.
 
 **In short:** `ed` is the line editor. Having just filled in the eight commands
 `TD-B-ED-IS-MISSING-EIGHT-COMMANDS` was about, a sweep of *every* letter GNU ed
@@ -98204,7 +98228,9 @@ $ printf '1d\nq\nH\n' | ed f.txt
 
 `scripts/ed-diff.sh` carries a `kbug_pipe` case naming this entry. It is loud on
 every run and does not fail it; when `H` lands the case turns `KFIXED`, which
-*does* fail the run, so the entry cannot be silently outlived.
+*does* fail the run, so the entry cannot be silently outlived. (It did, and it
+is now `run_pipe '1d\nq\nH\n' f.txt` in the `=== explaining the last error ===`
+section, alongside 26 other `h`/`H` cases.)
 
 ### Where
 

@@ -74,14 +74,26 @@
 //!
 //! # What this `ed` does not have
 //!
-//! The command language is a subset, and the subset is stated here rather than
-//! left to be discovered:
+//! The command language is now complete — every letter GNU ed 1.20.1 accepts,
 //!
-//! - No `m`, `t`, `j`, `k` and `'x`, `r`, `e`/`E`, `u`, `x`/`y`, `h`/`H`, `#`,
-//!   no `+line` on the command line, no marks. See `known-issues.md` →
-//!   `TD-B-ED-IS-MISSING-EIGHT-COMMANDS`. (Not `z` — GNU ed answers `?` to that
-//!   one too, so it is not a gap. Not `!command` either: that one is a refusal
-//!   rather than a gap — see below.)
+//! ```text
+//! a c d e E f g G h H i j k l m n p P q Q r s t u v V w W x y z = # !
+//! ```
+//!
+//! is implemented, except `!`, which is a *refusal* rather than a gap (see
+//! below). What is left is one command-line feature: no `+line` operand.
+//!
+//! Getting there took two passes, and the lesson from the second is worth
+//! keeping. The first worked from the list of commands *this file* was missing,
+//! which is not the same as the list GNU *has*; the second swept GNU's own set
+//! a letter at a time and turned up seven more. One of those seven, `z`, had
+//! actually been tried and written off as "GNU answers `?` to that one too" —
+//! because it was tried with `.` at the end of the buffer, where `z`'s default
+//! address `.+1` is out of range and `?` is an entirely ordinary `Invalid
+//! address`. A `?` from a command that does not exist and a `?` from one that
+//! does are the same `?`, which is the whole reason `h` and `H` are worth
+//! having, and is an argument for measuring a command from more than one
+//! starting state.
 //!
 //! # Regular expressions
 //!
@@ -122,25 +134,26 @@
 //!
 //! # How this is checked
 //!
-//! `scripts/ed-diff.sh` runs 400 cases against GNU ed 1.20.1 inside WSL and
+//! `scripts/ed-diff.sh` runs 507 cases against GNU ed 1.20.1 inside WSL and
 //! compares four things, not the usual three: stdout, stderr, the exit status
 //! **and the bytes left on disk**. The fourth is not belt-and-braces — the
 //! data-loss bug above agreed with GNU on the first three and disagreed only on
 //! the file. Every case appears in the two stdin kinds where the two kinds
 //! differ. `OURS=/usr/bin/ed scripts/ed-diff.sh` checks the harness can still
-//! tell the two apart: it turns all 8 deliberate differences into `XPASS` and
-//! the 1 known-bug case into `KFIXED`, and nothing else moves.
+//! tell the two apart: it turns all 8 deliberate differences into `XPASS`, and
+//! nothing else moves.
 //!
 //! It is the harness, not the unit tests, that has found every substantive
-//! disagreement here. Four rules in this file were *wrong in a way that reads
+//! disagreement here. Five rules in this file were *wrong in a way that reads
 //! correctly* until it ran: a line that `m` moves keeps its `g` selection (it
 //! does not), a global that changes nothing leaves the previous undo record
 //! alone (it does not — the global clears it on entry), `u` restores only the
-//! buffer (it restores `.` too, to where it was before the whole global), and
-//! a file name may run straight onto its command letter (`efive.txt` is
-//! `Unexpected command suffix`). None of the four is visible from GNU's
-//! documentation, and two of them are invisible from GNU's source unless you
-//! already know which function to read.
+//! buffer (it restores `.` too, to where it was before the whole global), a
+//! file name may run straight onto its command letter (`efive.txt` is
+//! `Unexpected command suffix`), and `z` pages from `.+1` (everywhere except
+//! inside a `g` list, where it pages from `.`). None of the five is visible
+//! from GNU's documentation, and three of them are invisible from GNU's source
+//! unless you already know which function to read.
 
 use coreutils::errmsg::strerror;
 use coreutils::filekind;
@@ -425,6 +438,9 @@ enum EdError {
     /// record, so this is "the last command did not change anything", not "the
     /// session has changed nothing".
     NothingToUndo,
+    /// `x` with an empty cut buffer. Only `d`, `c`, `j`, `s` and `y` fill it,
+    /// so this is what `1m$` then `x` says in a fresh session.
+    NothingToPut,
     /// `q` on a modified buffer. Status 1: the *command* failed.
     BufferModified,
     /// End of input on a modified buffer. Status 2 — measured: this is a
@@ -457,6 +473,7 @@ impl EdError {
             EdError::InvalidDestination => "Invalid destination",
             EdError::InvalidMarkCharacter => "Invalid mark character",
             EdError::NothingToUndo => "Nothing to undo",
+            EdError::NothingToPut => "Nothing to put",
             EdError::BufferModified | EdError::BufferModifiedAtEof => "Warning: buffer modified",
         }
     }
@@ -1449,6 +1466,35 @@ struct Editor {
     /// undo` to `1d`, `g/beta/p`, `u`. It is taken — moved out — by the first
     /// modifying command inside the global.
     global_before: Option<Snapshot>,
+    /// The lines `x` will put back, filled by `d`, `c`, `j`, `s` and `y`.
+    ///
+    /// Filled by exactly those five and by nothing else — measured: `m`, `t`,
+    /// `r`, `a`, `i` and `u` all leave it as it was, so `1m$` then `x` answers
+    /// `Nothing to put` on a fresh session. It is *not* part of
+    /// [`Snapshot`] either: `1d`, `u`, `x` still puts back the deleted line,
+    /// because undoing a delete does not un-cut it.
+    ///
+    /// Plain text, no marks: a line put back by `x` carries neither the `k`
+    /// marks the original had nor a `g` selection.
+    cut_buffer: Vec<Vec<u8>>,
+    /// The last error reported, for `h` and `H` to print.
+    ///
+    /// Survives any number of successful commands — `9p`, `h`, `1p`, `h`
+    /// prints the same sentence twice — and is only ever replaced, never
+    /// cleared, which is why it is set in [`Editor::fail`] and nowhere else.
+    last_error: Option<EdError>,
+    /// Whether a sentence follows the `?`. Starts as `-v` and is toggled by
+    /// `H`, which is why it lives here rather than staying on [`Options`].
+    verbose: bool,
+    /// Whether the prompt is written before each command is read, toggled by
+    /// `P`. Starts on exactly when `-p` was given.
+    prompt_on: bool,
+    /// The prompt itself. GNU's default is `*`, which is what `P` turns on when
+    /// no `-p` set one.
+    prompt: Vec<u8>,
+    /// How many lines a bare `z` prints. GNU starts at 22, and a count given to
+    /// `z` *persists* as the new window: `1z3` then `z` prints lines 4 to 6.
+    window: usize,
     /// The command list of a running `g`/`v`/`G`/`V`, as lines still to be
     /// consumed, reversed so the next one is the last element.
     ///
@@ -1466,6 +1512,11 @@ struct Editor {
 impl Editor {
     fn new(opts: Options) -> Self {
         let file_driven = filekind::borrowed_stdin().is_some_and(|f| filekind::is_regular(&f));
+        let verbose = opts.verbose;
+        // `-p` both sets the string and turns the prompt on; `P` alone turns on
+        // GNU's default `*`. Measured: `P`, `1p` writes `*one`.
+        let prompt_on = opts.prompt.is_some();
+        let prompt = opts.prompt.clone().unwrap_or_else(|| b"*".to_vec());
         Editor {
             buffer: Vec::new(),
             current: 0,
@@ -1485,6 +1536,13 @@ impl Editor {
             undo: None,
             global_undo_taken: false,
             global_before: None,
+            cut_buffer: Vec::new(),
+            last_error: None,
+            verbose,
+            prompt_on,
+            prompt,
+            // GNU's default window, and the number `z` prints with no count.
+            window: 22,
             global_input: None,
         }
     }
@@ -1816,7 +1874,10 @@ impl Editor {
     /// Report an error. Returns whether the session must end.
     fn fail(&mut self, e: EdError) -> bool {
         self.put(b"?\n");
-        if self.opts.verbose {
+        // Remembered for `h` and `H`, which is the only way to see it after the
+        // fact when the session did not start with `-v`.
+        self.last_error = Some(e);
+        if self.verbose {
             let mut line = Vec::new();
             if self.file_driven {
                 line.extend_from_slice(format!("script, line {}: ", self.line_no).as_bytes());
@@ -1851,7 +1912,8 @@ impl Editor {
 
     fn run(&mut self) -> u8 {
         loop {
-            if let Some(prompt) = self.opts.prompt.clone() {
+            if self.prompt_on {
+                let prompt = self.prompt.clone();
                 self.put(&prompt);
                 let _ = self.out.flush();
             }
@@ -2056,6 +2118,7 @@ impl Editor {
                 let text = self.read_text();
                 let added = text.len();
                 let before = self.begin_change();
+                self.yank(lo, hi);
                 self.delete(lo, hi);
                 self.insert(lo.saturating_sub(1), text);
                 self.current = lo.saturating_sub(1).saturating_add(added);
@@ -2145,6 +2208,7 @@ impl Editor {
                 // honours the print suffix.
                 if hi > lo {
                     let before = self.begin_change();
+                    self.yank(lo, hi);
                     let taken = self.cut(lo, hi);
                     let mut joined: Vec<u8> = Vec::new();
                     for line in &taken {
@@ -2266,10 +2330,10 @@ impl Editor {
 
             // One level of undo, and `u` after `u` redoes — see [`Snapshot`].
             b'u' => {
-                let suffix = print_suffix(&c.rest)?;
                 if c.addressed {
                     return Err(EdError::UnexpectedAddress);
                 }
+                let suffix = print_suffix(&c.rest)?;
                 let Some(prev) = self.undo.take() else {
                     return Err(EdError::NothingToUndo);
                 };
@@ -2298,10 +2362,163 @@ impl Editor {
             // though it is still *resolved*, so `/zzz/#` is `No match`.
             b'#' => Ok(Action::Continue),
 
+            // `h` explains the last `?`. It is how a person at a terminal finds
+            // out *why* something was refused, which they cannot do any other
+            // way: `-v` has to be decided before the session starts, and by the
+            // time you want the reason it is too late to have asked for it.
+            //
+            // It does not clear the record — `9p`, `h`, `1p`, `h` prints the
+            // sentence twice — so it can be asked more than once, and it prints
+            // nothing at all when nothing has failed yet.
+            b'h' => {
+                if c.addressed {
+                    return Err(EdError::UnexpectedAddress);
+                }
+                let suffix = print_suffix(&c.rest)?;
+                if let Some(e) = self.last_error {
+                    let mut line = e.sentence().as_bytes().to_vec();
+                    line.push(b'\n');
+                    self.put(&line);
+                }
+                self.finish_suffix(suffix);
+                Ok(Action::Continue)
+            }
+
+            // `H` is `h` made automatic, and `-v` is exactly "start with `H`
+            // already on" — which is why the flag it toggles is an `Editor`
+            // field and not the immutable `Options` one, and why `-v` plus an
+            // `H` turns the sentences *off*.
+            b'H' => {
+                if c.addressed {
+                    return Err(EdError::UnexpectedAddress);
+                }
+                let suffix = print_suffix(&c.rest)?;
+                self.verbose = !self.verbose;
+                // Turning it on prints the pending sentence, so `1d`, `q`, `H`
+                // prints `Warning: buffer modified` twice: once for the `q` the
+                // `H` is explaining, and once because the `H` itself is now
+                // verbose about it. Measured, and it is the useful behaviour —
+                // you type `H` *because* something just failed.
+                if self.verbose
+                    && let Some(e) = self.last_error
+                {
+                    let mut line = e.sentence().as_bytes().to_vec();
+                    line.push(b'\n');
+                    self.put(&line);
+                }
+                self.finish_suffix(suffix);
+                Ok(Action::Continue)
+            }
+
+            // `P` toggles the prompt. GNU writes it before every command it
+            // reads, whether or not input is a terminal, so a script that turns
+            // it on gets a `*` interleaved with its output — which is what
+            // makes it worth having a harness case.
+            b'P' => {
+                if c.addressed {
+                    return Err(EdError::UnexpectedAddress);
+                }
+                let suffix = print_suffix(&c.rest)?;
+                self.prompt_on = !self.prompt_on;
+                self.finish_suffix(suffix);
+                Ok(Action::Continue)
+            }
+
+            // `(.,.)y` copies the addressed lines into the cut buffer. It is
+            // the one command here that neither moves `.` nor modifies the
+            // buffer: `1,2yp` prints the line `.` was already on.
+            b'y' => {
+                let suffix = print_suffix(&c.rest)?;
+                let (lo, hi) = self.range(&c, (self.current, self.current), false)?;
+                self.yank(lo, hi);
+                self.finish_suffix(suffix);
+                Ok(Action::Continue)
+            }
+
+            // `(.)x` puts the cut buffer back after the addressed line. `0x` is
+            // legal — it puts at the front — which is why the range allows zero.
+            b'x' => {
+                let suffix = print_suffix(&c.rest)?;
+                let (_, hi) = self.range(&c, (self.current, self.current), true)?;
+                // Checked after the address, as GNU does: `9x` on a five-line
+                // buffer is `Invalid address` even with nothing to put.
+                if self.cut_buffer.is_empty() {
+                    return Err(EdError::NothingToPut);
+                }
+                let lines = self.cut_buffer.clone();
+                let added = lines.len();
+                let before = self.begin_change();
+                self.insert(hi, lines);
+                self.current = hi.saturating_add(added);
+                self.touch();
+                self.record_change(before);
+                self.finish_suffix(suffix);
+                Ok(Action::Continue)
+            }
+
+            // `(.+1)z(N)` prints a window of lines and remembers `N` as the
+            // window size for next time — the paging command, and the reason a
+            // bare `z` at the end of a buffer answers `Invalid address` rather
+            // than `Unknown command`.
+            b'z' => {
+                // The address is the *first* line printed, not the last, and
+                // when two are given it is the second that counts: `1z3` prints
+                // 1 to 3, and `1,3z2` prints 3 to 4. So the pair collapses to
+                // "the second address, defaulting to `.+1`" — which is exactly
+                // what `range` cannot express, since it derives its upper bound
+                // from the lower default.
+                //
+                // Inside a `g` list the default is `.` rather than `.+1` —
+                // GNU's own `current_addr + !isglobal`, and the only place in
+                // ed where a default address depends on *where the command came
+                // from*. It is the right quirk: the global has just put `.` on
+                // the selected line, and a `g/RE/z` that skipped past it would
+                // page from the line after every match. Measured: `g/line0/z2`
+                // on thirty numbered lines starts each window on the match.
+                let skip = usize::from(self.global_input.is_none());
+                let start = c.second.or(c.first).unwrap_or_else(|| {
+                    i64::try_from(self.current.saturating_add(skip)).unwrap_or(1)
+                });
+                if start < 1 || start > i64::try_from(self.total()).unwrap_or(i64::MAX) {
+                    return Err(EdError::InvalidAddress);
+                }
+                let start = usize::try_from(start).map_err(|_| EdError::InvalidAddress)?;
+                let mut pos = 0usize;
+                while matches!(c.rest.get(pos), Some(b'0'..=b'9')) {
+                    pos = pos.saturating_add(1);
+                }
+                if pos > 0 {
+                    let digits = c.rest.get(..pos).unwrap_or_default();
+                    // A count of zero, and one too large to hold, are both
+                    // `Invalid command suffix` — as is `1z-1`, which never
+                    // reaches here because `-` is not a digit and so falls to
+                    // `print_suffix` below. Measured, all three.
+                    let n: usize = std::str::from_utf8(digits)
+                        .ok()
+                        .and_then(|t| t.parse().ok())
+                        .filter(|n| *n > 0)
+                        .ok_or(EdError::InvalidCommandSuffix)?;
+                    self.window = n;
+                }
+                let style =
+                    print_suffix(c.rest.get(pos..).unwrap_or_default())?.unwrap_or_default();
+                // Clamped at the end of the buffer rather than refused: `4z9`
+                // on a five-line buffer prints lines 4 and 5 and is not an
+                // error, which is what makes `z` usable for walking to the end.
+                let end = start
+                    .saturating_add(self.window)
+                    .saturating_sub(1)
+                    .min(self.total());
+                // `print_range` leaves `.` on the last line printed.
+                self.print_range(start, end, style);
+                Ok(Action::Continue)
+            }
+
             b'd' => {
                 let suffix = print_suffix(&c.rest)?;
                 let (lo, hi) = self.range(&c, (self.current, self.current), false)?;
                 let before = self.begin_change();
+                self.yank(lo, hi);
                 self.delete(lo, hi);
                 self.current = lo.min(self.total());
                 self.touch();
@@ -2328,6 +2545,15 @@ impl Editor {
                         None => None,
                     };
                     if let Some(new_line) = replaced {
+                        // The cut buffer ends up holding the *last* changed
+                        // line's original, not all of them: GNU rewrites a line
+                        // by deleting the old one and inserting the new, and
+                        // each of those deletes yanks — clearing what the
+                        // previous line left. So `,s/a/X/` over three matching
+                        // lines leaves one line in the cut buffer, and a
+                        // following `x` puts back only the third line's before.
+                        // Measured.
+                        self.yank(n, n);
                         if let Some(slot) = self.buffer.get_mut(idx) {
                             *slot = new_line;
                         }
@@ -2402,14 +2628,19 @@ impl Editor {
                 self.global(lo, hi, &re, invert, interactive, &body)
             }
 
-            b'w' => {
+            // `w` truncates the file and writes the range; `W` appends to it.
+            // Everything else about them is the same, down to `W` clearing the
+            // modified flag even when the name is not the default one — which
+            // is arguably wrong of GNU, since the buffer is then saved in no
+            // single place, but it is what GNU does and is measured.
+            b'w' | b'W' => {
                 let (lo, hi) = if c.addressed {
                     self.range(&c, (1, self.total()), false)?
                 } else {
                     (1, self.total())
                 };
                 let name = self.resolve_name(&c.rest, true)?;
-                self.write(&name, lo, hi)?;
+                self.write(&name, lo, hi, c.cmd == b'W')?;
                 Ok(Action::Continue)
             }
 
@@ -2442,10 +2673,14 @@ impl Editor {
             }
 
             b'q' => {
-                print_suffix(&c.rest)?;
+                // Address first, then suffix: `1q9` is `Unexpected address`,
+                // not `Invalid command suffix`. GNU checks them in that order
+                // for every command that refuses an address, and now that `h`
+                // exists the difference between the two sentences is visible.
                 if c.addressed {
                     return Err(EdError::UnexpectedAddress);
                 }
+                print_suffix(&c.rest)?;
                 if self.modified && !self.warned {
                     return Err(EdError::BufferModified);
                 }
@@ -2453,10 +2688,10 @@ impl Editor {
             }
 
             b'Q' => {
-                print_suffix(&c.rest)?;
                 if c.addressed {
                     return Err(EdError::UnexpectedAddress);
                 }
+                print_suffix(&c.rest)?;
                 Ok(Action::Quit)
             }
 
@@ -2515,6 +2750,25 @@ impl Editor {
                 self.kmarks.drain(start..end.min(self.kmarks.len()));
             }
         }
+    }
+
+    /// Copy the 1-based inclusive range `lo..=hi` into the cut buffer, for a
+    /// later `x` to put back.
+    ///
+    /// Replaces what was there rather than adding to it, which is what makes
+    /// the `s` case come out right: GNU yanks once per line it rewrites, so
+    /// after a multi-line `s` only the last line's original survives.
+    ///
+    /// No marks travel. The cut buffer is plain text — a `k` mark set on a line
+    /// that is deleted and then `x`-ed back does not come back with it, which
+    /// is measured and is also the only sane answer, since `x` may put the
+    /// lines back several times.
+    fn yank(&mut self, lo: usize, hi: usize) {
+        self.cut_buffer = self
+            .buffer
+            .get(lo.saturating_sub(1)..hi.min(self.buffer.len()))
+            .unwrap_or_default()
+            .to_vec();
     }
 
     /// Cut the 1-based inclusive range `lo..=hi` out of the buffer, marks and
@@ -2695,7 +2949,12 @@ impl Editor {
         outcome
     }
 
-    fn write(&mut self, name: &[u8], lo: usize, hi: usize) -> Result<(), EdError> {
+    /// Write `lo..=hi` to `name`, truncating it or — for `W` — appending.
+    ///
+    /// The byte count reported is the count *this* write produced, so a `W`
+    /// onto a file that already had lines in it reports only what it added,
+    /// not the file's new size. Measured.
+    fn write(&mut self, name: &[u8], lo: usize, hi: usize, append: bool) -> Result<(), EdError> {
         let mut bytes: Vec<u8> = Vec::new();
         let mut n = lo;
         while n <= hi {
@@ -2706,7 +2965,16 @@ impl Editor {
             bytes.push(b'\n');
             n = n.saturating_add(1);
         }
-        match std::fs::write(os_from_bytes(name), &bytes) {
+        let written = if append {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(os_from_bytes(name))
+                .and_then(|mut f| f.write_all(&bytes))
+        } else {
+            std::fs::write(os_from_bytes(name), &bytes)
+        };
+        match written {
             Ok(()) => {
                 self.modified = false;
                 if !self.opts.script {
@@ -3783,5 +4051,234 @@ mod tests {
         assert!(!has_trailing_continuation(b"s/a/b/\\\\"));
         assert!(!has_trailing_continuation(b"p"));
         assert!(has_trailing_continuation(b"\\\\\\"));
+    }
+
+    // ---------------- the cut buffer ----------------
+
+    /// The cut buffer a list of commands leaves behind, with the buffer and the
+    /// current line, since the interesting cases are about what `x` and `y`
+    /// leave *un*changed.
+    fn cut_after(lines_in: &[&str], cmds: &[&[u8]]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>, usize, bool) {
+        let mut e = editor_with(lines_in);
+        for cmd in cmds {
+            assert!(e.execute(cmd).is_ok(), "command failed: {:?}", *cmd);
+        }
+        (
+            std::mem::take(&mut e.cut_buffer),
+            std::mem::take(&mut e.buffer),
+            e.current,
+            e.modified,
+        )
+    }
+
+    #[test]
+    fn yank_fills_the_cut_buffer_and_changes_nothing_else() {
+        let all = ["a", "b", "c"];
+        // `.` starts at 3. `y` neither moves it nor marks the buffer modified,
+        // which is what separates it from every other command that reads a
+        // range — measured against GNU.
+        let (cut, buf, cur, modified) = cut_after(&all, &[b"1,2y"]);
+        assert_eq!(cut, lines(&["a", "b"]));
+        assert_eq!(buf, lines(&all));
+        assert_eq!(cur, 3);
+        assert!(!modified);
+        // The default range is `.,.`, not the whole buffer.
+        assert_eq!(cut_after(&all, &[b"y"]).0, lines(&["c"]));
+        assert_eq!(drive_err(&all, &[b"0y"]), EdError::InvalidAddress);
+        assert_eq!(drive_err(&all, &[b"9y"]), EdError::InvalidAddress);
+    }
+
+    #[test]
+    fn put_inserts_the_cut_buffer_after_the_addressed_line() {
+        let all = ["a", "b", "c"];
+        let (_, buf, cur, modified) = cut_after(&all, &[b"1y", b"$x"]);
+        assert_eq!(buf, lines(&["a", "b", "c", "a"]));
+        assert_eq!(cur, 4, "`.` is the last line put");
+        assert!(modified);
+        // `0x` is legal, which is why the range allows zero.
+        assert_eq!(
+            cut_after(&all, &[b"1y", b"0x"]).1,
+            lines(&["a", "a", "b", "c"])
+        );
+        // The buffer is not consumed, so the same lines can be put twice.
+        assert_eq!(
+            cut_after(&all, &[b"1y", b"$x", b"$x"]).1,
+            lines(&["a", "b", "c", "a", "a"])
+        );
+        assert_eq!(drive_err(&all, &[b"x"]), EdError::NothingToPut);
+        // The address is checked before the buffer is: an `x` that is both off
+        // the end and has nothing to put says `Invalid address`. Measured, and
+        // it is the order GNU checks them in.
+        assert_eq!(drive_err(&all, &[b"9x"]), EdError::InvalidAddress);
+    }
+
+    #[test]
+    fn every_command_that_removes_a_line_fills_the_cut_buffer() {
+        let all = ["a", "b", "c"];
+        // The four that do. `j` is the surprising one: it looks like a rewrite
+        // rather than a removal, but GNU builds the joined line and then
+        // *deletes* the range, and deleting is what yanks.
+        assert_eq!(cut_after(&all, &[b"1d"]).0, lines(&["a"]));
+        assert_eq!(cut_after(&all, &[b"1,2d"]).0, lines(&["a", "b"]));
+        assert_eq!(cut_after(&all, &[b"1,2j"]).0, lines(&["a", "b"]));
+        assert_eq!(cut_after(&all, &[b"1s/a/X/"]).0, lines(&["a"]));
+        // And a multi-line `s` leaves only the *last* line it changed, because
+        // GNU yanks once per rewritten line and each yank clears the last.
+        assert_eq!(
+            cut_after(&["a1", "a2", "b"], &[b",s/a/X/"]).0,
+            lines(&["a2"])
+        );
+        // The four that do not, however much they look like they should.
+        assert!(cut_after(&all, &[b"1m$"]).0.is_empty());
+        assert!(cut_after(&all, &[b"1t$"]).0.is_empty());
+        // `a` and `i` are not here because their text comes from stdin, which a
+        // unit test has no way to feed; `scripts/ed-diff.sh` covers them.
+        // It survives an undo, being no part of the snapshot `u` swaps.
+        assert_eq!(cut_after(&all, &[b"1d", b"u"]).0, lines(&["a"]));
+    }
+
+    // ---------------- explaining the last error ----------------
+
+    #[test]
+    fn the_last_error_is_remembered_for_h_and_is_not_cleared_by_reading_it() {
+        let mut e = editor_with(&["a", "b", "c"]);
+        assert!(e.last_error.is_none(), "nothing has failed yet");
+        assert!(
+            e.execute(b"h").is_ok(),
+            "and `h` on nothing is not an error"
+        );
+        if let Err(err) = e.execute(b"9p") {
+            e.fail(err);
+        }
+        assert_eq!(e.last_error, Some(EdError::InvalidAddress));
+        // Reading it leaves it in place, so it can be asked for twice — and so
+        // that an `H` turned on later still has something to print.
+        assert!(e.execute(b"h").is_ok());
+        assert_eq!(e.last_error, Some(EdError::InvalidAddress));
+        assert!(e.execute(b"1p").is_ok());
+        assert_eq!(e.last_error, Some(EdError::InvalidAddress));
+    }
+
+    #[test]
+    fn h_and_h_take_no_address_and_only_a_print_suffix() {
+        let all = ["a", "b", "c"];
+        for cmd in [&b"1h"[..], b"1H", b"1P"] {
+            assert_eq!(
+                drive_err(&all, &[cmd]),
+                EdError::UnexpectedAddress,
+                "{cmd:?}"
+            );
+        }
+        for cmd in [&b"h9"[..], b"H9", b"P9"] {
+            assert_eq!(
+                drive_err(&all, &[cmd]),
+                EdError::InvalidCommandSuffix,
+                "{cmd:?}"
+            );
+        }
+        for cmd in [&b"hp"[..], b"Hp", b"Pp", b"hn", b"hl"] {
+            let mut e = editor_with(&all);
+            assert!(e.execute(cmd).is_ok(), "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn capital_h_toggles_the_same_flag_that_dash_v_sets() {
+        // `-v` is exactly "start with `H` already on", which is why the flag
+        // lives on the editor and not on the immutable options — and why `-v`
+        // followed by an `H` turns the sentences *off* rather than on.
+        let mut e = editor_with(&["a"]);
+        assert!(!e.verbose);
+        assert!(e.execute(b"H").is_ok());
+        assert!(e.verbose);
+        assert!(e.execute(b"H").is_ok());
+        assert!(!e.verbose);
+        drop(e);
+        let mut v = Editor::new(Options {
+            verbose: true,
+            ..Options::default()
+        });
+        assert!(v.verbose);
+        assert!(v.execute(b"H").is_ok());
+        assert!(!v.verbose, "-v then H is off, not on");
+    }
+
+    #[test]
+    fn capital_p_toggles_the_prompt_that_dash_p_starts_on() {
+        let mut e = editor_with(&["a"]);
+        assert!(!e.prompt_on);
+        assert_eq!(e.prompt, b"*", "the default prompt string");
+        assert!(e.execute(b"P").is_ok());
+        assert!(e.prompt_on);
+        assert!(e.execute(b"P").is_ok());
+        assert!(!e.prompt_on);
+        drop(e);
+        let mut p = Editor::new(Options {
+            prompt: Some(b"> ".to_vec()),
+            ..Options::default()
+        });
+        assert!(p.prompt_on, "-p starts it on");
+        assert_eq!(p.prompt, b"> ");
+        assert!(p.execute(b"P").is_ok());
+        assert!(!p.prompt_on, "-p then P is off");
+    }
+
+    // ---------------- paging ----------------
+
+    #[test]
+    fn z_prints_a_window_starting_at_its_address() {
+        let ten = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"];
+        // The address is the first line printed, not the last, so `.` ends up
+        // at `address + window - 1`. That is the whole observable here, since
+        // what `z` writes goes to the real stdout — `scripts/ed-diff.sh` checks
+        // the bytes.
+        let (_, cur, _) = drive(&ten, &[b"1z3"]);
+        assert_eq!(cur, 3);
+        // The count persists as the window for every later `z`.
+        let (_, cur, _) = drive(&ten, &[b"1z3", b"z"]);
+        assert_eq!(cur, 6, "the second z printed 4..6");
+        // Two addresses: the *second* is the start.
+        let (_, cur, _) = drive(&ten, &[b"1,3z2"]);
+        assert_eq!(cur, 4, "started at 3, not at 1");
+        // Clamped at the end rather than refused, which is what makes `z`
+        // usable for walking off the bottom of a buffer.
+        let (_, cur, _) = drive(&ten, &[b"8z9"]);
+        assert_eq!(cur, 10);
+    }
+
+    #[test]
+    fn z_defaults_to_the_line_after_the_current_one_and_to_a_window_of_22() {
+        let mut e = editor_with(&["a", "b", "c"]);
+        assert_eq!(e.window, 22, "GNU's default window");
+        // `.` is 3, so `.+1` is off the end. This is the state the old
+        // `known-issues.md` entry measured, and why it concluded — wrongly —
+        // that GNU had no `z` at all: `?` from a command that does not exist
+        // and `?` from one that does are the same `?`.
+        assert_eq!(e.execute(b"z").err(), Some(EdError::InvalidAddress));
+        assert!(e.execute(b"1").is_ok());
+        assert!(e.execute(b"z").is_ok(), "from line 1 it pages to the end");
+        assert_eq!(e.current, 3);
+    }
+
+    #[test]
+    fn a_z_count_must_be_a_positive_number_it_can_hold() {
+        let all = ["a", "b", "c"];
+        for cmd in [&b"1z0"[..], b"1z-1", b"1zx", b"1z99999999999999999999"] {
+            assert_eq!(
+                drive_err(&all, &[cmd]),
+                EdError::InvalidCommandSuffix,
+                "{cmd:?}"
+            );
+        }
+        // The address is checked first, so an off-the-end address wins over a
+        // bad count.
+        assert_eq!(drive_err(&all, &[b"9z0"]), EdError::InvalidAddress);
+        assert_eq!(drive_err(&all, &[b"0z2"]), EdError::InvalidAddress);
+        // A refused count does not become the window.
+        let mut e = editor_with(&all);
+        assert!(e.execute(b"1z2").is_ok());
+        assert_eq!(e.window, 2);
+        assert!(e.execute(b"1z0").is_err());
+        assert_eq!(e.window, 2, "the refused 0 did not take");
     }
 }

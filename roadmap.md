@@ -196,6 +196,21 @@ wording *above* a landed one, so a truthful header is what keeps the unfinished
 half in the queue — a `✅` on a half-done request hides live work from the one
 report that exists to find it.
 
+**Write the status in words the script knows.** It reads the first ~120
+characters after `**Status:**` and looks for one of these:
+
+| Verdict | Words |
+|---|---|
+| still work | `open` `reopened` `partial` `partially` `in progress` `blocked` `pending` `not started` |
+| finished | `done` `landed` `fixed` `implemented` `delivered` `resolved` `answered` `folded in` `closed` `declined` `withdrawn` `obsolete` `superseded` `fulfilled` `consumed` `wontfix` |
+
+Anything else — `**Status:** needs a decision from you first` was a real one —
+reads as *unrecognised*, which counts as open but tells the reader nothing.
+A negated done word (`not fixed`, `never landed`) counts as open; a heading like
+`## Resolved` works as a marker on its own. Prefer a word from the table over
+inventing one: the table is what the report can act on, and a status it cannot
+parse is a status that only works on the day you write it.
+
 **A deletion is a gate failure, not a style note.**
 `scripts/check-requests-not-deleted.py` compares `requests/` against the merge
 base with `origin/main` and refuses the build if a file that existed there is

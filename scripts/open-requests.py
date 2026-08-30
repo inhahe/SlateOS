@@ -53,29 +53,126 @@ NAME_RE = re.compile(r"^([a-z])-([a-z])-(.+)\.md$")
 HEAD_LINES = 25
 TAIL_LINES = 25
 
-# Phrases that mean "this one is finished". Matched case-insensitively anywhere
-# in the head or tail, not anchored to a line start, because the marker is
-# written inline as often as it is written as its own paragraph.
-DONE_PATTERNS = [
-    re.compile(p, re.IGNORECASE)
+# A status marker is a *paragraph*, not a line: everything from `**Status:**` to
+# the next blank line.
+#
+# It used to be a line -- `\*\*status:\*\*[^\n]{0,80}?` -- and that made the
+# verdict depend on typesetting rather than on what the sentence said. The same
+# status, wrapped two ways:
+#
+#     **Status:** landed for ask 1, but ask 2 is blocked on lane B   -> open
+#     **Status:** landed for ask 1, but ask 2 is
+#     blocked on lane B                                              -> DONE
+#
+# The second is a false clear -- a request with live work reported finished --
+# and it is produced by a line break. The two vocabularies below can only rank
+# against each other when both are searched over the same text, so the block is
+# extracted once and both look at it.
+STATUS_BLOCK_RE = re.compile(
+    r"\*\*status:\*\*(.*?)(?:\n[ \t]*\n|\Z)", re.IGNORECASE | re.DOTALL
+)
+
+# How far into a status block the deciding word may sit, in CHARACTERS.
+#
+# The distinction between characters and lines is the whole fix. The old
+# pattern bounded the search with `[^\n]{0,80}`, which is a *line*, so a status
+# that wrapped hid its own second clause. Counting characters instead spans the
+# wrap, and the same sentence classifies the same way however it is typeset.
+#
+# A bound is still needed, because a status block is a paragraph and a paragraph
+# talks about its neighbours. `b-a-cap-enumerating-query-syscall.md` is stamped
+# LANDED and then adds "(§312 step 3 is a separate, still-open request …)" 330
+# characters in -- searching the whole block reported that finished request as
+# open, on the strength of a word about a different one.
+#
+# 120 measured against the dropbox as it stands (191 files): the count of open
+# files is flat from 80 to 240 (38, 37, 36, 38, 40) and bottoms at 120. Below
+# it, done words that wrap fall outside and their files read as unclassifiable;
+# above it, prose about neighbouring requests starts being read as this one's
+# status. Both tails fail toward "open", which is why the curve is shallow and
+# why picking the minimum is safe rather than clever.
+STATUS_WINDOW = 120
+
+# Words that mean "finished", and words that mean "still work".
+DONE_WORDS = (
+    r"done|landed|fixed|implemented|delivered|resolved|answered|folded in|"
+    r"closed|declined|withdrawn|obsolete|superseded|fulfilled|consumed|"
+    r"wont ?fix|won't ?fix"
+)
+OPEN_WORDS = (
+    r"open|reopened|partial|partially|in progress|blocked|pending|not started"
+)
+
+# `\b` is the wrong boundary on the right-hand side, because this project writes
+# `open-questions.md` constantly and `\bopen\b` matches inside it. That is not a
+# hypothetical: `b-a-q47-floor-fired-for-real-and-here-is-the-refill-rate.md` is
+# stamped `✅ FOLDED IN` and says where the value went -- "the refill rate is in
+# `open-questions.md`" -- and a `\b` boundary read the filename as this request's
+# own status and reported a finished request as open.
+#
+# So: reject a hyphen on the right (`open-questions`, `closed-loop`), allow one
+# on the left (`still-open` really does mean open, and it is the tail of the
+# compound that carries the meaning). `(?<!\w)` still refuses `reopen`, which
+# has its own entry in the list anyway.
+DONE_WORD_RE = re.compile(rf"(?<!\w)({DONE_WORDS})(?![\w-])", re.IGNORECASE)
+OPEN_WORD_RE = re.compile(rf"(?<!\w)({OPEN_WORDS})(?![\w-])", re.IGNORECASE)
+
+# A done word with a negator just before it is not a completion. Before this
+# guard, `**Status:** not yet resolved` and `**Status:** never landed` were both
+# reported *done* -- a status line saying in plain English that the work is
+# unfinished, read as finished.
+#
+# Applied to the done vocabulary ONLY, and the asymmetry is the point. The two
+# failure directions do not cost the same: a finished request misread as open
+# costs one glance at a file, while an open one misread as finished disappears
+# from the only report that looks for it. So the rule is to be eager to find
+# "open" and reluctant to find "done", and a guard that makes DONE harder to
+# match runs with that grain. The same guard on OPEN would run against it --
+# it would turn "no longer blocked" into a clear, which is the trade this
+# report should never make cheaply.
+NEGATOR_RE = re.compile(
+    r"\b(not|never|no|isn't|aren't|hasn't|haven't|cannot|can't|un)\b"
+    r"[^.;:\n]{0,24}$",
+    re.IGNORECASE,
+)
+
+# Headings that stand in for a status line, e.g. a `## Resolved` reply section.
+# No negation guard: these match only a word immediately after the hashes, so
+# there is no room for a negator to sit in front of it.
+DONE_HEADING_PATTERNS = [
+    re.compile(p, re.IGNORECASE | re.MULTILINE)
     for p in (
-        r"\*\*status:\*\*[^\n]{0,80}?\b(done|landed|fixed|implemented|delivered|"
-        r"resolved|answered|folded in|closed|declined|withdrawn|obsolete|"
-        r"superseded|wont ?fix|won't ?fix)\b",
         r"^#{1,4}\s+(resolved|answered|done|fixed|landed)\b",
         r"^#{1,4}\s+lane [a-z]'s (answer|reply)\b",
     )
 ]
 
-# A marker that says the opposite, and outranks the ones above -- a file whose
-# header says "PARTIALLY DONE" or "reopened" is still work.
-OPEN_PATTERNS = [
-    re.compile(p, re.IGNORECASE)
-    for p in (
-        r"\*\*status:\*\*[^\n]{0,80}?\b(open|reopened|partial|partially|"
-        r"in progress|blocked|pending|not started)\b",
-    )
-]
+
+def status_verdict(text: str) -> tuple[bool, str] | None:
+    """``(is_open, matched_text)`` from the `**Status:**` blocks, or None.
+
+    Every block is considered, not just the first: a file that carries a header
+    stamp and an appended reply section has two, and the reader wants the answer
+    that accounts for both. Open wins over done for the reason in NEGATOR_RE.
+    """
+    blocks = [m.group(1)[:STATUS_WINDOW] for m in STATUS_BLOCK_RE.finditer(text)]
+    done_hit: str | None = None
+    for block in blocks:
+        if OPEN_WORD_RE.search(block):
+            return (True, f"**Status:**{block}".strip()[:80])
+        for m in DONE_WORD_RE.finditer(block):
+            if not NEGATOR_RE.search(block[: m.start()]):
+                done_hit = done_hit or f"**Status:**{block}".strip()[:80]
+    if done_hit is not None:
+        return (False, done_hit)
+    if blocks:
+        # A `**Status:**` line whose wording matches neither vocabulary. It is
+        # open, because an unclassifiable status is not evidence of completion,
+        # but say so differently from "no status marker at all" -- the two call
+        # for different fixes, and telling them apart is what stops a reader
+        # concluding the tool is simply noisy.
+        return (True, f"unrecognised status: {blocks[0].strip()[:60]}")
+    return None
 
 LANE_BY_CONFIG_DIR = {
     "": "a",
@@ -126,14 +223,13 @@ def classify(path: Path) -> tuple[bool, str, str]:
     title = title_of(head, path)
     if head.startswith("<<unreadable:"):
         return (True, head, title)
-    both = head + "\n" + tail
-    for pat in OPEN_PATTERNS:
-        m = pat.search(both)
-        if m:
-            return (True, m.group(0).strip(), title)
-    for pat in DONE_PATTERNS:
-        m = pat.search(both)
-        if m:
+    # A blank line between the two halves, so a `**Status:**` at the very end of
+    # the head cannot run into the first line of the tail and read as one block.
+    both = head + "\n\n" + tail
+    if (verdict := status_verdict(both)) is not None:
+        return (verdict[0], verdict[1], title)
+    for pat in DONE_HEADING_PATTERNS:
+        if m := pat.search(both):
             return (False, m.group(0).strip(), title)
     return (True, "no status marker", title)
 

@@ -81946,7 +81946,7 @@ one too many.
 
 ---
 
-## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 515 of 1937
+## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 503 of 1928
 
 **In short:** the kernel has ~430 small modules that each keep a table of numbers
 and print it — how much swap is compressed, which signals a process has blocked,
@@ -82052,6 +82052,22 @@ naive way.
 | 2026-08-26 | `futexstat` | 516 | category 3, the sharpest instance found so far. `procfs.rs` publishes `futexstat::stats()` and `hotspots(10)` under `/proc`, and the `futexstat` shell command prints the same table — while all four of `record_wait` / `record_wake` / `record_timeout` / `record_contention` were unreachable. So `/proc`'s futex hotspot list was permanently empty and its wait/wake/timeout totals permanently zero, on a kernel whose futex implementation works. A reader takes that as *measured* zero contention. Fixed by wiring the four recorders into `kernel/src/ipc/futex.rs` at the real blocking and waking points. |
 | 2026-08-26 | `irqstat` | 515 (and 222 → 220 modules, 1940 → 1937 mutators) | category 3, the third projection — and **the first one where deleting the mutators was right**, against this entry's own standing advice. `/proc/irqstat` and the `irqstat` command served per-IRQ-line counts, per-CPU interrupt totals and ISR latency while all six of `record`/`record_latency`/`mark_spurious`/`register_irq`/`register_cpu`/`init_defaults` were unreachable; before that the table was seeded with five fictional IRQ lines and four fictional per-CPU rows. Rewritten as a stateless projection of `idt::vector_counts()` — no `STATE`, no lock, nothing to seed or reset — which also makes `A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT` inapplicable to this module by construction rather than by care. **Why deletion, when the rule above says the function is usually right and the caller is what is missing:** here the functions were the wrong *shape*, not merely uncalled. `record(cpu, irq)` presumes a per-CPU per-line table the kernel's counter architecture cannot feed (`VECTOR_COUNTS` is one flat global array), and `IrqLine::spurious`/`affinity_mask` and the whole `CpuIrqState` latency pair had no source at all — they *were* the fabrication surface. Keeping them would not have preserved evidence of an unfed number; it would have preserved an invitation to the wrong fix, namely a second counter of the same event on the ISR path, which is two numbers that can disagree with nothing to say which is right. The `IrqType` enum went the same way: `Timer`/`Keyboard`/`Disk`/`Network`/`Usb`/`Gpu` is a guess about which device sits behind a line, and the kernel does not know that, so it is now `Timer`/`Device`/`Ipi`/`Spurious`/`Unassigned` — derived from the vector number, which the kernel *does* know. **Read the count change with care:** unlike the two rows below, this one moves the metric by removing functions rather than by wiring callers, so the drop is not five modules' worth of progress. That is the mirror of the `pagecache` lesson — the metric counts functions, and the defect is an unfed table. |
 | 2026-08-26 | `netdev` | 516 (unchanged, and that is the point) | category 3, the second projection. `/proc/netdev` listed no interfaces and reported `total_rx_bytes: 0` on a kernel that had just completed a DHCP exchange, because all six of `record_rx`/`record_tx`/`record_error`/`record_drop`/`register_iface`/`set_link_state` were unreachable -- while `net::interface` counted every frame in six relaxed atomics that `netstat -i` was already printing. The two halves of one intent, never joined, exactly as with `pagecache`. Joined at *read* time (a projected `kernel` row) rather than by calling `record_rx` per frame, which would put this module's spin lock and a string compare per interface on the path of every packet. The six `record_*`/`register_*` stay unreachable and now legitimately so, reserved for a per-NIC source that does not exist. **New finding while naming the row:** `net::interface`'s counters are not one NIC's -- `net::veth::poll` records into the same atomics, so the total includes frames that never reached the wire. The projected row is therefore named `kernel` and not `eth0`, and the conflation is logged separately as `A-NET-INTERFACE-COUNTERS-CONFLATE-THE-NIC-WITH-EVERY-VETH-PAIR`. |
+| 2026-08-30 | `perfmon` | 503 (and 220 → 219 modules, 1941 → 1928 mutators) | category 3, the fourth projection, and the largest single module cleared: **twelve** unreachable mutators, all of them. `/proc/perfmon` printed `CPU samples: 0 / Mem samples: 0 / Disk samples: 0 / Net samples: 0` on every boot for the life of the kernel, and `perfmon cpu` answered "No CPU samples" — while `kstat` had been sampling free frames, heap bytes, pressure, runnable/live task counts and per-CPU utilisation into a 60-entry ring *once a second since boot*. The `pagecache`/`netdev` shape exactly: two halves of one intent, never joined. Rewritten so every history is projected from `kstat::recent()` at read time and the module stores only the two alert thresholds, which are policy rather than measurement. **Both deletion rules from the `irqstat` row applied again, and more widely.** `CpuSample`'s `system_pct`/`user_pct` (the scheduler publishes only `(total, idle)` per CPU), `freq_mhz` and `temp_mc` (no frequency or thermal driver exists), and `process_count`/`thread_count` (no *historical* source) were deleted, as were `MemSample`'s `cached_bytes`/`swap_used_bytes`/`page_faults` and the whole of `DiskSample`/`NetSample` — the latter two because their counters live behind spin locks the timer softirq cannot take, so no sampler can ever fill them. `/proc/perfmon` now ends with a line pointing at `/proc/diskstat` and `/proc/netdev` for the cumulative figures, so the absence is stated rather than silent. **Also removed: two knobs that moved and changed nothing** — `perfmon interval <ms>` and `set_max_samples` stored a value that `get_config()` read back while nothing sampled any faster, because this module had no sampler; a knob that answers "did that work?" with a false yes is worse than a fixed value. Interval and depth are now reported from `kstat::sample_interval_ms()`/`history_depth()` and labelled not-settable. **And the alert model changed shape:** alerts are derived from the newest sample rather than appended per over-threshold sample, so `id`/`dismissed` and `perfmon dismiss` are gone — a CPU pinned at 100% used to accumulate identical rows, and dismissing them made a still-overloaded machine report itself healthy. Two new shell arms, `perfmon cpu-alert <pct>` and `perfmon mem-alert <pct>`, make the surviving setters reachable. Full rationale, including what was argued *against* deleting the fields: `design-decisions.md` §641. |
+
+**A blind spot in the metric, found while writing that row and worth knowing
+before the next module.** `scripts/find-unreachable-mutators.py` decides
+reachability by searching other files for the literal text `module::name(` — a
+*call*. Passing a mutator as a **function item** to a shared helper
+(`set_threshold(&parts, "cpu", perfmon::set_cpu_alert)`) is a real caller that
+the scanner cannot see, and it reported both `perfmon` setters as callerless
+after they had been wired up. Wrapping in a closure makes the text match but
+trips `clippy::redundant_closure`, so the resolution was to split the helper
+into a parse half and a report half, leaving each shell arm to call its setter
+directly. Two consequences: a future refactor that tidies those two arms back
+into one callback will silently re-break the measurement without changing any
+behaviour, and — more importantly — **the 503 figure may undercount reachability
+elsewhere for the same reason**, so treat it as an upper bound on the problem
+rather than an exact census.
 
 The futexstat fix is worth reading before doing the next category-3 module,
 because it ran into the constraint that shapes all of them: **you usually cannot
@@ -95117,9 +95133,119 @@ boxes are the only thing that *can* see the clip vanish, and are blind to
 everything else. A wrong comment beside a vacuous assertion is how a tautology
 survives three readings.
 
-Still open: `guitk`'s own tests for `Frame::hit`, and any test asserting a
-widget's rect is inside its parent where the parent rect was used to compute the
-child's.
+**`guitk`'s own tests for `Frame::hit` — checked 2026-08-30, nothing to do.**
+The worry was that the toolkit never pinned down the behaviour the app tests
+were unknowingly leaning on, in which case it could drift and take fifty apps'
+tests with it. It pins it down in five places: `a_target_is_trimmed_to_the_clip_in_force`
+(a straddling box comes back cut, and the cut half is not clickable),
+`a_target_entirely_outside_the_clip_is_dropped`,
+`a_nested_clip_can_only_shrink_the_visible_region`,
+`a_degenerate_clip_clips_everything_away`, and
+`an_over_popped_clip_stops_trimming_the_callers_hits`, which is the same rule
+read from the other side. So the lesson is about where an app puts its
+assertion, not about a gap in the toolkit.
+
+Still open: any test asserting a widget's rect is inside its parent where the
+parent rect was used to compute the child's.
+
+**It happened again in `apps/solitaire`, 2026-08-30 — the shape is more common
+than the two apps above suggested.** `every_pile_is_drawn_inside_the_window`
+walked every recorded box and asserted it lay within `0..w, 0..h`. The app
+clips to the window, so that is exactly the tautology described above, written
+independently by a different pass over a different app. A mutation fitting the
+card size to the tableau alone — which runs the top row clean off the side of a
+narrow window — passed it. What replaced it is a second usable spelling worth
+remembering alongside "compare against the layout's own rect": **compare the
+boxes against each other.** Every card in a card game is one size, so a card
+that comes back narrower than its neighbours is a card the clip cut, and the
+assertion is `w == max(w)` over the card targets rather than `x >= 0`. Any app
+that draws a grid of identically-sized things — a board, a keypad, a palette,
+a tile map — can use it, and unlike the "inside the window" form it cannot be
+satisfied by the trimming itself.
+
+### Lesson 81: a recorded hit box is not evidence that anything was drawn in it (lane C, 2026-08-30)
+
+**In short:** the natural way to check that a panel drew all its rows is to ask
+the frame whether each row's target has a box —
+`probe::rect_of_sized(&app, Target::Captures, size).is_some()`. That checks the
+row was *laid out*. It does not check the row was *painted*. In `apps/checkers`
+the two are separable: `panel_row` computes the row's rectangle, draws the text
+into it, and returns the rectangle, and the caller hands that rectangle to
+`f.hit`. Delete the drawing and keep the return — one line — and every box is
+still recorded, every `is_some()` still answers yes, and the panel is blank.
+A mutation doing exactly that survived the test whose stated job was to catch
+it.
+
+**The rule.** A hit box and a painted pixel are two different outputs of the
+drawing pass, and a test that reads one says nothing about the other. If what
+you mean is "the user can see this", assert against the render commands. If
+what you mean is "the user can click this", assert against the hit map. Say
+which one you meant, and if you meant both, assert both — the box exists *and*
+some `RenderCommand::Text`/`FillRect` origin falls inside it.
+
+**The tell.** A drawing helper that returns the rect it was given rather than
+the rect it drew, with a call site of the shape
+`f.hit(Target::X, helper(f, ..))`. The rect flows to the hit map through a path
+that does not pass through the painting. Also: any test whose only assertion is
+`rect_of(..).is_some()` for a target whose *content* is the point of it. The
+inverse shape — a control painted but never recorded — is caught by clicking
+it, so it is the visible half that goes unguarded.
+
+**How it was found.** A mutation sweep on `apps/checkers` gutting `panel_row`'s
+body to `let _ = (f, s, ink); row`. The row was expected to be caught by
+`the_panel_draws_its_rows_while_they_fit` and was instead caught only by
+`the_captures_line_credits_the_side_that_did_the_taking`, which happens to read
+the text. Fixed by requiring each of the panel's five boxes to contain the
+origin of a line of text.
+
+**Where else to look.** Every app in this campaign has a
+"the panel/toolbar/sidebar drew its rows" test, and the cheap spelling of it is
+`is_some()` over a list of targets. Wherever the drawing helper's return value
+is independent of whether it drew — which is most of them, since returning the
+laid-out rect is what makes `union` and the stacking cursor work — the test is
+measuring the layout and reporting on the paint.
+
+### Lesson 82: a `min` whose losing side never loses is an untested half of the code (lane C, 2026-08-30)
+
+**In short:** layout code is full of "fit it to A, fit it to B, take the
+smaller" — `size = by_width.min(by_height)`. Only one of the two ever *wins* in
+any given state, and the tests are written against the states the app is
+normally in, so the other side of the `min` can be deleted outright without a
+single test noticing. In `apps/solitaire`, `Table::fit` sizes a card to the top
+row and to the deepest fan a column can reach, and takes the smaller. The
+deepest fan it reserves for is six face-down cards under twelve face-up. The
+*opening deal* fans column 6 seven cards deep. Every geometry test in the suite
+read an opening deal, so the fan half of the fit was slack in all of them, and
+two mutations that removed it survived or were caught only by tests that had no
+business firing.
+
+**The rule.** A `min`/`max`/`clamp` in layout code is a branch, and a branch has
+two sides. If the app's ordinary state always takes the same side, the other
+side is unexecuted code wearing the same coverage number as the line it shares.
+Write a test that *forces* the losing side — construct the worst case directly
+rather than hoping the natural one contains it. In solitaire that meant
+clearing a column and pushing eighteen cards into it by hand, which is a state
+the game can reach and the opening deal never is.
+
+**The tell.** Any `fit`/`solve` function that reserves room for a maximum
+(`MAX_DEPTH`, `worst_case_rows`, "enough for the longest label") when the
+fixtures are all typical. Also: a suite whose every drawing test starts from the
+same `App::new()`, which for a game means the opening position — the position
+most carefully chosen to be unremarkable.
+
+**How it was found.** A mutation sweep on `apps/solitaire` replacing
+`by_top.min(by_tableau)` with each half alone. `the card is fitted across
+alone` and `the card is fitted to the top row alone` were expected to be caught
+by the deep-column test and were not, because that test read the opening deal.
+Fixed by `the_deepest_fan_a_deal_can_reach_still_fits_the_window`, which builds
+the eighteen-card column and asserts the first and last card are the same size.
+
+**Where else to look.** Every app in this campaign has a `Layout::solve` with at
+least one `min` of two candidate sizes, and the reserve-for-the-worst-case side
+is the one that only bites at a window size or a game state the fixtures do not
+visit: sudoku's pencil-mark grid, chess's move history, checkers' capture
+panel, and every app that reserves room for a scrollback it never fills in a
+test.
 
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
@@ -97712,6 +97838,270 @@ each length exactly.
 | The stored-block split | `deflate/src/lib.rs`, `deflate_stored` |
 | Tests | `incompressible_input_is_never_inflated`, `lz77_never_loses_to_plain_huffman`, `stored_blocks_split_above_the_sixteen_bit_length`, `levels_are_distinguishable_and_monotonic_in_ratio` |
 | Downstream | `ziparchive`, `kernel/src/fs/compress.rs`, `gzip`/`zlib_deflate` — all get the ratio for free, no call-site change |
+
+---
+
+## `A-LOCKDEP-SELF-TEST-PANICS-ON-EVERY-RELEASE-BUILD` (lane A, 2026-08-30) — **fixed 2026-08-30 (took three attempts; the first two were incomplete)**
+
+**Status:** FIXED 2026-08-30, on the third attempt, by deleting the mechanism
+rather than repairing it. Rounds 1 and 2 are recorded below as written at the
+time. Round 1 concluded the *test* was wrong and the code was right — it was the
+other way round. Round 2 found a real cause but treated it as *the* cause; it
+turned out to be one of three independent optimiser liberties that each erase
+exactly one stack frame. Round 3 is the fix that shipped. The earlier rounds are
+kept because the reasoning errors are the useful part: each one ended in a
+plausible mechanism that fully explained the symptom and was not the whole
+story.
+
+**In short:** the kernel would not finish booting when built with optimisations
+on. It panicked partway through startup, inside a self-test belonging to the
+lock-order checker. The test was checking that the checker correctly records
+*which piece of code took a lock* — information that appears in every deadlock
+report it prints. In an optimised build it was recording the wrong function: not
+the one that took the lock, but the one that called it. So every "taken at" line
+in every release-build lock report pointed at innocent code. The self-test was
+right to panic; three rounds were needed to fix it, and the fix in the end was
+to stop asking the machine where the caller was and ask the *compiler* instead
+— it knows, and it cannot be optimised into a different answer.
+
+---
+
+### Round 1 (wrong): "the test is asserting a property of the build"
+
+**What happened.** `lockdep`'s test 9b checks that `caller_ips()` walks exactly
+one frame up from `lock_acquire`, landing on the caller. It identified that
+caller by symbolising the recorded return address and asserting the name
+`contains("lockdep")`:
+
+```rust
+lock_acquire(SITE_PROBE, b"site-probe", Acquire::Blocking);
+…
+if let Some((name, _)) = crate::ksyms::resolve_static(site as u64) {
+    assert!(name.contains("lockdep"), "recorded site resolved to {name} …");
+}
+```
+
+In a debug build the caller is `lockdep::self_test` and the substring matches.
+In release, LLVM inlined `self_test` into `kernel_main`, so the recorded address
+genuinely *is* inside `kernel_main` — the frame walk was correct and the
+assertion fired anyway:
+
+```
+!!! KERNEL PANIC !!!
+panicked at kernel\src\lockdep.rs:1647:13:
+recorded site resolved to kernel_main, which is not the calling self-test
+```
+
+**The test was asserting a property of the build, not of the code under test.**
+After inlining there is no `self_test` frame to walk to, because there is no
+`self_test`. A test whose premise the optimiser is free to delete is a test that
+only runs at `-O0`.
+
+**How it stayed hidden — and this is the transferable part.** `scripts/boot-test.sh`
+builds debug. `--bench` builds release, and `--bench` had not been run since
+before this test was written. So the failing configuration was one flag away and
+nothing in between exercised it. **A self-test that reasons about symbol names,
+frame layout, or inlining is release-sensitive by construction, and the routine
+gate does not cover it.** The other place this class lives is `caller_ips()`
+itself, whose own `#[inline(never)]` doc comment says the attribute is
+load-bearing — the same hazard, correctly handled one function away.
+
+**The fix.** Move the probe's acquire into a dedicated `#[inline(never)] fn
+site_probe_acquire(probe: usize)`, so a frame with a stable symbol exists in
+every build, and compare against the name `resolve_static` gives for that
+function's *own address* rather than a hardcoded substring:
+
+```rust
+let expected = crate::ksyms::resolve_static(site_probe_acquire as usize as u64).map(|(n, _)| n);
+assert!(Some(name) == expected, …);
+```
+
+Asking the same table for both sides is deliberate: a literal would test the
+symboliser's spelling and mangling as much as the frame walk, and neither is
+this test's subject. The assertion is now stronger than the substring it
+replaced — `contains("lockdep")` would also have accepted a walk that landed on
+any other function in this file.
+
+**Not a regression in lockdep.** `caller_ips` was right in both builds
+throughout; only the test's way of naming its own caller was wrong.
+
+*(That last paragraph is the error. It was written without re-running `--bench`,
+because the change was "obviously" sufficient. It was not.)*
+
+---
+
+### Round 2 (correct): `lock_acquire` was `#[inline]`, so the walk lost a frame
+
+Running `--bench` after round 1 panicked again, and the stronger assertion round
+1 had installed is what made the second panic legible:
+
+```
+panicked at kernel\src\lockdep.rs:1680:13:
+recorded site resolved to kernel_main, not to the function that took the lock
+(Some("_ZN6kernel7lockdep18site_probe_acquire…")) — caller_ips() walked to the wrong frame
+```
+
+Both sides of that comparison now come from the symbol table, so this is not a
+naming quibble: the walk genuinely landed on `kernel_main` when the function
+that took the lock was `site_probe_acquire`, which still exists as a real
+`#[inline(never)]` frame. Round 1's premise — "there is no `self_test` frame to
+walk to, because there is no `self_test`" — had been repaired, and the walk was
+*still* one frame high. That is the tell that the walker, not the target, was
+wrong.
+
+**The actual cause.** `caller_ips()` is `#[inline(never)]` and reads two frames:
+its own, then its parent's — the parent being `lock_acquire`, whose return
+address is the acquisition site. That is correct only while `lock_acquire` *has*
+a frame. It was declared `#[inline]`. In a release build LLVM took the hint, so
+the "parent frame" the walk found was not `lock_acquire`'s but its caller's, and
+the return address in it belonged to the caller's **caller**. Every recorded
+site was off by exactly one level of call.
+
+`#[inline]` is a hint and `#[inline(never)]` is a guarantee, and the frame walk
+was resting the whole of its correctness on the hint.
+
+**This was never confined to the test.** The same run prints the held-lock dump
+a few lines above the panic, and it shows the defect directly:
+
+```
+[lockdep]   cpu 0 holds 2 lock(s):
+[lockdep]     [0] test-A @ 0xdead0001, taken at 0xffffffff812eec9b (kernel_main+0x16b)
+[lockdep]     [1] test-B @ 0xdead0002, taken at 0xffffffff812eec9b (kernel_main+0x16b)
+```
+
+Two different locks, taken at two different places, reported at one identical
+address — the call to `self_test` in `kernel_main`. In a release build every
+lockdep report attributed every acquisition to whoever called the function that
+took the lock. That is worse than printing nothing: a bare address carries an
+implicit claim to be worth reading, and this one sends you to code that never
+touched the lock.
+
+**The fix, in two parts, because a frame can be lost two ways.**
+
+1. `lock_acquire` is now `#[inline(never)]`. The invariant the walk depends on
+   becomes a guarantee instead of a hope. It costs nothing measurable: there are
+   two call sites, both already doing `preempt_disable` + `ensure_registered` +
+   `tracking_enabled` on the same path, and `ENABLED` is true from boot onward,
+   so the early-out that the inline hint existed to fold away is the branch not
+   taken in production.
+2. `site_probe_acquire` gained a `core::hint::black_box(probe)` after the
+   acquire. `#[inline(never)]` on the *callee* does not stop the *caller's* own
+   frame vanishing: a body consisting of one call in tail position can be
+   emitted as `jmp` instead of `call`, reusing the frame rather than pushing
+   one, which produces the identical off-by-one from the opposite direction.
+   The barrier takes the call out of tail position, which is what makes the
+   frame mandatory.
+
+*(Round 2 is correct as far as it goes, and both of its fixes were verified by
+disassembly to have worked. It is incomplete: it treats "a frame can be lost two
+ways" as an enumeration, and there was a third way, in the walker itself.)*
+
+---
+
+### Round 3 (the fix): a function cannot assume its own prologue has run
+
+Round 2's `--bench` run panicked again, one frame closer than before —
+`kernel_main::case` instead of `kernel_main`. At that point the honest move was
+to stop proposing mechanisms and read the machine code, which is what found the
+third hazard immediately:
+
+```
+$ llvm-objdump -d --disassemble-symbols='…caller_ips…' target/x86_64-unknown-none/release/kernel
+ffffffff81150310: movq %rbp, %rax      <-- the asm! that reads the frame pointer
+ffffffff81150313: testq %rax, %rax     <-- null / alignment sanity checks
+…
+ffffffff81150322: pushq %rbp           <-- the prologue, AFTER the read
+ffffffff81150323: movq %rsp, %rbp
+```
+
+LLVM had **shrink-wrapped** `caller_ips`: it sank the `push rbp; mov rsp,rbp`
+prologue below the early-exit checks, because on the bail-out paths no frame is
+needed. Perfectly legal, and invisible from the source. The `asm!("mov {}, rbp")`
+at the top of the function therefore read the *caller's* `rbp`, so "my frame"
+was really "my caller's frame" and the whole walk was shifted by one — again.
+
+`-C force-frame-pointers=yes` does not prevent this. It guarantees the frame
+pointer is *maintained*, not that it is established before the first instruction
+that reads it.
+
+**So there are three separate ways to lose exactly one frame**, and they are not
+a list that can be closed:
+
+| # | Liberty | What the walk sees |
+|---|---|---|
+| 1 | the callee is inlined into its caller | the "parent frame" belongs to the caller |
+| 2 | a one-call body is emitted as `jmp` (sibling/tail call) | the frame is reused, not pushed |
+| 3 | the prologue is sunk below the read (shrink wrapping) | `rbp` is still the caller's |
+
+Rounds 1 and 2 each closed one of these with an attribute. No arrangement of
+attributes closes the third, because it is not about who gets inlined into whom:
+**a function cannot assume its own prologue has run.**
+
+**The fix: `#[track_caller]`.** The question the walk was trying to answer —
+"which line of code called me?" — is one the compiler already knows and answers
+exactly, at compile time, via `Location::caller()`. No optimisation can move it.
+`lock_acquire` and `sync::Mutex::{lock, try_lock}` all carry the attribute, so
+the location `lockdep` records is transitively the *user's* source line rather
+than a line inside `sync.rs`.
+
+What this deleted, and why the deletions are the point:
+
+- `caller_ips()` — ~65 lines of RBP-chain walking, `asm!`, canonical-address and
+  alignment checks, and three paragraphs of doc comment justifying attributes on
+  neighbouring functions. Gone.
+- `CLASS_SITE_UP` and the `via:` line in violation reports. That second array
+  existed only because the immediate caller of `lock_acquire` is nearly always
+  `Mutex::<T>::lock`, which names the guarded *type* and not the code that took
+  the lock; a real inversion in boot batch 31 reported both sides as
+  `kernel::sync::Mutex<T>::lock+0x6f`, differing only in the monomorphisation
+  hash. `#[track_caller]` sees through that in one step, so the workaround has
+  no remaining job.
+- `site_probe_acquire`, the `#[inline(never)]` probe helper round 1 added, and
+  its `black_box`. With no frame to find, no frame need be forced to exist.
+
+Reports improved in the process: `file:line:col` instead of `symbol+0xoffset`,
+and correct at every optimisation level rather than at `-O0` only.
+
+**The one hazard that remains, and how it is gated.** `#[track_caller]` degrades
+*silently*. Remove it from `lock_acquire` and every site becomes the
+`Location::caller()` line inside `lockdep.rs`; remove it from `Mutex::lock` and
+every site becomes the `lock_acquire` call inside `sync.rs`. Both are real code
+locations and both look like plausible answers in a report — the second is
+precisely the failure this whole mechanism exists to prevent. So test 9b now has
+two cases, one per attribute, and each asserts the **exact line** it expects
+(captured with `line!() + 1` immediately above the acquire) rather than merely
+that something was recorded. An exact line is the only assertion both wrong
+answers fail.
+
+**The transferable lesson.** Round 1 explained the failure convincingly and
+fixed a real weakness (the substring assertion *was* build-dependent), then drew
+the wrong conclusion from it and did not re-run the one command that would have
+said so. Round 2 found a genuine cause, fixed it correctly, and assumed it was
+the only one. Both were plausible mechanisms that fully accounted for the
+symptom — and a plausible mechanism that accounts for the symptom is not the
+same as the cause. The thing that ended it was not a better hypothesis but
+`llvm-objdump`: **after the second wrong guess, stop reasoning about the
+compiler and read what it emitted.** And the real fix was not a third patch to
+the walk but the recognition that the walk was answering a question the language
+answers exactly — three rounds of increasingly careful frame arithmetic were
+three rounds spent reimplementing `#[track_caller]` badly.
+
+The saving grace throughout was that each round made the assertion *stronger*
+rather than weaker. A fix that had loosened the test to make the panic go away
+would have shipped the wrong attribution silently and permanently.
+
+| | |
+|---|---|
+| The panic | `kernel/src/lockdep.rs`, test 9b in `self_test` |
+| The real defect | `kernel/src/lockdep.rs::caller_ips` — recovering the caller by walking the frame chain at all |
+| Round-1 fix (real weakness, wrong conclusion) | `site_probe_acquire` + symbol-table-vs-symbol-table assertion |
+| Round-2 fix (necessary, insufficient) | `#[inline(never)]` on `lock_acquire`; `black_box` to defeat the sibling call |
+| Round-3 fix (shipped) | `#[track_caller]` on `lock_acquire` and `sync::Mutex::{lock, try_lock}`; `CLASS_SITE` holds a `&'static Location`; `caller_ips`, `CLASS_SITE_UP` and `site_probe_acquire` deleted |
+| Blast radius before the fix | every `taken at` address in every release-build lockdep report, not just the self-test |
+| How to reproduce (before the fix) | `./scripts/boot-test.sh --bench` — release build, panics ~20s into the boot |
+| The gate that missed it | `scripts/boot-test.sh` without `--bench` builds debug |
+| The gate now | test 9b asserts the exact recorded `file:line` for both attributes, and is correct in debug and release alike |
+| Design record | `design-decisions.md` §642 |
 
 ---
 

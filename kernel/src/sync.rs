@@ -425,7 +425,15 @@ impl<T> Mutex<T> {
     /// Notifies lockdep before spinning so the dependency edge is
     /// recorded even if the lock is uncontended.  Tracks contention
     /// statistics when enabled.
+    ///
+    /// `#[track_caller]` is load-bearing and not decoration. `lockdep` records
+    /// the acquisition site as `Location::caller()`, so without the attribute
+    /// here every lock in the kernel would be reported as taken at this line in
+    /// `sync.rs` — a plausible-looking answer that names the same place for
+    /// every lock, which is exactly the failure the site recording exists to
+    /// avoid. See `lockdep::CLASS_SITE`.
     #[inline]
+    #[track_caller]
     pub fn lock(&self) -> MutexGuard<'_, T> {
         self.ensure_registered();
         let addr = self.addr();
@@ -523,8 +531,12 @@ impl<T> Mutex<T> {
     ///
     /// If successful, records the acquisition with lockdep.
     /// If the lock is already held, returns `None` without recording.
+    ///
+    /// `#[track_caller]` for the same reason as [`Mutex::lock`]: it is what
+    /// makes the site lockdep records be *your* line rather than this one.
     #[inline]
     #[allow(dead_code)]
+    #[track_caller]
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
         self.ensure_registered();
         let addr = self.addr();

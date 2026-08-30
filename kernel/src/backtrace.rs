@@ -43,6 +43,31 @@ pub struct Frame {
 ///
 /// Frame pointers must be valid.  If the kernel is built without
 /// `-C force-frame-pointers=yes`, this may return garbage or nothing.
+///
+/// # Do not put a branch above the `asm!`
+///
+/// `#[inline(never)]` gives this function a frame; it does not guarantee the
+/// frame has been *established* by the time the `asm!` reads `RBP`. LLVM may
+/// **shrink-wrap** a prologue — sink `push rbp; mov rsp,rbp` below an early
+/// exit, so the paths that return without needing a frame never pay for one.
+/// The prologue stays at entry here only because the body is straight-line and
+/// there is no earlier branch to sink past. `-C force-frame-pointers=yes` does
+/// not help: it guarantees the frame pointer is maintained, not that it is set
+/// up before the first instruction that reads it.
+///
+/// So an early-out added above the `asm!` — a cheap "is the kernel far enough
+/// along to walk?" check, say — would silently make `rbp` the *caller's*, and
+/// this function's documented contract (frame 0 is the immediate caller) would
+/// quietly become "frame 0 is the caller's caller": one frame missing from
+/// every backtrace, with nothing to signal it. Put such a check in the caller,
+/// or in [`walk_from`], which takes the value and has no such dependency.
+///
+/// This is not hypothetical. It is the third of the three ways lockdep's
+/// acquisition-site walk lost exactly one frame, and it is the one no attribute
+/// can close; see `design-decisions.md` §642. lockdep no longer walks at all —
+/// `#[track_caller]` answers its question exactly — but a backtrace genuinely
+/// needs the frames of code it did not call, so the walk stays here and the
+/// hazard is documented rather than removed.
 #[inline(never)] // Ensure this function has its own frame.
 pub fn capture() -> BacktraceResult {
     let rbp: u64;
@@ -130,6 +155,9 @@ pub fn print_from(start_rbp: u64) {
 }
 
 /// Print the current backtrace (from the call site).
+///
+/// The same "do not put a branch above the `asm!`" constraint as [`capture`]
+/// applies here, and for the same reason.
 #[inline(never)]
 #[allow(dead_code)]
 pub fn print_current() {

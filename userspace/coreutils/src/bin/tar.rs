@@ -4,6 +4,16 @@
 //!        tar -x [-f ARCHIVE] [-v] [-C DIR]    extract archive
 //!        tar -t [-f ARCHIVE]                   list archive
 //!
+//! Each of those has GNU's long spelling too — `--create`, `--extract` (or
+//! `--get`), `--list`, `--verbose`, `--file`, `--directory`,
+//! `--preserve-permissions` (or `--same-permissions`) — abbreviable to any
+//! unambiguous prefix, and `--` ends the options. `-?`/`--help`, `--usage` and
+//! `--version` answer and exit 0. The other 160 long options GNU has are
+//! **recognised and refused** rather than ignored; see
+//! [`LONG_OPTIONS`] for why a table of names this tar does not implement is
+//! load-bearing rather than decorative, and [`unsupported`] for why refusing
+//! beats the two cheaper answers.
+//!
 //! Supports basic POSIX/ustar tar format (uncompressed).
 //! Files > 8GB and paths > 255 chars are not supported.
 //!
@@ -41,6 +51,7 @@
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
+use coreutils::getopt::{self, Opt, Program, Takes};
 // `escape`, not `quotef`, and that is a deliberate departure from the house
 // style of the other 85 bins. GNU tar calls `set_quoting_style (NULL,
 // escape_quoting_style)` at startup, so *every* name it prints -- in a
@@ -54,7 +65,10 @@ use coreutils::errmsg::strerror;
 // `set_quoting_style` above. Measured side by side in one run of one command:
 // `tar: esc: Cannot hard link to ‘etc/passwd’: ...` next to
 // `tar: caf\351: Not found in archive`.
-use coreutils::quote::{escape, escape_os, os_bytes, quote, quoteaf};
+// `quoteaf` left with the hand-written option loop: every command-line
+// diagnostic now comes from `coreutils::getopt`, which does its own rendering
+// (glibc's straight-marked style, not gnulib's locale-aware one).
+use coreutils::quote::{escape, escape_os, os_bytes, quote};
 // Only the non-unix twin of `Dir` builds a path out of a member's bytes; on
 // unix every component is handed to `openat` as it stands.
 #[cfg(any(not(unix), test))]
@@ -85,7 +99,303 @@ const EXIT_FATAL: i32 = 2;
 const EXIT_USAGE: i32 = 64;
 
 /// The second line argp prints after any usage error, verbatim.
+///
+/// **Two commands, not one**, and that is why every call site here prints this
+/// rather than [`getopt::Error::message`]. The shared getopt module ends its
+/// diagnostics with gnulib's one-command `Try 'tar --help' for more
+/// information.`, which is right for the 85 utilities that use `getopt_long`
+/// directly and wrong for tar: argp supplies its own referral naming both
+/// `--help` and `--usage`. The *sentences* are glibc's either way — argp calls
+/// `getopt_long` to do the parsing — so only this last line differs. Measured
+/// side by side: all six of tar's command-line errors end in this line.
 const TRY_HELP: &str = "Try 'tar --help' or 'tar --usage' for more information.";
+
+/// tar's name and its usage status, bound once so no diagnostic can drift.
+///
+/// 64, not 1 and not 2 — see [`EXIT_USAGE`]. It is passed here rather than
+/// written into each message so that the two cannot disagree.
+const TAR: Program = Program::new("tar", EXIT_USAGE);
+
+/// The short options this tar implements, in `getopt` notation.
+///
+/// No leading `+`: tar **permutes**, so an option may follow an operand.
+/// Measured — `tar -tf t.tar a --verbose` applies the `--verbose` and prints a
+/// long listing, rather than treating it as a second member name.
+///
+/// `?` is a real option letter here, not the error return: argp gives `--help`
+/// the short form `-?`, and `tar -?` prints the help and exits 0. The shared
+/// parser looks the letter up by byte and has no special case for `?`, so
+/// listing it is all that is needed.
+const SHORT_OPTIONS: &str = "cxtvpkUf:C:?";
+
+/// Every long option GNU tar 1.35 has — all 172 — in argp's own table order.
+///
+/// # Why the whole set, when this tar implements twelve of them
+///
+/// Because the table is what decides whether an abbreviation is *ambiguous*,
+/// and an abbreviation is resolved against every name tar knows, not every name
+/// tar acts on. Drop the 160 unimplemented entries and `tar --ex` stops being
+/// an error and silently becomes `--extract` — GNU refuses it, listing
+/// fourteen candidates. A table that lists only what it implements does not
+/// merely give a worse message; it gives a *different command* than GNU would.
+///
+/// The unimplemented names are still refused, by [`parse_args`] — recognising a
+/// name and performing it are separate things. See [`unsupported`].
+///
+/// # Why the order is load-bearing, and must not be sorted
+///
+/// `getopt_long` lists an ambiguous prefix's candidates in the order the caller
+/// declared them, so this array's order is observable output:
+///
+/// ```text
+/// $ tar --ex
+/// tar: option '--ex' is ambiguous; possibilities: '--extract' '--exclude' ...
+/// ```
+///
+/// `--extract` precedes `--exclude`, which alphabetical order would reverse.
+/// The order is neither alphabetical nor arbitrary: it is argp's own grouping
+/// by function — the operation modes, then the incremental options, then the
+/// overwrite-control ones, and so on — which is why sorting it by any key at
+/// all is wrong.
+///
+/// # How this was obtained
+///
+/// One measurement, from the binary:
+///
+/// ```text
+/// $ tar --=x
+/// tar: option '--' is ambiguous; possibilities: '--list' '--extract' ...
+/// ```
+///
+/// The empty name is a prefix of every entry, so the ambiguity list *is* the
+/// table — all 172 names, in declaration order, in one line.
+/// `scripts/getopt-ambiguity-check.py` runs exactly this at push time and
+/// refuses a push whose table disagrees, so the array below is verified against
+/// the real utility on every push rather than only when it was written.
+///
+/// The argument classes are a second sweep: `tar --opt=zz` answering `doesn't
+/// allow an argument` is `Nothing`; `tar --opt` *as the last word* answering
+/// `requires an argument` is `Required`; neither is `Optional`. The option must
+/// be last — a `Required` one followed by anything simply eats it, so `tar
+/// --file --version` reports nothing at all. That comes out 113 / 52 / 7.
+///
+/// **Two names are invisible to `--help`,** which is why the ambiguity list and
+/// not the help text is the authority for the name *set*:
+///
+/// - `--program-name`, which argp hides.
+/// - `--HANG`, a hidden debug option that sleeps forever, and the only name
+///   here beginning with a capital letter. It was missed by the first version
+///   of this table, which was reconstructed a letter at a time from `tar --a`,
+///   `tar --b`, … over the lower-case alphabet — a sweep that can never reach
+///   it. The push-time check caught it. The lesson is the general one:
+///   enumerate from the utility's own output, never from an alphabet you chose.
+///
+/// The table was also checked exhaustively against GNU: every distinct prefix
+/// of every name was put to the binary and its verdict compared with this
+/// table's — resolved, unrecognised, or ambiguous, and for ambiguous ones the
+/// candidate list in order — for **zero** mismatches. That is also what
+/// establishes tar needs [`Program::resolve_long`] rather than
+/// `resolve_long_aliased`: tar does have aliases (`--extract`/`--get`), but no
+/// two of them share a prefix, so name-only resolution is exact here. Were that
+/// untrue, some prefix would have been accepted by GNU and called ambiguous by
+/// us.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
+    ("list", Takes::Nothing),
+    ("extract", Takes::Nothing),
+    ("get", Takes::Nothing),
+    ("create", Takes::Nothing),
+    ("diff", Takes::Nothing),
+    ("compare", Takes::Nothing),
+    ("append", Takes::Nothing),
+    ("update", Takes::Nothing),
+    ("catenate", Takes::Nothing),
+    ("concatenate", Takes::Nothing),
+    ("delete", Takes::Nothing),
+    ("test-label", Takes::Nothing),
+    ("sparse", Takes::Nothing),
+    ("hole-detection", Takes::Required),
+    ("sparse-version", Takes::Required),
+    ("incremental", Takes::Nothing),
+    ("listed-incremental", Takes::Required),
+    ("level", Takes::Required),
+    ("ignore-failed-read", Takes::Nothing),
+    ("occurrence", Takes::Optional),
+    ("seek", Takes::Nothing),
+    ("no-seek", Takes::Nothing),
+    ("no-check-device", Takes::Nothing),
+    ("check-device", Takes::Nothing),
+    ("verify", Takes::Nothing),
+    ("remove-files", Takes::Nothing),
+    ("keep-old-files", Takes::Nothing),
+    ("skip-old-files", Takes::Nothing),
+    ("keep-newer-files", Takes::Nothing),
+    ("overwrite", Takes::Nothing),
+    ("unlink-first", Takes::Nothing),
+    ("recursive-unlink", Takes::Nothing),
+    ("no-overwrite-dir", Takes::Nothing),
+    ("overwrite-dir", Takes::Nothing),
+    ("keep-directory-symlink", Takes::Nothing),
+    ("one-top-level", Takes::Optional),
+    ("to-stdout", Takes::Nothing),
+    ("to-command", Takes::Required),
+    ("ignore-command-error", Takes::Nothing),
+    ("no-ignore-command-error", Takes::Nothing),
+    ("owner", Takes::Required),
+    ("group", Takes::Required),
+    ("owner-map", Takes::Required),
+    ("group-map", Takes::Required),
+    ("mtime", Takes::Required),
+    ("clamp-mtime", Takes::Nothing),
+    ("mode", Takes::Required),
+    ("atime-preserve", Takes::Optional),
+    ("touch", Takes::Nothing),
+    ("same-owner", Takes::Nothing),
+    ("no-same-owner", Takes::Nothing),
+    ("numeric-owner", Takes::Nothing),
+    ("preserve-permissions", Takes::Nothing),
+    ("same-permissions", Takes::Nothing),
+    ("no-same-permissions", Takes::Nothing),
+    ("preserve-order", Takes::Nothing),
+    ("same-order", Takes::Nothing),
+    ("delay-directory-restore", Takes::Nothing),
+    ("no-delay-directory-restore", Takes::Nothing),
+    ("sort", Takes::Required),
+    ("xattrs", Takes::Nothing),
+    ("no-xattrs", Takes::Nothing),
+    ("xattrs-include", Takes::Required),
+    ("xattrs-exclude", Takes::Required),
+    ("selinux", Takes::Nothing),
+    ("no-selinux", Takes::Nothing),
+    ("acls", Takes::Nothing),
+    ("no-acls", Takes::Nothing),
+    ("file", Takes::Required),
+    ("force-local", Takes::Nothing),
+    ("rmt-command", Takes::Required),
+    ("rsh-command", Takes::Required),
+    ("multi-volume", Takes::Nothing),
+    ("tape-length", Takes::Required),
+    ("info-script", Takes::Required),
+    ("new-volume-script", Takes::Required),
+    ("volno-file", Takes::Required),
+    ("blocking-factor", Takes::Required),
+    ("record-size", Takes::Required),
+    ("ignore-zeros", Takes::Nothing),
+    ("read-full-records", Takes::Nothing),
+    ("format", Takes::Required),
+    ("old-archive", Takes::Nothing),
+    ("portability", Takes::Nothing),
+    ("posix", Takes::Nothing),
+    ("pax-option", Takes::Required),
+    ("label", Takes::Required),
+    ("auto-compress", Takes::Nothing),
+    ("no-auto-compress", Takes::Nothing),
+    ("use-compress-program", Takes::Required),
+    ("bzip2", Takes::Nothing),
+    ("gzip", Takes::Nothing),
+    ("gunzip", Takes::Nothing),
+    ("ungzip", Takes::Nothing),
+    ("compress", Takes::Nothing),
+    ("uncompress", Takes::Nothing),
+    ("lzip", Takes::Nothing),
+    ("lzma", Takes::Nothing),
+    ("lzop", Takes::Nothing),
+    ("xz", Takes::Nothing),
+    ("zstd", Takes::Nothing),
+    ("one-file-system", Takes::Nothing),
+    ("absolute-names", Takes::Nothing),
+    ("dereference", Takes::Nothing),
+    ("hard-dereference", Takes::Nothing),
+    ("starting-file", Takes::Required),
+    ("newer", Takes::Required),
+    ("after-date", Takes::Required),
+    ("newer-mtime", Takes::Required),
+    ("backup", Takes::Optional),
+    ("suffix", Takes::Required),
+    ("strip-components", Takes::Required),
+    ("transform", Takes::Required),
+    ("xform", Takes::Required),
+    ("checkpoint", Takes::Optional),
+    ("checkpoint-action", Takes::Required),
+    ("check-links", Takes::Nothing),
+    ("totals", Takes::Optional),
+    ("utc", Takes::Nothing),
+    ("full-time", Takes::Nothing),
+    ("index-file", Takes::Required),
+    ("block-number", Takes::Nothing),
+    ("show-defaults", Takes::Nothing),
+    ("show-snapshot-field-ranges", Takes::Nothing),
+    ("show-omitted-dirs", Takes::Nothing),
+    ("show-transformed-names", Takes::Nothing),
+    ("show-stored-names", Takes::Nothing),
+    ("quoting-style", Takes::Required),
+    ("quote-chars", Takes::Required),
+    ("no-quote-chars", Takes::Required),
+    ("interactive", Takes::Nothing),
+    ("confirmation", Takes::Nothing),
+    ("verbose", Takes::Nothing),
+    ("warning", Takes::Required),
+    ("restrict", Takes::Nothing),
+    ("add-file", Takes::Required),
+    ("directory", Takes::Required),
+    ("files-from", Takes::Required),
+    ("null", Takes::Nothing),
+    ("no-null", Takes::Nothing),
+    ("unquote", Takes::Nothing),
+    ("no-unquote", Takes::Nothing),
+    ("verbatim-files-from", Takes::Nothing),
+    ("no-verbatim-files-from", Takes::Nothing),
+    ("exclude", Takes::Required),
+    ("exclude-from", Takes::Required),
+    ("exclude-caches", Takes::Nothing),
+    ("exclude-caches-under", Takes::Nothing),
+    ("exclude-caches-all", Takes::Nothing),
+    ("exclude-tag", Takes::Required),
+    ("exclude-ignore", Takes::Required),
+    ("exclude-ignore-recursive", Takes::Required),
+    ("exclude-tag-under", Takes::Required),
+    ("exclude-tag-all", Takes::Required),
+    ("exclude-vcs", Takes::Nothing),
+    ("exclude-vcs-ignores", Takes::Nothing),
+    ("exclude-backups", Takes::Nothing),
+    ("recursion", Takes::Nothing),
+    ("no-recursion", Takes::Nothing),
+    ("anchored", Takes::Nothing),
+    ("no-anchored", Takes::Nothing),
+    ("ignore-case", Takes::Nothing),
+    ("no-ignore-case", Takes::Nothing),
+    ("wildcards", Takes::Nothing),
+    ("no-wildcards", Takes::Nothing),
+    ("wildcards-match-slash", Takes::Nothing),
+    ("no-wildcards-match-slash", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("usage", Takes::Nothing),
+    ("program-name", Takes::Required),
+    ("HANG", Takes::Optional),
+    ("version", Takes::Nothing),
+];
+
+/// A long option GNU tar has and this one does not implement.
+///
+/// **This is a deliberate divergence, and the only one in the parser.** GNU
+/// would accept every one of these; we refuse, with a sentence that says which
+/// of the two reasons applies so the reader is not sent looking for a typo.
+///
+/// The alternative is worse in a way that is not obvious until it bites. Before
+/// long options existed here, `--exclude=*.o` was not an option at all — it fell
+/// through to the operand branch and became a *file name to archive*, so
+/// `tar -cf a.tar --exclude=*.o src` quietly produced an archive containing
+/// everything the user asked to leave out, plus a spurious member, and exited 0.
+/// A refusal at status 64 is a script that stops; silence is a backup that is
+/// wrong and says it succeeded.
+///
+/// Reporting it as `unrecognized option` — the other cheap answer — would be a
+/// second lie: the name *is* tar's, and telling a user that `--exclude` is not
+/// a tar option sends them to the manual to check a spelling that was right.
+fn unsupported(name: &str) -> getopt::Error {
+    TAR.usage(format!(
+        "option '--{name}' is recognised but not implemented by this tar"
+    ))
+}
 
 /// Close out a run that had at least one non-fatal failure.
 ///
@@ -114,6 +424,42 @@ fn fatal() -> i32 {
 // argv parsing — pure, cross-platform
 // ============================================================================
 
+/// What the command line turned out to be asking for.
+///
+/// Three of the four answers are not archive work at all. They are separated
+/// from [`TarArgs`] rather than folded into it as flags because the difference
+/// is total: `--help` does not extract anything, does not care that no
+/// operation was given, and exits 0. Returning them from the parser also puts
+/// the **precedence** rule in one place — the parser stops at the first of
+/// them it reaches — and precedence is the whole of the observable behaviour
+/// here. Measured against GNU:
+///
+/// | Command line | GNU | Why |
+/// |---|---|---|
+/// | `tar --help --frobnicate` | help, exit 0 | `--help` came first |
+/// | `tar --frobnicate --help` | `unrecognized option`, exit 64 | the bad one came first |
+/// | `tar -c --help` | help, exit 0 | `-c` is fine; `--help` wins over doing it |
+/// | `tar --file --help` | `You must specify one of…`, exit 2 | `--help` was eaten as `--file`'s value |
+///
+/// An iterator gives all four rows for free, because it hands back one item at
+/// a time in argv order and this function acts on the first that decides the
+/// run. A parser that validated the whole of argv before returning anything
+/// would fail the first row, and one that scanned for `--help` up front would
+/// fail the second and the fourth.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum Request {
+    /// `-?`, `--help`: the full option list, on stdout, exit 0.
+    Help,
+    /// `--usage`: the one-paragraph synopsis, on stdout, exit 0. It exists
+    /// because [`TRY_HELP`] names it — a referral that points at an option the
+    /// program rejects is worse than no referral.
+    Usage,
+    /// `--version`, on stdout, exit 0.
+    Version,
+    /// Do the archive work described by these arguments.
+    Run(TarArgs),
+}
+
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct TarArgs {
@@ -127,90 +473,314 @@ struct TarArgs {
     /// not do at all — it left every extracted file at whatever `File::create`
     /// produced.
     same_permissions: bool,
+    /// What to do about something already standing where a member is to go.
+    /// See [`OldFiles`].
+    old_files: OldFiles,
     archive_file: Option<OsString>,
     directory: Option<OsString>,
     files: Vec<OsString>,
 }
 
-/// Parse tar's argv.  Supports clustered short flags; `f` and `C`
-/// consume the following argv element as their value (even when
-/// clustered as e.g. `-xvf`, in which case the next argv is the value
-/// of `f`).  Unknown short flags return an error.
+/// What extraction does about an entry that is *already there*.
 ///
-/// The error strings are argp's, verbatim, less the `tar: ` prefix the caller
-/// adds: `invalid option -- 'Q'` and `option requires an argument -- 'f'`. They
-/// used to read `option -f requires an argument`, which says the same thing in
-/// a word order nothing else in the system uses — and a caller matching tar's
-/// stderr is matching the real tar's, not ours.
+/// GNU keeps these in one variable, not five flags, and that is observable
+/// rather than an implementation detail: naming two of them is a usage error
+/// (`tar: '--overwrite' cannot be used with '--keep-old-files'`, exit 2) while
+/// naming the *same* one twice is fine. A set of independent booleans cannot
+/// produce that pair of behaviours; a single-valued setting produces both for
+/// free. See [`OldFiles::choose`].
 ///
-/// The scan is over **bytes**, and the values and operands come out as
-/// `OsString` unchanged. Every one of them is a path — the archive, the `-C`
-/// destination, and each file to add — and on this OS a path may hold any byte
-/// but `/` and NUL. Reading argv as `String` made `tar -cf a.tar <name>` abort
-/// before doing anything at all when the name was not valid UTF-8, which is a
-/// legal name here. See `known-issues.md` → `B-tar-READ-EVERY-PATH-AS-UTF-8`.
+/// # What each one does, measured
 ///
-/// A cluster is walked byte by byte rather than `char` by `char`. That is not
-/// merely the byte-safe spelling of the same loop: a multi-byte character in a
-/// cluster used to be reported whole (`unknown option: -é`), and now reports
-/// its first byte. Since no such cluster is ever valid, the difference is only
-/// in the wording of a refusal — but the byte version cannot panic on a cluster
-/// that is not UTF-8 at all, which the `char` version could not even reach.
-fn parse_args(args: &[OsString]) -> Result<TarArgs, String> {
-    let mut out = TarArgs::default();
-    let mut i: usize = 0;
+/// The archive holds `a`; the destination already holds something called `a`.
+///
+/// | | plain file there | hard-linked file | symlink there | directory there | nothing there |
+/// |---|---|---|---|---|---|
+/// | [`Replace`](Self::Replace) (default) | replaced, new inode | link broken, other name keeps its contents | **link replaced**, its target untouched | removed if empty, else `Cannot open: File exists` | created |
+/// | [`Overwrite`](Self::Overwrite) | **written through**, same inode | **other name changes too** | link replaced | `Cannot open: Is a directory` | created |
+/// | [`Keep`](Self::Keep) | `Cannot open: File exists`, exit 2 | as left | as left | `Cannot open: File exists` | created |
+/// | [`Skip`](Self::Skip) | untouched, exit 0 | untouched | untouched | untouched | created |
+/// | [`UnlinkFirst`](Self::UnlinkFirst) | removed, then created | link broken | link removed | removed if empty, else `Cannot unlink: Directory not empty` | created |
+/// | [`KeepNewer`](Self::KeepNewer) | kept if its mtime ≥ the member's | as the mtime says | the *link's* own mtime decides | always replaced — directories are exempt | created |
+///
+/// The two rows that are easy to get wrong are the first two. `Replace`
+/// **unlinks and recreates**, so a file with other hard links to it keeps those
+/// names pointing at the old contents; `Overwrite` **truncates in place**, so
+/// every name for that inode changes at once. That is the entire difference
+/// between them, it is invisible in the output of both, and reversing it
+/// silently rewrites files the archive never mentioned.
+///
+/// The third row is a security property rather than a convenience: none of
+/// these follows a pre-existing symlink out of the destination. Measured
+/// against GNU across the whole family (`tar-ovw2.sh`, `tar-ovw4.sh`), the
+/// only way to make GNU write outside the destination is `-P --keep-old-files`,
+/// where `-P` switches the containment check off by request. `--overwrite` in
+/// particular does *not* write at the far end of a link — see
+/// [`Located::create_file_overwriting`], which is where that is arranged.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+enum OldFiles {
+    /// The default: remove what is there and create the member afresh.
+    #[default]
+    Replace,
+    /// `--overwrite`: truncate what is there and write into it.
+    Overwrite,
+    /// `-k`, `--keep-old-files`: refuse, and report it as a failure.
+    Keep,
+    /// `--skip-old-files`: step over the member, exit status untouched.
+    Skip,
+    /// `-U`, `--unlink-first`: remove first, before even trying to create.
+    UnlinkFirst,
+    /// `--keep-newer-files`: refuse when what is there is at least as new as
+    /// the member, and say so — but as a warning, not a failure.
+    KeepNewer,
+}
 
-    while let Some(arg) = args.get(i) {
-        let bytes = os_bytes(arg);
-        // `--anything` is not an option here: this tar has no long options, and
-        // treating `--` as the start of a cluster would read each of its letters
-        // as a flag. It falls through to the operand branch, as it always has.
-        if bytes.first() == Some(&b'-') && bytes.len() > 1 && bytes.get(1) != Some(&b'-') {
-            let rest = bytes.get(1..).unwrap_or(&[]);
-            for &c in rest {
-                match c {
-                    b'c' => out.create = true,
-                    b'x' => out.extract = true,
-                    b't' => out.list = true,
-                    b'v' => out.verbose = true,
-                    b'p' => out.same_permissions = true,
-                    b'f' => {
-                        i = i.saturating_add(1);
-                        let v = args
-                            .get(i)
-                            .ok_or_else(|| "option requires an argument -- 'f'".to_string())?;
-                        out.archive_file = Some(v.clone());
-                    }
-                    b'C' => {
-                        i = i.saturating_add(1);
-                        let v = args
-                            .get(i)
-                            .ok_or_else(|| "option requires an argument -- 'C'".to_string())?;
-                        out.directory = Some(v.clone());
-                    }
-                    other => {
-                        // `quoteaf` rather than `char::from`: `other` is an
-                        // arbitrary byte from the command line, and rendering it
-                        // raw would let a crafted argument forge a line of
-                        // tar's stderr.
-                        //
-                        // The wording is GNU's, measured: `tar -Q` says
-                        // `tar: invalid option -- 'Q'`. It used to read
-                        // `unknown option: -Q`, and since `quoteaf` always
-                        // quotes, keeping that shape would have produced the
-                        // odd `-'Q'` — so the message moved to the one it
-                        // should have had anyway.
-                        return Err(format!("invalid option -- {}", quoteaf(&[other])));
-                    }
-                }
-            }
-        } else {
-            out.files.push(arg.clone());
+impl OldFiles {
+    /// The spelling used in the conflict diagnostic.
+    ///
+    /// Always the *long* name, even for a setting given as `-k` or `-U`: GNU
+    /// answers `tar -U -k` with `'--keep-old-files' cannot be used with
+    /// '--unlink-first'`, naming neither letter.
+    fn long_name(self) -> &'static str {
+        match self {
+            // Never printed — the default is what "no conflict" means — but a
+            // name is owed here rather than a panic, since the compiler cannot
+            // see that and a future caller might not either.
+            Self::Replace => "--no-overwrite-dir",
+            Self::Overwrite => "--overwrite",
+            Self::Keep => "--keep-old-files",
+            Self::Skip => "--skip-old-files",
+            Self::UnlinkFirst => "--unlink-first",
+            Self::KeepNewer => "--keep-newer-files",
         }
-        i = i.saturating_add(1);
     }
 
-    Ok(out)
+    /// Adopt `wanted`, or report the conflict with what was already chosen.
+    ///
+    /// Repetition is allowed — `tar -k -k` and `tar --overwrite --overwrite`
+    /// both extract, measured — because the test is whether the *value* would
+    /// change, not whether an option was seen twice.
+    ///
+    /// The exit status is [`EXIT_FATAL`] (2) and not [`EXIT_USAGE`] (64), which
+    /// looks like a mistake and is not: 64 is argp's `argp_err_exit_status`,
+    /// used for the option table's own complaints (`unrecognized option`,
+    /// `is ambiguous`), while this sentence comes from tar's `USAGE_ERROR`
+    /// macro, which exits with tar's ordinary failure status. Both were
+    /// measured; `tar --frobnicate` is 64 and `tar -k --overwrite` is 2.
+    fn choose(&mut self, wanted: Self) -> Result<(), getopt::Error> {
+        if *self != Self::Replace && *self != wanted {
+            return Err(getopt::Error {
+                sentence: format!(
+                    "'{}' cannot be used with '{}'",
+                    wanted.long_name(),
+                    self.long_name()
+                ),
+                referral: None,
+                status: EXIT_FATAL,
+            });
+        }
+        *self = wanted;
+        Ok(())
+    }
+}
+
+/// Parse tar's argv: short options, long options, and operands.
+///
+/// The walk itself is [`coreutils::getopt`], which is `getopt_long`'s rules
+/// rather than an approximation of them — and argp, which is what real tar
+/// uses, *calls* `getopt_long`, so matching the shared module matches tar. That
+/// is worth more than it sounds: the four spellings of a value
+/// (`-f A`, `-fA`, `--file A`, `--file=A`) are all accepted now, where the
+/// hand-written loop this replaced understood only the first and third, and an
+/// unimplemented option's value is consumed rather than being left behind as a
+/// stray operand.
+///
+/// Two behaviours arrive with it that were previously bugs, not choices:
+///
+/// - **`--` ends the options.** It used to fall through to the operand branch
+///   and be looked for inside the archive, so `tar -xf t.tar -- a` answered
+///   `tar: --: Not found in archive` and exited 2 where GNU extracts `a` and
+///   exits 0.
+/// - **`-fA` works.** A value attached to its letter was previously read as
+///   more option letters, so `-fout.tar` failed on `o` — `invalid option --
+///   'o'` — instead of naming the archive.
+///
+/// # Errors
+///
+/// The five glibc sentences, verbatim, plus [`unsupported`]'s. They are
+/// returned rather than printed so that `main` prints tar's own referral; see
+/// [`TRY_HELP`], which is argp's two-command line and not the getopt module's.
+///
+/// # Bytes, not text
+///
+/// Values and operands come out as `OsString` unchanged. Every one of them is a
+/// path — the archive, the `-C` destination, each file to add — and on this OS
+/// a path may hold any byte but `/` and NUL. Reading argv as `String` made
+/// `tar -cf a.tar <name>` abort before doing anything at all when the name was
+/// not valid UTF-8, which is a legal name here. See `known-issues.md` →
+/// `B-tar-READ-EVERY-PATH-AS-UTF-8`. The shared parser preserves that: it
+/// splits clusters by **byte**, so `-é` is refused by its first byte instead of
+/// panicking, and a long name that is not UTF-8 can match no option and so
+/// takes the `unrecognized option` path rather than failing some third way.
+fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+    let mut out = TarArgs::default();
+
+    for item in TAR.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
+        match item? {
+            // Returned the moment they are reached, which is what makes
+            // `tar --help --frobnicate` print help and `tar --frobnicate
+            // --help` an error. See [`Request`].
+            Opt::Short(b'?', _) => return Ok(Request::Help),
+            Opt::Short(b'c', _) => out.create = true,
+            Opt::Short(b'x', _) => out.extract = true,
+            Opt::Short(b't', _) => out.list = true,
+            Opt::Short(b'v', _) => out.verbose = true,
+            Opt::Short(b'p', _) => out.same_permissions = true,
+            Opt::Short(b'k', _) => out.old_files.choose(OldFiles::Keep)?,
+            Opt::Short(b'U', _) => out.old_files.choose(OldFiles::UnlinkFirst)?,
+            Opt::Short(b'f', value) => out.archive_file = value,
+            Opt::Short(b'C', value) => out.directory = value,
+            // Unreachable while this arm and `SHORT_OPTIONS` agree, since the
+            // parser rejects any letter the string does not list. It is a
+            // refusal rather than a panic so that adding a letter to
+            // `SHORT_OPTIONS` and forgetting the arm is a usage error, which is
+            // true, instead of an abort.
+            Opt::Short(other, _) => return Err(TAR.invalid_option(other)),
+
+            // Long names, as the *table* spells them: an abbreviation has
+            // already been resolved, so `--extr` arrives here as `extract`.
+            Opt::Long(name, value) => match name {
+                "create" => out.create = true,
+                // GNU's own alias pair for `-x`, and likewise `-p` below. Both
+                // spellings are separate table entries because `getopt_long`
+                // matches on names; they converge here.
+                "extract" | "get" => out.extract = true,
+                "list" => out.list = true,
+                "verbose" => out.verbose = true,
+                "preserve-permissions" | "same-permissions" => out.same_permissions = true,
+                "file" => out.archive_file = value,
+                "directory" => out.directory = value,
+                // The overwrite-control family. Every one of them assigns to
+                // the same setting, through the check that makes naming two of
+                // them an error. See [`OldFiles`].
+                "overwrite" => out.old_files.choose(OldFiles::Overwrite)?,
+                "keep-old-files" => out.old_files.choose(OldFiles::Keep)?,
+                "skip-old-files" => out.old_files.choose(OldFiles::Skip)?,
+                "unlink-first" => out.old_files.choose(OldFiles::UnlinkFirst)?,
+                "keep-newer-files" => out.old_files.choose(OldFiles::KeepNewer)?,
+                "help" => return Ok(Request::Help),
+                "usage" => return Ok(Request::Usage),
+                "version" => return Ok(Request::Version),
+                other => return Err(unsupported(other)),
+            },
+
+            Opt::Operand(arg) => out.files.push(arg.clone()),
+        }
+    }
+
+    Ok(Request::Run(out))
+}
+
+/// The full option list, on stdout, for `-?` and `--help`.
+///
+/// **It describes this tar, not GNU's.** Reproducing GNU's help verbatim would
+/// have been the easy answer and is the wrong one: it advertises 171 long
+/// options of which twelve work here, so a reader following it would be told to
+/// use `--exclude` by the very program that refuses it. That is the same
+/// silent-lie failure that made unimplemented options a refusal rather than a
+/// no-op — see `design-decisions.md` 703 — and it would be worse in help text,
+/// because help is what someone reads *specifically* to find out what is
+/// available.
+///
+/// The shape is argp's, since that is what a tar user recognises: the `Usage:`
+/// line, an examples block, the operation modes separated from the modifiers,
+/// and the informational options last. The closing paragraph states the two
+/// facts that distinguish this tar from the one the reader has used before —
+/// ustar only, and the other names refuse rather than being ignored — because
+/// a user who does not know the second will read a refusal as a bug.
+fn help_text() -> String {
+    "\
+Usage: tar [OPTION...] [FILE]...
+Save many files together into a single archive, and restore individual files
+from an archive.
+
+Examples:
+  tar -cf archive.tar foo bar  # Create archive.tar from files foo and bar.
+  tar -tvf archive.tar         # List all files in archive.tar verbosely.
+  tar -xf archive.tar          # Extract all files from archive.tar.
+
+ Main operation mode:
+
+  -c, --create               create a new archive
+  -t, --list                 list the contents of an archive
+  -x, --extract, --get       extract files from an archive
+
+ Operation modifiers:
+
+  -C, --directory=DIR        change to directory DIR
+  -f, --file=ARCHIVE         use archive file ARCHIVE; with no -f the archive
+                               is standard input or standard output
+  -p, --preserve-permissions, --same-permissions
+                             extract the stored permissions exactly, rather
+                               than applying the umask
+  -v, --verbose              list each file as it is processed
+
+ Overwrite control:
+
+      --keep-newer-files     don't replace existing files that are newer than
+                             their archive copies
+  -k, --keep-old-files       don't replace existing files when extracting,
+                             treat them as errors
+      --overwrite            overwrite existing files when extracting
+      --skip-old-files       don't replace existing files when extracting,
+                             silently skip over them
+  -U, --unlink-first         remove each file prior to extracting over it
+
+ Informational options:
+
+  -?, --help                 give this help list
+      --usage                give a short usage message
+      --version              print program version
+
+Mandatory arguments to long options are mandatory for the corresponding short
+options too.  A long option may be abbreviated to any unambiguous prefix.
+
+This tar reads and writes POSIX ustar archives.  GNU tar's other long options
+are recognised but not implemented: naming one is an error rather than being
+quietly ignored, so a command asking for something this tar cannot do stops
+instead of doing something else and reporting success.
+"
+    .to_string()
+}
+
+/// The short synopsis, on stdout, for `--usage`.
+///
+/// argp generates this by wrapping the option table into a bracketed list, and
+/// wraps it to the terminal width with continuation lines indented to clear the
+/// `Usage: ` prefix. With seventeen names the whole thing still fits in a few
+/// lines, so it is written out rather than generated; the indent matches argp's
+/// so the two look alike side by side.
+///
+/// The order is **GNU's own**, reduced to the names this tar implements, and it
+/// is neither alphabetical nor the order of [`help_text`]. argp emits the option
+/// table's declaration order — the same grouping-by-function that makes
+/// [`LONG_OPTIONS`] unsortable — with the argument-taking short letters pulled
+/// out after the cluster. Measured from `tar --usage`, whose first line is
+/// `[-AcdrtuxGnSkUWOmpsMBiajJzZhPlRvwo?] [-g FILE] [-C DIR] …`: strike the
+/// letters this tar does not have and `ctxkUpv?` is what is left, `p` before
+/// `v` and `k` before `U`. The long names come from the same line and put the
+/// overwrite family between `--directory` and `--preserve-permissions`, which is
+/// where argp's table has it and *not* where the help text does.
+fn usage_text() -> String {
+    "\
+Usage: tar [-ctxkUpv?] [-C DIR] [-f ARCHIVE] [--create] [--list] [--extract]
+            [--get] [--directory=DIR] [--keep-newer-files] [--keep-old-files]
+            [--overwrite] [--skip-old-files] [--unlink-first]
+            [--preserve-permissions] [--same-permissions] [--file=ARCHIVE]
+            [--verbose] [--help] [--usage] [--version] [FILE]...
+"
+    .to_string()
 }
 
 fn main() {
@@ -218,10 +788,39 @@ fn main() {
     let parsed = match parse_args(&args) {
         Ok(p) => p,
         Err(e) => {
-            diag!("tar: {e}");
+            // `e.sentence`, deliberately, and never `e.message()` or
+            // `TAR.report(&e)`: both append the getopt module's one-command
+            // referral, and tar's is argp's two-command one. See `TRY_HELP`.
+            diag!("tar: {}", e.sentence);
             diag!("{TRY_HELP}");
-            process::exit(EXIT_USAGE);
+            process::exit(e.status);
         }
+    };
+
+    // The three informational requests answer and leave, before any mode
+    // check: `tar --help` prints help rather than complaining that no
+    // operation was given, and exits 0.
+    //
+    // The write is unchecked, and that is GNU's behaviour rather than an
+    // oversight: measured, `tar --help >&-` prints nothing and exits **0**,
+    // where `wc --help >&-` reports `write error: Bad file descriptor` and
+    // exits 1. argp writes help to a `FILE*` and never asks whether it landed.
+    // Matching it also keeps `tar --help | head` from failing, which is how
+    // help is most often read.
+    let parsed = match parsed {
+        Request::Help => {
+            drop(stdfd::write_all(1, help_text().as_bytes()));
+            process::exit(0);
+        }
+        Request::Usage => {
+            drop(stdfd::write_all(1, usage_text().as_bytes()));
+            process::exit(0);
+        }
+        Request::Version => {
+            drop(stdfd::write_all(1, b"tar (SlateOS coreutils) 0.1.0\n"));
+            process::exit(0);
+        }
+        Request::Run(parsed) => parsed,
     };
 
     // Every mode returns its own status rather than exiting inline, so that
@@ -258,6 +857,7 @@ fn main() {
             },
             &parsed.files,
             parsed.same_permissions,
+            parsed.old_files,
         )
     } else if parsed.list {
         do_list_main(
@@ -1815,7 +2415,13 @@ fn restore_metadata(at: &Located, name: &[u8], mode: u32, mtime: i64, status: &m
 /// The resolved location is handed back with the result because every caller
 /// wants it afterwards — to stamp a mode and an mtime on what it just made, or
 /// to write the member's data into it.
-fn create_at<T, F>(root: &Dir, name: &[u8], status: &mut i32, create: F) -> io::Result<(Located, T)>
+fn create_at<T, F>(
+    root: &Dir,
+    name: &[u8],
+    ovw: Overwriting,
+    status: &mut i32,
+    create: F,
+) -> Result<(Located, T), NotCreated>
 where
     F: Fn(&Located) -> io::Result<T>,
 {
@@ -1834,25 +2440,123 @@ where
         }
         other => other?,
     };
+    // `-U` is the one member of the family that acts *before* the attempt, and
+    // that ordering is the whole of it: the removal's own failure is reported
+    // and the member abandoned, where the default's identical removal happens
+    // only after an `EEXIST` and has its failure discarded. Measured, that is
+    // the difference between `tar: dir: Cannot unlink: Directory not empty`
+    // (`-U`) and `tar: dir: Cannot open: File exists` (default).
+    if ovw.old_files == OldFiles::UnlinkFirst
+        && let Err(e) = loc.clear_for_unlink_first()
+    {
+        diag!("tar: {}: Cannot unlink: {}", escape(name), strerror(&e));
+        *status = EXIT_FATAL;
+        return Err(NotCreated::Silent);
+    }
     match create(&loc) {
-        Err(first) if first.kind() == io::ErrorKind::AlreadyExists => {
-            if loc.unlink().is_err() && loc.rmdir().is_err() {
-                return Err(first);
+        Err(first) if in_the_way(&first) => match ovw.old_files {
+            // A directory member is the family's standing exception: `-k` steps
+            // over an existing directory without a word, where for every other
+            // type it is an error. Measured — `tar -xkf` over a tree it has
+            // already unpacked prints nothing about the directories and exits 0
+            // if nothing else is in the way.
+            OldFiles::Keep if ovw.directory_member => Err(NotCreated::Silent),
+            // The original `EEXIST` is handed back rather than a sentence of our
+            // own, so the caller phrases it in the member type's own operation:
+            // `Cannot open: File exists`, `Cannot mkfifo: File exists`,
+            // `Cannot create symlink to ‘t’: File exists`. That is GNU's shape
+            // because GNU likewise just stops suppressing the error.
+            OldFiles::Keep => Err(NotCreated::Failed(first)),
+            OldFiles::Skip => {
+                // Every member type, directories included — unlike `-k`, whose
+                // silence about a directory is total. And only under `-v`:
+                // without it `--skip-old-files` says nothing at all.
+                if ovw.verbose {
+                    diag!("tar: {}: skipping existing file", escape(name));
+                }
+                Err(NotCreated::Silent)
             }
-            create(&loc).map(|v| (loc, v))
-        }
-        other => other.map(|v| (loc, v)),
+            _ => {
+                if loc.unlink().is_err() && loc.rmdir().is_err() {
+                    return Err(NotCreated::Immovable(first));
+                }
+                create(&loc).map(|v| (loc, v)).map_err(NotCreated::Failed)
+            }
+        },
+        other => other.map(|v| (loc, v)).map_err(NotCreated::Failed),
     }
 }
 
-/// `mkdir` for a directory *member*, where an existing directory is success.
+/// Is this failure "something is already standing there"?
 ///
-/// The `AlreadyExists` is passed through for anything that is not a directory,
-/// so [`create_at`] removes the obstacle and tries again. That is GNU's
-/// behaviour and it matters twice over: a directory member extracted over a
-/// plain file replaces the file (measured, `tar-rules11.sh` case 4), and one
-/// extracted over a **symlink pointing at a directory** replaces the *symlink*
-/// (`tar-rules12.sh`) instead of quietly extracting through it into wherever it
+/// `EEXIST` for every creating call that passes `O_EXCL` or has no choice
+/// (`mkdir`, `symlinkat`, `mkfifoat`, `linkat`), and `ELOOP` for the one that
+/// does not: `--overwrite`'s open passes `O_TRUNC|O_NOFOLLOW`, so a symlink in
+/// the way is refused as a link that must not be followed rather than as an
+/// entry that already exists. Both mean the same thing to the recovery below,
+/// and treating only the first as recoverable would leave `--overwrite` unable
+/// to replace a symlink — which GNU does (`tar-ovw2.sh`).
+fn in_the_way(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::AlreadyExists || e.raw_os_error() == Some(ELOOP)
+}
+
+/// Why [`create_at`] created nothing.
+///
+/// Three outcomes rather than one error, because the overwrite-control family
+/// added a way to decline that is not a failure. Collapsing them into an
+/// `io::Error` would force every caller to guess which of its `Cannot …`
+/// sentences to print, and `--skip-old-files` prints none of them.
+enum NotCreated {
+    /// The creating call failed, and the caller should say so in its own
+    /// wording. This is the only arm that sets the exit status, and it is the
+    /// caller that sets it.
+    Failed(io::Error),
+    /// Something was already standing there, the policy called for removing it,
+    /// and the removal failed — a non-empty directory, in practice.
+    ///
+    /// Carries the *creation's* first error rather than the removal's, because
+    /// that is what all but one caller prints: GNU discards the failed removal
+    /// and reports the original `EEXIST`, so a symlink member over a non-empty
+    /// directory says `Cannot open: File exists` and not `Directory not empty`.
+    /// The one exception is a directory member, which has its own sentence for
+    /// it (`Unexpected inconsistency when making directory`) and is the only
+    /// member type that can reach this at all under a default extraction —
+    /// [`Located::mkdir_member`] accepts an existing directory as success, so
+    /// only `--keep-newer-files`, which must use a plain `mkdir`, gets here.
+    Immovable(io::Error),
+    /// Nothing was created and nothing more is to be said. Either
+    /// `--skip-old-files` stepped over an existing entry (exit status
+    /// untouched), or `-k` met a directory that was already there (likewise),
+    /// or `-U` could not clear the way and has already reported it.
+    Silent,
+}
+
+impl From<io::Error> for NotCreated {
+    fn from(e: io::Error) -> Self {
+        Self::Failed(e)
+    }
+}
+
+/// What [`create_at`] needs to know about the extraction it is part of.
+///
+/// Passed as one `Copy` value rather than three parameters because it is
+/// threaded through six member-type arms and two helpers, and a bare
+/// `(OldFiles, bool, bool)` at each of those call sites is two booleans nobody
+/// can tell apart.
+#[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Overwriting {
+    /// What to do about an entry that is already there. See [`OldFiles`].
+    old_files: OldFiles,
+    /// Whether `-v` was given, which is the only thing that decides whether
+    /// `--skip-old-files` announces what it stepped over.
+    verbose: bool,
+    /// Whether the member being created is a **directory**, which `-k` treats
+    /// differently from every other type: silently, and without restoring the
+    /// member's mode or mtime onto the directory that was already there.
+    directory_member: bool,
+}
+
 /// Create a member's missing ancestor directories, GNU's way.
 ///
 /// Not `create_dir_all`. The two agree whenever they succeed, and agree on the
@@ -1987,6 +2691,7 @@ mod oflag {
     pub const WRONLY: i32 = 1;
     pub const CREAT: i32 = 0o100;
     pub const EXCL: i32 = 0o200;
+    pub const TRUNC: i32 = 0o1000;
     pub const NONBLOCK: i32 = 0o4000;
     pub const DIRECTORY: i32 = 0o200_000;
     pub const NOFOLLOW: i32 = 0o400_000;
@@ -2015,8 +2720,12 @@ const AT_FDCWD: i32 = -100;
 #[cfg(unix)]
 const EXDEV: i32 = 18;
 
-/// `ELOOP`, for a chain of symlinks with no end.
-#[cfg(unix)]
+/// `ELOOP`, for a chain of symlinks with no end — and for the `O_NOFOLLOW` open
+/// that refuses to start one, which is how `--overwrite` meets a symlink.
+///
+/// Not `#[cfg(unix)]` like its neighbours because [`in_the_way`] compares
+/// against it on every host; off unix nothing produces the number, so the test
+/// is simply never true there.
 const ELOOP: i32 = 40;
 
 /// How many symlinks one member's parent may be resolved through.
@@ -2476,6 +3185,16 @@ fn make_dev(major: u64, minor: u64) -> u64 {
 const S_IFCHR: u32 = 0o020000;
 const S_IFBLK: u32 = 0o060000;
 
+/// The file-type field of `st_mode`, and the value in it that means "directory".
+///
+/// Needed because `--keep-newer-files` exempts directories: what is standing in
+/// the way has to be classified before its mtime is worth comparing. See
+/// [`Located::kind_and_mtime`].
+#[cfg(unix)]
+const S_IFMT: u32 = 0o170000;
+#[cfg(unix)]
+const S_IFDIR: u32 = 0o040000;
+
 /// The parts of a member's creation whose *wording* is worth keeping beside
 /// the flags that produce it.
 #[cfg(unix)]
@@ -2513,6 +3232,93 @@ impl Located {
             oflag::WRONLY | oflag::CREAT | oflag::EXCL | oflag::NONBLOCK,
             0o666,
         )
+    }
+
+    /// [`create_file`](Self::create_file) as `--overwrite` wants it: keep the
+    /// inode and truncate it, rather than unlinking the name and making a new
+    /// one.
+    ///
+    /// `O_TRUNC` in place of `O_EXCL` is the whole of the option — it is what
+    /// makes an extraction over a hard-linked file change every name for that
+    /// inode, which is the behaviour `create_file`'s doc explains the default
+    /// avoids. Both are right; they are different requests.
+    ///
+    /// **`O_NOFOLLOW` is not optional here.** Without `O_EXCL` the open would
+    /// otherwise follow a symlink already on disk and truncate whatever it
+    /// pointed at, so an archive of `x` unpacked with `--overwrite` into a
+    /// directory holding `x -> ../../outside` would write outside the
+    /// destination — past every other defence in this program, because the link
+    /// came from the filesystem and not from the archive. With the flag the
+    /// open fails `ELOOP`, [`create_at`] removes the link and retries, and a
+    /// *regular file* appears in its place. That is GNU's answer too: measured
+    /// (`tar-ovw2.sh`), `--overwrite` over such a link leaves `x` a plain file
+    /// and the outside target byte-for-byte unchanged.
+    ///
+    /// A **directory** in the way is deliberately not recovered from: `openat`
+    /// says `EISDIR`, and GNU reports `Cannot open: Is a directory` and exits 2
+    /// rather than removing it. `--overwrite` truncates; it does not delete.
+    fn create_file_overwriting(&self) -> io::Result<File> {
+        self.open(
+            oflag::WRONLY | oflag::CREAT | oflag::TRUNC | oflag::NOFOLLOW | oflag::NONBLOCK,
+            0o666,
+        )
+    }
+
+    /// Clear the leaf out of the way for `-U`, before anything is created.
+    ///
+    /// `unlink` then `rmdir`, in that order and for the same reason
+    /// [`create_at`] uses it: a file is the common case and `unlink` on a
+    /// directory is the cheap failure. An empty directory is therefore removed,
+    /// a non-empty one is not, and `ENOENT` — nothing there at all — is the
+    /// success this is usually asking for.
+    ///
+    /// The error kept is the **second** call's, which is what puts
+    /// `Directory not empty` in GNU's message rather than the `Is a directory`
+    /// the `unlink` produced: measured, a `-U` extraction over a non-empty
+    /// directory says `tar: dir: Cannot unlink: Directory not empty`.
+    fn clear_for_unlink_first(&self) -> io::Result<()> {
+        match self.unlink() {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(_) => match self.rmdir() {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            },
+        }
+    }
+
+    /// The leaf's own mtime in whole seconds, and whether it is a directory —
+    /// or `None` when nothing is there.
+    ///
+    /// `AT_SYMLINK_NOFOLLOW`, so a symlink answers for *itself*. That is
+    /// measured GNU behaviour and not an obvious choice: under
+    /// `--keep-newer-files` a link whose own mtime is old is replaced even when
+    /// it points at a brand-new file, and one whose own mtime is new is kept
+    /// even when its target is ancient (`tar-knf.sh`). It also means a dangling
+    /// link answers rather than erroring, which is why such a link is *kept*
+    /// instead of provoking a `Cannot stat` warning.
+    ///
+    /// Whole seconds is exact rather than a simplification: a member's mtime
+    /// comes from a ustar header and so has no fractional part, and the test
+    /// this feeds is `on-disk ≥ member`. Since a nanosecond field is never
+    /// negative, `sec ≥ member` and `(sec, nsec) ≥ (member, 0)` agree on every
+    /// input. Measured at the boundary: on-disk one nanosecond after the
+    /// member's second is kept, one second before it is replaced.
+    fn kind_and_mtime(&self) -> io::Result<Option<(bool, i64)>> {
+        let cname = c_name(&self.leaf)?;
+        let mut st = CStat::default();
+        // SAFETY: as `identity` — `cname` is NUL-terminated and `st` is the
+        // full-size `struct stat` the call fills and does not retain.
+        let rc = unsafe { fstatat(self.dir.0, cname.as_ptr(), &raw mut st, AT_SYMLINK_NOFOLLOW) };
+        if rc == 0 {
+            return Ok(Some((st.st_mode & S_IFMT == S_IFDIR, st.st_mtim.tv_sec)));
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() == io::ErrorKind::NotFound {
+            Ok(None)
+        } else {
+            Err(e)
+        }
     }
 
     /// Stand up the empty file a delayed symlink's place is held with.
@@ -2689,6 +3495,48 @@ impl Located {
             .open(self.path())
     }
 
+    fn create_file_overwriting(&self) -> io::Result<File> {
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(self.path())
+    }
+
+    fn clear_for_unlink_first(&self) -> io::Result<()> {
+        match self.unlink() {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(_) => match self.rmdir() {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            },
+        }
+    }
+
+    /// The unix twin's doc explains what this is for. Here the metadata comes
+    /// from `symlink_metadata`, which is `lstat` under another name, so a
+    /// symlink still answers for itself.
+    fn kind_and_mtime(&self) -> io::Result<Option<(bool, i64)>> {
+        use std::time::UNIX_EPOCH;
+        let md = match fs::symlink_metadata(self.path()) {
+            Ok(md) => md,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let mtime = md.modified()?;
+        // `duration_since` reports a time *before* the epoch as an error whose
+        // payload is the distance back to it, so the two arms are the two signs
+        // of one number rather than a success and a failure.
+        let secs = match mtime.duration_since(UNIX_EPOCH) {
+            Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+            Err(e) => i64::try_from(e.duration().as_secs())
+                .unwrap_or(i64::MAX)
+                .saturating_neg(),
+        };
+        Ok(Some((md.is_dir(), secs)))
+    }
+
     fn create_placeholder(&self) -> io::Result<()> {
         self.create_file().map(drop)
     }
@@ -2762,9 +3610,67 @@ impl Located {
 /// remove-and-retry [`create_at`] does everywhere else -- which is why a symlink
 /// over a *non-empty directory* reports `Cannot open: File exists` rather than
 /// the `Cannot create symlink to ‘…’` a relative one would.
-fn make_placeholder(root: &Dir, name: &[u8], status: &mut i32) -> io::Result<(u64, u64)> {
-    let (at, ()) = create_at(root, name, status, Located::create_placeholder)?;
-    at.identity()
+fn make_placeholder(
+    root: &Dir,
+    name: &[u8],
+    ovw: Overwriting,
+    status: &mut i32,
+) -> Result<(u64, u64), NotCreated> {
+    let (at, ()) = create_at(root, name, ovw, status, Located::create_placeholder)?;
+    Ok(at.identity()?)
+}
+
+/// `--keep-newer-files`: is what already stands at `name` reason to leave the
+/// member unextracted? Says so if it is.
+///
+/// Three answers rather than two, and each was measured (`tar-knf.sh`,
+/// `tar-knf2.sh`, `tar-knf3.sh`):
+///
+/// * **Nothing there** — extract. An absent ancestor counts as nothing there
+///   too, which is why `NotFound` from the resolution is not an error here.
+/// * **A directory there** — extract, whatever its timestamp. Directories are
+///   exempt from this option entirely; a regular member lands on top of a
+///   directory dated a year from now without a word (and then usually fails at
+///   the creation, if the directory is not empty). The exemption is of what is
+///   *on disk*, not of the member: a directory **member** is declined like any
+///   other when a newer plain file holds its name. The exemption is also the
+///   reason a directory member over an existing directory is decided entirely
+///   by whether that directory can be removed — see the `--keep-newer-files`
+///   arm of the directory member's `create` choice in [`do_extract`].
+/// * **Anything else** — compare `lstat`'s mtime, and decline if it is at least
+///   as new as the member's.
+///
+/// A resolution or `stat` failure is a *warning*, not an error: GNU prints
+/// `Warning: Cannot stat` and then declines the member anyway, leaving the exit
+/// status alone. The case that produces it is an archive holding `a/i` where `a`
+/// was itself kept and is a plain file, so the warning is the expected
+/// consequence of a decision this option already made.
+///
+/// The comparison is in whole seconds, which is exact rather than approximate:
+/// see [`Located::kind_and_mtime`].
+fn keeps_newer(root: &Dir, name: &[u8], member_mtime: i64) -> bool {
+    let newer = match root.locate(name).and_then(|at| at.kind_and_mtime()) {
+        Ok(None) => return false,
+        Ok(Some((true, _))) => return false,
+        Ok(Some((false, mtime))) => mtime >= member_mtime,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return false,
+        Err(e) => {
+            diag!(
+                "tar: {}: Warning: Cannot stat: {}",
+                escape(name),
+                strerror(&e)
+            );
+            true
+        }
+    };
+    if newer {
+        // gnulib's `quote()` — curly quotes, not tar's escaping style — and the
+        // name is *not* prefixed with `tar: name:` the way a failure is. GNU's
+        // sentence is `tar: Current ‘a’ is newer or same age`, which reads as a
+        // remark about the tree rather than a complaint about the member.
+        diag!("tar: Current {} is newer or same age", quote(name));
+    }
+    newer
 }
 
 /// Replace every placeholder with the symlink it stood for.
@@ -2824,6 +3730,7 @@ fn do_extract(
     verbose: Verbose,
     members: &[OsString],
     same_permissions: bool,
+    old_files: OldFiles,
 ) -> i32 {
     // The archive is opened before the `-C` chdir, so its own path is resolved
     // against the directory the user was standing in, as GNU does.
@@ -2872,6 +3779,12 @@ fn do_extract(
     // a 0500 directory's mode *and* its timestamp, and ours restored neither.
     let mut pending_dirs: Vec<(Vec<u8>, u32, i64)> = Vec::new();
     let mut delayed: Vec<DelayedLink> = Vec::new();
+    // The same for every member except the directories, which flip one field.
+    let ovw = Overwriting {
+        old_files,
+        verbose: verbose != Verbose::Off,
+        directory_member: false,
+    };
 
     let stop = walk(input.as_mut(), |member, input| {
         let raw_name = member.name.as_slice();
@@ -2910,27 +3823,81 @@ fn do_extract(
             verbose.line(raw_name);
         }
 
+        // `--keep-newer-files` is decided here, above the type switch, because
+        // it applies to *every* member type and not only to the regular files
+        // whose data would be rewritten: measured, a symlink, a fifo, a hard
+        // link and a directory member are all declined by a newer file standing
+        // in the way (`tar-knf2.sh`). It is also below the `-v` name line,
+        // which is where GNU prints its notice — `a` then `tar: Current ‘a’ is
+        // newer or same age`, in that order.
+        if old_files == OldFiles::KeepNewer && keeps_newer(&root, trim_slashes(&name), member.mtime)
+        {
+            return Handled::Skip;
+        }
+
         match member.typeflag {
             _ if member.is_dir() => {
                 // A directory member is stored as `d/`, but every diagnostic
                 // about it names `d` — and the trailing slash would also make
                 // the ancestor walk treat the member itself as its own ancestor.
                 let name = trim_slashes(&name).to_vec();
-                if let Err(e) = create_at(&root, &name, &mut status, Located::mkdir_member) {
-                    diag!("tar: {}: Cannot mkdir: {}", escape(&name), strerror(&e));
-                    status = EXIT_FATAL;
-                } else {
-                    pending_dirs.push((
-                        name,
-                        extraction_mode(member.mode, same_permissions, umask),
-                        member.mtime,
-                    ));
+                let ovw = Overwriting {
+                    directory_member: true,
+                    ..ovw
+                };
+                // Three of the five need a plain `mkdir` rather than
+                // [`Located::mkdir_member`], which reports an existing
+                // *directory* as success — right for the default and for
+                // `--overwrite`, wrong for these, and for two different reasons.
+                //
+                // Under `-k` and `--skip-old-files` it is wrong because success
+                // is what puts the member's mode and mtime in `pending_dirs`:
+                // measured, `tar -xkf` over a directory it has already unpacked
+                // leaves that directory's 0700 mode and old timestamp exactly as
+                // found, where the default restores the member's (`tar-ovw6.sh`).
+                //
+                // Under `--keep-newer-files` it is wrong because GNU does not
+                // take the shortcut at all — it *removes* the existing directory
+                // and makes the member's, so an empty one is replaced (mode and
+                // mtime become the member's) and a non-empty one is a hard error.
+                // The mtime plays no part: an on-disk directory is exempt from
+                // the age test (see [`keeps_newer`]), so what decides is only
+                // whether the removal succeeds (`tar-knf3.sh`).
+                let create: fn(&Located) -> io::Result<()> = match old_files {
+                    OldFiles::Keep | OldFiles::Skip | OldFiles::KeepNewer => Located::mkdir,
+                    _ => Located::mkdir_member,
+                };
+                match create_at(&root, &name, ovw, &mut status, create) {
+                    Err(NotCreated::Failed(e)) => {
+                        diag!("tar: {}: Cannot mkdir: {}", escape(&name), strerror(&e));
+                        status = EXIT_FATAL;
+                    }
+                    // The one member type with a sentence of its own for an
+                    // obstacle it could not clear, and it names neither the call
+                    // nor the errno. Reached only under `--keep-newer-files`,
+                    // over a directory whose removal failed; the members *inside*
+                    // it are still extracted, into the directory that stayed.
+                    Err(NotCreated::Immovable(_)) => {
+                        diag!(
+                            "tar: {}: Unexpected inconsistency when making directory",
+                            escape(&name)
+                        );
+                        status = EXIT_FATAL;
+                    }
+                    Err(NotCreated::Silent) => {}
+                    Ok(_) => {
+                        pending_dirs.push((
+                            name,
+                            extraction_mode(member.mode, same_permissions, umask),
+                            member.mtime,
+                        ));
+                    }
                 }
                 Handled::Skip
             }
             b'0' | b'\0' | b'7' => {
                 let mode = extraction_mode(member.mode, same_permissions, umask);
-                extract_plain(&root, input, &name, member, mode, &mut status)
+                extract_plain(&root, input, &name, member, mode, ovw, &mut status)
             }
             b'2' if is_delayed_target(&member.linkname) => {
                 // A symlink out of the destination — absolute, or climbing —
@@ -2948,27 +3915,31 @@ fn do_extract(
                 // returns, so a second archive would meet a real symlink. What
                 // stops that one is [`Dir::locate`], which refuses to walk
                 // through it however it got there.
-                match make_placeholder(&root, &name, &mut status) {
+                match make_placeholder(&root, &name, ovw, &mut status) {
                     Ok(id) => delayed.push(DelayedLink {
                         name: name.clone(),
                         target: member.linkname.clone(),
                         mtime: member.mtime,
                         id,
                     }),
-                    Err(e) => {
+                    Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         // `Cannot open`, not `Cannot create symlink`: at this
                         // point GNU really is opening a file, and the wording
                         // is how the two paths are told apart in a log.
                         diag!("tar: {}: Cannot open: {}", escape(&name), strerror(&e));
                         status = EXIT_FATAL;
                     }
+                    // Nothing stood up, so nothing is queued: the link is not
+                    // made at the end of the run either, which is the point of
+                    // having declined to disturb what is there.
+                    Err(NotCreated::Silent) => {}
                 }
                 Handled::Skip
             }
             b'2' => {
                 let create = |at: &Located| at.make_symlink(&member.linkname);
-                match create_at(&root, &name, &mut status, create) {
-                    Err(e) => {
+                match create_at(&root, &name, ovw, &mut status, create) {
+                    Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         diag!(
                             "tar: {}: Cannot create symlink to {}: {}",
                             escape(&name),
@@ -2977,6 +3948,7 @@ fn do_extract(
                         );
                         status = EXIT_FATAL;
                     }
+                    Err(NotCreated::Silent) => {}
                     // No mode is applied. A symlink has none of its own on any
                     // system this runs on — `lrwxrwxrwx` is a constant — and
                     // `chmod` through one would silently repermission whatever
@@ -3003,7 +3975,9 @@ fn do_extract(
                     let target = root.locate(&link_target)?;
                     at.hard_link_to(&target)
                 };
-                if let Err(e) = create_at(&root, &name, &mut status, create) {
+                if let Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) =
+                    create_at(&root, &name, ovw, &mut status, create)
+                {
                     // The one place in this program that quotes with `‘…’`
                     // instead of tar's escape style, because it is the one
                     // place GNU does: this sentence is built with gnulib's
@@ -3023,11 +3997,12 @@ fn do_extract(
             }
             b'6' => {
                 let mode = extraction_mode(member.mode, same_permissions, umask);
-                match create_at(&root, &name, &mut status, |at| at.make_fifo(mode)) {
-                    Err(e) => {
+                match create_at(&root, &name, ovw, &mut status, |at| at.make_fifo(mode)) {
+                    Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         diag!("tar: {}: Cannot mkfifo: {}", escape(&name), strerror(&e));
                         status = EXIT_FATAL;
                     }
+                    Err(NotCreated::Silent) => {}
                     Ok((at, ())) => {
                         restore_metadata(&at, &name, mode, member.mtime, &mut status);
                     }
@@ -3039,8 +4014,8 @@ fn do_extract(
                 let block = member.typeflag == b'4';
                 let create =
                     |at: &Located| at.make_device(mode, block, member.devmajor, member.devminor);
-                match create_at(&root, &name, &mut status, create) {
-                    Err(e) => {
+                match create_at(&root, &name, ovw, &mut status, create) {
+                    Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         // `Operation not permitted` for everyone but root, and
                         // that is the point rather than a shortcoming: an
                         // archive that could conjure a block device would be
@@ -3048,6 +4023,7 @@ fn do_extract(
                         diag!("tar: {}: Cannot mknod: {}", escape(&name), strerror(&e));
                         status = EXIT_FATAL;
                     }
+                    Err(NotCreated::Silent) => {}
                     Ok((at, ())) => {
                         restore_metadata(&at, &name, mode, member.mtime, &mut status);
                     }
@@ -3073,7 +4049,7 @@ fn do_extract(
                     escape(&[other])
                 );
                 let mode = extraction_mode(member.mode, same_permissions, umask);
-                extract_plain(&root, input, &name, member, mode, &mut status)
+                extract_plain(&root, input, &name, member, mode, ovw, &mut status)
             }
         }
     });
@@ -3127,9 +4103,10 @@ fn extract_plain(
     name: &[u8],
     member: &Member,
     mode: u32,
+    ovw: Overwriting,
     status: &mut i32,
 ) -> Handled {
-    if extract_regular_file(root, input, name, member.size, mode, member.mtime, status) {
+    if extract_regular_file(root, input, name, member, mode, ovw, status) {
         Handled::Consumed
     } else {
         Handled::Truncated
@@ -3216,14 +4193,29 @@ fn archive_label(archive_file: Option<&OsStr>) -> Vec<u8> {
 /// applied through the *same* resolved parent the file was created in, rather
 /// than by walking the name a second time and hoping it still leads to the file
 /// just written.
-fn open_for_member(root: &Dir, name: &[u8], status: &mut i32) -> Option<(Located, File)> {
-    match create_at(root, name, status, Located::create_file) {
+fn open_for_member(
+    root: &Dir,
+    name: &[u8],
+    ovw: Overwriting,
+    status: &mut i32,
+) -> Option<(Located, File)> {
+    // `--overwrite` is the one setting that changes the *open* rather than what
+    // is done about its failure: `O_TRUNC` where the others use `O_EXCL`, so the
+    // inode survives and every other name for it changes with the contents. See
+    // [`Located::create_file_overwriting`].
+    let create: fn(&Located) -> io::Result<File> = if ovw.old_files == OldFiles::Overwrite {
+        Located::create_file_overwriting
+    } else {
+        Located::create_file
+    };
+    match create_at(root, name, ovw, status, create) {
         Ok(pair) => Some(pair),
-        Err(e) => {
+        Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
             diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
             *status = EXIT_FATAL;
             None
         }
+        Err(NotCreated::Silent) => None,
     }
 }
 
@@ -3235,18 +4227,26 @@ fn open_for_member(root: &Dir, name: &[u8], status: &mut i32) -> Option<(Located
 /// whose header claimed 2^40 bytes made this program try to reserve a
 /// terabyte before reading a single block — a one-line denial of service
 /// costing the attacker 512 bytes of file.
+///
+/// Takes the whole `member` rather than its size and mtime separately — the
+/// `mode` stays a parameter because it is not the member's stored one but the
+/// result of [`extraction_mode`], which the caller has already worked out.
 fn extract_regular_file(
     root: &Dir,
     input: &mut dyn Read,
     name: &[u8],
-    size: u64,
+    member: &Member,
     mode: u32,
-    mtime: i64,
+    ovw: Overwriting,
     status: &mut i32,
 ) -> bool {
+    let size = member.size;
     // Still consume the data whatever happens below: the archive may hold
     // members after this one, and abandoning the stream would lose them too.
-    let mut opened = open_for_member(root, name, status);
+    // That is as true of a member `--skip-old-files` stepped over as of one that
+    // could not be opened — the bytes are in the stream either way, and the
+    // headers after them only line up if they are read.
+    let mut opened = open_for_member(root, name, ovw, status);
 
     let mut remaining = size;
     let mut block = [0u8; BLOCK_SIZE];
@@ -3284,7 +4284,7 @@ fn extract_regular_file(
             diag!("tar: {}: Cannot write: {}", escape(name), strerror(&e));
             *status = EXIT_FATAL;
         } else {
-            restore_metadata(&at, name, mode, mtime, status);
+            restore_metadata(&at, name, mode, member.mtime, status);
         }
     }
     true
@@ -3609,6 +4609,20 @@ mod tests {
         items.iter().map(|x| os_from_bytes(x)).collect()
     }
 
+    /// [`parse_args`] for the tests that are about *parsing*, not about which
+    /// [`Request`] came back.
+    ///
+    /// It panics rather than returning on `Help`/`Usage`/`Version`, so a change
+    /// that made, say, `-p` collide with `--help` would fail loudly here
+    /// instead of quietly comparing unequal against a default `TarArgs`.
+    fn run_args(args: &[OsString]) -> Result<TarArgs, getopt::Error> {
+        match parse_args(args) {
+            Ok(Request::Run(parsed)) => Ok(parsed),
+            Ok(other) => panic!("expected an archive run, got {other:?}"),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Build a single tar header block with the given name and size.
     fn make_header(name: &[u8], size: u64, typeflag: u8) -> [u8; BLOCK_SIZE] {
         let mut h = TarHeader::new();
@@ -3680,13 +4694,13 @@ mod tests {
 
     #[test]
     fn parse_empty() {
-        let a = parse_args(&s(&[])).unwrap();
+        let a = run_args(&s(&[])).unwrap();
         assert_eq!(a, TarArgs::default());
     }
 
     #[test]
     fn parse_create_with_file() {
-        let a = parse_args(&s(&["-c", "-f", "out.tar", "a", "b"])).unwrap();
+        let a = run_args(&s(&["-c", "-f", "out.tar", "a", "b"])).unwrap();
         assert!(a.create);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.files, s(&["a", "b"]));
@@ -3695,7 +4709,7 @@ mod tests {
     #[test]
     fn parse_clustered_create_verbose_file() {
         // -cvf out.tar a -- the f consumes the next argv element.
-        let a = parse_args(&s(&["-cvf", "out.tar", "a"])).unwrap();
+        let a = run_args(&s(&["-cvf", "out.tar", "a"])).unwrap();
         assert!(a.create);
         assert!(a.verbose);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
@@ -3704,7 +4718,7 @@ mod tests {
 
     #[test]
     fn parse_extract_with_directory() {
-        let a = parse_args(&s(&["-x", "-C", "/tmp", "-f", "in.tar"])).unwrap();
+        let a = run_args(&s(&["-x", "-C", "/tmp", "-f", "in.tar"])).unwrap();
         assert!(a.extract);
         assert_eq!(a.directory.as_deref(), Some(OsStr::new("/tmp")));
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("in.tar")));
@@ -3712,37 +4726,40 @@ mod tests {
 
     #[test]
     fn parse_list() {
-        let a = parse_args(&s(&["-tf", "x.tar"])).unwrap();
+        let a = run_args(&s(&["-tf", "x.tar"])).unwrap();
         assert!(a.list);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("x.tar")));
     }
 
     #[test]
     fn parse_unknown_flag_errors() {
-        let err = parse_args(&s(&["-Z"])).unwrap_err();
+        let err = run_args(&s(&["-Z"])).unwrap_err();
         // Byte for byte what GNU tar 1.35 says for `tar -Q`, less the
         // `tar: ` prefix the caller adds.
-        assert_eq!(err, "invalid option -- 'Z'");
+        assert_eq!(err.sentence, "invalid option -- 'Z'");
+        // 64, not 2: a command line that could not be parsed. Measured on every
+        // one of tar's six getopt errors.
+        assert_eq!(err.status, EXIT_USAGE);
     }
 
     #[test]
     fn parse_missing_f_value_errors() {
         // argp's wording, byte for byte: `tar -cf` says exactly this and exits
         // 64. See `scripts/tar-diff.sh`, case "-f with no argument".
-        let err = parse_args(&s(&["-f"])).unwrap_err();
-        assert_eq!(err, "option requires an argument -- 'f'");
+        let err = run_args(&s(&["-f"])).unwrap_err();
+        assert_eq!(err.sentence, "option requires an argument -- 'f'");
     }
 
     #[test]
     fn parse_missing_c_value_errors() {
-        let err = parse_args(&s(&["-C"])).unwrap_err();
-        assert_eq!(err, "option requires an argument -- 'C'");
+        let err = run_args(&s(&["-C"])).unwrap_err();
+        assert_eq!(err.sentence, "option requires an argument -- 'C'");
     }
 
     #[test]
     fn parse_files_with_dashes_handled() {
         // Bare positional arg starting with non-dash is a file.
-        let a = parse_args(&s(&["-c", "f1", "f2"])).unwrap();
+        let a = run_args(&s(&["-c", "f1", "f2"])).unwrap();
         assert!(a.create);
         assert_eq!(a.files, s(&["f1", "f2"]));
     }
@@ -3755,7 +4772,7 @@ mod tests {
 
     #[test]
     fn parse_keeps_an_operand_that_is_not_utf8() {
-        let a = parse_args(&b(&[b"-c", b"caf\xe9", b"ok"])).unwrap();
+        let a = run_args(&b(&[b"-c", b"caf\xe9", b"ok"])).unwrap();
         assert!(a.create);
         assert_eq!(a.files, b(&[b"caf\xe9", b"ok"]));
         // Not merely "did not crash": the bytes are the ones passed in, so the
@@ -3765,14 +4782,14 @@ mod tests {
 
     #[test]
     fn parse_keeps_a_dash_f_value_that_is_not_utf8() {
-        let a = parse_args(&b(&[b"-cf", b"\xff\xfe.tar", b"x"])).unwrap();
+        let a = run_args(&b(&[b"-cf", b"\xff\xfe.tar", b"x"])).unwrap();
         let f = a.archive_file.unwrap();
         assert_eq!(os_bytes(&f).as_ref(), b"\xff\xfe.tar");
     }
 
     #[test]
     fn parse_keeps_a_dash_c_value_that_is_not_utf8() {
-        let a = parse_args(&b(&[b"-x", b"-C", b"/tmp/d\x80r"])).unwrap();
+        let a = run_args(&b(&[b"-x", b"-C", b"/tmp/d\x80r"])).unwrap();
         assert!(a.extract);
         let d = a.directory.unwrap();
         assert_eq!(os_bytes(&d).as_ref(), b"/tmp/d\x80r");
@@ -3783,11 +4800,502 @@ mod tests {
         // A cluster is walked byte by byte, so a `-` followed by something
         // that is not UTF-8 at all is refused like any other unknown flag
         // rather than being a case the parser cannot represent.
-        let err = parse_args(&b(&[b"-\xe9"])).unwrap_err();
-        assert!(err.contains("invalid option"), "{err}");
-        // `quoteaf` renders the byte rather than emitting it raw, so the
-        // message cannot forge a line of tar's stderr.
-        assert!(!err.as_bytes().contains(&0xe9), "{err}");
+        let err = run_args(&b(&[b"-\xe9"])).unwrap_err();
+        assert!(err.sentence.contains("invalid option"), "{err}");
+        // The byte is escaped rather than emitted raw, so the message cannot
+        // forge a line of tar's stderr.
+        assert!(!err.sentence.as_bytes().contains(&0xe9), "{err}");
+    }
+
+    // ---------------- long options ----------------
+    //
+    // Every expectation below was measured against GNU tar 1.35, and the table
+    // that drives them was checked against it exhaustively: all 1381 distinct
+    // prefixes of every name, verdict and candidate list, zero mismatches.
+    // See `LONG_OPTIONS`.
+
+    #[test]
+    fn parse_long_forms_of_every_short_option() {
+        let a = run_args(&s(&[
+            "--create",
+            "--verbose",
+            "--preserve-permissions",
+            "--file=out.tar",
+            "--directory=/tmp",
+            "x",
+        ]))
+        .unwrap();
+        assert!(a.create && a.verbose && a.same_permissions);
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
+        assert_eq!(a.directory.as_deref(), Some(OsStr::new("/tmp")));
+        assert_eq!(a.files, s(&["x"]));
+    }
+
+    #[test]
+    fn parse_long_value_may_be_the_next_word_or_attached() {
+        // `--file=A` and `--file A` are the same thing; the hand-written parser
+        // this replaced understood neither.
+        for argv in [
+            s(&["--extract", "--file=in.tar"]),
+            s(&["--extract", "--file", "in.tar"]),
+        ] {
+            let a = run_args(&argv).unwrap();
+            assert!(a.extract);
+            assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("in.tar")));
+        }
+    }
+
+    #[test]
+    fn parse_accepts_gnus_alias_spellings() {
+        // Two names, one option, in both of GNU's pairs.
+        assert!(run_args(&s(&["--get"])).unwrap().extract);
+        assert!(run_args(&s(&["--extract"])).unwrap().extract);
+        assert!(
+            run_args(&s(&["--same-permissions"]))
+                .unwrap()
+                .same_permissions
+        );
+        assert!(
+            run_args(&s(&["--preserve-permissions"]))
+                .unwrap()
+                .same_permissions
+        );
+    }
+
+    #[test]
+    fn parse_takes_each_member_of_the_overwrite_family() {
+        for (argv, want) in [
+            (s(&["-x"]), OldFiles::Replace),
+            (s(&["-x", "--overwrite"]), OldFiles::Overwrite),
+            (s(&["-x", "-k"]), OldFiles::Keep),
+            (s(&["-x", "--keep-old-files"]), OldFiles::Keep),
+            (s(&["-x", "--skip-old-files"]), OldFiles::Skip),
+            (s(&["-x", "-U"]), OldFiles::UnlinkFirst),
+            (s(&["-x", "--unlink-first"]), OldFiles::UnlinkFirst),
+            (s(&["-x", "--keep-newer-files"]), OldFiles::KeepNewer),
+            // Clustered, to prove the two new letters are in `SHORT_OPTIONS`
+            // rather than only in the long table.
+            (s(&["-xk"]), OldFiles::Keep),
+            (s(&["-xU"]), OldFiles::UnlinkFirst),
+        ] {
+            assert_eq!(run_args(&argv).unwrap().old_files, want, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn naming_one_of_the_overwrite_family_twice_is_allowed() {
+        // GNU tests whether the *value* would change, not whether an option was
+        // seen twice, so a repetition is not a conflict. Measured: `tar -k -k`
+        // and `tar --overwrite --overwrite` both extract (`tar-ovw-diff.sh`).
+        assert_eq!(
+            run_args(&s(&["-x", "-k", "-k"])).unwrap().old_files,
+            OldFiles::Keep
+        );
+        assert_eq!(
+            run_args(&s(&["-x", "--overwrite", "--overwrite"]))
+                .unwrap()
+                .old_files,
+            OldFiles::Overwrite
+        );
+        // Two spellings of one option are the same value, so likewise fine.
+        assert_eq!(
+            run_args(&s(&["-x", "-k", "--keep-old-files"]))
+                .unwrap()
+                .old_files,
+            OldFiles::Keep
+        );
+    }
+
+    #[test]
+    fn naming_two_of_the_overwrite_family_is_a_usage_error() {
+        // The *second* option is named first, and both are named by their long
+        // spelling however they were written -- `tar -U -k` complains about
+        // `'--keep-old-files' … '--unlink-first'`, naming neither letter.
+        let e = run_args(&s(&["-x", "-U", "-k"])).unwrap_err();
+        assert_eq!(
+            e.sentence,
+            "'--keep-old-files' cannot be used with '--unlink-first'"
+        );
+        // Exit 2, not the 64 an unrecognised option gets: this sentence comes
+        // from tar's own `USAGE_ERROR`, not from argp's option table. Measured
+        // both ways -- `tar --frobnicate` is 64 and `tar -k --overwrite` is 2.
+        assert_eq!(e.status, EXIT_FATAL);
+        assert_eq!(
+            run_args(&s(&["-x", "--keep-newer-files", "--overwrite"]))
+                .unwrap_err()
+                .sentence,
+            "'--overwrite' cannot be used with '--keep-newer-files'"
+        );
+    }
+
+    #[test]
+    fn parse_accepts_an_unambiguous_abbreviation() {
+        // `--extr` is a prefix of `--extract` alone. The resolved name is what
+        // reaches the match arm, so no arm needs to know about abbreviations.
+        let a = run_args(&s(&["--extr", "--verbo"])).unwrap();
+        assert!(a.extract && a.verbose);
+    }
+
+    #[test]
+    fn parse_refuses_an_abbreviation_ambiguous_only_because_of_an_option_we_lack() {
+        // `--verb` is one letter short of unambiguous, and the option that
+        // makes it so — `--verbatim-files-from` — is one this tar does not
+        // implement. So this case is decided *entirely* by an entry that exists
+        // for no other reason, which is the clearest statement of why the table
+        // carries all 172 names. Measured: GNU refuses `--verb` identically,
+        // and `--verbo` lists an archive.
+        let err = run_args(&s(&["--verb"])).unwrap_err();
+        assert_eq!(
+            err.sentence,
+            "option '--verb' is ambiguous; possibilities: '--verbose' '--verbatim-files-from'"
+        );
+        assert!(run_args(&s(&["--verbo"])).unwrap().verbose);
+    }
+
+    #[test]
+    fn parse_refuses_an_ambiguous_abbreviation_listing_gnus_candidates() {
+        // The reason the table carries all 172 names. With only the twelve this
+        // tar implements, `--ex` would be a *unique* prefix of `--extract` and
+        // would silently extract.
+        let err = run_args(&s(&["--ex"])).unwrap_err();
+        assert_eq!(
+            err.sentence,
+            "option '--ex' is ambiguous; possibilities: '--extract' '--exclude' \
+             '--exclude-from' '--exclude-caches' '--exclude-caches-under' \
+             '--exclude-caches-all' '--exclude-tag' '--exclude-ignore' \
+             '--exclude-ignore-recursive' '--exclude-tag-under' '--exclude-tag-all' \
+             '--exclude-vcs' '--exclude-vcs-ignores' '--exclude-backups'"
+        );
+    }
+
+    #[test]
+    fn parse_lists_ambiguity_candidates_in_gnus_order_not_alphabetically() {
+        // The single most easily-broken property of the table: `--extract`
+        // precedes `--exclude`, which sorting would reverse. Asserted on its
+        // own so that an alphabetised table fails with an obvious message
+        // rather than inside the long string above.
+        let err = run_args(&s(&["--ex"])).unwrap_err();
+        let extract = err.sentence.find("'--extract'").unwrap();
+        let exclude = err.sentence.find("'--exclude'").unwrap();
+        assert!(extract < exclude, "{}", err.sentence);
+    }
+
+    #[test]
+    fn parse_refuses_an_unknown_long_option() {
+        let err = run_args(&s(&["--frobnicate"])).unwrap_err();
+        // The whole word as typed, `--` included — there is no resolved name to
+        // report instead.
+        assert_eq!(err.sentence, "unrecognized option '--frobnicate'");
+    }
+
+    #[test]
+    fn parse_refuses_a_value_given_to_a_long_option_that_takes_none() {
+        let err = run_args(&s(&["--extract=yes"])).unwrap_err();
+        // Named as the table spells it, not as typed. Measured: GNU answers an
+        // abbreviated `--extr=yes` with `'--extract'` too.
+        assert_eq!(err.sentence, "option '--extract' doesn't allow an argument");
+        assert_eq!(
+            run_args(&s(&["--extr=yes"])).unwrap_err().sentence,
+            "option '--extract' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn parse_refuses_a_long_option_whose_required_value_is_missing() {
+        let err = run_args(&s(&["--file"])).unwrap_err();
+        // Note the word order differs from the short form's `option requires an
+        // argument -- 'f'`. That is glibc's, not a slip.
+        assert_eq!(err.sentence, "option '--file' requires an argument");
+    }
+
+    #[test]
+    fn parse_refuses_a_recognised_but_unimplemented_option() {
+        let err = run_args(&s(&["--exclude=*.o"])).unwrap_err();
+        assert_eq!(
+            err.sentence,
+            "option '--exclude' is recognised but not implemented by this tar"
+        );
+        assert_eq!(err.status, EXIT_USAGE);
+    }
+
+    #[test]
+    fn parse_does_not_leave_an_unimplemented_options_value_as_an_operand() {
+        // The trap this avoids: `--exclude` takes a value, so if the parser did
+        // not know that, `*.o` would be left behind and archived as a file. The
+        // refusal is what the user sees, but the operand list is what would
+        // have been silently wrong had the table's argument class been missing.
+        let err = run_args(&s(&["-c", "--exclude", "*.o", "src"])).unwrap_err();
+        assert!(err.sentence.contains("--exclude"), "{err}");
+    }
+
+    #[test]
+    fn parse_treats_double_dash_as_end_of_options() {
+        // Previously a bug, not a choice: `--` fell through to the operand
+        // branch and was looked for inside the archive, so this exited 2 with
+        // `tar: --: Not found in archive` where GNU exits 0.
+        let a = run_args(&s(&["-xf", "t.tar", "--", "a"])).unwrap();
+        assert!(a.extract);
+        assert_eq!(a.files, s(&["a"]));
+    }
+
+    #[test]
+    fn parse_after_double_dash_an_option_shaped_name_is_a_file() {
+        // The point of the terminator: a member really called `--exclude` is
+        // archivable, and a member called `-c` does not turn on create.
+        let a = run_args(&s(&["-c", "--", "--exclude", "-c"])).unwrap();
+        assert!(a.create);
+        assert_eq!(a.files, s(&["--exclude", "-c"]));
+    }
+
+    #[test]
+    fn parse_accepts_a_short_value_attached_to_its_letter() {
+        // `-fout.tar` used to be read as more option letters and failed on the
+        // `o`: `invalid option -- 'o'`.
+        let a = run_args(&s(&["-cvfout.tar", "x"])).unwrap();
+        assert!(a.create && a.verbose);
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
+        assert_eq!(a.files, s(&["x"]));
+    }
+
+    #[test]
+    fn parse_permutes_options_after_operands() {
+        // Measured: `tar -tf t.tar a --verbose` gives a long listing, so an
+        // option after an operand is still an option.
+        let a = run_args(&s(&["-tf", "t.tar", "a", "--verbose"])).unwrap();
+        assert!(a.list && a.verbose);
+        assert_eq!(a.files, s(&["a"]));
+    }
+
+    #[test]
+    fn parse_keeps_a_long_option_value_that_is_not_utf8() {
+        // The `=VALUE` half of a long option is a path like any other, and must
+        // survive bytes that are not text.
+        let a = run_args(&b(&[b"-x", b"--directory=/tmp/d\x80r"])).unwrap();
+        let d = a.directory.unwrap();
+        assert_eq!(os_bytes(&d).as_ref(), b"/tmp/d\x80r");
+    }
+
+    #[test]
+    fn parse_refuses_a_long_name_that_is_not_utf8_without_panicking() {
+        // No option name is non-ASCII, so such a name matches nothing; it must
+        // reach the unrecognised path rather than failing some third way.
+        let err = run_args(&b(&[b"--caf\xe9"])).unwrap_err();
+        assert!(err.sentence.contains("unrecognized option"), "{err}");
+        assert!(!err.sentence.as_bytes().contains(&0xe9), "{err}");
+    }
+
+    #[test]
+    fn long_option_table_is_in_gnus_measured_order_and_has_no_duplicates() {
+        // Guards the table itself rather than the parser. A duplicate name
+        // would make one entry unreachable, and the count pins the set: 170
+        // from `--help` plus the two it hides, `--program-name` and `--HANG`.
+        // `scripts/getopt-ambiguity-check.py` re-derives the whole thing from
+        // `tar --=x` at push time; this is the cheap local guard.
+        assert_eq!(LONG_OPTIONS.len(), 172);
+        // Fully qualified: the file's `BTreeSet` import is `#[cfg(unix)]`, and
+        // this test is not.
+        let mut seen = std::collections::BTreeSet::new();
+        for (name, _) in LONG_OPTIONS {
+            assert!(seen.insert(*name), "duplicate long option: --{name}");
+        }
+        // The two `--help` does not mention. `--HANG` is also the only name
+        // with a capital in it, and so the one no lower-case prefix sweep can
+        // ever reach — which is how the first version of this table lost it.
+        assert!(seen.contains("program-name"));
+        assert!(seen.contains("HANG"));
+        // Not sorted — and that is the invariant, not an accident. See the
+        // ambiguity-order test above.
+        assert!(
+            LONG_OPTIONS.windows(2).any(|w| w[0].0 > w[1].0),
+            "table looks alphabetised; GNU's order is observable output"
+        );
+    }
+
+    #[test]
+    fn the_empty_long_name_lists_the_whole_table_in_order() {
+        // `tar --=x`: the empty name is a prefix of every entry, so the
+        // ambiguity list *is* the table. This is the only case in which the
+        // full cross-letter order is observable — every other ambiguous prefix
+        // has candidates that all share its first letter — which is why the
+        // array is GNU's declaration order and not a per-letter reconstruction
+        // of it. Measured byte for byte against GNU: 2806 identical bytes,
+        // both exiting 64. It is also the measurement
+        // `scripts/getopt-ambiguity-check.py` reads GNU's table with.
+        let err = run_args(&s(&["--=x"])).unwrap_err();
+        let expected: String = LONG_OPTIONS
+            .iter()
+            .map(|(name, _)| format!(" '--{name}'"))
+            .collect();
+        // The word as typed, `=x` and all — glibc names the argv word in an
+        // ambiguity, and only resolves to a table name once one entry has won.
+        assert_eq!(
+            err.sentence,
+            format!("option '--=x' is ambiguous; possibilities:{expected}")
+        );
+        assert_eq!(err.status, EXIT_USAGE);
+    }
+
+    // ---------------- --help, --usage, --version ----------------
+
+    #[test]
+    fn parse_recognises_the_three_informational_options() {
+        assert_eq!(parse_args(&s(&["--help"])).unwrap(), Request::Help);
+        assert_eq!(parse_args(&s(&["-?"])).unwrap(), Request::Help);
+        assert_eq!(parse_args(&s(&["--usage"])).unwrap(), Request::Usage);
+        assert_eq!(parse_args(&s(&["--version"])).unwrap(), Request::Version);
+    }
+
+    #[test]
+    fn parse_abbreviates_help_and_version_but_not_usage() {
+        // `--us` is ambiguous, and not for a reason anyone would guess:
+        // `--use-compress-program` shares the prefix. Measured against GNU,
+        // which gives these two candidates in this order. `--hel` and `--vers`
+        // are each unique and resolve.
+        assert_eq!(parse_args(&s(&["--hel"])).unwrap(), Request::Help);
+        assert_eq!(parse_args(&s(&["--vers"])).unwrap(), Request::Version);
+        assert_eq!(
+            parse_args(&s(&["--us"])).unwrap_err().sentence,
+            "option '--us' is ambiguous; possibilities: '--use-compress-program' '--usage'"
+        );
+        assert_eq!(parse_args(&s(&["--usa"])).unwrap(), Request::Usage);
+    }
+
+    #[test]
+    fn help_wins_over_a_bad_option_after_it_and_loses_to_one_before_it() {
+        // The whole of the precedence rule, and the reason `parse_args` returns
+        // a `Request` from inside the loop rather than validating argv first.
+        // Both rows measured against GNU: exit 0 with help, then exit 64 with
+        // `unrecognized option`.
+        assert_eq!(
+            parse_args(&s(&["--help", "--frobnicate"])).unwrap(),
+            Request::Help
+        );
+        assert_eq!(
+            parse_args(&s(&["--frobnicate", "--help"]))
+                .unwrap_err()
+                .sentence,
+            "unrecognized option '--frobnicate'"
+        );
+    }
+
+    #[test]
+    fn help_wins_over_an_operation_that_precedes_it() {
+        // `tar -c --help` prints help; it does not create an archive. The `-c`
+        // is parsed and then discarded with the rest of `TarArgs`, which is why
+        // `Request` is an enum rather than a flag on `TarArgs`.
+        assert_eq!(parse_args(&s(&["-c", "--help"])).unwrap(), Request::Help);
+        assert_eq!(parse_args(&s(&["-c?"])).unwrap(), Request::Help);
+    }
+
+    #[test]
+    fn help_given_as_a_value_is_a_value_and_not_a_request() {
+        // `--file --help` names an archive called `--help`. GNU agrees, and
+        // then fails at exit 2 with `You must specify one of…` because no
+        // operation was given -- which is `main`'s branch, not the parser's.
+        let a = run_args(&s(&["--file", "--help"])).unwrap();
+        assert_eq!(a.archive_file, Some(OsString::from("--help")));
+    }
+
+    #[test]
+    fn parse_refuses_a_value_given_to_help() {
+        assert_eq!(
+            parse_args(&s(&["--help=x"])).unwrap_err().sentence,
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn help_text_documents_every_option_this_tar_implements_and_no_others() {
+        let help = help_text();
+        for name in [
+            "--create",
+            "--list",
+            "--extract",
+            "--get",
+            "--directory",
+            "--file",
+            "--preserve-permissions",
+            "--same-permissions",
+            "--verbose",
+            "--keep-newer-files",
+            "--keep-old-files",
+            "--overwrite",
+            "--skip-old-files",
+            "--unlink-first",
+            "--help",
+            "--usage",
+            "--version",
+        ] {
+            assert!(help.contains(name), "help omits {name}");
+        }
+        // The point of writing our own help rather than reproducing GNU's: an
+        // option the parser refuses must not be advertised. `--exclude` stands
+        // in for the other 155. See `design-decisions.md` 703.
+        //
+        // `--overwrite-dir` is here rather than among the advertised names on
+        // purpose, and it is the reason this list is checked as a *substring*
+        // search rather than a set comparison: it is a real GNU option this tar
+        // does not have, and `--overwrite` — which it does — is a prefix of it,
+        // so a help text that named the pair the other way round would pass a
+        // naive `contains` and lie. The assertion below therefore only holds
+        // because `--overwrite` is written with two trailing spaces before its
+        // description and never as `--overwrite-dir`.
+        for name in [
+            "--exclude",
+            "--overwrite-dir",
+            "--gzip",
+            "--strip-components",
+        ] {
+            assert!(
+                !help.contains(name),
+                "help advertises {name}, which we refuse"
+            );
+        }
+    }
+
+    /// The synopsis and the help must describe the *same* tar.
+    ///
+    /// They are two hand-written strings that have to be edited together, and
+    /// the failure mode when they are not is silent: an option that works, is
+    /// documented in one place and missing from the other. Every long name in
+    /// the synopsis must appear in the help, and every long name the help
+    /// advertises must appear in the synopsis.
+    #[test]
+    fn usage_and_help_advertise_the_same_options() {
+        let (usage, help) = (usage_text(), help_text());
+        // `[--directory=DIR]` in the synopsis is `--directory=DIR` in the help
+        // too, so the argument spelling needs no special handling; only the
+        // brackets have to come off.
+        for word in usage.split_whitespace() {
+            let Some(name) = word.strip_prefix("[--").map(|w| w.trim_end_matches(']')) else {
+                continue;
+            };
+            assert!(
+                help.contains(&format!("--{name}")),
+                "the synopsis offers --{name} and the help does not mention it"
+            );
+        }
+        for line in help.lines() {
+            for word in line.split([' ', ',']).filter(|w| w.starts_with("--")) {
+                assert!(
+                    usage.contains(&format!("[{word}]")),
+                    "the help documents {word} and the synopsis omits it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn help_and_usage_are_wrapped_and_end_in_a_newline() {
+        for text in [help_text(), usage_text()] {
+            assert!(text.ends_with('\n'), "{text:?}");
+            assert!(!text.ends_with("\n\n"), "{text:?}");
+            for line in text.lines() {
+                assert!(line.len() <= 79, "line too long ({}): {line}", line.len());
+            }
+        }
+        assert!(help_text().starts_with("Usage: tar [OPTION...] [FILE]...\n"));
+        assert!(usage_text().starts_with("Usage: tar [-ctxkUpv?]"));
     }
 
     // ---------------- contains_dot_dot ----------------

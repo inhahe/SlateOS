@@ -50666,6 +50666,187 @@ nesting and so no soleness test. If a third such site appears outside the
 that the defect concentrates in positional operands, and two known exceptions is
 where the bet still pays.
 
+## 703. `tar` carries every one of GNU's long-option names but performs twelve — a recognised name it cannot honour is refused, not ignored
+
+> The counts written into the body below — 171 names, nine performed — were both
+> corrected within the day; see the two amendments at the end. The real figures
+> are **172 names, twelve performed**. The body is left as written because the
+> second amendment is about *how* the wrong number was arrived at, which is the
+> part worth not losing.
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** GNU's `tar` accepts about 171 spelled-out options (`--verbose`,
+`--exclude`, …); ours does the work of nine of them. The question is what to do
+with the other 162 when someone types one. Ignoring them is dangerous — a
+backup that was told to leave files out would quietly include them and report
+success. So this `tar` now knows all 171 names, and answers the 162 it cannot
+perform with "recognised but not implemented" and a failure status, which stops
+a script instead of misleading it. Knowing the names it does not implement also
+turns out to be *required* for the nine it does, for the reason in the second
+half below.
+
+**The decision, in two parts.**
+
+1. **The name table lists every option GNU has, not every option we perform.**
+2. **A name in the table that we do not perform is a usage error** —
+   `tar: option '--exclude' is recognised but not implemented by this tar`,
+   status 64 — rather than being silently dropped or reported as unknown.
+
+**Why part 1 is not optional.** An abbreviation is legal if it is a prefix of
+exactly one option, so the *set of names* decides what a prefix means. With a
+nine-name table, `--ex` is a unique prefix of `--extract` and would extract;
+GNU calls it ambiguous and lists fourteen candidates. The sharpest case is
+`--verb`, which is ambiguous only because of `--verbatim-files-from` — an option
+this `tar` will likely never implement, and whose sole function here is to make
+`--verb` an error, exactly as GNU does. A table trimmed to what we implement
+does not merely produce a worse message; it silently runs a *different command*
+than the same argv would run under GNU. The shared `coreutils::getopt` module
+already says this in its own words, so part 1 is house doctrine rather than a
+judgement call — it is recorded here only because the 162 dead entries look like
+dead weight to a future reader who might tidy them away.
+
+**Why part 2, and what was rejected.**
+
+| Answer | Cost |
+|---|---|
+| **Refuse (chosen)** | Diverges from GNU visibly: a command GNU runs, we decline. A script using an unimplemented option stops with a clear reason. |
+| Ignore it | *What changes:* `tar -cf a.tar --exclude '*.o' src` silently archives the `.o` files and exits 0. The failure is silent, in the direction of doing more than asked, and is discovered when the archive is restored. |
+| Report `unrecognized option` | *What changes:* the message says `--exclude` is not a `tar` option. It is; we just don't do it. That sends the reader to check a spelling that was already right. |
+
+Refusing is the only one of the three whose failure mode is a stopped script
+rather than a wrong archive, and it is the only one that tells the truth about
+why. The divergence from GNU is real and is the price.
+
+**A note on what this replaced, because it makes the stakes concrete.** Before
+this change `tar` had *no* long options at all: `--anything` fell through to the
+operand branch and became a file name. So `tar -cf a.tar --exclude '*.o' src`
+did not ignore the option — it tried to archive two files called `--exclude` and
+`*.o`, complained they did not exist, and produced an archive that both lacked
+the exclusion and contained a spurious member. The same fall-through also meant
+`--` was not an end-of-options marker but a member name to look for, so
+`tar -xf t.tar -- a` failed with `tar: --: Not found in archive` where GNU
+exits 0.
+
+**How the table was established, and why that matters for maintenance.** The
+names, their argument classes, and their *order* were all measured from GNU
+1.35 rather than transcribed, then checked exhaustively: every one of the 1381
+distinct prefixes of the 171 names was put to the real binary and its verdict
+compared against this table's — resolved, unrecognised, or ambiguous, with the
+candidate list in order — for **zero** mismatches. That sweep is also what
+established that `tar` needs plain name-based resolution rather than the
+alias-aware variant: `tar` does have alias pairs (`--extract`/`--get`,
+`--preserve-permissions`/`--same-permissions`), but no two aliases share a
+prefix, so nothing is made unabbreviatable by keying on names. If a future
+change adds a name, that assumption is the one to re-test.
+
+**The order is observable output and must not be alphabetised.** `getopt_long`
+lists an ambiguous prefix's candidates in table order, so `--extract` must
+precede `--exclude`. It was obtained by asking the binary one question per
+letter — every candidate for an ambiguous prefix necessarily shares its first
+letter, so 36 queries fix the whole array and cross-letter order is
+unobservable. That sweep is also what turned up `--program-name`, which appears
+in no `--help` output because argp hides it, and which is therefore in the table
+on the authority of the ambiguity lists alone.
+
+**Two amendments, both the same day (2026-08-29).**
+
+1. `--help`, `--usage` and `--version` moved from the refused group into the
+   performed one — see 704 — so the counts read *twelve performed*.
+2. **The table is 172 names, not 171, and the paragraph above is wrong about
+   the order.** The push-time gate `scripts/getopt-ambiguity-check.py` — which
+   this entry did not know existed — reads GNU's table with one measurement the
+   per-letter sweep cannot match: `tar --=x`. The empty name is a prefix of
+   *every* entry, so the ambiguity list is the whole table, in declaration
+   order, in one line. Two things fell out. First, it found `--HANG`, a hidden
+   debug option that sleeps forever and the only name beginning with a capital
+   — invisible to a sweep over `--a … --z`, and therefore missed above. Second,
+   the claim that "cross-letter order is unobservable" is false: this one case
+   observes all of it, and the real order is argp's grouping by function, not
+   the letter-grouped reconstruction that was committed. Both are fixed, the
+   exemption that had kept `tar` out of the gate is deleted, and `tar --=x` is
+   now byte-identical to GNU's (2806 bytes, exit 64). Nothing else in this entry
+   changes — the per-letter order happened to be right *within* each letter, so
+   every diagnostic it was reasoned about stayed the same. The lesson worth
+   carrying: **enumerate from the utility's own output, never from an alphabet
+   you chose**, and check whether the repository already has a gate for what you
+   are about to measure by hand.
+
+## 704. `tar --help` prints this tar's twelve options, not GNU's 172 — and, like GNU, does not check that the write landed
+
+**Date:** 2026-08-29
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** After 703 gave `tar` long options, its own error messages ended
+with `Try 'tar --help' or 'tar --usage' for more information.` — while both of
+those commands answered "recognised but not implemented". A program that
+directs you to two commands it refuses is worse than one with no help at all,
+so `-?`/`--help`, `--usage` and `--version` are now implemented. Two things
+about *how* were genuine choices rather than obvious: the help text is written
+for this tar instead of copied from GNU's, and a failed write of it is ignored
+rather than reported.
+
+**Decision 1: the help text describes this tar.**
+
+| Answer | *What changes* |
+|---|---|
+| **Write our own (chosen)** | `tar --help` lists twelve long options. A user who has read GNU's help gets a shorter, unfamiliar page — but everything on it works. |
+| Reproduce GNU's help verbatim | `tar --help` lists 172 options, 160 of which the same program then refuses. The page is instantly familiar and is a lie in 159 places. |
+
+Copying GNU's page is the more *compatible* answer and the wrong one, for the
+reason 703 already settled about options generally: help text is read
+specifically to find out what is available, so an over-broad page fails at the
+one job it has. It would also read as a bug rather than a policy — someone who
+follows the program's own help into `--exclude` and is told it is not
+implemented has been sent there by the program.
+
+The page keeps argp's *shape* — the `Usage:` line, an examples block, operation
+modes separated from modifiers, informational options last — because that is
+what a `tar` user recognises, and closes with the two facts that distinguish
+this tar from the one the reader has used before: ustar only, and unimplemented
+names refuse rather than being ignored. Without the second sentence a refusal
+looks like breakage. A unit test asserts both directions: every performed
+option appears, and a sample of refused ones does not.
+
+**Decision 2: the write is unchecked, which diverges from the house rule.**
+
+Measured: `tar --help >&-` prints nothing and exits **0**, where
+`wc --help >&-` reports `write error: Bad file descriptor` and exits 1. argp
+writes help to a `FILE*` and never asks whether it landed; coreutils utilities
+run `close_stdout` at exit and do.
+
+| Answer | *What changes* |
+|---|---|
+| **Match GNU — ignore (chosen)** | `tar --help \| head -20` exits 0 quietly, as it does everywhere else. A genuinely undeliverable help page fails silently. |
+| Apply the coreutils rule — report | `tar --help \| head -20` can print `tar: write error: Broken pipe` and exit 1, which no other `tar` does. |
+
+Help is most often read through a pager or `head`, so the second column's
+failure mode is common and the first's is nearly unreachable — nobody is
+depending on the exit status of a help page. This tar has no `close_stdout`
+discipline on any of its other stdout paths either, so matching GNU here is also
+the internally consistent choice; adopting the rule would mean adopting it for
+listing output too, which is a separate change with its own measurements to do.
+
+**Precedence was measured, not assumed,** and is the reason `parse_args`
+returns its answer from *inside* the parse loop rather than validating argv
+first:
+
+| Command line | Result | Why |
+|---|---|---|
+| `tar --help --frobnicate` | help, exit 0 | `--help` came first |
+| `tar --frobnicate --help` | `unrecognized option`, exit 64 | the bad one came first |
+| `tar -c --help` | help, exit 0 | `--help` wins over doing the work |
+| `tar --file --help` | `You must specify one of…`, exit 2 | `--help` was eaten as `--file`'s value |
+
+All four are GNU's, and all four fall out of first-one-wins iteration. A parser
+that checked the whole command line before returning would fail row 1; one that
+scanned for `--help` up front would fail rows 2 and 4. A 19-case shape
+differential against the real binary — exit status, which stream, which class of
+message — found zero differences.
+
 ## 636. `RESOLVE_BENEATH` is decided per hop and syntactically, not by canonicalising the final path
 
 **Date:** 2026-08-29

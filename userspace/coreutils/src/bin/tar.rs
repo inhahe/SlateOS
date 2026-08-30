@@ -497,11 +497,46 @@ struct TarArgs {
     /// See [`OldFiles`].
     old_files: OldFiles,
     archive_file: Option<OsString>,
-    directory: Option<OsString>,
-    files: Vec<OsString>,
+    /// Every `-C` / `--directory`, in the order it was written.
+    ///
+    /// Not `Option<OsString>`, because `-C` is not an option carrying a value —
+    /// it is an *instruction*, it may appear any number of times, and each one
+    /// is resolved **relative to the one before it** rather than to the
+    /// directory tar started in. Measured, GNU 1.35: `-C d1 -C d2` needs
+    /// `d1/d2` to exist, and reports plain `d2` when it does not. Treating the
+    /// last one as the answer — which this tar did until 2026-08-30 — silently
+    /// turns that into a chdir to `./d2`.
+    chdirs: Vec<OsString>,
+    /// The non-option operands, each tagged with the directory it belongs to.
+    files: Vec<Operand>,
+}
+
+/// A non-option operand, and which of [`TarArgs::chdirs`] was in force where it
+/// appeared.
+///
+/// `dir` is a count, not an index: `0` means "the directory tar started in",
+/// `n` means "after the first `n` `-C`s". It is what makes `-C d1 x -C d2 y`
+/// expressible at all — the destination varies down the operand list, so a
+/// single folded directory cannot represent it.
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Operand {
+    name: OsString,
+    dir: usize,
 }
 
 impl TarArgs {
+    /// The operand *names*, dropping the `-C` tagging.
+    ///
+    /// Test-only, and deliberately so: production code needs the tag, because
+    /// which directory an operand belongs to is half its meaning. This exists
+    /// so that a test about parsing ("which operands were collected, in what
+    /// order") does not have to restate the tag it is not testing.
+    #[cfg(test)]
+    fn names(&self) -> Vec<OsString> {
+        self.files.iter().map(|o| o.name.clone()).collect()
+    }
+
     /// `-t` / `--list`: choose list mode **and** bump the verbosity counter.
     ///
     /// The two go together in GNU's own handler, and separating them here would
@@ -751,7 +786,9 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Short(b'k', _) => out.old_files.choose(OldFiles::Keep)?,
             Opt::Short(b'U', _) => out.old_files.choose(OldFiles::UnlinkFirst)?,
             Opt::Short(b'f', value) => out.archive_file = value,
-            Opt::Short(b'C', value) => out.directory = value,
+            // Pushed, not assigned: see [`TarArgs::chdirs`]. `value` is
+            // `Required` in both tables, so `None` cannot reach here.
+            Opt::Short(b'C', value) => out.chdirs.extend(value),
             // Unreachable while this arm and `SHORT_OPTIONS` agree, since the
             // parser rejects any letter the string does not list. It is a
             // refusal rather than a panic so that adding a letter to
@@ -772,7 +809,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 "verbose" => out.verbose = out.verbose.saturating_add(1),
                 "preserve-permissions" | "same-permissions" => out.same_permissions = true,
                 "file" => out.archive_file = value,
-                "directory" => out.directory = value,
+                "directory" => out.chdirs.extend(value),
                 // The overwrite-control family. Every one of them assigns to
                 // the same setting, through the check that makes naming two of
                 // them an error. See [`OldFiles`].
@@ -787,7 +824,10 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 other => return Err(unsupported(other)),
             },
 
-            Opt::Operand(arg) => out.files.push(arg.clone()),
+            Opt::Operand(arg) => out.files.push(Operand {
+                name: arg.clone(),
+                dir: out.chdirs.len(),
+            }),
         }
     }
 
@@ -1042,7 +1082,12 @@ fn main() {
             let verbose = Verbose::new(parsed.verbose, parsed.archive_file.is_none());
             #[cfg(unix)]
             {
-                do_create(parsed.archive_file.as_deref(), &parsed.files, verbose)
+                do_create(
+                    parsed.archive_file.as_deref(),
+                    &parsed.chdirs,
+                    &parsed.files,
+                    verbose,
+                )
             }
             #[cfg(not(unix))]
             {
@@ -1053,7 +1098,7 @@ fn main() {
         }
         Mode::Extract => do_extract(
             parsed.archive_file.as_deref(),
-            parsed.directory.as_deref(),
+            &parsed.chdirs,
             // Extraction never writes the archive to stdout, so the list always
             // goes there.
             Verbose::new(parsed.verbose, false),
@@ -1063,6 +1108,7 @@ fn main() {
         ),
         Mode::List => do_list_main(
             parsed.archive_file.as_deref(),
+            &parsed.chdirs,
             parsed.verbose,
             &parsed.files,
         ),
@@ -2245,8 +2291,46 @@ impl Creator<'_> {
     }
 }
 
+/// Enter `chdirs[*entered .. want]`, one at a time and in order.
+///
+/// Each `-C` is resolved against the one before it, so they cannot be folded
+/// into a single path and they cannot be skipped: `-C a -C b` requires `a/b`,
+/// and if `a` is missing it is `a` that must be named, not `a/b`. Stepping one
+/// at a time is what makes the *reported* name match GNU's.
+///
+/// `entered` is carried by the caller rather than returned, so that a failure
+/// leaves it truthful — the directories already entered stay entered, which is
+/// the state the process is actually in.
+///
+/// # Errors
+///
+/// The process exit status, already reported, if a directory cannot be entered.
+fn enter_chdirs(chdirs: &[OsString], entered: &mut usize, want: usize) -> Result<(), i32> {
+    while *entered < want {
+        let Some(dir) = chdirs.get(*entered) else {
+            break;
+        };
+        if let Err(e) = env::set_current_dir(dir) {
+            // `Cannot open`, not `Cannot chdir` — which reads oddly for an
+            // option whose name is "directory", but GNU implements the chdir
+            // with an open and reports the open. Measured on 1.35 under `-c`,
+            // `-t` and `-x` alike, for a missing directory (`No such file or
+            // directory`) and for a plain file (`Not a directory`).
+            diag!("tar: {}: Cannot open: {}", escape_os(dir), strerror(&e));
+            return Err(fatal());
+        }
+        *entered = entered.saturating_add(1);
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
-fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose) -> i32 {
+fn do_create(
+    archive_file: Option<&OsStr>,
+    chdirs: &[OsString],
+    files: &[Operand],
+    verbose: Verbose,
+) -> i32 {
     // Identified by inode, not by name: `tar -cf ./b.tar .` and `tar -cf b.tar
     // .` name the archive differently and it is the same file both times, and
     // comparing the strings would catch neither.
@@ -2282,11 +2366,28 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
         archive_id,
         writable: true,
     };
+    // The chdirs are walked *with* the operands, not folded and applied once.
+    // In create mode the operands are processed in the order they were written,
+    // so `entered` only ever moves forward and a plain chdir suffices.
+    let mut entered = 0usize;
     for operand in files {
+        if let Err(rc) = enter_chdirs(chdirs, &mut entered, operand.dir) {
+            return rc;
+        }
         // The member name is the operand exactly as typed, byte for byte —
-        // which is what GNU stores too.
-        let name = os_bytes(operand);
-        creator.add(Path::new(operand), &name);
+        // which is what GNU stores too. Note it is *not* joined with the `-C`
+        // directory: `-C src inner` stores `inner`, not `src/inner`. That is
+        // the whole point of `-C` over a path prefix.
+        let name = os_bytes(&operand.name);
+        creator.add(Path::new(&operand.name), &name);
+    }
+    // A `-C` written after the last operand is still *executed* — so one naming
+    // a directory that does not exist is the ordinary fatal chdir failure, and
+    // the refusal below is never reached. Measured: GNU leaves a zero-byte
+    // archive behind, having died before the end-of-archive blocks, which is
+    // why this runs here rather than after them.
+    if let Err(rc) = enter_chdirs(chdirs, &mut entered, chdirs.len()) {
+        return rc;
     }
 
     let zero_block = [0u8; BLOCK_SIZE];
@@ -2298,6 +2399,39 @@ fn do_create(archive_file: Option<&OsStr>, files: &[OsString], verbose: Verbose)
         diag!("tar: Cannot write: {}", strerror(&e));
         status = EXIT_FATAL;
     }
+
+    // Having executed the trailing `-C`s above, GNU then refuses the command
+    // for containing them at all. `tar cf out.tar mydir -C /elsewhere` is a
+    // line people write meaning the opposite of what it does, so a silent no-op
+    // that exits 0 is the one outcome that helps nobody.
+    //
+    // The archive is finished first and is complete: measured, GNU's `-cf a.tar
+    // -C tree a.txt -C sub` leaves a listable 10240-byte `a.tar` behind and
+    // *then* exits 2. Create-only — under `-x` and `-t` the identical trailing
+    // `-C` is silently ignored and the run exits 0 (see `do_extract`) — and
+    // keyed off `files.last()` rather than off `chdirs`, because with no
+    // operands at all there is nothing for a `-C` to be "after".
+    //
+    // Every trailing option gets a line of its own under one header. GNU names
+    // them by their short form where they have one, so `--directory=sub` is
+    // reported as `-C ‘sub’`; the quotes are the locale's directional pair, and
+    // an unprintable byte inside them is escaped as it is everywhere else
+    // (measured: a directory named `caf\351` prints as `-C ‘caf\351’`).
+    if let Some(last) = files.last()
+        && let Some(trailing) = chdirs.get(last.dir..)
+        && !trailing.is_empty()
+    {
+        diag!(
+            "tar: The following options were used after non-option arguments.  \
+             These options are positional and affect only arguments that follow \
+             them.  Please, rearrange them properly."
+        );
+        for dir in trailing {
+            diag!("tar: -C \u{2018}{}\u{2019} has no effect", escape_os(dir));
+        }
+        status = EXIT_FATAL;
+    }
+
     if status == 0 {
         0
     } else {
@@ -2714,11 +2848,11 @@ struct Selector {
 }
 
 impl Selector {
-    fn new(members: &[OsString]) -> Self {
+    fn new(members: &[Operand]) -> Self {
         Self {
             wanted: members
                 .iter()
-                .map(|m| (trim_slashes(&os_bytes(m)).to_vec(), false))
+                .map(|m| (trim_slashes(&os_bytes(&m.name)).to_vec(), false))
                 .collect(),
         }
     }
@@ -4218,9 +4352,9 @@ fn apply_delayed_links(root: &Dir, links: Vec<DelayedLink>, status: &mut i32) {
 
 fn do_extract(
     archive_file: Option<&OsStr>,
-    directory: Option<&OsStr>,
+    chdirs: &[OsString],
     verbose: Verbose,
-    members: &[OsString],
+    members: &[Operand],
     same_permissions: bool,
     old_files: OldFiles,
 ) -> i32 {
@@ -4237,11 +4371,22 @@ fn do_extract(
         None => Box::new(io::stdin()),
     };
 
-    if let Some(dir) = directory
-        && let Err(e) = env::set_current_dir(dir)
-    {
-        diag!("tar: {}: Cannot chdir: {}", escape_os(dir), strerror(&e));
-        return fatal();
+    // How far down the `-C` chain to go. With no member operands the whole
+    // archive is wanted and the destination is the end of the chain -- that is
+    // the ordinary `tar -xf a.tar -C dest`. With operands, a `-C` that no
+    // operand follows is never reached: measured, `tar -xf o.tar -C g2 one -C
+    // nosuchdir` extracts `one` into `g2` and exits **0**, where the same
+    // trailing `-C` under `-c` is fatal. Extraction treats `-C` as a
+    // destination for the members after it; creation treats it as a step in a
+    // sequence, and executes every step.
+    let want = if members.is_empty() {
+        chdirs.len()
+    } else {
+        members.iter().map(|m| m.dir).max().unwrap_or(0)
+    };
+    let mut entered = 0usize;
+    if let Err(rc) = enter_chdirs(chdirs, &mut entered, want) {
+        return rc;
     }
 
     // After the chdir, not before: `-C` chooses the destination, and the
@@ -4814,7 +4959,12 @@ fn extract_regular_file(
     true
 }
 
-fn do_list_main(archive_file: Option<&OsStr>, verbose: u8, members: &[OsString]) -> i32 {
+fn do_list_main(
+    archive_file: Option<&OsStr>,
+    chdirs: &[OsString],
+    verbose: u8,
+    members: &[Operand],
+) -> i32 {
     let mut input: Box<dyn Read> = match archive_file {
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
@@ -4825,6 +4975,23 @@ fn do_list_main(archive_file: Option<&OsStr>, verbose: u8, members: &[OsString])
         },
         None => Box::new(io::stdin()),
     };
+
+    // Listing writes nothing to the filesystem, so a `-C` cannot change the
+    // output — but it can still fail, and GNU lets it: `tar -tf o.tar -C
+    // nosuchdir` prints `nosuchdir: Cannot open` and exits 2 rather than
+    // listing the archive. Ignoring `-C` here, which is what this tar did until
+    // 2026-08-30, turned a command the user got wrong into a silent success.
+    // The `want` rule is the extraction one, for the same reason: see
+    // `do_extract`.
+    let want = if members.is_empty() {
+        chdirs.len()
+    } else {
+        members.iter().map(|m| m.dir).max().unwrap_or(0)
+    };
+    let mut entered = 0usize;
+    if let Err(rc) = enter_chdirs(chdirs, &mut entered, want) {
+        return rc;
+    }
 
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
@@ -5132,6 +5299,22 @@ mod tests {
         items.iter().map(|x| OsString::from(*x)).collect()
     }
 
+    /// Operands with no `-C` in front of them.
+    ///
+    /// The ordinary shape, and the only one the [`Selector`] tests want: they
+    /// are about which *names* match, not about which directory a match lands
+    /// in, so tagging every operand with directory 0 states "no `-C` here"
+    /// once instead of restating it at each call site.
+    fn ops(items: &[&str]) -> Vec<Operand> {
+        items
+            .iter()
+            .map(|x| Operand {
+                name: OsString::from(*x),
+                dir: 0,
+            })
+            .collect()
+    }
+
     /// Build an argv out of raw byte strings, so a test can pass an argument
     /// that no `&str` can hold.
     ///
@@ -5248,7 +5431,7 @@ mod tests {
         let a = run_args(&s(&["-c", "-f", "out.tar", "a", "b"])).unwrap();
         assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
-        assert_eq!(a.files, s(&["a", "b"]));
+        assert_eq!(a.names(), s(&["a", "b"]));
     }
 
     #[test]
@@ -5258,15 +5441,55 @@ mod tests {
         assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.verbose, 1);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
-        assert_eq!(a.files, s(&["a"]));
+        assert_eq!(a.names(), s(&["a"]));
     }
 
     #[test]
     fn parse_extract_with_directory() {
         let a = run_args(&s(&["-x", "-C", "/tmp", "-f", "in.tar"])).unwrap();
         assert_eq!(a.mode, Mode::Extract);
-        assert_eq!(a.directory.as_deref(), Some(OsStr::new("/tmp")));
+        assert_eq!(a.chdirs, s(&["/tmp"]));
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("in.tar")));
+    }
+
+    /// Every `-C` is kept, in order — not folded to the last one.
+    ///
+    /// The fold is what this tar did until 2026-08-30, and it is silent: `-C d1
+    /// -C d2` became a single chdir to `d2`, which under GNU's reading is
+    /// `d1/d2`. Two different directories, no diagnostic, and the difference
+    /// only shows up in where the files went.
+    #[test]
+    fn every_c_is_kept_in_the_order_it_was_written() {
+        let a = run_args(&s(&["-xf", "a.tar", "-C", "d1", "-C", "d2"])).unwrap();
+        assert_eq!(a.chdirs, s(&["d1", "d2"]));
+        // Both spellings feed the same list, and interleave in argv order.
+        let a = run_args(&s(&["-xf", "a.tar", "-C", "d1", "--directory=d2"])).unwrap();
+        assert_eq!(a.chdirs, s(&["d1", "d2"]));
+    }
+
+    /// Each operand records how many `-C`s preceded it.
+    ///
+    /// This is the whole reason operands are not a plain `Vec<OsString>`: `-C
+    /// d1 x -C d2 y` sends `x` and `y` to *different* directories, so there is
+    /// no one directory the operand list as a whole belongs to. The count also
+    /// answers "was a `-C` written after the last operand", which under `-c` is
+    /// an error rather than a no-op.
+    #[test]
+    fn an_operand_records_how_many_c_came_before_it() {
+        let a = run_args(&s(&[
+            "-cf", "o.tar", "before", "-C", "d1", "x", "-C", "d2", "y",
+        ]))
+        .unwrap();
+        assert_eq!(a.names(), s(&["before", "x", "y"]));
+        assert_eq!(
+            a.files.iter().map(|o| o.dir).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        // A `-C` after the last operand leaves `chdirs` longer than the last
+        // operand's count, which is exactly the test `do_create` makes.
+        let a = run_args(&s(&["-cf", "o.tar", "-C", "d1", "x", "-C", "d2"])).unwrap();
+        assert_eq!(a.files.last().map(|o| o.dir), Some(1));
+        assert_eq!(a.chdirs.len(), 2);
     }
 
     #[test]
@@ -5306,7 +5529,7 @@ mod tests {
         // Bare positional arg starting with non-dash is a file.
         let a = run_args(&s(&["-c", "f1", "f2"])).unwrap();
         assert_eq!(a.mode, Mode::Create);
-        assert_eq!(a.files, s(&["f1", "f2"]));
+        assert_eq!(a.names(), s(&["f1", "f2"]));
     }
 
     // The point of the byte conversion: every one of these arguments is a
@@ -5320,10 +5543,10 @@ mod tests {
     fn parse_keeps_an_operand_that_is_not_utf8() {
         let a = run_args(&b(&[b"-c", b"caf\xe9", b"ok"])).unwrap();
         assert_eq!(a.mode, Mode::Create);
-        assert_eq!(a.files, b(&[b"caf\xe9", b"ok"]));
+        assert_eq!(a.names(), b(&[b"caf\xe9", b"ok"]));
         // Not merely "did not crash": the bytes are the ones passed in, so the
         // file that gets archived is the file that was named.
-        assert_eq!(os_bytes(&a.files[0]).as_ref(), b"caf\xe9");
+        assert_eq!(os_bytes(&a.files[0].name).as_ref(), b"caf\xe9");
     }
 
     #[test]
@@ -5339,7 +5562,7 @@ mod tests {
     fn parse_keeps_a_dash_c_value_that_is_not_utf8() {
         let a = run_args(&b(&[b"-x", b"-C", b"/tmp/d\x80r"])).unwrap();
         assert_eq!(a.mode, Mode::Extract);
-        let d = a.directory.unwrap();
+        let d = a.chdirs.first().cloned().unwrap();
         assert_eq!(os_bytes(&d).as_ref(), b"/tmp/d\x80r");
     }
 
@@ -5378,8 +5601,8 @@ mod tests {
         assert_eq!(a.verbose, 1);
         assert!(a.same_permissions);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
-        assert_eq!(a.directory.as_deref(), Some(OsStr::new("/tmp")));
-        assert_eq!(a.files, s(&["x"]));
+        assert_eq!(a.chdirs, s(&["/tmp"]));
+        assert_eq!(a.names(), s(&["x"]));
     }
 
     #[test]
@@ -5612,7 +5835,7 @@ mod tests {
         assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.verbose, 1);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("a.tar")));
-        assert_eq!(a.files, s(&["dir"]));
+        assert_eq!(a.names(), s(&["dir"]));
     }
 
     #[test]
@@ -5624,13 +5847,13 @@ mod tests {
         // misreading. Measured against GNU: `tar-old1.sh`.
         let a = run_args(&s(&["cfC", "a.tar", "dir", "x"])).unwrap();
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("a.tar")));
-        assert_eq!(a.directory.as_deref(), Some(OsStr::new("dir")));
-        assert_eq!(a.files, s(&["x"]));
+        assert_eq!(a.chdirs, s(&["dir"]));
+        assert_eq!(a.names(), s(&["x"]));
 
         let a = run_args(&s(&["cCf", "dir", "a.tar", "x"])).unwrap();
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("a.tar")));
-        assert_eq!(a.directory.as_deref(), Some(OsStr::new("dir")));
-        assert_eq!(a.files, s(&["x"]));
+        assert_eq!(a.chdirs, s(&["dir"]));
+        assert_eq!(a.names(), s(&["x"]));
     }
 
     #[test]
@@ -5639,11 +5862,11 @@ mod tests {
         // *dashed* first argument is likewise. Both measured; the second is
         // what stops `tar -c f a.tar` from quietly becoming `-c -f a.tar`.
         let a = run_args(&s(&["cf", "a.tar", "dir", "cvf"])).unwrap();
-        assert_eq!(a.files, s(&["dir", "cvf"]));
+        assert_eq!(a.names(), s(&["dir", "cvf"]));
 
         let a = run_args(&s(&["-c", "f", "a.tar", "dir"])).unwrap();
         assert!(a.archive_file.is_none());
-        assert_eq!(a.files, s(&["f", "a.tar", "dir"]));
+        assert_eq!(a.names(), s(&["f", "a.tar", "dir"]));
     }
 
     #[test]
@@ -5668,10 +5891,10 @@ mod tests {
         let a = run_args(&s(&["cf", "a.tar", "--verbose", "dir"])).unwrap();
         assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.verbose, 1);
-        assert_eq!(a.files, s(&["dir"]));
+        assert_eq!(a.names(), s(&["dir"]));
 
         let a = run_args(&s(&["cf", "a.tar", "--", "-dir"])).unwrap();
-        assert_eq!(a.files, s(&["-dir"]));
+        assert_eq!(a.names(), s(&["-dir"]));
 
         let e = run_args(&s(&["cQf", "a.tar", "dir"])).unwrap_err();
         assert_eq!(e.sentence, "invalid option -- 'Q'");
@@ -5856,7 +6079,7 @@ mod tests {
         // `tar: --: Not found in archive` where GNU exits 0.
         let a = run_args(&s(&["-xf", "t.tar", "--", "a"])).unwrap();
         assert_eq!(a.mode, Mode::Extract);
-        assert_eq!(a.files, s(&["a"]));
+        assert_eq!(a.names(), s(&["a"]));
     }
 
     #[test]
@@ -5865,7 +6088,7 @@ mod tests {
         // archivable, and a member called `-c` does not turn on create.
         let a = run_args(&s(&["-c", "--", "--exclude", "-c"])).unwrap();
         assert_eq!(a.mode, Mode::Create);
-        assert_eq!(a.files, s(&["--exclude", "-c"]));
+        assert_eq!(a.names(), s(&["--exclude", "-c"]));
     }
 
     #[test]
@@ -5876,7 +6099,7 @@ mod tests {
         assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.verbose, 1);
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
-        assert_eq!(a.files, s(&["x"]));
+        assert_eq!(a.names(), s(&["x"]));
     }
 
     #[test]
@@ -5888,7 +6111,7 @@ mod tests {
         let a = run_args(&s(&["-tf", "t.tar", "a", "--verbose"])).unwrap();
         assert_eq!(a.mode, Mode::List);
         assert_eq!(a.verbose, 2);
-        assert_eq!(a.files, s(&["a"]));
+        assert_eq!(a.names(), s(&["a"]));
     }
 
     #[test]
@@ -5897,7 +6120,7 @@ mod tests {
         // The `=VALUE` half of a long option is a path like any other, and must
         // survive bytes that are not text.
         let a = run_args(&b(&[b"-x", b"--directory=/tmp/d\x80r"])).unwrap();
-        let d = a.directory.unwrap();
+        let d = a.chdirs.first().cloned().unwrap();
         assert_eq!(os_bytes(&d).as_ref(), b"/tmp/d\x80r");
     }
 
@@ -7157,7 +7380,7 @@ mod tests {
     fn selector_matches_a_named_member_and_its_subtree() {
         // `tar -xf a.tar dir` unpacks the subtree, not the bare entry -- and
         // with no selector at all this used to unpack the whole archive.
-        let mut sel = Selector::new(&s(&["t/sub"]));
+        let mut sel = Selector::new(&ops(&["t/sub"]));
         assert!(sel.wants(b"t/sub/"));
         assert!(sel.wants(b"t/sub/b.bin"));
         assert!(!sel.wants(b"t/a.txt"));
@@ -7168,14 +7391,14 @@ mod tests {
 
     #[test]
     fn selector_ignores_trailing_slashes_on_either_side() {
-        let mut sel = Selector::new(&s(&["t/sub/"]));
+        let mut sel = Selector::new(&ops(&["t/sub/"]));
         assert!(sel.wants(b"t/sub"));
         assert!(sel.wants(b"t/sub/b.bin"));
     }
 
     #[test]
     fn selector_reports_an_operand_that_matched_nothing() {
-        let mut sel = Selector::new(&s(&["present", "absent"]));
+        let mut sel = Selector::new(&ops(&["present", "absent"]));
         assert!(sel.wants(b"present"));
         assert_eq!(sel.report_missing(), EXIT_FATAL);
     }

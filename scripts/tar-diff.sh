@@ -1159,7 +1159,74 @@ old_case 'an empty first argument, alone'   ''
 old_case 'a -- before the cluster'          -- cf o.tar src
 
 # ===========================================================================
-# 8. the known divergences
+# 8. -C, the change-directory instruction
+# ===========================================================================
+# `-C` is not an option carrying a value. It is an instruction executed *where
+# it appears* in the operand list, it may be given any number of times, and
+# each one is resolved relative to the one before it rather than to the
+# directory tar started in.
+#
+# Until 2026-08-30 this tar stored it as one `Option<OsString>` and acted on it
+# in exactly one place, inside the extractor. So a second `-C` overwrote the
+# first instead of following it, and under `-c` and `-t` the option was parsed
+# and then silently discarded -- which meant `tar -cf out.tar -C dir .`, the
+# commonest line anyone writes with this utility, failed with `Cannot stat`,
+# and `tar -tf a.tar -C nosuchdir` listed the archive and exited 0 where GNU
+# refuses. Five `-C` cases already existed and every one of them passed: all
+# five give one `-C`, once, under `-x`, which is the exact shape in which the
+# broken reading and GNU's cannot be told apart.
+create_case 'create from another directory'       -C tree a.txt
+create_case 'create with the -C dot idiom'        -C tree .
+create_case 'two -C, the second inside the first' -C tree -C sub .
+# `-f o.tar` is opened before the chdir and is not moved by it -- otherwise
+# these would write their output inside `tree` and then compare two files that
+# do not exist. (The pre-existing `-xvf ref.tar -C od` case says the same thing
+# for reading: the archive is found where tar started, not under `od`.)
+
+# A `-C` that cannot be entered is fatal, and the message is `Cannot open`,
+# not `Cannot chdir` -- which reads oddly for an option whose long name is
+# `--directory`, but GNU performs the chdir with an open and reports the open.
+# Ours said `Cannot chdir` until the same date.
+plain_case 'a -C that does not exist'          -cf o.tar -C nosuchdir tree/a.txt
+plain_case 'a -C naming a plain file'          -cf o.tar -C tree/a.txt zero.txt
+plain_case 'a -C that does not exist (-t)'     -tf ref.tar -C nosuchdir
+plain_case 'a -C naming a plain file (-t)'     -tf ref.tar -C ref.tar
+
+# A `-C` written *after* the last operand affects nothing, and under `-c` GNU
+# will not let that pass: it writes the archive in full, then prints a block of
+# its own and exits 2. `tar cf out.tar mydir -C /elsewhere` is a line people
+# write meaning the opposite of what it does, so exiting 0 would be the one
+# outcome that helps nobody. The trailing `-C` is nonetheless *executed* first,
+# which is what the `nosuchdir` case below shows -- it dies on the chdir and
+# never reaches the block.
+create_case 'a -C after the last operand'    -C tree a.txt -C sub
+create_case 'two -C after the last operand'  -C tree a.txt -C sub -C .
+# Reported by short name whichever spelling was used: `--directory=sub` comes
+# back as `-C 'sub'`.
+create_case 'a trailing --directory'         -C tree a.txt --directory=sub
+# ...and the value inside the block is quoted the way every other name is: an
+# unprintable byte as `\351`, inside the locale's directional single quotes.
+mkdir -p "cd-$NONUTF8"
+create_case 'a trailing -C that is not UTF-8' tree/a.txt -C "cd-$NONUTF8"
+plain_case 'a trailing -C that does not exist' -cf o.tar -C tree a.txt -C nosuchdir
+
+# ...and all of that is create-only. Under `-x` a `-C` that no member operand
+# follows is never reached at all -- not executed, not complained about, exit 0.
+# Extraction treats `-C` as a destination for the members after it, while
+# creation treats it as a step in a sequence and runs every step. With no member
+# operands at all the whole archive is wanted, so the destination is the end of
+# the chain.
+prep_two_dirs() { mkdir -p d1/d2; }
+PREP=prep_two_dirs extract_case 'two -C, both before the member' ref.tar \
+  -C d1 -C d2 tree/a.txt
+PREP=prep_two_dirs extract_case 'two -C and no member operands' ref.tar -C d1 -C d2
+PREP=prep_two_dirs extract_case 'a trailing -C that does not exist' ref.tar \
+  -C d1 tree/a.txt -C nosuchdir
+extract_case 'a -C that does not exist' ref.tar -C nosuchdir
+extract_case 'a -C naming a plain file' ref.tar -C ../ref.tar
+
+# ===========================================================================
+# 9. the known divergences
 # ===========================================================================
 plain_xcase \
   "GNU's -Z is compression, which this tar does not implement; the message is a refusal either way, and the wording of a refusal for an option we do not have is not something to copy" \

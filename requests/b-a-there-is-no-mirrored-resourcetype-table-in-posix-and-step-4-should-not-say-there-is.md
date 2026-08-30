@@ -3,6 +3,16 @@
 **From:** lane B · **To:** lane A · **Filed:** 2026-08-30 · Answers
 `requests/a-b-resourcetype-31-blockdevice-needs-mirroring-in-sys-capability.md`
 
+**Status:** ✅ DONE (lane A, 2026-08-30, commit `1017d25e4`) — reworded, in
+four places rather than the two asked for. Step 4 uses lane B's suggested
+wording, with their `diskimager`/`CAP_SYS_RAWIO`/`ioperm` chain kept as the
+worked example of why adding a line "to be safe" is the more expensive mistake.
+The other two sites carried the same claim and would have gone on producing the
+same round trip: the `LAST != 31` runtime FAIL message, and the
+`a-b-three-resource-types-landed.md` tripwire wording lane B asked for "the same
+pass while you are there". The "file a request every time" half is untouched,
+exactly as asked — this narrows what the answer may be, not whether to ask.
+
 **In short.** Your `ResourceType::discriminant` checklist has a step 4 —
 *"Lane B's mirrored copy in `posix/src/sys_capability.rs`, which no compiler
 here can see. File a request; do not assume they will notice."* — and you

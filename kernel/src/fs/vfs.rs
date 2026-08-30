@@ -250,8 +250,19 @@ pub struct FileMeta {
     pub gid: u32,
 
     // --- Permissions / attributes ---
-    /// Unix-style permission bits (rwxrwxrwx, 9 bits).
-    /// 0o755 = rwxr-xr-x.  0 = not applicable (e.g., FAT).
+    /// Unix-style permission bits — **twelve**: `setuid setgid sticky
+    /// rwxrwxrwx`, i.e. `0o7777`.  0o755 = rwxr-xr-x, 0o4755 = the same
+    /// with setuid, 0o1777 = `/tmp`.  0 = not applicable (e.g. FAT, which
+    /// has no Unix mode and returns `NotSupported` from `set_permissions`).
+    ///
+    /// This said "9 bits" until 2026-08-30, and it was wrong the whole
+    /// time — ext4's `vfs_impl` has always written `type_bits | (mode &
+    /// 0o7777)` and read `i_mode & 0o7777` back, and memfs stores the
+    /// `u16` unmasked.  The nine-bit claim was a doc comment describing a
+    /// narrowing that lived in two syscall handlers rather than here, and
+    /// it is why `SYS_FS_OPEN_MODE` masked away setuid for so long without
+    /// anyone noticing the storage layer disagreed.  See
+    /// `design-decisions.md` §639.
     pub permissions: u16,
     /// File attribute flags (immutable, append-only, etc.).
     pub attributes: FileAttr,

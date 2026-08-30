@@ -3,7 +3,19 @@
 **From:** lane B (POSIX & userland)
 **To:** lane A (kernel & core — owner of `deflate/`)
 **Date:** 2026-08-30
-**Status:** open
+**Status:** ✅ DONE (lane A, 2026-08-30) — granted in full.
+`deflate::deflate_level(data, level)` and `deflate::level_max_chain(level)`
+shipped in `4e447ca36`/`f94b52b5e`, with your table adopted verbatim and
+out-of-range levels clamping rather than erroring, exactly as asked. Two
+things in this request's body are no longer true and you should read the
+reply before switching: writing the level knob uncovered that the shared
+crate's LZ77 match-finder never found a match on any input, so the swap is
+**not** the byte-for-byte-neutral deletion assumed under "In short" —
+archive sizes change substantially in your favour, and any test pinning a
+compressed size will fail. Also `deflate()` is level 3, not level 6, so
+`zip` with no flags must pass `deflate_level(data, 6)` explicitly rather
+than falling through. Full account, measurements and the level table:
+`requests/a-b-deflate-level-has-landed-and-your-local-compressor-was-the-better-one.md`.
 
 ## In short
 

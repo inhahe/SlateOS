@@ -5177,6 +5177,39 @@ fn rlimit_target(arg0: u64) -> KernelResult<Option<pcb::ProcessId>> {
     }
 }
 
+/// Decide whether the current caller may raise a hard resource limit.
+///
+/// This kernel's `CAP_SYS_RESOURCE` is a [`ResourceType::ResourceLimit`]
+/// capability held with [`Rights::WRITE`] — a capability that *already
+/// existed* for this purpose (it landed 2026-08-21) rather than a new
+/// `Rights` bit, because the authority being asserted is "may write
+/// resource limits" and that is exactly what the pair already spells.
+///
+/// Deliberately **not** an error path.  Lacking the capability is not a
+/// failure of `setrlimit`; it is the ordinary case, and it only becomes a
+/// refusal if the call actually attempts a raise.  A caller with no
+/// capability lowering its own hard limit must still succeed, so the
+/// answer is a value ([`pcb::LimitAuthority`]) that
+/// [`pcb::set_rlimit`] consults only where it matters, not a `?` here.
+///
+/// Shared by both ABIs — native `SYS_RLIMIT_SET` and the Linux shim's
+/// `prlimit64`/`setrlimit` — for the same reason `pcb::set_rlimit` is a
+/// single choke point: a rule derived two ways drifts.
+///
+/// See `design-decisions.md` §640.
+pub(crate) fn rlimit_authority() -> pcb::LimitAuthority {
+    if require_cap_type(
+        crate::cap::ResourceType::ResourceLimit,
+        crate::cap::Rights::WRITE,
+    )
+    .is_ok()
+    {
+        pcb::LimitAuthority::MayRaiseHardLimit
+    } else {
+        pcb::LimitAuthority::Unprivileged
+    }
+}
+
 /// `SYS_RLIMIT_GET` — read one of a process's Linux resource limits
 /// (`getrlimit(3)`).
 ///
@@ -5248,7 +5281,10 @@ pub fn sys_rlimit_get(args: &SyscallArgs) -> SyscallResult {
 /// Every policy decision belongs to [`pcb::set_rlimit`] and none to this
 /// function, because the Linux shim's `prlimit64` calls the same thing: a
 /// rule enforced here would apply to one ABI and not the other, which is
-/// the class of bug this syscall exists to end.
+/// the class of bug this syscall exists to end.  The one thing decided on
+/// this side is *who is asking* — [`rlimit_authority`] — which cannot be
+/// answered below the syscall layer at all, and which the Linux shim
+/// derives by calling that same function rather than its own copy.
 ///
 /// In kernel context (a boot self-test with no owning process) the
 /// arguments are validated and the write is discarded — there is no PCB to
@@ -5284,7 +5320,7 @@ pub fn sys_rlimit_set(args: &SyscallArgs) -> SyscallResult {
     let [cur, max] = pair;
 
     match target {
-        Some(pid) => match pcb::set_rlimit(pid, resource, cur, max) {
+        Some(pid) => match pcb::set_rlimit(pid, resource, cur, max, rlimit_authority()) {
             Ok(()) => SyscallResult::ok(0),
             Err(e) => SyscallResult::err(e),
         },
@@ -8819,12 +8855,20 @@ pub fn sys_fs_mkdir_mode(args: &SyscallArgs) -> SyscallResult {
 
     // arg2 = directory create mode (already umask-masked).  Zero → historical
     // 0o755 default.
+    //
+    // Twelve bits, not nine.  This masked to `0o777` until 2026-08-30, which
+    // silently dropped the sticky bit — and the sticky bit is not an exotic
+    // corner of `mkdir`: it is what makes `/tmp` safe, and `mkdir(path,
+    // 0o1777)` is the single most common place anyone sets it.  The mask was
+    // never a limit of the filesystem (ext4's `set_permissions_ino` masks to
+    // `0o7777` and `stat` reads twelve back), only of this line.  See
+    // `design-decisions.md` §639.
     #[allow(clippy::cast_possible_truncation)]
     let mode_raw = args.arg2 as u16;
     let mode = if mode_raw == 0 {
         crate::fs::Vfs::DEFAULT_DIR_MODE
     } else {
-        mode_raw & 0o777
+        mode_raw & 0o7777
     };
 
     match crate::fs::Vfs::mkdir_mode(&path, mode) {
@@ -9095,16 +9139,166 @@ pub fn sys_fs_open_mode(args: &SyscallArgs) -> SyscallResult {
     // arg3 = create mode (already umask-masked by userspace).  A zero value is
     // treated as "unspecified" → the historical 0o644 default, so a caller that
     // omits O_CREAT (and passes 0) never accidentally creates a 0o000 file.
+    //
+    // Twelve bits, not nine.  This masked to `0o777` until 2026-08-30, so
+    // `open(path, O_CREAT, 0o4755)` created a file that `stat` then reported
+    // as `0o755` — the setuid bit vanished with no error, which is the worst
+    // way for a permission request to fail.  Nothing below this line ever
+    // needed the narrower mask: `fs::handle::open_resolved` stamps what it is
+    // given and ext4 stores `i_mode & 0o7777`.  See `design-decisions.md`
+    // §639.
     #[allow(clippy::cast_possible_truncation)]
     let mode_raw = args.arg3 as u16;
     let create_mode = if mode_raw == 0 {
         crate::fs::handle::DEFAULT_CREATE_MODE
     } else {
-        mode_raw & 0o777
+        mode_raw & 0o7777
     };
 
     match crate::fs::handle::open_with_mode(&path, flags, create_mode) {
         Ok(handle) => {
+            if let Some(pid) = caller_pid() {
+                pcb::register_ipc_handle(pid, ResourceType::File, handle);
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_OPENAT2` — open relative to a directory handle, under
+/// path-resolution restrictions.  The native equivalent of `openat2(2)`.
+///
+/// `arg0`/`arg1`/`arg2`/`arg3` are [`sys_fs_open_mode`]'s path pointer,
+/// path length, open flags and create mode, in its order and positions.
+/// `arg4` is the resolve mask ([`RESOLVE_NO_SYMLINKS`],
+/// [`RESOLVE_BENEATH`]); `arg5` is the directory handle to resolve
+/// against, or `0` for the process's current working directory.
+///
+/// See [`crate::syscall::number::SYS_FS_OPENAT2`] for the ABI rationale
+/// and `design-decisions.md` §639 for why the resolve bits sit at
+/// `1 << 16` rather than Linux's `0x04`.
+///
+/// # Ordering
+///
+/// Two orderings below are load-bearing and must not be "tidied":
+///
+/// 1. **Unknown resolve bits are refused before anything else** — before
+///    the path is even copied in.  `openat2`'s extension contract is that
+///    an unrecognised restriction is an error, never a silent omission; a
+///    caller that asks for a confinement this kernel does not implement
+///    must be told, not quietly given an unconfined handle.
+/// 2. **`beneath_fragment_ok` runs before `arg5` is looked up.**  An
+///    absolute (or upward-stepping) fragment under `RESOLVE_BENEATH` is
+///    self-contradictory on its face, so no base is needed to refuse it —
+///    and refusing first means the reply cannot be used to probe which
+///    handles exist.  A caller told `CrossDevice` learns nothing about the
+///    handle table.  This mirrors `sys_openat_beneath` in the Linux shim,
+///    and [`crate::fs::Vfs::resolve_beneath`] repeats the check as its own
+///    first step, so the early exit cannot disagree with it.
+pub fn sys_fs_openat2(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
+
+    let resolve = args.arg4;
+
+    // (1) Unknown restriction → refuse.  See the ordering note above.  This
+    // is also what makes a mistranslated Linux `open_how.resolve` fail on
+    // its first call rather than silently mean something else here.
+    if resolve & crate::syscall::number::RESOLVE_ALL != resolve {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let path_len = args.arg1 as usize;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags_raw = args.arg2 as u32;
+
+    if args.arg0 == 0 || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let rel = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    let mut flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
+    if resolve & crate::syscall::number::RESOLVE_NO_SYMLINKS != 0 {
+        flags = flags.union(crate::fs::handle::OpenFlags::NO_SYMLINKS);
+    }
+
+    // Same twelve-bit create mode as `sys_fs_open_mode`, same zero-means-
+    // default rule.  The two are deliberately identical; §639 widened both
+    // in one change so a caller cannot observe them disagreeing.
+    #[allow(clippy::cast_possible_truncation)]
+    let mode_raw = args.arg3 as u16;
+    let create_mode = if mode_raw == 0 {
+        crate::fs::handle::DEFAULT_CREATE_MODE
+    } else {
+        mode_raw & 0o7777
+    };
+
+    let beneath = resolve & crate::syscall::number::RESOLVE_BENEATH != 0;
+
+    // (2) The base-free half of the containment rule, answered before the
+    // handle lookup.  See the ordering note above.
+    if beneath && crate::fs::Vfs::beneath_fragment_ok(&rel).is_err() {
+        return SyscallResult::err(KernelError::CrossDevice);
+    }
+
+    // The base.  Handle 0 means the process working directory; native file
+    // handles are never 0, so this is not an in-band sentinel stolen from a
+    // valid value.  A real handle must be one this process owns — the same
+    // gate every other handle-taking fs call applies — and it must name a
+    // directory, which `resolve`/`open` below enforces by failing to walk
+    // through a non-directory.
+    let dirfd = args.arg5;
+    let base = if dirfd == 0 {
+        let Some(pid) = caller_pid() else {
+            // A bare kernel task has no cwd to resolve against.  It can
+            // still use this call by passing an explicit handle.
+            return SyscallResult::err(KernelError::InvalidArgument);
+        };
+        match pcb::get_cwd(pid) {
+            Some(c) => crate::fs::path::PathBuf::from(c),
+            None => return SyscallResult::err(KernelError::NotFound),
+        }
+    } else {
+        if let Err(e) = require_file_handle_owner(dirfd) {
+            return SyscallResult::err(e);
+        }
+        match crate::fs::handle::handle_path(dirfd) {
+            Ok(p) => p,
+            Err(e) => return SyscallResult::err(e),
+        }
+    };
+
+    let opened = if beneath {
+        crate::fs::handle::open_beneath_with_mode(
+            crate::fs::handle::Beneath {
+                base: &base,
+                rel: &rel,
+            },
+            flags,
+            create_mode,
+        )
+    } else {
+        // Without containment this is plain `openat`: an absolute path
+        // ignores the base, exactly as POSIX specifies for `openat(2)`.
+        let joined = if rel.is_absolute() {
+            rel.clone()
+        } else {
+            base.join(&rel)
+        };
+        crate::fs::handle::open_with_mode(&joined, flags, create_mode)
+    };
+
+    match opened {
+        Ok(handle) => {
+            // Same per-process ownership record as every other open: it is
+            // what closes the handle on exit and what lets fork() share it.
             if let Some(pid) = caller_pid() {
                 pcb::register_ipc_handle(pid, ResourceType::File, handle);
             }

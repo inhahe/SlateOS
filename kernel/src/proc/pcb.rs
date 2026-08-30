@@ -2706,32 +2706,72 @@ pub fn get_rlimit(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
     table.get(&pid).map(|p| p.rlimits[resource as usize])
 }
 
+/// Whether the caller of [`set_rlimit`] is entitled to raise a hard limit.
+///
+/// This is a *parameter* rather than something `set_rlimit` goes looking
+/// for, and that is deliberate.  `pcb` is below the syscall layer: it has
+/// no caller, and reaching up to `syscall::caller_pid()` from here would
+/// invert the layering and make the process table's behaviour depend on
+/// which side of a syscall boundary it happened to be called from.  The
+/// capability check lives where `caller_pid()` and the capability table
+/// already live — the syscall layer — and the *answer* comes down here.
+///
+/// The alternative rejected was a second, privileged entry point
+/// (`set_rlimit_privileged`).  That would break the property
+/// [`set_rlimit`]'s doc comment relies on and states outright: that it is
+/// the single choke point for *both* ABIs.  Two doors is how a rule ends
+/// up enforced on the native path and missed on the Linux one.
+///
+/// It is a two-variant enum rather than a `bool` because a bare `true` at
+/// a call site says nothing about *what* is true.  `MayRaiseHardLimit`
+/// names the authority being asserted, and a future third state (say, a
+/// resource-scoped grant) is an added variant rather than a signature
+/// change at every call site.
+///
+/// See `design-decisions.md` §640.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitAuthority {
+    /// The caller holds no `ResourceLimit` capability: hard limits may be
+    /// lowered but never raised.  This is what every ordinary process
+    /// gets, and what every test that exists to assert the refusal passes.
+    Unprivileged,
+    /// The caller holds `ResourceType::ResourceLimit` with `Rights::WRITE`
+    /// — this kernel's `CAP_SYS_RESOURCE` — and may raise a hard limit.
+    /// It still may not exceed the absolute `RLIMIT_NOFILE` ceiling; see
+    /// [`set_rlimit`].
+    MayRaiseHardLimit,
+}
+
 /// Install a new `(rlim_cur, rlim_max)` for `pid`'s `resource`.
 ///
 /// Enforces the two invariants Linux enforces unconditionally:
 ///   - `new_cur <= new_max`  (else `InvalidArgument`).
-///   - `new_max <= old_max`  (else `PermissionDenied`) — raising the
-///     hard limit requires `CAP_SYS_RESOURCE` on Linux; we have no
-///     equivalent, so unprivileged callers can only lower the hard
-///     limit.
+///   - `new_max <= old_max`  (else `PermissionDenied`) *unless* the
+///     caller passes [`LimitAuthority::MayRaiseHardLimit`] — raising the
+///     hard limit requires `CAP_SYS_RESOURCE` on Linux, and here requires
+///     a `ResourceLimit` capability with `Rights::WRITE`.  Unprivileged
+///     callers can only lower the hard limit.
 ///
 /// …plus one this kernel enforces that Linux does not:
 ///   - `RLIMIT_NOFILE`'s hard limit may never exceed
 ///     [`linux_fd::MAX_FDS_U64`] (else `PermissionDenied`).
 ///
-/// That third rule is **absolute**, not merely a consequence of the
-/// second.  Today it is redundant, because the default hard limit *is*
-/// `MAX_FDS` and rule two forbids raises outright — but the whole point
-/// of rule two is that it is expected to be relaxed once
-/// `CAP_SYS_RESOURCE` exists as a real capability (a `ResourceLimit`
-/// resource type landed on 2026-08-21 for exactly that purpose).  When
-/// it is relaxed, every other resource can honestly be raised, and
-/// `RLIMIT_NOFILE` cannot: the fd table is a fixed
+/// That third rule is **absolute**, and as of 2026-08-30 it is no longer
+/// redundant: rule two was written expecting to be relaxed once
+/// `CAP_SYS_RESOURCE` existed as a real capability (a `ResourceLimit`
+/// resource type landed on 2026-08-21 for exactly that purpose), and it
+/// has now been relaxed.  Every other resource can honestly be raised by
+/// a caller passing [`LimitAuthority::MayRaiseHardLimit`];
+/// `RLIMIT_NOFILE` cannot, because the fd table is a fixed
 /// `[Option<FdEntry>; MAX_FDS]` array inside the PCB, so a larger limit
-/// would be a promise no privilege can make the kernel keep.  Writing the
-/// ceiling down here, rather than leaving it to be rediscovered at the
-/// point rule two is loosened, is the difference between a limit that
-/// stays true and one that quietly becomes a lie again.
+/// would be a promise no privilege can make the kernel keep.  Note the
+/// ordering in the body: the ceiling is checked *before* the authority is
+/// consulted, so no capability can route around it.  Writing the ceiling
+/// down ahead of the relaxation, rather than leaving it to be
+/// rediscovered at the point rule two was loosened, is the difference
+/// between a limit that stays true and one that quietly becomes a lie
+/// again — and it is why this relaxation needed no new thinking about
+/// fds.
 ///
 /// This is the single choke point for *both* ABIs — the native
 /// `SYS_RLIMIT_SET` and the Linux shim's `prlimit64`/`setrlimit` all end
@@ -2751,22 +2791,33 @@ pub fn get_rlimit(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
 /// - [`KernelError::NoSuchProcess`] if `pid` is unknown.
 /// - [`KernelError::InvalidArgument`] if `resource >= NUM_RLIMITS` or
 ///   `new_cur > new_max`.
-/// - [`KernelError::PermissionDenied`] if `new_max` exceeds the
-///   existing hard limit, or exceeds `MAX_FDS` for `RLIMIT_NOFILE`.
-pub fn set_rlimit(pid: ProcessId, resource: u32, new_cur: u64, new_max: u64) -> KernelResult<()> {
+/// - [`KernelError::PermissionDenied`] if `new_max` exceeds the existing
+///   hard limit and `authority` is [`LimitAuthority::Unprivileged`], or
+///   if `new_max` exceeds `MAX_FDS` for `RLIMIT_NOFILE` (which no
+///   `authority` lifts).
+pub fn set_rlimit(
+    pid: ProcessId,
+    resource: u32,
+    new_cur: u64,
+    new_max: u64,
+    authority: LimitAuthority,
+) -> KernelResult<()> {
     if resource >= NUM_RLIMITS {
         return Err(KernelError::InvalidArgument);
     }
     if new_cur > new_max {
         return Err(KernelError::InvalidArgument);
     }
+    // Deliberately above the authority check: the fd-table ceiling is a
+    // statement about what the kernel can physically honour, not about
+    // who is asking, so no capability may route around it.
     if resource == RLIMIT_NOFILE && new_max > linux_fd::MAX_FDS_U64 {
         return Err(KernelError::PermissionDenied);
     }
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
     let (_, old_max) = proc.rlimits[resource as usize];
-    if new_max > old_max {
+    if new_max > old_max && authority == LimitAuthority::Unprivileged {
         return Err(KernelError::PermissionDenied);
     }
     proc.rlimits[resource as usize] = (new_cur, new_max);
@@ -7352,13 +7403,17 @@ fn test_rlimits() -> KernelResult<()> {
         destroy(pid);
         return fail("get_rlimit accepted a resource >= NUM_RLIMITS");
     }
-    if set_rlimit(pid, NUM_RLIMITS, 0, 0) != Err(KernelError::InvalidArgument) {
+    if set_rlimit(pid, NUM_RLIMITS, 0, 0, LimitAuthority::Unprivileged)
+        != Err(KernelError::InvalidArgument)
+    {
         destroy(pid);
         return fail("set_rlimit accepted a resource >= NUM_RLIMITS");
     }
 
     // (3) cur > max is invalid for every resource, checked before privilege.
-    if set_rlimit(pid, RLIMIT_NOFILE, 200, 100) != Err(KernelError::InvalidArgument) {
+    if set_rlimit(pid, RLIMIT_NOFILE, 200, 100, LimitAuthority::Unprivileged)
+        != Err(KernelError::InvalidArgument)
+    {
         destroy(pid);
         return fail("set_rlimit accepted rlim_cur > rlim_max");
     }
@@ -7367,19 +7422,28 @@ fn test_rlimits() -> KernelResult<()> {
     //     matters most: `linux_fd_install` reads it as "skip the check", so
     //     accepting it here would disable the only thing standing between a
     //     program and an EMFILE it was told could not happen.
-    if set_rlimit(pid, RLIMIT_NOFILE, 0, RLIM_INFINITY) != Err(KernelError::PermissionDenied) {
+    if set_rlimit(
+        pid,
+        RLIMIT_NOFILE,
+        0,
+        RLIM_INFINITY,
+        LimitAuthority::Unprivileged,
+    ) != Err(KernelError::PermissionDenied)
+    {
         destroy(pid);
         return fail("set_rlimit accepted RLIM_INFINITY for RLIMIT_NOFILE");
     }
     let over = linux_fd::MAX_FDS_U64.saturating_add(1);
-    if set_rlimit(pid, RLIMIT_NOFILE, 0, over) != Err(KernelError::PermissionDenied) {
+    if set_rlimit(pid, RLIMIT_NOFILE, 0, over, LimitAuthority::Unprivileged)
+        != Err(KernelError::PermissionDenied)
+    {
         destroy(pid);
         return fail("set_rlimit accepted a NOFILE hard limit above MAX_FDS");
     }
 
     // (5) Lowering works, and is observable.  Then lowering the hard limit
     //     is one-way: raising it back is refused even to its own default.
-    if let Err(e) = set_rlimit(pid, RLIMIT_NOFILE, 64, 64) {
+    if let Err(e) = set_rlimit(pid, RLIMIT_NOFILE, 64, 64, LimitAuthority::Unprivileged) {
         destroy(pid);
         serial_println!("[proc]   (lowering NOFILE gave {:?})", e);
         return fail("set_rlimit refused a lowering of RLIMIT_NOFILE");
@@ -7388,18 +7452,97 @@ fn test_rlimits() -> KernelResult<()> {
         destroy(pid);
         return fail("the lowered RLIMIT_NOFILE did not read back");
     }
-    if set_rlimit(pid, RLIMIT_NOFILE, 64, linux_fd::MAX_FDS_U64)
-        != Err(KernelError::PermissionDenied)
+    if set_rlimit(
+        pid,
+        RLIMIT_NOFILE,
+        64,
+        linux_fd::MAX_FDS_U64,
+        LimitAuthority::Unprivileged,
+    ) != Err(KernelError::PermissionDenied)
     {
         destroy(pid);
         return fail("a lowered hard limit was raised again");
     }
 
-    // (6) An unknown pid is NoSuchProcess, not a panic and not a silent
-    //     success.  Checked after the argument gates, matching `set_rlimit`'s
-    //     documented order.
+    // (7) `MayRaiseHardLimit` actually lifts the refusal — the whole point of
+    //     §640.  Asserting only that unprivileged callers are refused would
+    //     pass just as well if the authority argument were ignored entirely,
+    //     which is the failure this case exists to catch: the hard limit was
+    //     lowered to 64 in (5), so raising it back to the fd table's capacity
+    //     is a genuine raise that (5) just proved is refused without it.
+    if let Err(e) = set_rlimit(
+        pid,
+        RLIMIT_NOFILE,
+        64,
+        linux_fd::MAX_FDS_U64,
+        LimitAuthority::MayRaiseHardLimit,
+    ) {
+        destroy(pid);
+        serial_println!("[proc]   (privileged NOFILE raise gave {:?})", e);
+        return fail("MayRaiseHardLimit did not permit raising a lowered hard limit");
+    }
+    if get_rlimit(pid, RLIMIT_NOFILE) != Some((64, linux_fd::MAX_FDS_U64)) {
+        destroy(pid);
+        return fail("the privileged hard-limit raise did not read back");
+    }
+
+    // (8) …and it lifts *only* that rule.  The NOFILE ceiling is a statement
+    //     about what the kernel can physically honour — the fd table is a
+    //     fixed-size array — so no capability may route around it.  If this
+    //     ever passes, `linux_fd_install` is enforcing a limit the PCB cannot
+    //     back, and the ceiling has quietly become a lie again.
+    if set_rlimit(
+        pid,
+        RLIMIT_NOFILE,
+        0,
+        RLIM_INFINITY,
+        LimitAuthority::MayRaiseHardLimit,
+    ) != Err(KernelError::PermissionDenied)
+    {
+        destroy(pid);
+        return fail("MayRaiseHardLimit lifted the absolute NOFILE ceiling");
+    }
+    if set_rlimit(
+        pid,
+        RLIMIT_NOFILE,
+        0,
+        over,
+        LimitAuthority::MayRaiseHardLimit,
+    ) != Err(KernelError::PermissionDenied)
+    {
+        destroy(pid);
+        return fail("MayRaiseHardLimit accepted a NOFILE hard limit above MAX_FDS");
+    }
+
+    // (9) A resource with no ceiling of its own raises freely with the
+    //     authority.  `RLIMIT_NICE` (13) is the case lane B filed
+    //     `requests/b-a-a-hard-limit-that-starts-at-zero-can-never-rise.md`
+    //     about: it defaults to `{0, 0}`, so before §640 no call sequence on
+    //     this system could ever move it off zero.
+    if let Err(e) = set_rlimit(pid, 13, 0, 20, LimitAuthority::MayRaiseHardLimit) {
+        destroy(pid);
+        serial_println!("[proc]   (privileged RLIMIT_NICE raise gave {:?})", e);
+        return fail("MayRaiseHardLimit did not permit raising RLIMIT_NICE off zero");
+    }
+    // …and the soft limit is then raisable by the process itself, with no
+    // authority at all, which is the route lane B needed to exist.
+    if let Err(e) = set_rlimit(pid, 13, 20, 20, LimitAuthority::Unprivileged) {
+        destroy(pid);
+        serial_println!("[proc]   (unprivileged NICE soft raise gave {:?})", e);
+        return fail("an unprivileged soft raise within the new hard limit was refused");
+    }
+    if get_rlimit(pid, 13) != Some((20, 20)) {
+        destroy(pid);
+        return fail("the RLIMIT_NICE round trip did not read back");
+    }
+
+    // (10) An unknown pid is NoSuchProcess, not a panic and not a silent
+    //      success.  Checked after the argument gates, matching `set_rlimit`'s
+    //      documented order.
     destroy(pid);
-    if set_rlimit(pid, RLIMIT_NOFILE, 0, 0) != Err(KernelError::NoSuchProcess) {
+    if set_rlimit(pid, RLIMIT_NOFILE, 0, 0, LimitAuthority::Unprivileged)
+        != Err(KernelError::NoSuchProcess)
+    {
         return fail("set_rlimit on a destroyed pid did not report NoSuchProcess");
     }
     if get_rlimit(pid, RLIMIT_NOFILE).is_some() {

@@ -2,11 +2,18 @@
 
 **From:** lane B · **To:** lane A · **Filed:** 2026-08-29
 
-**Status:** ⏳ ask 1 landed 2026-08-29 by lane A; **ask 2 answered 2026-08-29 by
-lane B — yes, forward — and now blocked on lane A** for the syscall number.
-Deliberately not marked done: half of this request is still real work, and a
-`✅` here would hide it from `scripts/open-requests.py`, which is the one thing
-that answers "what is still open for me?" at the start of every task.
+**Status:** ✅ DONE (lane A, 2026-08-30) — both asks landed. Ask 1 was fixed
+2026-08-29; ask 2's one prerequisite, `SYS_FS_OPENAT2`, is 661 as of 2026-08-30,
+with the six flat arguments lane B specified and a twelve-bit create mode.
+Nothing here waits on lane A any longer.
+
+The ⏳ this line carried until 2026-08-30 was correct while it stood, and the
+reason is worth keeping: half of the request was real work on lane A's side, and
+a `✅` would have hidden it from `scripts/open-requests.py` — the one thing that
+answers "what is still open for me?" at the start of every task. What remains
+now is lane B forwarding libc's `openat2` onto 661, which is lane B's own work
+and is tracked on their side; keeping this file open in *lane A's* queue would
+report the same thing the same way, to the lane that cannot act on it.
 
 > **Ask 2, answered 2026-08-29 by lane B: yes, libc will forward.** Still ⏳
 > rather than ✅ because what remains is real and is lane A's — `SYS_FS_OPENAT2`

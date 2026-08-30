@@ -846,6 +846,53 @@ def cmd_build(only: str | None, force: bool = False) -> int:
         f"{fastpy}{os.pathsep}{existing}" if existing else str(fastpy)
     )
     print(f"[ctest] fastpy: {fastpy}")
+
+    # Finding the checkout is not the same as being able to use it.  Every
+    # build.py below starts by importing fastpy's compiler, which imports
+    # llvmlite; if that dependency is absent the loop still runs, and all 70
+    # fixtures fail with byte-identical tracebacks naming a module the reader
+    # has to recognise as third-party to act on.  That happened on 2026-08-29
+    # after a Python upgrade dropped the site-packages: 70 copies of one root
+    # cause, none of them named.  So ask once, here, where the checkout is
+    # already in hand.
+    #
+    # In a subprocess rather than in-process, for the same reason build.py
+    # runs in one: what must be importable is `sys.executable` + this
+    # PYTHONPATH, not whatever this script happens to have loaded.  It also
+    # keeps llvmlite's 43 MB out of a process that only needs to hash files.
+    probe = subprocess.run(
+        [sys.executable, "-c", "import compiler.codegen, compiler.toolchain"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=child_env,
+    )
+    if probe.returncode != 0:
+        missing = None
+        for line in probe.stderr.splitlines():
+            if "ModuleNotFoundError: No module named" in line:
+                missing = line.split("'")[1] if "'" in line else None
+        print(f"[ctest] ERROR: found fastpy at {fastpy}, but cannot import it.")
+        if missing and not missing.startswith("compiler"):
+            print(f"[ctest]        Missing third-party module: {missing!r}")
+            print(f"[ctest]        Install it into THIS interpreter:")
+            print(f"[ctest]          {sys.executable} -m pip install {missing}")
+            print("[ctest]        (fastpy's compiler needs llvmlite to emit object")
+            print("[ctest]         code; a Python upgrade loses site-packages, so this")
+            print("[ctest]         reappears after every interpreter bump.)")
+        elif missing:
+            print(f"[ctest]        {fastpy} does not look like a fastpy checkout:")
+            print(f"[ctest]        it has no importable {missing!r}.")
+        else:
+            print("[ctest]        The import failed for a reason other than a missing")
+            print("[ctest]        module — full output below.")
+        print(probe.stdout)
+        print(probe.stderr)
+        print("[ctest]        Refusing to build: every fixture would fail this way,")
+        print("[ctest]        and 70 identical tracebacks name the cause no better")
+        print("[ctest]        than one does.")
+        return 1
+
     selected = [f for f in fixtures() if not only or only in f.name]
     if not selected:
         print(f"[ctest] ERROR: no fixture matches --only {only!r}" if only

@@ -43,11 +43,11 @@ use super::number::{
     SYS_FS_FLOCK, SYS_FS_FORMAT, SYS_FS_FSTAT, SYS_FS_FTRUNCATE, SYS_FS_FUNLOCK, SYS_FS_GET_XATTR,
     SYS_FS_HANDLE_PATH, SYS_FS_JOURNAL_CURSOR, SYS_FS_JOURNAL_FLUSH, SYS_FS_JOURNAL_READ,
     SYS_FS_LINK, SYS_FS_LIST_DIR, SYS_FS_LIST_XATTRS, SYS_FS_LSTAT, SYS_FS_METADATA, SYS_FS_MKDIR,
-    SYS_FS_MKDIR_MODE, SYS_FS_MOUNT, SYS_FS_OPEN, SYS_FS_OPEN_MODE, SYS_FS_READ, SYS_FS_READ_FILE,
-    SYS_FS_READDIR_AT, SYS_FS_READLINK, SYS_FS_REMOVE_XATTR, SYS_FS_RENAME, SYS_FS_RMDIR,
-    SYS_FS_SEEK, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE, SYS_FS_SET_ATTR, SYS_FS_SET_OWNER,
-    SYS_FS_SET_PERMS, SYS_FS_SET_TIMES, SYS_FS_SET_XATTR, SYS_FS_STAT, SYS_FS_STATVFS,
-    SYS_FS_SYMLINK, SYS_FS_SYNC, SYS_FS_TMPFILE, SYS_FS_TRASH, SYS_FS_TRASH_EMPTY,
+    SYS_FS_MKDIR_MODE, SYS_FS_MOUNT, SYS_FS_OPEN, SYS_FS_OPEN_MODE, SYS_FS_OPENAT2, SYS_FS_READ,
+    SYS_FS_READ_FILE, SYS_FS_READDIR_AT, SYS_FS_READLINK, SYS_FS_REMOVE_XATTR, SYS_FS_RENAME,
+    SYS_FS_RMDIR, SYS_FS_SEEK, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE, SYS_FS_SET_ATTR,
+    SYS_FS_SET_OWNER, SYS_FS_SET_PERMS, SYS_FS_SET_TIMES, SYS_FS_SET_XATTR, SYS_FS_STAT,
+    SYS_FS_STATVFS, SYS_FS_SYMLINK, SYS_FS_SYNC, SYS_FS_TMPFILE, SYS_FS_TRASH, SYS_FS_TRASH_EMPTY,
     SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRIM, SYS_FS_TRUNCATE, SYS_FS_UMOUNT,
     SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ, SYS_FS_WRITE, SYS_FS_WRITE_FILE,
     SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI, SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE,
@@ -522,6 +522,7 @@ const fn build_v1_table() -> SyscallTable {
     // Filesystem — handle-based (610–699).
     handlers[SYS_FS_OPEN as usize] = Some(handlers::sys_fs_open);
     handlers[SYS_FS_OPEN_MODE as usize] = Some(handlers::sys_fs_open_mode);
+    handlers[SYS_FS_OPENAT2 as usize] = Some(handlers::sys_fs_openat2);
     handlers[SYS_FS_CLOSE as usize] = Some(handlers::sys_fs_close);
     handlers[SYS_FS_READ as usize] = Some(handlers::sys_fs_read);
     handlers[SYS_FS_WRITE as usize] = Some(handlers::sys_fs_write);
@@ -890,6 +891,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_clock_adjtime()?;
     test_dispatch_console_write()?;
     test_dispatch_fs_roundtrip(&mut skips)?;
+    test_dispatch_openat2_native(&mut skips)?;
     test_io_dir_classification()?;
     test_dispatch_mprotect_native()?;
     test_dispatch_process_group_syscalls()?;
@@ -909,6 +911,298 @@ pub fn self_test() -> KernelResult<()> {
 
     skips.report("[syscall]");
     serial_println!("[syscall] Dispatch self-test PASSED{}", skips.suffix());
+    Ok(())
+}
+
+/// Verify the **native** `SYS_FS_OPENAT2` (661): its resolve-bit gate, the
+/// order in which it answers, its `dirfd` marshalling, and its twelve-bit
+/// create mode.
+///
+/// # What each case is actually for
+///
+/// (a) is the one that justifies `design-decisions.md` §639's odd-looking
+/// numbering. It passes Linux's `RESOLVE_BENEATH` value, `0x08`, which in
+/// *our* scheme is an unknown bit — so a caller that forwards
+/// `open_how.resolve` untranslated is refused on its first call instead of
+/// silently receiving some other restriction, or none. If someone ever
+/// "harmonises" our constants with Linux's, this case fails.
+///
+/// (b) pins the ordering, and it is the only case that can. It asks for
+/// `RESOLVE_BENEATH` with an absolute fragment *and* a `dirfd` that cannot
+/// exist. The answer must be `CrossDevice` — not `InvalidHandle` — because
+/// the request is self-contradictory on its face and needs no base to
+/// refuse. If the handle lookup ever moves above the containment check, the
+/// error changes and this case says so. That matters beyond tidiness: a
+/// caller that could tell `InvalidHandle` from `CrossDevice` here would have
+/// a probe for which handles exist.
+///
+/// (c) and (d) are the containment rule itself reaching the VFS with the
+/// right base — an escaping `..` refused, a contained sibling opened. (d)
+/// reads the byte back rather than merely checking for success, because a
+/// wrong base also succeeds; only the content distinguishes them. This is
+/// the kernel-context sibling of
+/// [`crate::proc::spawn::self_test_openat2_beneath`], which proves the same
+/// thing from ring 3 through the Linux ABI.
+///
+/// (e) pins the twelve-bit create mode from §639. `open(…, CREATE, 0o4755)`
+/// must produce a file whose stored permissions are `0o4755`, not `0o755`:
+/// the setuid bit vanishing with no error is the failure this call was
+/// widened to prevent, and it is invisible to any test that only checks the
+/// open succeeded.
+///
+/// Kernel context, so the capability gate is bypassed and there is no cwd —
+/// `dirfd == 0` is therefore covered from ring 3 rather than here.
+#[allow(clippy::too_many_lines)]
+fn test_dispatch_openat2_native(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
+    use crate::fs::handle::OpenFlags;
+    use crate::syscall::number::{RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS, SYS_FS_OPENAT2};
+
+    const BASE: &[u8] = b"/openat2_native";
+    const INSIDE_BYTE: u8 = 0x5A;
+
+    if !crate::fs::selftest::is_mounted_rw("/") {
+        skips.record(
+            "Native openat2",
+            "/ is not mounted read-write yet (running before filesystem init)",
+        );
+        return Ok(());
+    }
+
+    // Staged through the VFS directly: a failure here is a defect in the
+    // fixture, not in the call under test, and must not be reported as one.
+    crate::fs::Vfs::mkdir_all("/openat2_native")?;
+    crate::fs::Vfs::write_file("/openat2_native/inside.txt", &[INSIDE_BYTE])?;
+    // Deliberately present: without it, the escaping-`..` case in (c) would
+    // return NotFound whether or not containment was enforced, and would pass
+    // for the wrong reason.
+    crate::fs::Vfs::write_file("/openat2_native_outside.txt", &[0xA5])?;
+
+    let mk = |path: &[u8], flags: u32, mode: u64, resolve: u64, dirfd: u64| SyscallArgs {
+        arg0: path.as_ptr() as u64,
+        arg1: path.len() as u64,
+        arg2: u64::from(flags),
+        arg3: mode,
+        arg4: resolve,
+        arg5: dirfd,
+    };
+
+    let dir = dispatch(
+        crate::syscall::number::SYS_FS_OPEN,
+        &SyscallArgs {
+            arg0: BASE.as_ptr() as u64,
+            arg1: BASE.len() as u64,
+            arg2: u64::from(OpenFlags::READ.union(OpenFlags::DIRECTORY).bits()),
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        },
+    );
+    if dir.value <= 0 {
+        serial_println!(
+            "[syscall]   FAIL: native openat2 fixture: open(O_DIRECTORY) returned {}",
+            dir.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let dirfd = dir.value as u64;
+
+    let mut failed = 0u32;
+    let mut check = |name: &str, got: i64, want: i64| {
+        if got != want {
+            serial_println!(
+                "[syscall]   FAIL: native openat2 {}: returned {}, expected {}",
+                name,
+                got,
+                want
+            );
+            failed += 1;
+        }
+    };
+
+    let einval = i64::from(KernelError::InvalidArgument.code());
+    let exdev = i64::from(KernelError::CrossDevice.code());
+
+    // (a) Linux's own RESOLVE_BENEATH value is an unknown bit here.
+    check(
+        "untranslated Linux resolve (0x08)",
+        dispatch(SYS_FS_OPENAT2, &mk(b"inside.txt", 1, 0, 0x08, dirfd)).value,
+        einval,
+    );
+    // ...and so is a bit above everything we define.
+    check(
+        "unknown resolve bit (1<<20)",
+        dispatch(SYS_FS_OPENAT2, &mk(b"inside.txt", 1, 0, 1 << 20, dirfd)).value,
+        einval,
+    );
+
+    // (b) Containment is decided before the handle is looked up.
+    check(
+        "absolute fragment under BENEATH with a bogus dirfd",
+        dispatch(
+            SYS_FS_OPENAT2,
+            &mk(b"/etc/passwd", 1, 0, RESOLVE_BENEATH, 0xDEAD_BEEF),
+        )
+        .value,
+        exdev,
+    );
+
+    // (c) An escaping `..` is refused even though the target really exists.
+    check(
+        "escaping `..` under BENEATH",
+        dispatch(
+            SYS_FS_OPENAT2,
+            &mk(
+                b"../openat2_native_outside.txt",
+                1,
+                0,
+                RESOLVE_BENEATH,
+                dirfd,
+            ),
+        )
+        .value,
+        exdev,
+    );
+
+    // (d) A contained open succeeds *and reads the right file*.  Success
+    //     alone would not distinguish the right base from a wrong one.
+    for (name, resolve) in [
+        ("contained open", RESOLVE_BENEATH),
+        ("plain relative open", 0),
+        (
+            "contained open with NO_SYMLINKS",
+            RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
+        ),
+    ] {
+        let r = dispatch(SYS_FS_OPENAT2, &mk(b"inside.txt", 1, 0, resolve, dirfd));
+        if r.value <= 0 {
+            serial_println!(
+                "[syscall]   FAIL: native openat2 {}: returned {}",
+                name,
+                r.value
+            );
+            failed += 1;
+            continue;
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let fd = r.value as u64;
+        let mut buf = [0u8; 1];
+        let read = dispatch(
+            crate::syscall::number::SYS_FS_READ,
+            &SyscallArgs {
+                arg0: fd,
+                arg1: buf.as_mut_ptr() as u64,
+                arg2: 1,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        );
+        if read.value != 1 || buf[0] != INSIDE_BYTE {
+            serial_println!(
+                "[syscall]   FAIL: native openat2 {}: read {} byte(s) = {:#x}, expected 1 byte \
+                 {:#x} (a wrong base opens successfully too — the byte is what tells them apart)",
+                name,
+                read.value,
+                buf[0],
+                INSIDE_BYTE
+            );
+            failed += 1;
+        }
+        let _ = dispatch(
+            crate::syscall::number::SYS_FS_CLOSE,
+            &SyscallArgs {
+                arg0: fd,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        );
+    }
+
+    // (e) The create mode is twelve bits wide (design-decisions.md §639).
+    let created = dispatch(
+        SYS_FS_OPENAT2,
+        &mk(
+            b"setuid.txt",
+            OpenFlags::WRITE.union(OpenFlags::CREATE).bits(),
+            0o4755,
+            RESOLVE_BENEATH,
+            dirfd,
+        ),
+    );
+    if created.value <= 0 {
+        serial_println!(
+            "[syscall]   FAIL: native openat2 CREATE with mode 0o4755 returned {}",
+            created.value
+        );
+        failed += 1;
+    } else {
+        #[allow(clippy::cast_sign_loss)]
+        let fd = created.value as u64;
+        let _ = dispatch(
+            crate::syscall::number::SYS_FS_CLOSE,
+            &SyscallArgs {
+                arg0: fd,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        );
+        match crate::fs::Vfs::metadata("/openat2_native/setuid.txt") {
+            Ok(md) if md.permissions == 0o4755 => {}
+            Ok(md) => {
+                serial_println!(
+                    "[syscall]   FAIL: native openat2 create mode stored {:#o}, expected 0o4755 \
+                     (the setuid bit was masked off — this is the §639 nine-vs-twelve-bit bug)",
+                    md.permissions
+                );
+                failed += 1;
+            }
+            Err(e) => {
+                serial_println!(
+                    "[syscall]   FAIL: native openat2 create-mode stat failed: {:?}",
+                    e
+                );
+                failed += 1;
+            }
+        }
+    }
+
+    let _ = dispatch(
+        crate::syscall::number::SYS_FS_CLOSE,
+        &SyscallArgs {
+            arg0: dirfd,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        },
+    );
+
+    // Fixture teardown is best-effort: a leftover file in the test tree is
+    // cosmetic, and reporting a cleanup failure as a test failure would blame
+    // this call for someone else's defect.
+    let _ = crate::fs::Vfs::remove("/openat2_native/setuid.txt");
+    let _ = crate::fs::Vfs::remove("/openat2_native/inside.txt");
+    let _ = crate::fs::Vfs::remove("/openat2_native_outside.txt");
+    let _ = crate::fs::Vfs::rmdir("/openat2_native");
+
+    if failed > 0 {
+        serial_println!(
+            "[syscall]   FAIL: native openat2: {} case(s) failed",
+            failed
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall]   Native openat2 (resolve gate, check order, dirfd base, 12-bit mode): OK"
+    );
     Ok(())
 }
 

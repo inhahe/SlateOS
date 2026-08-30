@@ -922,23 +922,42 @@ fn resolve_chdir_chain(operands: &[Operand]) -> PathBuf {
     for (dir, landed) in chdir_chain(operands) {
         match fs::metadata(&landed) {
             Ok(m) if m.is_dir() => base = landed,
-            Ok(_) => fail_chdir(dir, &io::Error::from(io::ErrorKind::NotADirectory)),
-            Err(e) => fail_chdir(dir, &e),
+            Ok(_) => fail_cannot_open(dir, &io::Error::from(io::ErrorKind::NotADirectory)),
+            Err(e) => fail_cannot_open(dir, &e),
         }
     }
     base
 }
 
-/// GNU's response to a `-C` that does not name a usable directory.
+/// GNU's response to something it needed and could not have: the archive, or
+/// a `-C` directory.
 ///
-/// Two lines and status 2, and the wording is GNU's rather than ours: it
-/// reports "Cannot open" even though nothing was being opened, and it calls
-/// the failure unrecoverable rather than accumulating it like a missing file
-/// operand. Both are worth copying exactly — a script that greps tar's stderr
-/// is the reason this text is an interface and not a message.
-fn fail_chdir(dir: &str, err: &io::Error) -> ! {
-    eprintln!("tar: {}: Cannot open: {}", quotef_os(dir), strerror(err));
+/// Two lines and status 2, and the wording is GNU's rather than ours in three
+/// ways worth not "improving": it says "Cannot open" for a `-C` even though
+/// nothing was being opened; it calls the failure unrecoverable rather than
+/// accumulating it the way a missing *file operand* is accumulated; and it
+/// says it twice, once naming the thing and once announcing the exit. A script
+/// that greps tar's stderr is why this text is an interface and not a message.
+///
+/// The distinction from [`exit_with_previous_errors`] is GNU's, and it is the
+/// difference between "I could not start" and "I finished, badly": a missing
+/// archive or `-C` stops everything immediately, whereas a missing operand
+/// among good ones still produces an archive containing the good ones.
+fn fail_cannot_open(what: &str, err: &io::Error) -> ! {
+    eprintln!("tar: {}: Cannot open: {}", quotef_os(what), strerror(err));
     eprintln!("tar: Error is not recoverable: exiting now");
+    process::exit(2);
+}
+
+/// GNU's closing line when members failed but the archive was still produced.
+///
+/// Status 2, the same as a fatal error — tar does not distinguish "could not
+/// start" from "finished with failures" by exit code, only by wording, so a
+/// caller that only checks `$?` cannot tell whether an archive exists. That is
+/// GNU's design and we copy it; a script wanting the difference has to test
+/// for the archive.
+fn exit_with_previous_errors() -> ! {
+    eprintln!("tar: Exiting with failure status due to previous errors");
     process::exit(2);
 }
 
@@ -969,9 +988,10 @@ fn create_archive(opts: &Options) -> Result<(), String> {
     let mut writer: Box<dyn Write> = if opts.archive == "-" {
         Box::new(io::stdout().lock())
     } else {
+        // GNU says "Cannot open" even when it is creating, and treats the
+        // failure as fatal rather than reporting it at the end.
         Box::new(
-            File::create(&opts.archive)
-                .map_err(|e| format!("cannot create '{}': {}", opts.archive, e))?,
+            File::create(&opts.archive).unwrap_or_else(|e| fail_cannot_open(&opts.archive, &e)),
         )
     };
 
@@ -986,7 +1006,7 @@ fn create_archive(opts: &Options) -> Result<(), String> {
         let file_arg = match operand {
             Operand::Chdir(dir) => {
                 if let Err(e) = env::set_current_dir(dir) {
-                    fail_chdir(dir, &e);
+                    fail_cannot_open(dir, &e);
                 }
                 continue;
             }
@@ -994,8 +1014,21 @@ fn create_archive(opts: &Options) -> Result<(), String> {
         };
 
         let path = Path::new(file_arg);
-        if !path.exists() {
-            let msg = format!("tar: {}: No such file or directory", file_arg);
+        // `exists()` was the wrong probe: it collapses every reason a path
+        // cannot be examined into "absent", so an operand inside a directory
+        // we lack search permission on was reported as "No such file or
+        // directory" — a claim about the filesystem that is false, and that
+        // sends the user looking for a typo instead of a permission. Ask for
+        // the metadata and report why it could not be had, which is also what
+        // GNU's "Cannot stat" is naming: the call it made, not a conclusion.
+        // `symlink_metadata`, not `metadata`, because tar archives a dangling
+        // symlink as a symlink rather than refusing it as a missing target.
+        if let Err(e) = fs::symlink_metadata(path) {
+            let msg = format!(
+                "tar: {}: Cannot stat: {}",
+                quotef_os(file_arg),
+                strerror(&e)
+            );
             eprintln!("{}", msg);
             errors.push(msg);
             continue;
@@ -1032,8 +1065,12 @@ fn create_archive(opts: &Options) -> Result<(), String> {
         .flush()
         .map_err(|e| format!("flush archive: {}", e))?;
 
+    // Each failure was already reported as it happened, which is why this
+    // says nothing about how many there were: GNU's summary is a verdict, not
+    // a count, and the count we used to print was also prefixed "tar: " twice
+    // because `main` adds its own.
     if !errors.is_empty() {
-        return Err(format!("tar: completed with {} error(s)", errors.len()));
+        exit_with_previous_errors();
     }
 
     Ok(())
@@ -1184,10 +1221,7 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
     let mut reader: Box<dyn Read> = if opts.archive == "-" {
         Box::new(io::stdin().lock())
     } else {
-        Box::new(
-            File::open(&opts.archive)
-                .map_err(|e| format!("cannot open '{}': {}", opts.archive, e))?,
-        )
+        Box::new(File::open(&opts.archive).unwrap_or_else(|e| fail_cannot_open(&opts.archive, &e)))
     };
 
     // A `-C` target is not created if it is missing. GNU chdirs into it, and a
@@ -1371,10 +1405,7 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
     }
 
     if !errors.is_empty() {
-        return Err(format!(
-            "tar: extraction completed with {} error(s)",
-            errors.len()
-        ));
+        exit_with_previous_errors();
     }
 
     Ok(())
@@ -1435,10 +1466,7 @@ fn list_archive(opts: &Options) -> Result<(), String> {
     let mut reader: Box<dyn Read> = if opts.archive == "-" {
         Box::new(io::stdin().lock())
     } else {
-        Box::new(
-            File::open(&opts.archive)
-                .map_err(|e| format!("cannot open '{}': {}", opts.archive, e))?,
-        )
+        Box::new(File::open(&opts.archive).unwrap_or_else(|e| fail_cannot_open(&opts.archive, &e)))
     };
 
     // Listing writes nothing to the filesystem, so `-C` cannot change the
@@ -1532,7 +1560,8 @@ fn main() {
     if args.len() < 2 || args.iter().any(|a| a == "--help" || a == "-h") {
         print_usage();
         if args.len() < 2 {
-            process::exit(1);
+            // GNU exits 2 for a usage error, the same as for a fatal one.
+            process::exit(2);
         }
         process::exit(0);
     }
@@ -1558,7 +1587,11 @@ fn main() {
 
     if let Err(e) = result {
         eprintln!("tar: {}", e);
-        process::exit(1);
+        // 2, not 1. GNU reserves 1 for "some files differ", which only
+        // `--compare` can produce, so exiting 1 for a fatal error told a
+        // script the archive had been read successfully and merely disagreed
+        // with the disk. Every failure tar can reach from here is a 2.
+        process::exit(2);
     }
 }
 

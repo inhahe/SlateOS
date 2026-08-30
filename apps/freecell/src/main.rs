@@ -3323,11 +3323,156 @@ mod tests {
         }
     }
 
+    // ── The rules the zones share ──────────────────────────────────
+
+    #[test]
+    fn stepping_back_from_the_start_of_a_ring_lands_on_its_end() {
+        assert_eq!(wrap_back(0, 4), 3);
+        assert_eq!(wrap_back(1, 4), 0);
+        assert_eq!(wrap_back(3, 4), 2);
+    }
+
+    #[test]
+    fn stepping_forward_off_the_end_of_a_ring_lands_on_its_start() {
+        assert_eq!(wrap_forward(3, 4), 0);
+        assert_eq!(wrap_forward(0, 4), 1);
+        assert_eq!(wrap_forward(2, 4), 3);
+    }
+
+    #[test]
+    fn a_ring_with_nothing_in_it_does_not_underflow() {
+        // The three zones each wrote `len - 1` for themselves, which is a
+        // subtraction below zero the moment a zone is empty. Nothing empties a
+        // zone today; the point is that nothing has to be checked before this
+        // is called.
+        assert_eq!(wrap_back(0, 0), 0);
+        assert_eq!(wrap_forward(0, 0), 0);
+        assert_eq!(wrap_back(0, 1), 0);
+        assert_eq!(wrap_forward(0, 1), 0);
+    }
+
+    #[test]
+    fn an_index_past_the_end_of_a_ring_is_brought_back_inside_it() {
+        assert_eq!(wrap_forward(9, 4), 0);
+        assert_eq!(wrap_back(9, 4), 8);
+    }
+
+    #[test]
+    fn the_cursor_walks_all_the_way_round_every_zone_and_back() {
+        for (start, len) in [
+            (FocusArea::FreeCell(0), FREE_CELL_COUNT),
+            (FocusArea::Foundation(0), FOUNDATION_COUNT),
+            (FocusArea::Tableau(0), TABLEAU_COLS),
+        ] {
+            let mut state = empty_game();
+            state.focus = start;
+            for _ in 0..len {
+                state.navigate_right();
+            }
+            assert_eq!(state.focus, start, "{start:?} did not come back round");
+            for _ in 0..len {
+                state.navigate_left();
+            }
+            assert_eq!(
+                state.focus, start,
+                "{start:?} did not come back the other way"
+            );
+        }
+    }
+
+    #[test]
+    fn the_top_row_the_cursor_rises_into_is_split_where_the_cells_end() {
+        // Both halves used to be found with a literal `4`, which is
+        // `FREE_CELL_COUNT` written out.
+        for col in 0..TABLEAU_COLS {
+            let mut state = empty_game();
+            state.focus = FocusArea::Tableau(col);
+            state.navigate_up();
+            let want = if col < FREE_CELL_COUNT {
+                FocusArea::FreeCell(col)
+            } else {
+                FocusArea::Foundation(col - FREE_CELL_COUNT)
+            };
+            assert_eq!(state.focus, want, "column {col} rose to the wrong slot");
+        }
+    }
+
+    #[test]
+    fn a_foundation_the_cursor_drops_from_lands_on_the_column_under_it() {
+        for idx in 0..FOUNDATION_COUNT {
+            let mut state = empty_game();
+            state.focus = FocusArea::Foundation(idx);
+            state.navigate_down();
+            assert_eq!(
+                state.focus,
+                FocusArea::Tableau(idx + FREE_CELL_COUNT),
+                "foundation {idx} dropped to the wrong column"
+            );
+        }
+    }
+
+    #[test]
+    fn a_king_is_never_placeable_on_a_foundation_that_is_already_full() {
+        // `== top + 1` on a `u8` wraps 255 to 0, which would have called an ace
+        // placeable on a foundation whose top read 255.
+        let ace = card(Suit::Hearts, Rank::Ace);
+        assert!(ace.can_place_on_foundation(0));
+        assert!(!ace.can_place_on_foundation(u8::MAX));
+        assert!(!ace.can_place_on_foundation(13));
+        assert!(card(Suit::Hearts, Rank::King).can_place_on_foundation(12));
+    }
+
+    #[test]
+    fn a_card_sent_home_is_in_exactly_one_place_afterwards() {
+        // Both auto-run loops used to take the card off the board on the line
+        // before the foundation was reached.
+        let mut state = empty_game();
+        state.tableau[0].push(card(Suit::Hearts, Rank::Ace));
+        state.free_cells[0] = Some(card(Suit::Spades, Rank::Ace));
+
+        let moved = state.auto_move_to_foundations(AutoRun::Asked);
+
+        assert_eq!(moved, 2, "not both aces went home");
+        assert!(state.tableau[0].is_empty());
+        assert_eq!(state.free_cells[0], None);
+        assert_eq!(state.foundation_total(), 2, "a card was made or lost");
+    }
+
+    #[test]
+    fn a_card_that_is_not_there_is_not_sent_home() {
+        let mut state = empty_game();
+        let ace = card(Suit::Hearts, Rank::Ace);
+        // The column is empty, so there is nothing to take.
+        assert!(!state.send_home(MoveLocation::Tableau(0), ace, true));
+        assert_eq!(state.foundation_total(), 0, "a card came from nowhere");
+        assert!(state.undo_stack.is_empty(), "a step was recorded anyway");
+    }
+
+    #[test]
+    fn a_column_the_board_does_not_have_sends_nothing_home() {
+        let mut state = empty_game();
+        let ace = card(Suit::Hearts, Rank::Ace);
+        assert!(!state.send_home(MoveLocation::Tableau(99), ace, true));
+        assert!(!state.send_home(MoveLocation::FreeCell(99), ace, true));
+        assert_eq!(state.foundation_total(), 0);
+    }
+
     // ── Rendering tests ────────────────────────────────────────────
 
     /// The window wrapped around a game whose deal is a fact, not a draw.
     fn app() -> FreeCell {
         FreeCell::with_seed(42)
+    }
+
+    /// Where a control sits on the strip.
+    ///
+    /// Found rather than written down, so a test says which *button* it means
+    /// and keeps meaning it when the strip gains one.
+    fn control_index(want: Control) -> usize {
+        Control::ALL
+            .iter()
+            .position(|c| *c == want)
+            .expect("every control is in Control::ALL")
     }
 
     /// The same window around a board a test built by hand.
@@ -3359,6 +3504,93 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    // ── The room reading ───────────────────────────────────────────
+
+    #[test]
+    fn the_footer_reports_how_much_room_is_left() {
+        // The number a freecell player plans against -- it caps how long a run
+        // can be shifted -- and it is on screen nowhere else.
+        let mut state = empty_game();
+        state.free_cells[0] = Some(card(Suit::Spades, Rank::King));
+        state.free_cells[1] = Some(card(Suit::Hearts, Rank::King));
+        state.tableau[0].push(card(Suit::Clubs, Rank::King));
+        let app = app_with(state);
+
+        let text = drawn_text(&app, FreeCell::SIZE);
+        assert!(
+            text.iter().any(|t| t == "2 cells   7 columns"),
+            "the room reading is not what the board says: {text:?}"
+        );
+    }
+
+    #[test]
+    fn the_room_reading_follows_the_board() {
+        let mut app = app();
+        let before = drawn_text(&app, FreeCell::SIZE);
+        app.state.focus = FocusArea::Tableau(0);
+        app.key_at(&probe::press(Key::F), FreeCell::SIZE);
+        let after = drawn_text(&app, FreeCell::SIZE);
+
+        assert!(
+            before.iter().any(|t| t.starts_with("4 cells")),
+            "a fresh deal should have four cells free: {before:?}"
+        );
+        assert!(
+            after.iter().any(|t| t.starts_with("3 cells")),
+            "parking a card did not change the reading: {after:?}"
+        );
+    }
+
+    #[test]
+    fn the_keyboard_hint_goes_before_the_room_reading_does() {
+        // Two captions share the right of the strip and only one of them is a
+        // fact about this board; the reminder is what a narrowing window drops
+        // first.
+        let app = app();
+        let wide = drawn_text(&app, (1600.0, 800.0));
+        let narrow = drawn_text(&app, (760.0, 800.0));
+
+        let hint = |t: &[String]| t.iter().any(|s| s.starts_with("Tab/Arrows"));
+        let room = |t: &[String]| t.iter().any(|s| s.ends_with("columns"));
+
+        assert!(hint(&wide) && room(&wide), "a wide window lost one of them");
+        assert!(!hint(&narrow), "the reminder held its ground: {narrow:?}");
+        assert!(room(&narrow), "the reading went first: {narrow:?}");
+    }
+
+    #[test]
+    fn a_footer_with_no_room_for_either_caption_still_draws_its_buttons() {
+        let app = app();
+        for width in [0.0, 1.0, 120.0, 320.0] {
+            let text = drawn_text(&app, (width, 800.0));
+            assert!(
+                !text.iter().any(|s| s.ends_with("columns")),
+                "the reading was squeezed in at {width}: {text:?}"
+            );
+        }
+        // And nothing about the narrow cases escapes the window.
+        for width in [0.0, 1.0, 120.0, 320.0] {
+            assert!(
+                app.frame(width, 800.0).is_balanced(),
+                "the frame is unbalanced at {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_on_the_room_reading_does_not_move_a_card() {
+        let mut app = app();
+        let cells = app.state.free_cells;
+        let moves = app.state.move_count;
+        assert_eq!(
+            probe::click(&mut app, Target::Room),
+            EventResult::Consumed,
+            "the reading let the click fall through it"
+        );
+        assert_eq!(app.state.free_cells, cells);
+        assert_eq!(app.state.move_count, moves);
     }
 
     #[test]
@@ -3768,7 +4000,10 @@ mod tests {
         // The button runs the key rather than the method the key calls, which is
         // what makes one refusal cover both ways in.
         let mut app = app_with(won_board());
-        probe::click(&mut app, Target::Control(0));
+        probe::click(
+            &mut app,
+            Target::Control(byte(control_index(Control::Undo))),
+        );
         assert!(app.state.won, "the win was undone from the sheet");
     }
 
@@ -3815,6 +4050,145 @@ mod tests {
             .centre();
         assert_eq!(app.click(x, y, MouseButton::Right), EventResult::Ignored);
         assert!(app.state.selection.is_none());
+    }
+
+    // ── The Free move ──────────────────────────────────────────────
+
+    #[test]
+    fn f_parks_the_focused_column_in_a_free_cell() {
+        // The move the game is named after. It was implemented and tested and
+        // reachable by nothing before the window went on.
+        let mut state = empty_game();
+        state.tableau[3].push(card(Suit::Spades, Rank::Nine));
+        state.focus = FocusArea::Tableau(3);
+        let mut app = app_with(state);
+
+        app.key_at(&probe::press(Key::F), FreeCell::SIZE);
+
+        assert_eq!(
+            app.state.free_cells[0],
+            Some(card(Suit::Spades, Rank::Nine)),
+            "the card did not reach a cell"
+        );
+        assert!(
+            app.state.tableau[3].is_empty(),
+            "the card is in both places"
+        );
+        assert_eq!(app.state.move_count, 1, "one press is one move");
+    }
+
+    #[test]
+    fn the_free_button_parks_a_card_just_as_the_key_does() {
+        let mut by_click = {
+            let mut state = empty_game();
+            state.tableau[0].push(card(Suit::Spades, Rank::Nine));
+            app_with(state)
+        };
+        let mut by_key = {
+            let mut state = empty_game();
+            state.tableau[0].push(card(Suit::Spades, Rank::Nine));
+            app_with(state)
+        };
+
+        probe::click(
+            &mut by_click,
+            Target::Control(byte(control_index(Control::Free))),
+        );
+        by_key.key_at(&probe::press(Key::F), FreeCell::SIZE);
+
+        assert_eq!(
+            by_click.state.free_cells, by_key.state.free_cells,
+            "the button and the key parked different cards"
+        );
+        assert_eq!(by_click.state.move_count, by_key.state.move_count);
+    }
+
+    #[test]
+    fn f_does_nothing_when_the_cursor_is_not_on_a_column() {
+        // A free cell and a foundation have no card to send to a cell, so the
+        // press does nothing rather than guessing a column.
+        for focus in [FocusArea::FreeCell(0), FocusArea::Foundation(0)] {
+            let mut state = empty_game();
+            state.tableau[0].push(card(Suit::Spades, Rank::Nine));
+            state.focus = focus;
+            let mut app = app_with(state);
+
+            app.key_at(&probe::press(Key::F), FreeCell::SIZE);
+
+            assert_eq!(
+                app.state.free_cells[0], None,
+                "{focus:?} guessed a column to park"
+            );
+            assert_eq!(app.state.move_count, 0, "{focus:?} counted a move");
+        }
+    }
+
+    #[test]
+    fn f_does_nothing_when_every_cell_is_full() {
+        let mut state = empty_game();
+        state.tableau[0].push(card(Suit::Spades, Rank::Nine));
+        for (i, rank) in [Rank::King, Rank::Queen, Rank::Jack, Rank::Ten]
+            .into_iter()
+            .enumerate()
+        {
+            state.free_cells[i] = Some(card(Suit::Spades, rank));
+        }
+        let mut app = app_with(state);
+
+        app.key_at(&probe::press(Key::F), FreeCell::SIZE);
+
+        assert_eq!(
+            app.state.tableau[0].len(),
+            1,
+            "the card left a column with nowhere to go"
+        );
+        assert_eq!(app.state.move_count, 0);
+    }
+
+    #[test]
+    fn a_parked_card_comes_back_on_one_undo() {
+        let mut state = empty_game();
+        state.tableau[2].push(card(Suit::Spades, Rank::Nine));
+        state.focus = FocusArea::Tableau(2);
+        let mut app = app_with(state);
+
+        app.key_at(&probe::press(Key::F), FreeCell::SIZE);
+        app.key_at(&probe::press(Key::Z), FreeCell::SIZE);
+
+        assert_eq!(
+            app.state.tableau[2],
+            vec![card(Suit::Spades, Rank::Nine)],
+            "one undo did not put the parked card back"
+        );
+        assert_eq!(app.state.free_cells[0], None);
+        assert_eq!(app.state.move_count, 0, "the count did not come back too");
+    }
+
+    #[test]
+    fn parking_an_ace_sends_it_straight_home() {
+        // Parking runs the same follow-on auto-move every placement does, so a
+        // card that is safe to send home does not sit in a cell for a turn.
+        let mut state = empty_game();
+        state.tableau[0].push(card(Suit::Hearts, Rank::Ace));
+        state.focus = FocusArea::Tableau(0);
+        let mut app = app_with(state);
+
+        app.key_at(&probe::press(Key::F), FreeCell::SIZE);
+
+        assert_eq!(
+            app.state.foundations[Suit::Hearts.index()],
+            vec![card(Suit::Hearts, Rank::Ace)],
+            "the ace stopped in a cell"
+        );
+        assert_eq!(app.state.free_cells[0], None);
+    }
+
+    #[test]
+    fn f_is_refused_on_a_won_board() {
+        let mut app = app_with(won_board());
+        app.key_at(&probe::press(Key::F), FreeCell::SIZE);
+        assert!(app.state.won, "the win was played out of");
+        assert_eq!(app.state.free_cells, [None; FREE_CELL_COUNT]);
     }
 
     #[test]

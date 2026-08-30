@@ -54,13 +54,37 @@
 //! # Deliberately absent
 //!
 //! `trap` and job control (both need signal handling this crate does not
-//! have), aliases, `getopts`, arrays, `select`, process substitution, brace
-//! expansion (dash has none either — `echo {a,b}` prints `{a,b}`), and
-//! `test`/`[` as builtins: the `test` binary beside this one is the same
-//! program, so a script gets the right answer through `PATH`. Each is a
-//! documented gap rather than an accident; `osh` has them all.
+//! have), aliases, `getopts`, `times`, `readonly`, `local`, arrays, `select`,
+//! process substitution, brace expansion (dash has none either — `echo {a,b}`
+//! prints `{a,b}`), and `test`/`[` as builtins: the `test` binary beside this
+//! one is the same program, so a script gets the right answer through `PATH`.
+//! Each is a documented gap rather than an accident; `osh` has them all.
+//!
+//! # Where it still differs from dash, and why
+//!
+//! `scripts/sh-diff.sh` runs both shells over ~225 cases and compares stdout,
+//! status, stderr and the files left on disk byte for byte. Everything passes
+//! except the list above and two wordings we prefer (`echo $(( ))` is 0 here,
+//! as in bash and ksh, where dash calls it a syntax error; a failed `cd` names
+//! the errno the way bash does). What the harness *cannot* see, because no case
+//! can reach it from a script, is the shape of three things below:
+//!
+//! * **`&` backgrounds only a single external command.** There is no `fork`, so
+//!   a builtin, a function or a compound after `&` runs in the foreground and
+//!   then reports 0. [`Shell::run_background`] draws the line.
+//! * **Descriptors above 2 reach an external child on unix only.** [`Command`]
+//!   names three; the rest are installed between fork and exec by
+//!   [`extra_fds`], which has no Windows counterpart. In-process builtins see
+//!   them everywhere, since they read the [`Io`] table directly.
+//! * **`n>&-` gives a child the null device, not a closed descriptor.** See
+//!   [`stdio_for`]: a child that writes to it is discarded rather than getting
+//!   `EBADF`. Visible only to a program that tests for the error.
 
-use coreutils::diag;
+// POSIX's `strerror` text, not the host's: `Display` on an `io::Error` gives
+// `The file exists. (os error 80)` on a Windows host and `File exists` on
+// SlateOS, and a shell's diagnostics are an interface — a script that greps
+// them, and a differential harness that compares them, both read the words.
+use coreutils::errmsg::strerror;
 use coreutils::fnmatch;
 use coreutils::quote::quotef_os;
 use coreutils::stdfd;
@@ -2095,6 +2119,113 @@ impl Io {
     }
 }
 
+// `missing_const_for_thread_local` is a false positive on rustc/clippy 1.95:
+// the initializer below already *is* a `const` block, and the lint fires
+// anyway. Reproduced in a nine-line crate containing nothing but a
+// `thread_local!` whose initializer is `const { RefCell::new(0) }`, so it is
+// not something about this one. Suppressed rather than worked around because
+// the only "fix" the lint would accept is the code that is already written.
+thread_local! {
+    /// Where a diagnostic from the shell itself goes *now*.
+    ///
+    /// A shell's own complaints are subject to the redirections of the command
+    /// they are about: `nosuchcommand 2>err` puts `not found` in `err`, and a
+    /// script that writes `exec 2>log` expects everything after it to land in
+    /// the log. A builtin is handed its [`Io`] and can honour that; a
+    /// diagnostic is raised from anywhere in the executor and cannot be, so the
+    /// destination is kept here instead of threaded through every call.
+    ///
+    /// Thread-local rather than a `static` because [`Fd`] holds an `Rc`, and
+    /// because the shell is single-threaded anyway — this is a stack of one
+    /// value, saved and restored by [`ErrScope`].
+    #[allow(
+        clippy::missing_const_for_thread_local,
+        reason = "false positive on rustc/clippy 1.95: the initializer already \
+                  *is* a `const` block. Reproduced in a nine-line crate whose \
+                  only content is a `thread_local!` initialized with \
+                  `const { RefCell::new(0) }`, so it is not something about \
+                  this one. The only change the lint would accept is the code \
+                  that is already written."
+    )]
+    static CURRENT_ERR: RefCell<Fd> = const { RefCell::new(Fd::Inherit(2)) };
+}
+
+/// Point shell diagnostics at `io`'s descriptor 2 until the guard is dropped.
+///
+/// A guard rather than a plain setter because every path out of a command must
+/// put the old destination back — including the `?` that unwinds a `Flow::Exit`
+/// out of the middle of a redirected function, which no explicit restore at the
+/// bottom of the function would ever run.
+struct ErrScope(Fd);
+
+impl ErrScope {
+    fn new(io: &Io) -> Self {
+        ErrScope(Self::point_at(io.get(2)))
+    }
+
+    /// Redirect diagnostics without a guard, returning what was there before.
+    ///
+    /// Used inside [`Shell::apply_redirs`], where the destination changes as
+    /// each redirection is applied and the guard already exists.
+    fn point_at(fd: Fd) -> Fd {
+        CURRENT_ERR.with(|slot| slot.replace(fd))
+    }
+}
+
+impl Drop for ErrScope {
+    fn drop(&mut self) {
+        let _ = ErrScope::point_at(self.0.clone());
+    }
+}
+
+/// Write one diagnostic to wherever the shell's standard error points now.
+///
+/// The standard-output flush around the write is what keeps
+/// `echo a; nosuch >out 2>&1` in order: descriptors 1 and 2 may share a
+/// destination, and this shell's own standard output is buffered. It brackets
+/// the write because the two arms need it on opposite sides — a diagnostic that
+/// goes *into* the stdout buffer needs the flush after, one that goes to the
+/// same file by another descriptor needs it before.
+fn diag_line(line: &str) {
+    let mut bytes = Vec::with_capacity(line.len().saturating_add(1));
+    bytes.extend_from_slice(line.as_bytes());
+    bytes.push(b'\n');
+    diag_out(&bytes);
+}
+
+/// [`diag_line`] without the newline, for a message assembled from bytes.
+fn diag_out(bytes: &[u8]) {
+    let fd = CURRENT_ERR.with(|slot| slot.borrow().clone());
+    // Not `Io::default()` with a `set`, because that would allocate a map for
+    // every diagnostic; the shape below is what `write_fd` reads.
+    let mut io = Io::default();
+    io.set(2, fd);
+    flush_stdout();
+    // Nowhere left to report a diagnostic that cannot be written; `write_fd`'s
+    // `Inherit(2)` arm records the loss in `stdfd`'s flag, which is the one
+    // that reaches the exit status.
+    let _ = write_fd(&io, 2, bytes);
+    flush_stdout();
+}
+
+/// Push this shell's buffered standard output out.
+fn flush_stdout() {
+    let mut out = stdfd::Stream::stdout();
+    let _ = out.flush();
+}
+
+/// `eprintln!`-shaped diagnostic, routed through [`diag_line`].
+///
+/// This shadows [`coreutils::diag`] deliberately, exactly as `sed.rs` does with
+/// its flushing variant: a shell diagnostic that ignored the current
+/// redirections would be a bug, and the way to make that unwritable is for the
+/// only `diag!` in scope to be the one that honours them.
+macro_rules! diag {
+    ($($arg:tt)*) => {
+        crate::diag_line(&::std::format!($($arg)*))
+    };
+}
+
 /// A path removed when the last holder lets go.
 #[derive(Debug)]
 struct TempPath(std::path::PathBuf);
@@ -2149,6 +2280,7 @@ struct Snapshot {
     status: u8,
     opts: Opts,
     cwd: Option<std::path::PathBuf>,
+    exec_io: Option<Io>,
 }
 
 /// The shell.
@@ -2182,6 +2314,25 @@ struct Shell {
     /// command that has no command name, which POSIX says takes its status
     /// from exactly that — `x=$(false)` is a failing command.
     last_subst: Option<u8>,
+    /// The table an `exec` with no command installed *in the redirection scope
+    /// now running*. `None` — the ordinary case — means "whatever this construct
+    /// was entered with".
+    ///
+    /// Scoped, not global, and that is the whole of the design. A real shell
+    /// implements `{ …; } 2>outer` by saving descriptor 2, pointing it at
+    /// `outer`, running, and putting the saved one back; an `exec 2>inner` in
+    /// between overwrites 2 for the rest of the group and is then thrown away
+    /// with it. [`Shell::in_redir_scope`] is that save-and-restore, and clearing
+    /// this field on the way in is what makes [`Shell::io_now`] able to answer
+    /// "did an `exec` happen *here*" without a generation counter: it is `Some`
+    /// only inside the scope that set it.
+    ///
+    /// A table rather than real `dup2`s for the reason [`Io`] gives — this
+    /// shell's builtins run in its own process, and the Windows host build has
+    /// no descriptors to `dup2` in the first place. What it costs is that a
+    /// descriptor above 2 reaches an external command only on unix, where
+    /// [`Shell::build_command`] installs it with `pre_exec`.
+    exec_io: Option<Io>,
     /// Whether the prompt is printed and errors are non-fatal.
     interactive: bool,
 }
@@ -2216,6 +2367,7 @@ impl Shell {
             bg: Vec::new(),
             cond_depth: 0,
             last_subst: None,
+            exec_io: None,
             interactive: false,
         }
     }
@@ -2228,6 +2380,7 @@ impl Shell {
             status: self.status,
             opts: self.opts,
             cwd: env::current_dir().ok(),
+            exec_io: self.exec_io.clone(),
         }
     }
 
@@ -2235,21 +2388,66 @@ impl Shell {
     ///
     /// We have no `fork`, so a subshell is emulated: run in this process, then
     /// put the state back. It covers what POSIX says a subshell must not leak —
-    /// variables, functions, positional parameters, options and the working
-    /// directory. What it cannot cover is a change to the *process*, so `exec`
-    /// and `ulimit` inside `( … )` are noted as gaps in the module docs rather
-    /// than silently half-working.
+    /// variables, functions, positional parameters, options, the working
+    /// directory and the descriptors `exec` gave the shell. What it cannot
+    /// cover is a change to the *process* — `exec cmd` inside `( … )` really
+    /// does replace this one, and `ulimit` is absent — both noted in the
+    /// module docs rather than silently half-working.
     fn restore(&mut self, snap: Snapshot) {
         self.vars = snap.vars;
         self.funcs = snap.funcs;
         self.params = snap.params;
         self.status = snap.status;
         self.opts = snap.opts;
+        self.exec_io = snap.exec_io;
         if let Some(dir) = snap.cwd {
             // Nothing useful to do if the directory we came from has been
             // removed under us; the shell keeps running where it is.
             let _ = env::set_current_dir(dir);
         }
+    }
+
+    /// The table to run the *next* command of a list with, given the table the
+    /// list was entered with.
+    ///
+    /// A wholesale replacement rather than an overlay, because [`exec_io`] was
+    /// itself built by applying `exec`'s redirections *to* the table in force
+    /// when `exec` ran — it already carries whatever the enclosing construct
+    /// established, with `exec`'s own changes on top. Overlaying it again, in
+    /// either direction, would get one of the two orders wrong: `exec >log`
+    /// before a `{ …; } >out` must lose to the group, and an `exec >log`
+    /// *inside* that group must beat it.
+    ///
+    /// [`exec_io`]: Shell::exec_io
+    fn io_now(&self, entry: &Io) -> Io {
+        self.exec_io.clone().unwrap_or_else(|| entry.clone())
+    }
+
+    /// The table the shell starts from where there is no enclosing command —
+    /// the top of a script, a prompt, the inside of a command substitution.
+    fn base_io(&self) -> Io {
+        self.exec_io.clone().unwrap_or_default()
+    }
+
+    /// Run `body` with its own `exec` scope, if `on`.
+    ///
+    /// `on` is "this construct has redirections of its own". Without them there
+    /// is nothing to put back and `exec` inside must persist: `{ exec 2>log; };
+    /// nosuch` logs, exactly as the same two commands written flat would. With
+    /// them the construct owns descriptor 2 for its duration and hands it back
+    /// on the way out, so `{ exec 2>inner; } 2>outer; nosuch` does not.
+    ///
+    /// A closure rather than a guard because the guard would need `&mut self`
+    /// for its whole lifetime; taking the closure's return value means a `?`
+    /// inside `body` still leaves through here rather than around it.
+    fn in_redir_scope<T>(&mut self, on: bool, body: impl FnOnce(&mut Self) -> T) -> T {
+        if !on {
+            return body(self);
+        }
+        let saved = self.exec_io.take();
+        let r = body(self);
+        self.exec_io = saved;
+        r
     }
 
     fn var(&self, name: &[u8]) -> Option<&Var> {
@@ -2429,10 +2627,13 @@ impl Shell {
                     continue;
                 }
             }
+            // Every field splitting produced is kept, empty ones included: with
+            // a non-whitespace `IFS` an empty field is *data*, and `IFS=:; set
+            // -- $PATH` on a `PATH` with an empty entry has to keep the hole
+            // where it was. The only expansion that yields no field at all is
+            // one that produced no bytes and had no quotes, and that is the
+            // case handled above.
             for f in fields {
-                if f.len() == 0 && !f.quotes {
-                    continue;
-                }
                 match if self.opts.noglob() { None } else { glob(&f) } {
                     // Not a pattern, or a pattern that matched nothing: the
                     // text stands as written.
@@ -3066,7 +3267,15 @@ impl Shell {
         match arith_eval(self, &text) {
             Ok(v) => Ok(v.to_string().into_bytes()),
             Err(e) => {
-                diag!("sh: arithmetic: {e}");
+                // dash's shape, expression text and all — `arithmetic
+                // expression: division by zero: "1/0"`. The text is what makes
+                // the message usable: the expression the script *wrote* was
+                // `$((x/y))`, and only the substituted form says what the
+                // values were.
+                diag!(
+                    "sh: arithmetic expression: {e}: \"{}\"",
+                    String::from_utf8_lossy(&text)
+                );
                 Err(Flow::Exit(2))
             }
         }
@@ -3147,6 +3356,85 @@ fn pipe_files() -> std::io::Result<(File, File)> {
             File::from(OwnedHandle::from(w)),
         ))
     }
+}
+
+// The three calls needed to install a descriptor above 2 in a child, and to ask
+// whether one is open at all.
+//
+// Declared here rather than taken from `libc`, which this crate deliberately
+// does not depend on: `std` already links the platform C library on every unix
+// target, and these are the only symbols from it the shell wants. All three are
+// async-signal-safe, which is what makes them usable after `fork`.
+//
+// (A plain comment, not a doc comment: rustdoc does not document an extern
+// block, and `unused_doc_comments` says so.)
+#[cfg(unix)]
+unsafe extern "C" {
+    fn dup(oldfd: i32) -> i32;
+    fn dup2(oldfd: i32, newfd: i32) -> i32;
+    fn close(fd: i32) -> i32;
+}
+
+/// Does this process actually hold descriptor `n` open?
+///
+/// Asked before `n<&m` copies `m`, because a table that only remembers what the
+/// *shell* did to a descriptor cannot tell an inherited-and-open one from an
+/// inherited-and-absent one: `cat <&9` in a shell started with nine descriptors
+/// is legitimate, and in one started with three is an error the script must
+/// hear about.
+///
+/// `dup` and `close` rather than `fcntl(F_GETFD)`, which would need an `F_GETFD`
+/// constant this crate has no portable source for. The pair asks the kernel the
+/// same question and costs two syscalls on a path that is already opening files.
+#[cfg(unix)]
+fn fd_is_open(n: i32) -> bool {
+    // SAFETY: both calls take a descriptor number and return one; neither reads
+    // or writes memory, so there are no pointer invariants to uphold. The
+    // duplicate is closed on the only path that creates one, and a `dup` that
+    // failed returned -1 rather than a descriptor, so nothing leaks.
+    unsafe {
+        let d = dup(n);
+        if d < 0 {
+            return false;
+        }
+        close(d);
+        true
+    }
+}
+
+/// Nothing to ask on a host that has no descriptor numbers to ask about.
+///
+/// The Windows build is a development convenience — see the module docs — and a
+/// descriptor that is not there fails when it is used rather than when it is
+/// named. Reporting "open" here is the answer that leaves that path alone.
+#[cfg(not(unix))]
+fn fd_is_open(_n: i32) -> bool {
+    true
+}
+
+/// The descriptors above 2 a child has to be handed by hand.
+///
+/// [`Command`] names three and no more, so `exec 3< f; cat <&3` needs the rest
+/// installed between `fork` and `exec`. Owned duplicates rather than raw
+/// numbers, so that the closure which uses them owns them too and none can be
+/// closed between here and the fork.
+#[cfg(unix)]
+fn extra_fds(io: &Io) -> std::io::Result<Vec<(i32, File)>> {
+    let mut out = Vec::new();
+    for (&n, fd) in &io.fds {
+        if n <= 2 {
+            continue;
+        }
+        match fd {
+            Fd::Open(f) => out.push((n, f.try_clone()?)),
+            Fd::Inherit(m) => out.push((n, dup_std(*m)?)),
+            // Nothing to install: a descriptor the child was never given is
+            // already closed, `Command` having opened everything else with
+            // close-on-exec set.
+            Fd::Closed => {}
+        }
+    }
+    Ok(out)
 }
 
 /// What a child should be given for its descriptor `n`.
@@ -3250,6 +3538,12 @@ impl Shell {
         if redirs.is_empty() {
             return Ok(Some(base.clone()));
         }
+        // A diagnostic from a later redirection honours an earlier one, because
+        // that is the order the descriptors are established in: `2>err >/nope`
+        // puts the complaint in `err`, and `>/nope 2>err` does not. The guard
+        // is dropped on the way out and the caller installs its own from the
+        // table this returns.
+        let _err = ErrScope::new(base);
         let mut io = base.clone();
         for r in redirs {
             let default_fd = match r.op {
@@ -3279,7 +3573,7 @@ impl Shell {
                             io.temps.push(Rc::new(guard));
                         }
                         Err(e) => {
-                            diag!("sh: cannot create here-document: {e}");
+                            diag!("sh: cannot create here-document: {}", strerror(&e));
                             return Ok(None);
                         }
                     }
@@ -3288,18 +3582,42 @@ impl Shell {
                     let t = self.expand_to_bytes(&r.target)?;
                     if t == b"-" {
                         io.set(n, Fd::Closed);
-                        continue;
-                    }
-                    match parse_int(&t).and_then(|v| i32::try_from(v).ok()) {
-                        // `2>&1` copies whatever descriptor 1 is *now*, which is
-                        // why order matters: `>f 2>&1` and `2>&1 >f` differ.
-                        Some(m) => {
-                            let src = io.get(m);
-                            io.set(n, src);
-                        }
-                        None => {
-                            diag!("sh: {}: bad file descriptor", coreutils::quote::quotef(&t));
-                            return Ok(None);
+                    } else {
+                        match parse_int(&t).and_then(|v| i32::try_from(v).ok()) {
+                            // `2>&1` copies whatever descriptor 1 is *now*,
+                            // which is why order matters: `>f 2>&1` and
+                            // `2>&1 >f` differ.
+                            Some(m) => {
+                                let src = io.get(m);
+                                // Copying a descriptor that is not open is an
+                                // error, not a silent nothing: `exec 3<&-` then
+                                // `cat <&3` would otherwise run `cat` on an
+                                // empty input and report success, which is the
+                                // worst possible answer — the script sees no
+                                // data and no complaint.
+                                let usable = match &src {
+                                    Fd::Closed => false,
+                                    Fd::Inherit(k) => fd_is_open(*k),
+                                    Fd::Open(_) => true,
+                                };
+                                if !usable {
+                                    diag!("sh: {m}: Bad file descriptor");
+                                    return Ok(None);
+                                }
+                                io.set(n, src);
+                            }
+                            None => {
+                                diag!("sh: {}: bad file descriptor", coreutils::quote::quotef(&t));
+                                // Fatal, where a descriptor that merely is not
+                                // open is not. dash draws the same line and
+                                // calls this one a syntax error: a target that
+                                // is not a number cannot be a typo for a
+                                // descriptor the script might have opened, so
+                                // there is no reading of the script under which
+                                // carrying on does what it says.
+                                self.special_error(2)?;
+                                return Ok(None);
+                            }
                         }
                     }
                 }
@@ -3331,12 +3649,24 @@ impl Shell {
                     match opts.open(&path) {
                         Ok(f) => io.set(n, Fd::Open(Rc::new(f))),
                         Err(e) => {
-                            diag!("sh: cannot open {}: {e}", quotef_os(&path));
+                            diag!(
+                                "sh: cannot {} {}: {}",
+                                if matches!(r.op, RedirOp::Read) {
+                                    "open"
+                                } else {
+                                    "create"
+                                },
+                                quotef_os(&path),
+                                strerror(&e)
+                            );
                             return Ok(None);
                         }
                     }
                 }
             }
+            // Whatever descriptor 2 has become is where the *next* redirection
+            // complains. See the guard above.
+            let _ = ErrScope::point_at(io.get(2));
         }
         Ok(Some(io))
     }
@@ -3410,18 +3740,27 @@ impl Plan {
 impl Shell {
     /// Run a whole list, honouring `set -e` between its members.
     fn run_list(&mut self, list: &List, io: &Io) -> Run<()> {
+        // Diagnostics raised between commands — a `.`-ed file that will not
+        // parse, the shell's own complaints — go where this list's descriptor
+        // 2 points. Dropped on the way out, so an `exec 2>log` that a subshell
+        // performed and then unwound does not outlive it.
+        let _err = ErrScope::new(&self.io_now(io));
         for (ao, bg) in &list.items {
+            // Re-read before every member, because the one before it may have
+            // been an `exec 2>log` that this one has to see.
+            let cur = self.io_now(io);
+            let _ = ErrScope::point_at(cur.get(2));
             if *bg {
-                self.run_background(ao, io)?;
-                continue;
-            }
-            self.run_and_or(ao, io)?;
-            // `set -e` does not fire on a pipeline written with `!`, nor on one
-            // used as a condition. POSIX is explicit about both, and a shell
-            // that got it wrong would exit out of its own `if`.
-            let banged = ao.rest.last().map_or(ao.first.bang, |(_, p)| p.bang);
-            if self.opts.errexit() && !banged && self.cond_depth == 0 && self.status != 0 {
-                return Err(Flow::Exit(self.status));
+                self.run_background(ao, &cur)?;
+            } else {
+                self.run_and_or(ao, &cur)?;
+                // `set -e` does not fire on a pipeline written with `!`, nor on
+                // one used as a condition. POSIX is explicit about both, and a
+                // shell that got it wrong would exit out of its own `if`.
+                let banged = ao.rest.last().map_or(ao.first.bang, |(_, p)| p.bang);
+                if self.opts.errexit() && !banged && self.cond_depth == 0 && self.status != 0 {
+                    return Err(Flow::Exit(self.status));
+                }
             }
         }
         Ok(())
@@ -3440,8 +3779,32 @@ impl Shell {
                 continue;
             }
             let last = i.saturating_add(1) == tail;
-            self.in_cond(!last, |sh| sh.run_pipeline(p, io))?;
+            // Re-read for the same reason `run_list` does: `exec 2>log && cmd`
+            // is one member of a list, and `cmd` is still after the `exec`.
+            let cur = self.io_now(io);
+            self.in_cond(!last, |sh| sh.run_pipeline(p, &cur))?;
         }
+        Ok(())
+    }
+
+    /// Run `body` as a subshell.
+    ///
+    /// Two things make it one: the state it changes is put back, and `exit`,
+    /// `break` and `return` end *it* rather than the shell that wrote it — an
+    /// `exit 3` in a subshell is the subshell's status, not the script's.
+    ///
+    /// There is no `fork` behind this. See [`Shell::restore`] for what that
+    /// costs and what it covers.
+    fn subshell(&mut self, body: impl FnOnce(&mut Self) -> Run<()>) -> Run<()> {
+        let snap = self.snapshot();
+        let r = body(self);
+        let status = match r {
+            Ok(()) => self.status,
+            Err(Flow::Exit(n) | Flow::Return(n)) => n,
+            Err(Flow::Break(_) | Flow::Continue(_)) => self.status,
+        };
+        self.restore(snap);
+        self.status = status;
         Ok(())
     }
 
@@ -3476,7 +3839,10 @@ impl Shell {
             let external = argv.first().is_some_and(|n| self.is_external(n));
             if external
                 && let Some(io) = self.apply_redirs(&cmd.redirs, io)?
-                && let Some(child) = self.spawn_external(&argv, &pairs, &io)
+                && let Some(child) = {
+                    let _err = ErrScope::new(&io);
+                    self.spawn_external(&argv, &pairs, &io)
+                }
             {
                 self.last_bg = Some(child.id());
                 self.bg.push(child);
@@ -3516,6 +3882,15 @@ impl Shell {
     ///    as it finishes, for the same reason;
     /// 5. wait for the children, and report the last stage's status.
     fn run_pipeline(&mut self, p: &Pipeline, io: &Io) -> Run<()> {
+        // `set -n` reads and checks and does not run — and it takes effect from
+        // the command *after* the one that set it, which is why the test is
+        // here and not only in front of the parse. A shell that only looked at
+        // `-n` on the command line would run everything after a `set -n` in the
+        // middle of a script.
+        if self.opts.noexec() {
+            self.status = 0;
+            return Ok(());
+        }
         if p.cmds.len() < 2 {
             if let Some(c) = p.cmds.first() {
                 self.run_cmd(c, io)?;
@@ -3537,7 +3912,7 @@ impl Shell {
             let both_here = !plans.get(i).is_some_and(Plan::is_external)
                 && !plans.get(j).is_some_and(Plan::is_external);
             if let Err(e) = connect(&mut stages, i, j, both_here) {
-                diag!("sh: cannot create pipe: {e}");
+                diag!("sh: cannot create pipe: {}", strerror(&e));
                 self.status = 2;
                 return Ok(());
             }
@@ -3555,7 +3930,10 @@ impl Shell {
                 ) => {
                     let stage = stage.clone();
                     match self.apply_redirs(p.cmds.get(i).map_or(&[], |c| &c.redirs), &stage)? {
-                        Some(io) => self.spawn_external(argv, pairs, &io),
+                        Some(io) => {
+                            let _err = ErrScope::new(&io);
+                            self.spawn_external(argv, pairs, &io)
+                        }
                         None => None,
                     }
                 }
@@ -3574,12 +3952,19 @@ impl Shell {
         let mut flow: Run<()> = Ok(());
         for i in 0..n {
             let stage = stages.get(i).cloned().unwrap_or_default();
+            // Every stage of a pipeline is a subshell — that is what makes
+            // `echo hi | read x` leave `x` unset, which surprises people often
+            // enough that bash has an option to turn it off. A stage that ran
+            // in the shell proper would be the odd one out: the *external*
+            // stages are separate processes and could never write back, so a
+            // builtin that could would make the two spellings of the same
+            // pipeline behave differently.
             let r = match (plans.get(i), p.cmds.get(i)) {
                 (Some(Plan::Simple { external: true, .. }), _) => Ok(()),
                 (Some(Plan::Simple { argv, pairs, .. }), Some(cmd)) => {
-                    self.run_resolved(argv, pairs, &cmd.redirs, &stage)
+                    self.subshell(|sh| sh.run_resolved(argv, pairs, &cmd.redirs, &stage))
                 }
-                (Some(Plan::Compound), Some(cmd)) => self.run_cmd(cmd, &stage),
+                (Some(Plan::Compound), Some(cmd)) => self.subshell(|sh| sh.run_cmd(cmd, &stage)),
                 _ => Ok(()),
             };
             if let Some(slot) = stages.get_mut(i) {
@@ -3601,7 +3986,7 @@ impl Shell {
                 Ok(st) if i.saturating_add(1) == n => last_status = status_of(&st),
                 Ok(_) => {}
                 Err(e) => {
-                    diag!("sh: wait: {e}");
+                    diag!("sh: wait: {}", strerror(&e));
                     if i.saturating_add(1) == n {
                         last_status = 1;
                     }
@@ -3633,6 +4018,26 @@ impl Shell {
         }
     }
 
+    /// How a *special* builtin reports an error.
+    ///
+    /// POSIX says an error in one of them ends a non-interactive shell, and
+    /// that is not a formality: `set -- a; shift 2` leaves the parameters
+    /// untouched, so a script that carried on would work on the wrong argument
+    /// and quietly do the wrong thing. A prompt keeps its shell, because losing
+    /// one to a typo would be unusable.
+    ///
+    /// It is deliberately *not* the same as a non-zero status: `false` and a
+    /// `.`-ed script that ends in `return 1` are failures, not errors, and
+    /// neither ends the shell.
+    fn special_error(&mut self, code: u8) -> Run<()> {
+        self.status = code;
+        if self.interactive {
+            Ok(())
+        } else {
+            Err(Flow::Exit(code))
+        }
+    }
+
     /// Would `name` be run as a separate process?
     fn is_external(&self, name: &[u8]) -> bool {
         !is_special(name) && !self.funcs.contains_key(name) && !is_regular(name)
@@ -3655,21 +4060,22 @@ impl Shell {
             self.status = 2;
             return Ok(());
         };
+        // A compound command's redirections cover its diagnostics too:
+        // `{ nosuch; } 2>err` writes into `err`, not to the terminal.
+        let _err = ErrScope::new(&io);
+        // …and they are given back when it ends, taking any `exec` performed
+        // inside with them. See [`Shell::in_redir_scope`].
+        self.in_redir_scope(!cmd.redirs.is_empty(), |sh| sh.run_compound(cmd, &io))
+    }
+
+    /// The body of a compound command, with its redirections already applied.
+    ///
+    /// Split out of [`Shell::run_cmd`] only so that the scope guard there can
+    /// take it as a closure; there is no other caller.
+    fn run_compound(&mut self, cmd: &Cmd, io: &Io) -> Run<()> {
+        let io = io.clone();
         match &cmd.kind {
-            CmdKind::Subshell(list) => {
-                let snap = self.snapshot();
-                let r = self.run_list(list, &io);
-                // A subshell absorbs `exit`, `break` and `return`: they end the
-                // subshell, not the shell that wrote it.
-                let status = match r {
-                    Ok(()) => self.status,
-                    Err(Flow::Exit(n) | Flow::Return(n)) => n,
-                    Err(Flow::Break(_) | Flow::Continue(_)) => self.status,
-                };
-                self.restore(snap);
-                self.status = status;
-                Ok(())
-            }
+            CmdKind::Subshell(list) => self.subshell(|sh| sh.run_list(list, &io)),
             CmdKind::Group(list) => self.run_list(list, &io),
             CmdKind::If { arms, otherwise } => {
                 for (cond, body) in arms {
@@ -3809,10 +4215,40 @@ impl Shell {
         if self.opts.xtrace() {
             self.trace(argv, pairs);
         }
+        // `exec` with no command is the one command whose redirections outlive
+        // it: POSIX says they become the shell's, from here to the end of the
+        // enclosing construct. The table is built exactly as any other
+        // command's would be — from the one in force here, which already
+        // carries whatever an enclosing `{ … } > out` established — and then
+        // kept instead of dropped. Handled here rather than in `bi_exec`
+        // because only this far up are the redirections still separable from
+        // the command.
+        if argv.len() == 1 && argv.first().is_some_and(|a| a == b"exec") {
+            match self.apply_redirs(redirs, io)? {
+                Some(new) => {
+                    self.exec_io = Some(new);
+                    self.status = 0;
+                }
+                // `exec` is a special builtin, and a redirection it cannot make
+                // is an error rather than a failing command: a script that went
+                // on would write everything after it to the wrong place.
+                None => return self.special_error(2),
+            }
+            return Ok(());
+        }
         let Some(io) = self.apply_redirs(redirs, io)? else {
             self.status = 2;
             return Ok(());
         };
+        // `nosuchcommand 2>err` must put `not found` in `err`, and the message
+        // comes from this shell rather than from the command that never ran.
+        let _err = ErrScope::new(&io);
+        // The three in-process cases below can reach an `exec` — through a
+        // function body, through `eval`, through a `.`-ed file — so a command
+        // written with redirections of its own gives them back on the way out,
+        // exactly as a compound one does. An external cannot: it is a different
+        // process and its `exec` is its own business.
+        let scoped = !redirs.is_empty();
         let name = argv.first().cloned().unwrap_or_default();
         if is_special(&name) {
             // A special builtin's assignments outlive it: `IFS=, set …` leaves
@@ -3820,16 +4256,18 @@ impl Shell {
             for (n, v) in pairs {
                 self.set_var(n, v.clone());
             }
-            return self.run_builtin(argv, &io);
+            return self.in_redir_scope(scoped, |sh| sh.run_builtin(argv, &io));
         }
         if let Some(body) = self.funcs.get(name.as_slice()).cloned() {
             for (n, v) in pairs {
                 self.set_var(n, v.clone());
             }
-            return self.run_function(&body, argv, &io);
+            return self.in_redir_scope(scoped, |sh| sh.run_function(&body, argv, &io));
         }
         if is_regular(&name) {
-            return self.with_temporary(pairs, |sh| sh.run_builtin(argv, &io));
+            return self.in_redir_scope(scoped, |sh| {
+                sh.with_temporary(pairs, |s| s.run_builtin(argv, &io))
+            });
         }
         // A `None` needs nothing done to it: `spawn_external` has already said
         // what went wrong and set the status, and 127 and 126 are the two
@@ -3841,7 +4279,7 @@ impl Shell {
             match child.wait() {
                 Ok(st) => self.status = status_of(&st),
                 Err(e) => {
-                    diag!("sh: wait: {e}");
+                    diag!("sh: wait: {}", strerror(&e));
                     self.status = 1;
                 }
             }
@@ -4035,9 +4473,6 @@ impl Shell {
         for (k, v) in pairs {
             cmd.env(os_from_bytes(k), os_from_bytes(v));
         }
-        // Only 0, 1 and 2 reach the child: a redirection of descriptor 3 is
-        // honoured for builtins but has nothing to attach to on an external
-        // program without `pre_exec`. Noted in the module docs.
         let (Ok(fd0), Ok(fd1), Ok(fd2)) = (stdio_for(io, 0), stdio_for(io, 1), stdio_for(io, 2))
         else {
             diag!(
@@ -4048,6 +4483,56 @@ impl Shell {
             return None;
         };
         cmd.stdin(fd0).stdout(fd1).stderr(fd2);
+        #[cfg(unix)]
+        {
+            let extra = match extra_fds(io) {
+                Ok(v) => v,
+                Err(e) => {
+                    diag!("sh: {}: {}", coreutils::quote::quotef(&name), strerror(&e));
+                    self.status = 1;
+                    return None;
+                }
+            };
+            if !extra.is_empty() {
+                use std::os::fd::AsRawFd;
+                use std::os::unix::process::CommandExt;
+                // SAFETY: the closure runs in the forked child between `fork`
+                // and `exec`, where only async-signal-safe calls are allowed.
+                // `dup`, `dup2` and `close` are three of them, and nothing else
+                // happens here — no allocation, no locking, no `std::io`
+                // beyond reading `errno`. The `File`s the closure owns were
+                // opened before the fork, so the descriptors it reads are open.
+                unsafe {
+                    cmd.pre_exec(move || {
+                        for (n, f) in &extra {
+                            let mut src = f.as_raw_fd();
+                            // A duplicate may already *be* the target: `dup`
+                            // hands out the lowest free descriptor, and the
+                            // target is free precisely because nothing has
+                            // claimed it. `dup2` onto itself does nothing and
+                            // leaves close-on-exec set, so the child would lose
+                            // the descriptor at `exec`; going through a third
+                            // one forces a real `dup2`, which clears the flag.
+                            let spare = if src == *n { dup(src) } else { -1 };
+                            if src == *n {
+                                if spare < 0 {
+                                    return Err(std::io::Error::last_os_error());
+                                }
+                                src = spare;
+                            }
+                            let r = dup2(src, *n);
+                            if spare >= 0 {
+                                close(spare);
+                            }
+                            if r < 0 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                        }
+                        Ok(())
+                    });
+                }
+            }
+        }
         // Everything this shell has buffered must reach the terminal before the
         // child writes to it, or `echo a; ls` comes out with `a` last.
         let mut out = stdfd::Stream::stdout();
@@ -4073,11 +4558,14 @@ impl Shell {
         let (file, guard) = match temp_file("subst", b"") {
             Ok(pair) => pair,
             Err(e) => {
-                diag!("sh: cannot capture output: {e}");
+                diag!("sh: cannot capture output: {}", strerror(&e));
                 return Err(Flow::Exit(2));
             }
         };
-        let mut io = Io::default();
+        // On top of the shell's own table, not on nothing: `exec 2>log` before
+        // a `$(…)` still sends what the substituted command complains about to
+        // the log. Only descriptor 1 is the substitution's own.
+        let mut io = self.base_io();
         io.set(1, Fd::Open(Rc::new(file)));
         let snap = self.snapshot();
         let r = self.run_list(&list, &io);
@@ -4097,12 +4585,12 @@ impl Shell {
         match File::open(guard.path()) {
             Ok(mut f) => {
                 if let Err(e) = f.read_to_end(&mut out) {
-                    diag!("sh: cannot read captured output: {e}");
+                    diag!("sh: cannot read captured output: {}", strerror(&e));
                     return Err(Flow::Exit(2));
                 }
             }
             Err(e) => {
-                diag!("sh: cannot read captured output: {e}");
+                diag!("sh: cannot read captured output: {}", strerror(&e));
                 return Err(Flow::Exit(2));
             }
         }
@@ -4344,7 +4832,7 @@ impl Shell {
             // report — every utility in this crate treats it the same way.
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => false,
             Err(e) => {
-                diag!("sh: write error: {e}");
+                diag!("sh: write error: {}", strerror(&e));
                 false
             }
         }
@@ -4457,7 +4945,7 @@ impl Shell {
                 self.status = u8::from(!ok);
             }
             Err(e) => {
-                diag!("sh: pwd: {e}");
+                diag!("sh: pwd: {}", strerror(&e));
                 self.status = 1;
             }
         }
@@ -4499,7 +4987,7 @@ impl Shell {
         let was = env::current_dir().ok();
         let path = std::path::PathBuf::from(os_from_bytes(&dir));
         if let Err(e) = env::set_current_dir(&path) {
-            diag!("sh: cd: {}: {e}", quotef_os(&path));
+            diag!("sh: cd: {}: {}", quotef_os(&path), strerror(&e));
             self.status = 2;
             return Ok(());
         }
@@ -4553,15 +5041,13 @@ impl Shell {
                 Some(v) => v,
                 None => {
                     diag!("sh: shift: illegal number: {}", String::from_utf8_lossy(a));
-                    self.status = 2;
-                    return Ok(());
+                    return self.special_error(2);
                 }
             },
         };
         if n > self.params.len() {
             diag!("sh: shift: can't shift that many");
-            self.status = 2;
-            return Ok(());
+            return self.special_error(2);
         }
         self.params.drain(0..n);
         self.status = 0;
@@ -4599,8 +5085,7 @@ impl Shell {
                     "sh: export: {}: bad variable name",
                     coreutils::quote::quotef(&name)
                 );
-                self.status = 2;
-                continue;
+                return self.special_error(2);
             }
             // `export X` on an unset variable exports it *empty*, so that a
             // child sees the name — POSIX is explicit and scripts rely on it.
@@ -4689,8 +5174,7 @@ impl Shell {
                             let text = String::from_utf8_lossy(nm).into_owned();
                             if !self.opts.set_named(&text, on) {
                                 diag!("sh: set: illegal option name: {text}");
-                                self.status = 2;
-                                return Ok(());
+                                return self.special_error(2);
                             }
                         }
                         // `set -o` with nothing after it lists the settings.
@@ -4713,8 +5197,7 @@ impl Shell {
                         char::from(first),
                         char::from(c)
                     );
-                    self.status = 2;
-                    return Ok(());
+                    return self.special_error(2);
                 }
             }
             i = i.saturating_add(1);
@@ -4745,8 +5228,7 @@ impl Shell {
             Ok(list) => self.run_list(&list, io),
             Err(e) => {
                 diag!("sh: eval: {}", parse_err_text(&e));
-                self.status = 2;
-                Ok(())
+                self.special_error(2)
             }
         }
     }
@@ -4755,10 +5237,12 @@ impl Shell {
     ///
     /// With a command this really does replace the process on unix, which is
     /// what makes `exec "$@"` in a wrapper script leave no shell behind.
-    /// *Without* one, POSIX says the redirections apply to the shell from then
-    /// on — and that this shell cannot do, because a redirection here is an
-    /// override on a table the command is given rather than a change to the
-    /// process's own descriptors. It is a no-op, and listed in the module docs.
+    ///
+    /// *Without* one it never gets here: [`Shell::run_resolved`] intercepts
+    /// that form, because the redirections then belong to the shell rather than
+    /// to the command, and by this point the two are no longer distinguishable.
+    /// The arm below is what is left — `exec` reached with neither a command
+    /// nor redirections, which does nothing and succeeds.
     fn bi_exec(&mut self, args: &[Vec<u8>], io: &Io) -> Run<()> {
         if args.is_empty() {
             self.status = 0;
@@ -4790,12 +5274,12 @@ impl Shell {
                 Ok(mut child) => match child.wait() {
                     Ok(st) => Err(Flow::Exit(status_of(&st))),
                     Err(e) => {
-                        diag!("sh: exec: {e}");
+                        diag!("sh: exec: {}", strerror(&e));
                         Err(Flow::Exit(126))
                     }
                 },
                 Err(e) => {
-                    diag!("sh: exec: {e}");
+                    diag!("sh: exec: {}", strerror(&e));
                     Err(Flow::Exit(126))
                 }
             }
@@ -4836,7 +5320,7 @@ impl Shell {
             let chunk = match read_line_fd(io, 0) {
                 Ok(c) => c,
                 Err(e) => {
-                    diag!("sh: read: {e}");
+                    diag!("sh: read: {}", strerror(&e));
                     self.status = 2;
                     return Ok(());
                 }
@@ -4901,28 +5385,33 @@ impl Shell {
     fn bi_dot(&mut self, args: &[Vec<u8>], io: &Io) -> Run<()> {
         let Some(file) = args.first() else {
             diag!("sh: .: filename argument required");
-            self.status = 2;
-            return Ok(());
+            return self.special_error(2);
         };
         let Some(path) = self.find_source(file) else {
-            diag!("sh: {}: not found", coreutils::quote::quotef(file));
-            self.status = 127;
-            return Ok(());
+            // `cannot open`, and status 2, because `.` is not a command lookup:
+            // 127 would say "no such command" about a *file*, and a script that
+            // tested for it would be testing the wrong thing. dash uses the same
+            // two, and POSIX asks only that the status be non-zero and that a
+            // non-interactive shell end — which `special_error` does.
+            diag!(
+                "sh: .: cannot open {}: {}",
+                coreutils::quote::quotef(file),
+                strerror(&std::io::Error::from(std::io::ErrorKind::NotFound))
+            );
+            return self.special_error(2);
         };
         let text = match std::fs::read(&path) {
             Ok(t) => t,
             Err(e) => {
-                diag!("sh: {}: {e}", quotef_os(&path));
-                self.status = 1;
-                return Ok(());
+                diag!("sh: {}: {}", quotef_os(&path), strerror(&e));
+                return self.special_error(2);
             }
         };
         let list = match parse(&text) {
             Ok(l) => l,
             Err(e) => {
                 diag!("sh: {}: {}", quotef_os(&path), parse_err_text(&e));
-                self.status = 2;
-                return Ok(());
+                return self.special_error(2);
             }
         };
         let saved = args
@@ -4990,7 +5479,7 @@ impl Shell {
     /// Parse and run a whole script.
     fn run_text(&mut self, text: &[u8]) -> u8 {
         if self.opts.verbose() {
-            stdfd::diag_bytes(text);
+            diag_out(text);
         }
         let list = match parse(text) {
             Ok(l) => l,
@@ -5004,7 +5493,7 @@ impl Shell {
         if self.opts.noexec() {
             return 0;
         }
-        let io = Io::default();
+        let io = self.base_io();
         let r = self.run_list(&list, &io);
         self.finish(r)
     }
@@ -5026,22 +5515,35 @@ impl Shell {
     /// the only way to know whether more input is needed: a quote or a
     /// here-document can leave a construct open across any number of lines, and
     /// only the parser knows. [`ParseErr::Incomplete`] is exactly that answer.
+    ///
+    /// That is for a *prompt*. A script arriving on standard input is read
+    /// whole first, because the script and the commands in it share descriptor
+    /// 0: `printf 'read x\necho [$x]\nvalue-line\n' | sh` must print `[]` and
+    /// then complain about `value-line`, and a shell that read a line at a time
+    /// would hand `value-line` to `read` as data instead of running it. Both
+    /// dash and bash slurp for the same reason.
     fn repl(&mut self) -> u8 {
-        let stdin = Io::default();
+        if !self.interactive {
+            let mut text = Vec::new();
+            if let Err(e) = std::io::stdin().read_to_end(&mut text) {
+                diag!("sh: read error: {}", strerror(&e));
+                return 2;
+            }
+            return self.run_text(&text);
+        }
+        let stdin = self.base_io();
         let mut pending: Vec<u8> = Vec::new();
         loop {
-            if self.interactive {
-                let which: &[u8] = if pending.is_empty() { b"PS1" } else { b"PS2" };
-                let fallback: &[u8] = if pending.is_empty() { b"$ " } else { b"> " };
-                let prompt = self.param_value(which).unwrap_or_else(|| fallback.to_vec());
-                // The prompt goes to standard error, as dash's does, so that
-                // `sh -i < script > out` does not put it in the output.
-                stdfd::diag_bytes(&prompt);
-            }
+            let which: &[u8] = if pending.is_empty() { b"PS1" } else { b"PS2" };
+            let fallback: &[u8] = if pending.is_empty() { b"$ " } else { b"> " };
+            let prompt = self.param_value(which).unwrap_or_else(|| fallback.to_vec());
+            // The prompt goes to standard error, as dash's does, so that
+            // `sh -i < script > out` does not put it in the output.
+            diag_out(&prompt);
             let line = match read_line_fd(&stdin, 0) {
                 Ok(l) => l,
                 Err(e) => {
-                    diag!("sh: read error: {e}");
+                    diag!("sh: read error: {}", strerror(&e));
                     return 2;
                 }
             };
@@ -5056,35 +5558,28 @@ impl Shell {
             match parse(&pending) {
                 Err(ParseErr::Incomplete) => continue,
                 Err(e) => {
+                    // A syntax error only skips a line at a prompt; the script
+                    // case is `run_text`'s, and it stops there.
                     diag!("sh: {}", parse_err_text(&e));
                     pending.clear();
                     self.status = 2;
-                    // A syntax error ends a script; it only skips a line at a
-                    // prompt.
-                    if !self.interactive {
-                        return 2;
-                    }
                 }
                 Ok(list) => {
                     if self.opts.verbose() {
-                        stdfd::diag_bytes(&pending);
+                        diag_out(&pending);
                     }
                     pending.clear();
                     if self.opts.noexec() {
                         continue;
                     }
-                    let io = Io::default();
+                    let io = self.base_io();
                     match self.run_list(&list, &io) {
                         Ok(()) => {}
                         Err(Flow::Exit(n) | Flow::Return(n)) => return n,
                         Err(Flow::Break(_) | Flow::Continue(_)) => {}
                     }
-                    // An interactive shell shows what it has done before it
-                    // asks for more.
-                    if self.interactive {
-                        let mut out = stdfd::Stream::stdout();
-                        let _ = out.flush();
-                    }
+                    // Show what has been done before asking for more.
+                    flush_stdout();
                 }
             }
         }
@@ -5182,7 +5677,7 @@ fn run_main() -> ExitCode {
         match std::fs::read(&path) {
             Ok(text) => sh.run_text(&text),
             Err(e) => {
-                diag!("sh: {}: {e}", quotef_os(&path));
+                diag!("sh: {}: {}", quotef_os(&path), strerror(&e));
                 127
             }
         }

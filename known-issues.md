@@ -94560,6 +94560,20 @@ menu in `apps/**` and `gui/**` that records a hit box for its backdrop *and* for
 its contents. The tell is a match arm naming a backdrop target with no sibling
 arm naming what is drawn on it.
 
+**Swept 2026-08-30, and it comes back clean — for the right reason.** The other
+three wired games with a real backdrop hit box (breakout `main.rs:1362`, pong
+`main.rs:902`, tetris `main.rs:1727`) all draw their overlay's lines with
+`centred`, which pushes text and records *no* hit box, so `Target::Overlay` is
+the only hit in that region and a one-target arm really does mean "anywhere on
+the sheet". That is the second of the two remedies above, arrived at by accident
+rather than by decision — none of the three says so. Asteroids was the only app
+that gave its overlay lines targets of their own, and giving them targets is
+what turned the accident into a bug. So the risk here is not in the three that
+are correct today; it is in the next person who adds one clickable line to one
+of them. (The four unwired apps that match a grep for `Target::Overlay` —
+fileassoc, startupmanager, taskscheduler, vpnmanager — are false positives:
+`Overlay0`/`Overlay1` there are Catppuccin *colour* names, not hit targets.)
+
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 
 **In short:** `userspace/coreutils/src/bin/time_cmd.rs` used to print

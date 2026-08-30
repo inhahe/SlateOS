@@ -3617,6 +3617,34 @@ mod tests {
     }
 
     #[test]
+    fn the_counters_stay_inside_the_header_band_on_a_squeezed_window() {
+        // The counters are placed a padding step below the title, which on a
+        // window too short to hold both puts them below the header -- and
+        // below the window itself, since on such a window the header is very
+        // nearly all of it. The `min` that pulls them back up is what this
+        // checks; the overlap test above cannot, because a hit box that falls
+        // outside the window is clipped away and simply stops being reported.
+        let mut g = game();
+        g.message = Some("No moves left! S=shuffle, N=new");
+        for (w, h) in SIZES.into_iter().chain(SQUEEZED) {
+            let l = Layout::solve(w, h);
+            let f = g.draw((w, h));
+            for (text, _, y, size, _) in texts(&f) {
+                if !text.starts_with("Tiles:") && !text.starts_with("No moves left!") {
+                    continue;
+                }
+                assert!(
+                    y >= l.header.y - 0.01 && y + size <= l.header.bottom() + 0.01,
+                    "at {w}x{h} the header line {text:?} runs from {y} to {} \
+                     but the header band is {:?}",
+                    y + size,
+                    l.header
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_line_of_text_is_told_how_wide_its_box_is() {
         // Without `max_width` the renderer has no licence to elide, so a string
         // longer than its box is drawn straight over its neighbour. This is the

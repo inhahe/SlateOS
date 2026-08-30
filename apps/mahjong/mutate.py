@@ -668,7 +668,11 @@ MUTATIONS = [
         "the header may be drawn outside the band it was given",
         "        let line_y = (title_box.bottom() + l.pad).min(inner.bottom() - l.status);",
         "        let line_y = title_box.bottom() + l.pad;",
-        ["the_counters_and_the_message_never_share_a_pixel"],
+        # The overlap test named here survived: the counters and the message
+        # are placed side by side, so pushing both of them below the window
+        # leaves them still not overlapping -- and their hit boxes, being
+        # clipped away entirely, stop being reported at all.
+        ["the_counters_stay_inside_the_header_band_on_a_squeezed_window"],
     ),
     # -- The window ----------------------------------------------------
     (

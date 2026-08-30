@@ -76,6 +76,35 @@ if [ "${SLATEOS_HOOK_TRAMPOLINE:-}" != "1" ]; then
     echo "  than the ones in this checkout. Fix with: ./scripts/install-hooks.sh" >&2
 fi
 
+# Every gate reports whether it ran, and the tally is printed unconditionally
+# at the end.
+#
+# WHY. A hook that prints nothing is indistinguishable from a hook that did not
+# run — which is exactly how the stale-copy bug above stayed invisible, and it
+# is also the ordinary case for a push that touches only documentation, where
+# every path-gated check legitimately skips. Silence therefore cannot be read
+# either way, and "no news is good news" is precisely the reading that failed.
+#
+# A tally the hook had to compute fixes that: `10 ran, 0 skipped` and
+# `0 ran, 10 skipped` are different lines, and *no line at all* means the hook
+# did not execute. It also makes an over-narrow `touches` pattern visible —
+# a gate that skips on a push it should have judged now says so by name,
+# instead of being silently absent.
+#
+# The names are the gates' own; a gate that refuses exits before this prints,
+# and its refusal message is loud enough not to need a tally.
+gates_ran=""
+gates_skipped=""
+
+# note_gate <name> <skip-flag>   — skip-flag "1" means the gate did not run.
+note_gate() {
+    if [ "$2" = "1" ]; then
+        gates_skipped="$gates_skipped $1"
+    else
+        gates_ran="$gates_ran $1"
+    fi
+}
+
 # Paths that must never leave this machine. Matched exactly against the paths
 # git reports, so these are repo-root-relative with no leading slash.
 GUARDED="todo2.txt"
@@ -100,6 +129,11 @@ if [ "${ALLOW_PRIVATE_PUSH:-0}" = "1" ]; then
     echo "pre-push: ALLOW_PRIVATE_PUSH=1 set — private-file check skipped." >&2
     GUARDED=""
 fi
+
+# Emptying GUARDED is how the bypass opts out, so an empty list *is* the skip.
+skip_private=0
+[ -n "$GUARDED" ] || skip_private=1
+note_gate private-file "$skip_private"
 
 # stdin gets one line per ref being pushed:
 #   <local ref> <local sha> <remote ref> <remote sha>
@@ -208,6 +242,7 @@ checker="${repo_root:-.}/scripts/multicall-aliases.py"
 [ -f "$checker" ] || skip_alias=1
 # Only lane B's tree can introduce one of these, so only pay for it there.
 touches userspace/ || skip_alias=1
+note_gate unreachable-command "$skip_alias"
 
 alias_failed=0
 if [ "$skip_alias" != "1" ] && ! "$py" "$checker" --check; then
@@ -280,6 +315,7 @@ fi
 raced="${repo_root:-.}/scripts/raced-globals.py"
 [ -f "$raced" ] || skip_raced=1
 touches posix/ userspace/ || skip_raced=1
+note_gate raced-global "$skip_raced"
 
 raced_failed=0
 if [ "$skip_raced" != "1" ]; then
@@ -366,6 +402,7 @@ fi
 argv="${repo_root:-.}/scripts/argv-utf8.py"
 [ -f "$argv" ] || skip_argv=1
 touches userspace/ || skip_argv=1
+note_gate argv-utf8 "$skip_argv"
 
 argv_failed=0
 if [ "$skip_argv" != "1" ]; then
@@ -508,8 +545,17 @@ case "$changed" in
         ;;
 esac
 
-getopt_failed=0
+# The effective skip is wider than $skip_getopt: a push that changed no
+# coreutils bin has nothing for this gate to compare, and both blocks below
+# are no-ops. Report that as a skip rather than as a silent run.
+skip_getopt_eff=1
 if [ "$skip_getopt" != "1" ] && { [ "$run_all" = "1" ] || [ -n "$bins" ]; }; then
+    skip_getopt_eff=0
+fi
+note_gate getopt-table "$skip_getopt_eff"
+
+getopt_failed=0
+if [ "$skip_getopt_eff" != "1" ]; then
     # Check the checker before believing it. One utility (GNU ed) parses long
     # options with its own parser rather than glibc's, so its table is compared
     # through a second path -- names scraped from `--help`, plus a probe that
@@ -615,6 +661,7 @@ fi
 errmsg="${repo_root:-.}/scripts/host-errmsg.py"
 [ -f "$errmsg" ] || skip_errmsg=1
 touches userspace/ || skip_errmsg=1
+note_gate host-errmsg "$skip_errmsg"
 
 errmsg_failed=0
 if [ "$skip_errmsg" != "1" ]; then
@@ -725,6 +772,7 @@ fi
 # A machine without rustfmt is a skip, not a failure — same reasoning as the
 # missing-python skip above: a hook that breaks pushing gets uninstalled.
 command -v rustfmt >/dev/null 2>&1 || skip_fmt=1
+note_gate rustfmt "$skip_fmt"
 
 # Report on one file, and return 1 if it needs reformatting.
 #
@@ -921,6 +969,7 @@ quote="${repo_root:-.}/scripts/quote-names.py"
 # be the push that re-verifies it, or lowering a number is unattended.
 touches userspace/ services/ init/ posix/ \
         scripts/quote-names.py scripts/quote-names-baseline.txt || skip_quote=1
+note_gate quote-names "$skip_quote"
 
 quote_failed=0
 if [ "$skip_quote" != "1" ]; then
@@ -1027,6 +1076,7 @@ reqdel="${repo_root:-.}/scripts/check-requests-not-deleted.py"
 # editing the waiver list must be the push that re-verifies it.
 touches requests/ scripts/check-requests-not-deleted.py \
         requests/.deletions-allowed || skip_reqdel=1
+note_gate request-deletion "$skip_reqdel"
 
 reqdel_failed=0
 if [ "$skip_reqdel" != "1" ]; then
@@ -1134,6 +1184,7 @@ else
 fi
 
 [ -n "${pushed_shas# }" ] || skip_ident=1
+note_gate fixture-identity "$skip_ident"
 
 # RFC 2606 §2-3 and RFC 6761 §6.3: names reserved so they can never be real.
 #
@@ -1206,5 +1257,28 @@ corpus, say — this is the one case that is legitimate:
 EOF
     exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# The tally. Unconditional, and on stderr with the rest of the hook's output.
+#
+# This is the line whose absence means "the hook did not run" — the one reading
+# that silence could never carry. It is deliberately printed even when every
+# gate skipped, because `0 ran, 10 skipped` is the interesting case, not the
+# boring one: it says the push was judged by nothing, which for a push that
+# edits only documentation is correct, and for a push that edits a utility is a
+# bug in a `touches` pattern. Naming the skipped gates is what makes the second
+# case diagnosable rather than merely suspicious.
+#
+# A refusing gate exits before this, so the tally is not a claim that the push
+# passed — only a record of what was asked.
+# ---------------------------------------------------------------------------
+n_ran=0
+n_skipped=0
+for _g in $gates_ran; do n_ran=$((n_ran + 1)); done
+for _g in $gates_skipped; do n_skipped=$((n_skipped + 1)); done
+
+echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
+[ "$n_ran" -gt 0 ] && echo "  ran:    ${gates_ran# }" >&2
+[ "$n_skipped" -gt 0 ] && echo "  skipped: ${gates_skipped# }" >&2
 
 exit 0

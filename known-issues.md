@@ -97739,6 +97739,38 @@ because they share the one `.git`. It is already done. Verified the same day:
 the next push printed `selftest: 5/5 rules ok` followed by the getopt sweep,
 which is the line whose absence started this.
 
+### The hook now says what it did, which is the other half of the fix
+
+The trampoline stops the hook being *stale*. It does not stop it being
+*absent* — and on a push that edits only documentation every path-gated check
+legitimately skips, so `pre-push` printed nothing at all, which is exactly the
+output a hook that never ran produces. That ambiguity is what hid this bug, and
+removing the cause without removing the ambiguity would leave the next delivery
+failure just as invisible.
+
+So each gate now calls `note_gate <name> <skip-flag>`, and the hook ends with an
+unconditional tally:
+
+```
+pre-push: 3 gate(s) ran, 7 skipped.
+  ran:    private-file rustfmt fixture-identity
+  skipped: unreachable-command raced-global argv-utf8 getopt-table host-errmsg
+           quote-names request-deletion
+```
+
+Three readings that silence could not carry: **no line at all** means the hook
+did not execute; `0 ran, 10 skipped` means the push was judged by nothing; and a
+gate named in `skipped` on a push that plainly should have triggered it is a
+`touches` pattern that is too narrow — previously indistinguishable from a gate
+that ran and was content. A refusing gate exits before the tally, so it records
+what was *asked*, not that the push passed.
+
+Gate 5 is the shape worth copying. Its `skip_getopt` was not its real skip
+condition: a push that changed no coreutils bin left both of its blocks as
+no-ops while the flag still said "running". Having to report itself forced the
+effective condition to be named (`skip_getopt_eff`), which is the usual effect
+of making a thing account for what it did.
+
 ### Where else to look
 
 - **Any check whose only evidence of running is a line of output.** Prefer a

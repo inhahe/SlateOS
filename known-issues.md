@@ -96559,3 +96559,46 @@ the substring arm is guarded by `rest.len() > 1`. That is a question about the
 shell's error *reporting* (kshell has no "bad substitution" concept at all),
 not about substring arithmetic, and folding it in would have made this commit
 two changes.
+
+## TD-B-USERSPACE-ZIP-STILL-CARRIES-ITS-OWN-DEFLATE-COMPRESSOR
+
+**Status:** open, blocked on lane A
+**Filed:** 2026-08-30 (lane B)
+**Where:** `userspace/zip/src/main.rs` — `Token`, `hash3`, `lz77_compress`,
+`deflate_compress`, `deflate_compress_stored`, `BitWriter`, `length_code`,
+`distance_code`, `fixed_litlen_encode`, `reverse_bits`, and the
+`LENGTH_TABLE` / `DISTANCE_TABLE` pair (~380 lines).
+
+**What it is.** Lane A asked for `userspace/zip` to stop carrying a private
+copy of RFC 1951 and use the shared `deflate` crate
+(`requests/a-b-userspace-zip-carries-a-third-deflate-and-a-second-zip-parser.md`).
+The *decompressor* half is done and deleted — see `b5ede6224`, which also
+fixed a decompression-bomb hole in the process. The *compressor* half is
+still here, and this entry exists so that half-finished state is a recorded
+decision rather than something that looks like an oversight to whoever reads
+the file next.
+
+**Why it is not just done.** `zip` accepts `-0` through `-9` and maps the
+level onto the LZ77 hash-chain depth — 4 at `-1`, 128 at the default `-6`,
+1024 at `-9`. `deflate::deflate(data)` takes no level and fixes
+`MAX_CHAIN = 16`, which is our `-3`. So the swap would collapse nine
+documented flags into one setting *and* silently demote the no-flags default
+to a weaker one, producing larger archives with no message and no way for the
+user to get the previous behaviour back. Removing duplication is worth a lot;
+it is not worth a silent quality regression on the path that runs when nobody
+passes a flag.
+
+**What unblocks it.** `deflate::deflate_level(data, level)` — one function,
+one constant becoming a parameter. Requested in
+`requests/b-a-deflate-cannot-express-a-compression-level.md`. If lane A adopts
+the zlib mapping above, this becomes a pure deletion with no behaviour change
+at all. If lane A declines, the right move is to close that request, note the
+local compressor as a deliberate permanent exception in the original request,
+and delete *this* entry — because at that point it is a decision, not debt.
+
+**What is NOT at risk while it sits.** This is duplication, not a bug: the
+local compressor is correct and round-trip tested, and it is on the *write*
+path, so no attacker-supplied bytes reach it. The bomb hole that made the
+decompressor urgent has no analogue on this side. The cost is maintenance —
+a bug fixed in `deflate`'s encoder does not reach `zip` — and it does not
+worsen with time.

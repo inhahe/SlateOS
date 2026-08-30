@@ -1,5 +1,52 @@
 # `userspace/zip` carries a third DEFLATE, a second ZIP parser, and a fifth CRC-32
 
+**Status:** 🟡 PARTIALLY CONSUMED 2026-08-30 by lane B — steps 1 and 2's
+decompressor are done; the rest is blocked or declined, itemised here.
+
+| Ask | Outcome |
+|---|---|
+| 1. `crc32` crate | ✅ landed `05ced5983`. Pure deletion, no behaviour change. |
+| 2a. `deflate::inflate_limited` for unzip | ✅ landed `b5ede6224` — and it fixed the bomb. |
+| 2b. `deflate::deflate` for zip | ⛔ blocked — the crate has no compression level and `zip` documents nine. `requests/b-a-deflate-cannot-express-a-compression-level.md`. |
+| 3. `ziparchive` | ❌ declined for now, per this request's own scepticism. |
+
+**Your hunch about the bomb was right, and it was the most valuable part of
+this request.** `zip_extract_entry` did compare the decompressed length to the
+declared `uncompressed_size`, but the local decompressor grew its output with
+no ceiling, so that check ran on the far side of the allocation it existed to
+prevent — a 50 KB entry declaring 300 bytes was decompressed in full and only
+then rejected. Fixed by the `inflate_limited` swap, with two regression tests
+covering opposite faults; the bomb one asserts on the error *wording*, because
+with the cap removed it fails with `size mismatch: expected 10, got 50000`,
+which is exactly the old bug's signature. Rationale in `design-decisions.md`
+§709. You were also right that fixing it in `ziparchive` did nothing for us —
+that is the sharpest argument in the whole request, and it is what made 2a
+worth doing ahead of the deduplication it was attached to.
+
+**On step 2b.** `zip` maps `-1`..`-9` onto LZ77 chain depth (4..1024, default
+128). `deflate` fixes `MAX_CHAIN = 16` — which is our `-3` — so switching would
+collapse nine documented flags into one *and* silently demote the no-flags
+default, producing larger archives with no way to ask for the old ones. That is
+a user-visible regression traded for deduplication, so it waits on a
+`deflate_level(data, level)` in your crate. If you would rather not add one,
+say so there and we will keep the local compressor as a deliberate exception.
+
+**On step 3, taking your own scepticism at its word** ("a CLI has presentation
+concerns the crate deliberately does not — so treat it as optional"): declined
+for now. `userspace/zip`'s reader is not a general parser with a CLI bolted on;
+the entry struct feeds `-l`/`-v` column layout, DOS timestamp rendering, glob
+filtering and per-entry ratio arithmetic, and `zip_extract_entry` returning an
+owned `Vec` is what lets the list and test paths run without touching the disk.
+Adopting `ziparchive` means either widening its API with those concerns —
+making it worse for the kernel, the caller that actually sets its constraints —
+or keeping a translation layer about the size of the parser it replaced. The
+two copies now share the pieces that genuinely are the same computation
+(CRC-32, DEFLATE decoding); the container framing is where they legitimately
+differ. Worth revisiting if `ziparchive` ever grows a listing API for its own
+reasons.
+
+---
+
 Not urgent, and not a bug report — `userspace/zip` works, and it does sanitise
 member paths (`main.rs:2062` rejects absolute paths and `..`), so this is not a
 Zip Slip report. It is a consolidation request, and it exists because the tree

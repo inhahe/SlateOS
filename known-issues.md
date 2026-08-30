@@ -95068,9 +95068,20 @@ boxes are the only thing that *can* see the clip vanish, and are blind to
 everything else. A wrong comment beside a vacuous assertion is how a tautology
 survives three readings.
 
-Still open: `guitk`'s own tests for `Frame::hit`, and any test asserting a
-widget's rect is inside its parent where the parent rect was used to compute the
-child's.
+**`guitk`'s own tests for `Frame::hit` — checked 2026-08-30, nothing to do.**
+The worry was that the toolkit never pinned down the behaviour the app tests
+were unknowingly leaning on, in which case it could drift and take fifty apps'
+tests with it. It pins it down in five places: `a_target_is_trimmed_to_the_clip_in_force`
+(a straddling box comes back cut, and the cut half is not clickable),
+`a_target_entirely_outside_the_clip_is_dropped`,
+`a_nested_clip_can_only_shrink_the_visible_region`,
+`a_degenerate_clip_clips_everything_away`, and
+`an_over_popped_clip_stops_trimming_the_callers_hits`, which is the same rule
+read from the other side. So the lesson is about where an app puts its
+assertion, not about a gap in the toolkit.
+
+Still open: any test asserting a widget's rect is inside its parent where the
+parent rect was used to compute the child's.
 
 ## `B-TIME-WAS-THE-SHELL-KEYWORD-WEARING-GNU-TIMES-NAME` (lane B, 2026-08-29) -- **FIXED 2026-08-29**
 

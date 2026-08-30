@@ -358,10 +358,16 @@ MUTATIONS = [
         ["a_launch_does_not_deal_the_one_board_that_was_hardcoded"],
     ),
     (
+        "the free cells are drawn a slot to the right of where they are laid out",
+        "        for idx in 0..FREE_CELL_COUNT {\n            let rect = t.top_slot(idx);",
+        "        for idx in 0..FREE_CELL_COUNT {\n            let rect = t.top_slot(idx.saturating_add(1));",
+        ["at_a_size_that_fits_the_clip_crops_nothing"],
+    ),
+    (
         "the whole window is left unclipped",
         "        f.clip(l.window);",
         "        f.clip(Rect::new(0.0, 0.0, f32::MAX, f32::MAX));",
-        ["nothing_is_drawn_outside_the_window"],
+        ["the_whole_frame_is_clipped_to_the_window"],
     ),
     (
         "the win sheet is drawn over every board, won or not",

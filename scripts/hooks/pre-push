@@ -1,5 +1,5 @@
 #!/bin/sh
-# Seven gates at the push boundary. Any one of them aborts the push.
+# Nine gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -9,6 +9,13 @@
 #   5. Refuse to publish a long-option table that disagrees with GNU's.
 #   6. Refuse to publish a utility that prints the host's error text, not POSIX's.
 #   7. Refuse to publish a source file that `rustfmt` would reformat.
+#   8. Refuse to publish a diagnostic that names a file without quoting it.
+#   9. Refuse to publish the deletion of a file under `requests/`.
+#
+# (This count was wrong before gate 9 was added: it read "Seven" while eight
+# were implemented. A list in a comment beside the code it lists is a second
+# copy that rots. It is short enough to be worth keeping, so it is *checked* --
+# scripts/test-pre-push-gates.py -- rather than trusted.)
 #
 # Each has a full comment above it, further down; each has its own bypass
 # variable, so silencing one never silences another; and each is scoped to the
@@ -58,6 +65,14 @@ z40=0000000000000000000000000000000000000000
 remote_name="${1:-origin}"
 violations=""
 
+# The commits this push would publish, collected by the gate-1 loop below.
+# Gate 9 needs them and cannot re-read stdin: git feeds the ref list once, and
+# the loop consumes it. Every other gate keys off HEAD via `touches()`, which is
+# right for gates asking "did this working branch introduce X"; gate 9 asks
+# "does the commit being published delete a request", and those differ whenever
+# a ref other than HEAD is pushed.
+pushed_shas=""
+
 # The bypass skips gate 1 only -- it must not `exit 0` out of the script, or
 # approving the private file would silently disable the unrelated gate below.
 # Emptying the guarded list is how it opts out: the scan below then has nothing
@@ -73,6 +88,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     # A branch deletion has no content to inspect.
     [ "$local_sha" = "$z40" ] && continue
     [ -z "$local_ref" ] && continue
+
+    pushed_shas="$pushed_shas $local_sha"
 
     for path in $GUARDED; do
         # 1. Is the guarded path present in the tip we are about to publish?
@@ -909,6 +926,109 @@ merely *that*.
 
 To push anyway:
     ALLOW_UNQUOTED_NAMES=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 9: refuse to publish the deletion of a request.
+#
+# `roadmap.md` rule 2: a landed request is stamped, not deleted. A request is
+# not a ticket, it is the *argument* — the measurement, the table, the reasoning
+# that settled a design — and around twenty things across the tree cite one by
+# path. See design-decisions.md §315.
+#
+# WHY HERE AS WELL AS IN THE BUILD. `boot-test.sh` and `pre-boot.py` already run
+# this checker, and that is the right place to learn about it. But the push is
+# where a deletion stops being a local mistake and becomes everyone's: the other
+# two lanes fetch `main`, and from then on restoring the file is archaeology
+# rather than `git checkout`. The two boundaries also fire at very different
+# rates — a lane pushes many times per boot test — so the build gate alone
+# leaves a wide window in which a deletion reaches the remote unexamined.
+#
+# WHY IT JUDGES THE COMMIT, NOT THE WORKTREE. The checker defaults to diffing
+# the merge base against the working tree, which is what a build gate wants.
+# That is the wrong question here, and wrong in the dangerous direction: a
+# commit that deletes `requests/foo.md` passes if the file has since been
+# restored and staged, because the worktree then shows no deletion — and the
+# commit is published anyway. This was measured, not supposed: with such a
+# commit staged-restored, the plain check exits 0 and `--head` exits 1.
+# `--head "$sha"` asks about the thing actually being sent, which also removes
+# the mirror-image false positive where an uncommitted deletion blocks a push
+# of unrelated clean commits.
+#
+# Renames pass (`-M`), so fixing a slug or sweeping into an archive directory is
+# fine, and `requests/.deletions-allowed` waives a basename with a stated reason
+# for when a deletion genuinely is right.
+#
+# Same self-test-first shape as gates 6 and 8, for a reason specific to this
+# one: every way this checker can break returns "no deletions found", which is
+# byte-identical to a healthy repository. Nothing in its output distinguishes
+# "clean" from "blind", so it is asked a question it should fail before its
+# answer here is believed.
+#
+# Bypass: ALLOW_REQUEST_DELETION=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+
+if [ "${ALLOW_REQUEST_DELETION:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_REQUEST_DELETION=1 set — request-deletion check skipped." >&2
+    skip_reqdel=1
+else
+    skip_reqdel=$skip
+fi
+
+reqdel="${repo_root:-.}/scripts/check-requests-not-deleted.py"
+[ -f "$reqdel" ] || skip_reqdel=1
+[ -n "${pushed_shas# }" ] || skip_reqdel=1
+# Every lane files and answers requests, so this is not scoped to a subtree the
+# way gates 2-6 are — but it is still scoped to the *change*: a push touching
+# neither `requests/` nor the checker cannot introduce the defect. The checker
+# and its allowlist are included for the reason gate 8 includes its baseline:
+# editing the waiver list must be the push that re-verifies it.
+touches requests/ scripts/check-requests-not-deleted.py \
+        requests/.deletions-allowed || skip_reqdel=1
+
+reqdel_failed=0
+if [ "$skip_reqdel" != "1" ]; then
+    if ! "$py" "$reqdel" --selftest >/dev/null; then
+        echo "pre-push: check-requests-not-deleted.py FAILED ITS OWN SELF-TEST — its result is not trustworthy." >&2
+        "$py" "$reqdel" --selftest >&2
+        reqdel_failed=1
+    else
+        for sha in $pushed_shas; do
+            if ! "$py" "$reqdel" --head "$sha"; then
+                reqdel_failed=1
+            fi
+        done
+    fi
+fi
+
+if [ "$reqdel_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a commit being published deletes a file under
+requests/.
+
+A landed request gets a \`**Status:**\` line and stays where it is. It is not a
+ticket to be closed; it is the argument that settled something, and code and
+documents across the tree cite it by path. Deleting it does not tidy the queue,
+it turns every one of those citations into a dead end — and it removes the
+request from \`scripts/open-requests.py\`, the one report that exists to find
+open work, silently and in the direction that reads as "nothing is open".
+
+The fix, for a request that has landed:
+    git checkout \$(git merge-base HEAD $remote_name/main) -- requests/<file>
+    # then add, e.g.:  **Status:** LANDED <date> by lane <x>
+
+Renames are fine — fixing a slug, or sweeping an answered entry into an archive
+directory, is an R and not a D, and passes.
+
+If a deletion genuinely is right, record why rather than bypassing:
+    echo "<basename>  # <reason>" >> requests/.deletions-allowed
+
+To push anyway:
+    ALLOW_REQUEST_DELETION=1 git push $remote_name ...
 
 EOF
     exit 1

@@ -96118,6 +96118,35 @@ to shared persistent state, the fix is only half the work -- the other half is
 diffing that state against what it should be, and *the quiet damage is the
 part that is still there*.
 
+**Addendum 2026-08-30 (lane B) -- "the count cannot grow" was true and not
+enough, so there is now a gate.** The entry above, and the open question it
+points at, both close on the reasoning that the poisoned config is repaired and
+so the 33 commits are a bounded, historical blemish. That is correct as far as
+it goes. What it does not cover is recurrence, and the history has a plain
+answer about recurrence that neither write-up mentions: **it already recurred
+once.** `786139a5a` ("base") and `2b7d0f0a3` ("delete one, sweep another"), on
+`lane-b`, are a second pair of fixture commits whose tree is the repository
+deleted -- made at 23:47, **twenty-five minutes after** the 23:22 repair
+(`31eb8c6bd`, "Stop the request-deletion self-test writing to the repo being
+pushed"), and repaired again in `6caf6467e`. So the interval between "the cause
+is fixed" and "the cause fires again" was measured here at 25 minutes.
+
+That is the argument for a mechanism rather than a corrected assumption. As of
+this entry the push boundary carries **gate 10**: a commit whose author *or*
+committer address sits in a domain the standards reserve for testing (RFC 2606
+`.invalid`/`.test`/`.example`/`example.com|net|org`, RFC 6761 `.localhost`) is
+refused before it can be published. It would have stopped both halves of this
+incident -- the four junk commits and all 33 misattributions carried the same
+`selftest@example.invalid`. It is a denylist rather than an allowlist of the
+operator's identity specifically so that it has no false positives to be worn
+down by; the full trade-off is `design-decisions.md` §708, and the behavioural
+coverage (which drives the real hook over real pushes, and is mutation-tested
+in both directions) is `scripts/test-pre-push-identity-gate.py`.
+
+Nothing here changes the operator's pending decision, which is only about
+whether to rewrite the history that already exists. This is about the history
+that does not exist yet.
+
 ---
 
 ## `B-tar-EVERY-ARCHIVE-RECORDED-THE-OWNER-AS-A-BARE-NUMBER` (lane B, 2026-08-29) -- **FIXED 2026-08-29**

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Nine gates at the push boundary. Any one of them aborts the push.
+# Ten gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -11,6 +11,7 @@
 #   7. Refuse to publish a source file that `rustfmt` would reformat.
 #   8. Refuse to publish a diagnostic that names a file without quoting it.
 #   9. Refuse to publish the deletion of a file under `requests/`.
+#  10. Refuse to publish a commit authored by a test fixture's identity.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented. A list in a comment beside the code it lists is a second
@@ -1029,6 +1030,140 @@ If a deletion genuinely is right, record why rather than bypassing:
 
 To push anyway:
     ALLOW_REQUEST_DELETION=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 10: refuse to publish a commit wearing a test fixture's identity.
+#
+# WHY THIS EXISTS. On 2026-08-29 a self-test built a throwaway repository with
+# `git init` / `git config user.name selftest` / `git commit`, driving it by
+# `cwd=<tmp>`. An inherited `GIT_DIR` outranked `cwd`, so every one of those
+# commands operated on the repository being pushed: the `git config` wrote
+# `user.name=selftest` / `user.email=selftest@example.invalid` into the
+# *shared* config, which all three lane worktrees read. The full post-mortem is
+# `known-issues.md` (`A-A-PUSH-GATE-DELETED-THE-REPOSITORY-IT-WAS-GATING`) and
+# `scripts/gitenv.py`'s module docstring.
+#
+# Two different kinds of damage came out of that, and this one gate would have
+# stopped both:
+#
+#   * the fixture's own commits — `7f6a6b446` and `71f164f7e`, whose tree is a
+#     single `requests/` directory, i.e. the entire repository deleted — were
+#     pushed to `origin/lane-a` and `origin/main`;
+#   * 33 commits of *real* work from two lanes, made over the following 70
+#     minutes, are permanently authored `selftest <selftest@example.invalid>`,
+#     because the poisoned config kept applying long after the fixture exited.
+#
+# Neither is repairable now: rewriting published history across three active
+# lanes needs a force-push, which this project forbids outright. That is the
+# argument for a gate rather than a fix — the damage is cheap to prevent at the
+# push boundary and impossible to undo one commit later.
+#
+# WHY A RESERVED-DOMAIN TEST, AND NOT "must equal `git config user.email`".
+# An allowlist of the configured identity is stricter and would also have
+# caught this, but it fails the wrong way: it blocks a legitimate co-author, a
+# vendored upstream history, or the operator committing from a second machine —
+# and a gate whose false positives are ordinary events gets bypassed by habit,
+# which is the same as not having it. The domains below are reserved by RFC 2606
+# (`.invalid`, `.test`, `.example`, `example.com/net/org`) and RFC 6761
+# (`.localhost`) precisely so that they can never resolve to a real party. No
+# human's commit can legitimately carry one. The check therefore has no false
+# positives to be worn down by, which is what makes it worth having on by
+# default for every lane.
+#
+# WHY AUTHOR *AND* COMMITTER. They differ on merges, cherry-picks and rebases,
+# and in the incident both were poisoned. Checking only the author would pass a
+# merge commit made under a fixture identity — and merges to `main` are exactly
+# the commits every other lane inherits.
+#
+# WHY IT IS NOT SCOPED BY `touches()`. Gates 2-6 are scoped to the subtree that
+# can introduce their defect, so a lane never pays for a check it cannot fail.
+# This defect has no subtree: it is a property of the commit's metadata, not of
+# any path, and it arrives precisely when something *other* than the author's
+# intent is writing commits. Scoping it would exempt the case it exists for.
+#
+# Bypass: ALLOW_FIXTURE_IDENTITY=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+
+if [ "${ALLOW_FIXTURE_IDENTITY:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_FIXTURE_IDENTITY=1 set — fixture-identity check skipped." >&2
+    skip_ident=1
+else
+    skip_ident=0
+fi
+
+[ -n "${pushed_shas# }" ] || skip_ident=1
+
+# RFC 2606 §2-3 and RFC 6761 §6.3: names reserved so they can never be real.
+#
+# Anchored at both ends, which is load-bearing in both directions. The leading
+# `@` stops a local part matching — `not-a-test@really.co.uk` is a real address
+# whose left-hand side contains "test". The trailing `$` stops a *prefix*
+# matching — `invalid.example.co.uk` and `test.mycompany.com` are domains
+# someone can actually own, and only a suffix test tells them apart from
+# `x@example.invalid`.
+reserved_domain='@([A-Za-z0-9.-]+\.)?(invalid|test|example|localhost)$|@([A-Za-z0-9.-]+\.)?example\.(com|net|org)$'
+
+ident_violations=""
+if [ "$skip_ident" != "1" ]; then
+    for sha in $pushed_shas; do
+        # Only the commits this push would add — everything already on a
+        # remote-tracking branch is published, and refusing it here would just
+        # wedge the lane.
+        #
+        # One line per *identity*, not per commit, so the single end-anchored
+        # regex above covers author and committer alike. Putting both on one
+        # line would leave the author field mid-line, where `$` cannot reach it
+        # — the shape of near-miss that makes a gate quietly half-work.
+        #
+        # `%ae`/`%ce` are the raw fields; `%aE`/`%cE` apply `.mailmap`, which
+        # would let a committed mapping file rewrite `selftest@example.invalid`
+        # to something innocuous and hide exactly what this looks for.
+        bad=$(git log --format='%h author    %ae%n%h committer %ce' "$sha" \
+                  --not --remotes="$remote_name" 2>/dev/null \
+              | grep -Ei "$reserved_domain" \
+              | head -n 10)
+        if [ -n "$bad" ]; then
+            ident_violations="$ident_violations
+$bad"
+        fi
+    done
+fi
+
+if [ -n "$ident_violations" ]; then
+    echo "pre-push: commits with a reserved-domain identity:" >&2
+    echo "$ident_violations" >&2
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a commit being published is authored by an address
+in a domain reserved for testing (RFC 2606 / RFC 6761), which no real person
+can hold.
+
+This is what a leaked test fixture looks like. On 2026-08-29 a self-test's
+\`git config user.name selftest\` landed in the *shared* config because an
+inherited GIT_DIR outranked its \`cwd\`, and for the next 70 minutes every
+commit from every lane was signed \`selftest <selftest@example.invalid>\` — 33
+of them, permanently, plus two commits whose tree was the repository deleted.
+
+So before fixing the identity, find out what set it. If it was a fixture, the
+fixture is writing to this repository and the identity is the least of it:
+
+    git config --show-origin --get-regexp '^user\\.'   # where is it coming from?
+    git config --local --unset user.name              # if it is in this repo
+    git config --local --unset user.email
+
+Then re-make the commits under the right identity. They are not yet published,
+so this is still a rebase and not a force-push:
+
+    git rebase --exec 'git commit --amend --no-edit --reset-author' \\
+        \$(git merge-base HEAD $remote_name/main)
+
+If you are deliberately publishing a fixture's history — importing a test
+corpus, say — this is the one case that is legitimate:
+    ALLOW_FIXTURE_IDENTITY=1 git push $remote_name ...
 
 EOF
     exit 1

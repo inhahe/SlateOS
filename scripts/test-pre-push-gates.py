@@ -50,7 +50,16 @@ NUMBER_WORDS = {
 }
 
 # `^#   4. ...` -- an entry in the header's numbered list.
-HEADER_ENTRY_RE = re.compile(r"^#   (\d+)\. ", re.MULTILINE)
+#
+# The indent is `\s+` rather than the three literal spaces this used to
+# require, because the header right-aligns its numbers: gate 10 is written
+# `#  10. `, with two spaces, so a fixed three-space indent silently stopped
+# seeing the list's last entry the moment a second digit arrived. That failed
+# in the least useful way available -- the suite reported the *header* as wrong
+# ("nine gates listed, ten implemented") when the header was right and the
+# regex reading it was not, which is a false accusation aimed at exactly the
+# line a reader would then have "fixed" by renumbering a correct list.
+HEADER_ENTRY_RE = re.compile(r"^#\s+(\d+)\. ", re.MULTILINE)
 
 # `# Gate 4: ...` or `# Gate 7 - ...`. The separator is required: the file also
 # contains the sentence "Gate 9 needs them and cannot re-read stdin", which is

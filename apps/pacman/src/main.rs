@@ -503,7 +503,7 @@ fn draw_maze(f: &mut Frame<Target>, maze: &[[Cell; MAZE_COLS]; MAZE_ROWS], b: &B
 // is a frightened ghost's flee target, two draws back to back with bounds 31
 // and 28.  31 is odd and behaved; 28 = 4 x 7 is not, and cost the ghosts most
 // of the maze -- see `random_maze_cell` below.
-use randrange::{RandomSource, SeededRng};
+use randrange::{RandomSource, SeededRng, seed_from_system};
 
 /// A uniformly random maze cell, used as a frightened ghost's flee target.
 ///
@@ -954,8 +954,15 @@ pub struct PacmanApp {
 }
 
 impl PacmanApp {
+    /// A game seeded from the system, so two players do not get the same one.
+    ///
+    /// The module doc has claimed this since the window was wired; the code
+    /// said `with_seed(42)`, so every launch on every machine ran the same
+    /// ghost draws for ever. `seed_from_system` falls back to a fixed seed only
+    /// when the kernel's randomness is out of reach, which is a fixed game
+    /// rather than no game.
     fn new() -> Self {
-        Self::with_seed(42)
+        Self::with_seed(seed_from_system(0x5041_434D_414E))
     }
 
     fn with_seed(seed: u64) -> Self {

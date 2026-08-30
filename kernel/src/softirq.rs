@@ -385,12 +385,10 @@ fn handle_timer() {
         crate::kstat::sample();
     }
 
-    // Load average update (every 5 seconds on BSP, like Linux's LOAD_FREQ).
-    if u64::from(ticks) % crate::loadavg::SAMPLE_INTERVAL_TICKS == 0
-        && crate::smp::current_cpu_index() == 0
-    {
-        crate::loadavg::sample();
-    }
+    // No load-average sampling here.  `crate::sched::update_load_average` owns
+    // it, driven from the scheduler's own timer tick, and there is deliberately
+    // only one such driver: this site used to run a second EWMA over a second
+    // task count, and the two disagreed for the whole life of the kernel.
 
     // IRQ storm detection: check once per second on BSP.
     if u64::from(ticks) % 100 == 0 && crate::smp::current_cpu_index() == 0 {

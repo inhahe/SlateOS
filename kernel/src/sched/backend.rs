@@ -256,6 +256,19 @@ impl SchedulerBackend {
         }
     }
 
+    /// Number of queued tasks that are not the CPU's idle task.
+    ///
+    /// What the load average counts; see
+    /// `priority_rr::PriorityRoundRobin::real_tasks`.
+    #[inline]
+    pub fn real_tasks(&self) -> usize {
+        match self {
+            Self::PriorityRR(s) => s.real_tasks(),
+            Self::Eevdf(s) => s.real_tasks(),
+            Self::Deadline(s) => s.real_tasks(),
+        }
+    }
+
     /// Steal up to `count` tasks from this queue (for work stealing).
     #[inline]
     pub fn steal(&mut self, count: usize) -> StolenTasks {

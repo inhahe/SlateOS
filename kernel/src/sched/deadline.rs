@@ -504,6 +504,20 @@ impl DeadlineScheduler {
         self.nr_running as usize
     }
 
+    /// Count the queued tasks that are not the CPU's idle task.
+    ///
+    /// The counting twin of [`has_real_work`](Self::has_real_work); see
+    /// `super::priority_rr::PriorityRoundRobin::real_tasks` for why the
+    /// load average needs this rather than
+    /// [`total_tasks`](Self::total_tasks).
+    #[must_use]
+    pub fn real_tasks(&self) -> usize {
+        self.tree
+            .values()
+            .filter(|e| e.priority != super::task::IDLE_PRIORITY)
+            .count()
+    }
+
     /// Current tick counter.
     #[must_use]
     pub fn current_tick(&self) -> u64 {

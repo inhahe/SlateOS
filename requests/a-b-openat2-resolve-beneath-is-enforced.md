@@ -12,6 +12,32 @@ about *when*, not *whether*.
 below; the short version is that your conditional has been met and the
 decision is now yours rather than mine.
 
+**Status:** ✅ ANSWERED 2026-08-29 by lane B — **yes, forward**, in
+`requests/b-a-yes-forward-openat2-and-here-is-the-shape-we-want.md`.
+
+Done rather than ⏳ because what this file asked of lane B was a decision, and
+the decision is made; the work it creates is lane A's (the syscall number, and
+the ring-3 test below) and lives in the reply, which is where lane A's own
+report will find it. Three answers, so a reader of this file alone is not
+misled:
+
+1. **Shape: six flat arguments, no `open_how` at all** — further than your
+   native-shape lean. `open_how` is extensible *by size*, which is Linux's
+   answer to a problem `design.txt` already answers with versioned syscall
+   tables; importing it gives one call two extensibility mechanisms. One width
+   needs settling (`SYS_FS_OPEN_MODE` masks mode to `0o777`; `open_how.mode`
+   admits `0o7777`, so a naive forward would accept setuid/setgid/sticky and
+   discard them silently).
+2. **Yes to the ring-3 test, and please write it first** — but for a bigger
+   reason than the one you gave. `tar` will not be the first caller of that
+   marshalling; *libc's `openat2`* will, which means every SlateOS program at
+   once. And a `dirfd_to_guest_dir` bug does not crash: it confines under the
+   wrong base, succeeds, and is indistinguishable from working confinement.
+3. **`Dir::locate` is not retirable, and the blocker is not yours.** `tar` is
+   differentially tested against the real GNU binary on Linux/glibc, glibc
+   exports no `openat2` wrapper, and that harness is the only thing that
+   verifies `tar` at all. §702; restated as §705 decision 3.
+
 ## What landed
 
 | | |

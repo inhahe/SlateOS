@@ -98,9 +98,20 @@ exits 0, because that state means "no history to compare", not "no deletions".
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# `gitenv.clean_env()` is load-bearing on every subprocess below, not hygiene.
+# An inherited `GIT_DIR` -- which git exports into every hook, and this script
+# is run from `pre-push` -- outranks both `cwd=` and `-C`, so without it the
+# self-test's fixture commands write to the repository being pushed. They once
+# did; see `scripts/gitenv.py` for what that cost and `f0534726e` for the
+# repair.
+import gitenv  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 REQUESTS = "requests/"
@@ -122,10 +133,16 @@ TRUNK_CANDIDATES = ("origin/main", "main")
 
 
 def _git(*args: str) -> tuple[int, str]:
-    """Run git in the repo root, returning (returncode, stdout+stderr)."""
+    """Run git in the repo root, returning (returncode, stdout+stderr).
+
+    `cwd=ROOT` is the whole of how this script picks a repository, which is why
+    the environment is scrubbed: an inherited `GIT_DIR` would silently override
+    it and every answer below would be about some other repository.
+    """
     proc = subprocess.run(
         ["git", *args],
         cwd=str(ROOT),
+        env=gitenv.clean_env(),
         capture_output=True,
         text=True,
         check=False,
@@ -208,14 +225,18 @@ def selftest() -> int:
     blocked them would be bypassed within a week), the allowlist must still
     waive, and machinery must stay exempt.
     """
-    import os
     import tempfile
 
     failures: list[str] = []
 
     def run(cwd: str, *args: str) -> str:
+        # `env=gitenv.clean_env()` is load-bearing, not hygiene. Without it this
+        # function writes to whatever repository the caller's environment names
+        # -- see `scripts/gitenv.py`, and note that the caller is `pre-push`,
+        # which always names one.
         proc = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+            ["git", *args], cwd=cwd, env=gitenv.clean_env(),
+            capture_output=True, text=True, check=True,
         )
         return proc.stdout
 

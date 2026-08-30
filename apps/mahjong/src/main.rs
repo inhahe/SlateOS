@@ -2046,7 +2046,17 @@ mod tests {
         // The legend and the help bar are subordinate to the counters; a small
         // font larger than the status font would read as the more important of
         // the two. The ceiling is `status`, not a constant, so it follows.
-        for (w, h) in SIZES {
+        //
+        // The extra windows are not decoration. `status` stops at 18pt above
+        // 783 pixels of height, and `small` only reaches 18pt at 1058 -- so a
+        // ceiling written as a constant instead of as `status` is wrong only
+        // in windows taller than that, and the tallest in `SIZES` is 1000. The
+        // sweep replaced the ceiling with a constant and no test could see it.
+        for (w, h) in SIZES
+            .iter()
+            .copied()
+            .chain([(1400.0, 1400.0), (900.0, 2200.0)])
+        {
             let l = Layout::solve(w, h);
             assert!(
                 l.small <= l.status,
@@ -2074,6 +2084,20 @@ mod tests {
             "the padding alone is {} of a 100-pixel window",
             wide_short.pad * 2.0
         );
+        // And it stops at both ends, which neither claim above needs: the
+        // comparison is satisfied by any padding that grows, including one
+        // that grows without limit until a 4K window is mostly margin. The
+        // sweep found that hole by deleting the ceiling and going unnoticed.
+        assert_eq!(
+            Layout::solve(300.0, 120.0).pad,
+            2.0,
+            "the padding has no floor"
+        );
+        assert_eq!(
+            Layout::solve(4000.0, 3000.0).pad,
+            14.0,
+            "the padding has no ceiling"
+        );
     }
     // ════════════════════════════════════════════════════════════════
     // The legend column: all of it or none of it
@@ -2098,8 +2122,20 @@ mod tests {
         // including one that ignores it. This is the claim that it does not:
         // two windows of the same width, differing only in the font the height
         // picks, must not get the same column.
-        let short = Layout::solve(1400.0, 420.0);
+        //
+        // "Differing only in the font" has to be arranged, and the first draft
+        // did not arrange it: it compared 1400x420 with 1400x1400, where the
+        // padding also grows from 6.3 to 14 -- and the column is `widest +
+        // font + pad * 3`, so it widened by the padding alone. A mutant that
+        // measured the legend at a fixed 12pt passed that comparison. Both
+        // windows here are past the padding's ceiling, so the font is the only
+        // thing left that differs.
+        let short = Layout::solve(1400.0, 1000.0);
         let tall = Layout::solve(1400.0, 1400.0);
+        assert_eq!(
+            short.pad, tall.pad,
+            "the fixture is broken: the padding differs too, so it could be what widens the column"
+        );
         assert!(
             tall.small > short.small,
             "the fixture is broken: both draw the legend at {}pt",
@@ -3517,6 +3553,19 @@ mod tests {
                 (strip.0.bottom() - h).abs() < 0.01,
                 "at {w}x{h} the help bar ends at {} rather than the bottom",
                 strip.0.bottom()
+            );
+            // And it is as tall as the line it holds. Both claims above are
+            // about where the strip is, and a strip of any height can be in
+            // the right place: the sweep pinned the bar at a constant 30 and
+            // the only test that noticed was the one about tile labels, which
+            // saw it through the board it left behind rather than as a bar
+            // whose text no longer fits.
+            assert!(
+                (strip.0.h - (l.small + l.pad * 2.0)).abs() < 0.01,
+                "at {w}x{h} the help bar is {} tall around a {}pt line padded by {}",
+                strip.0.h,
+                l.small,
+                l.pad
             );
         }
     }

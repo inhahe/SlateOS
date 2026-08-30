@@ -113,7 +113,10 @@ MUTATIONS = [
         "the padding has no ceiling, so a huge window is mostly margin",
         "        let pad = (w.min(h) * 0.015).clamp(2.0, 14.0).min(w.min(h) / 2.0);",
         "        let pad = (w.min(h) * 0.015).max(2.0).min(w.min(h) / 2.0);",
-        ["the_fonts_grow_with_the_window_and_stop_at_both_ends"],
+        # The fonts test is about the fonts; the padding's own ceiling belongs
+        # with the padding's own test, which until this sweep only compared two
+        # windows and so was satisfied by any padding that grew at all.
+        ["the_padding_is_taken_from_the_shorter_side"],
     ),
     (
         "the title font has no ceiling",
@@ -136,7 +139,10 @@ MUTATIONS = [
     (
         "the small font is capped at a constant rather than at the line above it",
         "        let small = (h * 0.017).clamp(7.0, status);",
-        "        let small = (h * 0.017).clamp(7.0, 18.0);",
+        # Not `18.0`, which was the first try and is `status`'s own ceiling --
+        # so the mutant computed the same number as the program at every
+        # height and survived by being equivalent rather than by being missed.
+        "        let small = (h * 0.017).clamp(7.0, 26.0);",
         ["the_small_font_never_outgrows_the_font_above_it"],
     ),
     (

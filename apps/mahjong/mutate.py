@@ -630,7 +630,12 @@ MUTATIONS = [
         "the label is not centred in the tile it names",
         "                x: text::center_x(label, r.x + r.w / 2.0, l.tile_font, FontWeightHint::Bold),",
         "                x: r.x,",
-        ["a_tiles_hit_box_is_the_rectangle_it_was_drawn_in"],
+        # First named against the hit-box test, which survived: a hit box is
+        # recorded from the tile rect and knows nothing about where the label
+        # inside it was put. The label test measured the glyph run's width but
+        # never its position, so a label flush against the tile's left edge
+        # passed. It now checks the midpoint too.
+        ["a_tiles_label_is_drawn_inside_the_tile_at_every_size"],
     ),
     (
         "the counters are written once rather than read off the board",

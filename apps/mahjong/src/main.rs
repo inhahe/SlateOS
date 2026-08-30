@@ -3341,12 +3341,37 @@ mod tests {
                 !drawn.is_empty(),
                 "at {w}x{h} the tiles were painted with no labels on them"
             );
-            for label in &drawn {
-                let width = text::measure(label, l.tile_font, FontWeightHint::Bold);
+            // Inside the tile is not the same as inside the *right* tile, and
+            // "inside" is not the same as centred: the sweep drew every label
+            // flush against its tile's left edge and this test still passed,
+            // because a label narrow enough to fit is narrow enough to fit
+            // anywhere in the tile. Each label's own midpoint must land on the
+            // midpoint of some tile. Measured with the toolkit's `measure`
+            // rather than with the production centring call, so the check does
+            // not agree with the thing it is checking.
+            let f = g.draw((w, h));
+            let centres: Vec<f32> = f
+                .hits()
+                .iter()
+                .filter(|(t, _)| matches!(t, Target::Tile(_)))
+                .map(|(_, r)| r.centre().0)
+                .collect();
+            assert!(!centres.is_empty(), "at {w}x{h} no tile was clickable");
+            for (label, x, ..) in texts(&f)
+                .into_iter()
+                .filter(|(_, _, _, size, _)| *size == l.tile_font)
+            {
+                let width = text::measure(&label, l.tile_font, FontWeightHint::Bold);
                 assert!(
                     width <= l.tile_w + 0.01,
                     "at {w}x{h} the label {label:?} measures {width} across a {} tile",
                     l.tile_w
+                );
+                let mid = x + width / 2.0;
+                assert!(
+                    centres.iter().any(|c| (c - mid).abs() < 0.5),
+                    "at {w}x{h} the label {label:?} is centred on {mid}, \
+                     which is not the middle of any tile"
                 );
             }
         }
@@ -3472,6 +3497,27 @@ mod tests {
                 );
             }
         }
+        // Both bounds above are satisfied by any constant between one and four
+        // pixels -- they are the clamp's own output range, so they say nothing
+        // about whether the border is derived from the tile at all. Comparing
+        // two window sizes is what makes the claim about scaling.
+        let border_at = |w: f32, h: f32| -> f32 {
+            g.draw((w, h))
+                .commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Line { width, .. } => Some(*width),
+                    _ => None,
+                })
+                .expect("the cursor is not drawn at all")
+        };
+        let small = border_at(360.0, 700.0);
+        let large = border_at(1600.0, 1000.0);
+        assert!(
+            large > small,
+            "the cursor border is {large} pixels on a 1600x1000 window and \
+             {small} on a 360x700 one, so it does not track the tile it outlines"
+        );
     }
 
     #[test]

@@ -1314,8 +1314,10 @@ impl Yahtzee {
         let rows = self.rows();
         let count = rows.len().max(1) as f32;
         // The rows share the column's height, capped so that a tall window
-        // gets a readable card rather than rows the height of a hand.
-        let row_h = (area.h / count).min(l.font * 2.2);
+        // gets a readable card rather than rows the height of a hand, and
+        // floored so a short one drops the rows that do not fit rather than
+        // squeezing eighteen of them into a strip too thin to read.
+        let row_h = (area.h / count).clamp(l.small, l.font * 2.2);
         let card_h = row_h * count;
 
         f.push(RenderCommand::FillRect {
@@ -1699,6 +1701,7 @@ mod tests {
 
     use super::*;
     use guitk::event::Modifiers;
+    use guitk::probe;
 
     /// Helper: create a game with a fixed seed for deterministic tests.
     fn test_game() -> Yahtzee {
@@ -1722,6 +1725,1195 @@ mod tests {
             text: String::new(),
         });
         handle_event(game, &event)
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // The window: geometry solved from the live size
+    //
+    // Every test below drives the program through `Probe`, so it asks the
+    // drawing pass where it put a control rather than repeating a coordinate
+    // the drawing pass might already have moved.
+    // ════════════════════════════════════════════════════════════════
+
+    /// Shapes the layout has to survive: the default, a small window, a large
+    /// one, a tall narrow one and a wide short one.
+    const SIZES: [(f32, f32); 5] = [
+        (WINDOW_WIDTH, WINDOW_HEIGHT),
+        (400.0, 300.0),
+        (1600.0, 1000.0),
+        (300.0, 900.0),
+        (1200.0, 260.0),
+    ];
+
+    /// Floating point slack: a pixel is the smallest thing anyone can see, so
+    /// a hundredth of one is noise.
+    const EPS: f32 = 0.01;
+
+    /// A game that has earned a Yahtzee bonus, reached the way play earns one:
+    /// a Yahtzee scored into the Yahtzee box, then a second one rolled.
+    fn game_with_yahtzee_bonus() -> Yahtzee {
+        let mut g = game_with_dice([4, 4, 4, 4, 4]);
+        assert!(g.score_category(Category::Yahtzee.index()));
+        g.dice = [4, 4, 4, 4, 4];
+        g.roll_number = 1;
+        assert!(g.score_category(Category::Fours.index()));
+        assert!(g.yahtzee_bonus_count > 0, "no bonus was recorded");
+        g
+    }
+
+    /// A game with every box spent, reached by playing it out.
+    fn finished_game() -> Yahtzee {
+        let mut g = test_game();
+        for i in 0..NUM_CATEGORIES {
+            g.roll();
+            assert!(g.score_category(i));
+        }
+        assert_eq!(g.phase(), GamePhase::GameOver);
+        g
+    }
+
+    /// A game standing in the phase named, reached the way play reaches it.
+    fn game_in_phase(phase: GamePhase) -> Yahtzee {
+        match phase {
+            GamePhase::Rolling => test_game(),
+            GamePhase::MustScore => {
+                let mut g = test_game();
+                for _ in 0..MAX_ROLLS {
+                    assert!(g.roll());
+                }
+                g
+            }
+            GamePhase::GameOver => finished_game(),
+        }
+    }
+
+    /// Every string the frame paints, with the box it paints it in.
+    fn painted_text(g: &Yahtzee, size: (f32, f32)) -> Vec<(String, f32, f32)> {
+        g.draw(size)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { x, y, text, .. } => Some((text.clone(), *x, *y)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The strings whose origin falls inside `area`.
+    fn texts_within(g: &Yahtzee, size: (f32, f32), area: Rect) -> Vec<String> {
+        painted_text(g, size)
+            .into_iter()
+            .filter(|(_, x, y)| {
+                *x >= area.x - EPS
+                    && *x <= area.right() + EPS
+                    && *y >= area.y - EPS
+                    && *y <= area.bottom() + EPS
+            })
+            .map(|(t, _, _)| t)
+            .collect()
+    }
+
+    /// The strings painted in the header band.
+    fn header_texts(g: &Yahtzee) -> Vec<String> {
+        let l = Layout::solve(WINDOW_WIDTH, WINDOW_HEIGHT);
+        texts_within(g, (WINDOW_WIDTH, WINDOW_HEIGHT), l.header)
+    }
+
+    fn die_boxes(g: &Yahtzee, size: (f32, f32)) -> Vec<Rect> {
+        let mut v: Vec<(usize, Rect)> = g
+            .draw(size)
+            .hits()
+            .iter()
+            .filter_map(|(t, r)| match t {
+                Target::Die(i) => Some((*i, *r)),
+                _ => None,
+            })
+            .collect();
+        v.sort_by_key(|(i, _)| *i);
+        v.into_iter().map(|(_, r)| r).collect()
+    }
+
+    // ── The bands ──────────────────────────────────────────────────
+
+    #[test]
+    fn the_header_sits_above_both_columns_and_never_overlaps_them() {
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            assert!(
+                l.header.bottom() <= l.left.y + EPS,
+                "{w}x{h}: header {:?} runs into the dice column {:?}",
+                l.header,
+                l.left
+            );
+            assert!(
+                l.header.bottom() <= l.card.y + EPS,
+                "{w}x{h}: header {:?} runs into the scorecard {:?}",
+                l.header,
+                l.card
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_columns_share_the_width_without_a_gap_or_an_overlap() {
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            assert!(
+                (l.left.right() - l.card.x).abs() < EPS,
+                "{w}x{h}: the columns meet at {} and {}",
+                l.left.right(),
+                l.card.x
+            );
+            assert!(
+                (l.card.right() - w).abs() < EPS,
+                "{w}x{h}: the scorecard ends at {} in a window {w} wide",
+                l.card.right()
+            );
+        }
+    }
+
+    #[test]
+    fn the_scorecard_never_takes_more_than_half_the_window() {
+        // The dice have to fit beside it. The old card was a flat 320 pixels,
+        // which is most of a 400-wide window and a sliver of a 1600-wide one.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            assert!(
+                l.card.w <= w / 2.0 + EPS,
+                "{w}x{h}: the card is {} of {w}",
+                l.card.w
+            );
+        }
+    }
+
+    #[test]
+    fn widening_the_window_widens_the_dice_column_rather_than_only_the_card() {
+        let narrow = Layout::solve(700.0, 700.0);
+        let wide = Layout::solve(1400.0, 700.0);
+        assert!(
+            wide.left.w > narrow.left.w + 1.0,
+            "the dice column stayed at {} when the window doubled",
+            narrow.left.w
+        );
+    }
+
+    #[test]
+    fn the_dice_the_button_and_the_help_stack_without_overlapping() {
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            let (dice, button, hints) = l.left_bands();
+            assert!(
+                dice.bottom() <= button.y + EPS,
+                "{w}x{h}: the button {button:?} is on top of the dice {dice:?}"
+            );
+            assert!(
+                button.bottom() <= hints.y + EPS,
+                "{w}x{h}: the help {hints:?} is on top of the button {button:?}"
+            );
+            assert!(
+                hints.bottom() <= l.left.bottom() + EPS,
+                "{w}x{h}: the help {hints:?} runs off the bottom of {:?}",
+                l.left
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_is_pinned_to_the_floor_of_the_column() {
+        // All three bands used to be stacked downwards from a fixed top, so in
+        // a short window the help was drawn under the window's edge.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            let (_, _, hints) = l.left_bands();
+            let floor = inset(l.left, l.pad).bottom();
+            assert!(
+                (hints.bottom() - floor).abs() < EPS,
+                "{w}x{h}: the help ends at {} with the floor at {floor}",
+                hints.bottom()
+            );
+        }
+    }
+
+    // ── The dice ───────────────────────────────────────────────────
+
+    #[test]
+    fn there_are_five_dice_and_each_is_drawn_once() {
+        for size in SIZES {
+            let boxes = die_boxes(&test_game(), size);
+            assert_eq!(boxes.len(), NUM_DICE, "{size:?}: {boxes:?}");
+        }
+    }
+
+    #[test]
+    fn every_die_is_the_same_size_as_every_other() {
+        // Comparing the dice against each other rather than against the window:
+        // a box the clip trimmed is a box smaller than its neighbours, whereas
+        // "inside the window" is true of every recorded box by construction.
+        for size in SIZES {
+            let boxes = die_boxes(&test_game(), size);
+            let first = boxes[0];
+            for (i, r) in boxes.iter().enumerate() {
+                assert!(
+                    (r.w - first.w).abs() < EPS && (r.h - first.h).abs() < EPS,
+                    "{size:?}: die {i} is {}x{} and die 0 is {}x{}",
+                    r.w,
+                    r.h,
+                    first.w,
+                    first.h
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_die_is_square() {
+        for size in SIZES {
+            for (i, r) in die_boxes(&test_game(), size).into_iter().enumerate() {
+                assert!(
+                    (r.w - r.h).abs() < EPS,
+                    "{size:?}: die {i} is {}x{}",
+                    r.w,
+                    r.h
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_dice_are_evenly_spaced_and_run_left_to_right() {
+        for size in SIZES {
+            let boxes = die_boxes(&test_game(), size);
+            let first_gap = boxes[1].x - boxes[0].right();
+            assert!(first_gap > -EPS, "{size:?}: the dice overlap");
+            for i in 1..NUM_DICE {
+                let gap = boxes[i].x - boxes[i - 1].right();
+                assert!(
+                    (gap - first_gap).abs() < EPS,
+                    "{size:?}: gap {i} is {gap}, gap 1 is {first_gap}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_dice_stay_inside_the_band_the_layout_gave_them() {
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            let (band, _, _) = l.left_bands();
+            let boxes = die_boxes(&test_game(), (w, h));
+            let row = Rect::new(
+                boxes[0].x,
+                boxes[0].y,
+                boxes[NUM_DICE - 1].right() - boxes[0].x,
+                boxes[0].h,
+            );
+            assert!(
+                row.x >= band.x - EPS && row.right() <= band.right() + EPS,
+                "{w}x{h}: the row {row:?} is wider than its band {band:?}"
+            );
+            assert!(
+                row.bottom() <= band.bottom() + EPS,
+                "{w}x{h}: the row {row:?} runs below its band {band:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn widening_the_window_grows_the_dice_rather_than_the_gaps_beside_them() {
+        // The old die was a flat 64 pixels with a flat 12-pixel gap, so a wider
+        // window bought nothing but empty table.
+        let narrow = die_boxes(&test_game(), (700.0, 700.0));
+        let wide = die_boxes(&test_game(), (1400.0, 700.0));
+        assert!(
+            wide[0].w > narrow[0].w + 1.0,
+            "a die was {} at 700 wide and {} at 1400",
+            narrow[0].w,
+            wide[0].w
+        );
+    }
+
+    #[test]
+    fn a_short_window_shrinks_the_dice_rather_than_running_them_off_the_bottom() {
+        let squat = die_boxes(&test_game(), (1200.0, 260.0));
+        let tall = die_boxes(&test_game(), (1200.0, 900.0));
+        assert!(
+            squat[0].h < tall[0].h,
+            "a die was {} tall in a 260-high window and {} in a 900-high one",
+            squat[0].h,
+            tall[0].h
+        );
+    }
+
+    #[test]
+    fn something_is_painted_inside_every_die_box() {
+        // A recorded box is not evidence that anything was drawn in it.
+        let g = test_game();
+        let frame = g.draw(SIZES[0]);
+        let filled: Vec<Rect> = frame
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect();
+        for (i, die) in die_boxes(&g, SIZES[0]).into_iter().enumerate() {
+            let (cx, cy) = die.centre();
+            assert!(
+                filled.iter().any(|r| r.contains(cx, cy)),
+                "die {i} has a hit box at {die:?} and nothing painted in it"
+            );
+        }
+    }
+
+    // ── The header ─────────────────────────────────────────────────
+
+    #[test]
+    fn the_title_the_turn_and_the_high_score_never_overlap() {
+        // The counter was drawn at `PADDING + 130.0` and the high score at
+        // `PADDING + 400.0`, so in a narrow window the score was off the right
+        // edge and in a wide one all three huddled in the left quarter.
+        for size in SIZES {
+            let g = test_game();
+            let title = probe::rect_of_sized(&g, Target::Title, size).expect("a title");
+            let turn = probe::rect_of_sized(&g, Target::Turn, size).expect("a turn counter");
+            let high = probe::rect_of_sized(&g, Target::High, size).expect("a high score");
+            assert!(
+                title.right() <= turn.x + EPS,
+                "{size:?}: the title {title:?} runs into the counter {turn:?}"
+            );
+            assert!(
+                turn.right() <= high.x + EPS,
+                "{size:?}: the counter {turn:?} runs into the high score {high:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_high_score_is_anchored_to_the_right_edge() {
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            let g = test_game();
+            let high = probe::rect_of_sized(&g, Target::High, (w, h)).expect("a high score");
+            let edge = inset(l.header, l.pad).right();
+            assert!(
+                high.right() <= edge + EPS,
+                "{w}x{h}: the high score ends at {} past the edge {edge}",
+                high.right()
+            );
+            assert!(
+                high.right() >= edge - l.pad,
+                "{w}x{h}: the high score ends at {} well short of the edge {edge}",
+                high.right()
+            );
+        }
+    }
+
+    #[test]
+    fn the_header_boxes_stay_within_the_header_band() {
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            let g = test_game();
+            for target in [Target::Title, Target::Turn, Target::High] {
+                let r = probe::rect_of_sized(&g, target, (w, h)).expect("a header box");
+                assert!(
+                    r.bottom() <= l.header.bottom() + EPS,
+                    "{w}x{h}: {target:?} at {r:?} hangs below the header {:?}",
+                    l.header
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_header_reads_game_over_once_every_box_is_spent() {
+        let mut g = finished_game();
+        let text = header_texts(&g).join(" ");
+        assert!(
+            text.contains("Game Over"),
+            "the header still reads {text:?}"
+        );
+        g.new_game();
+        let text = header_texts(&g).join(" ");
+        assert!(
+            text.contains("Turn 1/13"),
+            "a new game's header reads {text:?}"
+        );
+    }
+
+    // ── The roll button ────────────────────────────────────────────
+
+    #[test]
+    fn the_button_is_wide_enough_for_its_widest_legend() {
+        // The box was a constant 140 pixels, cut for "Roll (R)"; "No Rolls
+        // Left" and "New Game (N)" are both longer and spilled out of it.
+        for size in SIZES {
+            let l = Layout::solve(size.0, size.1);
+            let widest = ["New Game (N)", "No Rolls Left", "Roll (R)"]
+                .into_iter()
+                .map(|t| text::measure(t, l.font, FontWeightHint::Bold))
+                .fold(0.0f32, f32::max);
+            let band = l.left_bands().1;
+            for state in [
+                GamePhase::Rolling,
+                GamePhase::MustScore,
+                GamePhase::GameOver,
+            ] {
+                let g = game_in_phase(state);
+                let r = probe::rect_of_sized(&g, Target::RollButton, size).expect("a button");
+                assert!(
+                    r.w >= widest.min(band.w) - EPS,
+                    "{size:?} {state:?}: the button is {} wide, its legends need {widest}",
+                    r.w
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_button_is_the_same_box_whatever_it_says() {
+        // A button that moves under the cursor between the second roll and the
+        // third is a button the player misses.
+        let size = SIZES[0];
+        let rolling =
+            probe::rect_of_sized(&game_in_phase(GamePhase::Rolling), Target::RollButton, size)
+                .expect("a button");
+        for state in [GamePhase::MustScore, GamePhase::GameOver] {
+            let r = probe::rect_of_sized(&game_in_phase(state), Target::RollButton, size)
+                .expect("a button");
+            assert_eq!(
+                (r.x, r.y, r.w, r.h),
+                (rolling.x, rolling.y, rolling.w, rolling.h),
+                "the button moved when it started saying {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_button_sits_under_the_dice_it_rolls() {
+        for size in SIZES {
+            let g = test_game();
+            let dice = die_boxes(&g, size);
+            let row_centre = f32::midpoint(dice[0].x, dice[NUM_DICE - 1].right());
+            let button = probe::rect_of_sized(&g, Target::RollButton, size).expect("a button");
+            let band = Layout::solve(size.0, size.1).left_bands().1;
+            // Centred on the row unless the band's edge gets in the way first.
+            let wanted =
+                (row_centre - button.w / 2.0).clamp(band.x, (band.right() - button.w).max(band.x));
+            assert!(
+                (button.x - wanted).abs() < EPS,
+                "{size:?}: the button starts at {} and the dice are centred on {row_centre}",
+                button.x
+            );
+        }
+    }
+
+    #[test]
+    fn the_button_says_what_the_click_will_do() {
+        let cases = [
+            (GamePhase::Rolling, "Roll (R)"),
+            (GamePhase::MustScore, "No Rolls Left"),
+            (GamePhase::GameOver, "New Game (N)"),
+        ];
+        for (state, legend) in cases {
+            let g = game_in_phase(state);
+            let button = probe::rect_of_sized(&g, Target::RollButton, SIZES[0]).expect("a button");
+            let found = texts_within(&g, SIZES[0], button);
+            assert!(
+                found.iter().any(|t| t == legend),
+                "{state:?}: the button reads {found:?}, not {legend:?}"
+            );
+        }
+    }
+
+    // ── The scorecard ──────────────────────────────────────────────
+
+    fn category_boxes(g: &Yahtzee, size: (f32, f32)) -> Vec<(usize, Rect)> {
+        let mut v: Vec<(usize, Rect)> = g
+            .draw(size)
+            .hits()
+            .iter()
+            .filter_map(|(t, r)| match t {
+                Target::Category(i) => Some((*i, *r)),
+                _ => None,
+            })
+            .collect();
+        v.sort_by_key(|(i, _)| *i);
+        v
+    }
+
+    #[test]
+    fn every_category_has_a_box_of_its_own() {
+        let g = test_game();
+        let boxes = category_boxes(&g, SIZES[0]);
+        assert_eq!(boxes.len(), NUM_CATEGORIES, "{boxes:?}");
+        for (n, (i, _)) in boxes.iter().enumerate() {
+            assert_eq!(*i, n, "the categories are not in order: {boxes:?}");
+        }
+    }
+
+    #[test]
+    fn every_category_box_carries_that_category_s_name() {
+        // A row is not the row it claims to be unless its name is in it.
+        let g = test_game();
+        for (i, band) in category_boxes(&g, SIZES[0]) {
+            let cat = Category::at(i).expect("a category");
+            let found = texts_within(&g, SIZES[0], band);
+            assert!(
+                found.iter().any(|t| t == cat.name()),
+                "box {i} should be {:?} and reads {found:?}",
+                cat.name()
+            );
+        }
+    }
+
+    #[test]
+    fn the_rows_are_the_same_height_and_do_not_overlap() {
+        for size in SIZES {
+            let boxes = category_boxes(&test_game(), size);
+            let first = boxes[0].1;
+            for (i, r) in &boxes {
+                assert!(
+                    (r.h - first.h).abs() < EPS,
+                    "{size:?}: row {i} is {} tall and row 0 is {}",
+                    r.h,
+                    first.h
+                );
+                assert!(
+                    (r.x - first.x).abs() < EPS && (r.w - first.w).abs() < EPS,
+                    "{size:?}: row {i} spans {}..{} and row 0 spans {}..{}",
+                    r.x,
+                    r.right(),
+                    first.x,
+                    first.right()
+                );
+            }
+            for w in boxes.windows(2) {
+                assert!(
+                    w[0].1.bottom() <= w[1].1.y + EPS,
+                    "{size:?}: row {} overlaps row {}",
+                    w[0].0,
+                    w[1].0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_rows_stay_inside_the_scorecard_column() {
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            let area = inset(l.card, l.pad);
+            for (i, r) in category_boxes(&test_game(), (w, h)) {
+                assert!(
+                    r.bottom() <= area.bottom() + EPS,
+                    "{w}x{h}: row {i} at {r:?} runs past the card {area:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_too_short_for_the_card_drops_rows_rather_than_squashing_them() {
+        // The row height is floored at the small font, so a card that cannot
+        // show eighteen readable rows shows the ones that fit and stops.
+        let squat = (820.0, 110.0);
+        let l = Layout::solve(squat.0, squat.1);
+        let area = inset(l.card, l.pad);
+        let boxes = category_boxes(&test_game(), squat);
+        assert!(
+            boxes.len() < NUM_CATEGORIES,
+            "all {NUM_CATEGORIES} rows fitted in a card {} tall",
+            area.h
+        );
+        for (i, r) in &boxes {
+            assert!(
+                r.h >= l.small - EPS,
+                "row {i} was squeezed to {} with the small font at {}",
+                r.h,
+                l.small
+            );
+            assert!(
+                r.bottom() <= area.bottom() + EPS,
+                "row {i} at {r:?} was drawn past the card {area:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_upper_tally_and_its_bonus_close_the_upper_section() {
+        // The row list used to be described twice -- once by the running `row_y`
+        // in the painting and once by `cat_index + 3` in the click -- so the two
+        // agreed only for as long as nobody inserted a row in one of them.
+        let rows = test_game().rows();
+        let upper = rows
+            .iter()
+            .position(|r| *r == Row::UpperTotal)
+            .expect("an upper total");
+        let bonus = rows.iter().position(|r| *r == Row::Bonus).expect("a bonus");
+        let rule = rows.iter().position(|r| *r == Row::Rule).expect("a rule");
+        assert_eq!((bonus, rule), (upper + 1, upper + 2), "{rows:?}");
+        for (n, row) in rows.iter().enumerate() {
+            if let Row::Cat(i) = row {
+                let cat = Category::at(*i).expect("a category");
+                assert_eq!(
+                    cat.is_upper(),
+                    n < upper,
+                    "{cat:?} is drawn on the {} side of the tally",
+                    if n < upper { "upper" } else { "lower" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_yahtzee_bonus_row_appears_only_once_a_bonus_is_earned() {
+        let g = test_game();
+        assert!(
+            !g.rows().contains(&Row::YahtzeeBonus),
+            "a fresh game already lists a bonus row"
+        );
+        assert!(
+            !probe::is_visible_sized(&g, Target::Tally(Row::YahtzeeBonus), SIZES[0]),
+            "a fresh game already draws a bonus row"
+        );
+
+        let g = game_with_yahtzee_bonus();
+        assert!(g.rows().contains(&Row::YahtzeeBonus), "{:?}", g.rows());
+        assert!(
+            probe::is_visible_sized(&g, Target::Tally(Row::YahtzeeBonus), SIZES[0]),
+            "the bonus was earned and the row is not drawn"
+        );
+    }
+
+    #[test]
+    fn the_bonus_row_pushes_the_grand_total_down_rather_than_landing_on_it() {
+        // The conditional row is exactly the one the old two-description
+        // scorecard could not place, because only one of the descriptions
+        // knew about it.
+        let plain = probe::rect_of_sized(&test_game(), Target::Tally(Row::GrandTotal), SIZES[0])
+            .expect("a grand total");
+        let bonused = game_with_yahtzee_bonus();
+        let total = probe::rect_of_sized(&bonused, Target::Tally(Row::GrandTotal), SIZES[0])
+            .expect("a grand total");
+        let bonus = probe::rect_of_sized(&bonused, Target::Tally(Row::YahtzeeBonus), SIZES[0])
+            .expect("a bonus row");
+        assert!(
+            bonus.bottom() <= total.y + EPS,
+            "the bonus row {bonus:?} is on top of the grand total {total:?}"
+        );
+        assert!(
+            total.y > plain.y + EPS,
+            "the grand total stayed at {} when a row was inserted above it",
+            plain.y
+        );
+    }
+
+    #[test]
+    fn a_scored_box_shows_its_score() {
+        let mut g = game_with_dice([3, 3, 3, 3, 3]);
+        assert!(g.score_category(Category::Threes.index()));
+        let band = category_boxes(&g, SIZES[0])
+            .into_iter()
+            .find(|(i, _)| *i == Category::Threes.index())
+            .expect("a threes row")
+            .1;
+        let found = texts_within(&g, SIZES[0], band);
+        assert!(found.iter().any(|t| t == "15"), "the row reads {found:?}");
+    }
+
+    // ── The mouse ──────────────────────────────────────────────────
+
+    #[test]
+    fn clicking_a_die_holds_it_and_clicking_it_again_lets_it_go() {
+        // There was no mouse handling in the toolkit sense: the old click
+        // recomputed the dice row from the same constants the drawing used.
+        let mut g = game_with_dice([1, 2, 3, 4, 5]);
+        for i in 0..NUM_DICE {
+            assert_eq!(probe::click(&mut g, Target::Die(i)), EventResult::Consumed);
+            assert!(g.held[i], "die {i} did not take the click");
+        }
+        for i in 0..NUM_DICE {
+            probe::click(&mut g, Target::Die(i));
+            assert!(!g.held[i], "die {i} would not let go");
+        }
+    }
+
+    #[test]
+    fn a_click_lands_on_the_die_it_is_over_and_no_other() {
+        let mut g = game_with_dice([1, 2, 3, 4, 5]);
+        probe::click(&mut g, Target::Die(3));
+        assert_eq!(
+            g.held,
+            [false, false, false, true, false],
+            "one click held {:?}",
+            g.held
+        );
+        assert_eq!(g.selected_die, 3, "the cursor did not follow the click");
+        assert_eq!(g.focus, FocusRegion::Dice);
+    }
+
+    #[test]
+    fn a_die_cannot_be_held_before_it_has_been_rolled() {
+        // Holding a die that has never been thrown is holding the number the
+        // constructor happened to leave there.
+        let mut g = test_game();
+        assert_eq!(g.roll_number, 0);
+        assert_eq!(probe::click(&mut g, Target::Die(0)), EventResult::Ignored);
+        assert!(!g.held[0]);
+    }
+
+    #[test]
+    fn clicking_the_button_rolls_and_stops_after_three() {
+        let mut g = test_game();
+        for n in 1..=MAX_ROLLS {
+            assert_eq!(
+                probe::click(&mut g, Target::RollButton),
+                EventResult::Consumed
+            );
+            assert_eq!(g.roll_number, n);
+        }
+        assert_eq!(
+            probe::click(&mut g, Target::RollButton),
+            EventResult::Ignored,
+            "a fourth roll was allowed"
+        );
+        assert_eq!(g.roll_number, MAX_ROLLS);
+    }
+
+    #[test]
+    fn clicking_the_button_after_the_last_box_starts_a_new_game() {
+        let mut g = finished_game();
+        let high = g.grand_total();
+        assert_eq!(
+            probe::click(&mut g, Target::RollButton),
+            EventResult::Consumed
+        );
+        assert_eq!(g.phase(), GamePhase::Rolling);
+        assert_eq!(g.turn_number, 0);
+        assert!(g.scores.iter().all(Option::is_none), "{:?}", g.scores);
+        assert_eq!(g.high_score, high, "the new game forgot the high score");
+    }
+
+    #[test]
+    fn clicking_a_category_spends_it() {
+        let mut g = game_with_dice([5, 5, 5, 2, 1]);
+        let fives = Category::Fives.index();
+        assert_eq!(
+            probe::click(&mut g, Target::Category(fives)),
+            EventResult::Consumed
+        );
+        assert_eq!(g.scores[fives], Some(15));
+        assert_eq!(g.turn_number, 1, "the turn did not advance");
+    }
+
+    #[test]
+    fn clicking_a_spent_category_a_second_time_changes_nothing() {
+        let mut g = game_with_dice([5, 5, 5, 2, 1]);
+        let fives = Category::Fives.index();
+        probe::click(&mut g, Target::Category(fives));
+        let before = g.scores;
+        assert_eq!(
+            probe::click(&mut g, Target::Category(fives)),
+            EventResult::Ignored,
+            "a spent box was spent again"
+        );
+        assert_eq!(g.scores, before);
+    }
+
+    #[test]
+    fn clicking_a_category_lands_on_that_category_and_no_other() {
+        // Every box is clicked in turn and each one must be the box that
+        // fills. The old click read the row from `cat_index + 3`, a second
+        // description of an order the painting kept separately.
+        for i in 0..NUM_CATEGORIES {
+            let mut g = game_with_dice([2, 2, 3, 4, 5]);
+            probe::click(&mut g, Target::Category(i));
+            let filled: Vec<usize> = (0..NUM_CATEGORIES)
+                .filter(|n| g.scores[*n].is_some())
+                .collect();
+            assert_eq!(filled, vec![i], "clicking box {i} filled {filled:?}");
+        }
+    }
+
+    #[test]
+    fn the_bonus_row_is_a_tally_and_not_a_box_a_click_can_spend() {
+        let mut g = game_with_yahtzee_bonus();
+        let before = g.scores;
+        let turn = g.turn_number;
+        assert_eq!(
+            probe::click(&mut g, Target::Tally(Row::YahtzeeBonus)),
+            EventResult::Ignored
+        );
+        assert_eq!(g.scores, before);
+        assert_eq!(g.turn_number, turn);
+    }
+
+    #[test]
+    fn every_tally_row_is_read_only() {
+        let g = game_with_yahtzee_bonus();
+        let tallies: Vec<Row> = g
+            .draw(SIZES[0])
+            .hits()
+            .iter()
+            .filter_map(|(t, _)| match t {
+                Target::Tally(r) => Some(*r),
+                _ => None,
+            })
+            .collect();
+        assert!(!tallies.is_empty(), "no tally rows were drawn");
+        for row in tallies {
+            let mut g = game_with_yahtzee_bonus();
+            let before = g.scores;
+            assert_eq!(
+                probe::click(&mut g, Target::Tally(row)),
+                EventResult::Ignored,
+                "{row:?} took a click"
+            );
+            assert_eq!(g.scores, before, "{row:?} changed a score");
+        }
+    }
+
+    #[test]
+    fn only_the_left_button_plays_the_game() {
+        // Answering all three meant a right-click spent a category, which is a
+        // turn the player cannot take back.
+        for button in [MouseButton::Right, MouseButton::Middle] {
+            let mut g = game_with_dice([1, 2, 3, 4, 5]);
+            assert_eq!(
+                probe::click_with(&mut g, Target::Die(0), button),
+                EventResult::Ignored,
+                "{button:?} held a die"
+            );
+            assert!(!g.held[0]);
+
+            let mut g = game_with_dice([1, 2, 3, 4, 5]);
+            assert_eq!(
+                probe::click_with(&mut g, Target::Category(0), button),
+                EventResult::Ignored,
+                "{button:?} spent a box"
+            );
+            assert!(g.scores.iter().all(Option::is_none));
+        }
+    }
+
+    #[test]
+    fn clicking_the_furniture_is_not_a_move() {
+        for target in [
+            Target::Title,
+            Target::Turn,
+            Target::High,
+            Target::Hint(0),
+            Target::Scorecard,
+        ] {
+            let mut g = game_with_dice([1, 2, 3, 4, 5]);
+            let before = (g.scores, g.held, g.roll_number, g.turn_number);
+            assert_eq!(
+                probe::click(&mut g, target),
+                EventResult::Ignored,
+                "{target:?} took a click"
+            );
+            assert_eq!(
+                (g.scores, g.held, g.roll_number, g.turn_number),
+                before,
+                "{target:?} changed the game"
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_outside_the_window_is_not_a_move() {
+        let mut g = game_with_dice([1, 2, 3, 4, 5]);
+        let (w, h) = SIZES[0];
+        for (x, y) in [
+            (-5.0, h / 2.0),
+            (w + 5.0, h / 2.0),
+            (w / 2.0, -5.0),
+            (w / 2.0, h + 5.0),
+        ] {
+            assert_eq!(
+                g.click_at(x, y, MouseButton::Left, SIZES[0]),
+                EventResult::Ignored,
+                "a click at {x},{y} was a move"
+            );
+        }
+        assert_eq!(g.held, [false; NUM_DICE]);
+    }
+
+    #[test]
+    fn a_click_on_bare_table_is_not_a_move() {
+        let mut g = game_with_dice([1, 2, 3, 4, 5]);
+        let point = probe::bare_point(&g, SIZES[0]);
+        if let Some((x, y)) = point {
+            let before = (g.scores, g.held, g.roll_number);
+            assert_eq!(
+                g.click_at(x, y, MouseButton::Left, SIZES[0]),
+                EventResult::Ignored,
+                "a click at {x},{y} on nothing was a move"
+            );
+            assert_eq!((g.scores, g.held, g.roll_number), before);
+        }
+    }
+
+    // ── The keyboard ───────────────────────────────────────────────
+
+    #[test]
+    fn a_key_release_is_ignored() {
+        // Every release used to be handled exactly like a press and repainted
+        // the whole window.
+        let mut g = test_game();
+        assert_eq!(
+            probe::key(&mut g, &probe::release(Key::R)),
+            EventResult::Ignored
+        );
+        assert_eq!(g.roll_number, 0, "a key release rolled the dice");
+    }
+
+    #[test]
+    fn a_key_the_game_does_not_use_is_ignored() {
+        let mut g = test_game();
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::Q)),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn r_rolls_until_there_are_no_rolls_left() {
+        let mut g = test_game();
+        for n in 1..=MAX_ROLLS {
+            assert_eq!(
+                probe::key(&mut g, &probe::press(Key::R)),
+                EventResult::Consumed
+            );
+            assert_eq!(g.roll_number, n);
+        }
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::R)),
+            EventResult::Ignored,
+            "a fourth roll was allowed"
+        );
+    }
+
+    #[test]
+    fn tab_moves_the_cursor_between_the_dice_and_the_card() {
+        let mut g = test_game();
+        assert_eq!(g.focus, FocusRegion::Dice);
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::Tab)),
+            EventResult::Consumed
+        );
+        assert_eq!(g.focus, FocusRegion::Scorecard);
+        probe::key(&mut g, &probe::press(Key::Tab));
+        assert_eq!(g.focus, FocusRegion::Dice, "tab did not come back");
+    }
+
+    #[test]
+    fn the_cursor_does_not_walk_off_either_end_of_the_dice() {
+        let mut g = test_game();
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::Left)),
+            EventResult::Ignored,
+            "left at the first die was a move"
+        );
+        assert_eq!(g.selected_die, 0);
+        for n in 1..NUM_DICE {
+            assert_eq!(
+                probe::key(&mut g, &probe::press(Key::Right)),
+                EventResult::Consumed
+            );
+            assert_eq!(g.selected_die, n);
+        }
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::Right)),
+            EventResult::Ignored,
+            "right at the last die was a move"
+        );
+        assert_eq!(g.selected_die, NUM_DICE - 1);
+    }
+
+    #[test]
+    fn the_cursor_does_not_walk_off_either_end_of_the_card() {
+        let mut g = test_game();
+        probe::key(&mut g, &probe::press(Key::Tab));
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::Up)),
+            EventResult::Ignored,
+            "up at the first box was a move"
+        );
+        assert_eq!(g.selected_category, 0);
+        for n in 1..NUM_CATEGORIES {
+            assert_eq!(
+                probe::key(&mut g, &probe::press(Key::Down)),
+                EventResult::Consumed
+            );
+            assert_eq!(g.selected_category, n);
+        }
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::Down)),
+            EventResult::Ignored,
+            "down at the last box was a move"
+        );
+        assert_eq!(g.selected_category, NUM_CATEGORIES - 1);
+    }
+
+    #[test]
+    fn the_arrows_only_move_the_cursor_that_has_the_focus() {
+        let mut g = test_game();
+        probe::key(&mut g, &probe::press(Key::Down));
+        assert_eq!(
+            g.selected_category, 0,
+            "down moved the card while the dice had the focus"
+        );
+        probe::key(&mut g, &probe::press(Key::Tab));
+        probe::key(&mut g, &probe::press(Key::Right));
+        assert_eq!(
+            g.selected_die, 0,
+            "right moved the dice while the card had the focus"
+        );
+    }
+
+    #[test]
+    fn the_number_keys_hold_the_die_they_name() {
+        let mut g = game_with_dice([1, 2, 3, 4, 5]);
+        let keys = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5];
+        for (i, key) in keys.into_iter().enumerate() {
+            assert_eq!(
+                probe::key(&mut g, &probe::press(key)),
+                EventResult::Consumed
+            );
+            assert!(g.held[i], "{key:?} did not hold die {i}");
+            assert_eq!(
+                g.held.iter().filter(|h| **h).count(),
+                i + 1,
+                "{key:?} held more than its own die"
+            );
+        }
+    }
+
+    #[test]
+    fn a_number_key_before_the_first_roll_is_ignored() {
+        let mut g = test_game();
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::Num1)),
+            EventResult::Ignored
+        );
+        assert!(!g.held[0]);
+    }
+
+    #[test]
+    fn space_holds_a_die_or_spends_a_box_depending_on_the_focus() {
+        let mut g = game_with_dice([6, 6, 6, 2, 1]);
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::Space)),
+            EventResult::Consumed
+        );
+        assert!(g.held[0], "space did not hold the selected die");
+
+        probe::key(&mut g, &probe::press(Key::Tab));
+        for _ in 0..Category::Sixes.index() {
+            probe::key(&mut g, &probe::press(Key::Down));
+        }
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::Enter)),
+            EventResult::Consumed
+        );
+        assert_eq!(g.scores[Category::Sixes.index()], Some(18));
+    }
+
+    #[test]
+    fn n_starts_a_new_game_and_keeps_the_high_score() {
+        let mut g = finished_game();
+        let high = g.grand_total();
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::N)),
+            EventResult::Consumed
+        );
+        assert_eq!(g.turn_number, 0);
+        assert_eq!(g.high_score, high);
+    }
+
+    // ── The window ─────────────────────────────────────────────────
+
+    #[test]
+    fn the_window_opens_at_the_size_the_layout_was_written_against() {
+        let g = test_game();
+        assert_eq!(
+            g.initial_size(),
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        );
+        let l = Layout::solve(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(!l.left.is_empty() && !l.card.is_empty() && !l.header.is_empty());
+    }
+
+    #[test]
+    fn the_render_pass_uses_the_size_the_window_hands_it() {
+        // `render` took a width and a height and spent them on the background
+        // rectangle alone; every other coordinate was a constant.
+        let mut g = test_game();
+        let small = g.render(400.0, 300.0);
+        let large = g.render(1600.0, 1000.0);
+        assert_ne!(
+            format!("{small:?}"),
+            format!("{large:?}"),
+            "the window's size made no difference to what was drawn"
+        );
+    }
+
+    #[test]
+    fn the_close_button_closes_the_window() {
+        let mut g = test_game();
+        assert_eq!(g.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn an_event_that_changed_nothing_does_not_ask_for_a_redraw() {
+        let mut g = test_game();
+        assert_eq!(
+            g.on_event(&Event::Key(probe::release(Key::R))),
+            Response::Idle
+        );
+        assert_eq!(
+            g.on_event(&Event::Key(probe::press(Key::R))),
+            Response::Redraw
+        );
+    }
+
+    #[test]
+    fn a_resize_is_remembered_so_the_next_click_lands() {
+        // The click is read against the size the frame was last drawn at, so a
+        // window that grew and a click that arrives afterwards have to agree.
+        let mut g = game_with_dice([1, 2, 3, 4, 5]);
+        assert_eq!(
+            handle_event(
+                &mut g,
+                &Event::Resize {
+                    width: 1600,
+                    height: 1000
+                }
+            ),
+            EventResult::Consumed
+        );
+        let die = probe::rect_of_sized(&g, Target::Die(4), (1600.0, 1000.0)).expect("a die");
+        let (cx, cy) = die.centre();
+        assert_eq!(
+            handle_event(
+                &mut g,
+                &Event::Mouse(MouseEvent {
+                    x: cx,
+                    y: cy,
+                    kind: MouseEventKind::Press(MouseButton::Left)
+                })
+            ),
+            EventResult::Consumed
+        );
+        assert!(g.held[4], "the click missed the die the resize moved");
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -3157,18 +4349,20 @@ mod tests {
     }
 
     #[test]
-    fn test_score_category_after_game_over() {
+    fn a_box_that_is_already_filled_cannot_be_spent_twice() {
+        // The turn counter and the filled boxes are two spellings of one fact
+        // (`the_turn_counter_equals_the_number_of_filled_boxes` pins them
+        // together), so the state that actually ends a game is "every box has a
+        // score in it" -- and in that state every category refuses.
         let mut g = test_game();
-        g.turn_number = NUM_TURNS;
-        g.roll_number = 1;
-        // Cannot score after game over because score_category checks roll_number > 0
-        // but the category check should still prevent invalid scoring.
-        // Actually, we should be able to score if phase is game_over — but the function
-        // checks if the category is already filled. Let's ensure no crash.
-        let result = g.score_category(0);
-        // It succeeds because we haven't filled it and roll_number > 0.
-        // The turn advancement code will see turn_number == 1 which is < NUM_TURNS so
-        // it sets phase to Rolling. This is an edge case, but it should not crash.
-        assert!(result);
+        g.roll();
+        for i in 0..NUM_CATEGORIES {
+            assert!(g.score_category(i), "box {i} should have been open");
+            g.roll();
+        }
+        assert_eq!(g.phase(), GamePhase::GameOver);
+        for i in 0..NUM_CATEGORIES {
+            assert!(!g.score_category(i), "box {i} was spent twice");
+        }
     }
 }

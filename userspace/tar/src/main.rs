@@ -873,22 +873,7 @@ fn archive_path_recursive<W: Write>(
     }
 }
 
-/// Every directory a chain of `-C` directives passes through, in order.
-///
-/// Returned as `(directive, directory it lands on)` pairs rather than just the
-/// final directory, because the caller has to be able to name the *directive*
-/// that failed. GNU really does `chdir` at each `-C`, so it stops at the first
-/// unusable one and reports the string the user typed; folding the chain first
-/// and checking only the result would report a composite path (`./d1/../d2`)
-/// that appears nowhere on the command line, and would silently accept
-/// `-C nosuch -C ..` — a chain whose ends exist but whose middle does not,
-/// which GNU rejects (measured, GNU tar 1.35).
-///
-/// Used by extract and list, which do not chdir the process at all: they hold a
-/// base directory and join member names onto it, and `sanitize_member_name` is
-/// what keeps a member from escaping that base. Rebuilding the base by path
-/// arithmetic keeps that boundary exactly where it was, whereas an
-/// `env::set_current_dir` would move the ground underneath it.
+/// One `-C` directive applied to the directory the previous ones landed on.
 ///
 /// Cumulative, and an absolute directive restarts the chain — both matching
 /// GNU: `-C d1 -C ../d2` lands on `d1/../d2`, and `-C d1 -C /tmp` lands on
@@ -896,37 +881,161 @@ fn archive_path_recursive<W: Write>(
 /// the filesystem to resolve, because collapsing `..` textually is wrong when a
 /// component is a symlink — the same reason `sanitize_member_name` refuses to
 /// fold `..` rather than rejecting it.
-fn chdir_chain(operands: &[Operand]) -> Vec<(&str, PathBuf)> {
-    let mut chain = Vec::new();
-    let mut base = PathBuf::from(".");
-    for op in operands {
-        if let Operand::Chdir(dir) = op {
-            let d = Path::new(dir.as_str());
-            base = if d.is_absolute() {
-                d.to_path_buf()
-            } else {
-                base.join(d)
-            };
-            chain.push((dir.as_str(), base.clone()));
-        }
+fn chdir_step(base: &Path, dir: &str) -> PathBuf {
+    let d = Path::new(dir);
+    if d.is_absolute() {
+        d.to_path_buf()
+    } else {
+        base.join(d)
     }
-    chain
 }
 
-/// The directory a chain of `-C` directives lands on, refusing a bad one.
+/// What an extract or list will do, worked out from the operand list alone.
 ///
-/// `.` when there are no directives, which is what makes `-C` optional without
-/// a special case at either call site.
-fn resolve_chdir_chain(operands: &[Operand]) -> PathBuf {
+/// Extract and list do not chdir the process at all: they hold a destination
+/// and join member names onto it, and `sanitize_member_name` is what keeps a
+/// member from escaping that destination. Rebuilding the destination by path
+/// arithmetic keeps that boundary exactly where it was, whereas an
+/// `env::set_current_dir` would move the ground underneath it.
+struct Plan<'a> {
+    /// Each `-C` that governs something, as `(directive, directory it lands
+    /// on)`, in order. Both halves are needed: the directory to check, and the
+    /// directive to *name* if the check fails. Folding the chain first and
+    /// checking only the result would report a composite path (`./d1/../d2`)
+    /// that appears nowhere on the command line, and would silently accept
+    /// `-C nosuch -C ..` — a chain whose ends exist but whose middle does not,
+    /// which GNU rejects.
+    chdirs: Vec<(&'a str, PathBuf)>,
+    /// Each member name from the command line, with the directory in force
+    /// where it appeared, because that is the one its members extract into:
+    /// `tar -xf a.tar -C d1 one -C ../d2 two` puts `one` under `d1` and `two`
+    /// under `d2`. Empty when no names were given, which means "everything".
+    filters: Vec<(&'a str, PathBuf)>,
+    /// Where members go when `filters` is empty.
+    fallback: PathBuf,
+}
+
+/// Read an operand list as a [`Plan`]. Pure: nothing is checked or opened.
+fn plan(operands: &[Operand]) -> Plan<'_> {
+    // A `-C` that no operand follows governs nothing, and GNU never performs
+    // it — `tar -xf a.tar one -C nosuch` succeeds, while `tar -xf a.tar -C
+    // nosuch` fails. The two are not inconsistent: with no names at all, the
+    // implicit "the whole archive" operand sits at the end of the list, so
+    // every directive is in front of something. Hence the walk stops at the
+    // last name, and covers everything when there is none.
+    let end = match operands
+        .iter()
+        .rposition(|o| matches!(o, Operand::Member(_)))
+    {
+        Some(i) => i.saturating_add(1),
+        None => operands.len(),
+    };
+
+    let mut chdirs = Vec::new();
+    let mut filters = Vec::new();
     let mut base = PathBuf::from(".");
-    for (dir, landed) in chdir_chain(operands) {
-        match fs::metadata(&landed) {
-            Ok(m) if m.is_dir() => base = landed,
+    for op in operands.get(..end).unwrap_or(operands) {
+        match op {
+            Operand::Chdir(dir) => {
+                base = chdir_step(&base, dir);
+                chdirs.push((dir.as_str(), base.clone()));
+            }
+            Operand::Member(name) => filters.push((name.as_str(), base.clone())),
+        }
+    }
+
+    Plan {
+        chdirs,
+        filters,
+        fallback: base,
+    }
+}
+
+/// Which directory an archive member extracts into, or `None` to skip it.
+///
+/// Also records that the name responsible has matched something, so that the
+/// ones that never did can be reported at the end. Attribution is to the
+/// *first* name that matches, which is GNU's rule and is the reason
+/// `tar -x dir dir/b.txt` reports "dir/b.txt: Not found in archive" even
+/// though the archive plainly contains it: `dir` claims every member beneath
+/// it, so the more specific name never gets to be first. Reversing the two
+/// works, because then `dir/b.txt` claims its member and `dir` claims the
+/// rest. The same rule explains a name repeated on the command line being
+/// reported missing, without that needing a case of its own.
+fn select_destination<'a>(
+    plan: &'a Plan<'_>,
+    matched: &mut [bool],
+    member: &str,
+) -> Option<&'a Path> {
+    if plan.filters.is_empty() {
+        return Some(&plan.fallback);
+    }
+    for ((name, dest), hit) in plan.filters.iter().zip(matched.iter_mut()) {
+        if member_matches(member, name) {
+            *hit = true;
+            return Some(dest);
+        }
+    }
+    None
+}
+
+/// Report every command-line name that matched nothing in the archive.
+///
+/// Appended to `errors` as well as printed, because a name that selected
+/// nothing means the caller did not get what it asked for — silence here would
+/// be a successful-looking run that extracted or listed less than requested.
+fn report_unmatched(plan: &Plan<'_>, matched: &[bool], errors: &mut Vec<String>) {
+    for ((name, _), hit) in plan.filters.iter().zip(matched.iter()) {
+        if !*hit {
+            let msg = format!("tar: {}: Not found in archive", quotef_os(name));
+            eprintln!("{}", msg);
+            errors.push(msg);
+        }
+    }
+}
+
+/// Refuse a `-C` that does not name a usable directory, before extracting.
+///
+/// Up front rather than lazily, so a mistyped destination halfway down a long
+/// operand list is not discovered after half the archive has been written.
+fn check_chdirs(chdirs: &[(&str, PathBuf)]) {
+    for (dir, landed) in chdirs {
+        match fs::metadata(landed) {
+            Ok(m) if m.is_dir() => {}
             Ok(_) => fail_cannot_open(dir, &io::Error::from(io::ErrorKind::NotADirectory)),
             Err(e) => fail_cannot_open(dir, &e),
         }
     }
-    base
+}
+
+/// Does an archive member fall under a name given on the command line?
+///
+/// Literal and component-wise, which is three separate deliberate refusals,
+/// all measured against GNU tar 1.35:
+///
+/// * **No globbing.** `dir/*` matches nothing; GNU warns and tells you to pass
+///   `--wildcards`. Treating `*` as a wildcard here would be the more helpful
+///   guess and the wrong one — it would silently extract more than a script
+///   asking for a literally-named member had authorised.
+/// * **No normalisation.** `./top.txt` does not match `top.txt`.
+/// * **Component boundaries.** `di` does not match `dir`, and `dir` matches
+///   `dir/b.txt` — a directory name selects everything beneath it.
+///
+/// A trailing slash on either side is ignored, so `-x dir/` works and the
+/// archive's own `dir/` entry is recognised as the directory it names.
+fn member_matches(member: &str, name: &str) -> bool {
+    let member = member.trim_end_matches('/');
+    let name = name.trim_end_matches('/');
+    // Only reachable from a name that was nothing but slashes. Matching
+    // everything would be a surprising reading of `tar -xf a.tar /`, and
+    // "Not found in archive" is the honest one.
+    if name.is_empty() {
+        return false;
+    }
+    member == name
+        || member
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// GNU's response to something it needed and could not have: the archive, or
@@ -1230,7 +1339,9 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
     // We used to `create_dir_all` here, which turned a typo'd destination into
     // a silently-created one — the archive would extract, into a directory the
     // user had no reason to expect and would not think to look in.
-    let base_dir = resolve_chdir_chain(&opts.operands);
+    let plan = plan(&opts.operands);
+    check_chdirs(&plan.chdirs);
+    let mut matched = vec![false; plan.filters.len()];
 
     let mut errors: Vec<String> = Vec::new();
     let mut consecutive_zero_blocks = 0u32;
@@ -1263,6 +1374,19 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
                 let msg = format!("tar: skipping bad header: {}", e);
                 eprintln!("{}", msg);
                 errors.push(msg);
+                continue;
+            }
+        };
+
+        // Member names select against the archive's own name, before
+        // stripping: `tar -x --strip-components=1 dir` matches `dir/b.txt` and
+        // then writes it as `b.txt`. Matching the stripped name instead would
+        // mean the name the user typed had to be the one that survives the
+        // strip, which is not the name they can see in `tar -t`.
+        let base_dir = match select_destination(&plan, &mut matched, &entry.path) {
+            Some(dir) => dir,
+            None => {
+                skip_data(&mut reader, entry.size)?;
                 continue;
             }
         };
@@ -1404,6 +1528,8 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
         }
     }
 
+    report_unmatched(&plan, &matched, &mut errors);
+
     if !errors.is_empty() {
         exit_with_previous_errors();
     }
@@ -1469,12 +1595,16 @@ fn list_archive(opts: &Options) -> Result<(), String> {
         Box::new(File::open(&opts.archive).unwrap_or_else(|e| fail_cannot_open(&opts.archive, &e)))
     };
 
-    // Listing writes nothing to the filesystem, so `-C` cannot change the
+    // Listing writes nothing to the filesystem, so a `-C` cannot change the
     // output — but GNU still chdirs, and so still refuses a directive naming
     // no directory: `tar -tf a.tar -C nosuch` exits 2 without listing a thing.
-    // Validating and discarding looks redundant and is not: it is the
-    // difference between a typo'd `-C` being reported and being ignored.
-    let _ = resolve_chdir_chain(&opts.operands);
+    // Checking a destination nothing will be written to looks redundant and is
+    // not: it is the difference between a typo'd `-C` being reported here and
+    // being discovered on the `-x` that follows.
+    let plan = plan(&opts.operands);
+    check_chdirs(&plan.chdirs);
+    let mut matched = vec![false; plan.filters.len()];
+    let mut errors: Vec<String> = Vec::new();
 
     let mut consecutive_zero_blocks = 0u32;
     let mut block = [0u8; BLOCK_SIZE];
@@ -1504,15 +1634,25 @@ fn list_archive(opts: &Options) -> Result<(), String> {
             }
         };
 
-        if opts.json {
-            print_json_entry(&entry);
-        } else if opts.verbose {
-            print_verbose_entry(&entry);
-        } else {
-            println!("{}", entry.path);
+        // The destination is meaningless here; what is being consulted is
+        // whether the member was selected at all, and by which name.
+        if select_destination(&plan, &mut matched, &entry.path).is_some() {
+            if opts.json {
+                print_json_entry(&entry);
+            } else if opts.verbose {
+                print_verbose_entry(&entry);
+            } else {
+                println!("{}", entry.path);
+            }
         }
 
         skip_data(&mut reader, entry.size)?;
+    }
+
+    report_unmatched(&plan, &matched, &mut errors);
+
+    if !errors.is_empty() {
+        exit_with_previous_errors();
     }
 
     Ok(())
@@ -1999,17 +2139,20 @@ mod tests {
     }
 
     /// The `.` is not cosmetic: it is what lets extract and list join member
-    /// names onto the base unconditionally, with no "was `-C` given?" branch.
+    /// names onto the destination unconditionally, with no "was `-C` given?"
+    /// branch at either call site.
     #[test]
-    fn test_chdir_chain_of_nothing_is_here() {
-        assert!(chdir_chain(&[]).is_empty());
-        assert_eq!(resolve_chdir_chain(&[]), PathBuf::from("."));
-        assert!(chdir_chain(&[member("a"), member("b")]).is_empty());
+    fn test_plan_for_nothing_is_here() {
+        let p = plan(&[]);
+        assert!(p.chdirs.is_empty());
+        assert!(p.filters.is_empty());
+        assert_eq!(p.fallback, PathBuf::from("."));
     }
 
-    /// The bug this whole change exists to fix: `-C` used to be one value, so
+    /// The bug the `Operand` list exists to fix: `-C` used to be one value, so
     /// the second directive replaced the first instead of being applied inside
-    /// it. `one` and `two` must both appear, in order.
+    /// it. Both must appear, in order, and each name must carry the directory
+    /// that was in force where *it* appeared.
     #[test]
     fn test_chdir_directives_accumulate_rather_than_replacing() {
         let ops = [
@@ -2019,12 +2162,20 @@ mod tests {
             member("b"),
             member("c"),
         ];
-        let chain = chdir_chain(&ops);
+        let p = plan(&ops);
         assert_eq!(
-            chain,
+            p.chdirs,
             vec![
                 ("one", PathBuf::from("./one")),
                 ("../two", PathBuf::from("./one/../two")),
+            ]
+        );
+        assert_eq!(
+            p.filters,
+            vec![
+                ("a", PathBuf::from("./one")),
+                ("b", PathBuf::from("./one/../two")),
+                ("c", PathBuf::from("./one/../two")),
             ]
         );
     }
@@ -2032,21 +2183,21 @@ mod tests {
     /// GNU refuses `-C one a -C two b` with "two: Cannot open" — because the
     /// second chdir happens *inside* `one`, so it looks for `one/two`. Getting
     /// this backwards (resolving each directive from the invocation directory)
-    /// would silently archive a different file rather than erroring, so the
+    /// would silently use a different directory rather than erroring, so the
     /// joined path is worth asserting on directly.
     #[test]
     fn test_second_chdir_is_relative_to_the_first() {
         let ops = [chdir("one"), member("a"), chdir("two"), member("b")];
-        let chain = chdir_chain(&ops);
-        assert_eq!(chain[1].1, PathBuf::from("./one/two"));
+        assert_eq!(plan(&ops).chdirs[1].1, PathBuf::from("./one/two"));
     }
 
     #[test]
     fn test_absolute_directive_restarts_the_chain() {
-        let ops = [chdir("one"), chdir("/tmp"), chdir("sub")];
-        let chain = chdir_chain(&ops);
-        assert_eq!(chain[1].1, PathBuf::from("/tmp"));
-        assert_eq!(chain[2].1, PathBuf::from("/tmp/sub"));
+        let ops = [chdir("one"), chdir("/tmp"), chdir("sub"), member("a")];
+        let p = plan(&ops);
+        assert_eq!(p.chdirs[1].1, PathBuf::from("/tmp"));
+        assert_eq!(p.chdirs[2].1, PathBuf::from("/tmp/sub"));
+        assert_eq!(p.filters[0].1, PathBuf::from("/tmp/sub"));
     }
 
     /// Deliberate: `..` is left in the path for the filesystem to resolve.
@@ -2055,17 +2206,151 @@ mod tests {
     /// `..` instead of folding it.
     #[test]
     fn test_chain_is_not_textually_normalised() {
-        let ops = [chdir("one"), chdir("..")];
-        let chain = chdir_chain(&ops);
-        assert_eq!(chain[1].1, PathBuf::from("./one/.."));
+        let ops = [chdir("one"), chdir(".."), member("a")];
+        assert_eq!(plan(&ops).chdirs[1].1, PathBuf::from("./one/.."));
     }
 
     /// Each pair carries the string the *user typed*, not the path it folds
     /// to, because that string is what the error message has to name.
     #[test]
     fn test_chain_reports_the_directive_not_the_folded_path() {
-        let ops = [chdir("one"), chdir("../two")];
-        let chain = chdir_chain(&ops);
-        assert_eq!(chain[1].0, "../two");
+        let ops = [chdir("one"), chdir("../two"), member("a")];
+        assert_eq!(plan(&ops).chdirs[1].0, "../two");
+    }
+
+    /// A `-C` after the last name governs nothing, so GNU never performs it
+    /// and never complains about it: `tar -xf a.tar one -C nosuch` succeeds.
+    /// Checking it anyway would fail a command GNU accepts.
+    #[test]
+    fn test_trailing_chdir_after_the_last_name_is_dropped() {
+        let ops = [chdir("one"), member("a"), chdir("nosuch")];
+        let p = plan(&ops);
+        assert_eq!(p.chdirs, vec![("one", PathBuf::from("./one"))]);
+        assert_eq!(p.filters, vec![("a", PathBuf::from("./one"))]);
+    }
+
+    /// ...but with no names at all the implicit "the whole archive" operand
+    /// sits at the end, so every directive is in front of something and every
+    /// one is checked. `tar -xf a.tar -C nosuch` does fail.
+    #[test]
+    fn test_with_no_names_every_directive_still_counts() {
+        let ops = [chdir("one"), chdir("two")];
+        let p = plan(&ops);
+        assert_eq!(p.chdirs.len(), 2);
+        assert_eq!(p.fallback, PathBuf::from("./one/two"));
+    }
+
+    #[test]
+    fn test_member_matches_exact_and_beneath() {
+        assert!(member_matches("top.txt", "top.txt"));
+        assert!(member_matches("dir/b.txt", "dir"));
+        assert!(member_matches("dir/sub/c.txt", "dir"));
+        assert!(member_matches("dir/sub/c.txt", "dir/sub"));
+    }
+
+    /// The archive spells a directory `dir/`; the user spells it `dir` or
+    /// `dir/`. All four combinations have to line up.
+    #[test]
+    fn test_member_matches_ignores_trailing_slashes() {
+        assert!(member_matches("dir/", "dir"));
+        assert!(member_matches("dir/", "dir/"));
+        assert!(member_matches("dir", "dir/"));
+        assert!(member_matches("dir/b.txt", "dir/"));
+    }
+
+    /// A prefix that stops mid-component is not a match — `di` must not
+    /// select `dir`, or a name would silently pull in its alphabetical
+    /// neighbours.
+    #[test]
+    fn test_member_matches_respects_component_boundaries() {
+        assert!(!member_matches("dir", "di"));
+        assert!(!member_matches("dir/b.txt", "di"));
+        assert!(!member_matches("dirty/b.txt", "dir"));
+    }
+
+    /// No normalisation and no globbing, both measured against GNU 1.35.
+    /// `./top.txt` really does not match `top.txt` there, and `dir/*` is
+    /// treated as a literal name that is not in the archive (with a warning
+    /// pointing at `--wildcards`).
+    #[test]
+    fn test_member_matches_is_literal() {
+        assert!(!member_matches("top.txt", "./top.txt"));
+        assert!(!member_matches("dir/b.txt", "dir/*"));
+        assert!(!member_matches("dir/b.txt", "*"));
+    }
+
+    /// Guard for a name that is nothing but slashes: matching everything
+    /// would be a very surprising reading of `tar -xf a.tar /`.
+    #[test]
+    fn test_member_matches_refuses_an_empty_name() {
+        assert!(!member_matches("top.txt", ""));
+        assert!(!member_matches("top.txt", "/"));
+    }
+
+    /// With no names given, every member is selected and goes to the fallback.
+    #[test]
+    fn test_no_names_selects_everything() {
+        let ops = [chdir("/tmp")];
+        let p = plan(&ops);
+        let mut hit = vec![];
+        assert_eq!(
+            select_destination(&p, &mut hit, "anything/at/all"),
+            Some(Path::new("/tmp"))
+        );
+    }
+
+    /// Each name sends its own members to the directory in force where it
+    /// appeared — the whole point of the operand list being ordered.
+    #[test]
+    fn test_each_name_extracts_into_its_own_destination() {
+        let ops = [chdir("d1"), member("one"), chdir("../d2"), member("two")];
+        let p = plan(&ops);
+        let mut hit = vec![false; 2];
+        assert_eq!(
+            select_destination(&p, &mut hit, "one/x"),
+            Some(Path::new("./d1"))
+        );
+        assert_eq!(
+            select_destination(&p, &mut hit, "two"),
+            Some(Path::new("./d1/../d2"))
+        );
+        assert_eq!(select_destination(&p, &mut hit, "three"), None);
+        assert_eq!(hit, vec![true, true]);
+    }
+
+    /// GNU attributes each member to the *first* name that matches it, which
+    /// is why `tar -x dir dir/b.txt` reports `dir/b.txt` as not found: `dir`
+    /// claims every member beneath it first. Reversing the two works. This is
+    /// surprising enough that it is worth pinning rather than rediscovering.
+    #[test]
+    fn test_first_matching_name_claims_the_member() {
+        let broad_first = [member("dir"), member("dir/b.txt")];
+        let p = plan(&broad_first);
+        let mut hit = vec![false; 2];
+        select_destination(&p, &mut hit, "dir/");
+        select_destination(&p, &mut hit, "dir/b.txt");
+        assert_eq!(hit, vec![true, false], "the specific name never matched");
+
+        let specific_first = [member("dir/b.txt"), member("dir")];
+        let p = plan(&specific_first);
+        let mut hit = vec![false; 2];
+        select_destination(&p, &mut hit, "dir/");
+        select_destination(&p, &mut hit, "dir/b.txt");
+        assert_eq!(hit, vec![true, true], "both names matched something");
+    }
+
+    /// Falls out of the same rule with no special case: the first copy claims
+    /// every member, so the second matched nothing and GNU says so.
+    #[test]
+    fn test_a_repeated_name_is_reported_missing() {
+        let ops = [member("top.txt"), member("top.txt")];
+        let p = plan(&ops);
+        let mut hit = vec![false; 2];
+        select_destination(&p, &mut hit, "top.txt");
+        assert_eq!(hit, vec![true, false]);
+
+        let mut errors = Vec::new();
+        report_unmatched(&p, &hit, &mut errors);
+        assert_eq!(errors, vec!["tar: top.txt: Not found in archive"]);
     }
 }

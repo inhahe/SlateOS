@@ -4507,6 +4507,263 @@ pub fn build_linux_execveat_test_elf(
     buf
 }
 
+/// Build a **Linux-ABI** test ELF that exercises `openat2(2)` — in particular
+/// the `RESOLVE_BENEATH` containment path — end-to-end from ring 3.
+///
+/// # Why this cannot be a kernel-context test
+///
+/// The existing `self_test_openat_dirfd` (in `syscall/linux.rs`) drives
+/// `dispatch_linux` directly from kernel context, which has **no fd table**.
+/// Every real (non-`AT_FDCWD`) `dirfd` therefore returns `EBADF` before
+/// [`dirfd_to_guest_dir`](crate::syscall::linux) does any of its actual work.
+/// The translation that turns a descriptor into the containment *base* —
+/// `handle_path` → `stat_resolved` → `unjail_path_for` — is exactly the part
+/// no in-kernel test can reach, and exactly the part lane B asked to see
+/// pinned before forwarding libc's `openat2` (see
+/// `requests/b-a-yes-forward-openat2-and-here-is-the-shape-we-want.md`).
+///
+/// # Why the exit code carries a *byte of file content*
+///
+/// The failure mode that matters here is not "the call errored." It is that a
+/// wrong base still **succeeds**: the walk is confined, the descriptor is
+/// valid, and the result looks exactly like working containment — it is just
+/// confined under the wrong directory. A test that asserts only success
+/// cannot see that.
+///
+/// So the program exits with the *first byte it reads through the descriptor*,
+/// and the caller stages a distinct byte in each directory a wrong base could
+/// plausibly resolve to. Every wrong answer becomes a different exit code
+/// rather than an error, which is what makes the test able to tell "contained
+/// under the right directory" from "contained under some directory."
+///
+/// Encoding of the exit code:
+///
+/// | Exit | Meaning |
+/// |---|---|
+/// | `0xFE` | the initial `open(dir)` failed — fixture/staging problem, not a verdict |
+/// | `0xFD` | `openat2` succeeded but `read` did not return 1 byte |
+/// | `1..=133` | `openat2` failed; the value is the raw errno (e.g. 18 = `EXDEV`) |
+/// | `>= 0xC8` | `openat2` succeeded; the value is the byte read (sentinels start at 200, above every errno) |
+///
+/// # Code
+///
+/// ```text
+///   ; when dir_nul is non-empty: obtain a real dirfd
+///   movabs rdi, &dir          ; 48 BF <8>
+///   mov    esi, 0x10000       ; BE ..      O_RDONLY|O_DIRECTORY
+///   xor    edx, edx           ; 31 D2
+///   mov    eax, 2             ; B8 ..      SYS_open
+///   syscall                   ; 0F 05
+///   test   rax, rax           ; 48 85 C0
+///   jns    .have_fd           ; 79 <rel8>   skips the 12-byte block below
+///   exit(0xFE)                ; inline, so the branch distance is local
+/// .have_fd:
+///   mov    rdi, rax           ; 48 89 C7   dirfd
+///   ; when dir_nul is empty, the above is replaced by:
+///   ;   mov rdi, -100         ; 48 C7 C7 9C FF FF FF   AT_FDCWD
+///
+///   movabs rsi, &rel          ; 48 BE <8>
+///   movabs rdx, &how          ; 48 BA <8>  struct open_how
+///   mov    r10d, 24           ; 41 BA ..   sizeof(open_how)
+///   mov    eax, 437           ; B8 ..      SYS_openat2
+///   syscall                   ; 0F 05
+///   test   rax, rax           ; 48 85 C0
+///   jns    .opened            ; 79 <rel8>
+///   neg    rax                ; 48 F7 D8   exit(errno)
+///   mov    rdi, rax           ; 48 89 C7
+///   exit(rdi)
+/// .opened:
+///   mov    rdi, rax           ; 48 89 C7   fd
+///   mov    rsi, rsp           ; 48 89 E6   scratch buffer on the stack
+///   mov    edx, 1             ; BA ..
+///   xor    eax, eax           ; 31 C0      SYS_read
+///   syscall                   ; 0F 05
+///   cmp    rax, 1             ; 48 83 F8 01
+///   je     .read_ok           ; 74 <rel8>
+///   exit(0xFD)
+/// .read_ok:
+///   movzx  edi, byte [rsp]    ; 0F B6 3C 24
+///   exit(rdi)
+///   int3                      ; CC — unreachable
+/// ```
+///
+/// `dir_nul` and `rel_nul` must be NUL-terminated. An empty `dir_nul` selects
+/// the `AT_FDCWD` form, which is how the process-cwd branch of
+/// `sys_openat_beneath` is reached.
+#[must_use]
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+pub fn build_linux_openat2_test_elf(
+    dir_nul: &[u8],
+    rel_nul: &[u8],
+    resolve: u64,
+) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 (ehdr) + 56 (one phdr)
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let use_dirfd = !dir_nul.is_empty();
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let dir_imm: usize;
+
+    if use_dirfd {
+        // movabs rdi, &dir
+        code.extend_from_slice(&[0x48, 0xBF]);
+        dir_imm = code.len();
+        code.extend_from_slice(&[0u8; 8]);
+        // mov esi, O_RDONLY|O_DIRECTORY (0o200000)
+        code.extend_from_slice(&[0xBE]);
+        code.extend_from_slice(&0o200_000u32.to_le_bytes());
+        // xor edx, edx  (mode)
+        code.extend_from_slice(&[0x31, 0xD2]);
+        // mov eax, 2 (SYS_open); syscall
+        code.extend_from_slice(&[0xB8, 0x02, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+        // test rax, rax; jns .have_fd
+        code.extend_from_slice(&[0x48, 0x85, 0xC0]);
+        code.extend_from_slice(&[0x79, 0x00]);
+        let jns_open_rel = code.len() - 1;
+        // open_fail: exit(0xFE).  Placed inline immediately after the branch
+        // rather than at the end of the function, so the jump distance is a
+        // fixed, locally-visible 12 bytes instead of a label that later edits
+        // could silently move.
+        code.extend_from_slice(&[0xBF, 0xFE, 0x00, 0x00, 0x00]); // mov edi, 0xFE
+        code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // exit
+        // .have_fd:
+        let have_fd = code.len();
+        code[jns_open_rel] = ((have_fd as isize) - (jns_open_rel as isize + 1)) as u8;
+        // mov rdi, rax  (dirfd)
+        code.extend_from_slice(&[0x48, 0x89, 0xC7]);
+    } else {
+        dir_imm = usize::MAX;
+        // mov rdi, -100 (AT_FDCWD), sign-extended imm32
+        code.extend_from_slice(&[0x48, 0xC7, 0xC7, 0x9C, 0xFF, 0xFF, 0xFF]);
+    }
+
+    // movabs rsi, &rel
+    code.extend_from_slice(&[0x48, 0xBE]);
+    let rel_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    // movabs rdx, &how
+    code.extend_from_slice(&[0x48, 0xBA]);
+    let how_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    // mov r10d, 24 (sizeof struct open_how)
+    code.extend_from_slice(&[0x41, 0xBA, 0x18, 0x00, 0x00, 0x00]);
+    // mov eax, 437 (SYS_openat2); syscall
+    code.extend_from_slice(&[0xB8, 0xB5, 0x01, 0x00, 0x00, 0x0F, 0x05]);
+    // test rax, rax; jns .opened
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]);
+    code.extend_from_slice(&[0x79, 0x00]);
+    let jns_openat2_rel = code.len() - 1;
+    // error path: exit(-rax) — the raw errno, so the caller sees *which* refusal.
+    code.extend_from_slice(&[0x48, 0xF7, 0xD8]); // neg rax
+    code.extend_from_slice(&[0x48, 0x89, 0xC7]); // mov rdi, rax
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // exit
+
+    // .opened:
+    let opened = code.len();
+    code.extend_from_slice(&[0x48, 0x89, 0xC7]); // mov rdi, rax  (fd)
+    code.extend_from_slice(&[0x48, 0x89, 0xE6]); // mov rsi, rsp  (scratch)
+    code.extend_from_slice(&[0xBA, 0x01, 0x00, 0x00, 0x00]); // mov edx, 1
+    code.extend_from_slice(&[0x31, 0xC0, 0x0F, 0x05]); // xor eax,eax (SYS_read); syscall
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x01]); // cmp rax, 1
+    code.extend_from_slice(&[0x74, 0x00]); // je .read_ok
+    let je_read_rel = code.len() - 1;
+    // read_fail: exit(0xFD)
+    code.extend_from_slice(&[0xBF, 0xFD, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+
+    // .read_ok: exit(buf[0]) — the byte that identifies *which* file was opened.
+    let read_ok = code.len();
+    code.extend_from_slice(&[0x0F, 0xB6, 0x3C, 0x24]); // movzx edi, byte [rsp]
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // exit
+
+    code.push(0xCC); // int3 — unreachable trap
+
+    // Patch the two remaining forward rel8 jumps.  The displacement is
+    // measured from the byte *after* the displacement itself.  (The dirfd
+    // form's `jns .have_fd` was already patched inline above, where its
+    // target was in scope.)
+    let jns_openat2_disp = (opened as isize) - (jns_openat2_rel as isize + 1);
+    let je_read_disp = (read_ok as isize) - (je_read_rel as isize + 1);
+    code[jns_openat2_rel] = jns_openat2_disp as u8;
+    code[je_read_rel] = je_read_disp as u8;
+
+    // --- Data layout (same PT_LOAD, after the code) ---
+    let code_len = code.len();
+    let data_base = code_offset as usize + code_len;
+    let dir_off = data_base;
+    let dir_end = dir_off + dir_nul.len();
+    let rel_off = dir_end;
+    let rel_end = rel_off + rel_nul.len();
+    // 8-align `struct open_how` — the kernel copies it with copy_from_user,
+    // which does not require alignment, but an aligned struct is what a real
+    // compiler would emit and keeps the layout honest.
+    let how_off = (rel_end + 7) & !7usize;
+    let file_size = how_off + 24;
+
+    let vaddr_of = |fo: usize| -> u64 { load_vaddr + (fo as u64 - code_offset) };
+    if use_dirfd {
+        let dir_vaddr = vaddr_of(dir_off);
+        code[dir_imm..dir_imm + 8].copy_from_slice(&dir_vaddr.to_le_bytes());
+    }
+    let rel_vaddr = vaddr_of(rel_off);
+    let how_vaddr = vaddr_of(how_off);
+    code[rel_imm..rel_imm + 8].copy_from_slice(&rel_vaddr.to_le_bytes());
+    code[how_imm..how_imm + 8].copy_from_slice(&how_vaddr.to_le_bytes());
+
+    // --- Build the file image ---
+    let seg_len = file_size - code_offset as usize;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_W | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_len as u64);
+    write_u64(&mut buf, ph + 40, seg_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
+    if use_dirfd {
+        buf[dir_off..dir_end].copy_from_slice(dir_nul);
+    }
+    buf[rel_off..rel_end].copy_from_slice(rel_nul);
+    // struct open_how { __u64 flags; __u64 mode; __u64 resolve; }
+    // flags = O_RDONLY (0), mode = 0 (no O_CREAT), resolve = caller's.
+    write_u64(&mut buf, how_off, 0);
+    write_u64(&mut buf, how_off + 8, 0);
+    write_u64(&mut buf, how_off + 16, resolve);
+
+    buf
+}
+
 /// Build a **Linux-ABI** test ELF that exercises the file-backed `mmap(2)`
 /// path end-to-end from ring 3.
 ///

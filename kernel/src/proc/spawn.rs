@@ -3379,6 +3379,231 @@ pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of `openat2(2)`'s `dirfd` marshalling, and of
+/// `RESOLVE_BENEATH` containment reaching the VFS with the **right base**.
+///
+/// # Why this test exists
+///
+/// `sys_openat_beneath` splits a request into a *base* (from `dirfd`) and a
+/// *fragment* (the caller's path), and hands both to `Vfs::resolve_beneath`.
+/// The VFS half of that is already well covered. The half that was not
+/// covered is the translation in between — `dirfd_to_guest_dir`'s
+/// `handle_path` → `stat_resolved` → `unjail_path_for` — because the existing
+/// `self_test_openat_dirfd` runs in kernel context, which has no fd table and
+/// so gets `EBADF` before that code does anything.
+///
+/// Lane B named this test as the prerequisite for forwarding libc's
+/// `openat2` (`requests/b-a-yes-forward-openat2-and-here-is-the-shape-we-want.md`),
+/// for a specific reason: if the base comes out wrong, the walk is *still*
+/// confined, the descriptor is *still* valid, and the result looks exactly
+/// like working containment. It is just containment under the wrong
+/// directory. Nothing errors.
+///
+/// # How a wrong base is made visible
+///
+/// Asserting "the call succeeded" would therefore prove nothing. Instead each
+/// directory a wrong base could plausibly resolve to gets its **own
+/// `inside.txt` holding a different byte**, and the program exits with the
+/// byte it actually read. A wrong base then shows up as a *different exit
+/// code*, not as an error:
+///
+/// | Byte | Staged at | A wrong base of… |
+/// |---|---|---|
+/// | `0xC8` | `<base>/inside.txt` | (the correct answer) |
+/// | `0xC9` | `/slateos-b2-decoy/inside.txt` | some other directory |
+/// | `0xCB` | `/inside.txt` | the filesystem root |
+/// | `0xCA` | `/slateos-b2-outside.txt` | — see below |
+///
+/// The escape target at `0xCA` exists **on purpose**. If it did not, the
+/// `../slateos-b2-outside.txt` probe would return `ENOENT` whether or not
+/// containment was enforced, and would pass for the wrong reason. Because the
+/// file is really there, a regression that dropped the check would return
+/// `0xCA` instead of `EXDEV` — a visibly different answer.
+///
+/// Skips only when the *environment* cannot host the fixture — a read-only or
+/// absent filesystem, via `selftest_setup!`. A staging error of any other kind
+/// fails the test rather than disabling it, because the staging runs through
+/// the same VFS the probes exercise. Must run **after** filesystem
+/// initialization (see `main.rs`).
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn self_test_openat2_beneath() -> KernelResult<()> {
+    const BASE: &str = "/slateos-b2-beneath";
+    const BASE_NUL: &[u8] = b"/slateos-b2-beneath\0";
+
+    const RIGHT: u8 = 0xC8; // under the base — the only correct answer
+    const DECOY: u8 = 0xC9; // a different directory
+    const OUTSIDE: u8 = 0xCA; // the escape target, deliberately present
+    const ROOT: u8 = 0xCB; // the filesystem root
+
+    const RESOLVE_BENEATH: u64 = 0x08;
+    const EXDEV: i32 = 18;
+
+    serial_println!("[spawn] Running openat2 RESOLVE_BENEATH (ring 3) integration test...");
+
+    // --- Stage the fixture ---------------------------------------------
+    // Deciding the skip from a bare `is_err()` on these calls would be a trap:
+    // the staging goes through the very VFS the probes exercise, so a genuine
+    // defect in it would switch this whole test off and the suite would go
+    // green *because* the code broke.  `selftest_setup!` splits the two
+    // outcomes — only NotSupported / ReadOnlyFilesystem / NoSuchDevice count
+    // as "this system cannot", and every other error fails the test.
+    let mut skips = crate::fs::selftest::Skips::new();
+    let ready = crate::selftest_setup!(
+        skips,
+        "[spawn]",
+        "openat2 beneath",
+        "no writable filesystem to stage the fixture in",
+        crate::fs::Vfs::mkdir_all(BASE),
+        crate::fs::Vfs::mkdir_all("/slateos-b2-beneath/deep"),
+        crate::fs::Vfs::mkdir_all("/slateos-b2-decoy"),
+        crate::fs::Vfs::write_file("/slateos-b2-beneath/inside.txt", &[RIGHT]),
+        crate::fs::Vfs::write_file("/slateos-b2-decoy/inside.txt", &[DECOY]),
+        crate::fs::Vfs::write_file("/inside.txt", &[ROOT]),
+        crate::fs::Vfs::write_file("/slateos-b2-outside.txt", &[OUTSIDE]),
+    );
+    if !ready {
+        skips.report("[spawn]");
+        return Ok(());
+    }
+
+    // `run` spawns the probe and returns its exit code.  The code is the byte
+    // read through the descriptor on success, or the raw errno on failure —
+    // see `build_linux_openat2_test_elf` for the encoding.
+    let run = |dir_nul: &[u8], rel_nul: &[u8], resolve: u64, cwd: Option<&[u8]>| -> Option<i32> {
+        let elf = elf::build_linux_openat2_test_elf(dir_nul, rel_nul, resolve);
+        let argv: &[&[u8]] = &[b"openat2prog"];
+        let envp: &[&[u8]] = &[b"PATH=/bin"];
+        let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+        let options = SpawnOptions {
+            name: "spawn-test-openat2",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &caps,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd,
+            uid_gid: None,
+        };
+        let result = spawn_process(&elf, &options).ok()?;
+        crate::sched::yield_now();
+        crate::sched::yield_now();
+        let code = pcb::exit_code(result.pid);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        code
+    };
+
+    let mut failed = 0u32;
+    // `expect` is the exit code the probe must produce.  Each case names what
+    // a *different* answer would mean, so a failure report identifies the
+    // defect rather than merely announcing a mismatch.
+    let mut check = |label: &str, got: Option<i32>, expect: i32, wrong_means: &str| {
+        if got == Some(expect) {
+            return;
+        }
+        failed += 1;
+        serial_println!(
+            "[spawn]   FAIL: openat2 beneath — {label}: got {got:?}, expected {expect} ({wrong_means})"
+        );
+    };
+
+    // 1. The base case: a real dirfd, a plain fragment.  Any other byte means
+    //    the descriptor did not translate to the directory it names.
+    check(
+        "dirfd + \"inside.txt\"",
+        run(BASE_NUL, b"inside.txt\0", RESOLVE_BENEATH, None),
+        i32::from(RIGHT),
+        "0xC9 = wrong directory, 0xCB = resolved against the root",
+    );
+
+    // 2. `..` that descends first and never rises above the base is ALLOWED —
+    //    the rule is per-hop, not "canonicalise and compare" (see
+    //    Vfs::beneath_step).  A refusal here would be over-enforcement, which
+    //    a success-only test could never distinguish from correctness.
+    check(
+        "dirfd + \"deep/../inside.txt\" (never rises above base)",
+        run(BASE_NUL, b"deep/../inside.txt\0", RESOLVE_BENEATH, None),
+        i32::from(RIGHT),
+        "EXDEV here means the containment rule is refusing a legal path",
+    );
+
+    // 3. `..` that *does* rise above the base is refused.  The target exists,
+    //    so an unenforced check returns 0xCA rather than ENOENT.
+    check(
+        "dirfd + \"../slateos-b2-outside.txt\" (escapes)",
+        run(
+            BASE_NUL,
+            b"../slateos-b2-outside.txt\0",
+            RESOLVE_BENEATH,
+            None,
+        ),
+        EXDEV,
+        "0xCA = containment not enforced; the escape target was really opened",
+    );
+
+    // 4. An absolute fragment is refused outright, without being compared to
+    //    the base — being inside it would not save it.
+    check(
+        "dirfd + absolute \"/slateos-b2-outside.txt\"",
+        run(
+            BASE_NUL,
+            b"/slateos-b2-outside.txt\0",
+            RESOLVE_BENEATH,
+            None,
+        ),
+        EXDEV,
+        "0xCA = an absolute path was quietly reinterpreted or allowed",
+    );
+
+    // 5. AT_FDCWD resolves against the process cwd, not the root.  An empty
+    //    dir argument selects the AT_FDCWD form of the probe.
+    check(
+        "AT_FDCWD + \"inside.txt\" with cwd = the base",
+        run(b"", b"inside.txt\0", RESOLVE_BENEATH, Some(BASE.as_bytes())),
+        i32::from(RIGHT),
+        "0xCB = AT_FDCWD fell back to the root instead of the process cwd",
+    );
+
+    // 6. The same dirfd without RESOLVE_BENEATH, which routes through
+    //    sys_openat_ex instead.  This is the control: it proves cases 3 and 4
+    //    are refused *by the containment rule* and not by some unrelated
+    //    breakage in the dirfd path that would refuse everything.
+    check(
+        "dirfd + \"inside.txt\", resolve = 0 (no BENEATH)",
+        run(BASE_NUL, b"inside.txt\0", 0, None),
+        i32::from(RIGHT),
+        "the plain openat2 dirfd path is broken independently of containment",
+    );
+
+    // --- Tear the fixture down -----------------------------------------
+    for p in [
+        "/slateos-b2-beneath/inside.txt",
+        "/slateos-b2-decoy/inside.txt",
+        "/inside.txt",
+        "/slateos-b2-outside.txt",
+    ] {
+        // Best-effort cleanup: a leftover fixture file would make the *next*
+        // boot's staging a no-op rather than a failure, so a removal error is
+        // not itself a verdict on the code under test.
+        let _ = crate::fs::Vfs::remove(p);
+    }
+
+    if failed != 0 {
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   openat2 RESOLVE_BENEATH (ring 3: dirfd base, deep/.. allowed, \
+         ../ and absolute refused EXDEV, AT_FDCWD uses cwd): OK"
+    );
+    Ok(())
+}
+
 /// VFS-dependent integration self-test: end-to-end **file-backed `mmap(2)`**
 /// from ring 3 through the real Linux syscall path.
 ///

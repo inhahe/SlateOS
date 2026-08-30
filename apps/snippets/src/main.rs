@@ -5498,13 +5498,19 @@ mod tests {
     }
 
     #[test]
-    fn the_wheel_over_the_list_scrolls_the_list_and_not_the_code() {
+    fn the_wheel_over_a_row_scrolls_the_list_and_not_the_code() {
         let names: Vec<String> = (0..80).map(|i| format!("s{i:02}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut a = app_with(&refs);
         // Over a *row*, not through `scroll` with the answer already in hand:
         // the routing is half of what the wheel does, and a test that supplies
         // the target has tested only the other half.
+        //
+        // A row is not the list, though, and the two are separately reachable:
+        // this test says nothing about `Target::List`, which is only exposed in
+        // the strip below the last row. Renaming a mutation that dropped
+        // `Target::List` from the list's arm left this test green, which is
+        // what `the_wheel_below_the_last_row_still_scrolls_the_list` is for.
         let row = rect_of(&a, Target::Row(id_of(&a, "s00"))).expect("the first row is drawn");
         let (rx, ry) = row.centre();
         assert_eq!(

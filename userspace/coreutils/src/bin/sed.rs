@@ -4724,6 +4724,19 @@ mod tests {
         let dir = ScratchDir::new("sed-r-test");
         let inc = dir.path("inc.txt");
         fs::write(&inc, b"A\nB\nC\n").expect("writing the include");
+        // Read the fixture back before using it. `R` is *right* to say nothing
+        // about a file it cannot get a line from — `Action::ReadLine` treats
+        // `Ok(0)` as a deliberate no-op — so an include that is not what this
+        // test wrote is byte-identical, from the assertions below, to `R` being
+        // broken. That is how this test once read as a defect in `R` when the
+        // real cause was a second process truncating a shared fixture path
+        // (`requests/c-b-sed-test-fixtures-share-one-path-across-processes.md`;
+        // `ScratchDir` above is the fix). One line names the right file.
+        assert_eq!(
+            fs::read(&inc).expect("reading the include back"),
+            b"A\nB\nC\n",
+            "the include is not what this test wrote"
+        );
         let path = inc.to_string_lossy().into_owned();
 
         // One `R` per cycle, in order.

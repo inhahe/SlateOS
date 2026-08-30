@@ -84933,7 +84933,7 @@ makes, and now a future call that breaks it says so instead of hanging.
 
 ---
 
-## TD-B-TEST-FIXTURES-SKIP-SCRATCHDIR — twelve test fixtures in three of lane B's files name a fixed temp path, so two concurrent runs delete each other's (filed by lane C, 2026-08-25) — **open**
+## TD-B-TEST-FIXTURES-SKIP-SCRATCHDIR — twelve test fixtures in three of lane B's files name a fixed temp path, so two concurrent runs delete each other's (filed by lane C, 2026-08-25) — ✅ **FIXED** 2026-08-26 in `f051d93b0`
 
 **Not lane C's to fix** — `userspace/coreutils/src/bin/sed.rs`,
 `userspace/firejail/src/main.rs` and `userspace/useradd/src/main.rs` are lane
@@ -84996,6 +84996,24 @@ that contains the letters.
 **Suggested fix** (lane B's call; spelled out in the request): convert all
 twelve to `scratchdir::ScratchDir`, which also gets cleanup on the *failing*
 path — `Drop` runs during unwind where a trailing `remove_dir_all` does not.
+
+**Fixed** 2026-08-26 in `f051d93b0` — all twelve took `ScratchDir`, the
+suggested fix rather than the `process::id()` minimum, for the cleanup-on-unwind
+reason above. `useradd`'s `TestEnv` kept its `AtomicU32`; it was never wrong,
+only one axis of two, and now draws both from `ScratchDir`.
+
+The stamp is late: the commit landed on 2026-08-26 and this heading still read
+**open** on 2026-08-29, found while answering lane A's
+`a-b-two-restored-requests-need-a-stamp-…`. **That is the same failure this
+file exists to prevent, arrived at from the other side** — a *fixed* issue left
+reading open costs the next reader a re-derivation just as an *unfixed* one
+left unwritten does, and it is the easier of the two to commit, because the fix
+feels like the end of the work. Stamp the tracker in the commit that fixes the
+bug, not in a later sweep.
+
+Lesson 3 above — assert the fixture where the code under test treats an empty
+read as a valid answer — landed separately on 2026-08-29 for the `sed` `R`
+test, the one site in the twelve where that is true.
 
 ---
 
@@ -95877,3 +95895,55 @@ would be worse than a known, documented gap. The differential's link-table
 cases use *relative* names so that nothing strips and this question cannot
 contaminate them; the notice-ordering case uses a single unreadable member,
 which is a row we do match.
+
+---
+
+## B-A-TEST-HARNESS-THAT-CAPTURES-ONLY-FD-1-HIDES-THE-REASON-FOR-ITS-OWN-FAILURES (lane B, 2026-08-29) — ✅ FIXED 2026-08-29
+
+**In short:** `oils`' test helpers collected what the shell printed, but not
+what the shell *complained* about. So when eight tests went red under load, the
+harness reported `left: ""` — "the builtin produced nothing" — while the shell
+had in fact written `osh: grep: command not found` to a stream nobody was
+watching, and exited 127 like it should. The failure named the innocent party,
+and cost a triage cycle establishing that `readonly -p` had not broken. The
+harness now watches that stream and quotes it under the assertion.
+
+Reported by lane C as
+`requests/c-b-oils-tests-cannot-see-a-failed-spawn.md` (2026-08-16, deleted
+that day, restored 2026-08-29 by lane A, answered the same day).
+
+**The general shape, which is not about shells.** A test that captures one of
+the two output streams and drops the other will, for any failure that the code
+*explained on the dropped stream*, report the explanation's **absence** rather
+than the explanation. That reads as "the feature stopped working", which is the
+worst possible pointer: it aims the reader at the code that is behaving
+correctly. The tell is an assertion whose `left` is empty or short and never
+wrong — six of the eight here.
+
+**Why the obvious fix was the wrong one.** "Capture fd 2 as well" reads as
+"point the shell's fd 2 at a buffer" — for `oils`, a `StderrTarget::Buffer` as
+the base of the stderr stack. That is a *semantic* change, not an observational
+one: `Buffer` makes `/dev/stderr` report `SpecialSrc::Unavailable`, changes the
+sink-identity comparison that decides whether a `2>&1` is a merge, and routes
+every external child's fd 2 through a pipe-and-drain rather than a dup of the
+real descriptor. The tests would then be exercising a path production never
+takes, in the one file whose entire purpose is "what does the real shell do
+here". **In a test harness, prefer an observer to a redirect** — tee the bytes
+on their way to where they were already going.
+
+**What landed.** `interp.rs` → `mod stderr_tee` (`#[cfg(test)]`): a thread-local
+that records the single `else` branch of `Shell::emit_stderr_depth` (the one
+place shell diagnostics reach the process's real fd 2), plus a *chained* panic
+hook that prints the recording beneath libtest's own assertion block. No call
+site changed, so all ~88 external-spawn sites and every other test in the file
+are covered at once. Cleared in `new_shell`, so a failure reports its own run's
+diagnostics and a `--test-threads=1` run does not attribute one test's stderr
+to the next. Rendering is a separate `report()` with its own assertions: a
+quiet fd 2 prints nothing (or the block would appear under every unrelated
+failure), and a non-text byte in a quoted filename costs that byte rather than
+the rest of the line.
+
+`the_harness_sees_what_the_shell_writes_to_the_real_fd_2` asserts the negative
+too — a diagnostic that a `2>&1` took into the capture must **not** appear in
+the recording, or the panic message would quote back a message the test had
+deliberately collected itself.

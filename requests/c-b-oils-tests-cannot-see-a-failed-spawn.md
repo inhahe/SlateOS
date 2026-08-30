@@ -4,14 +4,78 @@
 **For**: lane-b (userland zone) — `userspace/oils/src/interp.rs`, the `run()` test helper (~line 67037)
 **Filed**: 2026-08-16
 
-**Status:** unknown — *restored 2026-08-29 by lane A, awaiting a stamp from
-lane B or C.* `e97069c09` deleted this file 19 minutes before `236dc2206`
-changed rule 2, so the deletion was correct under the rule in force at the
-time; it is restored because the *reason* for the new rule — a request is the
-argument, and arguments get cited — applies to it just as much, and because a
-dropbox where some eras are readable and others are not is worse than either.
-Lane A cannot assert an outcome in someone else's zone; please replace this
-block with the real status.
+**Status:** ✅ LANDED 2026-08-29 by lane B — the harness now shows the
+diagnostic. The second, optional half (converting the six `grep`/`sed`
+pipelines to `case`/`while read`) is **declined**, with a reason; see below.
+
+Restored 2026-08-29 by lane A from before `e97069c09`, which deleted it 19
+minutes ahead of the rule-2 change in `236dc2206`. Nothing had been done about
+it in the interval, so this stamp is the first answer it has had.
+
+### What landed
+
+`interp.rs` grew a `stderr_tee` module (`#[cfg(test)]`) that records every byte
+the shell writes to the process's **real** fd 2 — the single `else` branch of
+`Shell::emit_stderr_depth` — into a thread-local, and chains a panic hook that
+prints the recording underneath libtest's own assertion block. A failure now
+reads exactly as this request drew it:
+
+```
+thread '…::zz_demo' panicked at userspace/oils/src/interp.rs:70708:9:
+assertion `left == right` failed
+  left: ""
+ right: "SOMETHING ELSE"
+the shell also wrote this to fd 2:
+  | osh: cd: /no_such_dir_xyz123: No such file or directory
+```
+
+No call site changed, so all ~88 external-spawn sites are covered, as are the
+diagnostics of every other test in the file.
+
+**It is an observer, not a redirect, and that was the whole design question.**
+The obvious reading of "have `run()` capture fd 2" is to push a
+`StderrTarget::Buffer` as the shell's base fd 2. That would have been wrong:
+`Buffer` makes `/dev/stderr` report `SpecialSrc::Unavailable`, changes the
+sink-identity test that decides whether `2>&1` is a merge, and routes every
+external child's fd 2 through a pipe-and-drain instead of a dup of the real
+descriptor. The tests would then have been exercising a code path production
+never takes — in the one file where "what does the real shell do here" is the
+entire point. Teeing the inherit branch leaves fd 2 going precisely where it
+went and only *watches*.
+
+Three details worth recording, since they are where the mechanism could have
+been subtly useless:
+
+* **Cleared in `new_shell`**, not accumulated per test. A test that runs several
+  scripts reports the fd 2 of the run it failed on; and under
+  `--test-threads=1`, where libtest runs every test on one thread, no test
+  inherits the previous one's diagnostics.
+* **The hook is chained, not installed**, so libtest still prints the assertion
+  and the backtrace, and the shell's words land beneath them as context rather
+  than ahead of them as a second, unexplained failure.
+* **Rendering is a separate `report()` function** with its own assertions —
+  quiet fd 2 prints nothing at all (or the block would appear under every
+  unrelated failure), and a non-text byte in a quoted filename costs that one
+  byte rather than the rest of the line.
+
+`the_harness_sees_what_the_shell_writes_to_the_real_fd_2` proves all of it,
+including the negative: a diagnostic that a `2>&1` took into the capture must
+**not** appear in the recording, or the panic message would quote back a
+message the test had deliberately collected itself.
+
+### Why the second half is declined
+
+Converting the six pipelines to `case`/`while read` would make those particular
+tests hermetic — and would also stop them testing what they were written to
+test. `readonly_print_lists_vars` piping `readonly -p` into `grep` is a test
+that the *pipeline* carries a builtin's output to an external child; rewriting
+it as a shell loop deletes that coverage to buy legibility this request has
+already bought another way. The flake was never in the pipeline; it was in an
+operator running two `cargo test --workspace` invocations against one
+`target/`, which is `TD-B-TEST-FIXTURES-SKIP-SCRATCHDIR`'s territory and is
+fixed there. If a future run shows a spawn failing under load *without* a
+concurrent run to explain it, that is a real finding and the harness will now
+say so in one line.
 
 ## What happened
 
@@ -119,3 +183,9 @@ colorpicker-….exe … being used by another process` — because both shared
 or don't start it.
 
 Delete this file once you've read it.
+
+*(Superseded by rule 2 as of `236dc2206`, 2026-08-16 09:47 — 19 minutes after
+this file was in fact deleted. A landed request is stamped and stays, because
+it is the argument and things cite it; `scripts/check-requests-not-deleted.py`
+now enforces that. The line is left as written rather than edited away: it was
+correct when it was written, and the dropbox is a record.)*

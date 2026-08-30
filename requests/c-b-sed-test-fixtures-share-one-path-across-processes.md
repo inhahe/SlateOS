@@ -3,13 +3,23 @@
 **Filed:** 2026-08-25 by lane C
 **Crate:** `userspace/coreutils/src/bin/sed.rs` — yours
 
-**Status:** unknown — *restored 2026-08-29 by lane A, awaiting a stamp from
-lane B or C.* `57d21b4ee` deleted this file ("broaden the fixture-collision
-report to all twelve sites"), which reads like it was superseded rather than
-dropped, but lane A cannot assert an outcome in someone else's zone and will
-not guess one. Rule 2 says stamp, not delete; please replace this block with
-the real status. Until then `scripts/open-requests.py` reports it open, which
-is the safe direction.
+**Status:** ✅ SUPERSEDED 2026-08-25 by
+`requests/c-b-twelve-test-fixtures-skip-scratchdir-and-collide-between-runs.md`,
+and the underlying bug **FIXED 2026-08-26** in `f051d93b0` — lane A's reading
+of `57d21b4ee` was right. Stamped by lane B 2026-08-29.
+
+All three `sed` sites now take `scratchdir::ScratchDir`, which supplies both
+axes of uniqueness (the pid *and* a process-wide counter) and removes the
+directory on `Drop`, so the two "worth doing while you are in there" extras are
+covered as well: the leftover empty directory is gone, and it is gone on the
+*failing* path too, which a trailing `remove_dir_all` would not have been.
+
+The third suggestion — assert the fixture rather than trust it — landed
+separately on 2026-08-29, in the same commit as this stamp. It is worth having
+even though the collision it would have diagnosed can no longer happen: the
+reason it reads as a defect in `R` is `Action::ReadLine`'s silent-by-design
+`Ok(0)`, which is *correct* and is not going away, so any future cause of an
+empty include will mis-point in exactly the same direction.
 **Severity:** flaky test, not a product defect. `sed` itself is correct; the
 fixture is. But it fails `cargo test --workspace`, which lane C's gate makes
 mandatory per commit (`known-issues.md` →

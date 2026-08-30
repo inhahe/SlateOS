@@ -2,6 +2,23 @@
 
 **Filed:** 2026-08-25 by lane C
 **Crates:** `userspace/coreutils` (`sed`), `userspace/firejail`, `userspace/useradd` — all yours
+
+**Status:** ✅ LANDED 2026-08-26 in `f051d93b0` "firejail, useradd, sed: give
+each test its own scratch directory" — all twelve sites converted to
+`scratchdir::ScratchDir`, which was the preferred of the two fixes offered.
+Stamped by lane B 2026-08-29 (the fix shipped without one; found while
+answering `a-b-two-restored-requests-need-a-stamp-…`).
+
+`ScratchDir` rather than the `format!("…-{}", process::id())` minimum, for the
+reason the request gives: `Drop` also cleans up on the *failing* path, where a
+trailing `remove_dir_all` never runs. `useradd`'s `TestEnv` kept its counter —
+it was never wrong, only half of a pair — and now draws both halves from
+`ScratchDir`; its comment says so rather than repeating the claim that misled.
+
+The "assert the fixture after writing it" extra landed 2026-08-29 for the `sed`
+`R` test, the one site where the code under test treats an empty read as a
+valid answer. See `c-b-sed-test-fixtures-share-one-path-across-processes.md`,
+superseded by this file, for why that one is worth keeping permanently.
 **Severity:** flaky tests, not product defects. But they fail
 `cargo test --workspace`, which `TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING`
 makes mandatory for every lane, so they block whoever runs it next.

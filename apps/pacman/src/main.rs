@@ -3440,4 +3440,419 @@ mod tests {
             board.rect
         );
     }
+
+    // -- Sheet contents --------------------------------------------------------
+
+    /// Every string the frame draws, in paint order.
+    fn drawn_text(app: &PacmanApp, size: (f32, f32)) -> Vec<String> {
+        app.frame(size.0, size.1)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_menu_sheet_offers_a_start_line_and_says_what_the_keys_do() {
+        let app = app_in(GameState::Menu);
+        for t in [
+            Target::Overlay,
+            Target::OverlayTitle,
+            Target::NewGame,
+            Target::Controls(0),
+            Target::Controls(1),
+        ] {
+            assert!(probe::is_visible(&app, t), "{t:?} is missing from the menu");
+        }
+        let text = drawn_text(&app, PacmanApp::SIZE);
+        assert!(text.contains(&"PAC-MAN".to_string()), "no title: {text:?}");
+    }
+
+    #[test]
+    fn the_pause_sheet_offers_both_ways_out() {
+        // Two lines, and a click has to say which -- that is the whole reason
+        // `Resume` and `NewGame` are separate targets rather than one sheet.
+        let app = app_in(GameState::Paused);
+        assert!(probe::is_visible(&app, Target::Resume), "no resume line");
+        assert!(probe::is_visible(&app, Target::NewGame), "no new-game line");
+        assert_ne!(
+            probe::rect_of(&app, Target::Resume),
+            probe::rect_of(&app, Target::NewGame),
+            "the two lines share a box, so a click cannot choose between them"
+        );
+    }
+
+    #[test]
+    fn the_game_over_sheet_reports_the_score_and_the_level_it_ended_on() {
+        let mut app = app_in(GameState::GameOver);
+        app.score = 4270;
+        app.level = 6;
+        let text = drawn_text(&app, PacmanApp::SIZE);
+        assert!(
+            text.contains(&"Score: 4270".to_string()),
+            "the final score is not on the sheet: {text:?}"
+        );
+        assert!(
+            text.contains(&"Level: 6".to_string()),
+            "the final level is not on the sheet: {text:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_covers_the_board_while_the_game_is_being_played() {
+        let app = app_in(GameState::Playing);
+        for t in [
+            Target::Overlay,
+            Target::OverlayTitle,
+            Target::NewGame,
+            Target::Resume,
+            Target::Controls(0),
+            Target::FinalStat(0),
+        ] {
+            assert!(
+                !probe::is_visible(&app, t),
+                "{t:?} is on screen during play"
+            );
+        }
+    }
+
+    #[test]
+    fn sheet_lines_are_stacked_top_to_bottom_and_do_not_overlap() {
+        for state in [GameState::Menu, GameState::Paused, GameState::GameOver] {
+            let app = app_in(state);
+            let f = app.frame(528.0, 738.0);
+            let mut lines: Vec<(String, Rect)> = f
+                .hits()
+                .iter()
+                .filter(|(t, _)| {
+                    matches!(
+                        t,
+                        Target::OverlayTitle
+                            | Target::NewGame
+                            | Target::Resume
+                            | Target::Controls(_)
+                            | Target::FinalStat(_)
+                    )
+                })
+                .map(|(t, r)| (format!("{t:?}"), *r))
+                .collect();
+            assert!(
+                lines.len() >= 2,
+                "{state:?} sheet has {} lines",
+                lines.len()
+            );
+            // Paint order is top to bottom, so the recorded order is the order
+            // on screen -- if it is not, the stack was placed out of sequence.
+            for pair in lines.windows(2) {
+                let (ref above, a) = pair[0];
+                let (ref below, b) = pair[1];
+                assert!(
+                    a.bottom() <= b.y + 0.01,
+                    "{state:?}: {above} at {a:?} overlaps {below} at {b:?}"
+                );
+            }
+            lines.clear();
+        }
+    }
+
+    #[test]
+    fn the_sheet_is_centred_on_the_window_at_every_shape() {
+        // The stack is measured before it is placed, so its middle is the
+        // window's middle. It used to be centred on its first line, which put
+        // a three-line sheet noticeably high.
+        for (w, h) in [(528.0, 738.0), (900.0, 400.0), (300.0, 1200.0)] {
+            let app = app_in(GameState::Menu);
+            let f = app.frame(w, h);
+            let lines: Vec<Rect> = f
+                .hits()
+                .iter()
+                .filter(|(t, _)| {
+                    matches!(
+                        t,
+                        Target::OverlayTitle | Target::NewGame | Target::Controls(_)
+                    )
+                })
+                .map(|(_, r)| *r)
+                .collect();
+            let top = lines.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+            let bottom = lines.iter().map(|r| r.bottom()).fold(f32::MIN, f32::max);
+            let middle = top.midpoint(bottom);
+            assert!(
+                (middle - h / 2.0).abs() < h * 0.06,
+                "sheet middle {middle} is not near {} in a {w}x{h} window",
+                h / 2.0
+            );
+        }
+    }
+
+    #[test]
+    fn the_sheet_lines_are_horizontally_centred() {
+        let app = app_in(GameState::Paused);
+        let f = app.frame(528.0, 738.0);
+        for (t, r) in f.hits() {
+            if !matches!(t, Target::OverlayTitle | Target::NewGame | Target::Resume) {
+                continue;
+            }
+            let centre = r.x + r.w / 2.0;
+            assert!(
+                (centre - 264.0).abs() < 1.0,
+                "{t:?} is centred at {centre}, not 264"
+            );
+        }
+    }
+
+    // -- Click routing ---------------------------------------------------------
+
+    #[test]
+    fn clicking_the_start_line_starts_the_game() {
+        let mut app = app_in(GameState::Menu);
+        assert_eq!(
+            probe::click(&mut app, Target::NewGame),
+            EventResult::Consumed
+        );
+        assert_eq!(app.state, GameState::Playing);
+    }
+
+    #[test]
+    fn clicking_resume_resumes_the_paused_game() {
+        let mut app = app_in(GameState::Paused);
+        app.score = 120;
+        assert_eq!(
+            probe::click(&mut app, Target::Resume),
+            EventResult::Consumed
+        );
+        assert_eq!(app.state, GameState::Playing);
+        assert_eq!(app.score, 120, "resuming is not restarting");
+    }
+
+    #[test]
+    fn clicking_new_game_on_the_pause_sheet_restarts() {
+        let mut app = app_in(GameState::Paused);
+        app.score = 120;
+        app.level = 4;
+        assert_eq!(
+            probe::click(&mut app, Target::NewGame),
+            EventResult::Consumed
+        );
+        assert_eq!(app.state, GameState::Playing);
+        assert_eq!(app.score, 0, "a new game starts at nothing");
+        assert_eq!(app.level, 1);
+    }
+
+    #[test]
+    fn clicking_new_game_after_a_loss_restarts_and_keeps_the_high_score() {
+        let mut app = app_in(GameState::GameOver);
+        app.score = 900;
+        app.high_score = 900;
+        assert_eq!(
+            probe::click(&mut app, Target::NewGame),
+            EventResult::Consumed
+        );
+        assert_eq!(app.state, GameState::Playing);
+        assert_eq!(app.score, 0);
+        assert_eq!(app.high_score, 900, "the high score outlives the game");
+        assert_eq!(app.lives, INITIAL_LIVES);
+    }
+
+    #[test]
+    fn clicking_a_control_line_is_taken_and_changes_nothing() {
+        // The menu's two control lines only say what the keys do. A click on
+        // one is consumed rather than passed through to the board behind the
+        // sheet, which would be a click on a maze the player cannot see.
+        for line in [Target::Controls(0), Target::Controls(1)] {
+            let mut app = app_in(GameState::Menu);
+            assert_eq!(
+                probe::click(&mut app, line),
+                EventResult::Consumed,
+                "{line:?} fell through the sheet"
+            );
+            assert_eq!(app.state, GameState::Menu, "{line:?} started something");
+        }
+    }
+
+    #[test]
+    fn clicking_the_dim_part_of_the_sheet_does_not_reach_the_board() {
+        let mut app = app_in(GameState::Menu);
+        // A corner: covered by the overlay, well away from every line.
+        assert_eq!(
+            app.click_at(2.0, 2.0, MouseButton::Left, PacmanApp::SIZE),
+            EventResult::Consumed
+        );
+        assert_eq!(app.state, GameState::Menu);
+    }
+
+    #[test]
+    fn clicking_the_board_during_play_is_ignored() {
+        let mut app = app_in(GameState::Playing);
+        let before = app.player_pos;
+        assert_eq!(
+            probe::click(&mut app, Target::Board),
+            EventResult::Ignored,
+            "the board is not a control"
+        );
+        assert_eq!(app.player_pos, before);
+        assert_eq!(app.state, GameState::Playing);
+    }
+
+    #[test]
+    fn a_right_click_on_the_start_line_does_nothing() {
+        let mut app = app_in(GameState::Menu);
+        assert_eq!(
+            probe::click_with(&mut app, Target::NewGame, MouseButton::Right),
+            EventResult::Ignored
+        );
+        assert_eq!(app.state, GameState::Menu);
+    }
+
+    #[test]
+    fn a_release_is_not_a_click() {
+        let mut app = app_in(GameState::Menu);
+        let start = probe::rect_of(&app, Target::NewGame).expect("a start line");
+        let (x, y) = start.centre();
+        let out = handle_event(
+            &mut app,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Release(MouseButton::Left),
+            }),
+        );
+        assert_eq!(out, EventResult::Ignored);
+        assert_eq!(app.state, GameState::Menu);
+    }
+
+    // -- Resize plumbing -------------------------------------------------------
+
+    #[test]
+    fn a_resize_moves_the_controls_with_the_window() {
+        // The point of the whole exercise: the boxes a click is read against
+        // come from the size the window last reported, not from a constant.
+        let small = (400.0, 600.0);
+        let large = (1200.0, 900.0);
+        let app = app_in(GameState::Menu);
+        let at_small = probe::rect_of_sized(&app, Target::NewGame, small).expect("start line");
+        let at_large = probe::rect_of_sized(&app, Target::NewGame, large).expect("start line");
+        assert_ne!(
+            at_small.centre(),
+            at_large.centre(),
+            "the start line sits at the same place in both windows"
+        );
+    }
+
+    #[test]
+    fn a_resize_event_is_what_moves_them() {
+        let mut app = app_in(GameState::Menu);
+        let large = (1200.0, 900.0);
+        let target = probe::rect_of_sized(&app, Target::NewGame, large).expect("start line");
+        let (x, y) = target.centre();
+
+        // Click at the large window's start line while the app still believes
+        // it is the default size. That point is off the right-hand edge of a
+        // 528-wide window, so there is nothing there at all.
+        assert!(
+            x > PacmanApp::SIZE.0,
+            "pick a point outside the small window"
+        );
+        assert_eq!(
+            handle_event(
+                &mut app,
+                &Event::Mouse(MouseEvent {
+                    x,
+                    y,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }),
+            ),
+            EventResult::Ignored,
+            "a click past the window's edge hit something"
+        );
+        assert_eq!(app.state, GameState::Menu, "nothing started");
+
+        // Tell it the window grew, then click the same point.
+        assert_eq!(
+            handle_event(
+                &mut app,
+                &Event::Resize {
+                    width: 1200,
+                    height: 900
+                },
+            ),
+            EventResult::Consumed
+        );
+        assert_eq!(app.size(), large);
+        assert_eq!(
+            handle_event(
+                &mut app,
+                &Event::Mouse(MouseEvent {
+                    x,
+                    y,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }),
+            ),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            app.state,
+            GameState::Playing,
+            "the resize did not move the start line"
+        );
+    }
+
+    #[test]
+    fn rendering_adopts_the_size_it_was_given() {
+        let mut app = app_in(GameState::Menu);
+        let _ = app.render(640.0, 480.0);
+        assert_eq!(app.size(), (640.0, 480.0));
+    }
+
+    #[test]
+    fn a_negative_size_is_read_as_nothing_rather_than_inside_out() {
+        let mut app = app_in(GameState::Menu);
+        app.resize(-100.0, -50.0);
+        assert_eq!(app.size(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn the_window_opens_at_the_size_its_frames_are_measured_for() {
+        let app = app_in(GameState::Menu);
+        let (w, h) = app.initial_size();
+        assert_eq!((f32_from_u32(w), f32_from_u32(h)), PacmanApp::SIZE);
+    }
+
+    #[test]
+    fn the_window_asks_to_be_woken_often_enough_to_animate() {
+        // The game moves on its own clock; the tick only has to be fine enough
+        // that a 140 ms player step is not visibly late.
+        let app = app_in(GameState::Menu);
+        let tick = app.tick_interval().expect("a game needs a clock");
+        assert!(
+            tick <= Duration::from_millis(PLAYER_MOVE_MS / 2),
+            "a {tick:?} tick is too coarse for a {PLAYER_MOVE_MS} ms step"
+        );
+    }
+
+    #[test]
+    fn closing_the_window_exits() {
+        let mut app = app_in(GameState::Playing);
+        assert!(matches!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+    }
+
+    #[test]
+    fn a_consumed_event_asks_for_a_redraw_and_an_ignored_one_does_not() {
+        let mut app = app_in(GameState::Menu);
+        assert!(matches!(
+            app.on_event(&Event::Key(probe::press(Key::N))),
+            Response::Redraw
+        ));
+        let mut app = app_in(GameState::Playing);
+        assert!(matches!(
+            app.on_event(&Event::Key(probe::release(Key::Up))),
+            Response::Idle
+        ));
+    }
 }

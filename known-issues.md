@@ -82212,8 +82212,79 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **267 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **189 of 800 remain**
 
+> **Burn-down log.** 2026-08-30 (forty-first batch): every function carrying
+> **three** sites, which is now none. 267 → 189 across 166 → 140 functions;
+> twenty-six functions left the ledger entirely — `cmd_audioeq`,
+> `cmd_buddyinfo`, `cmd_cgroupfs`, `cmd_directio`, `cmd_display`,
+> `cmd_displaycal`, `cmd_dpiscaling`, `cmd_fault_inject`, `cmd_fontpreview`,
+> `cmd_httpd`, `cmd_ipclog`, `cmd_memcg`, `cmd_msivec`, `cmd_netindicator`,
+> `cmd_netmon`, `cmd_netusage`, `cmd_pftrack`, `cmd_power`, `cmd_raidmgr`,
+> `cmd_rcustat`, `cmd_surroundsound`, `cmd_taskbar`, `cmd_timezone`,
+> `cmd_ttystat`, `cmd_vmballoon` and `parse_datetime_to_ns`. Pinned by
+> self-test rung 106.
+>
+> **The batch-40 defect did not recur, and the reason is worth writing down
+> rather than claiming as care.** Batch 40 mislabelled five diagnostics by
+> search-and-replacing a statement that was not unique to the function being
+> edited. Batch 41 anchored every edit on an adjacent distinguishing line —
+> almost always the `match module::fn(…)` immediately below — and the edit tool
+> *rejected* three of them outright as ambiguous (`cmd_pftrack`'s `top`,
+> `cmd_memcg`'s three byte counts, `cmd_netmon`'s three ids). The mechanism
+> that prevented the repeat was the tool refusing a non-unique match, not
+> vigilance; a batch done with a script that takes the first match would have
+> reproduced batch 40 exactly. Whoever automates this should make ambiguity an
+> error, not a choice.
+>
+> **A new axis, and the one rung 106 is sorted by: where the guess ends up.**
+> The three shapes named by batch 40 (guards that worked by luck, strict beside
+> guessing, limits that truncate evidence) sort this defect by *how the old code
+> survived review*. Batch 41 makes a second sort worth having — by what the
+> invented number touches, because that decides how long it outlives the
+> command:
+>
+> * **It reaches a file.** `directio write <path> <data> [offset]` guessed
+>   offset `0`, so a mistyped offset did not fail to write — it wrote over the
+>   **head** of the file and reported "DIO wrote N bytes". Nothing later
+>   distinguishes those bytes from data. This is the only site in forty-one
+>   batches where the guess is persisted.
+> * **It binds a resource.** `httpd start` / `httpd tls` guessed `8080` / `443`
+>   behind an `if port == 0` guard — the batch-40 "guard that worked by luck"
+>   shape, but *inverted*: the default here is legal, so the guard was
+>   unreachable for exactly the input it looks like it exists for. The guard was
+>   kept (an explicit `httpd start 0` still deserves it); what changed is that
+>   the unreadable word no longer arrives at it wearing a legal value.
+> * **It is filed as a measurement.** `ttystat read`/`write` (cumulative device
+>   totals), `buddyinfo update`/`split`, `rcustat end`, `ipclog` — a guessed
+>   count is indistinguishable from an observed one the instant it lands, and
+>   every later `stats` reading is quietly wrong by that much. Third batch
+>   running in which this is the largest sub-group.
+> * **It is echoed back as confirmation.** `displaycal red|green|blue` (all
+>   three default `220` and print the value back), `netindicator report`,
+>   `surroundsound calibrate`. The operand the caller can check against the
+>   output is the one that was made up — so the output *confirms the guess*.
+>
+> **The sharpest single site was not any of those:** `timezone detect <lat>
+> <lon>` guessed `0.0` for either coordinate, so `timezone detect 51.5 0.1O`
+> answered for the Gulf of Guinea and printed a timezone name with no hint that
+> half its input had been discarded. A wrong answer shaped like a right one is
+> what the whole campaign is about.
+>
+> **Two sites had no guard at all behind the guess**, i.e. not even luck:
+> `cgroupfs mem <path> <bytes>` silently set the memory cap to **0** for an
+> unreadable byte count, and `netmon close <id>` closed connection **0**. Both
+> are act-on-the-wrong-object rather than report-the-wrong-number.
+>
+> **One entry in this batch is not a command arm**, and it is the one that
+> generalises: `parse_datetime_to_ns` parsed the *date* fields strictly
+> (`.ok()?`, propagating to `touch`'s existing "invalid date" refusal) and the
+> *time* fields with `.unwrap_or(0)` — strict and guessing inside a single
+> function, six lines apart. `touch -d '2026-08-30 12:3o:00'` meant 12:00:00
+> exactly. It also now refuses a fourth colon-separated field instead of
+> dropping it. Investigating it surfaced a separate defect in `cmd_touch`,
+> logged below as `A-TOUCH--D-CANNOT-ACCEPT-THE-FORMAT-ITS-OWN-USAGE-LINE-PRINTS`.
+>
 > **Burn-down log.** 2026-08-29 (fortieth batch): every function carrying
 > **four** sites, which is now none. 332 → 267 across 185 → 166 functions;
 > nineteen functions left the ledger entirely. `cmd_webcam`, `cmd_vmzone`,

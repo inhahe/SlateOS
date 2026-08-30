@@ -178,8 +178,37 @@ sentence on what actually shipped. The queue property comes from that line,
 not from the file's absence:
 
 ```bash
-grep -L '^\*\*Status:\*\* ✅' requests/*.md      # everything still open
+python scripts/open-requests.py            # what is still open for your lane
+python scripts/open-requests.py --outgoing # what you filed on other lanes
 ```
+
+**Use the script, not a grep.** The obvious query — `grep -L '^\*\*Status:\*\*
+✅' requests/*.md` — is what this rule used to recommend, and it under-reports
+in the direction that matters: it misses a marker written mid-line
+(`**Filed:** … **Status:** …`), and any `ls | grep | head` variant silently
+truncates, which twice reported *nothing open* when something was. The script
+is loose about where the marker sits and strict about what counts as done, and
+anything it cannot classify it calls open.
+
+Say so honestly when only half of a request landed: write `**Status:** ⏳ ask 1
+landed …; ask 2 blocked on lane <x>`. The script ranks an open/blocked/partial
+wording *above* a landed one, so a truthful header is what keeps the unfinished
+half in the queue — a `✅` on a half-done request hides live work from the one
+report that exists to find it.
+
+**A deletion is a gate failure, not a style note.** `scripts/check-requests-not-
+deleted.py` compares `requests/` against the merge base with `origin/main` and
+refuses the build if a file that existed there is gone. It runs in `pre-boot.py`
+and in `boot-test.sh`. Renames pass (fixing a slug, or an archive sweep);
+`requests/.deletions-allowed` waives a basename with a stated reason. The gate
+exists because this rule was enforced by attention and attention lost **four
+times in the two weeks after it was written** — `d30e2a5ca` (A, 108 minutes
+after the rule landed), `57d21b4ee`, `cd23f2f97` (C — and the reply lane C
+filed the same day cites the deleted file by name in its own first line), and
+`dd4e34fd9` (A, in a commit whose own message asserted the *opposite* rule).
+Every lane, in commits that are otherwise careful; misremembering a rule is not
+something a further reminder fixes. All the missing files were restored on
+2026-08-29.
 
 The rule used to say "delete the file when it lands", and that was wrong for
 a reason that only shows up later: **a request file is the canonical write-up
@@ -192,9 +221,13 @@ That is not hypothetical: three files were deleted under the old rule
 §306/§307 and `todo.txt` pointing at nothing. All three have been restored.
 See `design-decisions.md` §315.
 
-A landed request is cheap to keep — the whole dropbox is under 30 small files
-— and expensive to lose, because what it holds is the *why*, which is exactly
-what the citing comment is reaching for.
+A landed request is cheap to keep — 186 files and 1.8 MiB of markdown as of
+2026-08-29, growing by a handful a day — and expensive to lose, because what
+it holds is the *why*, which is exactly what the citing comment is reaching
+for. (The "under 30 small files" this paragraph used to claim was true when
+the rule was written and had been wrong by 6× for weeks; the argument does not
+depend on the number, but a stale one invites the reader to re-derive the
+conclusion from a figure that no longer holds.)
 
 ### 3. Shared documents are append-only, with per-lane sections
 

@@ -13,21 +13,31 @@ one of those citations into a dead end, and, worse, into an unanswerable
 question: a reader who follows a missing path cannot tell whether the request
 was answered, withdrawn, or never existed.
 
-The convention was enforced by attention, and attention has now lost twice, both
-times in lane A:
+The convention was enforced by attention, and attention lost four times. Rule 2
+changed in `236dc2206`, 2026-08-16 09:47; every commit below is after it:
 
-* `5234a590f` deleted `requests/b-a-jobctl-fixture-now-covers-waitid.md`. Found
-  during the 2026-08-16 audit, restored from `5234a590f^`.
-* `dd4e34fd9` deleted two more -- and its own commit message asserted the
-  *opposite* rule, so the author was not ignoring the convention but
-  misremembering it. The symptom arrived within three minutes: the very next
-  commit had to repoint two live citations at something that still existed,
-  which is precisely the failure §315 describes.
+* `d30e2a5ca` (lane A, 2026-08-16 11:35) -- one hour and 48 minutes later.
+* `57d21b4ee` (2026-08-25) -- `c-b-sed-test-fixtures-share-one-path-across-
+  processes.md`, still missing until 2026-08-29.
+* `cd23f2f97` (lane C, 2026-08-29) -- `a-c-scratch-target-dir-outliving-its-
+  job.md`, and the reply that lane C filed the same day *cites it by name in
+  its own first line*, so the deletion broke the reply's only pointer at the
+  thing it was replying to.
+* `dd4e34fd9` (lane A, 2026-08-29) -- two more, and its own commit message
+  asserted the *opposite* rule. That is the telling one: the author was not
+  ignoring the convention but misremembering it, which no reminder fixes. The
+  symptom arrived within three minutes -- the next commit had to repoint two
+  live citations at something that still existed, exactly the failure §315
+  describes.
 
-A rule that fails this way does not want a third reminder. `scripts/open-
-requests.py` cannot help -- it answers "which surviving files are unresolved?",
-and a deleted file survives nothing, so a deletion makes a request vanish from
-the one report that exists to find it. Only a diff against history can see it.
+So this is not one lane being careless. It is every lane, spread over two
+weeks, in commits whose messages are otherwise careful.
+
+`scripts/open-requests.py` cannot help. It answers "which surviving files are
+unresolved?", and a deleted file survives nothing, so a deletion makes a request
+vanish from the one report that exists to find it -- silently, and in the
+direction that reads as "nothing is open". Only a diff against history can see
+a deletion at all.
 
 What it checks
 --------------

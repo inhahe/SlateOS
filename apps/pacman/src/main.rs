@@ -77,13 +77,6 @@ const ROWS_I32: i32 = MAZE_ROWS as i32;
 const WINDOW_WIDTH: f32 = 528.0;
 const WINDOW_HEIGHT: f32 = 738.0;
 
-/// The same, in the whole pixels a window is asked for in.
-///
-/// Two spellings of one number, kept next to each other so they cannot drift:
-/// the window manager wants integers, the layout works in floats.
-const INITIAL_WINDOW_W: u32 = 528;
-const INITIAL_WINDOW_H: u32 = 738;
-
 /// How often the window wakes the game up.
 ///
 /// The game itself moves on its own clock -- a player step every 140 ms, a
@@ -232,7 +225,10 @@ impl Layout {
     pub fn new(w: f32, h: f32) -> Self {
         let w = w.max(0.0);
         let h = h.max(0.0);
-        let pad = (w.min(h) * 0.014).clamp(2.0, 12.0);
+        // Held to half the shorter side as well as to the clamp: a floor of
+        // two pixels put the bands' left edge at x = 2 in a window one pixel
+        // wide, which is a band that starts outside the window it is in.
+        let pad = (w.min(h) * 0.014).clamp(2.0, 12.0).min(w.min(h) / 2.0);
         let head = (h / 42.0).clamp(9.0, 20.0);
         let font = (h / 44.0).clamp(9.0, 18.0);
         let title = (h / 24.0).clamp(14.0, 34.0);
@@ -1581,6 +1577,11 @@ impl PacmanApp {
         let board = Board::new(l.body);
         let mut f = Frame::new(w, h);
 
+        // Everything is drawn inside the window. Without this a reading too
+        // wide for a narrow window spilled past the edge, and a zero-sized
+        // window still recorded a clickable `Press N to start` at its centre --
+        // a control in a window with no pixels to show it.
+        f.clip(l.window);
         fill(&mut f, l.window, BASE, CornerRadii::ZERO);
         self.draw_header(&mut f, &l);
 
@@ -1594,6 +1595,7 @@ impl PacmanApp {
 
         self.draw_footer(&mut f, &l);
         self.draw_sheet(&mut f, &l);
+        f.unclip();
         f
     }
 
@@ -1604,6 +1606,9 @@ impl PacmanApp {
         if l.header.is_empty() {
             return;
         }
+        // A reading wider than the band is cut off at the band rather than
+        // written across the maze below it.
+        f.clip(l.header);
         let inner = l.pad.max(2.0);
         let bold = FontWeightHint::Bold;
         let y = l.header.y + (l.header.h - text::line_height(l.head, bold)) / 2.0;
@@ -1639,6 +1644,7 @@ impl PacmanApp {
             bold,
         );
         f.hit(Target::Level, r);
+        f.unclip();
     }
 
     /// Dots and power pellets, each with the box a test can find it by.
@@ -1792,6 +1798,7 @@ impl PacmanApp {
         if l.footer.is_empty() {
             return;
         }
+        f.clip(l.footer);
         let inner = l.pad.max(2.0);
         let plain = FontWeightHint::Regular;
         let line = text::line_height(l.small, plain);
@@ -1825,6 +1832,7 @@ impl PacmanApp {
             plain,
         );
         f.hit(Target::Dots, r);
+        f.unclip();
     }
 
     /// The sheet that covers the board while the game is on the menu, paused
@@ -1997,8 +2005,16 @@ impl App for PacmanApp {
         "pacman".to_string()
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the natural size is two small positive whole numbers"
+    )]
     fn initial_size(&self) -> (u32, u32) {
-        (INITIAL_WINDOW_W, INITIAL_WINDOW_H)
+        // Converted from the float pair rather than written out again: the two
+        // spellings sat next to each other with a comment saying they could not
+        // drift, which is a promise a comment cannot keep.
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
     fn tick_interval(&self) -> Option<Duration> {
@@ -3132,5 +3148,296 @@ mod tests {
         if app.player_pos == Pos::new(5, 14) {
             assert_ne!(app.mouth_open, initial_mouth);
         }
+    }
+
+    // -- Window wiring: sizes to measure at ------------------------------------
+
+    /// Sizes every geometry invariant is checked at.
+    ///
+    /// Not a round-numbers list: a layout that is right at 528x738 and wrong
+    /// everywhere else is exactly the fault this app had, so the sizes are
+    /// deliberately awkward -- very wide, very tall, smaller than the header
+    /// and footer put together, and zero.
+    const SIZES: [(f32, f32); 9] = [
+        (528.0, 738.0),
+        (320.0, 240.0),
+        (1920.0, 1080.0),
+        (2000.0, 300.0),
+        (300.0, 2000.0),
+        (140.0, 90.0),
+        (37.0, 41.0),
+        (1.0, 1.0),
+        (0.0, 0.0),
+    ];
+
+    /// The three states the game can be drawn in.
+    fn each_state() -> [(GameState, &'static str); 3] {
+        [
+            (GameState::Menu, "menu"),
+            (GameState::Playing, "playing"),
+            (GameState::GameOver, "game over"),
+        ]
+    }
+
+    fn app_in(state: GameState) -> PacmanApp {
+        let mut app = test_app();
+        app.state = state;
+        app
+    }
+
+    // -- Layout tests ----------------------------------------------------------
+
+    #[test]
+    fn layout_bands_never_have_a_negative_side() {
+        // A rectangle of negative width draws inside out, and the old fixed
+        // layout produced one for any window shorter than its header plus its
+        // footer.
+        for (w, h) in SIZES {
+            let l = Layout::new(w, h);
+            for (name, r) in [
+                ("window", l.window),
+                ("header", l.header),
+                ("body", l.body),
+                ("footer", l.footer),
+            ] {
+                assert!(
+                    r.w >= 0.0 && r.h >= 0.0,
+                    "{name} is {r:?} at {w}x{h}, which is inside out"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn layout_bands_stay_inside_the_window() {
+        for (w, h) in SIZES {
+            let l = Layout::new(w, h);
+            for (name, r) in [("header", l.header), ("body", l.body), ("footer", l.footer)] {
+                assert!(
+                    r.x >= 0.0 && r.y >= 0.0 && r.right() <= w + 0.01 && r.bottom() <= h + 0.01,
+                    "{name} is {r:?}, outside a {w}x{h} window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn layout_bands_stack_in_order_and_do_not_overlap() {
+        for (w, h) in SIZES {
+            let l = Layout::new(w, h);
+            assert!(
+                l.header.bottom() <= l.body.y + 0.01,
+                "header {:?} runs into body {:?} at {w}x{h}",
+                l.header,
+                l.body
+            );
+            assert!(
+                l.body.bottom() <= l.footer.y + 0.01,
+                "body {:?} runs into footer {:?} at {w}x{h}",
+                l.body,
+                l.footer
+            );
+        }
+    }
+
+    #[test]
+    fn layout_font_sizes_are_positive_and_ordered() {
+        // The title has to read as a title at every size, and a font of zero
+        // or less is a line nobody can see.
+        for (w, h) in SIZES {
+            let l = Layout::new(w, h);
+            for (name, size) in [
+                ("head", l.head),
+                ("font", l.font),
+                ("title", l.title),
+                ("small", l.small),
+            ] {
+                assert!(size > 0.0, "{name} font is {size} at {w}x{h}");
+            }
+            assert!(
+                l.title >= l.font && l.font >= l.small,
+                "fonts out of order at {w}x{h}: title {} font {} small {}",
+                l.title,
+                l.font,
+                l.small
+            );
+        }
+    }
+
+    #[test]
+    fn a_taller_window_gets_larger_type() {
+        // The whole point of solving the layout from the window: at the sizes
+        // between the clamps, growing the window grows the type.
+        let small = Layout::new(528.0, 500.0);
+        let large = Layout::new(528.0, 900.0);
+        assert!(
+            large.title > small.title && large.font > small.font,
+            "type did not grow: {:?} then {:?}",
+            (small.title, small.font),
+            (large.title, large.font)
+        );
+    }
+
+    // -- Board tests -----------------------------------------------------------
+
+    #[test]
+    fn board_cells_are_square_and_fill_the_grid() {
+        for (w, h) in SIZES {
+            let b = Board::new(Layout::new(w, h).body);
+            assert!(b.cell >= 0.0, "cell side {} at {w}x{h}", b.cell);
+            let expect_w = b.cell * MAZE_COLS as f32;
+            let expect_h = b.cell * MAZE_ROWS as f32;
+            assert!(
+                (b.rect.w - expect_w).abs() < 0.01 && (b.rect.h - expect_h).abs() < 0.01,
+                "grid {:?} is not {MAZE_COLS}x{MAZE_ROWS} cells of {} at {w}x{h}",
+                b.rect,
+                b.cell
+            );
+        }
+    }
+
+    #[test]
+    fn board_is_centred_in_the_body() {
+        for (w, h) in SIZES {
+            let body = Layout::new(w, h).body;
+            let b = Board::new(body);
+            let left = b.rect.x - body.x;
+            let right = body.right() - b.rect.right();
+            let top = b.rect.y - body.y;
+            let bottom = body.bottom() - b.rect.bottom();
+            assert!(
+                (left - right).abs() < 0.01 && (top - bottom).abs() < 0.01,
+                "grid {:?} sits off-centre in body {:?} at {w}x{h}",
+                b.rect,
+                body
+            );
+        }
+    }
+
+    #[test]
+    fn board_never_spills_out_of_the_body() {
+        for (w, h) in SIZES {
+            let body = Layout::new(w, h).body;
+            let b = Board::new(body);
+            assert!(
+                b.rect.x >= body.x - 0.01
+                    && b.rect.y >= body.y - 0.01
+                    && b.rect.right() <= body.right() + 0.01
+                    && b.rect.bottom() <= body.bottom() + 0.01,
+                "grid {:?} spills out of body {:?} at {w}x{h}",
+                b.rect,
+                body
+            );
+        }
+    }
+
+    #[test]
+    fn a_bigger_window_gets_a_bigger_cell() {
+        let small = Board::new(Layout::new(528.0, 738.0).body);
+        let large = Board::new(Layout::new(1056.0, 1476.0).body);
+        assert!(
+            large.cell > small.cell,
+            "cell stayed at {} in a window twice the size",
+            small.cell
+        );
+    }
+
+    #[test]
+    fn every_cell_of_the_grid_is_inside_the_grid() {
+        let b = Board::new(Layout::new(528.0, 738.0).body);
+        for row in 0..ROWS_I32 {
+            for col in 0..COLS_I32 {
+                let r = b.cell_rect(row, col);
+                assert!(
+                    r.x >= b.rect.x - 0.01
+                        && r.y >= b.rect.y - 0.01
+                        && r.right() <= b.rect.right() + 0.01
+                        && r.bottom() <= b.rect.bottom() + 0.01,
+                    "cell ({row}, {col}) is {r:?}, outside grid {:?}",
+                    b.rect
+                );
+            }
+        }
+    }
+
+    // -- Frame invariants ------------------------------------------------------
+
+    #[test]
+    fn the_frame_is_balanced_in_every_state_at_every_size() {
+        // An unbalanced frame is a clip or a translation that was pushed and
+        // not popped, which silently displaces everything drawn after it.
+        for (state, label) in each_state() {
+            for (w, h) in SIZES {
+                let app = app_in(state);
+                assert!(
+                    app.frame(w, h).is_balanced(),
+                    "{label} at {w}x{h} left a clip or translation on the stack"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_hit_box_stays_inside_the_window() {
+        for (state, label) in each_state() {
+            for (w, h) in SIZES {
+                let app = app_in(state);
+                for (target, r) in app.frame(w, h).hits() {
+                    assert!(
+                        r.x >= -0.01
+                            && r.y >= -0.01
+                            && r.right() <= w + 0.01
+                            && r.bottom() <= h + 0.01,
+                        "{label} at {w}x{h}: {target:?} is {r:?}, outside the window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_hit_box_is_empty() {
+        // An empty box can never be clicked, so recording one is a control the
+        // user cannot reach and a test that would pass by finding it.
+        for (state, label) in each_state() {
+            for (w, h) in SIZES {
+                if w <= 0.0 || h <= 0.0 {
+                    continue;
+                }
+                let app = app_in(state);
+                for (target, r) in app.frame(w, h).hits() {
+                    assert!(
+                        !r.is_empty(),
+                        "{label} at {w}x{h}: {target:?} is empty at {r:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_zero_sized_window_draws_nothing_that_can_be_clicked() {
+        let app = app_in(GameState::Menu);
+        let f = app.frame(0.0, 0.0);
+        assert!(f.is_balanced());
+        assert_eq!(f.hit_test(0.0, 0.0), None, "a zero window has no controls");
+    }
+
+    #[test]
+    fn the_board_hit_covers_the_whole_grid() {
+        let app = app_in(GameState::Playing);
+        let f = app.frame(528.0, 738.0);
+        let board = Board::new(Layout::new(528.0, 738.0).body);
+        let recorded = f
+            .rect_of(|t| matches!(t, Target::Board))
+            .expect("the board records a hit box");
+        assert!(
+            (recorded.x - board.rect.x).abs() < 0.01
+                && (recorded.y - board.rect.y).abs() < 0.01
+                && (recorded.w - board.rect.w).abs() < 0.01
+                && (recorded.h - board.rect.h).abs() < 0.01,
+            "board hit {recorded:?} is not the grid {:?}",
+            board.rect
+        );
     }
 }

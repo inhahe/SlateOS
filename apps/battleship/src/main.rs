@@ -1676,6 +1676,8 @@ mod tests {
         clippy::cast_possible_truncation
     )]
 
+    use guitk::probe;
+
     use super::*;
 
     // ── AI fleet placement is not confined to one colour of the board ──
@@ -2810,5 +2812,1217 @@ mod tests {
         };
         // Row 3,4,5 col 2 — row 5, col 2 is occupied by carrier.
         assert!(!fleet.place_ship(v_ship));
+    }
+
+    // ── The window ──────────────────────────────────────────────────
+    //
+    // Everything below drives the program the way the window does: draw at a
+    // size, ask the frame what was drawn where, click there. Not one of these
+    // tests could exist before this app had a window -- `main` was
+    // `let _app = BattleshipApp::new();`, so the drawing ran nowhere and the
+    // only thing a test could reach was the state behind it.
+
+    /// The size almost every claim below is checked at.
+    const SIZE: (f32, f32) = BattleshipApp::SIZE;
+
+    /// The window sizes the layout claims are checked at.
+    ///
+    /// A tall thin window and a short wide one are the two shapes that break a
+    /// layout written for one aspect ratio, and the 200x150 one is smaller
+    /// than the drawing's old fixed extent in both directions.
+    const SIZES: [(f32, f32); 6] = [
+        (1000.0, 720.0),
+        (1400.0, 900.0),
+        (700.0, 520.0),
+        (420.0, 900.0),
+        (1200.0, 300.0),
+        (200.0, 150.0),
+    ];
+
+    /// A game with all five of the player's ships already placed.
+    fn firing_app() -> BattleshipApp {
+        setup_firing_app()
+    }
+
+    /// The box the frame recorded for `target`, or a panic naming it.
+    fn box_of(app: &BattleshipApp, target: Target) -> Rect {
+        probe::rect_of(app, target).unwrap_or_else(|| panic!("nothing was drawn for {target:?}"))
+    }
+
+    // ── Layout ──────────────────────────────────────────────────────
+
+    #[test]
+    fn the_bands_run_down_the_window_in_order_and_do_not_overlap() {
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            let bands = [
+                ("header", l.header),
+                ("message", l.message),
+                ("body", l.body),
+                ("stats", l.stats),
+                ("help", l.help),
+            ];
+            let mut y = 0.0_f32;
+            for (name, band) in bands {
+                assert!(
+                    band.y >= y - 0.001,
+                    "{name} starts at {} above {y} in a {w}x{h} window",
+                    band.y
+                );
+                assert!(band.h >= 0.0, "{name} has a negative height at {w}x{h}");
+                y = band.bottom();
+            }
+            assert!(
+                y <= h + 0.001,
+                "the bands run {y} down a window only {h} tall"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bands_fill_the_window_and_span_its_width() {
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            assert_eq!(l.window, Rect::new(0.0, 0.0, w, h));
+            for band in [l.header, l.message, l.body, l.stats, l.help] {
+                assert_eq!(band.x, 0.0, "a band is inset at {w}x{h}");
+                assert_eq!(band.w, w, "a band is not the window's width at {w}x{h}");
+            }
+            assert!(
+                (l.help.bottom() - h).abs() < 0.001 || l.body.h == 0.0,
+                "the last band ends at {} in a window {h} tall",
+                l.help.bottom()
+            );
+        }
+    }
+
+    #[test]
+    fn a_bigger_window_gets_bigger_cells() {
+        // The point of solving the layout each frame rather than reading it
+        // off a `const CELL_SIZE: f32 = 36.0`: the same board at two sizes is
+        // two different pictures, and the bigger window gets the bigger one.
+        let small = Layout::solve(700.0, 520.0).grids();
+        let large = Layout::solve(1400.0, 1040.0).grids();
+        assert!(
+            large.step > small.step * 1.5,
+            "doubling the window barely moved the cell: {} -> {}",
+            small.step,
+            large.step
+        );
+        assert!(large.cell < large.step, "the gap between cells closed up");
+        assert!(large.label > small.label, "the labels did not grow with it");
+    }
+
+    #[test]
+    fn the_cells_are_square_and_the_two_grids_are_the_same_size() {
+        for (w, h) in SIZES {
+            let g = Layout::solve(w, h).grids();
+            let own = g.board_rect(g.own);
+            let ocean = g.board_rect(g.ocean);
+            assert!(
+                (own.w - own.h).abs() < 0.001,
+                "the player's grid is {}x{} at {w}x{h}",
+                own.w,
+                own.h
+            );
+            assert_eq!(
+                (own.w, own.h),
+                (ocean.w, ocean.h),
+                "the two grids differ in size at {w}x{h}"
+            );
+            for r in 0..GRID_SIZE {
+                for c in 0..GRID_SIZE {
+                    let cell = g.cell_rect(g.own, r, c);
+                    assert!(
+                        (cell.w - cell.h).abs() < 0.001,
+                        "cell {r},{c} is {}x{} at {w}x{h}",
+                        cell.w,
+                        cell.h
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_grids_never_overlap_and_both_stay_inside_the_body() {
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            let g = l.grids();
+            let own = g.board_rect(g.own);
+            let ocean = g.board_rect(g.ocean);
+            assert!(
+                own.right() <= ocean.x + 0.001,
+                "the grids overlap at {w}x{h}: {own:?} and {ocean:?}"
+            );
+            for (name, board) in [("own", own), ("ocean", ocean)] {
+                assert!(
+                    board.x >= l.body.x - 0.001
+                        && board.right() <= l.body.right() + 0.001
+                        && board.y >= l.body.y - 0.001
+                        && board.bottom() <= l.body.bottom() + 0.001,
+                    "the {name} grid {board:?} leaves the body {:?} at {w}x{h}",
+                    l.body
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_row_and_column_labels_have_room_left_of_and_above_the_cells() {
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            let g = l.grids();
+            // The A-J column has to start inside the body, not off its left
+            // edge: the old drawing reserved `LABEL_OFFSET` from a fixed grid
+            // origin, which is only inside the window at one window size.
+            assert!(
+                g.own.0 - g.label >= l.body.x - 0.001,
+                "the row labels start at {} outside the body at {w}x{h}",
+                g.own.0 - g.label
+            );
+            assert!(
+                g.caption_y >= l.body.y - 0.001 && g.caption_y < g.own.1,
+                "the caption at {} is not above the cells at {}",
+                g.caption_y,
+                g.own.1
+            );
+            assert!(
+                g.own.1 - g.label >= g.caption_y - 0.001,
+                "the 1-10 row sits on top of the caption at {w}x{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_is_drawn_outside_the_window() {
+        for (w, h) in SIZES {
+            let app = firing_app();
+            let f = app.draw((w, h));
+            for (target, rect) in f.hits() {
+                assert!(
+                    rect.x >= -0.001
+                        && rect.y >= -0.001
+                        && rect.right() <= w + 0.001
+                        && rect.bottom() <= h + 0.001,
+                    "{target:?} was drawn at {rect:?} outside a {w}x{h} window"
+                );
+            }
+            // A hit box is recorded whether or not it would survive the clip,
+            // so the boxes above cannot see a missing clip at all -- only the
+            // commands can.
+            let outer = f.commands().iter().find_map(|c| match c {
+                RenderCommand::PushClip {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => Some((*x, *y, *width, *height)),
+                _ => None,
+            });
+            assert_eq!(
+                outer,
+                Some((0.0, 0.0, w, h)),
+                "a {w}x{h} window was not clipped to itself"
+            );
+            assert!(f.is_balanced(), "a clip was pushed and never popped");
+        }
+    }
+
+    #[test]
+    fn a_window_with_no_room_at_all_still_draws_a_frame() {
+        // Not "looks right" -- there is no right at this size. Only that the
+        // arithmetic stays finite and nothing panics, which is what a window
+        // dragged shut actually does to a layout.
+        for (w, h) in [(0.0, 0.0), (1.0, 400.0), (400.0, 1.0), (-50.0, -50.0)] {
+            let app = firing_app();
+            let f = app.draw((w, h));
+            for (target, rect) in f.hits() {
+                assert!(
+                    rect.x.is_finite()
+                        && rect.y.is_finite()
+                        && rect.w.is_finite()
+                        && rect.h.is_finite(),
+                    "{target:?} came out as {rect:?} in a {w}x{h} window"
+                );
+                assert!(rect.w >= 0.0 && rect.h >= 0.0, "{target:?} is inside out");
+            }
+        }
+    }
+
+    #[test]
+    fn each_grid_s_caption_is_centred_over_the_grid_it_names() {
+        // The old drawing subtracted a hand-measured half-width -- 40.0 for
+        // "Your Fleet" and 55.0 for "Opponent's Ocean" -- so the two captions
+        // were centred to two different standards, and neither one to the
+        // width the text actually takes.
+        for (w, h) in SIZES {
+            let app = firing_app();
+            let g = Layout::solve(w, h).grids();
+            for (target, origin) in [(Target::OwnLabel, g.own), (Target::OceanLabel, g.ocean)] {
+                let caption = probe::rect_of_sized(&app, target, (w, h))
+                    .unwrap_or_else(|| panic!("no caption for {target:?} at {w}x{h}"));
+                let board = g.board_rect(origin);
+                assert!(
+                    (caption.centre().0 - board.centre().0).abs() <= 1.0,
+                    "{target:?} sits at {} over a grid centred on {} at {w}x{h}",
+                    caption.centre().0,
+                    board.centre().0
+                );
+            }
+        }
+    }
+
+    // ── What a click lands on ───────────────────────────────────────
+
+    #[test]
+    fn every_cell_of_both_grids_records_a_box_a_click_can_find() {
+        let app = firing_app();
+        let f = app.draw(SIZE);
+        for r in 0..GRID_SIZE {
+            for c in 0..GRID_SIZE {
+                for target in [
+                    Target::Own(byte(r), byte(c)),
+                    Target::Ocean(byte(r), byte(c)),
+                ] {
+                    let rect = box_of(&app, target);
+                    let (x, y) = rect.centre();
+                    assert_eq!(
+                        f.hit_test(x, y),
+                        Some(target),
+                        "a click in the middle of {target:?} lands somewhere else"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_cells_are_drawn_where_the_grid_says_they_are() {
+        // The box a click is tested against and the square the player sees are
+        // the same rectangle, which is the entire claim the hit map makes.
+        let app = firing_app();
+        let g = Layout::solve(SIZE.0, SIZE.1).grids();
+        for (origin, cell_of) in [
+            (
+                g.own,
+                (|r, c| Target::Own(byte(r), byte(c))) as fn(usize, usize) -> Target,
+            ),
+            (
+                g.ocean,
+                (|r, c| Target::Ocean(byte(r), byte(c))) as fn(usize, usize) -> Target,
+            ),
+        ] {
+            for r in 0..GRID_SIZE {
+                for c in 0..GRID_SIZE {
+                    let drawn = box_of(&app, cell_of(r, c));
+                    let want = g.cell_rect(origin, r, c);
+                    // Within a pixel rather than to the bit: the recorded box
+                    // is the drawn one intersected with the window's clip, and
+                    // that intersection is two more float operations on the
+                    // same numbers.
+                    for (axis, a, b) in [
+                        ("x", drawn.x, want.x),
+                        ("y", drawn.y, want.y),
+                        ("w", drawn.w, want.w),
+                        ("h", drawn.h, want.h),
+                    ] {
+                        assert!(
+                            (a - b).abs() < 0.01,
+                            "cell {r},{c} has {axis} {a} where the grid puts {b}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_board_behind_the_cells_is_reachable_where_the_cells_are_not() {
+        // The gap between two cells is not dead space: it answers as the board
+        // it belongs to, so a click that falls a pixel short of a square is
+        // still a click on that grid and not on nothing at all.
+        let app = firing_app();
+        let f = app.draw(SIZE);
+        let g = Layout::solve(SIZE.0, SIZE.1).grids();
+        for (origin, board) in [(g.own, Target::OwnBoard), (g.ocean, Target::OceanBoard)] {
+            let first = g.cell_rect(origin, 0, 0);
+            let x = first.right() + (g.step - g.cell) / 2.0;
+            let y = first.centre().1;
+            assert_eq!(
+                f.hit_test(x, y),
+                Some(board),
+                "the gap right of the first cell answers as nothing"
+            );
+            // Answered, and doing nothing: a click that misses a square by a
+            // pixel must not fire the cell next to it.
+            let mut clicked = firing_app();
+            assert_eq!(
+                clicked.click_at(x, y, MouseButton::Left, SIZE),
+                EventResult::Consumed
+            );
+            assert_eq!(
+                clicked.player_shots, 0,
+                "a click in the gutter of {board:?} fired a shell"
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_on_your_own_grid_places_the_ship_being_placed() {
+        let mut app = BattleshipApp::with_seed(7);
+        assert_eq!(app.phase, GamePhase::Placement);
+        assert_eq!(app.current_placement_ship(), Some(ShipKind::Carrier));
+
+        assert_eq!(
+            probe::click(&mut app, Target::Own(3, 2)),
+            EventResult::Consumed
+        );
+        let carrier = app
+            .player_fleet
+            .ships
+            .first()
+            .copied()
+            .expect("the click placed no ship");
+        assert_eq!(carrier.kind, ShipKind::Carrier);
+        assert_eq!(
+            (carrier.row, carrier.col),
+            (3, 2),
+            "the ship went somewhere other than the cell that was clicked"
+        );
+        assert_eq!(
+            app.current_placement_ship(),
+            Some(ShipKind::Battleship),
+            "the placement did not move on to the next ship"
+        );
+    }
+
+    #[test]
+    fn a_click_that_would_hang_a_ship_off_the_board_pulls_it_back_on() {
+        // A cursor walked with arrow keys cannot leave the board; a click can
+        // put it anywhere at all, which is exactly the case the clamp used to
+        // be called for on Down and Right and not on Up and Left.
+        let mut app = BattleshipApp::with_seed(7);
+        probe::click(&mut app, Target::Own(0, byte(LAST_CELL)));
+        let carrier = app
+            .player_fleet
+            .ships
+            .first()
+            .copied()
+            .expect("the click placed no ship");
+        assert_eq!(
+            (carrier.row, carrier.col),
+            (0, GRID_SIZE - ShipKind::Carrier.size()),
+            "the five-cell Carrier was placed with its bow off the board"
+        );
+        for (r, c) in carrier.cells() {
+            assert!(
+                r < GRID_SIZE && c < GRID_SIZE,
+                "cell {r},{c} is off the board"
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_cell_another_ship_already_holds_is_refused() {
+        let mut app = BattleshipApp::with_seed(7);
+        probe::click(&mut app, Target::Own(0, 0));
+        assert_eq!(app.player_fleet.ships.len(), 1);
+        probe::click(&mut app, Target::Own(0, 0));
+        assert_eq!(
+            app.player_fleet.ships.len(),
+            1,
+            "a second ship was stacked on the first"
+        );
+        assert_eq!(
+            app.current_placement_ship(),
+            Some(ShipKind::Battleship),
+            "the refused placement moved on to the next ship anyway"
+        );
+        assert!(
+            app.message.contains("Invalid"),
+            "the refusal was silent: {:?}",
+            app.message
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_ocean_fires_at_that_cell() {
+        let mut app = firing_app();
+        let before = app.player_shots;
+        assert_eq!(
+            probe::click(&mut app, Target::Ocean(4, 6)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.player_shots, before + 1, "the click fired nothing");
+        assert_eq!(
+            (app.cursor_row, app.cursor_col),
+            (4, 6),
+            "the cursor did not move to the cell that was clicked"
+        );
+        assert_ne!(
+            app.opponent_fleet.mark_at(4, 6),
+            CellMark::Empty,
+            "the shell landed on some other cell"
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_cell_already_fired_at_costs_nothing() {
+        let mut app = firing_app();
+        probe::click(&mut app, Target::Ocean(4, 6));
+        let shots = app.player_shots;
+        let ai_shots = app.ai_state.shots;
+        probe::click(&mut app, Target::Ocean(4, 6));
+        assert_eq!(app.player_shots, shots, "the same cell was fired at twice");
+        assert_eq!(
+            app.ai_state.shots, ai_shots,
+            "the AI took a turn for a shot that was never taken"
+        );
+        assert!(
+            app.message.contains("Already fired"),
+            "the refusal was silent: {:?}",
+            app.message
+        );
+    }
+
+    #[test]
+    fn neither_grid_answers_a_click_in_the_phase_it_is_not_for() {
+        let mut placing = BattleshipApp::with_seed(7);
+        let before = placing.opponent_fleet.mark_at(0, 0);
+        probe::click(&mut placing, Target::Ocean(0, 0));
+        assert_eq!(
+            placing.player_shots, 0,
+            "a shell was fired during placement"
+        );
+        assert_eq!(placing.opponent_fleet.mark_at(0, 0), before);
+
+        let mut firing = firing_app();
+        let ships = firing.player_fleet.ships.len();
+        probe::click(&mut firing, Target::Own(9, 9));
+        assert_eq!(
+            firing.player_fleet.ships.len(),
+            ships,
+            "a sixth ship was placed in the middle of the battle"
+        );
+        assert_eq!(firing.player_shots, 0, "clicking one's own grid fired");
+    }
+
+    #[test]
+    fn a_click_on_the_chrome_is_answered_and_changes_nothing() {
+        for target in [
+            Target::Title,
+            Target::Phase,
+            Target::Message,
+            Target::OwnLabel,
+            Target::OceanLabel,
+            Target::Stats,
+            Target::Help,
+        ] {
+            let mut app = firing_app();
+            let before = format!("{:?}", app.player_fleet.marks);
+            assert_eq!(
+                probe::click(&mut app, target),
+                EventResult::Consumed,
+                "{target:?} let the click fall through to whatever is behind it"
+            );
+            assert_eq!(app.player_shots, 0, "{target:?} fired a shell");
+            assert_eq!(app.ai_state.shots, 0, "{target:?} gave the AI a turn");
+            assert_eq!(
+                format!("{:?}", app.player_fleet.marks),
+                before,
+                "{target:?} changed the board"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_left_button_does_anything() {
+        let mut app = firing_app();
+        let (x, y) = box_of(&app, Target::Ocean(4, 6)).centre();
+        assert_eq!(
+            app.click_at(x, y, MouseButton::Right, SIZE),
+            EventResult::Ignored
+        );
+        assert_eq!(app.player_shots, 0, "a right click fired a shell");
+    }
+
+    #[test]
+    fn a_click_outside_everything_is_left_alone() {
+        let mut app = firing_app();
+        assert_eq!(
+            app.click_at(-10.0, -10.0, MouseButton::Left, SIZE),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn the_click_and_the_key_place_the_same_ship() {
+        let mut by_click = BattleshipApp::with_seed(7);
+        probe::click(&mut by_click, Target::Own(2, 3));
+
+        let mut by_key = BattleshipApp::with_seed(7);
+        for _ in 0..2 {
+            by_key.key_at(&probe::press(Key::Down), SIZE);
+        }
+        for _ in 0..3 {
+            by_key.key_at(&probe::press(Key::Right), SIZE);
+        }
+        by_key.key_at(&probe::press(Key::Enter), SIZE);
+
+        // That the two agree is only half of it: a click and a key that both
+        // do nothing agree perfectly. The ship has to have been placed.
+        assert_eq!(
+            by_key.player_fleet.ships.first().map(|s| (s.row, s.col)),
+            Some((2, 3)),
+            "the keys placed nothing"
+        );
+        assert_eq!(
+            by_click.player_fleet.ships, by_key.player_fleet.ships,
+            "the click and the keys placed different ships"
+        );
+    }
+
+    #[test]
+    fn the_click_and_the_key_fire_the_same_shell() {
+        let mut by_click = firing_app();
+        probe::click(&mut by_click, Target::Ocean(0, 2));
+
+        let mut by_key = firing_app();
+        for _ in 0..2 {
+            by_key.key_at(&probe::press(Key::Right), SIZE);
+        }
+        by_key.key_at(&probe::press(Key::Enter), SIZE);
+
+        assert_eq!(by_key.player_shots, 1, "the keys fired nothing");
+        assert_eq!(
+            format!("{:?}", by_click.opponent_fleet.marks),
+            format!("{:?}", by_key.opponent_fleet.marks),
+            "the click and the keys hit different cells"
+        );
+    }
+
+    // ── Keys the window delivers ────────────────────────────────────
+
+    #[test]
+    fn escape_does_not_deal_a_new_board() {
+        // It used to, under the comment "Could quit, but we just reset for
+        // now" -- so the key a player presses to back out of something threw
+        // the game away, from any phase, with no confirmation.
+        let mut app = firing_app();
+        probe::click(&mut app, Target::Ocean(0, 0));
+        let shots = app.player_shots;
+        let ships = app.player_fleet.ships.clone();
+
+        assert_eq!(
+            app.key_at(&probe::press(Key::Escape), SIZE),
+            EventResult::Ignored,
+            "Escape was taken for something"
+        );
+        assert_eq!(app.phase, GamePhase::Firing, "Escape reset the game");
+        assert_eq!(app.player_shots, shots, "Escape threw away the score");
+        assert_eq!(app.player_fleet.ships, ships, "Escape unplaced the fleet");
+    }
+
+    #[test]
+    fn escape_closes_the_window() {
+        let mut app = firing_app();
+        assert!(matches!(
+            app.on_event(&Event::Key(probe::press(Key::Escape))),
+            Response::Exit
+        ));
+    }
+
+    #[test]
+    fn n_deals_a_new_board_in_every_phase() {
+        for phase in [GamePhase::Placement, GamePhase::Firing, GamePhase::GameOver] {
+            let mut app = firing_app();
+            app.phase = phase;
+            app.player_shots = 9;
+            assert_eq!(
+                app.key_at(&probe::press(Key::N), SIZE),
+                EventResult::Consumed
+            );
+            assert_eq!(
+                app.phase,
+                GamePhase::Placement,
+                "N did nothing in {phase:?}"
+            );
+            assert_eq!(app.player_shots, 0, "the old score survived N in {phase:?}");
+            assert!(
+                app.player_fleet.ships.is_empty(),
+                "the old fleet survived N in {phase:?}"
+            );
+            assert_eq!(
+                app.opponent_fleet.ships.len(),
+                FLEET.len(),
+                "the AI did not lay out a new fleet in {phase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_the_game_has_no_use_for_is_left_alone() {
+        // `Ignored` rather than `Consumed`: a window that swallowed every
+        // keystroke would take the ones its container wanted too.
+        let mut app = firing_app();
+        assert_eq!(
+            app.key_at(&probe::press(Key::Z), SIZE),
+            EventResult::Ignored
+        );
+        let mut over = firing_app();
+        over.phase = GamePhase::GameOver;
+        assert_eq!(
+            over.key_at(&probe::press(Key::Enter), SIZE),
+            EventResult::Ignored,
+            "Enter did something on a finished board"
+        );
+    }
+
+    #[test]
+    fn the_window_says_what_it_is() {
+        let app = BattleshipApp::with_seed(1);
+        assert_eq!(app.title(), "Battleship");
+        assert_eq!(app.app_id(), "battleship");
+        assert_eq!(app.initial_size(), (1000, 720));
+    }
+
+    #[test]
+    fn a_resize_is_what_the_next_click_is_read_against() {
+        // The first frame a real window submits goes out before any resize
+        // event arrives, so the size a click is read at has to be the size the
+        // last frame was drawn at -- not a remembered constant.
+        let mut app = firing_app();
+        let big = (1400.0, 900.0);
+        let rect = probe::rect_of_sized(&app, Target::Ocean(4, 6), big).expect("no cell drawn");
+        let (x, y) = rect.centre();
+
+        app.on_event(&Event::Resize {
+            width: 1400,
+            height: 900,
+        });
+        app.on_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(
+            (app.cursor_row, app.cursor_col),
+            (4, 6),
+            "the click was read against a size the window is no longer"
+        );
+    }
+
+    #[test]
+    fn the_window_asks_for_a_redraw_only_when_something_changed() {
+        let mut app = firing_app();
+        assert!(matches!(
+            app.on_event(&Event::Key(probe::press(Key::Right))),
+            Response::Redraw
+        ));
+        assert!(matches!(
+            app.on_event(&Event::Key(probe::press(Key::Z))),
+            Response::Idle
+        ));
+        assert!(matches!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+    }
+
+    // ── What is drawn ───────────────────────────────────────────────
+
+    /// Every run of text in a frame, with the colour it was drawn in.
+    fn texts(f: &Frame<Target>) -> Vec<(String, Color)> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. } => Some((text.clone(), *color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether some run of text in the frame contains `needle`.
+    fn drew(f: &Frame<Target>, needle: &str) -> bool {
+        texts(f).iter().any(|(t, _)| t.contains(needle))
+    }
+
+    /// Every run of text whose origin falls inside `rect`, joined by a space.
+    ///
+    /// `drew` asks the whole frame, which is the wrong question for a band
+    /// that has to *not* say a word the rest of the window says freely: the
+    /// stats band carries "Shots fired", so a help line asked through `drew`
+    /// can never be shown to have dropped the word "fire".
+    fn text_in(f: &Frame<Target>, rect: Rect) -> String {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { x, y, text, .. } if rect.contains(*x, *y) => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The colours of every rectangle filled at `rect`'s top-left corner.
+    fn fills_at(f: &Frame<Target>, rect: Rect) -> Vec<Color> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { x, y, color, .. }
+                    if (x - rect.x).abs() < 0.01 && (y - rect.y).abs() < 0.01 =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_phase_is_named_in_the_header_and_coloured_by_how_it_is_going() {
+        for (phase, won, word, colour) in [
+            (GamePhase::Placement, false, "Ship Placement", YELLOW),
+            (GamePhase::Firing, false, "Battle", GREEN),
+            (GamePhase::GameOver, true, "Victory!", GREEN),
+            (GamePhase::GameOver, false, "Defeat!", RED),
+        ] {
+            let mut app = firing_app();
+            app.phase = phase;
+            app.player_won = won;
+            let f = app.draw(SIZE);
+            let said = texts(&f)
+                .into_iter()
+                .find(|(t, _)| t == word)
+                .unwrap_or_else(|| panic!("{word:?} was never drawn"));
+            assert_eq!(said.1, colour, "{word:?} was drawn in the wrong colour");
+            assert!(drew(&f, "Battleship"), "the title went missing");
+        }
+    }
+
+    #[test]
+    fn the_two_halves_of_the_header_do_not_sit_on_top_of_each_other() {
+        // The phase is right-aligned by measuring the words. "Ship Placement"
+        // is half again as long as "Battle", and the window is whatever the
+        // user dragged it to, so a fixed column for either is wrong at once.
+        for (w, h) in SIZES {
+            let mut app = firing_app();
+            app.phase = GamePhase::Placement;
+            let title = probe::rect_of_sized(&app, Target::Title, (w, h)).expect("no title");
+            let phase = probe::rect_of_sized(&app, Target::Phase, (w, h)).expect("no phase");
+            if w >= 700.0 {
+                assert!(
+                    title.right() <= phase.x + 0.001,
+                    "the title {title:?} runs into the phase {phase:?} at {w}x{h}"
+                );
+                assert!(
+                    phase.right() <= w + 0.001,
+                    "the phase runs off the right edge at {w}x{h}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_message_bar_carries_the_message_and_answers_across_its_whole_width() {
+        let mut app = firing_app();
+        app.message = String::from("You sank their Cruiser!");
+        let f = app.draw(SIZE);
+        assert!(
+            drew(&f, "You sank their Cruiser!"),
+            "the message was not said"
+        );
+
+        let l = Layout::solve(SIZE.0, SIZE.1);
+        let band = box_of(&app, Target::Message);
+        assert!(
+            (band.w - l.message.w).abs() < 0.01 && (band.h - l.message.h).abs() < 0.01,
+            "the bar answers only {band:?} of a band {:?} wide",
+            l.message
+        );
+    }
+
+    #[test]
+    fn the_aiming_ring_is_drawn_on_the_cell_the_cursor_is_on() {
+        let mut app = firing_app();
+        app.cursor_row = 3;
+        app.cursor_col = 7;
+        let g = Layout::solve(SIZE.0, SIZE.1).grids();
+        let want = g.cell_rect(g.ocean, 3, 7);
+        let rings: Vec<_> = app
+            .draw(SIZE)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect { x, y, .. } => Some((*x, *y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rings.len(), 1, "there is not exactly one aiming ring");
+        let (x, y) = rings.first().copied().expect("no ring");
+        assert!(
+            (x - want.x).abs() < 0.01 && (y - want.y).abs() < 0.01,
+            "the ring is at {x},{y} and the cursor's cell is at {},{}",
+            want.x,
+            want.y
+        );
+    }
+
+    #[test]
+    fn the_ring_is_drawn_only_while_there_is_something_to_aim_at() {
+        for phase in [GamePhase::Placement, GamePhase::GameOver] {
+            let mut app = firing_app();
+            app.phase = phase;
+            let rings = app
+                .draw(SIZE)
+                .commands()
+                .iter()
+                .filter(|c| matches!(c, RenderCommand::StrokeRect { .. }))
+                .count();
+            assert_eq!(rings, 0, "an aiming ring was drawn in {phase:?}");
+        }
+    }
+
+    #[test]
+    fn the_ring_follows_the_cursor() {
+        let mut app = firing_app();
+        let g = Layout::solve(SIZE.0, SIZE.1).grids();
+        let before = app.draw(SIZE);
+        app.key_at(&probe::press(Key::Right), SIZE);
+        app.key_at(&probe::press(Key::Down), SIZE);
+        let after = app.draw(SIZE);
+        let ring = |f: &Frame<Target>| {
+            f.commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::StrokeRect { x, y, .. } => Some((*x, *y)),
+                    _ => None,
+                })
+                .expect("no ring")
+        };
+        assert_ne!(ring(&before), ring(&after), "the ring did not move");
+        let want = g.cell_rect(g.ocean, 1, 1);
+        let (x, y) = ring(&after);
+        assert!((x - want.x).abs() < 0.01 && (y - want.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_ship_being_placed_is_previewed_over_the_cells_it_would_take() {
+        let mut app = BattleshipApp::with_seed(7);
+        app.placement_row = 2;
+        app.placement_col = 1;
+        let g = Layout::solve(SIZE.0, SIZE.1).grids();
+        let f = app.draw(SIZE);
+        let tint = Color::rgba(166, 227, 161, 120);
+        for c in 1..=ShipKind::Carrier.size() {
+            assert!(
+                fills_at(&f, g.cell_rect(g.own, 2, c)).contains(&tint),
+                "cell 2,{c} was not shown as part of the ship being placed"
+            );
+        }
+        assert!(
+            !fills_at(&f, g.cell_rect(g.own, 2, 0)).contains(&tint),
+            "the preview reached a cell the ship does not cover"
+        );
+        assert!(
+            !fills_at(&f, g.cell_rect(g.ocean, 2, 1)).contains(&tint),
+            "the preview was drawn on the opponent's ocean"
+        );
+    }
+
+    #[test]
+    fn a_placement_that_would_be_refused_is_previewed_in_the_refusing_colour() {
+        let mut app = BattleshipApp::with_seed(7);
+        probe::click(&mut app, Target::Own(0, 0));
+        // The Battleship now starts where the Carrier already lies.
+        app.placement_row = 0;
+        app.placement_col = 0;
+        let g = Layout::solve(SIZE.0, SIZE.1).grids();
+        let f = app.draw(SIZE);
+        assert!(
+            fills_at(&f, g.cell_rect(g.own, 0, 0)).contains(&Color::rgba(243, 139, 168, 120)),
+            "an overlapping placement was shown as if it would be accepted"
+        );
+    }
+
+    #[test]
+    fn the_preview_is_gone_once_the_last_ship_is_placed() {
+        let app = firing_app();
+        let g = Layout::solve(SIZE.0, SIZE.1).grids();
+        let f = app.draw(SIZE);
+        for tint in [
+            Color::rgba(166, 227, 161, 120),
+            Color::rgba(243, 139, 168, 120),
+        ] {
+            for c in 0..GRID_SIZE {
+                assert!(
+                    !fills_at(&f, g.cell_rect(g.own, 0, c)).contains(&tint),
+                    "a placement preview is still on the board during the battle"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_hit_is_a_cross_and_a_miss_is_a_dot() {
+        let mut app = firing_app();
+        // A cell the opponent's fleet holds, and one it does not.
+        let ship = app
+            .opponent_fleet
+            .ships
+            .first()
+            .copied()
+            .expect("the AI placed no ships");
+        let (hr, hc) = ship.cells().first().copied().expect("a ship with no cells");
+        let (mr, mc) = (0..GRID_SIZE)
+            .flat_map(|r| (0..GRID_SIZE).map(move |c| (r, c)))
+            .find(|&(r, c)| app.opponent_fleet.ship_at(r, c).is_none())
+            .expect("the AI's ships cover the whole ocean");
+
+        probe::click(&mut app, Target::Ocean(byte(hr), byte(hc)));
+        probe::click(&mut app, Target::Ocean(byte(mr), byte(mc)));
+
+        let g = Layout::solve(SIZE.0, SIZE.1).grids();
+        let f = app.draw(SIZE);
+        let hit_cell = g.cell_rect(g.ocean, hr, hc);
+        let crosses = f
+            .commands()
+            .iter()
+            .filter(|c| {
+                matches!(c, RenderCommand::Line { x1, y1, .. }
+                    if hit_cell.contains(*x1, *y1))
+            })
+            .count();
+        assert_eq!(crosses, 2, "a hit was not marked with a two-stroke cross");
+        assert!(
+            fills_at(&f, g.cell_rect(g.ocean, mr, mc)).is_empty()
+                || !fills_at(&f, g.cell_rect(g.ocean, mr, mc)).contains(&RED),
+            "a miss was marked in the colour of a hit"
+        );
+        let dots = f
+            .commands()
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == BLUE))
+            .count();
+        assert!(dots >= 1, "a miss left no mark at all");
+    }
+
+    #[test]
+    fn the_opponent_s_ships_are_hidden_until_the_game_is_over() {
+        let app = firing_app();
+        let g = Layout::solve(SIZE.0, SIZE.1).grids();
+        let f = app.draw(SIZE);
+        let hull = ShipKind::Carrier.color();
+        let ship = app
+            .opponent_fleet
+            .ships
+            .iter()
+            .find(|s| s.kind == ShipKind::Carrier)
+            .copied()
+            .expect("the AI has no Carrier");
+        for (r, c) in ship.cells() {
+            assert!(
+                !fills_at(&f, g.cell_rect(g.ocean, r, c)).contains(&hull),
+                "the opponent's Carrier is visible at {r},{c} before a shot was fired"
+            );
+        }
+
+        let mut over = app;
+        over.phase = GamePhase::GameOver;
+        let f = over.draw(SIZE);
+        for (r, c) in ship.cells() {
+            assert!(
+                fills_at(&f, g.cell_rect(g.ocean, r, c)).contains(&hull),
+                "the fleet was not revealed at {r},{c} when the game ended"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sunk_enemy_ship_is_shown_while_the_battle_is_still_on() {
+        let mut app = firing_app();
+        let destroyer = app
+            .opponent_fleet
+            .ships
+            .iter()
+            .find(|s| s.kind == ShipKind::Destroyer)
+            .copied()
+            .expect("the AI has no Destroyer");
+        for (r, c) in destroyer.cells() {
+            app.cursor_row = r;
+            app.cursor_col = c;
+            app.fire_at_opponent();
+        }
+        let g = Layout::solve(SIZE.0, SIZE.1).grids();
+        let f = app.draw(SIZE);
+        for (r, c) in destroyer.cells() {
+            assert!(
+                fills_at(&f, g.cell_rect(g.ocean, r, c)).contains(&OVERLAY0),
+                "the wreck at {r},{c} is still drawn as open water"
+            );
+        }
+    }
+
+    #[test]
+    fn the_stats_say_what_the_game_recorded() {
+        let mut app = firing_app();
+        app.player_shots = 8;
+        app.player_hits = 2;
+        app.ai_state.shots = 5;
+        app.ai_state.hits = 1;
+        let f = app.draw(SIZE);
+        for line in [
+            "Shots: 8",
+            "Hit Rate: 25.0%",
+            "AI Shots: 5",
+            "AI Hit Rate: 20.0%",
+            "Your Ships: 5/5",
+            "Enemy Ships: 5/5",
+        ] {
+            assert!(drew(&f, line), "the stats never said {line:?}");
+        }
+    }
+
+    #[test]
+    fn a_fleet_down_to_its_last_ship_is_said_in_the_colour_of_alarm() {
+        let mut app = firing_app();
+        let f = app.draw(SIZE);
+        let colour_of = |f: &Frame<Target>, prefix: &str| {
+            texts(f)
+                .into_iter()
+                .find(|(t, _)| t.starts_with(prefix))
+                .unwrap_or_else(|| panic!("{prefix:?} was never drawn"))
+                .1
+        };
+        assert_eq!(colour_of(&f, "Your Ships"), GREEN);
+
+        // Sink four of the player's five.
+        let doomed: Vec<_> = app.player_fleet.ships.iter().copied().take(4).collect();
+        for ship in doomed {
+            for (r, c) in ship.cells() {
+                app.player_fleet.receive_fire(r, c);
+            }
+        }
+        let f = app.draw(SIZE);
+        assert_eq!(
+            colour_of(&f, "Your Ships"),
+            RED,
+            "one ship left was not called out"
+        );
+        assert!(drew(&f, "Your Ships: 1/5"));
+    }
+
+    #[test]
+    fn the_help_line_says_what_the_keys_do_in_this_phase() {
+        for (phase, needle, absent) in [
+            (GamePhase::Placement, "rotate", "fire"),
+            (GamePhase::Firing, "fire", "rotate"),
+            (GamePhase::GameOver, "new game", "rotate"),
+        ] {
+            let mut app = firing_app();
+            app.phase = phase;
+            let f = app.draw(SIZE);
+            let help = text_in(&f, box_of(&app, Target::Help));
+            assert!(
+                help.contains(needle),
+                "the help in {phase:?} never said {needle:?}, it said {help:?}"
+            );
+            assert!(
+                !help.contains(absent),
+                "the help in {phase:?} still offered {absent:?}: {help:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn both_grids_are_labelled_a_to_j_down_and_one_to_ten_across() {
+        let app = firing_app();
+        let f = app.draw(SIZE);
+        let said = texts(&f);
+        let count = |needle: &str| said.iter().filter(|(t, _)| t == needle).count();
+        for r in 0..GRID_SIZE {
+            let letter = String::from(char::from(b'A' + byte(r)));
+            assert_eq!(
+                count(&letter),
+                2,
+                "the row label {letter:?} is not on both grids"
+            );
+        }
+        for c in 1..=GRID_SIZE {
+            let number = format!("{c}");
+            assert!(
+                count(&number) >= 2,
+                "the column label {number:?} is not on both grids"
+            );
+        }
+    }
+
+    // ── The rules underneath ────────────────────────────────────────
+
+    #[test]
+    fn the_clamp_keeps_every_ship_on_the_board_from_every_cell() {
+        for kind in FLEET {
+            for orientation in [Orientation::Horizontal, Orientation::Vertical] {
+                for row in 0..GRID_SIZE {
+                    for col in 0..GRID_SIZE {
+                        let mut app = BattleshipApp::with_seed(3);
+                        app.placement_orientation = orientation;
+                        app.placement_index = FLEET
+                            .iter()
+                            .position(|k| *k == kind)
+                            .expect("a ship not in the fleet");
+                        app.placement_row = row;
+                        app.placement_col = col;
+                        app.clamp_placement();
+                        let ship = app.placement_preview_ship().expect("nothing to place");
+                        assert!(
+                            ship.is_within_bounds(),
+                            "{kind:?} {orientation:?} from {row},{col} was left off the board"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_ai_never_fires_at_the_same_cell_twice() {
+        let mut app = firing_app();
+        let mut seen = [[false; GRID_SIZE]; GRID_SIZE];
+        for r in 0..GRID_SIZE {
+            for c in 0..GRID_SIZE {
+                if app.phase != GamePhase::Firing {
+                    break;
+                }
+                app.cursor_row = r;
+                app.cursor_col = c;
+                app.fire_at_opponent();
+            }
+        }
+        for r in 0..GRID_SIZE {
+            for c in 0..GRID_SIZE {
+                if app.ai_state.has_fired(r, c) {
+                    assert!(!seen[r][c], "the AI fired at {r},{c} twice");
+                    seen[r][c] = true;
+                }
+            }
+        }
+        let fired = seen.iter().flatten().filter(|f| **f).count();
+        assert_eq!(
+            fired, app.ai_state.shots,
+            "the AI's shot count does not match the cells it marked"
+        );
+    }
+
+    #[test]
+    fn a_hit_rate_before_the_first_shot_is_zero_and_not_a_division_by_nothing() {
+        let app = BattleshipApp::with_seed(11);
+        assert_eq!(app.player_hit_rate(), 0.0);
+        assert_eq!(app.ai_hit_rate(), 0.0);
+        assert_eq!(percent(0, 0), 0.0);
+        assert_eq!(percent(3, 4), 75.0);
     }
 }

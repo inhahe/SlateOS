@@ -63,6 +63,9 @@ import subprocess
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+import srcload  # noqa: E402
+
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
 #: Pad values used by `--self-test`. 3072 is deliberately not a multiple of
@@ -509,15 +512,13 @@ def bench_history():
     sweep. Both are the project's recurring failure: a check that cannot fire,
     presenting as a check that found nothing.
     """
-    import importlib.util
-
-    path = os.path.join(SCRIPT_DIR, "bench-history.py")
-    spec = importlib.util.spec_from_file_location("bench_history", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    # Loaded from source rather than through `importlib`: a `SourceFileLoader`
+    # consults `__pycache__`, whose staleness check is `(mtime, size)` at
+    # one-second resolution, so two same-size writes to the sibling inside one
+    # second leave the second one invisible and this script silently runs the
+    # previous version of it. See `scripts/srcload.py`.
+    return srcload.load(os.path.join(SCRIPT_DIR, "bench-history.py"),
+                        "bench_history")
 
 
 #: How the sweep names the boot test when it hands it to `bash`.

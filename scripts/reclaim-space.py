@@ -82,6 +82,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import srcload  # noqa: E402
+
 GIB = 1024**3
 
 # Suffixes under build/ that must survive an age sweep.
@@ -261,16 +264,12 @@ def attribute_holder(path, log):
     partial reclaim into no reclaim at all.
     """
     try:
-        import importlib.util
-
         src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "who-holds-dir.py")
-        spec = importlib.util.spec_from_file_location("who_holds_dir", src)
-        if spec is None or spec.loader is None:
+        if not os.path.exists(src):
             log("    (cannot attribute: %s is not importable)" % src)
             return
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        mod = srcload.load(src, "who_holds_dir")
 
         root = os.path.abspath(path)
         found = 0

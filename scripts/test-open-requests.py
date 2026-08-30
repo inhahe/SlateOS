@@ -356,54 +356,51 @@ def test_the_roadmap_vocabulary_table_matches_the_code(mod):
               int(stated.group(1)), mod.STATUS_WINDOW)
 
 
-def test_the_loader_sees_an_edit_made_in_the_same_second(mod):  # noqa: ARG001
-    """The suite must test the bytes on disk, not a cached compile of them.
+def test_this_suites_loader_still_reads_the_file(mod):  # noqa: ARG001
+    """`load_module` must test the bytes on disk, not a cached compile of them.
 
-    Reproduces the staleness window described on `load_module`: write a module,
-    import it so a `.pyc` gets written, then rewrite it *in the same second and
-    at the same size*. A `SourceFileLoader` reuses the cache and returns the old
-    value; `load_module` re-reads and returns the new one.
+    Narrower than it looks, and deliberately so. That the *mechanism* defeats
+    the bytecode cache is `test-srcload.py`'s property, tested there against
+    both loaders. What this file needs to keep pinned is that its own
+    `load_module` is still wired to that mechanism -- a one-line revert to
+    `spec.loader.exec_module` would leave every other test here green while the
+    suite validated code that is not on disk, which is the failure the whole
+    file's docstring is about, pointed at itself.
 
-    The same-size requirement is why the two bodies differ only in a digit. If
-    this test ever starts passing for the wrong reason, it will be because the
-    sizes drifted apart -- so the sizes are asserted equal, and the elapsed time
-    is asserted to be under a second, rather than trusted.
+    The cache is primed and then invalidated dishonestly: the rewrite is the
+    same size and is stamped with the *same* mtime via `os.utime`, so
+    `(mtime, size)` still matches and a `SourceFileLoader` would hand back the
+    old value. Pinning the stamp rather than racing the clock is what makes
+    this reproduce every run instead of almost every run.
     """
     import importlib.util
-    import pathlib
     import tempfile
-    import time
+
+    stamp = 1_600_000_000.0
+
+    def write(path, text):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.utime(path, (stamp, stamp))
 
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "stalecheck.py")
-        before, after = "VALUE = 111\n", "VALUE = 222\n"
-        check("the two bodies are the same size",
-              len(before), len(after))
+        write(path, "VALUE = 111\n")
 
-        pathlib.Path(path).write_text(before, encoding="utf-8")
-        start = time.time()
-
-        # Prime the cache the way the old loader did, which also writes the
-        # .pyc that the second load would go on to reuse.
+        # Primed the way the old loader did, which also writes the `.pyc` that
+        # a cache-consulting loader would go on to reuse.
         spec = importlib.util.spec_from_file_location("stalecheck", path)
         primed = importlib.util.module_from_spec(spec)
         sys.modules["stalecheck"] = primed
         spec.loader.exec_module(primed)
         check("the primed load sees the first version", primed.VALUE, 111)
+        was = os.path.getsize(path)
 
-        pathlib.Path(path).write_text(after, encoding="utf-8")
-        elapsed = time.time() - start
+        write(path, "VALUE = 222\n")
+        check("the rewrite is the same size", os.path.getsize(path), was)
 
-        got = load_module(path, name="stalecheck_reloaded").VALUE
-        check("load_module sees the rewrite", got, 222)
-
-        # If the rewrite landed in a later second the cache would have been
-        # invalidated honestly and this test proved nothing. Say so rather than
-        # passing quietly -- a test that only sometimes tests its subject is
-        # worse than one that does not exist, because it is believed.
-        if elapsed >= 1.0:
-            print(f"NOTE  same-second window missed ({elapsed:.2f}s); the stale"
-                  " path was not exercised this run")
+        check("load_module sees the rewrite",
+              load_module(path, name="stalecheck_reloaded").VALUE, 222)
         sys.modules.pop("stalecheck", None)
         sys.modules.pop("stalecheck_reloaded", None)
 

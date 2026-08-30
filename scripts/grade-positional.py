@@ -90,7 +90,6 @@ disturbance to find".
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import platform
@@ -98,6 +97,9 @@ import statistics
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+import srcload  # noqa: E402
+
 BENCH_HISTORY = os.path.join(REPO_ROOT, "scripts", "bench-history.py")
 DEFAULT_HISTORY = os.path.join(REPO_ROOT, "bench", "history.jsonl")
 
@@ -408,13 +410,15 @@ def region_disturbed(metrics, where):
 
 
 def load_bench_history():
-    """Import bench-history.py by path (its name is not a valid identifier)."""
-    spec = importlib.util.spec_from_file_location("bench_history", BENCH_HISTORY)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {BENCH_HISTORY}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    """Import bench-history.py by path (its name is not a valid identifier).
+
+    Loaded from source rather than through `importlib`: a `SourceFileLoader`
+    consults `__pycache__`, whose staleness check is `(mtime, size)` at
+    one-second resolution, so two same-size writes to the sibling inside
+    one second leave the second one invisible and this script silently
+    runs the previous version of it. See `scripts/srcload.py`.
+    """
+    return srcload.load(BENCH_HISTORY, "bench_history")
 
 
 def positions_of(entries):

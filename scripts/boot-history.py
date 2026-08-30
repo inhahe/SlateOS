@@ -79,7 +79,6 @@ regardless -- a broken recorder must not turn a green boot red.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import platform
@@ -91,6 +90,9 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+import srcload  # noqa: E402
+
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 DEFAULT_SERIAL = os.path.join(REPO_ROOT, "build", "serial-test.txt")
 DEFAULT_HISTORY = os.path.join(REPO_ROOT, "bench", "boot-history.jsonl")
@@ -104,16 +106,16 @@ def bench_history():
 
     Cached because the module compiles several dozen regexes at import and the
     tests parse many logs, while a real run parses one.
+
+    Loaded from source rather than through `importlib`: a `SourceFileLoader`
+    consults `__pycache__`, whose staleness check is `(mtime, size)` at
+    one-second resolution, so two same-size writes to the sibling inside
+    one second leave the second one invisible and this script silently
+    runs the previous version of it. See `scripts/srcload.py`.
     """
     global _BENCH_HISTORY_MODULE
     if _BENCH_HISTORY_MODULE is None:
-        spec = importlib.util.spec_from_file_location("bench_history",
-                                                      BENCH_HISTORY)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"cannot load {BENCH_HISTORY}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        _BENCH_HISTORY_MODULE = module
+        _BENCH_HISTORY_MODULE = srcload.load(BENCH_HISTORY, "bench_history")
     return _BENCH_HISTORY_MODULE
 
 #: How much of a failing boot's serial log to keep, and how wide.

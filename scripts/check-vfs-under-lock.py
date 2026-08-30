@@ -49,18 +49,24 @@ Exit codes: 0 clean, 1 findings, 2 could not run.
 
 from __future__ import annotations
 
-import importlib.util
 import re
 import sys
 from pathlib import Path
 
 _SIBLING = Path(__file__).resolve().parent / "check-recursive-locks.py"
-_spec = importlib.util.spec_from_file_location("check_recursive_locks", _SIBLING)
-if _spec is None or _spec.loader is None:  # pragma: no cover - packaging error
-    print(f"error: cannot load {_SIBLING}", file=sys.stderr)
-    raise SystemExit(2)
-_rl = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_rl)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import srcload  # noqa: E402
+
+# Loaded from source rather than through `importlib`: a `SourceFileLoader`
+# consults `__pycache__`, whose staleness check is `(mtime, size)` at
+# one-second resolution, so two same-size writes to the sibling inside one
+# second leave the second one invisible and this script silently runs the
+# previous version of it. See `scripts/srcload.py`.
+try:
+    _rl = srcload.load(str(_SIBLING), "check_recursive_locks")
+except OSError as _exc:  # pragma: no cover - packaging error
+    print(f"error: cannot load {_SIBLING}: {_exc}", file=sys.stderr)
+    raise SystemExit(2) from _exc
 
 # A call into the VFS, however it is spelled at the call site:
 #   Vfs::read_at_resolved(..)      crate::fs::Vfs::metadata(..)

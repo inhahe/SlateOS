@@ -47,7 +47,18 @@ import tempfile
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
+import gitenv  # noqa: E402
 import src_digest as sd  # noqa: E402
+
+# Every git command in this file drives a throwaway repository and picks it with
+# `-C`. That does not beat an inherited `GIT_DIR`, which git exports into hooks,
+# `git bisect run` and `git rebase --exec` -- so under any of those this suite
+# would build its fixtures inside the real repository and commit to it. On
+# 2026-08-29 the equivalent bug in `check-requests-not-deleted.py --selftest`
+# did exactly that and published two commits deleting the whole tree; see
+# `scripts/gitenv.py`. Scrubbing once here covers every child, which is the
+# form that cannot be forgotten at one call site out of the dozen below.
+gitenv.scrub_environ()
 
 _FAILURES = []
 

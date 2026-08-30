@@ -14961,6 +14961,109 @@ lookup is filed under before asking what the lookup does.
 
 ## Fixed Bugs
 
+### B-FETCH-CANNOT-RESOLVE-A-HOST-NAME. `fetch` could reach a literal IP address and nothing else — 2026-08-30 — FIXED 2026-08-30 (lane B)
+
+**Where:** `net::Connection::connect`, `userspace/coreutils/src/bin/fetch.rs`.
+One call site, in `fetch_url`.
+
+**Symptom.** Every URL naming a host — which is every URL anyone would type —
+failed before a packet was sent:
+
+```
+$ fetch -I http://example.com/
+fetch: connection to example.com:80 failed: bad address: invalid socket address syntax
+$ echo $?
+2
+```
+
+The utility's entire stated purpose is to fetch a URL, so this was not a
+corner: `fetch` worked only when handed a numeric address, and no test or
+document mentioned that restriction.
+
+**Cause.** The connect path never resolved anything. It read:
+
+```rust
+let addr: SocketAddr = format!("{host}:{port}")
+    .parse()
+    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad address"))?;
+```
+
+`str::parse::<SocketAddr>` is *not* a resolver — it parses the textual form of
+an address that is already numeric. `"93.184.215.14:80"` parses;
+`"example.com:80"` does not, and the `InvalidInput` it returns was then
+reported as the network having a bad address rather than as the program never
+having asked the network anything.
+
+**Why it lasted.** Every test in the file exercised URL *parsing*
+(`ParsedUrl::parse`), header parsing, chunk decoding and redirect resolution —
+all of which are pure functions over bytes and all of which were correct. The
+one step that is not pure, and so is not unit-testable without a network, was
+also the one step that was wrong. Nothing in the crate ever ran the binary
+against a server.
+
+**Fix.** `to_socket_addrs()`, which is the resolver, and then *every* returned
+address is tried rather than the first, because a dual-stack name commonly
+resolves to an AAAA record this machine has no route to. Resolution failure and
+connection failure are now separate arms of a `ConnectError`, because they want
+different diagnostics: a name that does not resolve gets one wording on all
+platforms (`fetch: could not resolve host: <host>`), since the host's own text
+for it is not an errno and is not portable — Windows says `No such host is
+known.` where glibc says `failed to lookup address information: Name or service
+not known`, and `coreutils::errmsg::strerror` can normalise neither. A refused
+or unreachable *address* is a real errno and is reported exactly.
+
+Measured after the fix, against the live network:
+
+| command | result |
+|---|---|
+| `fetch -I http://example.com/` | `HTTP 200 OK`, headers, `rc=0` |
+| `fetch -L -I http://google.com/` | follows to `http://www.google.com/`, `rc=0` |
+| `fetch http://no-such-host-xyzzy.invalid/` | `fetch: could not resolve host: …`, `rc=2` |
+| `fetch http://127.0.0.1:9/` | `fetch: connection to 127.0.0.1:9 failed: Connection refused`, `rc=2` |
+| `fetch -q http://httpbin.org/stream/3` | 3 lines (chunked decoding) |
+| `fetch -L -q http://httpbin.org/redirect/12` | `fetch: too many redirects (max 10)`, `rc=1` |
+
+**Known limitation, deliberate:** `--timeout` bounds each `connect` and each
+later read and write, but **not** the name lookup — `to_socket_addrs` is the
+platform resolver and offers no deadline. A resolver that hangs hangs us. The
+fix is a resolver of our own, which this OS will need anyway once `net/` serves
+userspace; it is not worth a thread-per-lookup workaround in one utility.
+
+### B-FETCH-ARGV-AND-HEADERS-WERE-UTF-8. Six more defects found while converting `fetch` to bytes — 2026-08-30 — FIXED 2026-08-30 (lane B)
+
+**Where:** `userspace/coreutils/src/bin/fetch.rs`, throughout. This was the
+`fetch.rs:argv-as-string` line of `scripts/argv-utf8-baseline.txt`; the
+conversion is what surfaced the rest, including the resolver bug above.
+
+1. **`env::args().skip(1).collect::<Vec<String>>()`** — the tracked finding.
+   A URL or `-o` name holding a byte that is not valid UTF-8 (a legal filename
+   on this OS) aborted the process before `main` ran. Now `args_os()` carried
+   through as `OsString`/`Vec<u8>` to the socket and to the `open`.
+2. **`String::from_utf8_lossy` on the response header block.** A `Location:`
+   or `Content-Disposition:` byte that is not UTF-8 became U+FFFD, and with
+   `-O` that replacement character went into a **file name**. Headers are now
+   `Vec<u8>` end to end; only the host is required to be ASCII.
+3. **A hand-written option loop.** No `--`, no bundling (`-qv`), no attached
+   value (`-oout.html`, `--output=…`), no unambiguous long-prefix (`--verb`),
+   and no `--version` at all. Replaced with `coreutils::getopt`, which gives
+   all of those and POSIX's own error wording.
+4. **`println!` for the `-I` header dump.** A `SIGPIPE`-less write failure
+   panicked instead of being reported; `fetch -I url | head -1` was the way in.
+   Now `stdfd::Stream::stdout` + `close_stdout`, as the rest of the crate does.
+5. **`-d` could not send a binary body.** The data came in as `String`, so a
+   POST of anything but text was impossible. Now `Vec<u8>`.
+6. **`find_subsequence` could panic.** `haystack.windows(n)` panics when
+   `n == 0`; an empty needle reached it from the header scan. Guarded, with a
+   test.
+
+Also fixed in passing: the `Saved to:` diagnostic printed the path unquoted,
+so a name with a space or a control byte was ambiguous or invisible — it now
+goes through `quotef_os`, and `-O` refuses a URL whose last segment is `.` or
+`..` rather than writing to the parent directory.
+
+`python scripts/argv-utf8.py --check` now reports **4 findings across 4 files**
+(`diff logger patch ps`), down from 5.
+
 ### B-KSHELL-ECHO-E-MANGLES-NON-ASCII. `echo -e` doubled every byte of every multi-byte character — 2026-08-24 — FIXED 2026-08-24 (lane A, `abeaca2aa`)
 
 **Where:** `interpret_echo_escapes`, `kernel/src/kshell.rs` (~line 8691); one
@@ -82212,8 +82315,79 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **267 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **189 of 800 remain**
 
+> **Burn-down log.** 2026-08-30 (forty-first batch): every function carrying
+> **three** sites, which is now none. 267 → 189 across 166 → 140 functions;
+> twenty-six functions left the ledger entirely — `cmd_audioeq`,
+> `cmd_buddyinfo`, `cmd_cgroupfs`, `cmd_directio`, `cmd_display`,
+> `cmd_displaycal`, `cmd_dpiscaling`, `cmd_fault_inject`, `cmd_fontpreview`,
+> `cmd_httpd`, `cmd_ipclog`, `cmd_memcg`, `cmd_msivec`, `cmd_netindicator`,
+> `cmd_netmon`, `cmd_netusage`, `cmd_pftrack`, `cmd_power`, `cmd_raidmgr`,
+> `cmd_rcustat`, `cmd_surroundsound`, `cmd_taskbar`, `cmd_timezone`,
+> `cmd_ttystat`, `cmd_vmballoon` and `parse_datetime_to_ns`. Pinned by
+> self-test rung 106.
+>
+> **The batch-40 defect did not recur, and the reason is worth writing down
+> rather than claiming as care.** Batch 40 mislabelled five diagnostics by
+> search-and-replacing a statement that was not unique to the function being
+> edited. Batch 41 anchored every edit on an adjacent distinguishing line —
+> almost always the `match module::fn(…)` immediately below — and the edit tool
+> *rejected* three of them outright as ambiguous (`cmd_pftrack`'s `top`,
+> `cmd_memcg`'s three byte counts, `cmd_netmon`'s three ids). The mechanism
+> that prevented the repeat was the tool refusing a non-unique match, not
+> vigilance; a batch done with a script that takes the first match would have
+> reproduced batch 40 exactly. Whoever automates this should make ambiguity an
+> error, not a choice.
+>
+> **A new axis, and the one rung 106 is sorted by: where the guess ends up.**
+> The three shapes named by batch 40 (guards that worked by luck, strict beside
+> guessing, limits that truncate evidence) sort this defect by *how the old code
+> survived review*. Batch 41 makes a second sort worth having — by what the
+> invented number touches, because that decides how long it outlives the
+> command:
+>
+> * **It reaches a file.** `directio write <path> <data> [offset]` guessed
+>   offset `0`, so a mistyped offset did not fail to write — it wrote over the
+>   **head** of the file and reported "DIO wrote N bytes". Nothing later
+>   distinguishes those bytes from data. This is the only site in forty-one
+>   batches where the guess is persisted.
+> * **It binds a resource.** `httpd start` / `httpd tls` guessed `8080` / `443`
+>   behind an `if port == 0` guard — the batch-40 "guard that worked by luck"
+>   shape, but *inverted*: the default here is legal, so the guard was
+>   unreachable for exactly the input it looks like it exists for. The guard was
+>   kept (an explicit `httpd start 0` still deserves it); what changed is that
+>   the unreadable word no longer arrives at it wearing a legal value.
+> * **It is filed as a measurement.** `ttystat read`/`write` (cumulative device
+>   totals), `buddyinfo update`/`split`, `rcustat end`, `ipclog` — a guessed
+>   count is indistinguishable from an observed one the instant it lands, and
+>   every later `stats` reading is quietly wrong by that much. Third batch
+>   running in which this is the largest sub-group.
+> * **It is echoed back as confirmation.** `displaycal red|green|blue` (all
+>   three default `220` and print the value back), `netindicator report`,
+>   `surroundsound calibrate`. The operand the caller can check against the
+>   output is the one that was made up — so the output *confirms the guess*.
+>
+> **The sharpest single site was not any of those:** `timezone detect <lat>
+> <lon>` guessed `0.0` for either coordinate, so `timezone detect 51.5 0.1O`
+> answered for the Gulf of Guinea and printed a timezone name with no hint that
+> half its input had been discarded. A wrong answer shaped like a right one is
+> what the whole campaign is about.
+>
+> **Two sites had no guard at all behind the guess**, i.e. not even luck:
+> `cgroupfs mem <path> <bytes>` silently set the memory cap to **0** for an
+> unreadable byte count, and `netmon close <id>` closed connection **0**. Both
+> are act-on-the-wrong-object rather than report-the-wrong-number.
+>
+> **One entry in this batch is not a command arm**, and it is the one that
+> generalises: `parse_datetime_to_ns` parsed the *date* fields strictly
+> (`.ok()?`, propagating to `touch`'s existing "invalid date" refusal) and the
+> *time* fields with `.unwrap_or(0)` — strict and guessing inside a single
+> function, six lines apart. `touch -d '2026-08-30 12:3o:00'` meant 12:00:00
+> exactly. It also now refuses a fourth colon-separated field instead of
+> dropping it. Investigating it surfaced a separate defect in `cmd_touch`,
+> logged below as `A-TOUCH--D-CANNOT-ACCEPT-THE-FORMAT-ITS-OWN-USAGE-LINE-PRINTS`.
+>
 > **Burn-down log.** 2026-08-29 (fortieth batch): every function carrying
 > **four** sites, which is now none. 332 → 267 across 185 → 166 functions;
 > nineteen functions left the ledger entirely. `cmd_webcam`, `cmd_vmzone`,
@@ -83427,7 +83601,9 @@ working at all.
 > destroys `root`. That is a separate defect with a separate fix, filed as
 > `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING`. The
 > two compound; clearing the guess only removes the path that reached the
-> unguarded operation *by accident*.
+> unguarded operation *by accident*. (That second defect was fixed on
+> 2026-08-30: `delete_group` now refuses any `GroupType::System` group, and
+> `create_group` refuses to mint one.)
 >
 > **Two non-numeric guesses in the same arm were fixed too, though the ledger
 > counts neither.** Leaving them would have been patching around the same defect
@@ -84359,6 +84535,86 @@ than exist, so a fix that forgets to lower the count fails the build too; the
 ledger cannot silently rot into a rubber stamp.
 
 **Not a regression.** True since each site was written.
+
+---
+
+## `A-TOUCH--D-CANNOT-ACCEPT-THE-FORMAT-ITS-OWN-USAGE-LINE-PRINTS` (lane A, 2026-08-30) — ✅ **FIXED** 2026-08-30
+
+**In short:** `touch -d` documents `YYYY-MM-DD HH:MM:SS` and could not accept
+it. The space in the middle split the datetime into two arguments before
+`touch` ever saw it, so the time was taken as the *filename*:
+`touch -d '2026-08-30 12:30:00' notes.txt` refused `notes.txt` as an extra
+operand, and `touch -d '2026-08-30 12:30:00'` on its own created a file
+called `12:30:00`.
+
+**Where.** `kernel/src/kshell.rs` — `cmd_touch`, and `command_parses_own_quotes`.
+
+**Why the quoting did not survive.** Every kshell command receives a flat
+`&str`, not an argv, so "these two words were one argument" is a fact the
+dispatch boundary cannot carry. `dispatch` calls `remove_quotes` on the
+argument string — which deletes the quote characters and leaves the space —
+and `cmd_touch` then re-split on whitespace. Four words came out of three
+arguments. Commands that need the distinction opt onto
+`command_parses_own_quotes` and use `split_words`, which respects quotes and
+removes them; `trap`, `awk`, `fold`, `base64`, `cut`, `tr`, `sed` and `column`
+were already there for the same reason. `touch` is now the ninth.
+
+**What made it invisible for so long.** The failure mode is not an error
+message about the date — it is an error message about the *path*, or a
+silently-created file with a strange name. Nobody reading
+`touch: extra operand ‘notes.txt’` looks at the `-d` operand.
+
+**It was hiding a second defect underneath it.** Because the time half was
+unreachable, the three `.unwrap_or(0)` reads of hour/minute/second in
+`parse_datetime_to_ns` had no way to fire, and so survived forty-one batches
+of the §600 guessed-value burn-down above. They were fixed in batch 41 —
+present fields must now parse, absent ones are still zero, and a fourth
+colon-separated field is refused rather than dropped. The two fixes are
+worth stating as one lesson: **a guessed value in dead code is not harmless,
+it is merely dormant**, and the batch that makes the code reachable is the
+batch that ships the bug.
+
+**Pinned by self-test rung 107**, which asserts the resulting `modified_ns`
+as an exact nanosecond count (`2026-08-30 12:30:00` UTC = 20695 days +
+45000 s after the epoch) rather than reading a formatted date back. Every
+step the rung covers — the quoting, the time fields, and the civil-date
+arithmetic — can be wrong in a way that still prints a plausible date. It
+also asserts that a mistyped minute is refused *as a date*, which is what
+proves the time fields are now reached at all, and that nothing is created
+under the name `12:3o:00`.
+
+**And there was a third defect under the second one, found by that rung on
+its first real boot.** With the quoting fixed and the time fields parsing,
+`touch -d '2026-08-30 12:30:00' /tmp/new.txt` still stamped the file with
+*the current time*. `cmd_touch` has two arms — update an existing file, or
+create a missing one — and only the update arm ever applied the timestamp.
+The create arm computed the instant, called `Vfs::write_file` (which stamps
+now), printed `created` and exited **0**. The value was worked out correctly
+and then dropped on the floor.
+
+That is the worst shape this family takes. A guessed value is wrong; a
+*discarded* value is wrong **and reports success**, so there is no diagnostic
+to notice and the only way to discover that `-d` did nothing is to `stat` the
+file afterwards. And it bit precisely the case `-d` exists for: a file you are
+back-dating is usually one you are also creating, so the broken arm was the
+common one and the working arm was the rare one. `requested` is now an
+`Option<u64>` — `None` meaning "no `-d`, no `-r`" — and the create arm applies
+it as an explicit second step, reporting a failure to set it rather than
+printing `created`.
+
+**Three defects in one command, each hidden by the one above it**, is the
+lesson worth keeping from this entry: the quoting bug made the time fields
+unreachable, which kept the guessed-value bug dormant, which meant nothing
+ever exercised the create-with-`-d` path far enough to notice the timestamp
+was being thrown away. Fixing the outermost one is what made the next one
+observable, twice in a row. **A rung that asserts an exact value is what
+converts "the fix compiles" into "the fix works"** — this one was written
+against the create path, failed on its first boot with `left:
+1788119411893528376` (a wall clock) against `right: 1788093000000000000`,
+and named the bug outright. Rung 107 now asserts both arms, so a future
+change that moves the defect from one to the other fails.
+
+**Not a regression.** All three were true since `cmd_touch` was written.
 
 ---
 
@@ -86646,9 +86902,9 @@ been updated to say so.
 
 ---
 
-## `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING` (lane A, 2026-08-26) — **open**, tech debt
+## `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING` (lane A, 2026-08-26) — ✅ **FIXED** 2026-08-30
 
-**In short:** `groupmgr delete 0` destroys the `root` group and prints
+**In short:** `groupmgr delete 0` destroyed the `root` group and printed
 `Deleted group 0.` as a success. There is no confirmation, no privilege check,
 and no protection for system groups — even though the code carries a
 `GroupType::System` label that looks like exactly that protection. The label is
@@ -86683,12 +86939,70 @@ on `root`. Deleting by GID-0-literal is the wrong shape of guard — it protects
 one id rather than the property that made that id worth protecting, and `wheel`
 at GID 1 is just as load-bearing.
 
+**Fixed (2026-08-30).** `GroupType::System` now *is* the policy, and it took two
+rules rather than the one the paragraph above asked for.
+
+- `delete_group` refuses any `System` group with `PermissionDenied`. It also
+  had to change shape: the old body was `retain` first, length-comparison
+  second, which cannot consult the entry it has already dropped. It now finds
+  the group, decides, and only then removes — so there is no window in which
+  `root` is deleted and put back.
+- `create_group` refuses to *mint* a `System` group, likewise
+  `PermissionDenied`.
+
+**Why the second rule was not optional, and was not in the original writeup.**
+The first rule alone converts one defect into another. If `System` groups are
+undeletable and anything may create one, then `groupmgr create 1000 x system`
+mints an immortal group, and 252 of them exhaust `MAX_GROUPS` permanently with
+no way to recover short of a reboot. An undeletable object that untrusted input
+may create is a resource leak with a security label on it. So the two rules are
+one decision — *the system's own identity set is fixed at startup* — and the
+entry's "narrow version" would have shipped a slot-exhaustion bug in exchange
+for the deletion bug.
+
+The general form is worth keeping: **whenever you make a class of object
+undeletable, ask in the same breath who may create one.** Immutability granted
+at the destroying end and withheld at the creating end is not a protection, it
+is a lever.
+
+**What did not change.** The entry's "fuller version" also proposed refusing to
+remove the last member of a system group, and refusing `remove_member` on
+`root`. Neither was implemented, and that is deliberate rather than deferred:
+`init_defaults` seeds every group with an **empty** member list on purpose (it
+refuses to fabricate memberships it has not observed — see the doc comment).
+An empty `root` is therefore the normal state at boot, so "the last member" is a
+rule about a condition this implementation does not have, and a guard on it
+would fire on exactly nothing. It becomes a real question once membership is
+wired to `useracct`, which is already recorded there as the deferred proper fix.
+
+**Shell.** `cmd_groupmgr` renders the new `PermissionDenied` specifically rather
+than as `Error: PermissionDenied` — `groupmgr: delete: group 0 is a system
+group`, and `groupmgr: create: system groups are defined at startup and cannot
+be created here`. `system` is still accepted by the type parser and still listed
+in the usage line: refusing the *word* would leave the operator guessing which
+of the three types they may use and why, where refusing the *request* tells them.
+
+**Tests.** `groupmgr::self_test` grew to 10 cases — 8 covers deletion (both
+`root` at GID 0 and `wheel` at GID 1, so a guard written against the literal `0`
+fails it; plus a `User` group at GID 100 that *is* deletable, so the guard is
+shown to read the type and not to have frozen the table), 9 covers creation
+(refused as `System`, accepted as `Service` at the same GID and name, then
+deleted). kshell rung 108 asserts the same four outcomes through the shell,
+each as a paired assertion — the message, the exit status, and the absence of
+the success line — because a refusal that prints an error and acts anyway
+satisfies the first of those alone.
+
 **Relationship to the D1 burn-down.** These are two different bugs that
 compound, and fixing one does not fix the other. Before the twenty-first batch,
 `cmd_groupmgr`'s `delete` arm guessed GID **0** for any word it could not parse
 — so `groupmgr delete 1O` deleted the root group. That guess is now refused, so
-reaching this operation requires *typing* `0`. The operation itself is still
-unguarded, and a correctly-typed `groupmgr delete 0` still destroys `root`. See
+reaching this operation required *typing* `0`; the operation itself was still
+unguarded, and a correctly-typed `groupmgr delete 0` still destroyed `root`.
+Both halves are now closed. The pairing is the point: the burn-down makes a
+destructive operation *hard to reach by accident*, and says nothing whatever
+about whether it should succeed when reached deliberately. Neither fix would
+have been sufficient alone, and the burn-down's refusal message would have made
+the remaining hole look handled. See
 `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
 
 **Not a regression.** True since `delete_group` was written.
@@ -98885,3 +99199,232 @@ section, alongside 26 other `h`/`H` cases.)
 | The error sentences | same file, `EdError`, `EdError::sentence` |
 | Where `-v` is read today | same file, `Options::verbose`, `Editor::fail` |
 | The harness case | `scripts/ed-diff.sh`, the `kbug_pipe` block |
+
+---
+
+## TD-B-sh-IS-NOT-A-SHELL — `if`, `while`, `case`, functions, `$(())`, globs, here-docs and backticks are all absent, non-ASCII text is corrupted, and `yes | head -2` hangs forever (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+**In short:** `userspace/coreutils/src/bin/sh.rs` is the program that ships as
+`sh` — the thing an init script, a `Makefile` recipe and a `system()` call all
+end up running. It advertises seventeen features in its own module header. Of
+those, measured against `dash` on 2026-08-30, roughly **four work**. A one-line
+`if true; then echo yes; fi` does not run; it tries to execute a program called
+`true;`. Any word containing a non-ASCII byte is silently corrupted before it
+reaches the command. And `yes | head -2` never returns.
+
+Found while converting the file for `TD-B-ARGV-IS-DECODED-AS-UTF-8-AND-A-BAD-BYTE-IS-A-PANIC`
+(it is one of the seven remaining findings). The panic that checker sees is, as
+that entry predicts, the smallest of the defects in the file.
+
+### Measured
+
+`sh -c CMD` against `dash -c CMD`, both built from this tree's
+`x86_64-unknown-linux-gnu` build, WSL, `LC_ALL=C.UTF-8`:
+
+| Command | dash | ours |
+|---|---|---|
+| `echo héllo` | `héllo` | `hÃ\|Â\|Ã\|Â©llo` — six bytes for two |
+| `X=world; echo "hi $X" tail` | `hi world tail` | `hi world tailX tail` |
+| `echo hi > f; cat f` | `hi` | `hi` **twice** — the builtin ignores the redirect |
+| `for i in 1 2 3; do echo $i; done` | `1 2 3` | *nothing at all* |
+| `if true; then echo yes; fi` | `yes` | `sh: true;: Permission denied` |
+| `while false; do echo x; done` | — | `sh: false;: Permission denied` |
+| `case a in a) echo m;; esac` | `m` | `sh: case: Permission denied` |
+| `f() { echo in f; }; f` | `in f` | three `Permission denied` lines |
+| `echo "a\|b"` | `a\|b` | `sh: b: Permission denied` |
+| `echo $((2+3))` | `5` | *empty* |
+| `echo ${UNSET:-def}` | `def` | *empty* |
+| `echo ${#PATH}` | `2775` | *empty* |
+| `set -- a b c; echo $#; echo $@` | `3` / `a b c` | dumps the whole environment |
+| `echo *` | the directory | `*` |
+| ``echo a`echo b`c`` | `abc` | ``a`echo b`c`` |
+| `( echo sub )` | `sub` | `sh: (: Permission denied` |
+| `{ echo grp; }` | `grp` | `sh: {: Permission denied` |
+| `read x <<EOF` … | `hello` | three `Permission denied` lines |
+| `exec echo hi` | `hi` | `sh: exec: Permission denied` |
+| **`yes \| head -2`** | `y` `y` | **hangs forever** |
+
+What does work: `echo hi`, `a && b \|\| c`, `$(...)` (only unnested at the end of
+a word), `cd`, `;`, and simple external commands.
+
+### Why, in each case
+
+The file has **no lexer and no parser**. `execute_script` splits the text into
+*lines*, `execute_if`/`execute_while`/`execute_for` look for their keywords with
+`str::starts_with` on a whole trimmed line, and everything else is handed to
+`execute_command`, which splits on `;` and then hands words to `Command::new`.
+Six separate consequences follow:
+
+1. **Compound commands must be spread over lines.** `if true; then echo yes; fi`
+   is one line, so `execute_script` never sees a line equal to `then`; the `if `
+   prefix strips to `true; then echo yes; fi`, `trim_end_matches("; then")`
+   removes nothing, and the condition run is the whole rest of the line. `for`
+   on one line finds `body_start == body_end` and runs an empty body — which is
+   why it prints nothing rather than erroring.
+2. **`case`, `until`, `{ }`, `( )`, `!`, functions and here-documents are not
+   implemented at all.** `f() { … }` is only recognised when the `{` ends the
+   line *and* the closing `}` is alone on its own line.
+3. **Non-ASCII is destroyed twice.** `expand_variables` and `tokenize` both copy
+   input with `result.push(bytes[i] as char)`. A byte ≥ 0x80 becomes the
+   `char` of that code point, which re-encodes to *two* UTF-8 bytes; the word
+   passes through both functions, so two bytes become six. This is silent data
+   corruption on ordinary UTF-8 text, not merely on invalid input.
+4. **The double-quote branch of `expand_variables` abandons its position.** On
+   seeing `$` inside `"…"` it expands *the entire remainder of the string* —
+   past the closing quote — appends it, `break`s, and then lets the outer loop
+   resume one byte later, so the tail is emitted a second time. That is the
+   `hi world tailX tail` row.
+5. **Pipelines are split on a bare `cmd.contains('\|')`, ignoring quotes**, so
+   `echo "a|b"` becomes two commands; and `execute_pipeline` calls
+   `child.wait()` on stage *i* before spawning stage *i+1*. A first stage that
+   writes more than one pipe buffer therefore blocks on a reader that will never
+   be started. `yes | head -2` is the two-line reproduction.
+6. **Builtins ignore the redirections that were parsed for them.**
+   `parse_redirections` runs before the builtin match, and only
+   `execute_external` consults the result — so `echo hi > f` writes the file
+   (via the parse) *and* stdout. Every builtin also writes through `println!`,
+   which panics rather than reporting on `EPIPE`.
+
+Two more, not visible above: `$@`/`$*` are absent, so `$@` falls through the
+`$VAR` path, reads no variable, and `set` with no `--` handling prints the
+environment; and `expand_variables` looks up `$X` in one flat `HashMap` that
+also holds the imported environment, so a positional parameter and an
+environment variable share a namespace.
+
+### The fix
+
+Rewrite the file around a real lexer → parser → expander → executor, working in
+`&[u8]` throughout. Bytes end-to-end is what removes the two `argv-utf8`
+findings (`sh.rs:55` argv, `sh.rs:183` environment) and is also, on its own, the
+whole of fix 3: a shell that never converts to `str` cannot mangle a byte.
+
+The scope is fixed by `design-decisions.md` §72, which says this file is to
+"stay a small POSIX baseline" while `userspace/oils` (`osh`, 150k lines) is the
+bash-superset shell. Small, therefore — but a shell that cannot run
+`if true; then echo yes; fi` is not a baseline of anything.
+
+### Where
+
+| | |
+|---|---|
+| The file | `userspace/coreutils/src/bin/sh.rs` (1236 lines) |
+| The corruption | same file, `expand_variables`, `tokenize` — `push(bytes[i] as char)` |
+| The quote bug | same file, `expand_variables`, the `b'"'` branch |
+| The deadlock | same file, `execute_pipeline` — `child.wait()` inside the spawn loop |
+| The line-scanner | same file, `execute_script`, `execute_if`, `execute_while`, `execute_for` |
+| The umbrella | `TD-B-ARGV-IS-DECODED-AS-UTF-8-AND-A-BAD-BYTE-IS-A-PANIC`, `scripts/argv-utf8-baseline.txt` |
+| The reference | `dash` under WSL; harness to be `scripts/sh-diff.sh` |
+
+### Fixed 2026-08-30 — `5ae8dfc41` (the rewrite) and `44027020a` (the certification)
+
+The file is now ~6,000 lines built as the four classical stages: `Lexer` →
+`Parser` → `Shell::expand_word` → `Shell::run_list`, in `&[u8]` from `args_os`
+to the `exec`. Every row of the measured table above passes, and so does the
+whole of what the header advertised.
+
+**The evidence is `scripts/sh-diff.sh`**, written for this and now the standing
+gate. It runs ours and dash over ~225 cases and compares **four** things byte
+for byte — stdout, exit status, stderr, and the files the case left on disk —
+and reports `217 passed, 0 differed, 8 differ on purpose`. `OURS=/bin/dash`
+runs it against itself, which is what keeps the two normalisations honest: it
+must report zero differences, and it does.
+
+Only two fields are normalised away, both on dash's side only, because neither
+is comparable and neither is ours to imitate: the `sh: <line>: ` prefix dash
+puts on a diagnostic, and dash's private abbreviated `strerror` table, which
+says `No such file` where every other program on the system — and POSIX — says
+`No such file or directory`. The normaliser runs over stdout and the disk files
+as well as stderr, since `2>&1`, `2>err` and `exec 2>log` move a diagnostic
+between all three.
+
+**The eight deliberate differences** are `trap`, `getopts`, aliases, `times`,
+`readonly` and `local` (absent by scope — `design-decisions.md` §72 puts them
+in `osh`), plus two wordings where dash is the outlier and we follow bash and
+ksh: `echo $(( ))` is `0` here where dash calls it a syntax error, and a failed
+`cd` names the errno (`cd: /nonexistent-dir: No such file or directory`) rather
+than dash's `cd: can't cd to …`.
+
+**Three limitations remain**, all documented in the module header and none
+reachable by a harness case:
+
+| | |
+|---|---|
+| `&` backgrounds only a single *external* command | no `fork`; a builtin, function or compound after `&` runs in the foreground and reports 0 (`Shell::run_background`) |
+| descriptors above 2 reach an external child on unix only | `Command` names three, the rest are installed between fork and exec by `extra_fds`, which has no Windows counterpart. In-process builtins see them everywhere |
+| `n>&-` hands a child the null device | not a genuinely closed descriptor, so a write is discarded rather than returning `EBADF` (`stdio_for`) |
+
+Both `argv-utf8` findings are gone with it — `sh.rs` is out of
+`scripts/argv-utf8-baseline.txt`, and `python scripts/argv-utf8.py --check`
+now prints **5 findings across 5 files** (`diff fetch logger patch ps`), down
+from 7 across 6.
+
+---
+
+## TD-B-more-HAS-NO-INTERACTIVE-COMMANDS-BEYOND-SPACE-ENTER-AND-q (lane B, 2026-08-30)
+
+**In short:** `more` is the pager — the program that shows a long file one
+screen at a time and waits for you to press something. It now accepts every
+*command-line option* util-linux's `more` accepts, but once it is on screen the
+only keys it understands are **space** (next screenful), **Enter** (one more
+line) and **q** (quit). util-linux understands about a dozen more, including
+searching. Nothing is broken; a keystroke it does not know is simply treated as
+"next screenful". The gap is that a user who types `/error` to search will get
+a page turn instead of a search, with no message saying why.
+
+**Where.** `userspace/coreutils/src/bin/more.rs` — `read_key`, and the `Key`
+enum it returns. `page` consumes exactly the three variants.
+
+**What util-linux has that we do not**, measured against util-linux 2.39.3:
+
+| key | what it does there |
+|---|---|
+| `/pattern` | search forward for a basic regular expression; `Pattern not found` in reverse video if it misses |
+| `n` | repeat the last `/` search |
+| `b`, `Ctrl-B` | back up one screenful (needs the file to be seekable) |
+| `=` | print the current line number |
+| `:f` | print the file name and line number |
+| `h`, `?` | the help screen listing all of these |
+| `!cmd` | run `cmd` through the shell |
+| `v` | open the file at the current line in `$VISUAL`/`$EDITOR` |
+| `.` | repeat the previous command |
+| `'` | return to where the last search started |
+| `:n`, `:p` | next / previous file when several were named |
+| a digit prefix | argument to the next command — `10<space>` shows ten more lines, `3b` backs up three screens |
+| `Ctrl-L` | redraw |
+
+**Why it is not simply "finish it".** Three of those need machinery this
+program does not have and cannot fake:
+
+- **`b`, `'` and `:p` need to go backwards**, and `page` reads forwards through
+  a `BufRead` that may be a pipe. util-linux handles this by writing stdin to a
+  temporary file when it is not seekable (`more.c`, `cache_stdin`). That is a
+  real design choice with a cost — an unbounded temp file for `cat big | more`
+  — and it should be decided deliberately rather than acquired by accident.
+- **`!cmd` and `v` shell out**, which means `more` grows a dependency on a
+  shell and on `$VISUAL`/`$EDITOR`, and inherits the whole quoting question.
+- **`/pattern` interactively** needs a line editor on the prompt row
+  (backspace, kill, ESC to cancel), which is a second input mode, not a key.
+
+`=`, `:f`, `h`, `.`, `:n`, digit prefixes and `Ctrl-L` need none of that and are
+the sensible first tranche.
+
+**Proper fix.** Widen `Key` from three variants to a parsed
+`(count: Option<usize>, command: Command)` read through a small state machine,
+so a digit prefix is accumulated rather than discarded, and `page` grows a
+`lines_remaining` budget it decrements instead of the current
+`rows = lines_per_page - 1` special case. Do the seekable/temp-file decision
+first — it determines whether `Command::Back` can exist at all, and it is the
+one part of this that belongs in `open-questions.md` rather than being settled
+in the code.
+
+**Not a regression.** Before 2026-08-30 this program had *no* options at all
+(`more -n 3 f` treated `-n` as a file name) and no prompt; the interactive set
+was the same three keys. This entry records the gap that remains after that
+work, not one it introduced.
+
+**`-e` and `-u` are accepted and do nothing, on purpose.** util-linux's own
+manual documents both as no-ops retained for compatibility: `-e` (exit on EOF)
+is unconditional there since 2.39, and `-u` (suppress underlining) has no
+effect because the program no longer emits underlining. Ours accepts both so a
+script written for util-linux runs, and ignores both because there is nothing
+to do. This is *not* an unimplemented option.

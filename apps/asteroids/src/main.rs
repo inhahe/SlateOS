@@ -635,7 +635,16 @@ impl Layout {
             (w - pad * 2.0).max(0.0),
             (header_h - pad).max(0.0),
         );
-        let body_y = header.bottom() + pad;
+        // Held to the window as well as measured from the header. In a window
+        // shorter than the header's floor the header fills it exactly, so
+        // `header.bottom() + pad` lands *past* the bottom edge -- at 824x6 it
+        // is 8, two pixels outside. The band was empty there, so nothing was
+        // drawn wrong and nothing looked wrong; but an empty rectangle at an
+        // impossible origin is a number waiting to be used by whatever is
+        // added next (a scroll base, a centring calculation, a hit box), and
+        // it would then be wrong in a way that traces back to here rather than
+        // to the code that trusted it.
+        let body_y = (header.bottom() + pad).min(h);
         Self {
             window: Rect::new(0.0, 0.0, w, h),
             header,
@@ -3273,6 +3282,14 @@ mod tests {
             (400.0, 300.0),
             (1600.0, 1200.0),
             (300.0, 900.0),
+            // Shorter than the header's own floor. The header's height is a
+            // share of `h` clamped up to at least 20, so below 20 the clamp
+            // is trying to make the band *taller* than the window it is in,
+            // and only the `.min(h)` behind it stops the header hanging out
+            // of the bottom. Every size above is 300 or more, so none of them
+            // reaches that: dropping the `.min(h)` left this test green.
+            (824.0, 6.0),
+            (40.0, 12.0),
         ] {
             let l = Layout::new(w, h);
             assert!(
@@ -3413,9 +3430,29 @@ mod tests {
 
     #[test]
     fn a_window_with_no_room_has_a_field_of_nothing_rather_than_a_backwards_one() {
+        // Through the layout first, which is how the game reaches it.
         let field = Field::new(Layout::new(20.0, 8.0).body);
         assert!(field.scale >= 0.0);
         assert!(field.rect.w >= 0.0 && field.rect.h >= 0.0);
+
+        // And then directly, with the shape the clamp in `Field::new` is
+        // actually for. `Layout` already clamps its bands to a non-negative
+        // size, so no window -- however small -- can hand `Field::new` a
+        // backwards rectangle, and a test that only goes through `Layout`
+        // cannot reach the `.max(0.0)` at all: deleting it left the case
+        // above green. `Field::new` is public and documents no precondition,
+        // so the shape is reachable by a caller even though it is not
+        // reachable by the game, and the clamp is what keeps such a caller
+        // from getting a field drawn inside out rather than an empty one.
+        let backwards = Field::new(Rect::new(10.0, 10.0, -400.0, -300.0));
+        assert!(
+            backwards.scale >= 0.0,
+            "a backwards area gave the field a negative scale"
+        );
+        assert!(
+            backwards.rect.w >= 0.0 && backwards.rect.h >= 0.0,
+            "a backwards area gave the field a backwards rectangle"
+        );
     }
 
     #[test]
@@ -3460,12 +3497,20 @@ mod tests {
         app.lives = 1_000_000;
         app.wave = 999_999;
         let frame = app.frame(SIZE.0, SIZE.1);
+        // The controls line is in the list too. It is not a reading, but it
+        // shares the header with them and is laid out by a different rule --
+        // the readings walk left to right across the top strip, the controls
+        // line takes the bottom one -- so the two rules can disagree about
+        // where the boundary is. Giving the readings the *whole* inner
+        // rectangle instead of the strip above the controls line left this
+        // test green while the two rows sat on top of each other.
         let boxes: Vec<Rect> = [
             Target::Title,
             Target::Score,
             Target::HighScore,
             Target::Lives,
             Target::Wave,
+            Target::Controls,
         ]
         .into_iter()
         .filter_map(|t| frame.rect_of(|c| *c == t))
@@ -3478,6 +3523,30 @@ mod tests {
                     "two readings shared space: {a:?} and {b:?}"
                 );
             }
+        }
+
+        // Not overlapping is only half of it: five boxes of a fixed width laid
+        // end to end do not overlap either, and that is exactly what the
+        // hardcoded-offset layout this replaced amounted to. What makes the
+        // layout right is that each box is as wide as the thing written in it,
+        // so a six-digit score is drawn rather than cut short with an
+        // ellipsis. Measured against the same call the drawing pass uses.
+        let l = Layout::new(SIZE.0, SIZE.1);
+        for (target, value, _) in app.readings() {
+            let Some(r) = frame.rect_of(|c| *c == target) else {
+                continue;
+            };
+            let weight = if target == Target::Title {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            };
+            let needed = text::measure(&value, l.head, weight);
+            assert!(
+                r.w >= needed,
+                "{target:?} was given {}px for {value:?}, which needs {needed}px",
+                r.w
+            );
         }
     }
 
@@ -3533,6 +3602,32 @@ mod tests {
         assert!(
             !probe::is_visible_sized(&app, Target::Controls, size),
             "both rows claimed to fit in a 20-pixel band"
+        );
+    }
+
+    /// A fixed width cannot pass this, whatever the fixed width is.
+    ///
+    /// Asserting `box >= measured text` is the right property but it is a
+    /// *threshold*, and a threshold can be cleared by a constant that happens
+    /// to be large enough: 130px survived that assertion because the values it
+    /// was tried against need about 130px. Two scores of visibly different
+    /// length compared against each other have no such loophole -- a layout
+    /// that ignores its content gives them the same box, and same is not
+    /// bigger. (`known-issues.md` lesson 75's shape: a witness has to move
+    /// further than the slack in the thing measuring it.)
+    #[test]
+    fn a_longer_reading_is_given_a_wider_box() {
+        let mut small = test_app();
+        small.score = 7;
+        let mut large = test_app();
+        large.score = 1_234_567_890;
+
+        let narrow = probe::rect_of(&small, Target::Score).expect("the score is drawn");
+        let wide = probe::rect_of(&large, Target::Score).expect("the score is drawn");
+        assert!(
+            wide.w > narrow.w,
+            "a ten-digit score got the same {}px box as a one-digit one",
+            narrow.w
         );
     }
 
@@ -3663,7 +3758,20 @@ mod tests {
                 "{target:?} was not on the pause sheet"
             );
         }
-        assert!(texts(&app, SIZE).iter().any(|t| t == "PAUSED"));
+
+        // The words, not just the boxes. A line whose text is blank still
+        // occupies its place in the stack and still records its hit box, so
+        // `is_visible(Target::NewGame)` stays true for a sheet that offers
+        // nothing -- emptying the string left every assertion above green.
+        // The name of this test is a claim about what the sheet *says*, and
+        // only reading the text tests that claim.
+        let shown = texts(&app, SIZE);
+        for wanted in ["PAUSED", "Press P or Esc to resume", "Press N for new game"] {
+            assert!(
+                shown.iter().any(|t| t == wanted),
+                "the pause sheet never said {wanted:?}; it said {shown:?}"
+            );
+        }
     }
 
     #[test]
@@ -3885,6 +3993,32 @@ mod tests {
             GameState::Paused,
             "the score bar resumed the game"
         );
+
+        // And then the strip itself, which the click above never reaches. The
+        // header's own hit box is recorded *before* the readings drawn on it,
+        // so a reading wins the hit test wherever the two overlap, and a click
+        // aimed at `Target::Score` tests the reading only. An arm added for
+        // `Target::Header` -- the overlay dead zone the other way round -- was
+        // invisible here until the strip was clicked where nothing covers it.
+        // (`known-issues.md` lesson 74: a test that names the target delivers
+        // the event past the code that decides the target.)
+        let header = probe::rect_of(&app, Target::Header).expect("the header is drawn");
+        let (x, y) = (header.right() - 2.0, header.centre().1);
+        assert_eq!(
+            app.frame(SIZE.0, SIZE.1).hit_test(x, y),
+            Some(Target::Header),
+            "the bare end of the header strip is covered by something else, \
+             so this click is not testing the header"
+        );
+        assert_eq!(
+            app.click_at(x, y, MouseButton::Left, SIZE),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            app.state,
+            GameState::Paused,
+            "the header strip resumed the game"
+        );
     }
 
     #[test]
@@ -3911,13 +4045,60 @@ mod tests {
         // The click is read against the size the frame was drawn at. If the
         // app kept the size it started with, this click would land on the
         // wrong thing in a window the user resized.
+        //
+        // Two things about the shape of this test were wrong at first and are
+        // deliberate now.
+        //
+        // It used to resize *down*, to 500x420, and click the pause sheet's
+        // resume line there. That is not a witness: the small window's
+        // coordinates are all inside the big one, and every target on the
+        // pause sheet resumes, so reading the click against the wrong size
+        // still landed on the sheet and still resumed. Both answers were
+        // `Consumed`/`Playing` and the test could not tell them apart --
+        // pinning the size to the one the game opens at left it green
+        // (`known-issues.md` lesson 75: a witness that moves less than the
+        // tolerance has not moved). Resizing *up* past the opening size puts
+        // the control at a point that is off the opening window altogether,
+        // where the wrong reading can only answer "nothing here".
+        //
+        // And it used to resize through `Probe::click_at`, which calls
+        // `resize` itself. That routes around `handle_event`'s `Resize` arm,
+        // so a build that threw resize events away passed this test too. The
+        // event is how a real window says it, so the event is what is sent.
         let mut app = test_app();
         app.state = GameState::Paused;
-        let small = (500.0, 420.0);
-        let rect = probe::rect_of_sized(&app, Target::Resume, small).expect("drawn small");
+        let big = (2000.0, 1600.0);
+        let rect = probe::rect_of_sized(&app, Target::Resume, big).expect("drawn big");
         let (x, y) = rect.centre();
+
+        // The premise, checked rather than assumed: this point must be one
+        // the opening size cannot explain.
         assert_eq!(
-            app.click_at(x, y, MouseButton::Left, small),
+            app.draw(SIZE).hit_test(x, y),
+            None,
+            "({x}, {y}) is still on something in a {SIZE:?} window, so a click \
+             read against the wrong size would land on it anyway"
+        );
+
+        assert_eq!(
+            handle_event(
+                &mut app,
+                &Event::Resize {
+                    width: 2000,
+                    height: 1600
+                }
+            ),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            handle_event(
+                &mut app,
+                &Event::Mouse(MouseEvent {
+                    x,
+                    y,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                })
+            ),
             EventResult::Consumed
         );
         assert_eq!(app.state, GameState::Playing);
@@ -4123,7 +4304,23 @@ mod tests {
         // flight. Panicking there loses the game.
         let mut app = test_app();
         for size in [(0.0, 0.0), (1.0, 800.0), (800.0, 1.0)] {
-            assert!(app.frame(size.0, size.1).is_balanced());
+            let f = app.frame(size.0, size.1);
+            assert!(f.is_balanced());
+
+            // And it draws nothing of no size. A window this small makes
+            // every band empty, so each `fill` is handed a rectangle with no
+            // area; without the guard in `fill` they all reach the
+            // compositor as zero-size `FillRect`s. Balance says nothing
+            // about that -- deleting the guard left the assertion above
+            // green -- and the commands are the only place it shows.
+            for c in f.commands() {
+                if let RenderCommand::FillRect { width, height, .. } = c {
+                    assert!(
+                        *width > 0.0 && *height > 0.0,
+                        "a {width}x{height} rectangle was filled in a {size:?} window"
+                    );
+                }
+            }
         }
         app.state = GameState::GameOver;
         assert!(app.frame(0.0, 0.0).is_balanced());

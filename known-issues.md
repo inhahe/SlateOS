@@ -82315,8 +82315,79 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **267 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **189 of 800 remain**
 
+> **Burn-down log.** 2026-08-30 (forty-first batch): every function carrying
+> **three** sites, which is now none. 267 → 189 across 166 → 140 functions;
+> twenty-six functions left the ledger entirely — `cmd_audioeq`,
+> `cmd_buddyinfo`, `cmd_cgroupfs`, `cmd_directio`, `cmd_display`,
+> `cmd_displaycal`, `cmd_dpiscaling`, `cmd_fault_inject`, `cmd_fontpreview`,
+> `cmd_httpd`, `cmd_ipclog`, `cmd_memcg`, `cmd_msivec`, `cmd_netindicator`,
+> `cmd_netmon`, `cmd_netusage`, `cmd_pftrack`, `cmd_power`, `cmd_raidmgr`,
+> `cmd_rcustat`, `cmd_surroundsound`, `cmd_taskbar`, `cmd_timezone`,
+> `cmd_ttystat`, `cmd_vmballoon` and `parse_datetime_to_ns`. Pinned by
+> self-test rung 106.
+>
+> **The batch-40 defect did not recur, and the reason is worth writing down
+> rather than claiming as care.** Batch 40 mislabelled five diagnostics by
+> search-and-replacing a statement that was not unique to the function being
+> edited. Batch 41 anchored every edit on an adjacent distinguishing line —
+> almost always the `match module::fn(…)` immediately below — and the edit tool
+> *rejected* three of them outright as ambiguous (`cmd_pftrack`'s `top`,
+> `cmd_memcg`'s three byte counts, `cmd_netmon`'s three ids). The mechanism
+> that prevented the repeat was the tool refusing a non-unique match, not
+> vigilance; a batch done with a script that takes the first match would have
+> reproduced batch 40 exactly. Whoever automates this should make ambiguity an
+> error, not a choice.
+>
+> **A new axis, and the one rung 106 is sorted by: where the guess ends up.**
+> The three shapes named by batch 40 (guards that worked by luck, strict beside
+> guessing, limits that truncate evidence) sort this defect by *how the old code
+> survived review*. Batch 41 makes a second sort worth having — by what the
+> invented number touches, because that decides how long it outlives the
+> command:
+>
+> * **It reaches a file.** `directio write <path> <data> [offset]` guessed
+>   offset `0`, so a mistyped offset did not fail to write — it wrote over the
+>   **head** of the file and reported "DIO wrote N bytes". Nothing later
+>   distinguishes those bytes from data. This is the only site in forty-one
+>   batches where the guess is persisted.
+> * **It binds a resource.** `httpd start` / `httpd tls` guessed `8080` / `443`
+>   behind an `if port == 0` guard — the batch-40 "guard that worked by luck"
+>   shape, but *inverted*: the default here is legal, so the guard was
+>   unreachable for exactly the input it looks like it exists for. The guard was
+>   kept (an explicit `httpd start 0` still deserves it); what changed is that
+>   the unreadable word no longer arrives at it wearing a legal value.
+> * **It is filed as a measurement.** `ttystat read`/`write` (cumulative device
+>   totals), `buddyinfo update`/`split`, `rcustat end`, `ipclog` — a guessed
+>   count is indistinguishable from an observed one the instant it lands, and
+>   every later `stats` reading is quietly wrong by that much. Third batch
+>   running in which this is the largest sub-group.
+> * **It is echoed back as confirmation.** `displaycal red|green|blue` (all
+>   three default `220` and print the value back), `netindicator report`,
+>   `surroundsound calibrate`. The operand the caller can check against the
+>   output is the one that was made up — so the output *confirms the guess*.
+>
+> **The sharpest single site was not any of those:** `timezone detect <lat>
+> <lon>` guessed `0.0` for either coordinate, so `timezone detect 51.5 0.1O`
+> answered for the Gulf of Guinea and printed a timezone name with no hint that
+> half its input had been discarded. A wrong answer shaped like a right one is
+> what the whole campaign is about.
+>
+> **Two sites had no guard at all behind the guess**, i.e. not even luck:
+> `cgroupfs mem <path> <bytes>` silently set the memory cap to **0** for an
+> unreadable byte count, and `netmon close <id>` closed connection **0**. Both
+> are act-on-the-wrong-object rather than report-the-wrong-number.
+>
+> **One entry in this batch is not a command arm**, and it is the one that
+> generalises: `parse_datetime_to_ns` parsed the *date* fields strictly
+> (`.ok()?`, propagating to `touch`'s existing "invalid date" refusal) and the
+> *time* fields with `.unwrap_or(0)` — strict and guessing inside a single
+> function, six lines apart. `touch -d '2026-08-30 12:3o:00'` meant 12:00:00
+> exactly. It also now refuses a fourth colon-separated field instead of
+> dropping it. Investigating it surfaced a separate defect in `cmd_touch`,
+> logged below as `A-TOUCH--D-CANNOT-ACCEPT-THE-FORMAT-ITS-OWN-USAGE-LINE-PRINTS`.
+>
 > **Burn-down log.** 2026-08-29 (fortieth batch): every function carrying
 > **four** sites, which is now none. 332 → 267 across 185 → 166 functions;
 > nineteen functions left the ledger entirely. `cmd_webcam`, `cmd_vmzone`,
@@ -83530,7 +83601,9 @@ working at all.
 > destroys `root`. That is a separate defect with a separate fix, filed as
 > `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING`. The
 > two compound; clearing the guess only removes the path that reached the
-> unguarded operation *by accident*.
+> unguarded operation *by accident*. (That second defect was fixed on
+> 2026-08-30: `delete_group` now refuses any `GroupType::System` group, and
+> `create_group` refuses to mint one.)
 >
 > **Two non-numeric guesses in the same arm were fixed too, though the ledger
 > counts neither.** Leaving them would have been patching around the same defect
@@ -84462,6 +84535,86 @@ than exist, so a fix that forgets to lower the count fails the build too; the
 ledger cannot silently rot into a rubber stamp.
 
 **Not a regression.** True since each site was written.
+
+---
+
+## `A-TOUCH--D-CANNOT-ACCEPT-THE-FORMAT-ITS-OWN-USAGE-LINE-PRINTS` (lane A, 2026-08-30) — ✅ **FIXED** 2026-08-30
+
+**In short:** `touch -d` documents `YYYY-MM-DD HH:MM:SS` and could not accept
+it. The space in the middle split the datetime into two arguments before
+`touch` ever saw it, so the time was taken as the *filename*:
+`touch -d '2026-08-30 12:30:00' notes.txt` refused `notes.txt` as an extra
+operand, and `touch -d '2026-08-30 12:30:00'` on its own created a file
+called `12:30:00`.
+
+**Where.** `kernel/src/kshell.rs` — `cmd_touch`, and `command_parses_own_quotes`.
+
+**Why the quoting did not survive.** Every kshell command receives a flat
+`&str`, not an argv, so "these two words were one argument" is a fact the
+dispatch boundary cannot carry. `dispatch` calls `remove_quotes` on the
+argument string — which deletes the quote characters and leaves the space —
+and `cmd_touch` then re-split on whitespace. Four words came out of three
+arguments. Commands that need the distinction opt onto
+`command_parses_own_quotes` and use `split_words`, which respects quotes and
+removes them; `trap`, `awk`, `fold`, `base64`, `cut`, `tr`, `sed` and `column`
+were already there for the same reason. `touch` is now the ninth.
+
+**What made it invisible for so long.** The failure mode is not an error
+message about the date — it is an error message about the *path*, or a
+silently-created file with a strange name. Nobody reading
+`touch: extra operand ‘notes.txt’` looks at the `-d` operand.
+
+**It was hiding a second defect underneath it.** Because the time half was
+unreachable, the three `.unwrap_or(0)` reads of hour/minute/second in
+`parse_datetime_to_ns` had no way to fire, and so survived forty-one batches
+of the §600 guessed-value burn-down above. They were fixed in batch 41 —
+present fields must now parse, absent ones are still zero, and a fourth
+colon-separated field is refused rather than dropped. The two fixes are
+worth stating as one lesson: **a guessed value in dead code is not harmless,
+it is merely dormant**, and the batch that makes the code reachable is the
+batch that ships the bug.
+
+**Pinned by self-test rung 107**, which asserts the resulting `modified_ns`
+as an exact nanosecond count (`2026-08-30 12:30:00` UTC = 20695 days +
+45000 s after the epoch) rather than reading a formatted date back. Every
+step the rung covers — the quoting, the time fields, and the civil-date
+arithmetic — can be wrong in a way that still prints a plausible date. It
+also asserts that a mistyped minute is refused *as a date*, which is what
+proves the time fields are now reached at all, and that nothing is created
+under the name `12:3o:00`.
+
+**And there was a third defect under the second one, found by that rung on
+its first real boot.** With the quoting fixed and the time fields parsing,
+`touch -d '2026-08-30 12:30:00' /tmp/new.txt` still stamped the file with
+*the current time*. `cmd_touch` has two arms — update an existing file, or
+create a missing one — and only the update arm ever applied the timestamp.
+The create arm computed the instant, called `Vfs::write_file` (which stamps
+now), printed `created` and exited **0**. The value was worked out correctly
+and then dropped on the floor.
+
+That is the worst shape this family takes. A guessed value is wrong; a
+*discarded* value is wrong **and reports success**, so there is no diagnostic
+to notice and the only way to discover that `-d` did nothing is to `stat` the
+file afterwards. And it bit precisely the case `-d` exists for: a file you are
+back-dating is usually one you are also creating, so the broken arm was the
+common one and the working arm was the rare one. `requested` is now an
+`Option<u64>` — `None` meaning "no `-d`, no `-r`" — and the create arm applies
+it as an explicit second step, reporting a failure to set it rather than
+printing `created`.
+
+**Three defects in one command, each hidden by the one above it**, is the
+lesson worth keeping from this entry: the quoting bug made the time fields
+unreachable, which kept the guessed-value bug dormant, which meant nothing
+ever exercised the create-with-`-d` path far enough to notice the timestamp
+was being thrown away. Fixing the outermost one is what made the next one
+observable, twice in a row. **A rung that asserts an exact value is what
+converts "the fix compiles" into "the fix works"** — this one was written
+against the create path, failed on its first boot with `left:
+1788119411893528376` (a wall clock) against `right: 1788093000000000000`,
+and named the bug outright. Rung 107 now asserts both arms, so a future
+change that moves the defect from one to the other fails.
+
+**Not a regression.** All three were true since `cmd_touch` was written.
 
 ---
 
@@ -86749,9 +86902,9 @@ been updated to say so.
 
 ---
 
-## `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING` (lane A, 2026-08-26) — **open**, tech debt
+## `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING` (lane A, 2026-08-26) — ✅ **FIXED** 2026-08-30
 
-**In short:** `groupmgr delete 0` destroys the `root` group and prints
+**In short:** `groupmgr delete 0` destroyed the `root` group and printed
 `Deleted group 0.` as a success. There is no confirmation, no privilege check,
 and no protection for system groups — even though the code carries a
 `GroupType::System` label that looks like exactly that protection. The label is
@@ -86786,12 +86939,70 @@ on `root`. Deleting by GID-0-literal is the wrong shape of guard — it protects
 one id rather than the property that made that id worth protecting, and `wheel`
 at GID 1 is just as load-bearing.
 
+**Fixed (2026-08-30).** `GroupType::System` now *is* the policy, and it took two
+rules rather than the one the paragraph above asked for.
+
+- `delete_group` refuses any `System` group with `PermissionDenied`. It also
+  had to change shape: the old body was `retain` first, length-comparison
+  second, which cannot consult the entry it has already dropped. It now finds
+  the group, decides, and only then removes — so there is no window in which
+  `root` is deleted and put back.
+- `create_group` refuses to *mint* a `System` group, likewise
+  `PermissionDenied`.
+
+**Why the second rule was not optional, and was not in the original writeup.**
+The first rule alone converts one defect into another. If `System` groups are
+undeletable and anything may create one, then `groupmgr create 1000 x system`
+mints an immortal group, and 252 of them exhaust `MAX_GROUPS` permanently with
+no way to recover short of a reboot. An undeletable object that untrusted input
+may create is a resource leak with a security label on it. So the two rules are
+one decision — *the system's own identity set is fixed at startup* — and the
+entry's "narrow version" would have shipped a slot-exhaustion bug in exchange
+for the deletion bug.
+
+The general form is worth keeping: **whenever you make a class of object
+undeletable, ask in the same breath who may create one.** Immutability granted
+at the destroying end and withheld at the creating end is not a protection, it
+is a lever.
+
+**What did not change.** The entry's "fuller version" also proposed refusing to
+remove the last member of a system group, and refusing `remove_member` on
+`root`. Neither was implemented, and that is deliberate rather than deferred:
+`init_defaults` seeds every group with an **empty** member list on purpose (it
+refuses to fabricate memberships it has not observed — see the doc comment).
+An empty `root` is therefore the normal state at boot, so "the last member" is a
+rule about a condition this implementation does not have, and a guard on it
+would fire on exactly nothing. It becomes a real question once membership is
+wired to `useracct`, which is already recorded there as the deferred proper fix.
+
+**Shell.** `cmd_groupmgr` renders the new `PermissionDenied` specifically rather
+than as `Error: PermissionDenied` — `groupmgr: delete: group 0 is a system
+group`, and `groupmgr: create: system groups are defined at startup and cannot
+be created here`. `system` is still accepted by the type parser and still listed
+in the usage line: refusing the *word* would leave the operator guessing which
+of the three types they may use and why, where refusing the *request* tells them.
+
+**Tests.** `groupmgr::self_test` grew to 10 cases — 8 covers deletion (both
+`root` at GID 0 and `wheel` at GID 1, so a guard written against the literal `0`
+fails it; plus a `User` group at GID 100 that *is* deletable, so the guard is
+shown to read the type and not to have frozen the table), 9 covers creation
+(refused as `System`, accepted as `Service` at the same GID and name, then
+deleted). kshell rung 108 asserts the same four outcomes through the shell,
+each as a paired assertion — the message, the exit status, and the absence of
+the success line — because a refusal that prints an error and acts anyway
+satisfies the first of those alone.
+
 **Relationship to the D1 burn-down.** These are two different bugs that
 compound, and fixing one does not fix the other. Before the twenty-first batch,
 `cmd_groupmgr`'s `delete` arm guessed GID **0** for any word it could not parse
 — so `groupmgr delete 1O` deleted the root group. That guess is now refused, so
-reaching this operation requires *typing* `0`. The operation itself is still
-unguarded, and a correctly-typed `groupmgr delete 0` still destroys `root`. See
+reaching this operation required *typing* `0`; the operation itself was still
+unguarded, and a correctly-typed `groupmgr delete 0` still destroyed `root`.
+Both halves are now closed. The pairing is the point: the burn-down makes a
+destructive operation *hard to reach by accident*, and says nothing whatever
+about whether it should succeed when reached deliberately. Neither fix would
+have been sufficient alone, and the burn-down's refusal message would have made
+the remaining hole look handled. See
 `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
 
 **Not a regression.** True since `delete_group` was written.

@@ -1480,6 +1480,16 @@ fn remove_quotes(s: &str) -> String {
 /// that also rules out an ordinary bracket expression: `s/[a-z] [0-9]/x/`
 /// cannot be said without a space.
 ///
+/// `touch` is here because its `-d` operand is a datetime whose date and time
+/// halves are separated by a space — `touch -d '2026-08-30 12:30:00' f`, which
+/// is the exact string its own usage line prints. Dequoted, that is four words,
+/// so `-d` took `2026-08-30`, `12:30:00` became the path operand, and `f`
+/// was refused as an extra one. Worse without the trailing path: `touch -d
+/// '2026-08-30 12:30:00'` created a file *named* `12:30:00`. The time half of
+/// [`parse_datetime_to_ns`] was therefore unreachable through this command —
+/// which is why the guessed hour/minute/second it used to substitute went
+/// forty-one batches without being noticed.
+///
 /// The list is the migration path, not a special case: a command moves onto
 /// it when it learns to parse quotes, and when everything is on it this
 /// function and [`remove_quotes`] both go away in favour of a real argv.
@@ -1487,7 +1497,7 @@ fn remove_quotes(s: &str) -> String {
 fn command_parses_own_quotes(cmd: &str) -> bool {
     matches!(
         cmd,
-        "trap" | "awk" | "fold" | "base64" | "cut" | "tr" | "sed" | "column"
+        "trap" | "awk" | "fold" | "base64" | "cut" | "tr" | "sed" | "column" | "touch"
     )
 }
 
@@ -21102,6 +21112,237 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
     }
 
+    serial_println!(
+        "  kshell::self_test 106: the guessed operand is refused before it can be \
+         written to a file, bound to a socket, read as a coordinate or added to \
+         a cumulative counter"
+    );
+    {
+        // Rung 106 -- batch 41, the twenty-six three-site functions. Paired
+        // assertions again, for the reason rung 104 gives: a fix that names the
+        // refusal and then acts anyway satisfies the first half on its own.
+        //
+        // The four cases are chosen for *where the guess ends up*, which is the
+        // axis batch 41 made visible. The previous rungs sorted this defect by
+        // how the old code survived review; these sort it by what the invented
+        // number touched, because that is what decides how long the damage
+        // outlives the command.
+
+        // 1. The guess that reaches the disk. `directio write` guessed offset 0
+        // for an unreadable one, so `directio write f data 4O96` did not fail to
+        // write -- it wrote over the *head* of the file, and reported "DIO wrote
+        // N bytes" as though the offset asked for had been used. Every other
+        // case in this rung leaves something wrong in memory; this one leaves it
+        // in a file, where nothing later distinguishes it from data.
+        let out = capture_command("directio write /zzdio.bin hello 4O96");
+        assert_output_contains(
+            "a mistyped offset is refused rather than written at offset 0",
+            &out,
+            b"`4O96' is not an offset",
+        );
+        assert_eq!(last_exit(), 1, "`directio write ... 4O96` errors");
+        assert_output_lacks("and nothing is reported written", &out, b"DIO wrote");
+
+        // 2. The guard that could never have worked. `httpd start` had an
+        // `if port == 0` check behind the guess -- the same shape rung 104 found
+        // catching typos by luck -- but here the guessed default is 8080, a
+        // legal port, so the guard was unreachable for exactly the input it
+        // looks like it exists for. `httpd start 8O8O` bound and announced a
+        // port nobody typed. The guard is kept, because an explicit `httpd
+        // start 0` still deserves it; what changed is that the unreadable word
+        // no longer arrives at it wearing a legal value.
+        let out = capture_command("httpd start 8O8O");
+        assert_output_contains(
+            "a mistyped port is refused rather than defaulted to a legal one",
+            &out,
+            b"`8O8O' is not a port",
+        );
+        assert_eq!(last_exit(), 1, "`httpd start 8O8O` errors");
+        assert_output_lacks(
+            "and no server is reported started",
+            &out,
+            b"HTTP server started",
+        );
+
+        // 3. Strict beside guessing, one operand apart. `timezone detect` read
+        // two coordinates: an unreadable latitude and an unreadable longitude
+        // both became 0.0. `timezone detect 51.5 0.1O` therefore answered for
+        // (51.5, 0.0) -- the Gulf of Guinea rather than London -- and printed a
+        // timezone name with no hint that half its input had been discarded. A
+        // wrong answer that is *shaped* like a right one is the reason this
+        // family is worth the batches: nothing downstream can tell.
+        let out = capture_command("timezone detect 51.5 0.1O");
+        assert_output_contains(
+            "a mistyped longitude is refused even though the latitude parsed",
+            &out,
+            b"`0.1O' is not a longitude in degrees",
+        );
+        assert_eq!(last_exit(), 1, "`timezone detect 51.5 0.1O` errors");
+        assert_output_lacks("and no timezone is reported detected", &out, b"Detected:");
+
+        // 4. The measurement being filed, as in rung 104's `diskstat read` --
+        // repeated here because batch 41 found it three more times and it is the
+        // one shape where refusing late is already too late. `ttystat read` adds
+        // its byte count to the device's cumulative totals; a guessed 1 is
+        // indistinguishable from an observed 1 the instant it lands, and every
+        // later reading of `ttystat stats` is quietly wrong by that much.
+        let _ = capture_command("ttystat init");
+        let _ = capture_command("ttystat register zztty console 4096");
+        let out = capture_command("ttystat read zztty 4O96");
+        assert_output_contains(
+            "a mistyped byte count is refused before it becomes a statistic",
+            &out,
+            b"`4O96' is not a byte count",
+        );
+        assert_eq!(last_exit(), 1, "`ttystat read zztty 4O96` errors");
+        assert_output_lacks("and nothing is reported read", &out, b"bytes from");
+    }
+
+    serial_println!(
+        "  kshell::self_test 107: `touch -d' accepts the space-separated datetime \
+         its own usage line prints, stamps the exact instant asked for on a file \
+         it creates as well as on one that exists, and refuses an unreadable \
+         time instead of taking it as the path"
+    );
+    {
+        // Rung 107 -- the defect batch 41 surfaced while fixing
+        // `parse_datetime_to_ns`. The time half of that parser was *unreachable*
+        // through `touch`: quote removal happens at the dispatch boundary, so
+        // `touch -d '2026-08-30 12:30:00' f` arrived as four whitespace-separated
+        // words. `-d` took `2026-08-30`, `12:30:00` became the path operand, and
+        // `f` was refused as an extra one -- and with no trailing path, `touch`
+        // created a file *named* `12:30:00`. `touch` is now on
+        // `command_parses_own_quotes` and splits with `split_words`.
+        //
+        // The stamp is asserted as an exact nanosecond count rather than by
+        // reading a formatted date back, because every intermediate step this
+        // rung is about -- the quoting, the hour/minute/second fields, and the
+        // civil-date arithmetic -- can be wrong in a way that still prints a
+        // plausible date. 2026-08-30 12:30:00 UTC is 20695 days plus 45000
+        // seconds after the epoch.
+        const ZZ_TOUCH_NS: u64 = 1_788_093_000_000_000_000;
+
+        let out = capture_command("touch -d \"2026-08-30 12:30:00\" /tmp/zz_touchdt.txt");
+        assert_eq!(last_exit(), 0, "a quoted datetime is one operand");
+        assert_output_lacks(
+            "the time half is not mistaken for a second path",
+            &out,
+            b"extra operand",
+        );
+        match crate::fs::Vfs::metadata(crate::fs::path::Path::new("/tmp/zz_touchdt.txt")) {
+            Ok(meta) => assert_eq!(
+                meta.modified_ns, ZZ_TOUCH_NS,
+                "the file carries the instant asked for, to the second"
+            ),
+            Err(e) => panic!("touch -d did not create /tmp/zz_touchdt.txt: {:?}", e),
+        }
+
+        // The same command against a file that already exists. `touch` has two
+        // arms -- create and update -- and only the update one ever applied
+        // the requested stamp; the create arm computed it and dropped it,
+        // reporting `created` and exiting 0 with the file carrying the current
+        // time. Both arms are asserted here so the two cannot drift apart
+        // again, and so a fix that moved the bug from one to the other fails.
+        const ZZ_TOUCH_NS2: u64 = 1_788_093_060_000_000_000; // one minute later
+        let out = capture_command("touch -d \"2026-08-30 12:31:00\" /tmp/zz_touchdt.txt");
+        assert_eq!(last_exit(), 0, "re-stamping an existing file succeeds");
+        assert_output_contains("and says it updated it", &out, b"timestamps updated");
+        match crate::fs::Vfs::metadata(crate::fs::path::Path::new("/tmp/zz_touchdt.txt")) {
+            Ok(meta) => assert_eq!(
+                meta.modified_ns, ZZ_TOUCH_NS2,
+                "an existing file takes the new instant, by the same rule as a new one"
+            ),
+            Err(e) => panic!("/tmp/zz_touchdt.txt vanished: {:?}", e),
+        }
+
+        // The same line with an unreadable minute. This is the assertion that
+        // proves the time fields are *reached*: before the quoting fix the
+        // mistyped word was never parsed as a time at all -- it became the path,
+        // and `touch` cheerfully created a file called `12:3o:00`.
+        let out = capture_command("touch -d \"2026-08-30 12:3o:00\" /tmp/zz_touchdt2.txt");
+        assert_output_contains(
+            "an unreadable minute is refused as a date, not accepted as a path",
+            &out,
+            b"invalid date",
+        );
+        assert_eq!(last_exit(), 1, "`touch -d' with an unreadable time errors");
+        assert!(
+            crate::fs::Vfs::metadata(crate::fs::path::Path::new("/tmp/zz_touchdt2.txt")).is_err(),
+            "and no file is stamped with a guessed midday"
+        );
+        assert!(
+            crate::fs::Vfs::metadata(crate::fs::path::Path::new("12:3o:00")).is_err(),
+            "and nothing is created under the name of the operand it could not read"
+        );
+    }
+
+    serial_println!(
+        "  kshell::self_test 108: `groupmgr delete' refuses a system group by type \
+         rather than by GID, `groupmgr create ... system' cannot mint one, and an \
+         ordinary group is still both creatable and deletable"
+    );
+    {
+        // Rung 108 -- the operation batch 21 left behind. Refusing an unreadable
+        // GID stopped `groupmgr delete 1O` from destroying `root`, but a
+        // correctly typed `groupmgr delete 0` still did, because
+        // `groupmgr::delete_group` was a bare `retain` that never read
+        // `group_type`. The guard is on the type, so this rung asserts GID 1
+        // (`wheel`) as well: a guard written against the literal 0 would pass
+        // the first case and fail the second, which is exactly the shape of
+        // fix known-issues.md argued against.
+        //
+        // `delete` and `get` do not open the table themselves -- only `list`
+        // and `create` call `init_defaults` -- so an unopened table would
+        // answer `NotSupported` and this rung would be asserting against the
+        // wrong refusal. `list` first makes the state explicit.
+        let out = capture_command("groupmgr list");
+        assert_output_contains("the group table is open", &out, b"group(s):");
+
+        let out = capture_command("groupmgr delete 0");
+        assert_output_contains(
+            "deleting the root group is refused, and says why",
+            &out,
+            b"is a system group",
+        );
+        assert_eq!(last_exit(), 1, "`groupmgr delete 0` errors");
+        assert_output_lacks("and is not reported as done", &out, b"Deleted group");
+        let out = capture_command("groupmgr get 0");
+        assert_output_contains("and the root group is still there", &out, b"Group: root");
+
+        let out = capture_command("groupmgr delete 1");
+        assert_output_contains(
+            "`wheel` is protected by the same rule, not by a GID-0 special case",
+            &out,
+            b"is a system group",
+        );
+        assert_eq!(last_exit(), 1, "`groupmgr delete 1` errors");
+        let out = capture_command("groupmgr get 1");
+        assert_output_contains("and wheel is still there", &out, b"Group: wheel");
+
+        // Undeletable groups that anyone may create are a slot leak against
+        // MAX_GROUPS, so the label is reserved at the creating end too.
+        let out = capture_command("groupmgr create 4243 zzsysgrp system");
+        assert_output_contains(
+            "a system group cannot be created from the shell",
+            &out,
+            b"cannot be created here",
+        );
+        assert_eq!(last_exit(), 1, "`groupmgr create ... system` errors");
+        assert_output_lacks("and is not reported as created", &out, b"Created group");
+        let out = capture_command("groupmgr get 4243");
+        assert_output_contains("and no such group exists", &out, b"Group not found");
+
+        // The same GID and name as a service group: it is the label that is
+        // reserved, and an ordinary group is still deletable afterwards -- the
+        // guard must not have made the whole table read-only.
+        let out = capture_command("groupmgr create 4243 zzsysgrp service");
+        assert_eq!(last_exit(), 0, "a service group is created");
+        assert_output_contains("and reported", &out, b"Created group");
+        let out = capture_command("groupmgr delete 4243");
+        assert_eq!(last_exit(), 0, "and what may be created may be deleted");
+        assert_output_contains("and reported", &out, b"Deleted group 4243");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -23764,13 +24005,24 @@ fn cmd_touch(args: &str) {
         return;
     }
 
+    // Quote-aware, and it has to be: `-d`'s operand contains a space in the
+    // very format the usage line above advertises, so
+    // `touch -d '2026-08-30 12:30:00' f` is three arguments and not four.
+    // Split on whitespace it was four — `-d` took `2026-08-30`, `12:30:00`
+    // became the path, and `f` was refused as an extra operand; without a
+    // trailing path it created a file *named* `12:30:00`. `touch` is on
+    // `command_parses_own_quotes`, so the quoting survives dispatch, and
+    // `split_words` both respects and removes it.
+    let words = split_words(args);
+
     let mut date_str: Option<&str> = None;
     let mut ref_file: Option<&str> = None;
     let mut file_path = "";
 
     let mut flags_done = false;
-    let mut words = args.split_whitespace();
-    while let Some(w) = words.next() {
+    let mut i = 0usize;
+    while let Some(w) = words.get(i).map(alloc::string::String::as_str) {
+        i += 1;
         if !flags_done && w == "--" {
             flags_done = true;
             continue;
@@ -23788,20 +24040,21 @@ fn cmd_touch(args: &str) {
             continue;
         }
         if w == "-d" {
-            // Collect the date string — it might have spaces (e.g., "2026-01-15 12:30:00").
-            date_str = words.next();
-            if date_str.is_none() {
+            let Some(v) = words.get(i).map(alloc::string::String::as_str) else {
                 shell_println!("touch: -d requires a date");
                 set_exit(1);
                 return;
-            }
+            };
+            i += 1;
+            date_str = Some(v);
         } else if w == "-r" {
-            ref_file = words.next();
-            if ref_file.is_none() {
+            let Some(v) = words.get(i).map(alloc::string::String::as_str) else {
                 shell_println!("touch: -r requires a reference file");
                 set_exit(1);
                 return;
-            }
+            };
+            i += 1;
+            ref_file = Some(v);
         } else {
             shell_println!("touch: unrecognized option `{}'", w);
             set_exit(1);
@@ -23817,11 +24070,15 @@ fn cmd_touch(args: &str) {
 
     let path = resolve_path(file_path);
 
-    // Determine the timestamp to use.
-    let timestamp = if let Some(ds) = date_str {
+    // The timestamp the operator *asked for*, as distinct from the one the
+    // file would get anyway. `None` means "no -d and no -r", and the
+    // difference matters on the creating path below: a stamp that was
+    // requested must be applied and its failure reported, where the ambient
+    // creation time needs neither.
+    let requested = if let Some(ds) = date_str {
         // Parse the date string.
         match parse_datetime_to_ns(ds) {
-            Some(ns) => ns,
+            Some(ns) => Some(ns),
             None => {
                 shell_println!(
                     "touch: invalid date '{}' (use YYYY-MM-DD or YYYY-MM-DD HH:MM:SS or epoch secs)",
@@ -23835,7 +24092,7 @@ fn cmd_touch(args: &str) {
         // Copy timestamp from reference file.
         let ref_path = resolve_path(rf);
         match crate::fs::Vfs::metadata(&ref_path) {
-            Ok(meta) => meta.modified_ns,
+            Ok(meta) => Some(meta.modified_ns),
             Err(e) => {
                 shell_println!("touch: {}: {:?}", ref_path.display(), e);
                 set_exit(1);
@@ -23843,13 +24100,14 @@ fn cmd_touch(args: &str) {
             }
         }
     } else {
-        crate::hpet::elapsed_ns()
+        None
     };
 
     // Check if file exists.
     match crate::fs::Vfs::stat(&path) {
         Ok(_) => {
             // File exists — update timestamps.
+            let timestamp = requested.unwrap_or_else(crate::hpet::elapsed_ns);
             match crate::fs::Vfs::set_times(&path, timestamp, timestamp) {
                 Ok(()) => {
                     shell_println!("{}: timestamps updated", path.display());
@@ -23862,8 +24120,33 @@ fn cmd_touch(args: &str) {
         }
         Err(_) => {
             // File doesn't exist — create empty file.
+            //
+            // The requested time has to be applied here as a second step.
+            // `write_file` stamps the file with the current time, and this arm
+            // used to stop there — so `touch -d <when> <newfile>` computed the
+            // instant asked for, created the file, and threw the instant away.
+            // It reported `created` and exited 0, which is the worst shape of
+            // this defect: the operator is told the operation succeeded, and
+            // the only way to discover that `-d` did nothing is to stat the
+            // file. It bit exactly the case `-d` is most often used for, since
+            // a file you are back-dating is usually one you are also creating.
             match crate::fs::Vfs::write_file(&path, &[]) {
                 Ok(()) => {
+                    if let Some(timestamp) = requested {
+                        // A stamp that was asked for and could not be applied
+                        // is a failure of the command, not a detail: the file
+                        // now exists carrying the wrong time. Say so, and do
+                        // not also print `created` — one outcome per run.
+                        if let Err(e) = crate::fs::Vfs::set_times(&path, timestamp, timestamp) {
+                            shell_println!(
+                                "touch: {}: created, but its timestamp could not be set: {:?}",
+                                path.display(),
+                                e
+                            );
+                            set_exit(1);
+                            return;
+                        }
+                    }
                     shell_println!("{}: created", path.display());
                 }
                 Err(e) => {
@@ -23908,19 +24191,24 @@ fn parse_datetime_to_ns(s: &str) -> Option<u64> {
 
     let (hour, minute, second) = if let Some(tp) = time_part {
         let time_fields: alloc::vec::Vec<&str> = tp.split(':').collect();
-        let h = time_fields
-            .first()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
-        let m = time_fields
-            .get(1)
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
-        let s = time_fields
-            .get(2)
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
-        (h, m, s)
+        // `HH`, `HH:MM` and `HH:MM:SS` are all accepted — an *omitted* field is
+        // zero — but a field that is **present** must be readable. These three
+        // reads were `.and_then(parse).unwrap_or(0)`, which made
+        // `touch -d '2026-08-30 12:3o:00'` (letter O for zero) mean 12:00:00
+        // exactly, and stamped the file with a time nobody typed. The date
+        // fields immediately above were already strict (`.ok()?`), so the
+        // function refused an unreadable month while inventing an unreadable
+        // minute — the "strict and guessing in the same function" shape. A
+        // fourth field is refused for the same reason: silently dropping it
+        // would accept a word the parser did not understand.
+        if time_fields.len() > 3 {
+            return None;
+        }
+        let mut hms = [0u32; 3];
+        for (slot, field) in hms.iter_mut().zip(time_fields.iter()) {
+            *slot = field.parse::<u32>().ok()?;
+        }
+        (hms[0], hms[1], hms[2])
     } else {
         (0, 0, 0)
     };
@@ -32239,8 +32527,13 @@ fn cmd_directio(args: &str) {
                 return;
             }
             let path = resolve_path(parts[1]);
-            let offset: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let len: usize = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(4096);
+            let Some(offset) = optional_num::<u64>(&parts, 2, "directio", sub, "offset", 0) else {
+                return;
+            };
+            let Some(len) = optional_num::<usize>(&parts, 3, "directio", sub, "length", 4096)
+            else {
+                return;
+            };
             match directio::dio_read(&path, offset, len) {
                 Ok((data, r)) => {
                     shell_println!(
@@ -32272,7 +32565,9 @@ fn cmd_directio(args: &str) {
                 return;
             }
             let path = resolve_path(parts[1]);
-            let offset: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(offset) = optional_num::<u64>(&parts, 3, "directio", sub, "offset", 0) else {
+                return;
+            };
             let data: Vec<u8> = if let Some(hex) = parts[2].strip_prefix("hex:") {
                 // Parse hex bytes.
                 hex.as_bytes()
@@ -39159,10 +39454,10 @@ fn cmd_power(args: &str) {
             }
         }
         "idle" => {
-            let s = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(s) = optional_num::<u64>(&parts, 1, "power", sub, "idle time in seconds", 0)
+            else {
+                return;
+            };
             shell_println!("Idle {}s -> {}", s, power::check_idle(s).label());
         }
         "autosaver" => match parts.get(1).copied().unwrap_or("") {
@@ -39195,14 +39490,14 @@ fn cmd_power(args: &str) {
             }
         }
         "simbat" => {
-            let pct = parts
-                .get(1)
-                .and_then(|s| s.parse::<u8>().ok())
-                .unwrap_or(50);
-            let min = parts
-                .get(2)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(-1);
+            let Some(pct) = optional_num::<u8>(&parts, 1, "power", sub, "battery percentage", 50)
+            else {
+                return;
+            };
+            let Some(min) = optional_num::<i32>(&parts, 2, "power", sub, "minutes remaining", -1)
+            else {
+                return;
+            };
             let ch = parts.get(3).copied() == Some("charging");
             power::handle_battery_update(pct, min, ch);
             shell_println!(
@@ -39275,14 +39570,16 @@ fn cmd_display(args: &str) {
         "add" => {
             let id = parts.get(1).copied().unwrap_or("");
             let name = parts.get(2).copied().unwrap_or("Monitor");
-            let pw = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let ph = parts
-                .get(4)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pw) =
+                optional_num::<u32>(&parts, 3, "display", sub, "physical width in mm", 0)
+            else {
+                return;
+            };
+            let Some(ph) =
+                optional_num::<u32>(&parts, 4, "display", sub, "physical height in mm", 0)
+            else {
+                return;
+            };
             if id.is_empty() {
                 shell_println!("Usage: display add <id> [name] [phys_w_mm] [phys_h_mm]");
                 set_exit(1);
@@ -39417,10 +39714,10 @@ fn cmd_display(args: &str) {
             let id = parts.get(1).copied().unwrap_or("");
             let w = parts.get(2).and_then(|s| s.parse::<u32>().ok());
             let h = parts.get(3).and_then(|s| s.parse::<u32>().ok());
-            let hz = parts
-                .get(4)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(60);
+            let Some(hz) = optional_num::<u32>(&parts, 4, "display", sub, "refresh rate in Hz", 60)
+            else {
+                return;
+            };
             if let (Some(w), Some(h)) = (w, h) {
                 match display::set_resolution(id, w, h, hz) {
                     Ok(()) => {
@@ -41220,10 +41517,10 @@ fn cmd_netindicator(args: &str) {
         }
         "speed" => {
             let name = parts.get(1).copied().unwrap_or("");
-            let mbps = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(mbps) = optional_num::<u32>(&parts, 2, "netind", sub, "speed in Mbps", 0)
+            else {
+                return;
+            };
             match netindicator::set_speed(name, mbps) {
                 Ok(()) => shell_println!("{}: {}Mbps", name, mbps),
                 Err(e) => {
@@ -41284,10 +41581,10 @@ fn cmd_netindicator(args: &str) {
         }
         "report" => {
             let ssid = parts.get(1).copied().unwrap_or("");
-            let sig = parts
-                .get(2)
-                .and_then(|s| s.parse::<u8>().ok())
-                .unwrap_or(50);
+            let Some(sig) = optional_num::<u8>(&parts, 2, "netind", sub, "signal percentage", 50)
+            else {
+                return;
+            };
             let sec = match parts.get(3).copied().unwrap_or("wpa2") {
                 "open" => netindicator::WifiSecurity::Open,
                 "wep" => netindicator::WifiSecurity::Wep,
@@ -41295,10 +41592,9 @@ fn cmd_netindicator(args: &str) {
                 "wpa3" => netindicator::WifiSecurity::WPA3,
                 _ => netindicator::WifiSecurity::WPA2,
             };
-            let ch = parts
-                .get(4)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(6);
+            let Some(ch) = optional_num::<u32>(&parts, 4, "netind", sub, "channel", 6) else {
+                return;
+            };
             if ssid.is_empty() {
                 shell_println!("Usage: netind report <ssid> [signal] [security] [channel]");
                 set_exit(1);
@@ -48130,8 +48426,16 @@ fn cmd_timezone(args: &str) {
             }
         }
         "detect" => {
-            let lat: f32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            let lon: f32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let Some(lat) =
+                optional_num::<f32>(&parts, 1, "timezone", sub, "latitude in degrees", 0.0)
+            else {
+                return;
+            };
+            let Some(lon) =
+                optional_num::<f32>(&parts, 2, "timezone", sub, "longitude in degrees", 0.0)
+            else {
+                return;
+            };
             match timezone::detect_from_location(lat, lon) {
                 Ok(tz) => shell_println!("Detected: {}", tz),
                 Err(e) => {
@@ -48168,7 +48472,10 @@ fn cmd_timezone(args: &str) {
         }
         "addntp" => {
             let host = parts.get(1).copied().unwrap_or("pool.ntp.org");
-            let port: u16 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(123);
+            let Some(port) = optional_num::<u16>(&parts, 2, "timezone", sub, "port number", 123)
+            else {
+                return;
+            };
             match timezone::add_ntp_server(host, port) {
                 Ok(()) => shell_println!("Added {}", host),
                 Err(e) => {
@@ -67641,10 +67948,11 @@ fn cmd_httpd(args: &str) {
             shell_println!("  httpd stop             Stop HTTP server");
         }
         "start" => {
-            let port_str = parts.get(1).copied().unwrap_or("8080");
-            let port: u16 = port_str.parse().unwrap_or(0);
+            let Some(port) = optional_num::<u16>(&parts, 1, "httpd", sub, "port", 8080) else {
+                return;
+            };
             if port == 0 {
-                shell_println!("Invalid port: {}", port_str);
+                shell_println!("Invalid port: {}", port);
                 set_exit(1);
                 return;
             }
@@ -67661,10 +67969,11 @@ fn cmd_httpd(args: &str) {
             shell_println!("HTTP server stopped");
         }
         "tls" => {
-            let port_str = parts.get(1).copied().unwrap_or("443");
-            let port: u16 = port_str.parse().unwrap_or(0);
+            let Some(port) = optional_num::<u16>(&parts, 1, "httpd", sub, "port", 443) else {
+                return;
+            };
             if port == 0 {
-                shell_println!("Invalid port: {}", port_str);
+                shell_println!("Invalid port: {}", port);
                 set_exit(1);
                 return;
             }
@@ -67716,7 +68025,10 @@ fn cmd_httpd(args: &str) {
             shell_println!("  Enabled:      {}", httpd::rate_limit_enabled());
         }
         "log" => {
-            let count: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let Some(count) = optional_num::<usize>(&parts, 1, "httpd", sub, "entry count", 20)
+            else {
+                return;
+            };
             let entries = httpd::recent_access_log(count);
             if entries.is_empty() {
                 shell_println!("No access log entries.");
@@ -78931,8 +79243,21 @@ fn cmd_surroundsound(args: &str) {
                 "sr" | "sideright" => surroundsound::SpeakerChannel::SideRight,
                 _ => surroundsound::SpeakerChannel::Center,
             };
-            let trim: i32 = parts.get(3).unwrap_or(&"0").parse().unwrap_or(0);
-            let dist: u32 = parts.get(4).unwrap_or(&"200").parse().unwrap_or(200);
+            let Some(trim) =
+                optional_num::<i32>(&parts, 3, "surroundsound", sub, "trim in centibels", 0)
+            else {
+                return;
+            };
+            let Some(dist) = optional_num::<u32>(
+                &parts,
+                4,
+                "surroundsound",
+                sub,
+                "distance in centimetres",
+                200,
+            ) else {
+                return;
+            };
             match surroundsound::calibrate_speaker(id, ch, trim, dist) {
                 Ok(()) => shell_println!(
                     "Calibrated {} on #{}: trim={} cb, dist={} cm",
@@ -78978,7 +79303,11 @@ fn cmd_surroundsound(args: &str) {
                     return;
                 }
             };
-            let hz: u32 = parts.get(2).unwrap_or(&"80").parse().unwrap_or(80);
+            let Some(hz) =
+                optional_num::<u32>(&parts, 2, "surroundsound", sub, "frequency in Hz", 80)
+            else {
+                return;
+            };
             match surroundsound::set_crossover(id, hz) {
                 Ok(()) => shell_println!("Crossover #{}: {} Hz", id, hz.clamp(40, 200)),
                 Err(e) => {
@@ -79103,8 +79432,14 @@ fn cmd_audioeq(args: &str) {
                     return;
                 }
             };
-            let band: usize = parts.get(2).unwrap_or(&"0").parse().unwrap_or(0);
-            let gain: i32 = parts.get(3).unwrap_or(&"0").parse().unwrap_or(0);
+            let Some(band) = optional_num::<usize>(&parts, 2, "audioeq", sub, "band index", 0)
+            else {
+                return;
+            };
+            let Some(gain) = optional_num::<i32>(&parts, 3, "audioeq", sub, "gain in centibels", 0)
+            else {
+                return;
+            };
             match audioeq::set_band_gain(id, band, gain) {
                 Ok(()) => shell_println!("Band {} gain: {} cb", band, gain.clamp(-1200, 1200)),
                 Err(e) => {
@@ -79122,7 +79457,10 @@ fn cmd_audioeq(args: &str) {
                     return;
                 }
             };
-            let gain: i32 = parts.get(2).unwrap_or(&"0").parse().unwrap_or(0);
+            let Some(gain) = optional_num::<i32>(&parts, 2, "audioeq", sub, "gain in centibels", 0)
+            else {
+                return;
+            };
             match audioeq::set_preamp(id, gain) {
                 Ok(()) => shell_println!("Preamp: {} cb", gain.clamp(-1200, 1200)),
                 Err(e) => {
@@ -79831,7 +80169,11 @@ fn cmd_dpiscaling(args: &str) {
             let Some(id) = required_num::<u32>(&parts, 1, "dpiscaling", sub, "display id") else {
                 return;
             };
-            let pct: u32 = parts.get(2).unwrap_or(&"100").parse().unwrap_or(100);
+            let Some(pct) =
+                optional_num::<u32>(&parts, 2, "dpiscaling", sub, "scale percentage", 100)
+            else {
+                return;
+            };
             match dpiscaling::set_scale(id, pct) {
                 Ok(()) => shell_println!("Scale: {}%", pct.clamp(50, 500)),
                 Err(e) => {
@@ -79863,7 +80205,9 @@ fn cmd_dpiscaling(args: &str) {
         }
         "register" => {
             let name = parts.get(1).copied().unwrap_or("Monitor");
-            let dpi: u32 = parts.get(2).unwrap_or(&"96").parse().unwrap_or(96);
+            let Some(dpi) = optional_num::<u32>(&parts, 2, "dpiscaling", sub, "DPI", 96) else {
+                return;
+            };
             match dpiscaling::register_display(name, dpi) {
                 Ok(id) => shell_println!("Registered display #{}: {} ({}dpi)", id, name, dpi),
                 Err(e) => {
@@ -79880,7 +80224,11 @@ fn cmd_dpiscaling(args: &str) {
                 "permonitorv2" | "pmv2" => dpiscaling::DpiAwareness::PerMonitorAwareV2,
                 _ => dpiscaling::DpiAwareness::SystemAware,
             };
-            let pct: u32 = parts.get(3).unwrap_or(&"0").parse().unwrap_or(0);
+            let Some(pct) =
+                optional_num::<u32>(&parts, 3, "dpiscaling", sub, "scale percentage", 0)
+            else {
+                return;
+            };
             match dpiscaling::set_app_override(app, awareness, pct) {
                 Ok(()) => shell_println!("Override for {}: {} {}%", app, awareness.label(), pct),
                 Err(e) => {
@@ -87812,7 +88160,9 @@ fn cmd_netusage(args: &str) {
             } else {
                 netusage::Direction::Download
             };
-            let bytes = parts[4].parse::<u64>().unwrap_or(0);
+            let Some(bytes) = readable_num::<u64>(parts[4], "netusage", sub, "byte count") else {
+                return;
+            };
             match netusage::record_traffic(app, iface, dir, bytes) {
                 Ok(()) => shell_println!("Recorded {} bytes {} for '{}'", bytes, dir.label(), app),
                 Err(e) => {
@@ -87845,7 +88195,10 @@ fn cmd_netusage(args: &str) {
             let cap = if parts[2] == "none" || parts[2] == "off" {
                 None
             } else {
-                Some(parts[2].parse::<u64>().unwrap_or(0))
+                let Some(b) = readable_num::<u64>(parts[2], "netusage", sub, "byte count") else {
+                    return;
+                };
+                Some(b)
             };
             match netusage::set_cap(app, cap) {
                 Ok(()) => match cap {
@@ -87888,10 +88241,10 @@ fn cmd_netusage(args: &str) {
             }
         }
         "top" => {
-            let max = parts
-                .get(1)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(10);
+            let Some(max) = optional_num::<usize>(&parts, 1, "netusage", sub, "app count", 10)
+            else {
+                return;
+            };
             let top = netusage::top_apps(max);
             if top.is_empty() {
                 shell_println!("No usage data");
@@ -88967,10 +89320,11 @@ fn cmd_fontpreview(args: &str) {
         "preview" | "show" => {
             if let Some(id_s) = parts.get(1) {
                 if let Ok(id) = id_s.parse::<u32>() {
-                    let size = parts
-                        .get(2)
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(16);
+                    let Some(size) =
+                        optional_num::<u32>(&parts, 2, "fontpreview", sub, "point size", 16)
+                    else {
+                        return;
+                    };
                     let sample = if parts.len() > 3 {
                         Some(parts[3..].join(" "))
                     } else {
@@ -89005,10 +89359,10 @@ fn cmd_fontpreview(args: &str) {
                 .split(',')
                 .filter_map(|s| s.parse::<u32>().ok())
                 .collect();
-            let size = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(14);
+            let Some(size) = optional_num::<u32>(&parts, 2, "fontpreview", sub, "point size", 14)
+            else {
+                return;
+            };
             match fontpreview::compare(&ids, None, size) {
                 Ok(results) => {
                     for r in &results {
@@ -89098,10 +89452,10 @@ fn cmd_fontpreview(args: &str) {
             let cat = parse_font_category(parts[3]);
             let path = parts[4];
             let version = parts.get(5).copied().unwrap_or("1.0");
-            let glyphs = parts
-                .get(6)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(glyphs) = optional_num::<u32>(&parts, 6, "fontpreview", sub, "glyph count", 0)
+            else {
+                return;
+            };
             match fontpreview::add_font(parts[1], style, cat, path, version, glyphs) {
                 Ok(id) => shell_println!("Added font #{}: {} {}", id, parts[1], style.label()),
                 Err(e) => {
@@ -91528,11 +91882,21 @@ fn cmd_raidmgr(args: &str) {
             let name = parts[1];
             let level = parse_raid_level(parts[2]);
             let disk_ids: Vec<&str> = parts[3].split(',').collect();
-            let size: u64 = parts
-                .get(4)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1_000_000_000);
-            let stripe: u32 = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(64);
+            let Some(size) = optional_num::<u64>(
+                &parts,
+                4,
+                "raidmgr",
+                sub,
+                "disk size in bytes",
+                1_000_000_000,
+            ) else {
+                return;
+            };
+            let Some(stripe) =
+                optional_num::<u32>(&parts, 5, "raidmgr", sub, "stripe size in KiB", 64)
+            else {
+                return;
+            };
             match raidmgr::create_array(name, level, &disk_ids, size, stripe) {
                 Ok(id) => shell_println!("Created {} array '{}' (id={})", level.label(), name, id),
                 Err(e) => {
@@ -91573,10 +91937,16 @@ fn cmd_raidmgr(args: &str) {
                 }
             };
             let disk = parts[2];
-            let size: u64 = parts
-                .get(3)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1_000_000_000);
+            let Some(size) = optional_num::<u64>(
+                &parts,
+                3,
+                "raidmgr",
+                sub,
+                "disk size in bytes",
+                1_000_000_000,
+            ) else {
+                return;
+            };
             let spare = parts.get(4).is_some_and(|s| *s == "spare");
             match raidmgr::add_disk(aid, disk, size, spare) {
                 Ok(()) => shell_println!(
@@ -92583,9 +92953,18 @@ fn cmd_displaycal(args: &str) {
                     return;
                 }
             };
-            let r: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(220);
-            let g: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(220);
-            let b: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(220);
+            let Some(r) = optional_num::<u32>(&parts, 2, "displaycal", sub, "red gamma", 220)
+            else {
+                return;
+            };
+            let Some(g) = optional_num::<u32>(&parts, 3, "displaycal", sub, "green gamma", 220)
+            else {
+                return;
+            };
+            let Some(b) = optional_num::<u32>(&parts, 4, "displaycal", sub, "blue gamma", 220)
+            else {
+                return;
+            };
             match displaycal::set_gamma(id, r, g, b) {
                 Ok(()) => shell_println!("Gamma set to {}/{}/{} for monitor {}", r, g, b, id),
                 Err(e) => {
@@ -95741,10 +96120,9 @@ fn cmd_netmon(args: &str) {
             }
         }
         "get" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = optional_num::<u32>(&parts, 1, "netmon", sub, "connection id", 0) else {
+                return;
+            };
             match netmon::get_connection(id) {
                 Some(c) => {
                     shell_println!("Connection #{}:", c.id);
@@ -95761,10 +96139,9 @@ fn cmd_netmon(args: &str) {
         }
         "pid" => {
             netmon::init_defaults();
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = optional_num::<u32>(&parts, 1, "netmon", sub, "PID", 0) else {
+                return;
+            };
             let conns = netmon::per_process(pid);
             shell_println!("{} connection(s) for PID {}:", conns.len(), pid);
             for c in &conns {
@@ -95781,10 +96158,9 @@ fn cmd_netmon(args: &str) {
             }
         }
         "close" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = optional_num::<u32>(&parts, 1, "netmon", sub, "connection id", 0) else {
+                return;
+            };
             match netmon::close_connection(id) {
                 Ok(()) => shell_println!("Connection {} closed.", id),
                 Err(e) => {
@@ -95897,6 +96273,16 @@ fn cmd_groupmgr(args: &str) {
             };
             match groupmgr::create_group(gid, name, gtype, "User-created group") {
                 Ok(()) => shell_println!("Created group '{}' (GID {})", name, gid),
+                // `system` is still spelled out in the usage line and still
+                // parses, because refusing the *word* would leave the operator
+                // guessing which of the three types they may use and why. What
+                // they get instead is the reason.
+                Err(crate::error::KernelError::PermissionDenied) => {
+                    shell_println!(
+                        "groupmgr: create: system groups are defined at startup and cannot be created here"
+                    );
+                    set_exit(1);
+                }
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
                     set_exit(1);
@@ -95915,15 +96301,20 @@ fn cmd_groupmgr(args: &str) {
             // superuser. Every unwrap_or(0) in this function names root or the
             // root group, on whichever axis it sits.
             //
-            // Refusing the word does not make the operation safe: a correctly
-            // typed `groupmgr delete 0` still destroys `root`. That is a
-            // separate defect, filed as
-            // `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING`.
+            // Refusing the word did not, on its own, make the operation safe:
+            // a correctly typed `groupmgr delete 0` still destroyed `root`.
+            // That second defect is now fixed in `groupmgr::delete_group`,
+            // which refuses any `GroupType::System` group — by type, so `wheel`
+            // at GID 1 is covered by the same rule as `root` at GID 0.
             let Some(gid) = required_num::<u32>(&parts, 1, "groupmgr", sub, "group id") else {
                 return;
             };
             match groupmgr::delete_group(gid) {
                 Ok(()) => shell_println!("Deleted group {}.", gid),
+                Err(crate::error::KernelError::PermissionDenied) => {
+                    shell_println!("groupmgr: delete: group {} is a system group", gid);
+                    set_exit(1);
+                }
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
                     set_exit(1);
@@ -96847,8 +97238,9 @@ fn cmd_cgroupfs(args: &str) {
         }
         "cpu" => {
             let path = parts.get(1).copied().unwrap_or("");
-            let weight_str = parts.get(2).copied().unwrap_or("0");
-            let weight = weight_str.parse::<u32>().unwrap_or(0);
+            let Some(weight) = optional_num::<u32>(&parts, 2, "cgroupfs", sub, "weight", 0) else {
+                return;
+            };
             if path.is_empty() || weight == 0 {
                 shell_println!("Usage: cgroupfs cpu <path> <weight 1-10000>");
                 set_exit(1);
@@ -96865,8 +97257,10 @@ fn cmd_cgroupfs(args: &str) {
         }
         "mem" => {
             let path = parts.get(1).copied().unwrap_or("");
-            let bytes_str = parts.get(2).copied().unwrap_or("0");
-            let bytes = bytes_str.parse::<u64>().unwrap_or(0);
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "cgroupfs", sub, "byte count", 0)
+            else {
+                return;
+            };
             if path.is_empty() {
                 shell_println!("Usage: cgroupfs mem <path> <bytes>");
                 set_exit(1);
@@ -96883,8 +97277,9 @@ fn cmd_cgroupfs(args: &str) {
         }
         "addpid" => {
             let path = parts.get(1).copied().unwrap_or("");
-            let pid_str = parts.get(2).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
+            let Some(pid) = optional_num::<u32>(&parts, 2, "cgroupfs", sub, "PID", 0) else {
+                return;
+            };
             if path.is_empty() || pid == 0 {
                 shell_println!("Usage: cgroupfs addpid <path> <pid>");
                 set_exit(1);
@@ -97936,8 +98331,9 @@ fn cmd_pftrack(args: &str) {
             }
         }
         "top" => {
-            let n_str = parts.get(1).copied().unwrap_or("5");
-            let n = n_str.parse::<usize>().unwrap_or(5);
+            let Some(n) = optional_num::<usize>(&parts, 1, "pftrack", sub, "entry count", 5) else {
+                return;
+            };
             let n = if n == 0 { 5 } else { n };
             pftrack::init_defaults();
             let top = pftrack::top_faulters(n);
@@ -97953,8 +98349,10 @@ fn cmd_pftrack(args: &str) {
             }
         }
         "hotspots" => {
-            let n_str = parts.get(1).copied().unwrap_or("10");
-            let n = n_str.parse::<usize>().unwrap_or(10);
+            let Some(n) = optional_num::<usize>(&parts, 1, "pftrack", sub, "entry count", 10)
+            else {
+                return;
+            };
             pftrack::init_defaults();
             let hs = pftrack::hotspots(n);
             shell_println!("Top {} hotspot addresses:", hs.len());
@@ -97969,8 +98367,10 @@ fn cmd_pftrack(args: &str) {
             }
         }
         "recent" => {
-            let n_str = parts.get(1).copied().unwrap_or("20");
-            let n = n_str.parse::<usize>().unwrap_or(20);
+            let Some(n) = optional_num::<usize>(&parts, 1, "pftrack", sub, "entry count", 20)
+            else {
+                return;
+            };
             pftrack::init_defaults();
             let events = pftrack::recent_events(n);
             shell_println!("Recent faults ({}):", events.len());
@@ -98043,8 +98443,10 @@ fn cmd_ipclog(args: &str) {
             }
         }
         "recent" => {
-            let n_str = parts.get(1).copied().unwrap_or("20");
-            let n = n_str.parse::<usize>().unwrap_or(20);
+            let Some(n) = optional_num::<usize>(&parts, 1, "ipclog", sub, "message count", 20)
+            else {
+                return;
+            };
             ipclog::init_defaults();
             let msgs = ipclog::recent(n);
             shell_println!("Recent IPC messages ({}):", msgs.len());
@@ -98063,8 +98465,9 @@ fn cmd_ipclog(args: &str) {
             }
         }
         "pid" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
+            let Some(pid) = optional_num::<u32>(&parts, 1, "ipclog", sub, "PID", 0) else {
+                return;
+            };
             if pid == 0 {
                 shell_println!("Usage: ipclog pid <pid>");
                 set_exit(1);
@@ -98086,8 +98489,9 @@ fn cmd_ipclog(args: &str) {
             }
         }
         "channel" => {
-            let ch_str = parts.get(1).copied().unwrap_or("0");
-            let ch = ch_str.parse::<u32>().unwrap_or(0);
+            let Some(ch) = optional_num::<u32>(&parts, 1, "ipclog", sub, "channel id", 0) else {
+                return;
+            };
             if ch == 0 {
                 shell_println!("Usage: ipclog channel <channel_id>");
                 set_exit(1);
@@ -98827,12 +99231,10 @@ fn cmd_rcustat(args: &str) {
         }
         "gp" => {
             rcustat::init_defaults();
-            let n = parts
-                .get(1)
-                .copied()
-                .unwrap_or("10")
-                .parse::<usize>()
-                .unwrap_or(10);
+            let Some(n) = optional_num::<usize>(&parts, 1, "rcustat", sub, "entry count", 10)
+            else {
+                return;
+            };
             let hist = rcustat::gp_history(n);
             if hist.is_empty() {
                 shell_println!("No grace period history.");
@@ -98866,12 +99268,10 @@ fn cmd_rcustat(args: &str) {
         }
         "end" => {
             rcustat::init_defaults();
-            let cb = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u64>()
-                .unwrap_or(0);
+            let Some(cb) = optional_num::<u64>(&parts, 1, "rcustat", sub, "callback count", 0)
+            else {
+                return;
+            };
             match rcustat::end_gp(rcustat::RcuFlavor::Preempt, cb) {
                 Ok(()) => shell_println!("Grace period ended ({} callbacks).", cb),
                 Err(e) => {
@@ -98882,12 +99282,9 @@ fn cmd_rcustat(args: &str) {
         }
         "stall" => {
             rcustat::init_defaults();
-            let cpu = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            let Some(cpu) = optional_num::<u32>(&parts, 1, "rcustat", sub, "CPU number", 0) else {
+                return;
+            };
             match rcustat::report_stall(cpu) {
                 Ok(()) => shell_println!("Stall reported on cpu{}.", cpu),
                 Err(e) => {
@@ -99377,12 +99774,9 @@ fn cmd_memcg(args: &str) {
         "limit" => {
             memcg::init_defaults();
             let path = parts.get(1).copied().unwrap_or("/");
-            let limit = parts
-                .get(2)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u64>()
-                .unwrap_or(0);
+            let Some(limit) = optional_num::<u64>(&parts, 2, "memcg", sub, "byte count", 0) else {
+                return;
+            };
             match memcg::set_limit(path, limit) {
                 Ok(()) => shell_println!("Set limit for '{}' to {}.", path, limit),
                 Err(e) => {
@@ -99394,12 +99788,9 @@ fn cmd_memcg(args: &str) {
         "charge" => {
             memcg::init_defaults();
             let path = parts.get(1).copied().unwrap_or("/");
-            let bytes = parts
-                .get(2)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u64>()
-                .unwrap_or(0);
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "memcg", sub, "byte count", 0) else {
+                return;
+            };
             match memcg::charge(path, bytes) {
                 Ok(()) => shell_println!("Charged {} bytes to '{}'.", bytes, path),
                 Err(e) => {
@@ -99411,12 +99802,9 @@ fn cmd_memcg(args: &str) {
         "uncharge" => {
             memcg::init_defaults();
             let path = parts.get(1).copied().unwrap_or("/");
-            let bytes = parts
-                .get(2)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u64>()
-                .unwrap_or(0);
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "memcg", sub, "byte count", 0) else {
+                return;
+            };
             match memcg::uncharge(path, bytes) {
                 Ok(()) => shell_println!("Uncharged {} bytes from '{}'.", bytes, path),
                 Err(e) => {
@@ -103934,10 +104322,10 @@ fn cmd_vmballoon(args: &str) {
             shell_println!("vmballoon: initialized");
         }
         "inflate" => {
-            let pages = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1000);
+            let Some(pages) = optional_num::<u64>(&parts, 1, "vmballoon", sub, "page count", 1000)
+            else {
+                return;
+            };
             match vmballoon::inflate(pages) {
                 Ok(()) => shell_println!("vmballoon: inflated {} pages", pages),
                 Err(e) => {
@@ -103947,10 +104335,10 @@ fn cmd_vmballoon(args: &str) {
             }
         }
         "deflate" => {
-            let pages = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1000);
+            let Some(pages) = optional_num::<u64>(&parts, 1, "vmballoon", sub, "page count", 1000)
+            else {
+                return;
+            };
             match vmballoon::deflate(pages) {
                 Ok(()) => shell_println!("vmballoon: deflated {} pages", pages),
                 Err(e) => {
@@ -103960,10 +104348,10 @@ fn cmd_vmballoon(args: &str) {
             }
         }
         "target" => {
-            let pages = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(pages) = optional_num::<u64>(&parts, 1, "vmballoon", sub, "page count", 0)
+            else {
+                return;
+            };
             match vmballoon::set_target(pages) {
                 Ok(()) => shell_println!("vmballoon: target → {} pages", pages),
                 Err(e) => {
@@ -104578,14 +104966,13 @@ fn cmd_msivec(args: &str) {
                 "msi" => msivec::MsiType::Msi,
                 _ => msivec::MsiType::MsiX,
             };
-            let count = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            let cpu = parts
-                .get(4)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(count) = optional_num::<u32>(&parts, 3, "msivec", sub, "vector count", 1)
+            else {
+                return;
+            };
+            let Some(cpu) = optional_num::<u32>(&parts, 4, "msivec", sub, "CPU number", 0) else {
+                return;
+            };
             match msivec::alloc_vectors(dev, mtype, count, cpu) {
                 Ok(()) => shell_println!(
                     "msivec: allocated {} {} vectors for {} on cpu {}",
@@ -104622,10 +105009,9 @@ fn cmd_msivec(args: &str) {
         }
         "target" => {
             let dev = parts.get(1).copied().unwrap_or("");
-            let cpu = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(cpu) = optional_num::<u32>(&parts, 2, "msivec", sub, "CPU number", 0) else {
+                return;
+            };
             match msivec::set_target_cpu(dev, cpu) {
                 Ok(()) => shell_println!("msivec: {} target cpu set to {}", dev, cpu),
                 Err(e) => {
@@ -105545,10 +105931,11 @@ fn cmd_ttystat(args: &str) {
                 "vt" => ttystat::TtyType::Virtual,
                 _ => ttystat::TtyType::Console,
             };
-            let buf = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(4096);
+            let Some(buf) =
+                optional_num::<u32>(&parts, 3, "ttystat", sub, "buffer size in bytes", 4096)
+            else {
+                return;
+            };
             match ttystat::register(name, ttype, buf) {
                 Ok(()) => shell_println!("ttystat: registered {} [{}]", name, ttype.label()),
                 Err(e) => {
@@ -105559,10 +105946,10 @@ fn cmd_ttystat(args: &str) {
         }
         "read" => {
             let name = parts.get(1).copied().unwrap_or("");
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "ttystat", sub, "byte count", 1)
+            else {
+                return;
+            };
             match ttystat::record_read(name, bytes) {
                 Ok(()) => shell_println!("ttystat: read {} bytes from {}", bytes, name),
                 Err(e) => {
@@ -105573,10 +105960,10 @@ fn cmd_ttystat(args: &str) {
         }
         "write" => {
             let name = parts.get(1).copied().unwrap_or("");
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "ttystat", sub, "byte count", 1)
+            else {
+                return;
+            };
             match ttystat::record_write(name, bytes) {
                 Ok(()) => shell_println!("ttystat: write {} bytes to {}", bytes, name),
                 Err(e) => {
@@ -106262,14 +106649,14 @@ fn cmd_buddyinfo(args: &str) {
         }
         "update" => {
             let name = parts.get(1).copied().unwrap_or("");
-            let order = parts
-                .get(2)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-            let count = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(order) = optional_num::<usize>(&parts, 2, "buddyinfo", sub, "order", 0) else {
+                return;
+            };
+            let Some(count) =
+                optional_num::<u64>(&parts, 3, "buddyinfo", sub, "free-block count", 0)
+            else {
+                return;
+            };
             match budstat::update_free(name, order, count) {
                 Ok(()) => shell_println!("buddyinfo: {} order {} = {}", name, order, count),
                 Err(e) => {
@@ -106280,10 +106667,9 @@ fn cmd_buddyinfo(args: &str) {
         }
         "split" => {
             let name = parts.get(1).copied().unwrap_or("");
-            let order = parts
-                .get(2)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
+            let Some(order) = optional_num::<usize>(&parts, 2, "buddyinfo", sub, "order", 0) else {
+                return;
+            };
             match budstat::record_split(name, order) {
                 Ok(()) => shell_println!("buddyinfo: split {} order {}", name, order),
                 Err(e) => {
@@ -107347,11 +107733,20 @@ fn cmd_taskbar(args: &str) {
             } else if val == "pulse" {
                 taskbar::ProgressState::Indeterminate
             } else if let Some(rest) = val.strip_prefix("pause:") {
-                taskbar::ProgressState::Paused(rest.parse::<u8>().unwrap_or(0))
+                let Some(pct) = readable_num::<u8>(rest, "taskbar", sub, "percentage") else {
+                    return;
+                };
+                taskbar::ProgressState::Paused(pct)
             } else if let Some(rest) = val.strip_prefix("error:") {
-                taskbar::ProgressState::Error(rest.parse::<u8>().unwrap_or(0))
+                let Some(pct) = readable_num::<u8>(rest, "taskbar", sub, "percentage") else {
+                    return;
+                };
+                taskbar::ProgressState::Error(pct)
             } else {
-                taskbar::ProgressState::Normal(val.parse::<u8>().unwrap_or(0))
+                let Some(pct) = readable_num::<u8>(val, "taskbar", sub, "percentage") else {
+                    return;
+                };
+                taskbar::ProgressState::Normal(pct)
             };
             match taskbar::set_progress(app_id, ps) {
                 Ok(()) => shell_println!("Progress set for {}", app_id),
@@ -130348,26 +130743,29 @@ fn cmd_fault_inject(args: &str) {
 
     match parts[0] {
         "fail" => {
-            let count = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            let Some(count) =
+                optional_num::<u32>(&parts, 1, "faultinject", "fail", "allocation count", 1)
+            else {
+                return;
+            };
             crate::mm::fault_inject::arm_fail_next(count);
             shell_println!("Armed: fail next {} allocation(s)", count);
         }
         "after" => {
-            let count = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            let Some(count) =
+                optional_num::<u32>(&parts, 1, "faultinject", "after", "allocation count", 1)
+            else {
+                return;
+            };
             crate::mm::fault_inject::arm_fail_after(count);
             shell_println!("Armed: fail after {} successful alloc(s)", count);
         }
         "prob" => {
-            let denom = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(10);
+            let Some(denom) =
+                optional_num::<u32>(&parts, 1, "faultinject", "prob", "denominator", 10)
+            else {
+                return;
+            };
             crate::mm::fault_inject::arm_probabilistic(denom);
             shell_println!("Armed: fail every ~1/{} allocations", denom);
         }

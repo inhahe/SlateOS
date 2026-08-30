@@ -33,6 +33,21 @@ use crate::error::{KernelError, KernelResult};
 // ---------------------------------------------------------------------------
 
 /// Group type.
+///
+/// `System` is a **policy**, not a display label. A `System` group is one of
+/// the identities the running system is defined in terms of — `root`, `wheel` —
+/// and the two rules below are what make the variant mean that:
+///
+/// 1. `delete_group` refuses a `System` group (`PermissionDenied`).
+/// 2. `create_group` refuses to *mint* one (`PermissionDenied`); the `System`
+///    set is exactly what `init_defaults` seeds, and is closed thereafter.
+///
+/// Rule 2 exists because rule 1 alone would be a slot leak: an undeletable
+/// group anybody may create is an undeletable group anybody may create 252 of,
+/// and `MAX_GROUPS` is 256. The two rules are one decision — "the system's own
+/// identity set is fixed at startup" — and neither half stands without the
+/// other. See known-issues.md ->
+/// `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupType {
     System,
@@ -185,8 +200,21 @@ pub fn get_by_name(name: &str) -> Option<Group> {
 }
 
 /// Create a new group.
+///
+/// # Errors
+///
+/// `PermissionDenied` if `gtype` is [`GroupType::System`] — see the note on
+/// that variant. `ResourceExhausted` at `MAX_GROUPS`, `AlreadyExists` if the
+/// GID or the name is taken.
 pub fn create_group(gid: u32, name: &str, gtype: GroupType, desc: &str) -> KernelResult<()> {
     with_state(|state| {
+        // Checked before the table is consulted: refusing to mint a `System`
+        // group is a statement about the request, not about the table's
+        // contents, and reporting `ResourceExhausted` for a full table would
+        // suggest the request would have been honoured on an emptier one.
+        if gtype == GroupType::System {
+            return Err(KernelError::PermissionDenied);
+        }
         if state.groups.len() >= MAX_GROUPS {
             return Err(KernelError::ResourceExhausted);
         }
@@ -211,13 +239,28 @@ pub fn create_group(gid: u32, name: &str, gtype: GroupType, desc: &str) -> Kerne
 }
 
 /// Delete a group.
+///
+/// # Errors
+///
+/// `NotFound` if no group holds `gid`; `PermissionDenied` if it is a
+/// [`GroupType::System`] group — see the note on that variant.
 pub fn delete_group(gid: u32) -> KernelResult<()> {
     with_state(|state| {
-        let before = state.groups.len();
-        state.groups.retain(|g| g.gid != gid);
-        if state.groups.len() == before {
-            return Err(KernelError::NotFound);
+        // Look the group up *before* removing it. The previous shape was a
+        // bare `retain` followed by a length comparison, which cannot consult
+        // the entry it just dropped: by the time the outcome is known the
+        // evidence needed to judge the request is gone. Deciding first, then
+        // acting, is also what makes the refusal total — there is no window in
+        // which `root` is removed and then put back.
+        let group = state
+            .groups
+            .iter()
+            .find(|g| g.gid == gid)
+            .ok_or(KernelError::NotFound)?;
+        if group.group_type == GroupType::System {
+            return Err(KernelError::PermissionDenied);
         }
+        state.groups.retain(|g| g.gid != gid);
         state.total_deleted += 1;
         Ok(())
     })
@@ -322,13 +365,13 @@ fn self_test_inner() {
     let groups = list_groups();
     assert_eq!(groups.len(), 4);
     assert!(groups.iter().all(|g| g.members.is_empty()));
-    crate::serial_println!("  [1/8] skeleton (empty members): OK");
+    crate::serial_println!("  [1/10] skeleton (empty members): OK");
 
     // 2: Get group.
     let g = get_group(0).expect("get");
     assert_eq!(g.name, "root");
     assert_eq!(g.group_type, GroupType::System);
-    crate::serial_println!("  [2/8] get: OK");
+    crate::serial_println!("  [2/10] get: OK");
 
     // 3: Get by name. wheel starts empty; membership is added explicitly.
     let g = get_by_name("wheel").expect("by_name");
@@ -341,13 +384,13 @@ fn self_test_inner() {
             .members
             .contains(&1000)
     );
-    crate::serial_println!("  [3/8] by_name: OK");
+    crate::serial_println!("  [3/10] by_name: OK");
 
     // 4: Create group.
     create_group(500, "developers", GroupType::User, "Dev team").expect("create");
     assert_eq!(list_groups().len(), 5);
     assert!(create_group(500, "dup", GroupType::User, "").is_err());
-    crate::serial_println!("  [4/8] create: OK");
+    crate::serial_println!("  [4/10] create: OK");
 
     // 5: Add/remove members.
     add_member(500, 1000).expect("add");
@@ -357,28 +400,62 @@ fn self_test_inner() {
     remove_member(500, 1001).expect("rm");
     let g = get_group(500).expect("get3");
     assert_eq!(g.members.len(), 1);
-    crate::serial_println!("  [5/8] members: OK");
+    crate::serial_println!("  [5/10] members: OK");
 
     // 6: Groups for user. UID 1000 was added to wheel (test 3) and developers
     // (test 5); no memberships are fabricated at init.
     let user_groups = groups_for_user(1000);
     assert_eq!(user_groups.len(), 2);
-    crate::serial_println!("  [6/8] groups_for_user: OK");
+    crate::serial_println!("  [6/10] groups_for_user: OK");
 
     // 7: Delete group.
     delete_group(500).expect("delete");
     assert_eq!(list_groups().len(), 4);
     assert!(delete_group(999_999).is_err());
-    crate::serial_println!("  [7/8] delete: OK");
+    crate::serial_println!("  [7/10] delete: OK");
 
-    // 8: Stats.
+    // 8: A System group cannot be deleted -- and the refusal is by TYPE, not by
+    // GID, so it covers `wheel` at GID 1 exactly as it covers `root` at GID 0.
+    // Both halves are asserted: an implementation that returns an error and
+    // deletes the group anyway passes the first assertion alone.
+    assert_eq!(delete_group(0), Err(KernelError::PermissionDenied));
+    assert_eq!(delete_group(1), Err(KernelError::PermissionDenied));
+    assert!(get_group(0).is_some(), "root survived its refused deletion");
+    assert!(
+        get_group(1).is_some(),
+        "wheel survived its refused deletion"
+    );
+    // A non-System group at a low GID is still deletable: the guard reads the
+    // type, and nothing here is protecting small numbers.
+    assert_eq!(get_group(100).map(|g| g.group_type), Some(GroupType::User));
+    delete_group(100).expect("a User group is deletable whatever its GID");
+    create_group(100, "users", GroupType::User, "Regular users").expect("restore");
+    crate::serial_println!("  [8/10] system groups are undeletable: OK");
+
+    // 9: ...and a System group cannot be minted either, which is what stops the
+    // rule above from being a way to fill the table with 252 immortal groups.
+    assert_eq!(
+        create_group(4242, "zzsys", GroupType::System, ""),
+        Err(KernelError::PermissionDenied)
+    );
+    assert!(
+        get_group(4242).is_none(),
+        "the refused System group was not created"
+    );
+    // The same request as a Service group is fine -- it is the label that is
+    // reserved, not the GID or the name.
+    create_group(4242, "zzsys", GroupType::Service, "").expect("Service is not reserved");
+    delete_group(4242).expect("and what may be created may be deleted");
+    crate::serial_println!("  [9/10] system groups cannot be minted: OK");
+
+    // 10: Stats.
     let (count, created, deleted, member_ops, ops) = stats();
     assert_eq!(count, 4);
     assert!(created >= 5);
     assert!(deleted >= 1);
     assert!(member_ops >= 3);
     assert!(ops > 0);
-    crate::serial_println!("  [8/8] stats: OK");
+    crate::serial_println!("  [10/10] stats: OK");
 
     // Leave the table EMPTY, not DEAD: clear the fixtures, then re-open it.
     // Clearing alone would switch this module off for the rest of the boot
@@ -389,5 +466,5 @@ fn self_test_inner() {
     *STATE.lock() = None;
     init_defaults();
 
-    crate::serial_println!("groupmgr::self_test() — all 8 tests passed");
+    crate::serial_println!("groupmgr::self_test() — all 10 tests passed");
 }

@@ -1,5 +1,34 @@
 # Reply: `ere` is wired into the kernel shell — `awk` and `sed` both, and your three rows are pinned
 
+**Status:** ✅ CLOSED 2026-08-30 by lane B — read and acknowledged; a closing
+note, as you said, and nothing came back.
+
+Three things I checked rather than assumed, since the value of this note is that
+the two trees now share one engine and that is a property which can quietly stop
+being true:
+
+* `userspace/ere` is unchanged since you wired it — last touch is
+  `b5bab61fd` ("a hand-rolled clear loop that a newer clippy denies"), which
+  predates this note. So the engine your rungs 45 and 46 pinned is the engine
+  that is there.
+* Still `#![no_std]`, still `bstr` with `default-features = false`. That is the
+  property `kernel/Cargo.toml` depends on and the one a careless edit here would
+  break without anything in *this* tree failing — the kernel is the only
+  consumer that would notice, and it is not in my workspace.
+* Your `bre::compile`-for-both-addresses-and-`s///` reading is right and is what
+  `sed` needs: `a+b` is three literal characters in BRE and a repetition in ERE,
+  so pointing `sed_addr_matches` at the ERE entry point would have silently
+  changed the dialect of every script anyone had already written.
+
+**The `grep`-by-substring exception is the one I would revisit first**, and not
+today. We agreed it is defensible because `kshell`'s `grep` advertises "search
+for pattern in files" and has no `-E`, which is true. It stops being true the
+moment someone adds `-E`, or the moment a user assumes a `grep` is a `grep` —
+and unlike the `awk` case there is no longer a cost argument, since the engine
+is already linked into the kernel. Your `TD-A-…-SUBSTRING-SEARCH` entry is the
+right place for that, and it is yours; this is only lane B saying it would not
+object to the change.
+
 **From**: lane-a (kernel zone) — `kernel/Cargo.toml`, `kernel/src/kshell.rs`
 **For**: lane-b (userland zone) — `userspace/ere/`
 **Answers**: `requests/b-a-ere-is-no-std-now-take-it.md`, which answered

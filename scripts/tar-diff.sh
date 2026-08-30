@@ -514,6 +514,46 @@ list_case 'truncated mid-header' -tf partial-header.tar
 extract_case 'a tree GNU wrote'   ref.tar
 extract_case 'one member by name' ref.tar tree/a.txt
 
+# Truncation on *extract* is a different code path from truncation on list, and
+# the difference is the whole point of the three cases below. A listing reader
+# only ever stops at a header boundary; an extractor can also run out of bytes
+# in the middle of a member's data, having already created the file and written
+# part of it. GNU gives two different answers, and the split is not where you
+# would guess:
+#
+#   cut inside (or at) a header   silent, exit 0. A short read where a header
+#                                 should begin is end-of-archive, not an error,
+#                                 so everything complete so far is kept and
+#                                 nothing is said about the remainder.
+#   cut inside member data        `Unexpected EOF in archive' *twice*, then
+#                                 `Error is not recoverable: exiting now',
+#                                 exit 2 -- and the partial member is left on
+#                                 disk holding the whole blocks that arrived.
+#
+# The doubled line is not a transcription slip: GNU 1.35 really prints it twice,
+# measured at every mid-data offset tried. It matters here because `settle`
+# compares stderr verbatim, so a tar that says it once is a difference.
+#
+# `tree`'s members are all one block or less, so a mid-data cut is unreachable
+# in `ref.tar` -- hence a fixture with a member six blocks long. Its layout is
+# fixed by `--sort=name`: [0] `bigsrc/', [1] `a.txt' header, [2] `a.txt' data,
+# [3] `big.bin' header, [4..9] `big.bin' data. The three offsets are one per
+# behaviour, and 2200 and 3072 are kept apart because they differ in what is
+# left behind (an empty `big.bin' versus a 1024-byte one) rather than in what is
+# printed -- a difference only `manifest` can see.
+mkdir -p bigsrc
+printf 'aaaa\n' > bigsrc/a.txt
+head -c 3000 /dev/zero | tr '\0' 'B' > bigsrc/big.bin
+touch -d '2001-09-09 01:46:40' bigsrc/a.txt bigsrc/big.bin bigsrc
+# shellcheck disable=SC2086
+"$gnu_real" $GNUFMT -cf big.tar bigsrc
+head -c 1724 big.tar > cut-header.tar
+head -c 2200 big.tar > cut-data-0.tar
+head -c 3072 big.tar > cut-data-1k.tar
+extract_case 'truncated inside a header'       cut-header.tar
+extract_case 'truncated before any data block' cut-data-0.tar
+extract_case 'truncated after one data block'  cut-data-1k.tar
+
 # Archived from *inside* `special`, so the members are `./f`, `./rel` and a
 # leading `.` for the directory itself. That is what `tar -cf - .` produces and
 # it is the common shape in the wild; it also means the destination's own mode

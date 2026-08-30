@@ -203,6 +203,17 @@ pub struct Frame<T> {
     /// The accumulated translation, maintained alongside `translations` so the
     /// common case — converting one rect — is an addition and not a fold.
     offset: (f32, f32),
+    /// How many pops arrived with nothing to pop.
+    ///
+    /// An over-pop is as damaging as an unpopped push and was invisible to
+    /// [`is_balanced`](Frame::is_balanced) until this was counted: `Vec::pop`
+    /// on an empty stack returns `None` and does nothing, so a helper that
+    /// popped a clip it had not pushed released *its caller's* clip, and the
+    /// stack still ended empty. Found by a mutation sweep on `apps/pacman`,
+    /// where deleting a `f.clip(...)` and leaving its `f.unclip()` behind let
+    /// the rest of the frame escape the window's clip while the frame reported
+    /// itself balanced.
+    stray_pops: u32,
     /// The width this frame is being drawn at.
     pub width: f32,
     /// The height this frame is being drawn at.
@@ -223,6 +234,7 @@ impl<T> Frame<T> {
             clips: Vec::new(),
             translations: Vec::new(),
             offset: (0.0, 0.0),
+            stray_pops: 0,
             width,
             height,
         }
@@ -257,7 +269,9 @@ impl<T> Frame<T> {
                 self.clips.push(effective);
             }
             RenderCommand::PopClip => {
-                self.clips.pop();
+                if self.clips.pop().is_none() {
+                    self.stray_pops = self.stray_pops.saturating_add(1);
+                }
             }
             RenderCommand::PushTranslate { dx, dy } => {
                 self.translations.push((dx, dy));
@@ -268,6 +282,8 @@ impl<T> Frame<T> {
                 if let Some((dx, dy)) = self.translations.pop() {
                     self.offset.0 -= dx;
                     self.offset.1 -= dy;
+                } else {
+                    self.stray_pops = self.stray_pops.saturating_add(1);
                 }
             }
             _ => {}
@@ -415,15 +431,21 @@ impl<T> Frame<T> {
             .map(|(_, rect)| *rect)
     }
 
-    /// Whether every clip and translation pushed has been popped.
+    /// Whether every clip and translation pushed has been popped, and no pop
+    /// arrived with nothing to pop.
     ///
     /// An unbalanced frame is a bug that is invisible in the window it happens
     /// in — an unpopped clip silently clips the rest of the frame, and an
     /// unpopped translation silently shifts it — so it is worth an assertion
     /// rather than an eventual "why is the status bar missing".
+    ///
+    /// The stray-pop half matters just as much and used to be missed: this
+    /// asked only whether the stacks ended empty, and a helper that popped a
+    /// clip it never pushed leaves them empty while having released the clip
+    /// its *caller* was relying on. Everything drawn after it escapes.
     #[must_use]
     pub fn is_balanced(&self) -> bool {
-        self.clips.is_empty() && self.translations.is_empty()
+        self.clips.is_empty() && self.translations.is_empty() && self.stray_pops == 0
     }
 
     /// The commands drawn so far.
@@ -800,6 +822,36 @@ mod tests {
         frame.unclip();
         assert!(frame.is_balanced());
         frame.translate(1.0, 1.0);
+        assert!(!frame.is_balanced());
+    }
+
+    #[test]
+    fn a_pop_with_nothing_to_pop_is_not_balanced() {
+        // The damaging case: a helper pops a clip it never pushed, which
+        // releases the clip its caller was relying on. The stacks still end
+        // empty, so `is_balanced` used to call this frame fine.
+        let mut frame: Frame<T> = Frame::new(100.0, 100.0);
+        frame.unclip();
+        assert!(!frame.is_balanced(), "a stray unclip is not balance");
+
+        let mut frame: Frame<T> = Frame::new(100.0, 100.0);
+        frame.untranslate();
+        assert!(!frame.is_balanced(), "a stray untranslate is not balance");
+    }
+
+    #[test]
+    fn an_over_popped_clip_stops_trimming_the_callers_hits() {
+        // Why the stray pop matters rather than merely being untidy.
+        let mut frame: Frame<T> = Frame::new(100.0, 100.0);
+        frame.clip(Rect::new(0.0, 0.0, 10.0, 10.0));
+        frame.unclip();
+        frame.unclip();
+        frame.hit(T::A, Rect::new(0.0, 0.0, 200.0, 50.0));
+        assert_eq!(
+            frame.hits()[0].1,
+            Rect::new(0.0, 0.0, 200.0, 50.0),
+            "the box escaped the clip, which is the fault to report"
+        );
         assert!(!frame.is_balanced());
     }
 

@@ -396,7 +396,11 @@ fn store_get(pid: i32, resource: i32, out: *mut Rlimit) -> Result<(), i32> {
             resource as u32 as u64,
             out as u64,
         );
-        if rc < 0 { Err(rlimit_errno(rc)) } else { Ok(()) }
+        if rc < 0 {
+            Err(rlimit_errno(rc))
+        } else {
+            Ok(())
+        }
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -450,7 +454,11 @@ fn store_set(pid: i32, resource: i32, new_limit: *const Rlimit) -> Result<(), i3
             resource as u32 as u64,
             new_limit as u64,
         );
-        if rc < 0 { Err(rlimit_errno(rc)) } else { Ok(()) }
+        if rc < 0 {
+            Err(rlimit_errno(rc))
+        } else {
+            Ok(())
+        }
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -1968,10 +1976,7 @@ mod tests {
             rlim_max: 0,
         };
         errno::set_errno(0);
-        assert_eq!(
-            prlimit(0, RLIMIT_CPU, core::ptr::null(), &mut via_zero),
-            0
-        );
+        assert_eq!(prlimit(0, RLIMIT_CPU, core::ptr::null(), &mut via_zero), 0);
         assert_eq!(
             prlimit(
                 crate::process::getpid(),

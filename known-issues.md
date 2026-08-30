@@ -81050,6 +81050,44 @@ inner one by the cost of everything the outer covers and the inner does not. Two
 equal timeouts are not belt-and-braces; they are one timeout, and it is the one
 with the less useful failure message.
 
+**Addendum, 2026-08-30: 530 s was not the worst case, and 1500 s is not enough.**
+The `deflate` LZ77 repair was boot-tested the same day and the run took
+**4292 s**, of which **3711 s was gates and build** and only 581 s was the boot
+itself. That is **seven times** the figure this lesson prescribes a budget from.
+The 1500 s recipe above would have been killed deep in the *build* phase, having
+never started QEMU — the same anonymous exit-124 this lesson exists to prevent,
+with an even less informative cause, because there would not even be a serial log
+to read.
+
+**What the original measurement missed is not cache warmth — it is graph
+position.** The 530 s run had a cold clippy cache but the change was *in* the
+kernel crate. `deflate` sits below it: `kernel/src/fs/compress.rs` links it, so
+touching it invalidates the kernel crate and every dependent, for clippy **and**
+the build, on every target the gate covers. Cold-cache and bottom-of-graph are
+different multipliers and they compose.
+
+**The rule, restated.** Size the outer budget from where the change sits in the
+dependency graph, not only from whether the cache is warm:
+
+| Change is… | Observed gates+build | Outer budget |
+|---|---:|---:|
+| inside one leaf crate nothing links | seconds–minutes | 1500 s |
+| inside `kernel`, cold clippy cache | 530 s | 1500 s |
+| in a crate `kernel` links (`deflate`, `ziparchive`, …) | **3711 s** | **5400 s** |
+
+When in doubt use 5400 s. A generous budget costs nothing — `run-timeout`'s real
+job is tearing down the process tree, and that is independent of the number —
+whereas a tight one costs the whole run *and* the diagnosis of why it died.
+
+**Second, smaller lesson from the same run: do not pipe a backgrounded
+long-runner through `tail`.** It was launched as
+`… ./scripts/boot-test.sh 2>&1 | tail -60`, and a pipe into `tail` buffers
+everything until the pipeline ends, so the task's output file stayed empty for
+the entire 71 minutes. Progress had to be reconstructed from `tasklist` RSS
+readings and from `build/serial-test.txt` directly. Redirect to a file and read
+the tail of *that* instead; the whole point of backgrounding is being able to
+watch it.
+
 ---
 
 ### TOOL-DIFF-WSL-LIB-FRESHNESS-CHECK-IS-CURRENTLY-INERT. `diff_lib_artifacts` cannot tell "this package has no library" from "this package's library is gone", and today it answers the second with the first — 2026-08-25 — FIXED

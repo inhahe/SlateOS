@@ -62680,15 +62680,19 @@ nice nohup patch ps readlink realpath renice rm rmdir sed sh sha256sum sleep
 stat strings tar tee time_cmd touch tty which xargs yes
 ```
 
-**Burn-down progress — 2026-08-30: seven findings left, in six files.** Naming
+**Burn-down progress — 2026-08-30: four findings left, in four files.** Naming
 what is *left* is now shorter than naming what is done, so this paragraph names
 that instead:
 
 ```
-diff  fetch  logger  patch  ps  sh (twice — argv and the environment)
+diff  logger  patch  ps
 ```
 
-`fetch` and `sh` are unblocked and are the next two to do. `diff`, `logger`,
+`fetch` and `sh` were the last two unblocked ones and are now done, which is
+what took the count from seven to four — `sh` carried two findings, argv and
+the environment. **Everything remaining is blocked on B-Q7**, so there is no
+unblocked work left in this entry; a reader looking for the next thing to do
+should look elsewhere until that question is answered. `diff`, `logger`,
 `patch` and `ps` each have a second implementation of the same utility outside
 `userspace/coreutils/` (`userspace/diff/`, `userspace/logger/`,
 `userspace/patch/`, `userspace/ps/`), so converting one of them means first
@@ -73501,6 +73505,14 @@ coreutils 9.4's `src/nice.c`, verified case-by-case against the real binary by
 `scripts/nice-diff.sh` — **127 cases, 125 passed, 0 differed, 2 differ on
 purpose**, plus 25 unit tests.
 
+> **Amended 2026-08-30.** Those figures were first taken in an environment
+> that *permitted* lowering the niceness, which hid a tenth defect: we called
+> `nice(2)` where GNU calls `setpriority(2)`, so a *refusal* was reported with
+> the wrong errno string. It stayed invisible until the harness ran somewhere
+> `RLIMIT_NICE` is 0, where it became 9 differences at once. Now fixed — see
+> `## nice reported a refused niceness with the wrong errno, because nice.c's
+> nice(2) branch is dead code` below — and the counts above are accurate again.
+
 ### What the old version did
 
 It accepted `-n N`, computed nothing from it, and ran the command at whatever
@@ -82315,8 +82327,79 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **189 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **131 of 800 remain**
 
+> **Burn-down log.** 2026-08-30 (forty-second batch): the **two**-site
+> functions, alphabetically as far as `cmd_netns` — twenty-nine of the
+> forty-nine. 189 → 131 across 140 → 111 functions: `cmd_audio`, `cmd_audit`,
+> `cmd_backupsched`, `cmd_cal`, `cmd_cgroup`,
+> `cmd_clipsync`, `cmd_cursorsettings`, `cmd_deskicons`, `cmd_dmastat`,
+> `cmd_drvmon`, `cmd_entropy`, `cmd_envvars`, `cmd_eyeprotect`,
+> `cmd_filetransfer`, `cmd_fwupdate`, `cmd_gamemode`, `cmd_hdrdisplay`,
+> `cmd_hexdump`, `cmd_hwrng`, `cmd_iolatency`, `cmd_iotdevice`, `cmd_kbmacro`,
+> `cmd_ksmstat`, `cmd_lavg`, `cmd_mdns`, `cmd_mediakeys`, `cmd_netdiag`,
+> `cmd_netlat` and `cmd_netns` left the ledger entirely. Pinned by self-test
+> rung 109.
+>
+> **Unlike batches 40 and 41, this one does not exhaust its tier**, and the
+> distinction is worth keeping rather than tidying away: twenty two-site
+> functions remain (`cmd_netthrottle` through `tokenize_arith`), so the ledger
+> is 20×2 + 91×1. Batch 43 is those twenty, after which the tier really is
+> empty and every remaining function carries exactly one site. Recording the
+> cut-off by *name* rather than as "the two-site batch" is what stops the next
+> reader trusting the tier header over the ledger — the ledger is the count,
+> and it says forty sites are still there.
+>
+> **This batch changed the shared printer, which no previous batch had to.**
+> `cal` and `hexdump -n` take their operands *directly*: there is no subcommand
+> word between the command and the number. Passing `""` as the subcommand
+> printed `cal: : \`1O' is not a month`, an empty middle field that reads as a
+> defect in the shell rather than as an absence. All ten family printers now go
+> through one `refuse_operand(cmd, sub, format_args!(…))` that collapses the
+> field when there is no subcommand. Recorded as design-decisions.md §644,
+> which also covers the two changes this forced on
+> `scripts/check-selftest-wording.py`: `format_args!` had to join its list of
+> print macros (a deferred print is still a print, and without it ~40 *correct*
+> rungs were reported as failures), and five older needles that spanned both
+> halves of the message were shortened to the body-only form the other ~40
+> refusal rungs already use — rather than teaching the gate to compose across a
+> helper boundary, which its own header forbids.
+>
+> **Two new shapes, on the "where the guess ends up" axis:**
+>
+> * **A sentinel chosen because it "cannot exist" — which the operator then
+>   reads.** `mdns unregister <idx>` guessed `usize::MAX`, and the not-found
+>   path printed it: *"Service #18446744073709551615 not found or inactive"*.
+>   `netns ifconfig <ns>` did the same with `u32::MAX`. The sentinel is picked
+>   to be unmistakable *to the code*, and it is — but nothing stops it reaching
+>   the screen, where it is a number the operator never typed and cannot map
+>   back to what they did type.
+> * **The different combinator: `filter_map(…ok())`, which drops rather than
+>   guesses.** `iotdevice group <name> 1,2,e` built a group of two devices from
+>   a list of three and reported success. It is the same defect one step
+>   further along — the unreadable word does not become a wrong value, it
+>   becomes *no* value, and the resulting object is quietly short. Nothing in
+>   `unwrap_or` grep-space would have found it; it was next to a site that was
+>   in the ledger. The whole list now fails if any member is unreadable.
+>
+> **The sharpest single site was `fwupdate apply <id>`**, which guessed device
+> `0`, flashed it, and printed "Reboot required". Firmware written to the wrong
+> device on a typo is the one consequence in forty-two batches that is worse
+> than `directio`'s overwritten file head, because it is not confined to a
+> filesystem.
+>
+> **Also in the batch, on the earlier axes:** *filed as a measurement* —
+> `lavg update` (folded into a moving average that outlives the command),
+> `netlat rtt`/`proc` (fabricated samples folded into percentiles),
+> `entropy add`/`drain` (over-credits, then spends, the entropy pool);
+> *binds a resource* — `mdns register <port>` advertised a guessed port to the
+> whole link; *acts on the wrong object* — `dmastat register`, `ksmstat
+> register` (pid 0 is the kernel's own), `envvars expand`, `eyeprotect
+> enable`/`disable`, `iotdevice set`, `kbmacro event key`. `mediakeys register`
+> defaulted to **pid 1**, init — the one process on the machine that is never a
+> media player. `cgroup io-limit`'s guessed `0` was the *unlimited* sentinel, so
+> a typo did not set a wrong cap, it removed the cap.
+>
 > **Burn-down log.** 2026-08-30 (forty-first batch): every function carrying
 > **three** sites, which is now none. 267 → 189 across 166 → 140 functions;
 > twenty-six functions left the ledger entirely — `cmd_audioeq`,
@@ -99429,6 +99512,326 @@ effect because the program no longer emits underlining. Ours accepts both so a
 script written for util-linux runs, and ignores both because there is nothing
 to do. This is *not* an unimplemented option.
 
+## TD-B-RM-ONE-FILE-SYSTEM-AND-PRESERVE-ROOT-ALL-ARE-IMPLEMENTED-BUT-UNCERTIFIED (lane B, 2026-08-30)
+
+**In short:** `rm` has two options that only mean anything when a *mount point*
+is involved — a place in the directory tree where a second disk (or a second
+filesystem of any kind) is attached. `--one-file-system` says "delete this
+tree, but stop at any place where a different disk begins"; `--preserve-root=all`
+says "refuse outright to delete a directory that is such a place". Both are
+implemented, and both are covered by unit tests that exercise the code paths.
+Neither has been compared against GNU's `rm` the way every other option has,
+because creating a mount point requires privileges the test harness does not
+have and should not be given. Nothing is known to be wrong; what is missing is
+the evidence that nothing is.
+
+**Where.** `userspace/coreutils/src/bin/rm.rs` — `Rm::crosses_into_its_parent`
+(that is `--preserve-root=all`) and the `level > 0 && self.options.one_file_system`
+branch at the top of `Rm::entry`. The device number both of them compare comes
+from `device_of`, which is `st_dev` on unix and `None` everywhere else.
+
+**Why it could not be measured.** `scripts/rm-diff.sh` runs both binaries inside
+WSL as an ordinary user. `mount -t tmpfs none dir` there fails with `Operation
+not permitted`, and there is no pre-existing mount point inside a directory the
+harness may destroy — which is what these two options need, since both are about
+what happens when a *descendant* of the operand is on a different filesystem
+from the operand. Every other option in the program is certified case by case
+against GNU coreutils 9.4 by that harness.
+
+**What would close it.** `unshare --map-root-user --mount` gives an unprivileged
+process a mount namespace in which it may mount a tmpfs, and WSL2 supports it.
+A section of `rm-diff.sh` guarded on `unshare -r -m true` succeeding could build
+`tree/sub` as a tmpfs mount and then run the same case on both sides:
+
+    rm -rv --one-file-system tree     # sub is skipped, tree/rmdir then fails
+    rm -rv tree                       # sub is descended into and removed
+    rm -rf --preserve-root=all tree/sub
+
+That is the right fix and it is not large. It was left out of the first version
+of the harness deliberately, so that the harness could go in green rather than
+carrying a section that silently skips on every host and is therefore never
+looked at again.
+
+**Related and *not* the same gap.** The recursive root failsafe (`rm -rf /`) is
+also absent from the harness, for a different and permanent reason: a test whose
+failure mode is deleting the operator's filesystem is not worth running at any
+level of confidence. It is covered instead by `rm.rs`'s unit test
+`a_recursive_operand_that_is_the_root_is_refused`, which points `Rm::root` —
+GNU's `x.root_dev_ino` — at a scratch directory, so the comparison under test is
+the real one with no `/` anywhere near it. The harness does carry the
+non-recursive `/` cases (`rm /`, `rm -d /`), which are safe whatever the code
+does because `unlink("/")` and `rmdir("/")` cannot succeed. See
+`scripts/rm-diff.sh`'s header, "What this harness will not do".
+
+**Off unix, both options degrade to doing nothing**, which is the safe
+direction: `device_of` answers `None`, nothing is ever "on a different device",
+and `rm` removes what it was asked to remove instead of silently stopping short.
+The only host that runs this today is the Windows development machine, where the
+unit tests run; the shipped target is SlateOS, which is unix.
+
+## TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL (lane B, 2026-08-30)
+
+**In short:** `rm -r dir` walks the tree by building up path *strings* —
+`dir`, then `dir/sub`, then `dir/sub/file` — and hands each whole string to the
+kernel. Every one of those calls re-walks the path from the top. If another
+program on the machine can write inside that tree, it can replace a directory
+with a symbolic link (a pointer to somewhere else) in the gap between `rm`
+deciding to descend into it and `rm` deleting what is inside it, and the
+deletions then land wherever the link points — outside the tree, possibly
+anywhere the user can write. GNU's `rm` cannot be tricked this way because it
+keeps an open handle to each directory and deletes *relative to that handle*,
+so the name it already resolved cannot be re-pointed underneath it.
+
+**Severity: real but conditional.** It needs a second party who can already
+write inside the directory being removed, running at the same moment. The
+usual shape is a shared or world-writable directory (`/tmp`-like) being cleaned
+up by a privileged process. It is not exploitable by a file's *contents* or by
+anything `rm`'s own user does.
+
+**Where.** `userspace/coreutils/src/bin/rm.rs`:
+
+- `Rm::remove_tree` lists a directory with `fs::read_dir(as_path(path))` and
+  then, for each name, builds `join(path, &name)` and calls
+  `fs::symlink_metadata` on the joined string.
+- `Rm::remove_nondirectory` → `fs::remove_file(as_path(path))`.
+- `Rm::rmdir` → `fs::remove_dir(as_path(path))`.
+
+Each of those is a fresh full-path resolution.
+
+**How to reproduce** (conceptually; not currently in the harness, because it is
+a race and would be flaky):
+
+    mkdir -p t/sub && touch t/sub/f victim
+    # attacker, in a loop: rm -rf t/sub; ln -s "$PWD" t/sub
+    rm -rf t
+    # `victim` can be removed, though it was never inside `t`
+
+**Proper fix.** Descend with directory descriptors, as `fts` does under
+`FTS_CWDFD` and as Rust's own `fs::remove_dir_all` does on Linux:
+
+- keep an `OwnedFd` for the directory being walked, opened once with
+  `O_DIRECTORY | O_NOFOLLOW`;
+- list it with `fdopendir`, and for each child use `fstatat(fd, name, …,
+  AT_SYMLINK_NOFOLLOW)`, `unlinkat(fd, name, 0)` and `unlinkat(fd, name,
+  AT_REMOVEDIR)`;
+- open a child directory with `openat(fd, name, O_DIRECTORY | O_NOFOLLOW)`, so
+  a name that became a symlink between the `fstatat` and the `openat` fails
+  with `ELOOP` instead of being followed.
+
+The path strings stay exactly as they are — they are still what gets *printed*,
+and `scripts/rm-diff.sh` certifies that spelling case by case — but they stop
+being what gets *resolved*. That separation is the whole change: a `walk`
+carrying `(dirfd, path_for_messages)` instead of `path` alone.
+
+**Why it is debt and not a regression.** The version this replaced called
+`fs::remove_dir_all`, which *is* descriptor-relative on Linux, so this
+particular race is new. It is logged rather than fixed immediately because the
+same rewrite removed two *unconditional* data-loss defects — `rm -rf .` emptied
+the current directory and `rm -rf /` was not refused — and a conditional race
+that needs a hostile local process is a strictly better position than those.
+The reasoning is recorded in full in `design-decisions.md` §723, Decision 1.
+
+**~~Blocked on nothing.~~ Corrected 2026-08-30: blocked on the kernel.** The
+original claim here was that `posix` already has `openat`, `unlinkat` and
+`fstatat`, so this was work in `rm.rs` alone. It has the names, but not the
+behaviour. All three, and `getdents64` with them, are **textual wrappers**:
+each calls `resolve_dirfd_path`, which looks up the *stored path string* of
+`dirfd` and concatenates the child name onto it, then calls the ordinary
+path-based `open`/`lstat`/`unlink`/`rmdir`. `posix/src/file.rs` says why in as
+many words — *"Our kernel file handles are path-based"* — so a descriptor does
+not name a directory *object* that a rename or a symlink swap cannot move.
+
+The consequence for this entry is specific and worth being blunt about: doing
+the `openat`/`unlinkat` rewrite in `rm.rs` would close the race **on the
+certification target and nowhere else**. `scripts/rm-diff.sh` builds for
+`x86_64-unknown-linux-gnu`, where those are glibc's genuinely fd-relative
+calls, so the fix would test green — while the binary that actually ships on
+SlateOS re-resolved every path from the root exactly as it does today. A fix
+that is real only where it is measured is worse than no fix, because it retires
+the entry.
+
+See **`B-POSIX-THE-AT-FAMILY-IS-TEXTUAL`** below, which is the general defect;
+this `rm` race is one symptom of it. Unblocking needs kernel-side fd-relative
+resolution, which is lane A's tree — filed as
+`requests/b-a-the-at-family-resolves-by-path-so-no-toctou-fix-is-possible.md`.
+
+## `nice` reported a refused niceness with the wrong errno, because `nice.c`'s `nice(2)` branch is dead code (lane B, 2026-08-30)
+
+**Status: FIXED.** `scripts/nice-diff.sh` is back to **127 cases, 125 passed,
+0 differed, 2 differ on purpose**.
+
+### The symptom
+
+Nine cases in `scripts/nice-diff.sh` — every one that lowers the niceness —
+differed by one word:
+
+```text
+DIFF nice -n -5 nice
+  ours: rc=0 out{0} err{nice: cannot set niceness: Operation not permitted}
+  gnu : rc=0 out{0} err{nice: cannot set niceness: Permission denied}
+```
+
+`EPERM` where GNU says `EACCES`. Text and exit status were otherwise identical,
+and the command still ran, so nothing about the *behaviour* was wrong — only
+the diagnostic.
+
+### Why it was latent for six days
+
+Lowering the niceness needs privilege, so the message only appears when the
+attempt is refused. The figures recorded when `nice` was ported were taken
+where the attempt *succeeded* — both sides then print nothing at all and the
+nine cases pass vacuously. They started failing when the harness ran as an
+ordinary user under a `RLIMIT_NICE` of 0 (`uid=1000`, `ulimit -e` → `0`),
+which refuses every lowering. The harness itself is byte-identical to the
+version that scored 0 differed; only the environment moved.
+
+This is the second time a divergence has hidden behind a case that cannot
+distinguish the two implementations — the first was the `rm` quoting bug, where
+no measured row held both `/` and `'`. The lesson is the same: a green harness
+proves the cases it ran, not the cases it could have run.
+
+### The root cause: a `#if` that never fires
+
+`nice.c` reads as though it calls `nice(2)`:
+
+```c
+#if HAVE_NICE
+# define GET_NICENESS() nice (0)
+#else
+# define GET_NICENESS() getpriority (PRIO_PROCESS, 0)
+#endif
+...
+#if HAVE_NICE
+  ok = (nice (adjustment) != -1 || errno == 0);
+#else
+  current_niceness = GET_NICENESS ();
+  if (current_niceness == -1 && errno != 0)
+    error (EXIT_CANCELED, errno, _("cannot get niceness"));
+  ok = (setpriority (PRIO_PROCESS, 0, current_niceness + adjustment) == 0);
+#endif
+```
+
+We ported the first arm. It is **never compiled on glibc**, because
+`configure.ac` only asks whether `nice` exists when three-argument
+`setpriority` does not:
+
+```text
+AC_CACHE_CHECK([for 3-argument setpriority function], [utils_cv_func_setpriority], ...)
+if test $utils_cv_func_setpriority = no; then
+  AC_CHECK_FUNCS([nice])
+fi
+```
+
+`setpriority` exists on glibc, so `AC_CHECK_FUNCS([nice])` never runs,
+`HAVE_NICE` is never defined, `#if HAVE_NICE` is false, and the shipped binary
+takes the `getpriority`/`setpriority` arm.
+
+That matters because glibc's `nice()` is itself `getpriority` + `setpriority`
+with **`EACCES` rewritten to `EPERM`** on the way out. Measured under WSL:
+
+```text
+nice(-5)                        -> -1, errno 1  Operation not permitted
+setpriority(PRIO_PROCESS, 0, n) -> -1, errno 13 Permission denied
+```
+
+Two independent lines of evidence agree — the `configure.ac` conditional, and
+the observed `Permission denied` that only the `setpriority` spelling can
+produce.
+
+### The fix
+
+`imp::set_niceness` in `userspace/coreutils/src/bin/nice.rs` now takes an
+**absolute** niceness and calls `setpriority(PRIO_PROCESS, 0, ...)`; the caller
+reads the current niceness with `getpriority` first and adds the adjustment,
+exactly as the surviving arm does — including upstream's fatal
+`cannot get niceness` if that read fails, which we did not have before because
+the `nice()` spelling never needed it. The `extern` block no longer declares
+`nice`. The module docs gained a section on the dead `#if`, and the defect
+table's `nice(adjustment)` row is corrected.
+
+The warning-versus-fatal split is unaffected: upstream's `perm_related_errno`
+is `EACCES || EPERM` and Rust maps both to `io::ErrorKind::PermissionDenied`,
+so only the rendered string moved.
+
+### The general hazard, for the next port
+
+**Do not port a `#if` arm without establishing which arm the shipped binary
+compiled.** Reading `src/*.c` is not enough; the answer is in `configure.ac`,
+and here the two arms differ in observable output. Anywhere else a coreutils
+source offers a portability fork, the same check is owed.
+
+## B-POSIX-THE-AT-FAMILY-IS-TEXTUAL, SO NOTHING IN USERSPACE CAN BE TOCTOU-SAFE (lane B, 2026-08-30) — OPEN
+
+**In short:** POSIX gives programs a way to say "open/stat/delete *this* name
+inside *that* directory I already have open" — the `openat`, `fstatat`,
+`unlinkat` family. The point of them is that the directory is named by an open
+handle rather than by a path, so nothing another program does to the path in
+the meantime can redirect the operation. We export all of those names, and
+none of them work that way: each one looks up the *text* of the path its
+directory handle was opened with, glues the child name onto the end, and calls
+the ordinary path-based operation. Every call therefore re-walks the whole path
+from the root, which is exactly what the family exists to avoid. Any program
+that uses them believing otherwise — ours or a ported one — has a security
+property it does not actually have.
+
+**Where.** `posix/src/file.rs`:
+
+- `resolve_dirfd_path(dirfd, path, out)` — `get_fd_path(dirfd)` then
+  `build_at_path(...)`. This is the whole mechanism.
+- `openat` → `open(full)`; `fstatat` → `stat`/`lstat(full)`;
+  `unlinkat` → `unlink`/`rmdir(full)`; `renameat`, `faccessat`, `fchmodat`,
+  `linkat`, `symlinkat`, `mkdirat`, `readlinkat` and `utimensat` are the same
+  shape.
+- `posix/src/dirent.rs::getdents64` is the same defect in a different spelling:
+  it looks up the fd's stored path and snapshots *that path* with
+  `SYS_FS_LIST_DIR`, so even listing a directory you hold open is a fresh path
+  resolution.
+
+**The root cause is architectural, not a wrapper bug.** `posix/src/file.rs`
+states it plainly, in the comment refusing `O_TMPFILE`:
+
+> Our kernel file handles are path-based, so a nameless inode cannot be
+> represented.
+
+A handle is a path, so there is no object for a descriptor to pin. The wrappers
+are not doing something silly; they are doing the only thing available to them.
+
+**Two distinct consequences, and the second is not a security issue at all:**
+
+1. **TOCTOU.** Anyone who can write inside a tree can swap a directory for a
+   symlink between two of our calls and redirect the second one. The live
+   instance is `rm -r` — see `TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-
+   REDIRECT-A-REMOVAL` above — but nothing about it is specific to `rm`.
+2. **Plain wrongness under rename.** Hold a directory open, have anything
+   rename it, and every subsequent `*at` call operates on the *old path* —
+   which now names a different directory, or nothing. On a real Unix the
+   descriptor follows the directory. This needs no attacker and no race
+   window worth the name; an ordinary concurrent `mv` does it.
+
+**What is *not* affected.** `SYS_FS_OPENAT2` (661) is a genuine fd-relative
+call: it passes `dirfd` to the kernel rather than reconstructing a path, and as
+of 2026-08-30 it enforces `RESOLVE_BENEATH` and `RESOLVE_NO_SYMLINKS`. So the
+containment primitive exists for *opening*. It has no counterpart for
+`unlinkat`, `fstatat` or `getdents64`, which is why it does not rescue `rm`:
+the walk could descend safely and still delete by path.
+
+**Proper fix — kernel-side, lane A.** File handles must reference the
+directory object, and the `*at` operations must resolve against it: an
+unlink/stat/list that takes `(dirfd, name)` and never reconstructs a path.
+`SYS_FS_OPENAT2` is the precedent for the ABI shape. Filed as
+`requests/b-a-the-at-family-resolves-by-path-so-no-toctou-fix-is-possible.md`.
+
+**Why this is filed rather than worked around.** The tempting workaround —
+have `rm` and friends call `openat`/`unlinkat` anyway — is actively harmful
+here. The certification harnesses build for `x86_64-unknown-linux-gnu` and
+link *glibc*, where those calls are real, so the workaround would go green in
+`scripts/*-diff.sh` and change nothing on the OS. It would convert a known
+defect into an unknown one.
+
+**Interim guidance for anyone writing userspace here:** do not rely on `*at`
+for isolation. If a program's correctness depends on a directory not moving
+under it, say so in a comment and treat it as a known gap, rather than reaching
+for `openat` and assuming it bought something.
 ### Lesson 81 addendum: the inventory is 55 sites in 20 apps, not seven (lane C, 2026-08-30)
 
 **In short:** Lesson 81's "where else to look" said "the seven `is_some()`-only

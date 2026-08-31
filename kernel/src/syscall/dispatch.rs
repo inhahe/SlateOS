@@ -206,7 +206,9 @@ type SyscallHandler = fn(&SyscallArgs) -> SyscallResult;
 /// Static dispatch table for syscall version 1.
 ///
 /// This is a flat array indexed by syscall number.  `None` entries
-/// are unimplemented syscalls (return `NotSupported`).
+/// are unimplemented syscalls (return `NoSuchSyscall`, which is
+/// deliberately *not* the `NotSupported` a registered handler returns —
+/// see the `else` arm of [`dispatch`]).
 ///
 /// The table is constructed at compile time.
 static V1_TABLE: SyscallTable = build_v1_table();
@@ -731,7 +733,25 @@ pub fn dispatch(nr: u64, args: &SyscallArgs) -> SyscallResult {
             nr,
             V1_TABLE.version
         );
-        SyscallResult::err(KernelError::NotSupported)
+        // `NoSuchSyscall` (-10), not `NotSupported` (-2).  An empty slot is the
+        // kernel saying it has never heard of this number; a *registered*
+        // handler returning `NotSupported` is saying it heard and cannot do the
+        // thing on this filesystem/device.  Those are different facts and a
+        // caller acts on them differently — the first means "fall back to the
+        // older route", the second means "this is the answer, stop".
+        //
+        // While both were -2 the difference could only be guessed at, and the
+        // POSIX layer's pinned `*at` fast path carried a per-syscall latch to do
+        // the guessing (`PINNED_UNLINKAT_ANSWERED` in `posix/src/file.rs`):
+        // fall back only until the first non-`-2` answer arrives.  That is
+        // sound but it is still a guess, and it is wrong for exactly as long as
+        // no answer has arrived yet — the first call on a filesystem that
+        // genuinely refuses gets silently downgraded to the racy path-based
+        // route, on the failure path, where nobody is looking.
+        //
+        // The Linux ABI is unaffected: `linux_errno_for` maps both to ENOSYS,
+        // because Linux has one errno for both facts.
+        SyscallResult::err(KernelError::NoSuchSyscall)
     };
 
     crate::ktrace::record_with_task(
@@ -855,7 +875,7 @@ pub fn current_version() -> u32 {
 /// thread (a valid stop signal would park this thread forever — see
 /// `test_dispatch_signal_stop_self_rejects_non_stop_signals`).  It must answer
 /// `InvalidArgument`; `PermissionDenied` means the filter ate it, and
-/// `NotSupported` means the slot is not wired.
+/// `NoSuchSyscall` means the slot is not wired.
 ///
 /// # Errors
 ///
@@ -1371,7 +1391,7 @@ fn test_dispatch_openat2_native() -> KernelResult<()> {
 /// Verify the **native** `mprotect` (SYS_MPROTECT = 22) is wired into the
 /// dispatch table and runs the shared argument-validation gate, returning
 /// raw `KernelError` codes (not Linux errno, and — crucially — not
-/// `NotSupported`, which is what the old TD-NATIVE-MPROTECT stub returned).
+/// `NoSuchSyscall`, which is what an unwired slot returns).
 ///
 /// This exercises the argument gates that short-circuit *before* any process
 /// or page-table state is touched, so it is safe to run from the kernel
@@ -1389,10 +1409,10 @@ fn test_dispatch_mprotect_native() -> KernelResult<()> {
     };
 
     // (a) Misaligned address → InvalidArgument (EINVAL), and NOT
-    //     NotSupported — this alone proves the handler is registered.
+    //     NoSuchSyscall — this alone proves the handler is registered.
     let r = dispatch(SYS_MPROTECT, &mk(0x1, 0x1000, 0x1));
-    if r.value == i64::from(KernelError::NotSupported.code()) {
-        serial_println!("[syscall]   FAIL: native mprotect unregistered (NotSupported)");
+    if r.value == i64::from(KernelError::NoSuchSyscall.code()) {
+        serial_println!("[syscall]   FAIL: native mprotect unregistered (NoSuchSyscall)");
         return Err(KernelError::InternalError);
     }
     if r.value != i64::from(KernelError::InvalidArgument.code()) {
@@ -1447,7 +1467,7 @@ fn test_dispatch_mprotect_native() -> KernelResult<()> {
 /// This test pins down three things that fix depends on:
 ///
 /// 1. **Registration.** An unknown-PID query must come back as
-///    `NoSuchProcess`, *not* `NotSupported`. `NotSupported` is what an
+///    `NoSuchProcess`, *not* `NoSuchSyscall`. `NoSuchSyscall` is what an
 ///    unregistered dispatch slot returns, so this distinction alone proves
 ///    the wiring.
 /// 2. **Delegation, not duplication.** The group/session policy lives in
@@ -1502,8 +1522,8 @@ fn test_dispatch_process_group_syscalls() -> KernelResult<()> {
         (SYS_PROCESS_GET_SID, "getsid"),
     ] {
         let r = dispatch(nr, &mk(NO_GROUP, 0));
-        if r.value == i64::from(KernelError::NotSupported.code()) {
-            serial_println!("[syscall]     ({} is unregistered: NotSupported)", name);
+        if r.value == i64::from(KernelError::NoSuchSyscall.code()) {
+            serial_println!("[syscall]     ({} is unregistered: NoSuchSyscall)", name);
             return fail("process-group syscall not wired into the table", &[]);
         }
         if r.value != i64::from(KernelError::NoSuchProcess.code()) {
@@ -1672,8 +1692,8 @@ fn test_dispatch_process_group_syscalls() -> KernelResult<()> {
 /// test cannot: the self-test task owns no process, so every "the caller's
 /// terminal" form is unresolvable here by construction. That is exactly what
 /// makes it a good *registration* probe, though — an unresolvable caller must
-/// report `NoSuchProcess`, so a `NotSupported` verdict can only mean the
-/// syscall number was never registered.
+/// report `NoSuchProcess`, so any other verdict means the syscall number was
+/// never registered.
 fn test_dispatch_ctty_syscalls() -> KernelResult<()> {
     let mk = |arg0: u64| SyscallArgs {
         arg0,
@@ -1688,9 +1708,12 @@ fn test_dispatch_ctty_syscalls() -> KernelResult<()> {
         Err(KernelError::InternalError)
     }
 
-    // (1) Registration. `NotSupported` is also ENOTTY, so it would be an
-    //     ambiguous verdict from a caller that *has* a session — but this
-    //     caller has no process at all, which must be ESRCH either way.
+    // (1) Registration. This used to need a caveat: `NotSupported` was both
+    //     "no such syscall" and (as ENOTTY) a legitimate answer from a caller
+    //     that *has* a session, so it was an ambiguous verdict. An unwired slot
+    //     now answers `NoSuchSyscall` instead, so the two can no longer be
+    //     confused. The probe below is unchanged and still stronger than
+    //     either: this caller has no process at all, which must be ESRCH.
     if dispatch(SYS_TTY_GET_PGRP, &mk(0)).value != i64::from(KernelError::NoSuchProcess.code()) {
         return fail("tcgetpgrp with no owning process should be NoSuchProcess (unregistered?)");
     }
@@ -1762,7 +1785,7 @@ fn test_dispatch_termios_syscalls() -> KernelResult<()> {
 
     // (1) A null pointer is InvalidArgument, not a fault or a silent success.
     //     This also proves both numbers are registered: an unregistered
-    //     number reports NotSupported.
+    //     number reports NoSuchSyscall.
     let null_args = SyscallArgs {
         arg0: 0,
         arg1: 0,
@@ -1867,7 +1890,7 @@ fn test_dispatch_rlimit_syscalls() -> KernelResult<()> {
     };
 
     // (1) A null buffer is InvalidArgument on both, which also proves both
-    //     numbers are registered — an unregistered number reports NotSupported.
+    //     numbers are registered — an unregistered number reports NoSuchSyscall.
     for (nr, name) in [
         (SYS_RLIMIT_GET, "SYS_RLIMIT_GET"),
         (SYS_RLIMIT_SET, "SYS_RLIMIT_SET"),
@@ -1934,7 +1957,7 @@ fn test_dispatch_rlimit_syscalls() -> KernelResult<()> {
 ///
 /// What only this layer can show is that the number dispatches at all.  That is
 /// worth its own check because the failure it catches is silent and total: an
-/// unregistered number returns `NotSupported`, so a userspace caller would
+/// unregistered number returns `NoSuchSyscall`, so a userspace caller would
 /// conclude the kernel is too old and fall back to `SYS_PROCESS_SPAWN_EX` —
 /// which inherits the *whole* capability table.  A missing table entry would
 /// therefore not look like a broken syscall; it would look like a sandbox that
@@ -1953,7 +1976,7 @@ fn test_dispatch_spawn_ex2_registered() -> KernelResult<()> {
     if r.value != invalid {
         serial_println!(
             "[syscall]   FAIL: SYS_PROCESS_SPAWN_EX2 gave {}, expected InvalidArgument ({}) \
-             — an unregistered number reports NotSupported, and callers read that as \
+             — an unregistered number reports NoSuchSyscall, and callers read that as \
              'old kernel' and fall back to inheriting everything",
             r.value,
             invalid
@@ -2112,7 +2135,7 @@ fn test_dispatch_pty_syscalls() -> KernelResult<()> {
         }
     }
 
-    // (3) Registration: an *unregistered* number reports NotSupported, which is
+    // (3) Registration: an *unregistered* number reports NoSuchSyscall, which is
     //     distinct from every verdict above, so reaching here proves each of
     //     the numbers tested has a handler installed.  `SYS_PTY_CREATE` is the
     //     one not covered by (1), so check it explicitly — and its refusal of a
@@ -2505,10 +2528,10 @@ fn test_dispatch_wait_status_reports_job_control() -> KernelResult<()> {
 
     // (a) Option validation runs before anything else, so it needs no
     //     fixture. WEXITED (4) is a `waitid`-only bit and is not accepted by
-    //     waitpid; a NotSupported here would mean the slot is unregistered.
+    //     waitpid; a NoSuchSyscall here would mean the slot is unregistered.
     let r = dispatch(SYS_PROCESS_WAIT_STATUS, &mk(1, 4));
-    if r.value == i64::from(KernelError::NotSupported.code()) {
-        return fail("unregistered (NotSupported)", &[]);
+    if r.value == i64::from(KernelError::NoSuchSyscall.code()) {
+        return fail("unregistered (NoSuchSyscall)", &[]);
     }
     if r.value != i64::from(KernelError::InvalidArgument.code()) {
         return fail("WEXITED should be InvalidArgument for waitpid", &[]);
@@ -3222,11 +3245,11 @@ fn test_dispatch_signal_stop_self_rejects_non_stop_signals() -> KernelResult<()>
     // value that does not fit in u32 at all (the `try_from` arm).
     for sig in [0_u64, 9, 18, 23, 64, u64::from(u32::MAX) + 1] {
         let r = dispatch(SYS_SIGNAL_STOP_SELF, &mk(sig));
-        // An unregistered dispatch slot answers NotSupported, so this
+        // An unregistered dispatch slot answers NoSuchSyscall, so this
         // distinction is what proves the handler is actually wired in
         // rather than that every call happens to fail.
-        if r.value == i64::from(KernelError::NotSupported.code()) {
-            serial_println!("[syscall]   FAIL: signal_stop_self unregistered (NotSupported)");
+        if r.value == i64::from(KernelError::NoSuchSyscall.code()) {
+            serial_println!("[syscall]   FAIL: signal_stop_self unregistered (NoSuchSyscall)");
             return Err(KernelError::InternalError);
         }
         if r.value != i64::from(KernelError::InvalidArgument.code()) {
@@ -3333,6 +3356,24 @@ fn test_dispatch_task_id() -> KernelResult<()> {
     Ok(())
 }
 
+/// An empty dispatch slot answers `NoSuchSyscall` (-10), which is a *different*
+/// code from the `NotSupported` (-2) a registered handler returns when it
+/// cannot do the thing.
+///
+/// The second assertion looks redundant next to the first and is not. The first
+/// compares the answer against the *symbol* `NoSuchSyscall`, so it stays green
+/// through any renumbering of that variant — including a renumbering to -2,
+/// which would silently restore the exact ambiguity the variant was created to
+/// remove. The second compares the two codes against each other, which is the
+/// property that actually matters: whatever numbers they hold, they must not be
+/// the same one, because a caller has to be able to tell "this kernel has never
+/// heard of the call, fall back" from "the call exists and its answer is no,
+/// stop".
+///
+/// The third assertion pins the compatibility promise: on the *Linux* ABI both
+/// codes must still arrive as `ENOSYS`, because Linux spends one errno on both
+/// facts. The distinction is a native-ABI feature; a Linux-ABI program must not
+/// be able to observe that it happened.
 fn test_dispatch_unimplemented() -> KernelResult<()> {
     let args = SyscallArgs {
         arg0: 0,
@@ -3344,14 +3385,43 @@ fn test_dispatch_unimplemented() -> KernelResult<()> {
     };
     // Use a known-undefined number in kernel-core range (95 is unallocated).
     let result = dispatch(95, &args);
-    if result.value != i64::from(KernelError::NotSupported.code()) {
+    if result.value != i64::from(KernelError::NoSuchSyscall.code()) {
         serial_println!(
-            "[syscall]   FAIL: unimplemented syscall returned {}, expected NotSupported",
-            result.value
+            "[syscall]   FAIL: unimplemented syscall returned {}, expected NoSuchSyscall ({})",
+            result.value,
+            KernelError::NoSuchSyscall.code()
         );
         return Err(KernelError::InternalError);
     }
-    serial_println!("[syscall]   Dispatch unimplemented: OK (NotSupported)");
+    if result.value == i64::from(KernelError::NotSupported.code()) {
+        serial_println!(
+            "[syscall]   FAIL: an empty slot and a handler-level refusal share a code; \
+             a caller cannot tell 'no such call' from 'no'"
+        );
+        return Err(KernelError::InternalError);
+    }
+    for (e, name) in [
+        (KernelError::NoSuchSyscall, "NoSuchSyscall"),
+        (KernelError::NotSupported, "NotSupported"),
+    ] {
+        let mapped = crate::syscall::linux::linux_errno_for(e);
+        if mapped != crate::syscall::linux::errno::ENOSYS {
+            serial_println!(
+                "[syscall]   FAIL: {} maps to Linux errno {}, expected ENOSYS ({}); \
+                 the native-ABI distinction has leaked into the Linux ABI",
+                name,
+                mapped,
+                crate::syscall::linux::errno::ENOSYS
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[syscall]   Dispatch unimplemented: OK (NoSuchSyscall {}, distinct from NotSupported {}, \
+         both ENOSYS on the Linux ABI)",
+        KernelError::NoSuchSyscall.code(),
+        KernelError::NotSupported.code()
+    );
     Ok(())
 }
 

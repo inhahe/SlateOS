@@ -1349,6 +1349,16 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
     match e {
         KernelError::InternalError => errno::EIO,
         KernelError::NotSupported => errno::ENOSYS,
+        // Deliberately the *same* errno as `NotSupported`, which is what makes
+        // this arm easy to misread as redundant.  It is not: Linux spends one
+        // errno on both facts, so collapsing them here is what the Linux ABI
+        // requires, and a Linux-ABI caller sees no change at all from
+        // `NoSuchSyscall` coming into existence.  The distinction the variant
+        // exists for lives on the *native* ABI, where the raw `-2`/`-10` is
+        // what reaches the caller.  Mapping this to something else — EOPNOTSUPP,
+        // say — would be inventing a divergence from Linux in order to expose a
+        // distinction Linux does not have.
+        KernelError::NoSuchSyscall => errno::ENOSYS,
         KernelError::InvalidArgument => errno::EINVAL,
         KernelError::WouldBlock => errno::EAGAIN,
         KernelError::Cancelled => errno::ECANCELED,

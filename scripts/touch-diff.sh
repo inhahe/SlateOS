@@ -105,7 +105,7 @@ mktree() {
   printf 'a\n' > file
   ln -s file link
   ln -s nowhere dangling
-  printf 'ro\n' > readonly
+  printf 'ro\n' > "readonly"
 
   /usr/bin/touch -a -d '2001-02-03 04:05:06.111111111' file
   /usr/bin/touch -m -d '2002-03-04 05:06:07.222222222' file

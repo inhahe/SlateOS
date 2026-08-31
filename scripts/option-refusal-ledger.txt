@@ -132,8 +132,6 @@ cmd_usagetime 1
 cmd_voicecontrol 1
 cmd_vpnprofile 1
 dispatch 1
-eval_test 2
 expand_braces_token 1
 extract_json_u64 1
 parse_size_arg 1
-tokenize_arith 2

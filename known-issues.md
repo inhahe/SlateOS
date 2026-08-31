@@ -82327,8 +82327,54 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **95 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **91 of 800 remain**
 
+> **Burn-down log.** 2026-08-30 (forty-third batch, part b): **the expression
+> evaluator**. 95 → 91 across 93 → 91 functions; `eval_test` and
+> `tokenize_arith` left the ledger, and **every entry that remains is now a
+> single site**. Pinned by self-test rung 111.
+>
+> This batch is a different shape from the forty-two before it. Those changed
+> a call site; this one gave `eval_arithmetic` **an error channel it never
+> had**. It returned a bare `i64`, so *every* way of failing — an unreadable
+> operand, a literal too big for `i64`, division by zero, an unclosed paren, a
+> character outside the language — produced `0` and returned it as an answer,
+> with exit status `0` besides. Nothing downstream could tell a computed zero
+> from a failed one, so this was §600's prohibited shape sitting under the
+> shell's whole expression language rather than under one option.
+>
+> The whole recursive-descent family (`parse_expr` → `parse_atom`),
+> `tokenize_arith` and `eval_test` now return `Result<_, ArithError>`, and the
+> eleven call sites each say what a failure means there: `$((…))` substitutes
+> nothing, a C-style `for` refuses to start or stops rather than looping to the
+> 10,000-iteration cap, `let` leaves the variable at its **previous** value
+> instead of overwriting it with the guess, and `test`/`expr` exit **2**, which
+> is what separates *malformed* from *false* — without it a typo in `$n` makes
+> `[ "$n" -eq 0 ]` true and silently takes the zero branch.
+>
+> **Nine defects here were outside the ledger's four.** Five had no `.parse()`
+> (division by zero in `/` and `%`, `parse_atom`'s `_ => 0`, the swallowed
+> unclosed paren, and the tokenizer's silent skip of any unknown character,
+> which made `6 & 3` evaluate to `6` where bash says `2`); the remaining four
+> were the accepted trailing operands (`1 2` → `1`) and the lone `=`, `&` and
+> `|` skips. Same lesson as part (a), from the other direction: the count is a
+> floor.
+>
+> **Where the references disagree, this shell follows dash.** `x=abc;
+> $((x))` is `0` in bash and an error in dash; bash's `0` *is* the invented
+> value §600 prohibits. On integer overflow the two disagree with each other
+> (bash wraps, dash saturates), which is the clearest possible sign that there
+> is no right value to substitute — so it is refused. An *unset* variable stays
+> `0`, because that is the documented rule everywhere and `$((count + 1))` on a
+> fresh variable must be `1`. Recorded as design-decisions.md §646.
+>
+> One incidental fix: `((x = 5))` used to call `eval_cfor_expr` for the
+> assignment and then evaluate the same string a second time for its status,
+> which only worked because the tokenizer dropped the `=`. `eval_cfor_expr` is
+> now `eval_arith_stmt` and returns its value, so the double evaluation is
+> gone — and `$((i = i + 1))`, which previously printed a value without ever
+> assigning it, now assigns.
+>
 > **Burn-down log.** 2026-08-30 (forty-third batch, part a): the rest of the
 > **two**-site functions except the expression evaluator's. 131 → 95 across
 > 111 → 93 functions: `cmd_netthrottle`, `cmd_pmcstat`, `cmd_policyengine`,

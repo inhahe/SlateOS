@@ -648,6 +648,53 @@ pub fn copy_xattrs(_from: On<'_>, _to: On<'_>, _which: Xattrs) -> Vec<XattrError
     Vec::new()
 }
 
+/// Read a file's list of extended-attribute names.
+///
+/// Where [`copy_xattrs`]'s non-unix arm answers "there was nothing to copy",
+/// these three answer "you cannot ask that here". The difference is that a copy
+/// of no attributes is a real outcome a caller can act on, while a *list* of no
+/// attributes would be a claim about the file that this host cannot make. See
+/// that function for why the `#[cfg(unix)]` arm is the one that ships.
+///
+/// # Errors
+///
+/// Always [`io::ErrorKind::Unsupported`], on this platform.
+#[cfg(not(unix))]
+pub fn list_xattrs(_on: On<'_>) -> io::Result<Vec<Vec<u8>>> {
+    Err(no_xattrs_here())
+}
+
+/// Read one extended attribute's value.
+///
+/// # Errors
+///
+/// Always [`io::ErrorKind::Unsupported`], on this platform. See
+/// [`list_xattrs`].
+#[cfg(not(unix))]
+pub fn get_xattr(_on: On<'_>, _name: &[u8]) -> io::Result<Vec<u8>> {
+    Err(no_xattrs_here())
+}
+
+/// Write one extended attribute's value.
+///
+/// # Errors
+///
+/// Always [`io::ErrorKind::Unsupported`], on this platform. See
+/// [`list_xattrs`].
+#[cfg(not(unix))]
+pub fn set_xattr(_on: On<'_>, _name: &[u8], _value: &[u8]) -> io::Result<()> {
+    Err(no_xattrs_here())
+}
+
+/// The one error the three non-unix arms return.
+#[cfg(not(unix))]
+fn no_xattrs_here() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this platform has no extended attributes",
+    )
+}
+
 /// `ENOTSUP` (== `EOPNOTSUPP`) on Linux, the only ABI this ships on. This crate
 /// has no `libc` dependency to read it from; named for the same reason
 /// `cp`'s `libc_eloop` is.
@@ -690,8 +737,15 @@ const XATTR_SIZE_RETRIES: u32 = 4;
 
 /// Read a file's list of extended-attribute names, NUL-separated by the kernel
 /// and split here.
+///
+/// # Errors
+///
+/// Whatever `listxattr`/`llistxattr`/`flistxattr` said — including `ENOTSUP`
+/// from a filesystem that has no extended attributes at all, which is a
+/// question this returns rather than answers. [`copy_xattrs`] is where that
+/// particular error becomes "nothing to copy".
 #[cfg(unix)]
-fn list_xattrs(on: On<'_>) -> io::Result<Vec<Vec<u8>>> {
+pub fn list_xattrs(on: On<'_>) -> io::Result<Vec<Vec<u8>>> {
     // The three spellings differ only in what they are given; keeping the choice
     // in one place keeps the probe-then-read loop from repeating it four times.
     //
@@ -776,8 +830,16 @@ fn split_names(list: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /// Read one extended attribute's value.
+///
+/// A present attribute with no bytes is `Ok(vec![])` and an absent one is
+/// `ENODATA`; the two are different states and the kernel distinguishes them.
+///
+/// # Errors
+///
+/// Whatever `getxattr`/`lgetxattr`/`fgetxattr` said, or [`io::ErrorKind::
+/// InvalidInput`] for a name containing a NUL.
 #[cfg(unix)]
-fn get_xattr(on: On<'_>, name: &[u8]) -> io::Result<Vec<u8>> {
+pub fn get_xattr(on: On<'_>, name: &[u8]) -> io::Result<Vec<u8>> {
     /// # Safety
     ///
     /// As [`list_xattrs`]'s `call`, plus: `cname` is NUL-terminated and outlives
@@ -845,8 +907,13 @@ fn get_xattr(on: On<'_>, name: &[u8]) -> io::Result<Vec<u8>> {
 /// The flag word is zero — "create it or replace it" — which is what libattr
 /// passes and what a copy wants: the destination is either new, or is being
 /// overwritten on purpose.
+///
+/// # Errors
+///
+/// Whatever `setxattr`/`lsetxattr`/`fsetxattr` said, or [`io::ErrorKind::
+/// InvalidInput`] for a name containing a NUL.
 #[cfg(unix)]
-fn set_xattr(on: On<'_>, name: &[u8], value: &[u8]) -> io::Result<()> {
+pub fn set_xattr(on: On<'_>, name: &[u8], value: &[u8]) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
 
     unsafe extern "C" {

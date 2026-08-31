@@ -986,10 +986,6 @@ impl TypingTutorApp {
     }
 
     // -----------------------------------------------------------------------
-    // Rendering
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
     // Drawing
     // -----------------------------------------------------------------------
 
@@ -1094,9 +1090,11 @@ impl TypingTutorApp {
                 text_w,
             );
             // `chars().count()`, not `len()`. The subtitle says "chars" and the
-            // program counted bytes, so every lesson containing a character
-            // outside ASCII advertised more characters than it has -- and this
-            // app's own lesson list has them.
+            // program counted bytes, so any lesson holding a character outside
+            // ASCII advertises more characters than it has. Every lesson
+            // shipped here happens to be ASCII, where the two agree -- which is
+            // why the test for this adds a lesson where they do not, rather
+            // than trusting the list to keep disagreeing on its own.
             let sub = format!(
                 "{} - {} chars",
                 lesson.category.name(),
@@ -2763,15 +2761,24 @@ mod tests {
     /// cannot hold it is a row drawn over the footer.
     #[test]
     fn a_body_too_short_for_a_row_shows_none() {
-        let l = Layout::solve(620.0, 40.0);
-        if l.body.h < l.row {
-            assert_eq!(
-                l.rows_visible(),
-                0,
-                "{:?} fits no row but claims one",
-                l.body
-            );
-        }
+        // 20 px, not 40. At 40 the chrome is given up entirely and the body
+        // gets 34 px, which is more than a row -- so the `if` never held and
+        // this test asserted nothing whatever the layout did. An assertion
+        // behind a condition is an assertion that can retire without failing,
+        // so the precondition is asserted rather than checked.
+        let l = Layout::solve(620.0, 20.0);
+        assert!(
+            l.body.h < l.row,
+            "this test needs a body too short for a row: body {:?}, row {}",
+            l.body,
+            l.row
+        );
+        assert_eq!(
+            l.rows_visible(),
+            0,
+            "{:?} fits no row but claims one",
+            l.body
+        );
     }
 
     /// The card grid wraps to as many columns as fit and no more, and the cards
@@ -2946,6 +2953,11 @@ mod tests {
             );
             assert_eq!(probe::click(&mut app, Target::Back), EventResult::Consumed);
             assert_eq!(app.view, AppView::LessonSelect, "{view:?} did not go back");
+            assert!(
+                app.session.is_none(),
+                "{view:?} went back and left the abandoned lesson in place, so \
+                 the next Enter resumes a session the user walked out of"
+            );
         }
     }
 
@@ -3075,11 +3087,21 @@ mod tests {
         assert!(capacity > 0 && capacity < app.lessons.len());
         for _ in 0..app.lessons.len() {
             app.key_at(&make_key(Key::Down, None), size);
+            let here = app.selected_lesson;
             assert!(
-                probe::rect_of_sized(&app, Target::Lesson(app.selected_lesson), size).is_some(),
-                "the cursor is on lesson {} and that row is not on screen",
-                app.selected_lesson
+                probe::rect_of_sized(&app, Target::Lesson(here), size).is_some(),
+                "the cursor is on lesson {here} and that row is not on screen"
             );
+            // Stepping one row off the bottom brings the list up by one, so the
+            // page just read stays on screen. Anchoring the cursor at the top
+            // instead would also keep it visible -- and would throw that page
+            // away every time (known-issues.md lesson 70).
+            if here > 0 {
+                assert!(
+                    probe::rect_of_sized(&app, Target::Lesson(here - 1), size).is_some(),
+                    "reaching lesson {here} scrolled the row above it off the top"
+                );
+            }
         }
     }
 
@@ -3371,6 +3393,235 @@ mod tests {
             drawn,
             LessonCategory::Numbers.color(),
             "the row is not in its category's colour"
+        );
+    }
+
+    // --- What the sweep found missing ---------------------------------------
+
+    /// The four bands stack down the window in order and do not overlap.
+    ///
+    /// The body is measured from the bottom of the subhead rather than from the
+    /// top of the window, and nothing else here would notice a body that starts
+    /// at the top: it would still be inside the window, still tile its rows,
+    /// still answer clicks. It would simply be drawn over its own title.
+    #[test]
+    fn the_bands_stack_without_overlapping() {
+        for size in SIZES {
+            let l = Layout::solve(size.0, size.1);
+            assert!(
+                l.header.y.abs() < 0.01,
+                "the header starts at {} rather than the top at {size:?}",
+                l.header.y
+            );
+            assert!(
+                l.subhead.y >= l.header.bottom() - 0.01,
+                "the subhead {:?} overlaps the header {:?} at {size:?}",
+                l.subhead,
+                l.header
+            );
+            assert!(
+                l.body.y >= l.subhead.bottom() - 0.01,
+                "the body {:?} is drawn over the chrome above it at {size:?}",
+                l.body
+            );
+            assert!(
+                l.body.bottom() <= l.footer.y + 0.01,
+                "the body {:?} runs into the footer {:?} at {size:?}",
+                l.body,
+                l.footer
+            );
+            assert!(
+                (l.footer.bottom() - size.1).abs() < 0.01,
+                "the footer ends at {} rather than the bottom at {size:?}",
+                l.footer.bottom()
+            );
+        }
+    }
+
+    /// A window too small to pay for its chrome gives the chrome up, not the
+    /// list -- and gives up the reminder lines before the title.
+    ///
+    /// A view with no lessons in it is a view with nothing in it; a view with no
+    /// title is one the user cannot name, which is why the title goes last.
+    #[test]
+    fn a_squeezed_window_gives_up_its_chrome_before_its_body() {
+        let l = Layout::solve(620.0, 60.0);
+        assert!(
+            l.rows_visible() >= 1,
+            "a 60 px window shows no lessons at all -- body {:?}, row {}",
+            l.body,
+            l.row
+        );
+        assert!(
+            l.subhead.h == 0.0 || l.footer.h == 0.0,
+            "a window this short kept every band and still found room for a row"
+        );
+        assert!(
+            l.header.h > 0.0,
+            "the title was given up before the reminder lines were"
+        );
+    }
+
+    /// A row clicked while a filter is on selects the lesson that row draws.
+    ///
+    /// The hit box carries an index into `lessons` and the drawing walks the
+    /// *filtered* list. Confusing the two selects a lesson from a different part
+    /// of the list than the one pointed at, and it cannot show up until a filter
+    /// makes the two numberings disagree -- which is why the unfiltered test
+    /// above it passes either way.
+    #[test]
+    fn a_row_clicked_under_a_filter_selects_the_lesson_it_shows() {
+        for steps in 1..=LessonCategory::all().len() {
+            let mut app = TypingTutorApp::new();
+            for _ in 0..steps {
+                probe::click(&mut app, Target::Filter);
+            }
+            let frame = app.draw(W);
+            for &idx in &app.filtered_lessons() {
+                let r = probe::rect_of(&app, Target::Lesson(idx)).unwrap_or_else(|| {
+                    panic!(
+                        "filter {:?} shows lesson {idx} and no row can be clicked for it",
+                        app.category_filter
+                    )
+                });
+                assert!(
+                    text_inside(&frame, &app.lessons[idx].title, r),
+                    "filter {:?} draws a row for lesson {idx} without its title",
+                    app.category_filter
+                );
+                let mut clicked = TypingTutorApp::new();
+                for _ in 0..steps {
+                    probe::click(&mut clicked, Target::Filter);
+                }
+                probe::click(&mut clicked, Target::Lesson(idx));
+                assert_eq!(
+                    clicked.selected_lesson, idx,
+                    "under filter {:?}, the row drawing {:?} selected lesson {}",
+                    app.category_filter, app.lessons[idx].title, clicked.selected_lesson
+                );
+            }
+        }
+    }
+
+    /// A window that grows shows the rows the scroll had hidden.
+    ///
+    /// Scrolling to the end of a short window and then enlarging it leaves an
+    /// offset the now-shorter remainder no longer needs. Left alone it holds the
+    /// top of the list off screen and pads the bottom with blank rows where
+    /// lessons used to be.
+    #[test]
+    fn a_window_that_grows_shows_the_rows_the_scroll_had_hidden() {
+        let small = (620.0, 260.0);
+        let big = (620.0, 1400.0);
+        let mut app = TypingTutorApp::new();
+        for _ in 0..40 {
+            app.scroll_at(small.0 / 2.0, small.1 / 2.0, -1.0, small);
+        }
+        assert!(
+            app.scroll_offset > 0,
+            "the short window did not scroll, so this proves nothing"
+        );
+        assert!(
+            Layout::solve(big.0, big.1).rows_visible() >= app.lessons.len(),
+            "this test needs a window the whole list fits into"
+        );
+        app.key_at(&make_key(Key::Down, None), big);
+        assert!(
+            probe::rect_of_sized(&app, Target::Lesson(0), big).is_some(),
+            "the window grew to fit every lesson and the first is still \
+             scrolled off the top -- offset {}",
+            app.scroll_offset
+        );
+    }
+
+    /// A key during a lesson that produces no character asks for no repaint.
+    ///
+    /// A function key or a bare modifier changes nothing on screen, and a view
+    /// that reports one consumed redraws the whole window for each.
+    #[test]
+    fn a_key_that_types_nothing_does_not_ask_for_a_repaint() {
+        let mut app = typed_into(0, 3);
+        assert_eq!(app.view, AppView::Typing, "this test needs a live lesson");
+        assert_eq!(
+            app.handle_key(&make_key(Key::Down, None)),
+            EventResult::Ignored
+        );
+    }
+
+    /// An unselected row is told apart from the background it sits on.
+    ///
+    /// The program this replaces filled it with `COL_BASE` -- the background --
+    /// so the list was one flat field and the only visible boundary in it was
+    /// the one the cursor was on.
+    #[test]
+    fn an_unselected_row_is_told_apart_from_the_background() {
+        let app = TypingTutorApp::new();
+        assert_ne!(app.selected_lesson, 1, "row one is meant to be unselected");
+        let r = probe::rect_of(&app, Target::Lesson(1)).expect("a second row");
+        let painted = app.draw(W).commands().iter().any(|c| {
+            matches!(c, RenderCommand::FillRect { x, y, color, .. }
+                if (*x - r.x).abs() < 0.01
+                    && (*y - r.y).abs() < 0.01
+                    && *color != hex(COL_BASE))
+        });
+        assert!(
+            painted,
+            "an unselected row is painted in the background colour, so the list \
+             is a single flat field"
+        );
+    }
+
+    /// A lesson's subtitle counts characters, not bytes.
+    ///
+    /// Every lesson shipped here is ASCII, where the two agree, so this adds one
+    /// where they do not rather than trusting the list to keep disagreeing --
+    /// which is the only way this can be a test of the count rather than a test
+    /// of what happens to be in the list today.
+    #[test]
+    fn a_lesson_subtitle_counts_characters_not_bytes() {
+        let mut app = TypingTutorApp::new();
+        app.lessons.push(Lesson {
+            category: LessonCategory::Sentences,
+            title: String::from("Accents"),
+            text: String::from("café naïve résumé"),
+        });
+        let idx = app.lessons.len() - 1;
+        let text = &app.lessons[idx].text;
+        assert_ne!(
+            text.len(),
+            text.chars().count(),
+            "this test needs a lesson whose bytes and characters differ"
+        );
+        let want = format!("Sentences - {} chars", text.chars().count());
+        app.selected_lesson = idx;
+        app.scroll_cursor_into_view();
+        let drawn = texts(&app, W.0, W.1);
+        assert!(
+            drawn.contains(&want),
+            "the subtitle does not say {want:?}: {drawn:?}"
+        );
+    }
+
+    /// The window is named, identified, and opens at the size its own tests
+    /// measure against.
+    ///
+    /// The last of the three is the one that matters here: every geometric test
+    /// in this file is written against [`Probe::SIZE`], so a window that opens
+    /// at some other size is a window none of them has ever seen.
+    #[test]
+    fn the_window_is_named_and_identified() {
+        let app = TypingTutorApp::new();
+        assert_eq!(App::title(&app), "Typing Tutor");
+        assert_eq!(App::app_id(&app), "typingtutor");
+        let (w, h) = App::initial_size(&app);
+        let opened = (
+            f32::from(u16::try_from(w).expect("a sane width")),
+            f32::from(u16::try_from(h).expect("a sane height")),
+        );
+        assert!(
+            (opened.0 - W.0).abs() < 1.0 && (opened.1 - W.1).abs() < 1.0,
+            "the window opens at {opened:?}, which is not the {W:?} its tests \
+             measure it at"
         );
     }
 

@@ -1009,6 +1009,13 @@ pub mod errno {
     pub const ETIMEDOUT: i32 = 110;
     pub const ECANCELED: i32 = 125;
     pub const ENODATA: i32 = 61;
+    /// `ESTALE` — a handle no longer denotes what it was opened on.
+    ///
+    /// Linux raises this for NFS file handles whose server-side object is
+    /// gone; we raise it for a directory handle whose pinned identity no
+    /// longer matches (see `KernelError::StaleHandle`).  The meaning a caller
+    /// must act on is identical: re-open, do not retry.
+    pub const ESTALE: i32 = 116;
 }
 
 /// `setsockopt`/`getsockopt` option levels (Linux `SOL_*`).
@@ -1380,6 +1387,7 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::TooManyOpenFiles => errno::EMFILE,
         KernelError::FileTooLarge => errno::EFBIG,
         KernelError::CrossDevice => errno::EXDEV,
+        KernelError::StaleHandle => errno::ESTALE,
         KernelError::IoError => errno::EIO,
         KernelError::NoSuchDevice => errno::ENODEV,
         KernelError::DeviceBusy => errno::EBUSY,

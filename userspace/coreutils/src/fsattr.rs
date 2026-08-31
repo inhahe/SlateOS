@@ -1,4 +1,5 @@
-//! Writing a file's metadata *by path*: its timestamps, its mode and its owner.
+//! Writing a file's metadata *by path*: its timestamps, its mode, its owner and
+//! its extended attributes.
 //!
 //! `std` can read all three and write almost none of them. [`fs::set_permissions`]
 //! is the one exception, and even it takes the mode through an opaque
@@ -12,20 +13,29 @@
 //! width does not fail to compile, it writes a wrong time. `cp -p` was about to
 //! be the third. This module is the one copy.
 //!
-//! # The three are one module because `-p` writes all three
+//! # They are one module because `-p` writes all of them
 //!
-//! `cp -p` restores timestamps, ownership and mode, in that order and for the
-//! same reason GNU gives (`copy.c:3245`): "chown turns off set[ug]id bits for
-//! non-root, so do the chmod last". Splitting them across three modules would
-//! put the three halves of one ordering constraint in three files, and the
-//! ordering is the part that is easy to get wrong — a `chmod` before the
-//! `chown` compiles, runs, and quietly drops the setuid bit off every copy made
-//! by a non-root user.
+//! `cp -p` restores timestamps, ownership, extended attributes and mode, in
+//! that order and for the two reasons GNU gives where it does it: "chown turns
+//! off set[ug]id bits for non-root, so do the chmod last" (`copy.c:3245`), and
+//! "set xattrs after ownership as changing owners will clear capabilities"
+//! (`copy.c:3279`). Splitting them across four modules would put the halves of
+//! one ordering constraint in four files, and the ordering is the part that is
+//! easy to get wrong — a `chmod` before the `chown` compiles, runs, and quietly
+//! drops the setuid bit off every copy made by a non-root user, and a
+//! `setxattr` before the `chown` loses `security.capability` the same way.
 //!
-//! [`Link`] is the other thing they share: each of the three has to be able to
-//! land on a symbolic link rather than on what it names, because `cp -P -p`
-//! stamps the link it just made. One enum answers that question for all three
-//! rather than three booleans spelled three ways.
+//! [`Link`] is the other thing they share: each has to be able to land on a
+//! symbolic link rather than on what it names, because `cp -P -p` stamps the
+//! link it just made. One enum answers that question for all of them rather
+//! than four booleans spelled four ways.
+//!
+//! The one asymmetry is that the mode is written *twice* where ACLs are
+//! involved, and deliberately: [`Xattrs::Permissions`] carries the access ACL,
+//! which on this filesystem *is* `system.posix_acl_access`, and writing an ACL
+//! rewrites the mode bits it encodes. gnulib's `qcopy_acl` handles this by
+//! chmod-ing first and copying the ACL second, so that the ACL wins where the
+//! two disagree and the mode still lands where there is no ACL at all.
 //!
 //! # Why a path and not a handle
 //!
@@ -432,6 +442,475 @@ pub fn set_mode(on: On<'_>, _mode: u32) -> io::Result<()> {
     }
 }
 
+/// Which of a file's extended attributes a copy carries.
+///
+/// The split has to exist because `system.posix_acl_access` is *both* an
+/// extended attribute and the file's permissions — this kernel stores POSIX
+/// ACLs in exactly the ext4 form Linux does (`kernel/src/fs/acl.rs`,
+/// `posix/src/linux_acl.rs`). Copying it under `--preserve=xattr` would make
+/// that option change who may read the file, which is `--preserve=mode`'s job
+/// and which a user asking only for extended attributes did not ask for.
+///
+/// GNU reaches the same split through `/etc/xattr.conf`, whose `permissions`
+/// action marks exactly these names (libattr `attr_copy_action`): gnulib's
+/// `qcopy_acl` copies the names that action selects, and coreutils' `copy_attr`
+/// copies the rest. This OS has no `/etc/xattr.conf` — nothing ships one and
+/// nothing reads one — so the classification is [`PERMISSION_XATTRS`] rather
+/// than a parsed file. The cost is that a site cannot add its own `skip` rules;
+/// the benefit is that the two halves cannot drift apart, which is exactly what
+/// happens on a Linux box whose `/etc/xattr.conf` is missing — there
+/// `--preserve=xattr` silently starts copying ACLs, because the classification
+/// lives in a file rather than in the program.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+pub enum Xattrs {
+    /// Everything except the permission-class names. What `--preserve=xattr`
+    /// carries.
+    Ordinary,
+    /// Only the permission-class names — the access ACL and the default ACL.
+    /// What `--preserve=mode` carries, *after* the mode itself is written.
+    Permissions,
+}
+
+/// The attribute names that are a file's permissions rather than data about it.
+///
+/// These are the `permissions` lines of the `/etc/xattr.conf` that distributions
+/// ship, narrowed to the two this kernel actually stores. The NFSv4 and SGI
+/// names in that file name ACL flavours nothing in this tree implements, and
+/// listing them would be guessing at spellings no code here can produce.
+const PERMISSION_XATTRS: [&[u8]; 2] = [b"system.posix_acl_access", b"system.posix_acl_default"];
+
+impl Xattrs {
+    /// Whether a copy of this class carries the attribute called `name`.
+    #[must_use]
+    pub fn carries(self, name: &[u8]) -> bool {
+        let is_permission = PERMISSION_XATTRS.contains(&name);
+        match self {
+            Xattrs::Ordinary => !is_permission,
+            Xattrs::Permissions => is_permission,
+        }
+    }
+}
+
+/// Which step of an extended-attribute copy failed.
+///
+/// The variant picks the message, because GNU's four wordings are not
+/// interchangeable: two name the attribute and two do not, and two blame the
+/// source while two blame the destination. A caller that had only an `io::Error`
+/// could not reconstruct which.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+pub enum XattrStep {
+    /// Reading the source's list of attribute names — libattr's
+    /// `listing attributes of %s`, about the *source*.
+    List,
+    /// Reading one attribute's value from the source — `getting attribute %s of
+    /// %s`, about the source.
+    Get,
+    /// Writing one attribute to the destination — `setting attribute %s for %s`,
+    /// about the *destination*.
+    Set,
+    /// Writing attributes to the destination failed in a way that is about the
+    /// destination as a whole rather than about one name — `setting attributes
+    /// for %s`. Two things reach it: `ENOSYS`, where libattr gives up on the
+    /// rest ("no hope of getting any further"), and a run in which one or more
+    /// individual writes returned `ENOTSUP`, which libattr collects into this
+    /// single report instead of one per attribute.
+    SetAll,
+}
+
+/// One thing that went wrong while copying a file's extended attributes.
+///
+/// A copy reports a *list* of these rather than stopping at the first, because
+/// libattr does not stop: a `getxattr` that fails is recorded and the loop moves
+/// to the next name. Collapsing them to one error would hide every attribute
+/// after the first unreadable one, and "the copy is missing an attribute nobody
+/// mentioned" is the failure mode the whole option exists to prevent.
+pub struct XattrError {
+    /// Which step failed, and so which wording applies.
+    pub at: XattrStep,
+    /// The attribute, for the two steps that name one.
+    pub name: Option<Vec<u8>>,
+    /// What the kernel said.
+    pub err: io::Error,
+}
+
+/// Copy extended attributes from one file to another.
+///
+/// Returns the failures in the order they happened; an empty vector is success.
+/// There is no `Result`, because "some attributes copied and one did not" is the
+/// ordinary outcome and is not representable as one — see [`XattrError`].
+///
+/// # Not finding any is not a failure
+///
+/// A source on a filesystem with no attribute support at all answers the initial
+/// `listxattr` with `ENOTSUP` or `ENOSYS`, and that is reported as success with
+/// nothing to copy, exactly as libattr's `attr_copy_file` does (`goto getout`
+/// without setting `ret`). The alternative — reporting it — would make `cp -a`
+/// noisy on every filesystem that has no xattrs, which is most of them.
+///
+/// The *destination* refusing is different and is reported, because there the
+/// source did have attributes and they have been dropped. `cp` then decides what
+/// to make of it: `--preserve=xattr` treats it as fatal, plain `-a` suppresses
+/// the message (GNU's `copy_attr_error` vs `copy_attr_allerror`, `copy.c:707`).
+///
+/// # The link is never followed, for `cp`
+///
+/// libattr's path form is `l*` throughout — `llistxattr`, `lgetxattr`,
+/// `lsetxattr` — with no option to follow, so `cp` passes [`Link::NoFollow`].
+/// [`Link::Follow`] is honoured here anyway rather than refused: the `l` and
+/// non-`l` pair exists in the ABI, and a module that owns the syscall
+/// declarations should not be the place a caller's choice is quietly narrowed.
+#[cfg(unix)]
+#[must_use]
+pub fn copy_xattrs(from: On<'_>, to: On<'_>, which: Xattrs) -> Vec<XattrError> {
+    let mut failures = Vec::new();
+
+    let names = match list_xattrs(from) {
+        Ok(names) => names,
+        Err(err) => {
+            if !absent_everywhere(&err) {
+                failures.push(XattrError {
+                    at: XattrStep::List,
+                    name: None,
+                    err,
+                });
+            }
+            return failures;
+        }
+    };
+
+    // libattr collects every `ENOTSUP` from the write loop into one report at
+    // the end (`setxattr_ENOTSUP++`) rather than emitting one per attribute,
+    // because the condition is a property of the destination filesystem and
+    // repeating it once per name says nothing new.
+    let mut unsupported = false;
+
+    for name in names {
+        if name.is_empty() || !which.carries(&name) {
+            continue;
+        }
+        let value = match get_xattr(from, &name) {
+            Ok(value) => value,
+            Err(err) => {
+                failures.push(XattrError {
+                    at: XattrStep::Get,
+                    name: Some(name),
+                    err,
+                });
+                continue;
+            }
+        };
+        let Err(err) = set_xattr(to, &name, &value) else {
+            continue;
+        };
+        match err.raw_os_error() {
+            Some(ENOTSUP) => unsupported = true,
+            // "no hope of getting any further": `ENOSYS` is the C library
+            // saying the call does not exist, which the next name will not
+            // change.
+            Some(ENOSYS) => {
+                failures.push(XattrError {
+                    at: XattrStep::SetAll,
+                    name: None,
+                    err,
+                });
+                break;
+            }
+            _ => failures.push(XattrError {
+                at: XattrStep::Set,
+                name: Some(name),
+                err,
+            }),
+        }
+    }
+
+    if unsupported {
+        failures.push(XattrError {
+            at: XattrStep::SetAll,
+            name: None,
+            err: io::Error::from_raw_os_error(ENOTSUP),
+        });
+    }
+    failures
+}
+
+/// Copy extended attributes from one file to another.
+///
+/// Windows has no extended attributes that this crate models — NTFS alternate
+/// data streams are a different thing with a different naming scheme — so there
+/// is never anything to copy and the answer is always "no failures". Same
+/// reasoning as [`set_owner`]'s non-unix arm: the target OS is the
+/// `#[cfg(unix)]` arm, and a `cp -a` that failed here would fail in the test
+/// suite and nowhere else.
+#[cfg(not(unix))]
+#[must_use]
+pub fn copy_xattrs(_from: On<'_>, _to: On<'_>, _which: Xattrs) -> Vec<XattrError> {
+    Vec::new()
+}
+
+/// `ENOTSUP` (== `EOPNOTSUPP`) on Linux, the only ABI this ships on. This crate
+/// has no `libc` dependency to read it from; named for the same reason
+/// `cp`'s `libc_eloop` is.
+#[cfg(unix)]
+const ENOTSUP: i32 = 95;
+
+/// `ENOSYS` on Linux — "the kernel does not implement this call".
+#[cfg(unix)]
+const ENOSYS: i32 = 38;
+
+/// `ERANGE` — "the buffer you offered is too small", which for the `*xattr`
+/// family means the value grew between the size probe and the read.
+#[cfg(unix)]
+const ERANGE: i32 = 34;
+
+/// Whether a failure means "this filesystem simply has no extended attributes",
+/// as opposed to "the attributes exist and something went wrong".
+///
+/// libattr's own test at the head of `attr_copy_file`: `errno != ENOSYS &&
+/// errno != ENOTSUP`. Note it is *not* coreutils' `errno_unsupported`, which is
+/// `ENOTSUP || ENODATA` — that one decides whether to *print* a failure, this one
+/// decides whether there is a failure at all.
+#[cfg(unix)]
+fn absent_everywhere(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(ENOTSUP | ENOSYS))
+}
+
+/// How many times a size probe may be re-run before its `ERANGE` is reported.
+///
+/// libattr probes once and reads once, and reports the `ERANGE` if the value
+/// grew in between (`attr_copy_file.c:90`). That is a race, not a design: the
+/// attribute is perfectly copyable and the report is wrong. Retrying costs one
+/// extra syscall in a case that essentially never happens and removes a
+/// spurious "cp: getting attribute 'user.x' of 'f': Numerical result out of
+/// range" from a concurrent writer's way. The bound exists so that a value being
+/// rewritten in a tight loop cannot spin here forever; the `ERANGE` is then
+/// reported, which is what libattr would have done immediately.
+#[cfg(unix)]
+const XATTR_SIZE_RETRIES: u32 = 4;
+
+/// Read a file's list of extended-attribute names, NUL-separated by the kernel
+/// and split here.
+#[cfg(unix)]
+fn list_xattrs(on: On<'_>) -> io::Result<Vec<Vec<u8>>> {
+    // The three spellings differ only in what they are given; keeping the choice
+    // in one place keeps the probe-then-read loop from repeating it four times.
+    //
+    // # Safety
+    //
+    // Either `cpath` is `Some` NUL-terminated bytes that outlive the call, or
+    // `on` is `On::File` holding a live descriptor.
+    unsafe fn call(on: On<'_>, cpath: Option<&[u8]>, buf: &mut [u8]) -> isize {
+        unsafe extern "C" {
+            fn listxattr(path: *const u8, list: *mut u8, size: usize) -> isize;
+            fn llistxattr(path: *const u8, list: *mut u8, size: usize) -> isize;
+            fn flistxattr(fd: i32, list: *mut u8, size: usize) -> isize;
+        }
+        use std::os::unix::io::AsRawFd;
+
+        // A null pointer with a zero size is the documented way to ask only for
+        // the length. An empty slice's `as_mut_ptr` is dangling rather than
+        // null, which is not the same request.
+        let (ptr, len) = if buf.is_empty() {
+            (core::ptr::null_mut(), 0)
+        } else {
+            (buf.as_mut_ptr(), buf.len())
+        };
+        match (on, cpath) {
+            // SAFETY: forwarded from this function's own contract. `buf` is
+            // `len` bytes and is written, not read, so its previous contents are
+            // never observed by the kernel.
+            (On::File(f), _) => unsafe { flistxattr(f.as_raw_fd(), ptr, len) },
+            (On::Path(_, Link::Follow), Some(p)) => unsafe { listxattr(p.as_ptr(), ptr, len) },
+            (On::Path(_, Link::NoFollow), Some(p)) => unsafe { llistxattr(p.as_ptr(), ptr, len) },
+            // Unreachable: `cpath` is `Some` for exactly the `On::Path` arms.
+            (On::Path(..), None) => -1,
+        }
+    }
+
+    let cpath = match on {
+        On::Path(path, _) => Some(c_path(path)?),
+        On::File(_) => None,
+    };
+
+    let mut buf = Vec::new();
+    for _ in 0..=XATTR_SIZE_RETRIES {
+        // SAFETY: `cpath` is `Some` for exactly the `On::Path` arms, and holds a
+        // NUL-terminated copy of the path that outlives the call; the `On::File`
+        // arm holds a live `File`.
+        let want = unsafe { call(on, cpath.as_deref(), &mut buf) };
+        let Ok(want) = usize::try_from(want) else {
+            return Err(io::Error::last_os_error());
+        };
+        if want == 0 {
+            return Ok(Vec::new());
+        }
+        buf.resize(want, 0);
+        // SAFETY: as above; `buf` now has `want` bytes for the kernel to fill.
+        let got = unsafe { call(on, cpath.as_deref(), &mut buf) };
+        if let Ok(got) = usize::try_from(got) {
+            buf.truncate(got);
+            return Ok(split_names(&buf));
+        }
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(ERANGE) {
+            return Err(err);
+        }
+        buf.clear();
+    }
+    Err(io::Error::from_raw_os_error(ERANGE))
+}
+
+/// Split the kernel's NUL-separated name list.
+///
+/// A trailing NUL terminates the last name rather than introducing an empty one,
+/// which is why this splits on NUL and drops a single trailing empty rather than
+/// using `split` naively. An interior empty name would be a kernel bug; it is
+/// dropped rather than trusted, because [`copy_xattrs`] would otherwise ask for
+/// an attribute called `""`.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn split_names(list: &[u8]) -> Vec<Vec<u8>> {
+    list.split(|b| *b == 0)
+        .filter(|name| !name.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+/// Read one extended attribute's value.
+#[cfg(unix)]
+fn get_xattr(on: On<'_>, name: &[u8]) -> io::Result<Vec<u8>> {
+    /// # Safety
+    ///
+    /// As [`list_xattrs`]'s `call`, plus: `cname` is NUL-terminated and outlives
+    /// the call.
+    unsafe fn call(on: On<'_>, cpath: Option<&[u8]>, cname: &[u8], buf: &mut [u8]) -> isize {
+        unsafe extern "C" {
+            fn getxattr(path: *const u8, name: *const u8, value: *mut u8, size: usize) -> isize;
+            fn lgetxattr(path: *const u8, name: *const u8, value: *mut u8, size: usize) -> isize;
+            fn fgetxattr(fd: i32, name: *const u8, value: *mut u8, size: usize) -> isize;
+        }
+        use std::os::unix::io::AsRawFd;
+
+        let (ptr, len) = if buf.is_empty() {
+            (core::ptr::null_mut(), 0)
+        } else {
+            (buf.as_mut_ptr(), buf.len())
+        };
+        let n = cname.as_ptr();
+        match (on, cpath) {
+            // SAFETY: forwarded from this function's own contract.
+            (On::File(f), _) => unsafe { fgetxattr(f.as_raw_fd(), n, ptr, len) },
+            (On::Path(_, Link::Follow), Some(p)) => unsafe { getxattr(p.as_ptr(), n, ptr, len) },
+            (On::Path(_, Link::NoFollow), Some(p)) => unsafe { lgetxattr(p.as_ptr(), n, ptr, len) },
+            // Unreachable: `cpath` is `Some` for exactly the `On::Path` arms.
+            (On::Path(..), None) => -1,
+        }
+    }
+
+    let cpath = match on {
+        On::Path(path, _) => Some(c_path(path)?),
+        On::File(_) => None,
+    };
+    let cname = c_name(name)?;
+
+    let mut buf = Vec::new();
+    for _ in 0..=XATTR_SIZE_RETRIES {
+        // SAFETY: `cname` and `cpath` are NUL-terminated buffers that outlive
+        // the call; the `On::File` arm holds a live `File`.
+        let want = unsafe { call(on, cpath.as_deref(), &cname, &mut buf) };
+        let Ok(want) = usize::try_from(want) else {
+            return Err(io::Error::last_os_error());
+        };
+        if want == 0 {
+            // A zero-length value is a real, storable thing, not an absence.
+            return Ok(Vec::new());
+        }
+        buf.resize(want, 0);
+        // SAFETY: as above; `buf` now has `want` bytes for the kernel to fill.
+        let got = unsafe { call(on, cpath.as_deref(), &cname, &mut buf) };
+        if let Ok(got) = usize::try_from(got) {
+            buf.truncate(got);
+            return Ok(buf);
+        }
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(ERANGE) {
+            return Err(err);
+        }
+        buf.clear();
+    }
+    Err(io::Error::from_raw_os_error(ERANGE))
+}
+
+/// Write one extended attribute's value.
+///
+/// The flag word is zero — "create it or replace it" — which is what libattr
+/// passes and what a copy wants: the destination is either new, or is being
+/// overwritten on purpose.
+#[cfg(unix)]
+fn set_xattr(on: On<'_>, name: &[u8], value: &[u8]) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    unsafe extern "C" {
+        fn setxattr(path: *const u8, name: *const u8, value: *const u8, size: usize, flags: i32)
+        -> i32;
+        fn lsetxattr(
+            path: *const u8,
+            name: *const u8,
+            value: *const u8,
+            size: usize,
+            flags: i32,
+        ) -> i32;
+        fn fsetxattr(fd: i32, name: *const u8, value: *const u8, size: usize, flags: i32) -> i32;
+    }
+
+    let cname = c_name(name)?;
+    // A zero-length value is stored as a present attribute with no bytes, so the
+    // pointer must still be non-null for the kernel's `copy_from_user`; an empty
+    // slice's `as_ptr` is a dangling-but-aligned address, which is what every
+    // other caller of a `(ptr, 0)` pair passes and what the kernel never reads.
+    let (vptr, vlen) = (value.as_ptr(), value.len());
+
+    let rc = match on {
+        // SAFETY: `f` is a live `File`, so its descriptor is open for the whole
+        // call; `cname` is NUL-terminated; `vptr`/`vlen` describe `value`, which
+        // outlives the call. Nothing is retained.
+        On::File(f) => unsafe { fsetxattr(f.as_raw_fd(), cname.as_ptr(), vptr, vlen, 0) },
+        On::Path(path, link) => {
+            let cpath = c_path(path)?;
+            // SAFETY: as above, with `cpath` NUL-terminated and outliving the
+            // call.
+            unsafe {
+                match link {
+                    Link::Follow => setxattr(cpath.as_ptr(), cname.as_ptr(), vptr, vlen, 0),
+                    Link::NoFollow => lsetxattr(cpath.as_ptr(), cname.as_ptr(), vptr, vlen, 0),
+                }
+            }
+        }
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// An attribute name as C wants it. The same NUL rule as [`c_path`], and for the
+/// same reason: a name truncated at an embedded NUL would silently address a
+/// *different* attribute.
+#[cfg(unix)]
+fn c_name(name: &[u8]) -> io::Result<Vec<u8>> {
+    if name.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "attribute name contains a NUL byte",
+        ));
+    }
+    let mut buf = Vec::with_capacity(name.len().saturating_add(1));
+    buf.extend_from_slice(name);
+    buf.push(0);
+    Ok(buf)
+}
+
 /// `AT_FDCWD` — resolve a relative path against the working directory.
 /// Matches `posix/src/file.rs`.
 #[cfg(unix)]
@@ -777,5 +1256,294 @@ mod tests {
             c_path(Path::new(OsStr::from_bytes(b"a\xffb"))).unwrap(),
             vec![b'a', 0xff, b'b', 0]
         );
+    }
+
+    // ------------------------------------------------ extended attributes --
+
+    /// The two classes partition the namespace: every name is carried by
+    /// exactly one of them. If a name were carried by both, `cp -a` would write
+    /// the ACL twice; if by neither, `cp -a` would drop it and say nothing.
+    #[test]
+    fn the_two_xattr_classes_partition_every_name() {
+        use super::Xattrs;
+
+        for name in [
+            &b"user.comment"[..],
+            b"security.capability",
+            b"system.posix_acl_access",
+            b"system.posix_acl_default",
+            b"trusted.whatever",
+            b"user.system.posix_acl_access",
+            b"",
+        ] {
+            assert!(
+                Xattrs::Ordinary.carries(name) ^ Xattrs::Permissions.carries(name),
+                "{} is in both classes or neither",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
+
+    /// The permission class is the ACL and nothing else. A name that merely
+    /// *contains* one of the two — `user.system.posix_acl_access` is a legal
+    /// attribute a user can set — is ordinary data, so the test is equality and
+    /// not a prefix or substring match.
+    #[test]
+    fn the_permission_class_is_exactly_the_two_acl_names() {
+        use super::Xattrs;
+
+        assert!(Xattrs::Permissions.carries(b"system.posix_acl_access"));
+        assert!(Xattrs::Permissions.carries(b"system.posix_acl_default"));
+        assert!(!Xattrs::Permissions.carries(b"user.system.posix_acl_access"));
+        assert!(!Xattrs::Permissions.carries(b"system.posix_acl_acces"));
+        assert!(!Xattrs::Permissions.carries(b"system.posix_acl_accessx"));
+        assert!(Xattrs::Ordinary.carries(b"user.comment"));
+        assert!(!Xattrs::Ordinary.carries(b"system.posix_acl_access"));
+    }
+
+    /// The kernel's list is NUL-*terminated*, not NUL-separated, so a naive
+    /// split yields a trailing empty name — and asking for an attribute called
+    /// `""` is an `ERANGE`/`ENODATA` that would be reported as a failed copy of
+    /// an attribute that never existed.
+    #[test]
+    fn the_name_list_is_split_without_a_phantom_trailing_entry() {
+        use super::split_names;
+
+        assert_eq!(split_names(b""), Vec::<Vec<u8>>::new());
+        assert_eq!(split_names(b"user.a\0"), vec![b"user.a".to_vec()]);
+        assert_eq!(
+            split_names(b"user.a\0user.b\0"),
+            vec![b"user.a".to_vec(), b"user.b".to_vec()]
+        );
+        // A list the kernel forgot to terminate still yields the last name.
+        assert_eq!(
+            split_names(b"user.a\0user.b"),
+            vec![b"user.a".to_vec(), b"user.b".to_vec()]
+        );
+        // Names are bytes, not text: a non-UTF-8 name must survive.
+        assert_eq!(split_names(b"user.\xff\0"), vec![b"user.\xff".to_vec()]);
+    }
+
+    /// An attribute name with a NUL is refused rather than truncated, for a
+    /// sharper reason than the path case: the truncated name is a *different,
+    /// valid* attribute, so the copy would silently read and write the wrong one
+    /// rather than fail.
+    #[test]
+    #[cfg(unix)]
+    fn an_attribute_name_with_a_nul_is_refused_not_truncated() {
+        use super::c_name;
+
+        assert_eq!(c_name(b"user.a").unwrap(), b"user.a\0".to_vec());
+        assert_eq!(
+            c_name(b"user.a\0evil").unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+
+    /// "This filesystem has no extended attributes" is not a failure, and the
+    /// test is libattr's — `ENOSYS` and `ENOTSUP` only. `ENODATA` is
+    /// deliberately absent even though coreutils' own `errno_unsupported`
+    /// includes it: that one decides whether to *print*, this one decides
+    /// whether anything went wrong.
+    #[test]
+    #[cfg(unix)]
+    fn only_enosys_and_enotsup_mean_there_was_nothing_to_copy() {
+        use super::absent_everywhere;
+        use std::io::Error;
+
+        assert!(absent_everywhere(&Error::from_raw_os_error(95)));
+        assert!(absent_everywhere(&Error::from_raw_os_error(38)));
+        assert!(!absent_everywhere(&Error::from_raw_os_error(61))); // ENODATA
+        assert!(!absent_everywhere(&Error::from_raw_os_error(13))); // EACCES
+        assert!(!absent_everywhere(&Error::other("not from the OS")));
+    }
+
+    // The live round-trip below needs a filesystem that stores `user.*`
+    // attributes. `/tmp` on the development host is such a filesystem and
+    // `/mnt/*` is not, so the helper reports which it got rather than failing:
+    // a missing feature in the *test environment* must not read as a bug in the
+    // code under test.
+    #[cfg(unix)]
+    fn scratch(stem: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("fsattr_test_{stem}_{pid}_{n}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Set one attribute, and say whether the filesystem took it.
+    #[cfg(unix)]
+    fn seed(path: &std::path::Path, name: &[u8], value: &[u8]) -> bool {
+        use super::{Link, On, set_xattr};
+        match set_xattr(On::Path(path, Link::NoFollow), name, value) {
+            Ok(()) => true,
+            Err(e) => {
+                assert!(
+                    super::absent_everywhere(&e),
+                    "seeding {} failed for a reason other than \"unsupported\": {e}",
+                    String::from_utf8_lossy(name)
+                );
+                false
+            }
+        }
+    }
+
+    /// The whole point, end to end: attributes present on the source are present
+    /// on the destination afterwards, with their bytes intact.
+    ///
+    /// Values are checked byte-for-byte including an empty one, because a
+    /// zero-length attribute is a real, storable thing that the size-probe loop
+    /// could easily confuse with "not there".
+    #[test]
+    #[cfg(unix)]
+    fn every_ordinary_attribute_crosses_with_its_bytes_intact() {
+        use super::{Link, On, Xattrs, copy_xattrs, get_xattr, list_xattrs};
+
+        let dir = scratch("roundtrip");
+        let (src, dst) = (dir.join("src"), dir.join("dst"));
+        std::fs::write(&src, b"body").unwrap();
+        std::fs::write(&dst, b"body").unwrap();
+
+        if !seed(&src, b"user.one", b"\x00\x01\xfe\xff") {
+            return; // No xattr support here; the target OS has it.
+        }
+        assert!(seed(&src, b"user.empty", b""));
+
+        let failures = copy_xattrs(
+            On::Path(&src, Link::NoFollow),
+            On::Path(&dst, Link::NoFollow),
+            Xattrs::Ordinary,
+        );
+        assert!(failures.is_empty(), "unexpected failures copying attributes");
+
+        let mut names = list_xattrs(On::Path(&dst, Link::NoFollow)).unwrap();
+        names.sort();
+        assert_eq!(names, vec![b"user.empty".to_vec(), b"user.one".to_vec()]);
+        assert_eq!(
+            get_xattr(On::Path(&dst, Link::NoFollow), b"user.one").unwrap(),
+            b"\x00\x01\xfe\xff".to_vec()
+        );
+        assert_eq!(
+            get_xattr(On::Path(&dst, Link::NoFollow), b"user.empty").unwrap(),
+            Vec::<u8>::new()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `Permissions` copy of a file whose only attributes are ordinary copies
+    /// nothing — which is what keeps `--preserve=mode` from carrying data the
+    /// user asked `--preserve=xattr` about, and vice versa.
+    #[test]
+    #[cfg(unix)]
+    fn a_permissions_copy_leaves_ordinary_attributes_behind() {
+        use super::{Link, On, Xattrs, copy_xattrs, list_xattrs};
+
+        let dir = scratch("classes");
+        let (src, dst) = (dir.join("src"), dir.join("dst"));
+        std::fs::write(&src, b"body").unwrap();
+        std::fs::write(&dst, b"body").unwrap();
+
+        if !seed(&src, b"user.one", b"v") {
+            return;
+        }
+
+        let failures = copy_xattrs(
+            On::Path(&src, Link::NoFollow),
+            On::Path(&dst, Link::NoFollow),
+            Xattrs::Permissions,
+        );
+        assert!(failures.is_empty());
+        assert!(
+            list_xattrs(On::Path(&dst, Link::NoFollow)).unwrap().is_empty(),
+            "a permissions-only copy carried an ordinary attribute"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A source with no attributes at all is a successful copy of nothing, not
+    /// a failure — and neither is a source on a filesystem that has no
+    /// attributes. `cp -a` runs this case on almost every file it copies.
+    #[test]
+    #[cfg(unix)]
+    fn a_source_with_no_attributes_is_a_success() {
+        use super::{Link, On, Xattrs, copy_xattrs};
+
+        let dir = scratch("empty");
+        let (src, dst) = (dir.join("src"), dir.join("dst"));
+        std::fs::write(&src, b"body").unwrap();
+        std::fs::write(&dst, b"body").unwrap();
+
+        assert!(
+            copy_xattrs(
+                On::Path(&src, Link::NoFollow),
+                On::Path(&dst, Link::NoFollow),
+                Xattrs::Ordinary,
+            )
+            .is_empty()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A destination that is not there fails once, naming the attribute, rather
+    /// than looping or reporting every name.
+    #[test]
+    #[cfg(unix)]
+    fn a_missing_destination_reports_the_attribute_it_could_not_write() {
+        use super::{Link, On, XattrStep, Xattrs, copy_xattrs};
+
+        let dir = scratch("nodest");
+        let src = dir.join("src");
+        std::fs::write(&src, b"body").unwrap();
+        if !seed(&src, b"user.one", b"v") {
+            return;
+        }
+
+        let failures = copy_xattrs(
+            On::Path(&src, Link::NoFollow),
+            On::Path(&dir.join("absent"), Link::NoFollow),
+            Xattrs::Ordinary,
+        );
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].at, XattrStep::Set);
+        assert_eq!(failures[0].name.as_deref(), Some(&b"user.one"[..]));
+        assert_eq!(failures[0].err.kind(), std::io::ErrorKind::NotFound);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A descriptor reaches the same attributes as the name that opened it.
+    /// `cp` uses the descriptor form for regular files, so a divergence here
+    /// would show up as `cp -a` copying attributes for directories and symlinks
+    /// but not for the ordinary case.
+    #[test]
+    #[cfg(unix)]
+    fn a_descriptor_and_a_name_see_the_same_attributes() {
+        use super::{On, Xattrs, copy_xattrs, list_xattrs};
+
+        let dir = scratch("byfd");
+        let (src, dst) = (dir.join("src"), dir.join("dst"));
+        std::fs::write(&src, b"body").unwrap();
+        std::fs::write(&dst, b"body").unwrap();
+        if !seed(&src, b"user.one", b"v") {
+            return;
+        }
+
+        let src_file = std::fs::File::open(&src).unwrap();
+        let dst_file = std::fs::OpenOptions::new().write(true).open(&dst).unwrap();
+        let failures = copy_xattrs(On::File(&src_file), On::File(&dst_file), Xattrs::Ordinary);
+        assert!(failures.is_empty());
+        assert_eq!(
+            list_xattrs(On::File(&dst_file)).unwrap(),
+            vec![b"user.one".to_vec()]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -710,6 +710,16 @@ const ENOSYS: i32 = 38;
 #[cfg(unix)]
 const ERANGE: i32 = 34;
 
+/// `ENODATA` (== `ENOATTR`) on Linux — "the file exists, that attribute does
+/// not". The two spellings are one number; there is no second code.
+#[cfg(unix)]
+const ENODATA: i32 = 61;
+
+/// `ENOENT` — "no such file". Named here only because this OS's kernel answers
+/// a missing *attribute* with it too; see [`remove_xattr`].
+#[cfg(unix)]
+const ENOENT: i32 = 2;
+
 /// Whether a failure means "this filesystem simply has no extended attributes",
 /// as opposed to "the attributes exist and something went wrong".
 ///
@@ -963,6 +973,77 @@ pub fn set_xattr(on: On<'_>, name: &[u8], value: &[u8]) -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+/// Take one extended attribute off a file, treating "it was not there" as done.
+///
+/// The absent case is folded into success on purpose. Every caller here is
+/// clearing a name it does not know to be present — gnulib's `qset_acl` deletes
+/// a directory's default ACL whether or not it has one, because "this file has
+/// no default ACL" is the state it is trying to reach, and a file that was
+/// already in that state has not failed to get there. Reporting it would make
+/// `cp -p` onto an ordinary file print a diagnostic about an attribute nobody
+/// asked for.
+///
+/// `ENODATA` is Linux's answer for that case, and `ENOENT` is this OS's for now:
+/// the kernel has one error for "no such file" and "no such attribute"
+/// (`known-issues.md` → `B-THE-KERNEL-XATTR-API-LOSES-TWO-THINGS-USERSPACE-NEEDS`,
+/// filed to lane A). Accepting both means a genuinely missing *path* is also
+/// swallowed here — which costs nothing, because every caller has just operated
+/// on that path and would have failed earlier if it were gone. When the kernel
+/// grows a distinct code, drop the `ENOENT`.
+///
+/// # Errors
+///
+/// Whatever `removexattr`/`lremovexattr`/`fremovexattr` said, except the two
+/// codes above, or [`io::ErrorKind::InvalidInput`] for a name containing a NUL.
+#[cfg(unix)]
+pub fn remove_xattr(on: On<'_>, name: &[u8]) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    unsafe extern "C" {
+        fn removexattr(path: *const u8, name: *const u8) -> i32;
+        fn lremovexattr(path: *const u8, name: *const u8) -> i32;
+        fn fremovexattr(fd: i32, name: *const u8) -> i32;
+    }
+
+    let cname = c_name(name)?;
+
+    let rc = match on {
+        // SAFETY: `f` is a live `File`, so its descriptor is open for the whole
+        // call, and `cname` is NUL-terminated and outlives it. Nothing is
+        // retained.
+        On::File(f) => unsafe { fremovexattr(f.as_raw_fd(), cname.as_ptr()) },
+        On::Path(path, link) => {
+            let cpath = c_path(path)?;
+            // SAFETY: as above, with `cpath` NUL-terminated and outliving the
+            // call.
+            unsafe {
+                match link {
+                    Link::Follow => removexattr(cpath.as_ptr(), cname.as_ptr()),
+                    Link::NoFollow => lremovexattr(cpath.as_ptr(), cname.as_ptr()),
+                }
+            }
+        }
+    };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    if matches!(err.raw_os_error(), Some(ENODATA | ENOENT)) {
+        return Ok(());
+    }
+    Err(err)
+}
+
+/// Take one extended attribute off a file.
+///
+/// # Errors
+///
+/// Always [`io::ErrorKind::Unsupported`], on this platform. See [`list_xattrs`].
+#[cfg(not(unix))]
+pub fn remove_xattr(_on: On<'_>, _name: &[u8]) -> io::Result<()> {
+    Err(no_xattrs_here())
 }
 
 /// An attribute name as C wants it. The same NUL rule as [`c_path`], and for the
@@ -1617,6 +1698,70 @@ mod tests {
         assert_eq!(
             list_xattrs(On::File(&dst_file)).unwrap(),
             vec![b"user.one".to_vec()]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Removal takes the named attribute and only the named one, by path and by
+    /// descriptor alike — and removing one that is not there succeeds.
+    ///
+    /// That last clause is the whole reason the function exists in this shape:
+    /// the caller (`cp -p` narrowing a destination's permissions) deletes the
+    /// two ACL names on every file it copies, and almost no file has them. If
+    /// absence were an error, the ordinary case would be the failing one.
+    #[test]
+    #[cfg(unix)]
+    fn removal_takes_one_name_and_absence_is_not_a_failure() {
+        use super::{Link, On, list_xattrs, remove_xattr};
+
+        let dir = scratch("remove");
+        let f = dir.join("f");
+        std::fs::write(&f, b"body").unwrap();
+
+        // Absent on a filesystem that has attributes, and absent because the
+        // filesystem has none, both have to come back `Ok`.
+        assert!(remove_xattr(On::Path(&f, Link::NoFollow), b"user.never").is_ok());
+
+        if !seed(&f, b"user.one", b"v") {
+            return;
+        }
+        assert!(seed(&f, b"user.two", b"w"));
+
+        remove_xattr(On::Path(&f, Link::NoFollow), b"user.one").unwrap();
+        assert_eq!(
+            list_xattrs(On::Path(&f, Link::NoFollow)).unwrap(),
+            vec![b"user.two".to_vec()],
+            "removal took a name it was not given"
+        );
+
+        // Twice in a row is the same as once: this is the state the caller wants.
+        remove_xattr(On::Path(&f, Link::NoFollow), b"user.one").unwrap();
+
+        let file = std::fs::OpenOptions::new().write(true).open(&f).unwrap();
+        remove_xattr(On::File(&file), b"user.two").unwrap();
+        assert!(list_xattrs(On::File(&file)).unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A name with a NUL is refused before it reaches the kernel, exactly as in
+    /// [`super::set_xattr`] — truncating it would delete a *different*
+    /// attribute, which is the one error here that destroys data.
+    #[test]
+    #[cfg(unix)]
+    fn removal_refuses_a_name_with_a_nul() {
+        use super::{Link, On, remove_xattr};
+
+        let dir = scratch("removenul");
+        let f = dir.join("f");
+        std::fs::write(&f, b"body").unwrap();
+
+        assert_eq!(
+            remove_xattr(On::Path(&f, Link::NoFollow), b"user.a\0b")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
         );
 
         let _ = std::fs::remove_dir_all(&dir);

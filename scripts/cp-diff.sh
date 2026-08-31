@@ -125,9 +125,23 @@ snapshot() {
 # And the bytes, so that a file which arrived with the right size and the wrong
 # contents is still caught. `-type f` does not follow, so a symlink is not read
 # here — its target is already in the snapshot above.
+#
+# NUL-separated, and sorted with `sort -z`, because section 12 creates a file
+# whose name holds a newline. Read line by line, that name arrived here as two
+# names, neither of which exists, so `cat` failed on both and the file's bytes
+# were never compared at all -- on either side, so nothing ever went red and
+# the only trace was `cat: b: No such file or directory` on the harness's own
+# stderr. A blind spot that announces itself and is still a blind spot.
+#
+# The `cat: …: Permission denied` lines that remain are section 11's, and are
+# the *symmetric* kind: the case makes a file unreadable on both sides, so both
+# bodies come out empty and the comparison says nothing about that one file
+# rather than saying something false about it. Same bargain as `snapshot`'s
+# discarded `find` errors, for the same reason.
 contents() {
   ( cd "$1" 2>/dev/null || return 0
-    find . -type f -printf '%P\n' 2>/dev/null | LC_ALL=C sort | while read -r f; do
+    find . -type f -printf '%P\0' 2>/dev/null | LC_ALL=C sort -z \
+      | while IFS= read -r -d '' f; do
       printf '== %s\n' "$f"
       cat -- "$f"
       printf '\n'

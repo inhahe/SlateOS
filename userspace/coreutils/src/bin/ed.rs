@@ -3113,7 +3113,7 @@ mod tests {
     fn a_file_name_that_is_not_utf8_survives_argv() {
         use std::os::unix::ffi::OsStringExt;
         let name = OsString::from_vec(vec![b'w', 0x80, b'x']);
-        let Request::Run(_, file) = parse_args(&[name.clone()]).unwrap() else {
+        let Request::Run(_, file) = parse_args(std::slice::from_ref(&name)).unwrap() else {
             panic!("expected a run")
         };
         assert_eq!(file, Some(name));
@@ -3437,7 +3437,7 @@ mod tests {
             br"a\tb\\c\$d\200e$"
                 .to_vec()
                 .into_iter()
-                .chain([b'\n'])
+                .chain(*b"\n")
                 .collect::<Vec<u8>>()
         );
     }

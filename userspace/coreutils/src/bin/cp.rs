@@ -113,6 +113,25 @@
 //!    lesson is bug 7's — a fix derived by reading is worth what the reading
 //!    was worth, and only measurement says whether it was right.
 //!
+//! # A ninth: one operand quietly destroying another's work
+//!
+//! 9. **Nothing remembered what this command had already written.** `cp a
+//!    other/a d` copied `a` to `d/a`, then copied `other/a` over it. Exit 0,
+//!    nothing printed, and the copy the user asked for was gone. Neither
+//!    operand is wrong on its own, which is why no amount of checking one
+//!    operand at a time could have found it; GNU keeps three tables for exactly
+//!    this question and this had none. [`Seen`] is that record, and it answers
+//!    three refusals — the collision above, the same collision reached through
+//!    a symlink this command created (where the damage lands on a file nobody
+//!    named), and a source given twice, which is a warning rather than an
+//!    error because the file the user asked for is in fact there.
+//!
+//!    The last of those is where the identity question gets sharp: `cp a ./a d`
+//!    is one file named twice, but `cp a hard-link-to-a d` is two directory
+//!    entries that share an inode and a perfectly reasonable request for two
+//!    copies. Telling them apart needs the entry — the directory it is in plus
+//!    the final component — and not the inode alone. See [`entry_id`].
+//!
 //! # Options this implementation does not have
 //!
 //! Everything except `-r`/`-R`/`--recursive`. They are recognised and rejected

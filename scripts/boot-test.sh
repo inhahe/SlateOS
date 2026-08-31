@@ -3243,6 +3243,49 @@ check_shell_message_names() {
 
 check_shell_message_names
 
+# The article in a refusal is chosen at runtime by `article_for`, so it is not
+# in any format string and `check-selftest-wording.py` cannot see it.  The one
+# place it becomes visible is a self-test rung asserting the message -- i.e. at
+# the end of an eleven-minute QEMU boot.  This moves it to the front.
+check_shell_noun_article() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Shell noun-article check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the noun-article gate against its fixture ==="
+    if ! "$py" "$PROJECT_ROOT/scripts/check-shell-noun-article.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The noun-article gate no longer agrees" >&2
+        echo "with its own fixture, so its verdict means nothing -- it reports a" >&2
+        echo "clean tree and a collapsed parser in the same words." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that an operand noun states an article spelling cannot pick ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-shell-noun-article.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A refusal would print the wrong article." >&2
+    echo "" >&2
+    echo "\`article_for\` picks by spelling; English picks by sound. A noun that" >&2
+    echo "starts with the \"yoo\" onset (user, uid, unit, URL) is spelled with a" >&2
+    echo "vowel and sounds like a consonant, so the rule yields \"an user id\"." >&2
+    echo "" >&2
+    echo "Write the article into the noun -- \"a user id\" -- which \`article_for\`" >&2
+    echo "prints verbatim. That is the escape hatch its own doc comment names." >&2
+    exit 1
+}
+
+check_shell_noun_article
+
 # A hand-written "every variant" list cannot go stale loudly.
 #
 # `const ALL: [Foo; N] = [...]` claims to name every variant of `Foo`, and the

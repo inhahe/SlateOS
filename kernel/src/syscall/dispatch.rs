@@ -905,8 +905,6 @@ pub fn verify_dispatch_under_filtering() -> KernelResult<()> {
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[syscall] Running dispatch self-test...");
 
-    let mut skips = crate::fs::selftest::Skips::new();
-
     test_dispatch_yield()?;
     test_dispatch_task_id()?;
     test_dispatch_unimplemented()?;
@@ -918,8 +916,8 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_clock_settime()?;
     test_dispatch_clock_adjtime()?;
     test_dispatch_console_write()?;
-    test_dispatch_fs_roundtrip(&mut skips)?;
-    test_dispatch_openat2_native(&mut skips)?;
+    // The two filesystem cases are *not* here: they run from `self_test_fs`
+    // after the root mount.  See that function for why.
     test_io_dir_classification()?;
     test_dispatch_mprotect_native()?;
     test_dispatch_process_group_syscalls()?;
@@ -937,8 +935,38 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_rusage_info_layout()?;
     test_dispatch_set_credentials_gate()?;
 
-    skips.report("[syscall]");
-    serial_println!("[syscall] Dispatch self-test PASSED{}", skips.suffix());
+    serial_println!("[syscall] Dispatch self-test PASSED");
+    Ok(())
+}
+
+/// The dispatch cases that need a mounted, writable root.
+///
+/// **Why this is a second entry point rather than a skip inside
+/// [`self_test`].** Both of these used to sit in `self_test`, each guarded by
+/// `is_mounted_rw("/")`. That guard is honest — it is a fact looked up in the
+/// mount table, which is what design-decisions.md §270 asks for — but
+/// `self_test` runs at boot Step 11 and the root filesystem mounts at Step
+/// 20f, so the guard was not *sometimes* false: it was false on every boot
+/// that has ever run, and neither case had executed once. A skip that has
+/// never not fired is a deletion with a log line.
+///
+/// Called from `main.rs` after the mount, alongside
+/// [`crate::ipc::io_ring::self_test_fh`] and
+/// [`crate::syscall::linux::self_test_fs`], which exist for the same reason.
+/// See `known-issues.md`
+/// `A-SIX-SELF-TESTS-SKIP-ON-EVERY-BOOT-AND-HAVE-NEVER-ONCE-RUN`.
+///
+/// There is deliberately no writability guard left in either case. Before the
+/// mount, "root is not writable yet" is a fact about the boot stage; after it,
+/// it is a defect, and answering a defect with a SKIP is how these two came to
+/// spend their whole lives unrun.
+pub fn self_test_fs() -> KernelResult<()> {
+    serial_println!("[syscall] Running post-mount dispatch self-test...");
+
+    test_dispatch_fs_roundtrip()?;
+    test_dispatch_openat2_native()?;
+
+    serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())
 }
 
@@ -978,22 +1006,39 @@ pub fn self_test() -> KernelResult<()> {
 /// widened to prevent, and it is invisible to any test that only checks the
 /// open succeeded.
 ///
-/// Kernel context, so the capability gate is bypassed and there is no cwd —
-/// `dirfd == 0` is therefore covered from ring 3 rather than here.
+/// (f), (g) and (h) are the whole of the `dirfd == 0` contract from
+/// `design-decisions.md` §648: `0` means *no base supplied*, so it is legal
+/// exactly where no base is read — an absolute fragment, (f), which checks the
+/// byte because that is the one shape with no base to be wrong about — and
+/// `InvalidArgument` everywhere else: (g) a relative fragment, (h) under
+/// containment. (h) is the case that mattered. `0` used to resolve against
+/// `pcb::get_cwd`, so a `RESOLVE_BENEATH` walk was confined to a directory the
+/// caller never named and *succeeded*, telling the caller its containment held.
+///
+/// These three could not exist before §648. This comment used to end "kernel
+/// context … there is no cwd — `dirfd == 0` is therefore covered from ring 3
+/// rather than here", and the ring-3 coverage it pointed at
+/// ([`crate::proc::spawn::self_test_openat2_beneath`]) goes through the
+/// **Linux** ABI's `AT_FDCWD`, a different mechanism — so native `dirfd == 0`
+/// was in fact covered nowhere.
+///
+/// Kernel context, so the capability gate is bypassed.
 #[allow(clippy::too_many_lines)]
-fn test_dispatch_openat2_native(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
+fn test_dispatch_openat2_native() -> KernelResult<()> {
     use crate::fs::handle::OpenFlags;
     use crate::syscall::number::{RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS, SYS_FS_OPENAT2};
 
     const BASE: &[u8] = b"/openat2_native";
     const INSIDE_BYTE: u8 = 0x5A;
 
+    // This case runs from `self_test_fs`, after the root mount, so an
+    // unwritable root here is a defect and not a boot stage.  Asserted rather
+    // than skipped: the skip this replaces fired on every boot ever recorded.
     if !crate::fs::selftest::is_mounted_rw("/") {
-        skips.record(
-            "Native openat2",
-            "/ is not mounted read-write yet (running before filesystem init)",
+        serial_println!(
+            "[syscall]   FAIL: Native openat2 runs after the root mount, but / is not mounted read-write"
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
 
     // Staged through the VFS directly: a failure here is a defect in the
@@ -1036,7 +1081,11 @@ fn test_dispatch_openat2_native(skips: &mut crate::fs::selftest::Skips) -> Kerne
     let dirfd = dir.value as u64;
 
     let mut failed = 0u32;
-    let mut check = |name: &str, got: i64, want: i64| {
+    // A free `fn` rather than a closure over `failed`: a closure would hold a
+    // unique borrow of `failed` from its definition to its last call, which
+    // makes the cases that count failures themselves (the read-back ones)
+    // impossible to interleave with the ones that use this.
+    fn check(failed: &mut u32, name: &str, got: i64, want: i64) {
         if got != want {
             serial_println!(
                 "[syscall]   FAIL: native openat2 {}: returned {}, expected {}",
@@ -1044,21 +1093,23 @@ fn test_dispatch_openat2_native(skips: &mut crate::fs::selftest::Skips) -> Kerne
                 got,
                 want
             );
-            failed += 1;
+            *failed = failed.saturating_add(1);
         }
-    };
+    }
 
     let einval = i64::from(KernelError::InvalidArgument.code());
     let exdev = i64::from(KernelError::CrossDevice.code());
 
     // (a) Linux's own RESOLVE_BENEATH value is an unknown bit here.
     check(
+        &mut failed,
         "untranslated Linux resolve (0x08)",
         dispatch(SYS_FS_OPENAT2, &mk(b"inside.txt", 1, 0, 0x08, dirfd)).value,
         einval,
     );
     // ...and so is a bit above everything we define.
     check(
+        &mut failed,
         "unknown resolve bit (1<<20)",
         dispatch(SYS_FS_OPENAT2, &mk(b"inside.txt", 1, 0, 1 << 20, dirfd)).value,
         einval,
@@ -1066,6 +1117,7 @@ fn test_dispatch_openat2_native(skips: &mut crate::fs::selftest::Skips) -> Kerne
 
     // (b) Containment is decided before the handle is looked up.
     check(
+        &mut failed,
         "absolute fragment under BENEATH with a bogus dirfd",
         dispatch(
             SYS_FS_OPENAT2,
@@ -1077,6 +1129,7 @@ fn test_dispatch_openat2_native(skips: &mut crate::fs::selftest::Skips) -> Kerne
 
     // (c) An escaping `..` is refused even though the target really exists.
     check(
+        &mut failed,
         "escaping `..` under BENEATH",
         dispatch(
             SYS_FS_OPENAT2,
@@ -1109,7 +1162,7 @@ fn test_dispatch_openat2_native(skips: &mut crate::fs::selftest::Skips) -> Kerne
                 name,
                 r.value
             );
-            failed += 1;
+            failed = failed.saturating_add(1);
             continue;
         }
         #[allow(clippy::cast_sign_loss)]
@@ -1135,7 +1188,7 @@ fn test_dispatch_openat2_native(skips: &mut crate::fs::selftest::Skips) -> Kerne
                 buf[0],
                 INSIDE_BYTE
             );
-            failed += 1;
+            failed = failed.saturating_add(1);
         }
         let _ = dispatch(
             crate::syscall::number::SYS_FS_CLOSE,
@@ -1166,7 +1219,7 @@ fn test_dispatch_openat2_native(skips: &mut crate::fs::selftest::Skips) -> Kerne
             "[syscall]   FAIL: native openat2 CREATE with mode 0o4755 returned {}",
             created.value
         );
-        failed += 1;
+        failed = failed.saturating_add(1);
     } else {
         #[allow(clippy::cast_sign_loss)]
         let fd = created.value as u64;
@@ -1189,17 +1242,97 @@ fn test_dispatch_openat2_native(skips: &mut crate::fs::selftest::Skips) -> Kerne
                      (the setuid bit was masked off — this is the §639 nine-vs-twelve-bit bug)",
                     md.permissions
                 );
-                failed += 1;
+                failed = failed.saturating_add(1);
             }
             Err(e) => {
                 serial_println!(
                     "[syscall]   FAIL: native openat2 create-mode stat failed: {:?}",
                     e
                 );
-                failed += 1;
+                failed = failed.saturating_add(1);
             }
         }
     }
+
+    // (f)(g)(h) `dirfd == 0` means "no base supplied" — not the cwd
+    //     (design-decisions.md §648).  These three are the whole of the native
+    //     `dirfd == 0` contract, and until §648 they could not exist here: `0`
+    //     read `pcb::get_cwd`, and kernel context has no cwd.
+    //
+    // (f) An absolute fragment is the complete answer, so no base is read and
+    //     `0` is legal.  The byte is checked, not just the success: this is the
+    //     one shape where a wrong base would go unnoticed, since there is no
+    //     base to be wrong.
+    let no_base = dispatch(
+        SYS_FS_OPENAT2,
+        &mk(b"/openat2_native/inside.txt", 1, 0, 0, 0),
+    );
+    if no_base.value <= 0 {
+        serial_println!(
+            "[syscall]   FAIL: native openat2 absolute fragment with dirfd=0 returned {} \
+             (§648: no base is read for an absolute path, so 0 is legal here)",
+            no_base.value
+        );
+        failed = failed.saturating_add(1);
+    } else {
+        #[allow(clippy::cast_sign_loss)]
+        let fd = no_base.value as u64;
+        let mut buf = [0u8; 1];
+        let read = dispatch(
+            crate::syscall::number::SYS_FS_READ,
+            &SyscallArgs {
+                arg0: fd,
+                arg1: buf.as_mut_ptr() as u64,
+                arg2: 1,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        );
+        if read.value != 1 || buf[0] != INSIDE_BYTE {
+            serial_println!(
+                "[syscall]   FAIL: native openat2 absolute fragment with dirfd=0: read {} \
+                 byte(s) = {:#x}, expected 1 byte {:#x}",
+                read.value,
+                buf[0],
+                INSIDE_BYTE
+            );
+            failed = failed.saturating_add(1);
+        }
+        let _ = dispatch(
+            crate::syscall::number::SYS_FS_CLOSE,
+            &SyscallArgs {
+                arg0: fd,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        );
+    }
+
+    // (g) A relative fragment needs a base and none was given.  Before §648
+    //     this opened against the process cwd — which for a native caller is a
+    //     directory the *Linux* ABI owns and a native `chdir` never updates.
+    check(
+        &mut failed,
+        "relative fragment with dirfd=0 (no base supplied)",
+        dispatch(SYS_FS_OPENAT2, &mk(b"inside.txt", 1, 0, 0, 0)).value,
+        einval,
+    );
+
+    // (h) Under containment `0` is always an error: "confine this walk beneath
+    //     a directory I did not name" cannot be honoured.  This is the case
+    //     that mattered most — the old code confined to the cwd and returned a
+    //     valid handle, so the caller was told its containment held while the
+    //     walk had been confined to somewhere it never named.
+    check(
+        &mut failed,
+        "relative fragment under BENEATH with dirfd=0",
+        dispatch(SYS_FS_OPENAT2, &mk(b"inside.txt", 1, 0, RESOLVE_BENEATH, 0)).value,
+        einval,
+    );
 
     let _ = dispatch(
         crate::syscall::number::SYS_FS_CLOSE,
@@ -3839,10 +3972,10 @@ fn test_dispatch_console_write() -> KernelResult<()> {
 
 /// Test filesystem syscalls: write, read, stat, mkdir, list, delete, rmdir.
 ///
-/// Exercises the full VFS path through the dispatch table.  Only runs once
-/// `/` is mounted read-write; the dispatch self-test also runs earlier in
-/// boot, before any filesystem exists.
-fn test_dispatch_fs_roundtrip(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
+/// Exercises the full VFS path through the dispatch table.  Runs from
+/// [`self_test_fs`], after the root mount — not from [`self_test`], which
+/// precedes it.
+fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
     let test_path = b"/syscall_test.txt";
     let test_data = b"Hello from syscall self-test!";
 
@@ -3858,12 +3991,16 @@ fn test_dispatch_fs_roundtrip(skips: &mut crate::fs::selftest::Skips) -> KernelR
     // (*a self-test may skip, but only on a fact it looked up* — there is a
     // second, unrelated §270 about DRM page flips; see `known-issues.md`
     // A-DESIGN-DECISIONS-NINE-DUPLICATE-SECTION-NUMBERS).)
+    //
+    // The lookup stays, but it is now an assertion rather than a skip: this
+    // case runs after the root mount, so an unwritable root is a defect.  It
+    // used to skip here, and because the caller ran at Step 11 and the mount
+    // happens at Step 20f, that skip fired on every boot ever recorded.
     if !crate::fs::selftest::is_mounted_rw("/") {
-        skips.record(
-            "Dispatch FS roundtrip",
-            "/ is not mounted read-write yet (running before filesystem init)",
+        serial_println!(
+            "[syscall]   FAIL: Dispatch FS roundtrip runs after the root mount, but / is not mounted read-write"
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
 
     // 1. Write a test file.

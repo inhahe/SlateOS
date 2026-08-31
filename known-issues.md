@@ -16271,6 +16271,61 @@ gone, replaced rather than inverted: they cannot become "must succeed" on a
 host that cannot open. `IN_ROOT` and `CACHED` keep their end-to-end differential
 tests unchanged.
 
+**The `dirfd == 0` route into this entry's failure mode is closed, 2026-08-31
+(lane A) — `0` no longer means the cwd.** The bullet three paragraphs up
+("`dirfd == 0` is not usable for a relative path") described the native ABI as
+reading handle `0` as "the process working directory". It no longer does: `0`
+now means **no base supplied**, and is legal only in the one shape where the
+base is provably never read. Rationale in `design-decisions.md` §648; lane B's
+report is `requests/b-a-the-kernels-cwd-and-libcs-cwd-are-two-different-
+directories.md`, answered in place.
+
+Why this belongs on *this* entry rather than only on §648: the fail-open mode
+this entry exists to document — *a containment check against the wrong base
+does not fail, it succeeds, on the wrong directory, and returns a valid
+descriptor that looks exactly like working confinement* — had `dirfd == 0` as
+a live route into it, on a base the caller never named. That route is gone
+structurally, not by discipline. For `SYS_FS_OPENAT2` (661):
+
+| `resolve` | fragment | `dirfd == 0` |
+|---|---|---|
+| none | absolute | **allowed**, unchanged — the base is never read |
+| none | relative | `InvalidArgument` (was: the kernel's cwd) |
+| `RESOLVE_BENEATH` | absolute | `CrossDevice`, already, before the base is looked at |
+| `RESOLVE_BENEATH` | relative | `InvalidArgument` |
+
+So under containment `0` is now *always* an error, which is what containment
+wants. `SYS_FS_UNLINKAT_PINNED`/`FSTATAT_PINNED`/`GETDENTS_PINNED` (662/663/664)
+lose the branch outright rather than narrowing it — they take a single-component
+name, never an absolute path, so no shape lets them proceed with no base; `0`
+falls through to the ordinary handle lookup and returns `InvalidHandle`, the
+honest answer since handle `0` does not exist.
+
+Two things worth keeping:
+
+- **The decisive argument was not cost.** Lane B recommended this outcome from
+  the cost of keeping two cwds in step across `fork`/`exec`/`spawn`, which is a
+  real cost and therefore re-litigable by someone who finds it affordable. The
+  non-negotiable argument is `CLAUDE.md`'s *"Every kernel object accessed via
+  unforgeable handles. **No ambient authority.**"* — `dirfd == 0` was a base the
+  caller did not name, could not have been denied, and could not delegate. The
+  alternative (a native `SYS_FS_SET_CWD` so the two cwds agree) would have added
+  a syscall whose purpose is to move the ambient base around.
+- **Lane B's stated trigger fired twice, not once.** They wrote that the trigger
+  to revisit was "the first native syscall that resolves a *relative* path
+  against `pcb::get_cwd`. Today `SYS_FS_OPENAT2` is the only one." It was two:
+  `pinned_dir_arg` (the 662/663/664 helper, landed the same day, §647) carried
+  the identical branch and was not visible from their side. Both are gone, so the
+  count is zero and the trigger is retired.
+
+Covered by `test_dispatch_openat2_native` cases (f)/(g)/(h) — absolute-with-`0`
+(reading the byte back, so a refuse-everything implementation cannot pass),
+relative-with-`0`, and relative-with-`0`-under-`BENEATH`. That test's own doc
+comment previously claimed `dirfd == 0` was "covered from ring 3 rather than
+here"; the ring-3 coverage it pointed at goes through the **Linux** ABI's
+`AT_FDCWD`, a different mechanism, so native `0` was covered nowhere. It is
+testable from kernel context precisely because it no longer depends on a cwd.
+
 ### D-NETSTACK-TCP-MINIMAL. Userspace `netstack` TCP client is minimal (slirp-only correctness) — DEBT 2026-07-14
 
 **Where:** `services/netstack/src/main.rs` — `tcp_fetch` / `send_tcp` /
@@ -24406,6 +24461,43 @@ twenty lines, not about the check. It was re-run as
 that can be saturated by benign output is not a check; recording the *reassurance*
 ("the repo stayed responsive") instead of the *result* would have been worse
 still, since it is evidence of nothing at all.
+
+**Update 2026-08-31 (lane A) — the 20 GiB floor is now unreachable by anything a
+lane can do, and the reason is that its premise no longer describes the
+machine.** `D:` is at **11.4 GiB free of 1.9 T, 100% used**. The floor was sized
+on 2026-08-15 against "138 GB of build output across four worktrees (59.1 / 40.4
+/ 35.0 / 3.5)". Today there is **exactly one `target/` on the volume** —
+`os-lane-a/target`, ~6.9 GiB — and none in `os`, `os-lane-b` or `os-lane-c`.
+`reclaim-space.py --need 20` finds that one candidate and reports it would reach
+18.4 GiB: still under the floor, and only by spending the very cache the run
+about to happen needs, so a cold rebuild puts the volume straight back where it
+started. The elastic part the prescription above counted on has already been
+squeezed out; the remaining 1.8 T is the operator's own data (Dropbox, Hyper-V,
+IDriveLocal, backups) and is not ours to delete.
+
+**What was done for the run at `c50b8e234`:** committed and pushed everything
+first, then `--min-free-gb=8` for one run. That is defensible on the floor's own
+stated terms and not a way around them — the floor exists "to leave enough room
+that the *editor* and git keep working while a build is refused", because
+"losing an uncommitted file costs the work", and against a clean, pushed tree
+there is no uncommitted file to lose. The other half of the floor's rationale (a
+link step dying part-way and leaving a stale-but-plausible kernel image in the
+ESP for a later `--no-build` to boot) is unaffected by the lowering: 8 GiB is
+still far more than a link step needs, and the run was not `--no-build`.
+
+**This is not a fix, and it should not become the habit.** The override is only
+sound while the tree is clean; running it with edits in flight reinstates
+precisely the 2026-08-15 failure. The two structural prescriptions above still
+stand and neither has been done:
+
+- **[operator] the shared `CARGO_TARGET_DIR` question** — now with a stronger
+  argument than in August, since the redundancy it would remove is currently
+  being paid for by refusing to boot-test at all.
+- **[A/operator] the floor needs to be a function of what is actually on the
+  volume**, not a constant sized against a four-worktree world that no longer
+  exists. A floor no run can ever clear stops being a guard and becomes a step
+  every run learns to skip — which is worse than a lower floor honestly set,
+  because a skipped guard protects nothing on the day the tree *is* dirty.
 
 ### [A] B-BENCH-RUN-CONTAMINATED-BY-ANOTHER-LANE-PRUNING-ITS-TARGET-DIR — 2026-08-15 — attribution recorded
 
@@ -82372,8 +82464,59 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **91 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **84 of 800 remain**
 
+> **Burn-down log.** 2026-08-30 (forty-fourth batch): **the guesses whose value
+> was the widest one its space has.** 91 → 84 across 91 → 84 functions;
+> `cmd_fwsettings`, `cmd_namespace`, `cmd_autostart`, `cmd_pidns`,
+> `cmd_taskmon`, `cmd_audiomux` and `cmd_sshd` left the ledger. Pinned by
+> self-test rung 112.
+>
+> Every entry left in the ledger is a single site, so from here on a batch is
+> chosen by what the guess *means* rather than by how many of them a function
+> has. This one is the set where the substituted number is not an arbitrary
+> placeholder but the value that means *all of it* or *the top of the tree* — so
+> the guess did not narrow the thing the operand named, it **opened** it:
+>
+> | Command | Guessed | What that value means there |
+> |---|---|---|
+> | `firewall add … <port> …` | `0` | the `list` arm renders port `0` as `*` — **every port** |
+> | `autostart add … [uid]` | `0` | root, and the item runs at boot |
+> | `namespace create … [PARENT_ID]` | `ROOT_NAMESPACE` | outside the container it was to nest in |
+> | `pidns create [parent]` | `0` | the root PID namespace, then printed back as `(parent: 0)` |
+> | `tmon register … [parent_pid]` | `0` | the top of the task tree |
+> | `amux stream … [pid]` | `0` | a real and important process (batch 34's harm) |
+>
+> `firewall add web in tcp 8O allow` is the one to remember: it did not add a
+> rule for the wrong port, it added an **allow rule for all 65536**, and printed
+> `port 0` in a success line that reads as confirmation.
+>
+> **Three more §645 word catch-alls went with it, all in that same arm**, and
+> all three widening: `_ => Both`, `_ => Any`, `_ => Allow`. Because the arm is
+> gated on `parts.len() >= 6`, every operand is required — so none of the three
+> was ever standing in for an *absent* word; each existed solely to absorb a
+> misspelled one. `blcok` produced an **allow** rule and said "allow". As in
+> batch 43a these were invisible to the gate (no `.parse()` in a `match` on a
+> `&str`) and were found by reading around a flagged site.
+>
+> **`cmd_sshd` is the batch's counter-example and was included for it.** Its
+> guess was already being caught — `0` is not a listening port and the range
+> check below rejected it — so the fix is not a refusal that was missing but a
+> *message* that could not say which word was wrong: `Invalid port` answered
+> `sshd port 0` and `sshd port 8O22` identically. Worth recording because it is
+> the shape a burn-down is most likely to skip as "already fine".
+>
+> **`cmd_audiomux` also carried the D2 shape next door**: `[output_id]` was
+> `and_then(|s| s.parse().ok())` into an `Option`, where an unreadable word is
+> indistinguishable from an omitted one, so `amux stream foo 5 1O` routed the
+> stream to the default output and reported success.
+>
+> Rung 112 asserts the converse as well as the refusals — `pidns create 99`
+> reaches `pidns::create` and is rejected *there*, by a different message —
+> because a rung made only of refusals would pass just as well against a helper
+> that refused everything, which is the failure mode a burn-down batch is most
+> likely to introduce.
+>
 > **Burn-down log.** 2026-08-30 (forty-third batch, part b): **the expression
 > evaluator**. 95 → 91 across 93 → 91 functions; `eval_test` and
 > `tokenize_arith` left the ledger, and **every entry that remains is now a
@@ -100095,6 +100238,109 @@ inviting a check-then-use of its own.
 **Not built** because no caller has asked, and an ABI invented for a
 hypothetical question is one more thing to keep in step. **Trigger:** lane B
 asking, or the first userspace caller whose correctness depends on it.
+
+## A-SIX-SELF-TESTS-SKIP-ON-EVERY-BOOT-AND-HAVE-NEVER-ONCE-RUN (lane A)
+
+**Status:** FIXED 2026-08-31 (the six instances). The *class* gate remains
+open — see "Then close the class" below.
+
+**In short:** Six self-test cases ask the mount table whether `/` is mounted
+read-write, find that it is not, record an honest SKIP, and return. They run
+at boot Steps 11 and 19; the root filesystem mounts at Step 20f. So the
+condition is not "sometimes false" — it is false on **every boot, always**,
+and these six cases have never executed a single time. They are green in the
+sense that nothing red is printed.
+
+**The six** (names as they appear in the serial log):
+
+| Subsystem | Case | Gate |
+|---|---|---|
+| `syscall` (dispatch.rs:991) | Native openat2 | `is_mounted_rw("/")` |
+| `syscall` (dispatch.rs:3861) | Dispatch FS roundtrip | `is_mounted_rw("/")` |
+| `syscall/linux` (linux.rs:72597) | mkdir/rmdir/unlink native-VFS round-trip | `is_mounted_rw("/")`, inline inside `self_test` |
+| `syscall/linux` (linux.rs:72925) | rename native-VFS round-trip | `is_mounted_rw("/")`, inline inside `self_test` |
+| `spawn` (spawn.rs:32078) | Spawn with fd_map | `is_mounted_rw("/")` |
+| `spawn` (spawn.rs:32401) | take_initial_fds one-shot | `is_mounted_rw("/")` |
+
+Reproduce against any boot log:
+
+    grep -n "SKIP.*not mounted read-write" build/serial-test.txt
+
+**Nothing here is dishonest, which is why nothing caught it.** Each skip is
+exactly what design-decisions.md §270 asks for — a fact the test *looked up*
+in the mount table rather than inferred from a failed `open`, so an open bug
+cannot silently switch the section off. `check-selftest-skips.py` enforces
+that honesty and passes. What no gate has a notion of is a skip that is
+honest and yet **unconditional in practice**: a predicate that is a constant
+at the point it is evaluated.
+
+**The fix pattern already exists in-tree, in three places.** A case that needs
+the filesystem is split into a second entry point called from `main.rs` after
+Step 20f:
+
+- `ipc::io_ring::self_test_fh()` — `main.rs:1577`, and its two cases are
+  visibly *passing* in the serial log rather than skipping.
+- `syscall::linux::self_test_rename_noreplace()` — `main.rs:1878`, with the
+  comment "which only sees a read-only root".
+- `syscall::linux::self_test_file_mmap()` — `main.rs:1934`, same shape.
+
+So the work is mechanical: move each of the six bodies behind a
+`self_test_*_fs()` entry point, call it from the post-mount block, and leave
+the pre-mount `self_test()` free of the case entirely — rather than leaving a
+skip behind that reports a condition which can no longer occur.
+
+Four of the six were already standalone `fn`s and moved by relocating one
+call. The two in `syscall/linux` were **inline blocks inside `pub fn
+self_test()`**, which spans some 15,000 lines; they had to be lifted into
+functions of their own first. That was the larger half of the work and the
+reason they were listed separately above.
+
+**What was done (2026-08-31).** Three new post-mount entry points, all called
+from the `main.rs` block that already hosts `io_ring::self_test_fh`:
+
+| New entry point | Cases moved |
+|---|---|
+| `syscall::dispatch::self_test_fs` | Dispatch FS roundtrip, Native openat2 |
+| `proc::spawn::self_test_fs` | Spawn with fd_map, take_initial_fds one-shot |
+| `syscall::linux::self_test_fs` | `test_linux_mkdir_rmdir_unlink_roundtrip`, `test_linux_rename_roundtrip` |
+
+Three further changes fell out of the move and are worth naming, because each
+was a second way the same six cases could have gone unnoticed:
+
+- **The guards became assertions.** Each case still calls `is_mounted_rw("/")`,
+  but a `false` now prints FAIL and returns `InternalError` instead of
+  recording a SKIP. Before the mount, "root is not writable yet" is a fact
+  about the boot stage; after it, it is a defect, and answering a defect with a
+  SKIP is how these six came to spend their whole lives unrun.
+- **The `Skips` recorders were deleted**, not left idle. With no case in
+  `dispatch::self_test`, `spawn::self_test` or `linux::self_test` able to skip,
+  a recorder there could only ever report zero — machinery that can no longer
+  record anything is one more thing for a reader to mistake for coverage.
+- **Two swallowed-error sub-gates became hard failures.** Inside the two
+  `syscall/linux` bodies, `if Vfs::write_file(..).is_ok() { .. }` wrapped three
+  assertions in the mkdir case and the whole `RENAME_NOREPLACE`/EEXIST leg in
+  the rename case. A failing write dropped those assertions and the section
+  still printed OK — the same defect as the outer skip, one level down and with
+  no log line at all. Both now fail loudly.
+
+The calls are FATAL rather than WARNING, matching the halves of the same
+suites that still run at Steps 11 and 19 and halt the boot on failure.
+Demoting them would have moved the six cases from never running to running and
+not mattering.
+
+**Then close the class, not just the instances.** Still open. Extend
+`scripts/check-selftest-skips.py` (or the boot-history machinery in
+`bench/boot-history.jsonl`, which already has the data) to fail when a named
+skip fires on 100% of recorded boots. A skip that has never once *not* fired
+is not a skip; it is a deletion with a log line.
+
+**Why this matters beyond the six.** `test_dispatch_openat2_native` is the
+test design-decisions.md §648 relies on for native `dirfd == 0` coverage, and
+it is one of the six. Adding cases to a test that provably never runs is the
+precise self-deception §648's own entry criticises elsewhere — so §648's
+test half was blocked on this (it is now unblocked), and any future "it is
+covered by a self-test" claim about these six subsystems is worth checking
+against the log first.
 
 ### Lesson 81 addendum: the inventory is 55 sites in 20 apps, not seven (lane C, 2026-08-30)
 

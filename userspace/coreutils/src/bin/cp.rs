@@ -1162,14 +1162,20 @@ fn copy_tree<W: Write>(src: &Path, src_mode: u32, dest: &Path, err: &mut W) -> b
     match fs::read_dir(src) {
         Ok(entries) => {
             for entry in entries {
-                if !copy_entry(&entry, dest, err) {
+                if !copy_entry(&entry, src, dest, err) {
                     ok = false;
                 }
             }
         }
         Err(e) => {
+            // GNU's wording, and it is the only one it has for this: `copy_dir`
+            // slurps the whole directory with `savedir` and reports every way
+            // that can fail as `cannot access`. "cannot read directory" would
+            // be the more precise sentence and is what `rm` prints, but a
+            // utility that differs from GNU only in the words of a diagnostic
+            // is still a utility whose output a script cannot match on.
             let why = strerror(&e);
-            let _ = writeln!(err, "cp: cannot read directory {}: {why}", quoteaf_os(src));
+            let _ = writeln!(err, "cp: cannot access {}: {why}", quoteaf_os(src));
             ok = false;
         }
     }
@@ -1212,12 +1218,23 @@ fn copy_tree<W: Write>(src: &Path, src_mode: u32, dest: &Path, err: &mut W) -> b
 
 /// One entry of a directory being walked. Split out of [`copy_tree`] only to
 /// keep the mode bookkeeping either side of the walk readable in one screen.
-fn copy_entry<W: Write>(entry: &io::Result<fs::DirEntry>, dest: &Path, err: &mut W) -> bool {
+fn copy_entry<W: Write>(
+    entry: &io::Result<fs::DirEntry>,
+    src: &Path,
+    dest: &Path,
+    err: &mut W,
+) -> bool {
     let entry = match entry {
         Ok(e) => e,
         Err(e) => {
+            // The source directory is what could not be read, so it is what is
+            // named — this said `dest` before, which is a directory that was
+            // created successfully a moment earlier and had nothing to do with
+            // the failure. Same sentence as the whole-directory failure in
+            // [`copy_tree`]: GNU reads a directory in one go, so it has no
+            // separate wording for giving up part-way through.
             let why = strerror(e);
-            let _ = writeln!(err, "cp: cannot read directory {}: {why}", quoteaf_os(dest));
+            let _ = writeln!(err, "cp: cannot access {}: {why}", quoteaf_os(src));
             return false;
         }
     };

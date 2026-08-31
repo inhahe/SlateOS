@@ -892,11 +892,7 @@ impl Dest {
 ///
 /// Any `stat` failure other than "it isn't there", which is [`Dest::New`], and
 /// other than `ELOOP` under `-f`, which is [`Dest::Opaque`].
-fn stat_destination(
-    src_meta: &fs::Metadata,
-    target: &Path,
-    flags: &CpFlags,
-) -> io::Result<Dest> {
+fn stat_destination(src_meta: &fs::Metadata, target: &Path, flags: &CpFlags) -> io::Result<Dest> {
     let use_lstat =
         src_meta.is_dir() || src_meta.file_type().is_symlink() || flags.remove_destination;
     let stat = if use_lstat {
@@ -1127,8 +1123,7 @@ fn copy_one<O: Write, E: Write>(
         // `same_file_ok`'s `x->move_mode || x->unlink_dest_before_opening` arm
         // (`copy.c:1877`), and it is why `cp --remove-destination a self`
         // succeeds where plain `cp a self` says "are the same file".
-        let link_replaced =
-            flags.remove_destination && dest_meta.file_type().is_symlink();
+        let link_replaced = flags.remove_destination && dest_meta.file_type().is_symlink();
         if !link_replaced && is_same_file(src_path, &target, !flags.follow_operand()) {
             let _ = writeln!(
                 job.err,
@@ -2522,7 +2517,12 @@ mod tests {
         for (spelling, force, remove, interactive) in [
             ("-f", true, false, Interactive::Unspecified),
             ("--force", true, false, Interactive::Unspecified),
-            ("--remove-destination", false, true, Interactive::Unspecified),
+            (
+                "--remove-destination",
+                false,
+                true,
+                Interactive::Unspecified,
+            ),
             ("-n", false, false, Interactive::AlwaysNo),
             ("--no-clobber", false, false, Interactive::AlwaysNo),
         ] {
@@ -2574,7 +2574,9 @@ mod tests {
     #[test]
     fn repeating_no_clobber_is_not_an_error() {
         assert_eq!(
-            run_parse(&["-n", "-n", "--no-clobber", "a", "b"]).0.interactive,
+            run_parse(&["-n", "-n", "--no-clobber", "a", "b"])
+                .0
+                .interactive,
             Interactive::AlwaysNo
         );
     }
@@ -3825,7 +3827,12 @@ mod tests {
         assert!(ok, "{err}");
         assert!(out.starts_with("removed "), "{out}");
         assert_eq!(body(&dang), b"A");
-        assert!(!fs::symlink_metadata(&dang).unwrap().file_type().is_symlink());
+        assert!(
+            !fs::symlink_metadata(&dang)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -981,9 +981,13 @@ mod tests {
     fn own_source_between(open: &str, close: &str) -> String {
         let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/errno.rs"))
             .expect("cannot read errno.rs; the check would otherwise pass vacuously");
-        let start = src.find(open).unwrap_or_else(|| panic!("no {open:?} in errno.rs"));
+        let start = src
+            .find(open)
+            .unwrap_or_else(|| panic!("no {open:?} in errno.rs"));
         let rest = &src[start..];
-        let end = rest.find(close).unwrap_or_else(|| panic!("no {close:?} after {open:?}"));
+        let end = rest
+            .find(close)
+            .unwrap_or_else(|| panic!("no {close:?} after {open:?}"));
         rest[..end].to_string()
     }
 
@@ -1000,7 +1004,9 @@ mod tests {
                 // Match on the exact token, so that `-50` does not satisfy
                 // `-500` and `-70` does not satisfy `-700`.
                 let needle = format!("{value}");
-                !block.split(|c: char| !(c.is_ascii_digit() || c == '-')).any(|t| t == needle)
+                !block
+                    .split(|c: char| !(c.is_ascii_digit() || c == '-'))
+                    .any(|t| t == needle)
             })
             .map(|(name, value)| format!("{name} ({value})"))
             .collect();

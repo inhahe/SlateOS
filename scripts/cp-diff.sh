@@ -662,8 +662,15 @@ TREE='mktree; ln -s tree treelink'
 run_case -r treelink/ dst
 
 # =============================================================================
-# 9. Copying a directory into itself
+# 9. One directory reached twice
 # =============================================================================
+# Two shapes, and one rule underneath them: a directory that would appear twice
+# in the destination can only do so by being hard-linked, and hard-linked
+# directories are what GNU refuses. The first half is the destination being
+# inside the source; the second is two paths on one command line arriving at
+# one directory.
+#
+# --- 9a. Into itself -----------------------------------------------------
 # Module docs, bug 2. Every spelling below resolves the destination to a path
 # inside the source, so a `cp` that went ahead would copy what it had just
 # written. Both sides are expected to refuse; the header explains why no case
@@ -701,6 +708,40 @@ TREE='mktree; mkdir treeish'
 run_case -r tree treeish
 TREE='mktree; mkdir treeish'
 run_case -r treeish tree
+
+# --- 9b. Twice over ------------------------------------------------------
+# The other way one directory is reached twice: an operand names it, and then
+# the walk of a *second* operand arrives at it from above. `tree/sub` and
+# `tree` are that pair, and the fixture already has them.
+#
+# This is the half a per-operand record cannot see. GNU keeps one table
+# (`src_to_dest`) that its walk reads too; ours kept the directory half where
+# only the operand loop could reach it, so until design-decisions.md 736 the
+# repeat below was copied a second time in silence and the status was 0.
+#
+# The order of the two operands decides whether there is a repeat at all,
+# because a directory found by *walking* is looked up and never recorded
+# (`copy.c:2670` takes `src_to_dest_lookup`, not `remember_copied`). Named
+# first, `tree/sub` is in the table and the walk refuses it; named second, the
+# walk that already passed it left nothing behind and both copies are made.
+run_case -r tree/sub tree dst
+run_case -r tree tree/sub dst
+# The refusal is not the end of the walk: the entries after the refused one are
+# still copied, and only the status carries the failure.
+run_case -rv tree/sub tree dst
+# `-L` is the answer that makes it legitimate — every name is followed, so one
+# directory reached twice is two independent copies of it, made silently
+# (`copy.c:2723`). `-H` is not: it follows operands only, so the walk still
+# refuses.
+run_case -rLv tree/sub tree dst
+run_case -rHv tree/sub tree dst
+# And with the option whose table this is, which changes nothing here: the rule
+# applies to directories whether or not `--preserve=links` was asked for.
+run_case -rv --preserve=links tree/sub tree dst
+# Deeper, so that the refusal happens below the top level of the walk rather
+# than at it.
+TREE='mktree; mkdir -p tree/sub/deeper; printf d > tree/sub/deeper/d.txt'
+run_case -rv tree/sub/deeper tree dst
 
 # =============================================================================
 # 10. Modes

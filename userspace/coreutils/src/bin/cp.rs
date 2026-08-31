@@ -143,6 +143,31 @@
 //!    copies. Telling them apart needs the entry — the directory it is in plus
 //!    the final component — and not the inode alone. See [`entry_id`].
 //!
+//! # A tenth: the record the walk could not read
+//!
+//! 10. **One directory copied twice, in silence.** `cp -r parent/child parent
+//!     d` copied `parent/child` to `d/child`, then walked into `parent`, found
+//!     that same directory a second time, and copied the whole subtree again to
+//!     `d/parent/child` — exit 0, nothing printed. GNU refuses the repeat
+//!     (`will not create hard link 'd/parent/child' to directory 'd/child'`)
+//!     and exits 1, because a directory appearing twice in the destination
+//!     could only be one directory if it were hard-linked, and hard-linked
+//!     directories are what it will not make.
+//!
+//!     The refusal *existed* here; it was in [`copy_one`], reading a table on
+//!     [`Seen`] that only the operand loop can reach. So it fired when two
+//!     operands named one directory and never when a walk arrived at one. Two
+//!     tables were kept where GNU keeps one, on the reasoning that a directory
+//!     and a file can never collide in a shared table — true, and beside the
+//!     point: the cost of the split was not a collision but that half the
+//!     question lived behind an interface half the code had no route to. They
+//!     are now one table, [`Copied`], hung where the walk can read it.
+//!
+//!     What makes it a tenth bug rather than a missing feature is the comment
+//!     that stood where the check now is, asserting that none of `copy_one`'s
+//!     refusals "can arise" in a walk. It was reasoning about *files*, and it
+//!     was right about them. See design-decisions.md 736.
+//!
 //! # Options this implementation does not have
 //!
 //! Everything except `-r`/`-R`/`--recursive`, `-t`/`--target-directory`,
@@ -417,7 +442,7 @@ struct Preserve {
     ownership: bool,
     /// `--preserve=links`: when two sources turn out to be one inode, make the
     /// second destination a **hard link** to the first rather than a second
-    /// copy of the bytes. See [`Links`].
+    /// copy of the bytes. See [`Copied`].
     ///
     /// The odd one out, and in two ways. It is not part of `-p` — GNU's `-p` is
     /// the three POSIX attributes and nothing else — and it is not an attribute
@@ -613,13 +638,13 @@ fn run_main() -> ExitCode {
             // Held for the whole run, not opened per prompt: `cp -i a b c d`
             // asks three questions and reads three lines of one stream.
             let mut answers = StdinAnswers::new();
-            // One table for the whole command, which is what `--preserve=links`
-            // means by "the same inode twice". See [`Links`].
-            let mut links = Links::default();
+            // One table for the whole command, which is what both of its
+            // readers mean by "the same inode twice". See [`Copied`].
+            let mut copied = Copied::default();
             let earned = {
                 let mut job = Job {
                     flags: &flags,
-                    links: &mut links,
+                    copied: &mut copied,
                     out: &mut out,
                     err: &mut err,
                     answers: &mut answers,
@@ -938,13 +963,15 @@ fn decode_preserve(list: &OsString, on: bool, flags: &mut CpFlags) -> Result<(),
 /// that path at all, which is how bugs 1–3 and 6 in the module docs survived.
 struct Job<'a, O: Write, E: Write> {
     flags: &'a CpFlags,
-    /// `--preserve=links`' record of which inode went where. Empty and unread
-    /// when the option was not given.
+    /// The record of which inode went where, read by `--preserve=links` and by
+    /// the directory-named-twice refusal alike.
     ///
-    /// On `Job` and not on [`Seen`] because the walk needs it: two hard-linked
-    /// files *inside* one source directory must come out linked too (measured),
-    /// and [`copy_entry`] can reach `Job` and cannot reach `Seen`.
-    links: &'a mut Links,
+    /// On `Job` and not on [`Seen`] because the *walk* needs it, twice over:
+    /// two hard-linked files inside one source directory must come out linked
+    /// too, and a directory reached by walking has to be checked against the
+    /// directories already copied. [`copy_entry`] can reach `Job` and cannot
+    /// reach `Seen`, so anything it must consult lives here.
+    copied: &'a mut Copied,
     /// Where `--verbose` announces. Measured: GNU's `emit_verbose` uses
     /// `printf`, so the line is on stdout and is *not* a diagnostic.
     out: &'a mut O,
@@ -1116,16 +1143,17 @@ fn dest_directory_error(dest: &Path) -> Option<io::Error> {
 
 /// What this command has already copied, and where it put it.
 ///
-/// Three of GNU's refusals need it, and all three exist to stop one operand
+/// Two of GNU's refusals need it, and both exist to stop one operand
 /// destroying the result of an earlier one in the same command — `cp a
 /// other/a d` would otherwise leave `d/a` holding `other/a`, and the copy of
 /// `a` the user asked for would be gone with nothing said. GNU keeps two hash
-/// tables for this (`copy.c`'s `src_info` and `dest_info`, plus the
-/// `remember_copied` table); the three fields below are the same information.
+/// tables for this (`copy.c`'s `src_info` and `dest_info`); the two fields
+/// below are the same information.
 ///
 /// Only *command-line* sources go in. A file reached by recursing into a
 /// directory cannot be named twice on one command line, so recording it would
-/// be work spent on a question that cannot arise.
+/// be work spent on a question that cannot arise. GNU's third table,
+/// `src_to_dest`, is not like that and is not here: see [`Copied`].
 #[derive(Default)]
 struct Seen {
     /// Non-directory sources already copied. Keyed on the file's identity
@@ -1133,14 +1161,6 @@ struct Seen {
     /// ./a d` is one file named twice, while `cp a hard-link-to-a d` is two
     /// entries that happen to share an inode and is a legitimate request.
     sources: HashSet<(FileId, EntryId)>,
-    /// Directory sources already copied, and *where* each was written. The
-    /// destination is part of the answer here and not for files, because GNU's
-    /// directory rule asks a different question — see [`copy_one`].
-    ///
-    /// A path rather than an [`EntryId`], because the refusal has to name it:
-    /// `will not create hard link 'd/s' to directory 'd/.'` quotes the earlier
-    /// destination, so the entry it identifies is not enough.
-    dirs: HashMap<FileId, PathBuf>,
     /// Destinations this command created, by path *and* identity. Both halves
     /// are needed: the path is what a later operand would collide with, and
     /// the identity is what says the thing at that path is still the one we
@@ -1175,27 +1195,36 @@ impl Seen {
     }
 }
 
-/// `--preserve=links`' answer to "have I copied this inode already, and where
-/// to?" — GNU's `remember_copied`/`src_to_dest` table (`copy.c:1997`).
+/// "Have I copied this inode already, and where to?" — GNU's one `src_to_dest`
+/// table (`copy.c:1997`), with its `remember_copied` and `src_to_dest_lookup`.
 ///
-/// One table for the whole command, not one per operand, because that is what
-/// the feature is for: `cp --preserve=links a b d` has to notice at `b` that it
-/// already wrote `a`'s inode to `d/a`. GNU's `hash_init` is likewise called once
-/// in `main` (`cp.c:1284`), and its comment "in this command line argument" is
-/// about which *arguments can share* an inode, not about the table's lifetime.
+/// Two rules read it, and they look unrelated until you notice that both are
+/// asking what a *second* appearance of one inode should become:
 ///
-/// A [`PathBuf`] value, not a [`FileId`]: the destination is what gets linked
-/// *from*, so it has to be nameable. GNU stores `dst_relname` for the same
-/// reason.
+/// * **`--preserve=links`** answers "a hard link to where the first appearance
+///   landed", which is why the value has to be a nameable destination.
+/// * **The directory rule** answers "nothing — a directory cannot appear twice
+///   except by being hard-linked, and hard-linked directories are what GNU
+///   refuses", with its comment naming Netapp snapshot trees as where they turn
+///   up. That refusal quotes the earlier destination too.
 ///
-/// Kept separate from [`Seen`]'s `dirs`, where GNU uses one table for both.
-/// They can never collide — a directory and a non-directory are different
-/// inodes — and the two lookups ask genuinely different questions, so a shared
-/// table would only make each one's rule harder to read.
+/// One table for both, as GNU has, and one for the whole command rather than
+/// one per operand: `cp --preserve=links a b d` has to notice at `b` that it
+/// already wrote `a`'s inode to `d/a`, so `hash_init` is called once in `main`
+/// (`cp.c:1284`). Its comment "in this command line argument" is about which
+/// *arguments can share* an inode, not about the table's lifetime.
+///
+/// The two rules were split here once — the directory half lived on [`Seen`],
+/// which only [`copy_one`] can reach — and the split was a bug, not a
+/// simplification: a directory found by *walking* was then checked against
+/// nothing at all. Measured before the merge, with `parent/child` a directory:
+/// `cp -r parent/child parent d` copied that subtree twice and exited 0, where
+/// GNU refuses the repeat with `will not create hard link 'd/parent/child' to
+/// directory 'd/child'` and exits 1. See design-decisions.md 736.
 #[derive(Default)]
-struct Links(HashMap<FileId, PathBuf>);
+struct Copied(HashMap<FileId, PathBuf>);
 
-impl Links {
+impl Copied {
     /// GNU's `remember_copied`: note that `id` is being copied to `target`, and
     /// answer with where it went *last* time if there was a last time.
     ///
@@ -1209,6 +1238,18 @@ impl Links {
         }
         self.0.insert(id, target.to_path_buf());
         None
+    }
+
+    /// GNU's `src_to_dest_lookup` (`copy.c:2670`): where did this inode go —
+    /// *without* claiming it is going here.
+    ///
+    /// The difference from [`Copied::remember`] is load-bearing and is GNU's.
+    /// A directory reached by walking is looked up and never recorded, because
+    /// only a directory *named on the command line* can be named twice;
+    /// recording walked ones instead would make the second half of a `cp -r p d
+    /// p` accuse the first half's entries of repeating themselves.
+    fn lookup(&self, id: FileId) -> Option<&Path> {
+        self.0.get(&id).map(PathBuf::as_path)
     }
 
     /// GNU's `forget_created`, called from its `un_backup` label
@@ -1784,39 +1825,47 @@ fn copy_one<O: Write, E: Write>(
     // the destination tree, which for a directory can only be done by hard
     // linking it — and hard-linked directories are what GNU refuses here, with
     // its comment naming Netapp snapshot trees as where they turn up.
+    //
+    // `remember`, not `lookup`: an operand *is* recorded, because a later
+    // operand — or a walk that reaches this same directory from elsewhere —
+    // has to be able to find it. [`copy_entry`] takes the other half.
+    // Unconditional, where the rest of [`Seen`] is built only for two or more
+    // operands, because the walk reads this table and a single operand's walk
+    // can reach a directory it was itself given (`cp -r parent d` cannot, but
+    // `cp -r parent/child parent d` is two operands only by accident of how
+    // the repeat is reached). GNU's `hash_init` is likewise unconditional.
+    //
+    // `-r` is not tested for: without it a directory operand is refused above,
+    // at "omitting directory", and never reaches this line.
+    //
+    // Nothing follows the two refusals: a miss has already been recorded by
+    // `remember` itself, which is why it is one call and not a lookup and an
+    // insert.
     if metadata.is_dir()
-        && let Some(seen) = seen.as_deref_mut()
         && let Some(id) = file_id(src_path, &metadata)
+        && let Some(earlier) = job.copied.remember(id, &target)
     {
-        match seen.dirs.get(&id) {
-            Some(earlier) => {
-                if same_entry(earlier, &target) {
-                    let _ = writeln!(
-                        job.err,
-                        "cp: warning: source directory {} specified more than once",
-                        quoteaf_os(src)
-                    );
-                    return true;
-                }
-                // Two *destinations* for one source directory is not an error
-                // when following symlinks was asked for: `cp -RL a b d`, where
-                // `a` and `b` are links to one directory, is a request for two
-                // independent copies of it and GNU makes them silently
-                // (`copy.c:2723`). `-H` says the same for operands, which is
-                // all [`copy_one`] handles.
-                if !flags.follow_operand() {
-                    let _ = writeln!(
-                        job.err,
-                        "cp: will not create hard link {} to directory {}",
-                        quoteaf_os(&target),
-                        quoteaf_os(earlier)
-                    );
-                    return false;
-                }
-            }
-            None => {
-                seen.dirs.insert(id, target.clone());
-            }
+        if same_entry(&earlier, &target) {
+            let _ = writeln!(
+                job.err,
+                "cp: warning: source directory {} specified more than once",
+                quoteaf_os(src)
+            );
+            return true;
+        }
+        // Two *destinations* for one source directory is not an error when
+        // following symlinks was asked for: `cp -RL a b d`, where `a` and `b`
+        // are links to one directory, is a request for two independent copies
+        // of it and GNU makes them silently (`copy.c:2723`). `-H` says the same
+        // for operands, which is all [`copy_one`] handles.
+        if !flags.follow_operand() {
+            let _ = writeln!(
+                job.err,
+                "cp: will not create hard link {} to directory {}",
+                quoteaf_os(&target),
+                quoteaf_os(&earlier)
+            );
+            return false;
         }
     }
 
@@ -2219,7 +2268,7 @@ fn place_entity<O: Write, E: Write>(
         && (hard_links(metadata) > 1 || job.flags.should_dereference(command_line_arg))
         && let Some(id) = file_id(src_path, metadata)
     {
-        if let Some(earlier) = job.links.remember(id, target) {
+        if let Some(earlier) = job.copied.remember(id, target) {
             return if create_hard_link(&earlier, target, job) {
                 Placed::Linked
             } else {
@@ -2238,7 +2287,7 @@ fn place_entity<O: Write, E: Write>(
     // happened. The guard there is `earlier_file == nullptr`, which is this
     // `recorded.is_some()` — the linking path above never reaches here.
     if !ok && let Some(id) = recorded {
-        job.links.forget(id);
+        job.copied.forget(id);
     }
 
     if ok { Placed::Copied } else { Placed::Failed }
@@ -2837,10 +2886,12 @@ fn copy_entry<O: Write, E: Write>(
     // `not replacing 'd/x/f'` and exits 1, and `cp -r --remove-destination`
     // announces `removed 'd/x/f'` for the same file.
     //
-    // The refusals [`copy_one`] makes either side of this are deliberately not
-    // here, and none of them can arise: a source found by walking cannot have
-    // been named twice on the command line, and nothing this command created
-    // can be reached inside the tree it is filling.
+    // Of the refusals [`copy_one`] makes either side of this, the ones about a
+    // *file* named twice are not here and cannot arise — a file found by
+    // walking was not named on the command line, and nothing this command
+    // created can be reached inside the tree it is filling. The one about a
+    // *directory* seen twice is a different matter and is below: a walk can
+    // reach a directory an operand already copied.
     let mut dest_state = match stat_destination(&meta, &to, job.flags) {
         Ok(d) => d,
         Err(e) => {
@@ -2881,6 +2932,51 @@ fn copy_entry<O: Write, E: Write>(
     }
     if !remove_destination_first(&to, &mut dest_state, job) {
         return false;
+    }
+
+    // A directory the walk has arrived at whose inode was already copied is
+    // that directory a second time. `cp -r parent/child parent d` is the plain
+    // way to get here: `parent/child` is copied to `d/child`, and then the walk
+    // into `parent` finds the very same directory again. Writing it out a
+    // second time would put one inode in two places, which for a directory
+    // means hard-linking it, which is what GNU refuses (`copy.c:2690`).
+    //
+    // A *lookup*, never a `remember`: GNU records only command-line directories
+    // (`copy.c:2667`) because only those can be named twice, and recording
+    // walked ones would make the ordinary second visit to a shared subtree —
+    // there is none, but the table would not know that — into an accusation.
+    //
+    // Two of GNU's four arms for this are deliberately absent, and neither can
+    // be reached from a walk. Both compare the *earlier destination* with
+    // something: `same_nameat (AT_FDCWD, src_name, …, earlier_file)` with this
+    // source, `same_nameat (dst_dirfd, dst_relname, …, earlier_file)` with this
+    // target. The first needs the place an operand was copied *to* to be the
+    // directory the walk is now standing on, which is a copy into itself and is
+    // refused at the operand before any walk starts (see [`place_source`]); GNU
+    // can reach it only because it additionally records the inode of the first
+    // destination directory it creates (`copy.c:2982`), which this `cp` does
+    // not do — see design-decisions.md 724 for why it refuses up front instead.
+    // The second needs two operands to have been copied to one path, which
+    // [`copy_one`]'s own arm answers first, with the warning that names the
+    // operand.
+    if meta.is_dir()
+        && let Some(id) = file_id(&from, &meta)
+        && let Some(earlier) = job.copied.lookup(id).map(Path::to_path_buf)
+    {
+        // GNU's third arm, with `command_line_arg` false so that only `-L`
+        // satisfies it: following symlinks was asked for, so two paths reaching
+        // one directory are a request for two independent copies of it and are
+        // made silently. `cp -RL a b d` with `a/l` and `b/l` both links to `c`
+        // is the case in its comment.
+        if !job.flags.follow_walked() {
+            let _ = writeln!(
+                job.err,
+                "cp: will not create hard link {} to directory {}",
+                quoteaf_os(&to),
+                quoteaf_os(&earlier)
+            );
+            return false;
+        }
     }
 
     // The same dispatch an operand goes through, and literally the same code:
@@ -4750,11 +4846,11 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
         let mut canned = Canned::new(answers);
-        let mut links = Links::default();
+        let mut copied = Copied::default();
         let ok = {
             let mut job = Job {
                 flags,
-                links: &mut links,
+                copied: &mut copied,
                 out: &mut out,
                 err: &mut err,
                 answers: &mut canned,
@@ -5022,6 +5118,98 @@ mod tests {
         assert!(ok, "{e}");
         assert_eq!(fs::read(dest.join("a").join("f")).unwrap(), b"body");
         assert_eq!(fs::read(dest.join("b").join("f")).unwrap(), b"body");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Builds `parent/{child/{f},top}` under a fresh scratch directory with an
+    /// empty `dest`, and hands back the three paths the walked-repeat tests
+    /// name. The shape is the smallest one where an operand and a *walk* reach
+    /// one directory: `parent/child` is copied by name, and then `parent` is
+    /// walked into and offers the same directory a second time.
+    fn nested_pair(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let dir = scratch(tag);
+        let parent = dir.join("parent");
+        let child = parent.join("child");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(child.join("f"), b"body").unwrap();
+        fs::write(parent.join("top"), b"top").unwrap();
+        let dest = dir.join("dest");
+        fs::create_dir(&dest).unwrap();
+        (dir, parent, dest)
+    }
+
+    /// The bug this table's merge was for. `cp -r parent/child parent dest`
+    /// copies `parent/child` to `dest/child`, then walks `parent` and finds
+    /// that same directory again. Before the merge the walk consulted no
+    /// record at all and copied the subtree a second time, exiting 0; GNU
+    /// refuses the repeat and exits 1. See [`Copied`].
+    #[test]
+    fn a_directory_reached_by_walking_is_refused_a_second_time() {
+        let (dir, parent, dest) = nested_pair("walked_repeat");
+
+        let (ok, e) = cp(&RECURSIVE, &[&parent.join("child"), &parent, &dest]);
+        assert!(!ok, "{e}");
+        assert!(e.contains("will not create hard link"), "{e}");
+        assert!(
+            e.contains("to directory"),
+            "the refusal names where the inode landed first: {e}"
+        );
+        assert_eq!(fs::read(dest.join("child").join("f")).unwrap(), b"body");
+        assert!(
+            !dest.join("parent").join("child").exists(),
+            "the repeat is refused, not copied: {e}"
+        );
+        // GNU's `copy_dir` does not stop at a failed entry, so the sibling
+        // after the refused one is still copied. Measured: its `-v` prints
+        // `'parent/top' -> 'dest/parent/top'` after the diagnostic.
+        assert_eq!(
+            fs::read(dest.join("parent").join("top")).unwrap(),
+            b"top",
+            "the walk carries on past the refusal: {e}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `-L` is the one answer that makes the same two paths legitimate: it asks
+    /// for every name to be followed, so one directory reached twice is two
+    /// independent copies of it and is made silently. GNU's third arm
+    /// (`copy.c:2723`) with `command_line_arg` false.
+    #[test]
+    fn following_links_lets_the_walk_copy_a_directory_twice() {
+        let (dir, parent, dest) = nested_pair("walked_repeat_L");
+
+        let flags = CpFlags {
+            dereference: Deref::Always,
+            ..RECURSIVE
+        };
+        let (ok, e) = cp(&flags, &[&parent.join("child"), &parent, &dest]);
+        assert!(ok, "{e}");
+        assert_eq!(fs::read(dest.join("child").join("f")).unwrap(), b"body");
+        assert_eq!(
+            fs::read(dest.join("parent").join("child").join("f")).unwrap(),
+            b"body"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The same two operands the other way round, which is *not* a repeat: the
+    /// walk reaches `parent/child` first, and a directory found by walking is
+    /// looked up and never recorded, so the operand that names it afterwards
+    /// finds nothing in the table. Recording walked directories — the obvious
+    /// simplification of [`Copied::lookup`] into [`Copied::remember`] — turns
+    /// this into a spurious refusal. Measured against GNU: both trees land and
+    /// the status is 0.
+    #[test]
+    fn a_walk_that_arrives_first_does_not_refuse_the_operand() {
+        let (dir, parent, dest) = nested_pair("walk_then_operand");
+
+        let (ok, e) = cp(&RECURSIVE, &[&parent, &parent.join("child"), &dest]);
+        assert!(ok, "{e}");
+        assert_eq!(
+            fs::read(dest.join("parent").join("child").join("f")).unwrap(),
+            b"body"
+        );
+        assert_eq!(fs::read(dest.join("child").join("f")).unwrap(), b"body");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -6341,7 +6529,7 @@ mod tests {
     // ----------------------------------------------------- --preserve=links --
     //
     // Every one of these is `#[cfg(unix)]`. The option is about hard links, and
-    // a host that has none has nothing here to assert — [`Links`] is still
+    // a host that has none has nothing here to assert — [`Copied`] is still
     // built there, but no source can ever have a second link and no
     // `should_dereference` case can fire without symlinks either, so the table
     // is unreachable rather than wrong. `scripts/cp-diff.sh` section 18

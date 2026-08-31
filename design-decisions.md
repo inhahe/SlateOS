@@ -53558,6 +53558,31 @@ start returning garbage because someone added a local variable two functions
 away. The same source helper can even be right at one call site and wrong at
 another, which is why the count in the binary is the count that matters.
 
+**"Correct by luck" is not a theoretical worry here — the luck ran out, and the
+boot logs date it.** Every retained serial log that reports the line is
+unanimous until the last one:
+
+| Log | Date | `[cpu]   SMEP=… SMAP=… UMIP=…` |
+|---|---|---|
+| `hang-catches/soak-20260816-143012-iter01..10` | 2026-08-16 | `SMEP=true SMAP=true UMIP=true` |
+| `virgl-probe-gl.txt`, `virgl-probe-plain.txt` | 2026-08-18 | `SMEP=true SMAP=true UMIP=true` |
+| `serial-batch39.txt` | 2026-08-23 | `SMEP=true SMAP=true UMIP=true` |
+| `serial-test.txt` | 2026-08-31 | **`SMEP=false SMAP=false UMIP=true`** |
+
+Nobody edited the feature-detection code in between. `cpu.rs`'s leaf-7 parse —
+`f.smep = ebx7 & (1 << 7) != 0` and the SMAP bit beside it — is untouched since
+long before 2026-08-16, and so is the `asm!` block that feeds it. What changed
+was the register the allocator handed that block, in response to edits
+elsewhere. So the kernel's two anti-privilege-escalation defences switched
+themselves off somewhere between 2026-08-23 and 2026-08-31, silently, as a
+side effect of unrelated work, and stayed off through every boot since.
+
+That is the strongest argument in this entry, and it is an observation rather
+than an argument: an idiom whose correctness is decided by register allocation
+does not fail when you write it, it fails later, for reasons that have nothing
+to do with it, and it takes a security feature with it. Ten sites were one
+unlucky allocation away from the same thing at all times.
+
 ### The decision
 
 Every CPUID in the kernel calls `core::arch::x86_64::__cpuid` or

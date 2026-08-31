@@ -100241,10 +100241,23 @@ asking, or the first userspace caller whose correctness depends on it.
 
 ## A-CPUID-EBX-IS-READ-FROM-A-REGISTER-THE-ASM-JUST-RESTORED (lane A)
 
-**Status:** OPEN, found 2026-08-31. **SMEP and SMAP have been disabled on every
-boot of this kernel, on every machine, since the feature-detection code was
-written** — not because the CPU lacks them, but because the kernel cannot see
-them.
+**Status:** FIXED 2026-08-31 in `22506d697` (boot confirmation pending; the fix
+is verified in the rebuilt binary — see "Verification" below). **SMEP and SMAP
+were disabled on every boot of this kernel between 2026-08-23 and 2026-08-31** —
+not because the CPU lacks them, but because the kernel could not see them.
+
+*An earlier revision of this entry said "since the feature-detection code was
+written". That was wrong, and the correction makes the bug worse rather than
+better.* The retained boot logs show `SMEP=true SMAP=true UMIP=true` on
+2026-08-16 (ten soak iterations), 2026-08-18 (two virgl probes) and 2026-08-23
+(`serial-batch39.txt`), and `SMEP=false SMAP=false UMIP=true` on 2026-08-31
+(`serial-test.txt`). No one touched the detection code in that window — the
+leaf-7 parse and the `asm!` block that feeds it both predate 2026-08-16
+unchanged. What changed was the register the allocator handed the block, in
+response to edits elsewhere in the tree. So this is not a bug that was always
+present and always broken; it is a bug that was always present and *became*
+broken, silently, as a side effect of unrelated work, and then stayed broken.
+That is the actual hazard of the idiom: it does not fail when you write it.
 
 **In short:** To ask the CPU what it supports you run the `cpuid` instruction,
 which answers in four registers: EAX, EBX, ECX, EDX. Rust will not let inline
@@ -100347,6 +100360,28 @@ the harness's default `-cpu`, `[smep_smap] Enabling SMEP` / `Enabling SMAP` in
 early boot, and the `[smep_smap]` SKIP disappearing — at which point its
 `ALLOWED` entry in `scripts/check-boot-skips.py` must be deleted, because a
 stale allowlist entry is itself a hard failure of that gate.
+
+**Verification actually obtained (2026-08-31, commit `22506d697`).** The
+allowlist entry is deleted and the rebuilt kernel was scanned with the same
+byte-pattern method that found the bug, which is the point: the fix is
+confirmed by the same instrument that produced the diagnosis, not by a
+different and more forgiving one.
+
+| Pattern following `0f a2` (`cpuid`) | Before | After |
+|---|---|---|
+| `mov %ebx,<r32>` (the fragile idiom, any allocation) | 21 | **0** |
+| `mov %ebx,%ebx` (the destructive allocation) | 5 | **0** |
+| `xchg %rbx,<r64>` (`core`'s idiom, correct for any allocation) | — | 144 |
+
+`cargo build -p kernel --release --target x86_64-unknown-none` is clean with
+zero warnings. The 144 is larger than the 28 source sites because the helpers
+inline into many callers — which is the same reason the "before" count was 21
+rather than 10, and is why the binary is the thing to count.
+
+What remains is the boot log, which confirms the *observable* effect rather
+than the fix. Note that the failure was value-only, so a passing boot log is
+weaker evidence than the byte scan above: a boot that printed `SMEP=true`
+would have done so on 2026-08-23 as well, while the bug was fully present.
 
 ## A-SIX-SELF-TESTS-SKIP-ON-EVERY-BOOT-AND-HAVE-NEVER-ONCE-RUN (lane A)
 

@@ -1349,6 +1349,18 @@ pub struct AutomatorApp {
     /// Wheel notches earned but not yet spent as whole rows.
     wheel: guitk::wheel::Accumulator,
     elapsed_ms: u64,
+    /// The machine's clock, in milliseconds since the epoch, as of the last
+    /// tick.
+    ///
+    /// Kept apart from `elapsed_ms`, which is time since the window opened.
+    /// The two are different quantities and were conflated: `created_at_ms`
+    /// and `modified_at_ms` were being stamped with the uptime, so a macro
+    /// created a minute into the session claimed to have been made at
+    /// 1970-01-01T00:01:00Z. Nothing displayed them yet, which is the only
+    /// reason it was invisible -- and the moment the tick arm below landed,
+    /// the stamps would have started counting seconds since the window
+    /// opened, which is not what a "created at" column means.
+    wall_ms: u64,
     status_message: String,
 }
 
@@ -1371,6 +1383,7 @@ impl AutomatorApp {
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             wheel: guitk::wheel::Accumulator::default(),
             elapsed_ms: 0,
+            wall_ms: now_ms().unwrap_or(0),
             status_message: "Ready".to_string(),
         }
     }
@@ -1467,7 +1480,7 @@ impl AutomatorApp {
 
     /// Create a new macro and select it.
     pub fn new_macro(&mut self, name: &str) -> u64 {
-        let id = self.library.create_macro(name, self.elapsed_ms);
+        let id = self.library.create_macro(name, self.wall_ms);
         self.selected_macro_id = Some(id);
         self.selected_action_idx = None;
         self.status_message = format!("Created macro: {name}");
@@ -1490,7 +1503,7 @@ impl AutomatorApp {
     /// Duplicate the selected macro.
     pub fn duplicate_selected_macro(&mut self) -> Option<u64> {
         let id = self.selected_macro_id?;
-        let new_id = self.library.duplicate(id, self.elapsed_ms)?;
+        let new_id = self.library.duplicate(id, self.wall_ms)?;
         self.selected_macro_id = Some(new_id);
         self.status_message = "Macro duplicated".to_string();
         Some(new_id)
@@ -1571,7 +1584,7 @@ impl AutomatorApp {
         self.recording_last_event_ms = self.elapsed_ms;
         if let Some(mac) = self.library.get_mut(target_id) {
             mac.actions.push(TimedAction::new(action, delay));
-            mac.modified_at_ms = self.elapsed_ms;
+            mac.modified_at_ms = self.wall_ms;
         }
     }
 
@@ -1730,7 +1743,7 @@ impl AutomatorApp {
             Ok(actions) => {
                 if let Some(mac) = self.library.get_mut(id) {
                     mac.actions = actions;
-                    mac.modified_at_ms = self.elapsed_ms;
+                    mac.modified_at_ms = self.wall_ms;
                 }
                 self.script_error = None;
                 self.status_message = "Script applied".to_string();
@@ -1773,7 +1786,7 @@ impl AutomatorApp {
             } else if idx >= mac.actions.len() {
                 self.selected_action_idx = Some(mac.actions.len().saturating_sub(1));
             }
-            mac.modified_at_ms = self.elapsed_ms;
+            mac.modified_at_ms = self.wall_ms;
             self.status_message = "Action deleted".to_string();
             return true;
         }
@@ -1795,7 +1808,7 @@ impl AutomatorApp {
             && mac.move_action(idx, idx.saturating_sub(1))
         {
             self.selected_action_idx = Some(idx.saturating_sub(1));
-            mac.modified_at_ms = self.elapsed_ms;
+            mac.modified_at_ms = self.wall_ms;
             return true;
         }
         false
@@ -1816,7 +1829,7 @@ impl AutomatorApp {
             let next = idx.saturating_add(1);
             if next < mac.actions.len() && mac.move_action(idx, next) {
                 self.selected_action_idx = Some(next);
-                mac.modified_at_ms = self.elapsed_ms;
+                mac.modified_at_ms = self.wall_ms;
                 return true;
             }
         }
@@ -1831,7 +1844,7 @@ impl AutomatorApp {
         };
         if let Some(mac) = self.library.get_mut(mac_id) {
             mac.actions.push(TimedAction::new(action, delay_ms));
-            mac.modified_at_ms = self.elapsed_ms;
+            mac.modified_at_ms = self.wall_ms;
             self.status_message = "Action added".to_string();
             return true;
         }
@@ -1844,7 +1857,7 @@ impl AutomatorApp {
             && let Some(mac) = self.library.get_mut(id)
         {
             mac.trigger = hotkey;
-            mac.modified_at_ms = self.elapsed_ms;
+            mac.modified_at_ms = self.wall_ms;
             self.status_message = "Trigger updated".to_string();
         }
     }
@@ -1903,6 +1916,13 @@ impl AutomatorApp {
     /// action until the program was closed.
     pub fn tick(&mut self, delta_ms: u64) -> bool {
         self.elapsed_ms = self.elapsed_ms.saturating_add(delta_ms);
+        // The window's clock is an interval, not a reading, so the wall clock
+        // has to be asked for separately. Asked here rather than at each stamp
+        // so that a macro created and immediately edited carries one reading
+        // rather than two that could straddle a leap second or a clock change.
+        if let Some(now) = now_ms() {
+            self.wall_ms = now;
+        }
         let was_playing = self.playback_state.is_playing();
         let fired = self.tick_playback(delta_ms).is_some();
         // The recording indicator pulses, so a recording window is always
@@ -2847,10 +2867,29 @@ impl AutomatorApp {
     // -----------------------------------------------------------------------
 
     /// Answer one event from the window.
+    ///
+    /// The tick arm is not decoration: `tick` is the only caller of
+    /// `tick_playback`, and without this arm every tick fell into `_ =>
+    /// Ignored`. The window still laid out, still repainted and still answered
+    /// the keyboard, so nothing looked wrong -- while a macro that was
+    /// "playing" sat on its first action for the life of the process, the
+    /// recording indicator never pulsed, and `elapsed_ms` read a plausible
+    /// zero. Every test that exercised playback called `tick` directly, which
+    /// is the path the compositor does not take (known-issues.md lesson 102).
     fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Tick { elapsed_ms } => {
+                // `tick` reports whether anything moved; a tick that changed
+                // nothing must not ask for a frame, or an idle automator
+                // repaints at the tick rate for ever.
+                if self.tick(*elapsed_ms) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -3496,6 +3535,17 @@ fn first_offset_showing(i: usize, rows: usize) -> usize {
 /// `#![allow(clippy::cast_precision_loss)]`.
 fn usize_f32(n: usize) -> f32 {
     u32::try_from(n).map_or(f32::from(u16::MAX), |n| n as f32)
+}
+
+/// The machine's clock in milliseconds since the epoch, or `None` if it reads
+/// before 1970 or past the end of a `u64` -- neither of which a caller can do
+/// anything about, so the last good reading is kept instead.
+fn now_ms() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis())
+        .and_then(|ms| u64::try_from(ms).ok())
 }
 
 /// `u64` milliseconds as `f32`, for the pulse phase.
@@ -5444,6 +5494,144 @@ mod tests {
             }
         }
         assert!(moved, "a playing macro never advanced on the clock");
+    }
+
+    #[test]
+    fn the_clock_reaches_the_playback_through_the_door_the_window_knocks_on() {
+        // The test above calls `tick` directly, and passed for the whole life
+        // of the frozen program: `handle_event` had no `Event::Tick` arm, so
+        // every tick the compositor delivered fell into `_ => Ignored` and a
+        // "playing" macro sat on its first action for ever. A test that calls
+        // the worker cannot see a missing door -- it has to knock where the
+        // window knocks (known-issues.md lesson 102).
+        let mut app = demo_app();
+        app.press(Button::Play);
+        let PlaybackState::Playing { action_idx, .. } = app.playback_state else {
+            panic!("Play did not start playback");
+        };
+        assert_eq!(action_idx, 0);
+        let mut moved = false;
+        for _ in 0..2000 {
+            app.handle_event(&Event::Tick {
+                elapsed_ms: TICK_MS,
+            });
+            if let PlaybackState::Playing { action_idx: i, .. } = app.playback_state
+                && i > 0
+            {
+                moved = true;
+                break;
+            }
+            if !app.playback_state.is_playing() {
+                moved = true;
+                break;
+            }
+        }
+        assert!(
+            moved,
+            "a macro that is playing did not advance on ticks delivered as events"
+        );
+    }
+
+    #[test]
+    fn a_tick_delivered_as_an_event_is_consumed_only_while_something_is_moving() {
+        // The same distinction as the repaint test below, at the entry point
+        // the platform actually calls: an arm that answered `Consumed`
+        // unconditionally would repaint an idle desktop sixty times a second,
+        // and one that answered `Ignored` unconditionally would drop the
+        // repaint a moving macro needs.
+        let tick = Event::Tick {
+            elapsed_ms: TICK_MS,
+        };
+        let mut idle = demo_app();
+        assert_eq!(
+            idle.handle_event(&tick),
+            EventResult::Ignored,
+            "an idle Automator asked the window for a frame"
+        );
+        let mut playing = demo_app();
+        playing.press(Button::Play);
+        assert_eq!(
+            playing.handle_event(&tick),
+            EventResult::Consumed,
+            "a playing macro asked the window for no frame"
+        );
+        let mut recording = demo_app();
+        recording.press(Button::Record);
+        assert_eq!(
+            recording.handle_event(&tick),
+            EventResult::Consumed,
+            "a recording Automator asked the window for no frame -- the indicator pulses"
+        );
+    }
+
+    #[test]
+    fn the_elapsed_clock_advances_on_ticks_that_arrive_as_events() {
+        // `elapsed_ms` drives the recording indicator's pulse and the
+        // playback timing. Frozen, it read a plausible zero for the life of
+        // the process -- which is exactly what makes this class invisible.
+        let mut app = demo_app();
+        assert_eq!(app.elapsed_ms, 0);
+        for _ in 0..10 {
+            app.handle_event(&Event::Tick {
+                elapsed_ms: TICK_MS,
+            });
+        }
+        assert_eq!(
+            app.elapsed_ms,
+            TICK_MS * 10,
+            "the elapsed clock did not accumulate the intervals the window delivered"
+        );
+    }
+
+    #[test]
+    fn a_new_macro_is_stamped_with_the_date_not_the_age_of_the_window() {
+        // `created_at_ms` is a date. The clock the window delivers is an
+        // interval, and accumulating those gives the age of the window --
+        // which, written into a `created_at`, claims every macro was made on
+        // 1970-01-01. They are different quantities and were conflated; the
+        // wall clock is now read separately.
+        let before = now_ms().expect("the machine's clock reads after 1970");
+        let mut app = demo_app();
+        for _ in 0..10 {
+            app.handle_event(&Event::Tick {
+                elapsed_ms: TICK_MS,
+            });
+        }
+        let id = app.new_macro("Stamped");
+        let stamp = app
+            .library
+            .get(id)
+            .expect("the macro that was just created")
+            .created_at_ms;
+        assert!(
+            stamp >= before,
+            "a new macro is stamped {stamp}, which is before this test started \
+             ({before}) -- so it is not a reading of the wall clock"
+        );
+        assert_ne!(
+            stamp, app.elapsed_ms,
+            "a new macro is stamped with the age of the window rather than the date"
+        );
+    }
+
+    #[test]
+    fn the_date_is_read_again_on_the_clock_not_once_when_the_window_opened() {
+        // A reading taken only in `new()` is right for the first minute and
+        // then drifts for as long as the session lasts: a macro made an hour
+        // in would be stamped with the hour the program started. The stale
+        // reading is planted here because waiting an hour is not a test.
+        let before = now_ms().expect("the machine's clock reads after 1970");
+        let mut app = demo_app();
+        app.wall_ms = 1;
+        app.handle_event(&Event::Tick {
+            elapsed_ms: TICK_MS,
+        });
+        assert!(
+            app.wall_ms >= before,
+            "the wall clock still reads {} after a tick -- it is never read again \
+             after the window opened",
+            app.wall_ms
+        );
     }
 
     #[test]

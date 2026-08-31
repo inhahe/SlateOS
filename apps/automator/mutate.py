@@ -56,6 +56,18 @@ What that hid, in rough order of how badly it would have shown:
     a narrow window, and the panel they were nominally in did not bound them.
   * **Thirteen crate-level `#![allow]`s hid 62 lints.**
 
+A postscript, added when lane B filed
+`requests/b-c-automator-never-receives-the-clock.md`: the fourth bullet above
+was fixed *by half*.  `tick` was written, `tick_playback` acquired a caller,
+and four rows of this table broke `tick` and were caught -- but `handle_event`
+never grew an `Event::Tick` arm, so the compositor's ticks fell into
+`_ => Ignored` and nothing in the running program ever called `tick` at all.
+Every one of those four rows passed against a program whose clock was dead,
+because every test behind them called `tick` directly.  The row "the tick never
+reaches the app" now breaks the *door* rather than the worker behind it, and is
+caught by four tests -- none of them the two that guarded `tick` before.  That
+is lesson 102 in its purest form: test the entry point the platform calls.
+
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
 """
@@ -95,6 +107,43 @@ MUTATIONS = [
         "        let fired = self.tick_playback(delta_ms).is_some();",
         "        let fired = false;",
         ["the_app_asks_for_a_clock_and_a_running_macro_advances_on_it"],
+    ),
+    # -- the clock the window delivers ---------------------------------------
+    # Filed by lane B as `requests/b-c-automator-never-receives-the-clock.md`:
+    # `handle_event` had no `Event::Tick` arm at all, so every tick the
+    # compositor delivered fell into `_ => Ignored`.  The four rows above this
+    # one all mutate `tick`, and `tick` was never reached from the window --
+    # which is exactly why they all passed against a frozen program.  These
+    # rows break the *door*, not the worker behind it.
+    (
+        "the tick never reaches the app, because the window's arm is missing",
+        "            Event::Tick { elapsed_ms } => {\n                // `tick` reports whether anything moved; a tick that changed\n                // nothing must not ask for a frame, or an idle automator\n                // repaints at the tick rate for ever.\n                if self.tick(*elapsed_ms) {\n                    EventResult::Consumed\n                } else {\n                    EventResult::Ignored\n                }\n            }\n            _ => EventResult::Ignored,",
+        "            _ => EventResult::Ignored,",
+        ["the_clock_reaches_the_playback_through_the_door_the_window_knocks_on"],
+    ),
+    (
+        "every tick delivered as an event is consumed, so an idle desktop repaints",
+        "                if self.tick(*elapsed_ms) {\n                    EventResult::Consumed\n                } else {\n                    EventResult::Ignored\n                }",
+        "                self.tick(*elapsed_ms);\n                EventResult::Consumed",
+        ["a_tick_delivered_as_an_event_is_consumed_only_while_something_is_moving"],
+    ),
+    (
+        "the elapsed clock is overwritten by each interval rather than summing them",
+        "        self.elapsed_ms = self.elapsed_ms.saturating_add(delta_ms);",
+        "        self.elapsed_ms = delta_ms;",
+        ["the_elapsed_clock_advances_on_ticks_that_arrive_as_events"],
+    ),
+    (
+        "a macro is stamped with the age of the window instead of the date",
+        "        let id = self.library.create_macro(name, self.wall_ms);",
+        "        let id = self.library.create_macro(name, self.elapsed_ms);",
+        ["a_new_macro_is_stamped_with_the_date_not_the_age_of_the_window"],
+    ),
+    (
+        "the wall clock is read once at startup and never again",
+        "        if let Some(now) = now_ms() {\n            self.wall_ms = now;\n        }",
+        "        if let Some(now) = now_ms() {\n            let _ = now;\n        }",
+        ["the_date_is_read_again_on_the_clock_not_once_when_the_window_opened"],
     ),
     (
         "the window opens at a size the layout cannot afford both panels at",

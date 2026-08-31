@@ -75,7 +75,15 @@
 //! # What GNU does that a reimplementation would not guess
 //!
 //! Every row below was measured against GNU coreutils 9.4 under
-//! `LC_ALL=C.UTF-8`.
+//! `LC_ALL=C.UTF-8`, and `scripts/touch-diff.sh` keeps them measured: it runs
+//! both programs over the same fixture and compares standard output, standard
+//! error, the exit status and *the timestamps left behind*. That last column is
+//! what makes the harness worth having for this program in particular — `touch`
+//! writes nothing to standard output in any case, so a text-only comparison
+//! would compare two empty strings a hundred times and certify nothing, while
+//! every question worth asking here ("did `-a` leave the modification time
+//! alone", "did `-h` stamp the link or its target") is a difference in the time
+//! columns and nowhere else.
 //!
 //! | Command | GNU | Why |
 //! |---|---|---|
@@ -129,30 +137,56 @@
 //! directories and ordinary files — enough for the whole test suite to run —
 //! but not a path that **stats and does not open**, which on unix would be a
 //! socket or a device node you may not open. See `known-issues.md` →
-//! `TD-B-TOUCH-CANNOT-STAMP-A-PATH-IT-CANNOT-OPEN`.
+//! `TD-B-TOUCH-CANNOT-STAMP-A-PATH-IT-CANNOT-OPEN`. Opening is also inherently a
+//! follow, so `-h` cannot be honoured on that host either; the tests that
+//! exercise it are `#[cfg(unix)]` for that reason, not because symlinks are
+//! unavailable on Windows.
+//!
+//! # `-h` does three things, not one
+//!
+//! `-h`/`--no-dereference` is not simply "pass `AT_SYMLINK_NOFOLLOW`". Every row
+//! was measured against GNU 9.4, and only the first is the obvious one:
+//!
+//! | What `-h` changes | Measured |
+//! |---|---|
+//! | the stamp | `touch -h link` moves the **symlink's** own time and leaves its target's alone; without `-h` it is the target that moves and the link that does not |
+//! | the create-open | `touch -h missing` creates **no file** — like `-c`, `-h` skips the open entirely (`touch.c`: `else if (! (no_create \|\| no_dereference))`) |
+//! | `-r`'s stat | `touch -h -r link f` copies the **link's** times, not its target's — so `-r` on a *dangling* symlink is an error without `-h` and works with it |
+//!
+//! The second row is why GNU's own `--help` says "created empty, unless -c **or
+//! -h** is supplied". It follows from the first: an open that creates would
+//! create a *regular file*, and there is no such thing as opening a symlink to
+//! stamp it, so a `-h` that still opened would either create the wrong kind of
+//! file or follow the link it was told not to follow.
+//!
+//! What `-h` does **not** change is the missing-file *diagnostic*. `-h` skips
+//! the open exactly as `-c` does, but only `-c` forgives the `ENOENT` that
+//! follows: measured, `touch -h nosuch` is `setting times of 'nosuch': No such
+//! file or directory` at exit 1, while `touch -hc nosuch` is silent at exit 0.
+//! The two are separate conditions in [`touch_one`] for that reason, and
+//! collapsing them into one flag would make `-h` quietly succeed on a file that
+//! is not there.
+//!
+//! `-h` on `-` is not special: measured, `touch -h -` still reports
+//! `setting times of '-': Permission denied`, because standard output is reached
+//! through a descriptor and a descriptor has no link to dereference. Upstream
+//! spells this `(no_dereference && fd == -1) ? AT_SYMLINK_NOFOLLOW : 0`; here
+//! the `-` case returns before [`Link`] is consulted at all.
 //!
 //! # Options this implementation does not have
 //!
-//! `-d`/`--date`, `-t`, and `-h`/`--no-dereference`:
+//! `-d`/`--date` and `-t`:
 //!
 //! | Option | What it needs that is not here |
 //! |---|---|
 //! | `-d STRING` | a full `parse_datetime` — `"next Thursday"`, `"2 hours ago"`, `"@1700000000"` |
 //! | `-t STAMP` | civil-time-to-epoch conversion in the *local* zone, including its history |
-//! | `-h` | nothing any more — see below |
 //!
-//! The first two are blocked by something this crate genuinely lacks. `-h` was
-//! too, until `cp -P -p` needed the same thing and
-//! [`fsattr::Link::NoFollow`](coreutils::fsattr::Link::NoFollow) was written for
-//! it: `AT_SYMLINK_NOFOLLOW` is now one argument away, and this option is
-//! refused only because wiring it up is a change of its own rather than a rider
-//! on somebody else's.
-//!
-//! They are refused by name — `option -d is not implemented by this touch` —
-//! rather than ignored, because ignoring any of the three silently does the
-//! *opposite* of what was asked: `-d` ignored stamps the file with now instead
-//! of the requested time, and `-h` ignored follows a symlink the caller asked
-//! not to follow and stamps the wrong file.
+//! Both are blocked by something this crate genuinely lacks. They are refused by
+//! name — `option -d is not implemented by this touch` — rather than ignored,
+//! because ignoring either silently does the *opposite* of what was asked: a
+//! `-d` that is ignored stamps the file with now instead of with the requested
+//! time, which is precisely the state the caller was trying to leave.
 //!
 //! `-f` is not in that list, because GNU documents it as accepted and ignored —
 //! it exists for a BSD `touch` that once had it. Ignoring it *is* the
@@ -246,6 +280,8 @@ struct TouchFlags {
     change_modify: bool,
     /// `-c`, `--no-create`.
     no_create: bool,
+    /// `-h`, `--no-dereference`.
+    no_dereference: bool,
     /// `-r`, `--reference=FILE`.
     reference: Option<OsString>,
 }
@@ -256,6 +292,30 @@ impl TouchFlags {
             Which::Access => self.change_access = true,
             Which::Modify => self.change_modify = true,
         }
+    }
+
+    /// Whether a name reached through this run's options means the symlink or
+    /// the file it points at.
+    ///
+    /// One method rather than three readings of `no_dereference`, because the
+    /// answer has to be the same in all three places `-h` reaches — the stamp,
+    /// the `-r` stat, and the doc that explains them — and a flag read directly
+    /// at each site is a flag that can be read backwards at one of them.
+    fn link(&self) -> Link {
+        if self.no_dereference {
+            Link::NoFollow
+        } else {
+            Link::Follow
+        }
+    }
+
+    /// Whether the create-if-missing open is attempted at all.
+    ///
+    /// GNU's `! (no_create || no_dereference)` (`touch.c`). `-h` skips the open
+    /// for a different reason than `-c` does — see the module docs — but skips
+    /// it just as completely.
+    fn creates(&self) -> bool {
+        !self.no_create && !self.no_dereference
     }
 
     /// GNU's `if (change_times == 0) change_times = CH_ATIME | CH_MTIME;`,
@@ -363,7 +423,8 @@ fn help_text() -> String {
 Usage: touch [OPTION]... FILE...
 Update the access and modification times of each FILE to the current time.
 
-A FILE argument that does not exist is created empty, unless -c is supplied.
+A FILE argument that does not exist is created empty, unless -c or -h
+is supplied.
 
 A FILE argument string of - is handled specially and causes touch to
 change the times of the file associated with standard output.
@@ -372,6 +433,9 @@ Mandatory arguments to long options are mandatory for short options too.
   -a                     change only the access time
   -c, --no-create        do not create any files
   -f                     (ignored)
+  -h, --no-dereference   affect each symbolic link instead of any referenced
+                         file (useful only on systems that can change the
+                         timestamps of a symlink)
   -m                     change only the modification time
   -r, --reference=FILE   use this file's times instead of current time
       --time=WORD        change the specified time:
@@ -417,6 +481,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Short(b'a', _) => flags.select(Which::Access),
             Opt::Short(b'm', _) => flags.select(Which::Modify),
             Opt::Short(b'c', _) | Opt::Long("no-create", _) => flags.no_create = true,
+            Opt::Short(b'h', _) | Opt::Long("no-dereference", _) => flags.no_dereference = true,
             // Accepted and discarded, which is what GNU's `--help` means by
             // `-f  (ignored)`. It is compatibility ballast for a BSD `touch`, so
             // ignoring it is the implementation rather than the absence of one.
@@ -438,7 +503,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // it means `touch -d` still reports a *missing argument*, and it
             // means the `2001-01-01` in `touch -d 2001-01-01 f` cannot be left
             // behind to be created as a file if the refusal is ever softened.
-            Opt::Short(flag @ (b'd' | b'h' | b't'), _) => return Err(unimplemented_short(flag)),
+            Opt::Short(flag @ (b'd' | b't'), _) => return Err(unimplemented_short(flag)),
             Opt::Long(name, _) => return Err(unimplemented_long(name)),
             // Unreachable: every letter of [`SHORT_OPTIONS`] is matched above,
             // and one that is not in it never gets this far — the walk answers
@@ -510,7 +575,7 @@ fn touch_all<W: Write>(flags: &TouchFlags, files: &[OsString], err: &mut W) -> b
     // with no operands at all reports the reference and not the missing operand.
     let reference = match flags.reference.as_ref() {
         None => None,
-        Some(path) => match reference_times(path) {
+        Some(path) => match reference_times(path, flags.link()) {
             Ok(stamp) => Some(stamp),
             Err(e) => {
                 let _ = writeln!(
@@ -545,10 +610,18 @@ fn touch_all<W: Write>(flags: &TouchFlags, files: &[OsString], err: &mut W) -> b
 
 /// The access and modification times of `-r`'s file.
 ///
-/// Follows symlinks, which is right because the only option that would not —
-/// `-h` — is refused.
-fn reference_times(path: &OsStr) -> io::Result<Stamp> {
-    let meta = fs::metadata(Path::new(path))?;
+/// `link` is [`Link::NoFollow`] under `-h`, and that is not a detail: measured,
+/// `touch -r dangling f` is `failed to get attributes of 'dangling'` at exit 1
+/// while `touch -h -r dangling f` succeeds and copies the dangling link's own
+/// times. Upstream writes it as `no_dereference ? lstat (…) : stat (…)`, with a
+/// comment explaining why it is not a function pointer — it would be a bug if
+/// the two had different signatures.
+fn reference_times(path: &OsStr, link: Link) -> io::Result<Stamp> {
+    let path = Path::new(path);
+    let meta = match link {
+        Link::Follow => fs::metadata(path)?,
+        Link::NoFollow => fs::symlink_metadata(path)?,
+    };
     Ok(Stamp {
         accessed: meta.accessed()?,
         modified: meta.modified()?,
@@ -582,7 +655,7 @@ fn touch_one(flags: &TouchFlags, file: &OsStr, reference: Option<Stamp>) -> Resu
 
     let path = Path::new(file);
     let mut open_error: Option<io::Error> = None;
-    if !flags.no_create {
+    if flags.creates() {
         // The handle is deliberately not kept. GNU stamps the *path*, not the
         // descriptor, so holding this open would buy nothing — and dropping it
         // here means the file is closed before the stamp rather than after,
@@ -592,12 +665,17 @@ fn touch_one(flags: &TouchFlags, file: &OsStr, reference: Option<Stamp>) -> Resu
         }
     }
 
-    match fsattr::set_times(On::Path(path, Link::Follow), times) {
+    match fsattr::set_times(On::Path(path, flags.link()), times) {
         Ok(()) => Ok(()),
         Err(e) => match open_error {
             Some(open) => Err(Failure::CannotTouch(open)),
             // `-c` means "do not create", not "create quietly": a file that is
             // simply not there is the case `-c` exists for, and it is a success.
+            //
+            // `flags.no_create` and deliberately not `!flags.creates()`: `-h`
+            // skips the open just as `-c` does, but forgives nothing. Measured,
+            // `touch -h nosuch` is `setting times of 'nosuch': No such file or
+            // directory` at exit 1 while `touch -hc nosuch` is silent at 0.
             None if flags.no_create && e.kind() == io::ErrorKind::NotFound => Ok(()),
             None => Err(Failure::SettingTimes(e)),
         },
@@ -731,7 +809,15 @@ mod tests {
     /// file called `-a`. This is the assertion that would have caught it.
     #[test]
     fn an_option_is_not_a_file_name() {
-        for typed in ["-a", "-m", "-c", "-f", "--no-create"] {
+        for typed in [
+            "-a",
+            "-m",
+            "-c",
+            "-f",
+            "-h",
+            "--no-create",
+            "--no-dereference",
+        ] {
             let (_, files) = run_parse(&[typed, "f"]);
             assert_eq!(files, vec!["f"], "{typed} was taken as an operand");
         }
@@ -884,8 +970,46 @@ mod tests {
                 )
             );
         }
-        // …and an abbreviation that is *not* ambiguous still resolves.
+        // …and an abbreviation that is *not* ambiguous still resolves. Both
+        // sides, because the two are one character apart and a table that lost
+        // an entry would still let one of them through.
         assert!(run_parse(&["--no-c", "f"]).0.no_create);
+        assert!(run_parse(&["--no-d", "f"]).0.no_dereference);
+    }
+
+    /// `-h` sets one flag; the two spellings must set the same one, and neither
+    /// may reach the operand list.
+    #[test]
+    fn dash_h_is_no_dereference() {
+        for typed in ["-h", "--no-dereference"] {
+            let (f, files) = run_parse(&[typed, "f"]);
+            assert!(f.no_dereference, "{typed}");
+            assert_eq!(files, vec!["f"], "{typed} was taken as an operand");
+            assert!(!f.no_create, "{typed} is not -c");
+        }
+        assert!(!run_parse(&["f"]).0.no_dereference, "and off by default");
+    }
+
+    /// The two derived questions `-h` answers, kept as one test because getting
+    /// either backwards is the same mistake: `-h` decides whether a name means
+    /// the link or its target, and — like `-c`, and unlike anything else —
+    /// whether the create-open happens at all.
+    #[test]
+    fn dash_h_suppresses_the_open_and_selects_the_link() {
+        let h = run_parse(&["-h", "f"]).0;
+        assert!(matches!(h.link(), Link::NoFollow));
+        assert!(!h.creates(), "GNU's `! (no_create || no_dereference)`");
+
+        let c = run_parse(&["-c", "f"]).0;
+        assert!(
+            matches!(c.link(), Link::Follow),
+            "-c is not -h: it stops the create, not the follow"
+        );
+        assert!(!c.creates());
+
+        let plain = run_parse(&["f"]).0;
+        assert!(matches!(plain.link(), Link::Follow));
+        assert!(plain.creates());
     }
 
     #[test]
@@ -911,13 +1035,11 @@ mod tests {
         );
     }
 
-    /// Ignoring any of these silently does the *opposite* of what was asked —
+    /// Ignoring either of these silently does the *opposite* of what was asked —
     /// see the module docs — so they are refused by name.
     #[test]
     fn unimplemented_options_are_rejected_by_name() {
         for typed in [
-            &["-h", "f"][..],
-            &["--no-dereference", "f"][..],
             &["-d", "now", "f"][..],
             &["--date=now", "f"][..],
             &["-t", "202001010000", "f"][..],
@@ -1376,5 +1498,206 @@ mod tests {
         assert_eq!(msg.lines().count(), 1, "{msg:?}");
         assert!(msg.contains(r"\n"), "the newline must be escaped: {msg:?}");
         let _ = fs::remove_dir_all(&d);
+    }
+
+    // ------------------------------------------------------ -h on the disk --
+    //
+    // `#[cfg(unix)]` because of the *stamp*, not the symlink: the Windows arm of
+    // `fsattr::set_times` has to open a handle, opening is a follow, and so
+    // `Link::NoFollow` cannot be honoured there. See the module docs. A symlink
+    // itself is creatable on the development host; what cannot be done there is
+    // stamping one without following it, which is the whole assertion.
+
+    /// A symlink `link` pointing at a fresh file `target`, both under a scratch
+    /// directory, with the target backdated so "did it move?" cannot be answered
+    /// by clock granularity.
+    #[cfg(unix)]
+    fn linked(stem: &str) -> (PathBuf, PathBuf, PathBuf, SystemTime) {
+        let d = scratch(stem);
+        let target = d.join("target");
+        let link = d.join("link");
+        fs::write(&target, b"t").unwrap();
+        let old = backdate(&target);
+        std::os::unix::fs::symlink("target", &link).unwrap();
+        // The link's own times start where the target's do, so a test that
+        // asserts one moved and the other did not is not comparing two clocks.
+        fsattr::set_times(On::Path(&link, Link::NoFollow), Times::both(old)).unwrap();
+        (d, target, link, old)
+    }
+
+    /// A symlink's *own* modification time. `fs::metadata` would follow it and
+    /// report the target's, which is exactly the mistake `-h` exists to avoid —
+    /// so a test written with `mtime` here would pass whether or not `-h` works.
+    #[cfg(unix)]
+    fn lmtime(path: &Path) -> SystemTime {
+        fs::symlink_metadata(path).unwrap().modified().unwrap()
+    }
+
+    /// The headline: `-h` moves the link and leaves the target alone. The
+    /// without-`-h` half is in the same test because either flag being wired to
+    /// the wrong sense produces a program that still passes one of them.
+    #[cfg(unix)]
+    #[test]
+    fn dash_h_stamps_the_link_and_not_its_target() {
+        let (d, target, link, old) = linked("nofollow");
+
+        let mut flags = plain();
+        flags.no_dereference = true;
+        let (ok, msg) = run(&flags, &[&link]);
+        assert!(ok, "{msg}");
+        assert!(lmtime(&link) > old, "the link's own time advanced");
+        assert_eq!(mtime(&target), old, "and the target's did not");
+
+        // Without `-h`, precisely the other way round.
+        let (d2, target2, link2, old2) = linked("follow");
+        let (ok, msg) = run(&plain(), &[&link2]);
+        assert!(ok, "{msg}");
+        assert!(mtime(&target2) > old2, "the target's time advanced");
+        assert_eq!(lmtime(&link2), old2, "and the link's own did not");
+
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d2);
+    }
+
+    /// `-h` on a **dangling** link is the case that cannot work by accident:
+    /// there is nothing at the other end to stamp instead, so a `-h` that
+    /// followed would fail outright rather than quietly stamp the wrong file.
+    #[cfg(unix)]
+    #[test]
+    fn dash_h_stamps_a_dangling_link() {
+        let d = scratch("dangling");
+        let link = d.join("link");
+        std::os::unix::fs::symlink("nowhere", &link).unwrap();
+
+        let (ok, msg) = run(&plain(), &[&link]);
+        assert!(ok, "without -h the target is created: {msg}");
+        assert!(d.join("nowhere").is_file(), "…and it is a regular file");
+
+        let d2 = scratch("dangling2");
+        let link2 = d2.join("link");
+        std::os::unix::fs::symlink("nowhere", &link2).unwrap();
+        let mut flags = plain();
+        flags.no_dereference = true;
+        let (ok, msg) = run(&flags, &[&link2]);
+        assert!(ok, "{msg}");
+        assert!(
+            !d2.join("nowhere").exists(),
+            "-h creates nothing at the far end"
+        );
+        assert!(
+            fs::symlink_metadata(&link2).is_ok(),
+            "and the link survives"
+        );
+
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d2);
+    }
+
+    /// Measured: `touch -h missing` creates no file and still fails, while
+    /// `touch -hc missing` is a silent success. The two halves are one test
+    /// because the temptation is to collapse `-h` and `-c` into one condition,
+    /// and that would make this first half exit 0.
+    #[test]
+    fn dash_h_skips_the_create_without_forgiving_the_absence() {
+        let d = scratch("hmissing");
+        let f = d.join("nosuch");
+
+        let mut flags = plain();
+        flags.no_dereference = true;
+        let (ok, msg) = run(&flags, &[&f]);
+        assert!(!ok, "-h alone does not forgive ENOENT");
+        assert!(msg.contains("setting times of"), "{msg}");
+        assert!(msg.contains("No such file or directory"), "{msg}");
+        assert!(
+            !msg.contains("cannot touch"),
+            "there was no open to fail: {msg}"
+        );
+        assert!(!f.exists(), "-h creates nothing");
+
+        flags.no_create = true;
+        let (ok, msg) = run(&flags, &[&f]);
+        assert!(ok, "-hc is a silent success: {msg}");
+        assert_eq!(msg, "");
+        assert!(!f.exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// `-h` reaches `-r` too: measured, the reference is `lstat`ted, so a
+    /// dangling reference is an error without `-h` and its own times with it.
+    #[cfg(unix)]
+    #[test]
+    fn dash_h_reads_the_reference_without_following_it() {
+        let (d, _target, link, old) = linked("hreference");
+        let plain_file = d.join("plain");
+        fs::write(&plain_file, b"p").unwrap();
+
+        // The link's own time is `old`; give the target a different one, so
+        // which of the two was read is visible in the answer.
+        let newer = old.checked_add(Duration::from_secs(1800)).unwrap();
+        fsattr::set_times(
+            On::Path(&d.join("target"), Link::Follow),
+            Times::both(newer),
+        )
+        .unwrap();
+
+        let mut flags = plain();
+        flags.reference = Some(link.as_os_str().to_owned());
+        let (ok, msg) = run(&flags, &[&plain_file]);
+        assert!(ok, "{msg}");
+        assert_eq!(
+            mtime(&plain_file),
+            newer,
+            "without -h the target is stat'ed"
+        );
+
+        flags.no_dereference = true;
+        let (ok, msg) = run(&flags, &[&plain_file]);
+        assert!(ok, "{msg}");
+        assert_eq!(mtime(&plain_file), old, "with -h the link itself is");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The dangling-reference half, which is the one that changes an error into
+    /// a success rather than one time into another.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_reference_needs_dash_h() {
+        let d = scratch("dangref");
+        let link = d.join("ref");
+        let f = d.join("f");
+        fs::write(&f, b"f").unwrap();
+        std::os::unix::fs::symlink("nowhere", &link).unwrap();
+        let old = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(1_300_000_000))
+            .unwrap();
+        fsattr::set_times(On::Path(&link, Link::NoFollow), Times::both(old)).unwrap();
+
+        let mut flags = plain();
+        flags.reference = Some(link.as_os_str().to_owned());
+        let (ok, msg) = run(&flags, &[&f]);
+        assert!(!ok, "following it lands on nothing");
+        assert!(msg.contains("failed to get attributes of"), "{msg}");
+
+        flags.no_dereference = true;
+        let (ok, msg) = run(&flags, &[&f]);
+        assert!(ok, "{msg}");
+        assert_eq!(mtime(&f), old);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Measured: `touch -h -` is still `setting times of '-': Permission
+    /// denied` on a terminal — a descriptor has no link to dereference, and
+    /// upstream's flag word is `(no_dereference && fd == -1)`. Here `-` returns
+    /// before [`TouchFlags::link`] is consulted, and this is the test that says
+    /// so: under a redirect the stamp *succeeds*, and it must succeed with `-h`
+    /// exactly as it does without.
+    #[test]
+    fn dash_h_does_not_change_what_a_bare_dash_means() {
+        let mut flags = plain();
+        flags.no_dereference = true;
+        let (ok_h, msg_h) = run(&flags, &[Path::new("-")]);
+        let (ok_plain, msg_plain) = run(&plain(), &[Path::new("-")]);
+        assert_eq!(ok_h, ok_plain, "-h: {msg_h:?}  plain: {msg_plain:?}");
+        assert_eq!(msg_h, msg_plain);
     }
 }

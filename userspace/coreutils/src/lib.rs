@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are eighteen so far. Three are about the interface these programs share
+//! There are nineteen so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -291,6 +291,18 @@
 //!   mask rather than read it, because `-m` names an exact mode, so they are
 //!   not copies of this and must not be folded into it.
 //!
+//! The nineteenth is the shared-interface argument again, but about an input
+//! rather than an output — the one thing these programs ask the *user* for:
+//!
+//! - [`yesno`] — what counts as "yes" at a `? ` prompt. gnulib has one of these
+//!   (`lib/yesno.c`) and `rm -i`, `cp -i`, `mv -i`, `ln -i`, `install` and
+//!   `find -ok` all call it, so upstream cannot drift; the two private copies
+//!   here already had. `find -ok`'s read the answer with `read_line` into a
+//!   `String` and so returned "no" for any input that was not UTF-8 — which a
+//!   terminal in a single-byte locale sends — while `rm`'s read bytes and
+//!   accepted it. A person who has learned what `rm -i` takes types the same
+//!   thing at `cp -i`, and must not get a different answer.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -320,3 +332,4 @@ pub mod umask;
 pub mod userspec;
 pub mod vercmp;
 pub mod xnum;
+pub mod yesno;

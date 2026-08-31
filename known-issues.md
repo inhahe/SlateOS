@@ -102777,3 +102777,42 @@ divided by the window — negligible for multi-second benchmark windows, large
 for short ones. Historical readings near 0.98 were *under*-stating a
 correctly-applied load, not over-stating it, so no past grading verdict flips;
 but do not mine pre-2026-08-31 occupancy figures for precision.
+
+## A-MEMFS-CANNOT-HARD-LINK-SO-NO-BOOT-EVER-TESTS-A-HARD-LINK (lane A, 2026-08-31)
+
+**What.** `kernel/src/fs/memfs.rs` implements no `link`/`link_no_follow`, so
+`FileSystem::link`'s default applies and every hard link on a memfs mount
+returns `NotSupported`. `/tmp` is memfs, and `/tmp` is where the VFS self-tests
+run — so **no boot has ever exercised a hard link**, on either the path route
+(`SYS_FS_LINK`) or the new pinned one (`SYS_FS_LINKAT_PINNED`, §658).
+
+**How it was found.** The new pinned `*at` self-test asserted that
+`link_at_pinned` produces a second name for the *same inode*. It failed the
+boot with `NotSupported` — from memfs, not from the primitive. Until that
+assertion was written, nothing had ever asked memfs to make a link.
+
+**Why memfs cannot.** Its tree is nodes owned **by value**: a `Dir` holds
+`children: BTreeMap<String, MemFsNode>`. Two names sharing one node is
+therefore not expressible. Real hard links need an inode table — directory
+entries mapping name → ino, with the node bodies held separately and
+refcounted — which is a restructure of the module rather than an added method.
+Note memfs already allocates a unique synthetic `st_ino` per node
+(`alloc_memfs_ino`), precisely so `cp -a`/`tar` hard-link dedup can work; that
+promise is only half-kept, since `nlink` can never exceed 1.
+
+**Current state.** The pinned self-test treats `NotSupported` from
+`link_at_pinned` as a recorded skip (`pinned linkat: the positive
+same-inode/nlinks assertion`) and continues. This is safe but must not become
+permanent: everything that makes the primitive *safe* — `check_at_name` and
+both `verify_pinned` passes — runs before the filesystem is reached, so the
+containment and stale-handle assertions do run. What is unproven is that a
+link, when it succeeds, actually shares an inode and raises `nlink`.
+
+**Proper fix.** Give memfs an inode table and implement `link`/`link_no_follow`
+against it, then delete the skip. That also gives `SYS_FS_LINK` its first
+self-test coverage, and it makes `nlink` and `st_ino` mean on memfs what they
+already claim to mean.
+
+**Watch it.** `scripts/check-boot-skips.py` will start reporting this skip on
+100% of boots once ten qualifying boots are recorded — which is the mechanism
+for making sure the skip above does not quietly become the permanent answer.

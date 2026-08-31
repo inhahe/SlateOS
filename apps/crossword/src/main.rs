@@ -889,11 +889,15 @@ impl Crossword {
     // ── Playing ────────────────────────────────────────────────────
 
     fn enter_letter(&mut self, ch: char) {
-        let upper = ch.to_ascii_uppercase();
+        // No `to_ascii_uppercase` here: `letter_of` is the only source of a
+        // typed letter and it answers in the case the grid is written in, so a
+        // second normalisation at the store is a rule written twice with one
+        // copy nothing can reach (lesson 51). The case lives in `letter_of`,
+        // and `a_letter_is_stored_upper_case_however_it_is_typed` holds it.
         let Some(cell) = self.cell_mut(self.cursor.0, self.cursor.1) else {
             return;
         };
-        cell.entry = Some(upper);
+        cell.entry = Some(ch);
         // A letter the player typed is the player's, even where one was given
         // away before. The old code left `revealed` set, so the end card went
         // on counting a letter the player had since worked out for themselves.
@@ -1062,10 +1066,12 @@ impl Crossword {
 
     fn scroll_clues(&mut self, rows: isize) -> bool {
         let before = self.clue_scroll;
+        // The clamp is written once, at the store. It used to be here *and* in
+        // the branch above, and a duplicated clamp is a clamp one of whose
+        // copies no test can reach (lesson 92): deleting the outer one changed
+        // nothing observable, so nothing was holding it.
         let moved = if rows >= 0 {
-            self.clue_scroll
-                .saturating_add(rows.unsigned_abs())
-                .min(self.max_scroll())
+            self.clue_scroll.saturating_add(rows.unsigned_abs())
         } else {
             self.clue_scroll.saturating_sub(rows.unsigned_abs())
         };
@@ -1080,10 +1086,13 @@ impl Crossword {
         self.show_help = false;
     }
 
+    /// Move the menu highlight, which cannot leave the list.
+    ///
+    /// The bound is here and nowhere else. `Key::Down` used to clamp its own
+    /// argument as well, which left this one unreachable: deleting it changed
+    /// nothing any test could see (lesson 92).
     fn select(&mut self, index: usize) {
-        if index < PUZZLES.len() {
-            self.selected_puzzle = index;
-        }
+        self.selected_puzzle = index.min(PUZZLES.len().saturating_sub(1));
     }
 
     // ── Events ─────────────────────────────────────────────────────
@@ -1202,11 +1211,7 @@ impl Crossword {
                 EventResult::Consumed
             }
             Key::Down => {
-                self.select(
-                    self.selected_puzzle
-                        .saturating_add(1)
-                        .min(PUZZLES.len().saturating_sub(1)),
-                );
+                self.select(self.selected_puzzle.saturating_add(1));
                 EventResult::Consumed
             }
             Key::Enter => {
@@ -2068,6 +2073,30 @@ mod tests {
     }
 
     /// Every run of text the frame painted, with the width it was bounded to.
+    /// Every screen the app can be on, at one window size.
+    ///
+    /// The whole-frame properties -- nothing outside the window, nothing with
+    /// no area -- have to hold on all of them, and building the list twice is
+    /// how one of them ends up tested on three screens and not the fourth.
+    fn every_screen(size: (f32, f32)) -> Vec<(&'static str, Crossword)> {
+        let mut menu = Crossword::new();
+        menu.size = size;
+        let mut game = playing(0);
+        game.size = size;
+        let mut helped = playing(1);
+        helped.size = size;
+        helped.show_help = true;
+        let mut done = playing(2);
+        done.size = size;
+        done.view = View::Completed;
+        vec![
+            ("menu", menu),
+            ("playing", game),
+            ("help", helped),
+            ("completed", done),
+        ]
+    }
+
     fn painted_text(app: &Crossword, size: (f32, f32)) -> Vec<(String, Option<f32>)> {
         app.draw(size)
             .commands()
@@ -2146,6 +2175,41 @@ mod tests {
     }
 
     #[test]
+    fn a_panel_too_narrow_to_read_is_left_out_rather_than_drawn_narrow() {
+        // The rule only governs windows that leave a *usable-looking but
+        // useless* gap beside the grid, and 220x700 is not one of them: there
+        // the grid takes the whole body and the gap is zero, so dropping the
+        // panel and keeping it look identical. A gap in the band appears when
+        // the grid is limited by the window's height instead of its width --
+        // widening the grid then does not consume the gap, and whatever is
+        // left over is left over. That is the regime this scans for, and
+        // `entered` is the guard that says the scan reached it (lesson 90).
+        let mut entered = false;
+        let mut w = 200.0_f32;
+        while w <= 900.0 {
+            let mut h = 160.0_f32;
+            while h <= 700.0 {
+                let l = Layout::solve(w, h, 5, 5);
+                assert!(
+                    l.panel.is_empty() || l.panel.w >= MIN_PANEL_WIDTH,
+                    "{w}x{h}: a {}-pixel clue panel holds no readable clue",
+                    l.panel.w
+                );
+                if l.panel.is_empty() && l.window.right() - l.pad - l.grid.right() > 1.0 {
+                    entered = true;
+                }
+                h += 10.0;
+            }
+            w += 10.0;
+        }
+        assert!(
+            entered,
+            "no window in the scan leaves a gap too narrow to hold a panel, \
+             so the scan says nothing about what happens when one does"
+        );
+    }
+
+    #[test]
     fn the_grid_fills_the_body_when_the_window_has_no_room_for_a_panel() {
         // The old grid was 36 pixels a cell whatever the window was: a 5x5
         // puzzle occupied 180 pixels of an 1920-pixel window and 180 of a
@@ -2175,6 +2239,24 @@ mod tests {
             shared > reserved,
             "dropping the panel should give its width to the grid: \
              grid {shared} vs reserved share {reserved}"
+        );
+    }
+
+    #[test]
+    fn a_cell_stops_growing_before_the_grid_swallows_the_monitor() {
+        // A 5x5 puzzle on a 1080-line screen has room for a 180-pixel cell,
+        // which is a crossword the size of a dinner plate. The cap is what
+        // keeps a small puzzle looking like one.
+        let big = Layout::solve(1920.0, 1080.0, 5, 5);
+        assert!(big.cell <= MAX_CELL, "a cell grew to {}", big.cell);
+        assert!(big.cell > 0.0, "and it still has to be drawn");
+        // The cap must not be what decides every window, or this test is a
+        // statement about a constant rather than about the layout.
+        let ordinary = Layout::solve(400.0, 400.0, 5, 5);
+        assert!(
+            ordinary.cell < MAX_CELL,
+            "the cap should not bind at 400x400: {}",
+            ordinary.cell
         );
     }
 
@@ -2226,30 +2308,33 @@ mod tests {
     fn nothing_is_painted_outside_the_window() {
         for (w, h) in SIZES {
             let window = Rect::new(0.0, 0.0, w, h);
-            let mut menu = Crossword::new();
-            menu.size = (w, h);
-            let mut game = playing(0);
-            game.size = (w, h);
-            let mut helped = playing(1);
-            helped.size = (w, h);
-            helped.show_help = true;
-            let mut done = playing(2);
-            done.size = (w, h);
-            done.view = View::Completed;
-
-            for (name, app) in [
-                ("menu", &menu),
-                ("playing", &game),
-                ("help", &helped),
-                ("completed", &done),
-            ] {
-                for r in painted_rects(app, (w, h)) {
+            for (name, app) in every_screen((w, h)) {
+                for r in painted_rects(&app, (w, h)) {
                     assert!(
                         r.x >= window.x - 0.51
                             && r.y >= window.y - 0.51
                             && r.right() <= window.right() + 0.51
                             && r.bottom() <= window.bottom() + 0.51,
                         "{name} painted {r:?} outside a {w}x{h} window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_with_no_area_is_painted() {
+        // `fill` refuses an empty rectangle. Without that refusal a window too
+        // narrow for a clue panel still paints the panel's background -- a
+        // zero-wide or negative-wide fill, which is inside the window and so
+        // invisible to the test above, and which a renderer is entitled to
+        // treat however it likes.
+        for (w, h) in SIZES {
+            for (name, app) in every_screen((w, h)) {
+                for r in painted_rects(&app, (w, h)) {
+                    assert!(
+                        r.w > 0.0 && r.h > 0.0,
+                        "{name} painted {r:?}, which has no area, in a {w}x{h} window"
                     );
                 }
             }
@@ -2505,6 +2590,37 @@ mod tests {
     }
 
     #[test]
+    fn a_word_with_no_clue_written_for_it_says_so_in_the_panel() {
+        // The clue tables are hand-written and the words are read off the
+        // grid, so a table can be short. It used to lose the extra words in
+        // silence. `MISSING_CLUE` is what a player sees instead -- and this is
+        // the only test that reaches that arm, since all three shipped tables
+        // are complete and `every_word_in_every_puzzle_has_a_clue` is what
+        // keeps them that way.
+        static SHORT_OF_CLUES: PuzzleDef = PuzzleDef {
+            name: "short",
+            width: 5,
+            height: 5,
+            grid: PUZZLES[0].grid,
+            across: &["Only one across clue was written"],
+            down: &[],
+        };
+        let mut app = playing(0);
+        app.number_and_clue(&SHORT_OF_CLUES);
+        let missing = app.clues.iter().filter(|c| c.text == MISSING_CLUE).count();
+        assert_eq!(
+            missing,
+            app.clues.len().saturating_sub(1),
+            "every word but the one clue that was written is missing its clue"
+        );
+        let drawn = painted_text(&app, Crossword::SIZE);
+        assert!(
+            drawn.iter().any(|(s, _)| s.contains(MISSING_CLUE)),
+            "a word with no clue has to be visible as such in the panel"
+        );
+    }
+
+    #[test]
     fn every_word_in_every_puzzle_has_a_clue() {
         // A clue list shorter than the grid's word count used to lose the
         // extra words in silence -- eight per puzzle. `MISSING_CLUE` makes
@@ -2537,6 +2653,33 @@ mod tests {
                     def.name,
                     texts.len()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn a_clue_carries_the_text_written_for_the_word_it_is_on() {
+        // The lists are in grid order and carry no numbers, so the only thing
+        // tying a clue to its word is the position it was read from. Both
+        // lists are five long in all three puzzles, so a pair handed to the
+        // wrong directions would leave every count right and every word
+        // clued -- and every clue on the wrong word.
+        for index in 0..PUZZLES.len() {
+            let app = playing(index);
+            let def = &PUZZLES[index];
+            for dir in [Direction::Across, Direction::Down] {
+                let texts = if dir == Direction::Across {
+                    def.across
+                } else {
+                    def.down
+                };
+                let got: Vec<&str> = app
+                    .clues
+                    .iter()
+                    .filter(|c| c.direction == dir)
+                    .map(|c| c.text)
+                    .collect();
+                assert_eq!(got, texts, "{}: the {dir:?} clues, in grid order", def.name);
             }
         }
     }
@@ -2614,6 +2757,33 @@ mod tests {
             "1 Across and 1 Down start in the same square"
         );
         assert_eq!(across.number, 1, "and it is the first square numbered");
+    }
+
+    #[test]
+    fn a_coordinate_off_the_board_is_off_the_board() {
+        // `index` is the one place that answers "is this on the grid". Both
+        // halves of its bound are load-bearing and neither is reachable
+        // through a key or a click, so this asks it directly: a column past
+        // the right edge would otherwise wrap onto the next row, and a row
+        // past the bottom would run off the end of a board that a future
+        // puzzle might not have sized to its `cells` vector.
+        let app = playing(0);
+        assert_eq!(app.index(0, 0), Some(0));
+        assert_eq!(
+            app.index(1, 0),
+            Some(app.width),
+            "the second row starts one width along"
+        );
+        assert_eq!(
+            app.index(app.height, 0),
+            None,
+            "a row past the bottom is off the board"
+        );
+        assert_eq!(
+            app.index(0, app.width),
+            None,
+            "a column past the right edge is off the board, not the next row"
+        );
     }
 
     #[test]
@@ -2802,6 +2972,33 @@ mod tests {
     // ── The cursor ─────────────────────────────────────────────────
 
     #[test]
+    fn an_arrow_turns_the_cursor_the_way_it_moved() {
+        // The highlighted word, the banner and what typing does next all
+        // follow `direction`, so an arrow that moves up the board while
+        // leaving the cursor reading across selects a word the player did not
+        // point at.
+        for (key, face) in [
+            (Key::Up, Direction::Down),
+            (Key::Down, Direction::Down),
+            (Key::Left, Direction::Across),
+            (Key::Right, Direction::Across),
+        ] {
+            for start in [Direction::Across, Direction::Down] {
+                let mut app = playing(0);
+                app.cursor = (2, 2);
+                app.direction = start;
+                let before = app.cursor;
+                app.key_at(&press(key), Crossword::SIZE);
+                assert_ne!(before, app.cursor, "{key:?} has to move from (2, 2)");
+                assert_eq!(
+                    app.direction, face,
+                    "{key:?} moved {face:?} and must leave the cursor reading that way"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_four_arrows_are_the_same_code_and_each_undoes_the_other() {
         // They were four hand-written loops, and `Key::Up`'s bounds guard was
         // in the match arm while `Key::Down`'s was in the loop, so the two
@@ -2848,40 +3045,21 @@ mod tests {
             (Key::Down, (4, 0)),
         ] {
             app.cursor = at;
+            app.direction = Direction::Across;
             let outcome = app.key_at(&press(key), Crossword::SIZE);
             assert_eq!(
                 app.cursor, at,
                 "{key:?} at the edge {at:?} has nowhere to go"
             );
             assert_eq!(outcome, EventResult::Ignored, "and is not worth a repaint");
+            // Nor does it turn: an arrow that could not move has not chosen a
+            // word, and turning would select a different word in place.
+            assert_eq!(
+                app.direction,
+                Direction::Across,
+                "{key:?} at the edge {at:?} moved nothing, so it turns nothing"
+            );
         }
-    }
-
-    #[test]
-    fn an_arrow_faces_the_word_it_walks_along() {
-        let mut app = playing(0);
-        app.cursor = (2, 0);
-        app.direction = Direction::Down;
-        app.key_at(&press(Key::Right), Crossword::SIZE);
-        assert_eq!(app.cursor, (2, 1), "the step has to happen for the turn to");
-        assert_eq!(
-            app.direction,
-            Direction::Across,
-            "a sideways step reads across"
-        );
-
-        // Back to column 0, which is the only column with a cell below row 2:
-        // an arrow that cannot move changes nothing, including the direction,
-        // so a downward step aimed at a black square proves nothing at all.
-        app.cursor = (2, 0);
-        app.direction = Direction::Across;
-        app.key_at(&press(Key::Down), Crossword::SIZE);
-        assert_eq!(app.cursor, (3, 0), "the step has to happen here too");
-        assert_eq!(
-            app.direction,
-            Direction::Down,
-            "and a downward one reads down"
-        );
     }
 
     #[test]
@@ -3166,9 +3344,15 @@ mod tests {
             let r = rect_of_sized(&app, Target::Button(button), Crossword::SIZE)
                 .unwrap_or_else(|| panic!("{button:?} is not on the screen at the default size"));
             assert!(!r.is_empty(), "{button:?} has no area to click");
+            // Whole, not overlapping. `intersect(..).is_some()` is satisfied by
+            // a button hanging half out of the strip, and half a button drawn
+            // over the grid is a button drawn over the grid.
             assert!(
-                l.footer.intersect(r).is_some(),
-                "{button:?} at {r:?} is not in the footer {:?}",
+                r.x >= l.footer.x
+                    && r.y >= l.footer.y
+                    && r.right() <= l.footer.right()
+                    && r.bottom() <= l.footer.bottom(),
+                "{button:?} at {r:?} is not wholly inside the footer {:?}",
                 l.footer
             );
         }
@@ -3264,10 +3448,17 @@ mod tests {
     #[test]
     fn revealing_a_word_fills_all_of_it_and_only_it() {
         let mut app = playing(0);
-        app.cursor = (2, 0);
+        // Row 0, not row 2: row 2 is `ELITE`, a word that fills its whole row,
+        // and on it "reveal the word" and "reveal the row" are the same
+        // instruction. Row 0 is `SPA#S`, where the two differ (lesson 90).
+        app.cursor = (0, 0);
         app.direction = Direction::Across;
         let word = app.current_word();
-        assert_eq!(word.len(), 5, "the fixture needs the long across word");
+        let playable_in_row = (0..app.width).filter(|&c| app.playable(0, c)).count();
+        assert!(
+            word.len() < playable_in_row,
+            "the fixture needs a row with more cells in it than the word has"
+        );
         app.key_at(&ctrl(Key::W), Crossword::SIZE);
         for (r, c) in &word {
             let cell = app.cell(*r, *c).unwrap();
@@ -3377,17 +3568,31 @@ mod tests {
         // the only thing that may cut it.
         let app = playing(0);
         let drawn = painted_text(&app, Crossword::SIZE);
-        for clue in &app.clues {
-            let want = format!("{}{}. {}", clue.number, clue.direction.initial(), clue.text);
-            let Some((_, max)) = drawn.iter().find(|(s, _)| *s == want) else {
+        let whole: Vec<String> = app
+            .clues
+            .iter()
+            .map(|c| format!("{}{}. {}", c.number, c.direction.initial(), c.text))
+            .collect();
+        let mut rows = 0usize;
+        for (s, max) in &drawn {
+            // A clue row is the painted text that opens `<number><A|D>. `.
+            // The clock reads "00:00" and would otherwise pass for one.
+            let after = s.trim_start_matches(|ch: char| ch.is_ascii_digit());
+            if after.len() == s.len() || !(after.starts_with("A. ") || after.starts_with("D. ")) {
                 continue;
-            };
+            }
+            rows = rows.saturating_add(1);
+            assert!(
+                whole.iter().any(|w| w == s),
+                "the panel drew {s:?}, which is no clue of this puzzle whole"
+            );
             let bound = max.expect("a clue is bounded by the panel it is in");
             assert!(
                 bound > 0.0,
                 "a clue bounded to nothing is a clue nobody reads"
             );
         }
+        assert!(rows > 0, "the panel has to draw some clues");
         assert!(
             drawn.iter().any(|(s, _)| s.starts_with("1A. ")),
             "the panel has to draw the first clue"
@@ -3400,15 +3605,25 @@ mod tests {
         // is the test that says the cut is the renderer's job now.
         let mut app = playing(0);
         app.clues[0].text = "Café frappé — a naïve piñata, 100 ½ Ω";
+        // The panel row, specifically. `contains("piñata")` over the whole
+        // frame is also satisfied by the banner, which draws the same clue by
+        // another route -- so a cut panel row would pass unnoticed.
+        let want = format!("1A. {}", app.clues[0].text);
+        let mut reached = 0usize;
         for (w, h) in SIZES {
             app.size = (w, h);
             let drawn = painted_text(&app, (w, h));
+            // A 900x60 window has a panel with no room for a row in it.
+            if Layout::solve(w, h, app.width, app.height).clue_rows_visible() == 0 {
+                continue;
+            }
             assert!(
-                drawn.iter().any(|(s, _)| s.contains("piñata"))
-                    || Layout::solve(w, h, app.width, app.height).panel.is_empty(),
+                drawn.iter().any(|(s, _)| *s == want),
                 "the accented clue has to reach the renderer whole at {w}x{h}"
             );
+            reached = reached.saturating_add(1);
         }
+        assert!(reached > 0, "no window in SIZES draws a clue row at all");
     }
 
     #[test]
@@ -3519,6 +3734,42 @@ mod tests {
             "there is no fourth puzzle to open"
         );
         assert!(app.cells.is_empty());
+    }
+
+    #[test]
+    fn a_close_request_closes_the_window() {
+        let mut app = playing(0);
+        assert!(matches!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+    }
+
+    #[test]
+    fn a_move_asks_for_a_redraw_and_a_dead_key_does_not() {
+        // A program that answers `Redraw` to everything repaints the screen
+        // for every mouse move; one that answers `Idle` to a move leaves the
+        // last frame on the screen. Both are visible, so both are here.
+        let mut app = playing(0);
+        assert!(matches!(
+            app.on_event(&Event::Key(press(Key::S))),
+            Response::Redraw
+        ));
+        assert!(
+            matches!(app.on_event(&Event::Key(press(Key::F5))), Response::Idle),
+            "a key the puzzle does not use asks for nothing"
+        );
+    }
+
+    #[test]
+    fn render_records_the_window_it_was_given() {
+        // The click handler resolves against `self.size`, which nothing but
+        // `render` sets. A `render` that did not record it would resolve every
+        // click against whatever size the app happened to start at -- which is
+        // the shape of the fault this whole app had.
+        let mut app = playing(0);
+        app.render(1000.0, 700.0);
+        assert_eq!(app.size, (1000.0, 700.0));
     }
 
     #[test]

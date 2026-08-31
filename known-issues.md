@@ -101282,3 +101282,57 @@ More generally, this is a third instance of the same shape as lessons 91 and
 two disagree not about the *value* but about the *unit*. A frame that says a
 needle twice, a box measured with one string and filled with another, a list
 counted in items and drawn in rows.
+
+### Lesson 96: a whole-frame text search is not a test of the widget you meant, when two widgets draw the same string (lane C, 2026-08-31)
+
+**In short:** `crossword` draws the clue for the word under the cursor twice --
+once in the banner across the top, once as a row of the scrolling clue panel.
+`a_clue_with_an_accent_in_it_is_drawn_rather_than_aborting` put an accented
+clue in the puzzle and asserted that the frame contained `piñata` *somewhere*.
+Mutating the panel to cut its clue at a byte offset -- the exact fault the test
+was written to prevent, and one that aborts the process on a real cut -- left
+the test green, because the banner was still drawing the whole string.
+
+**The code:**
+
+```rust
+let drawn = painted_text(&app, (w, h));   // every Text command in the frame
+assert!(
+    drawn.iter().any(|(s, _)| s.contains("piñata"))
+        || Layout::solve(w, h, app.width, app.height).panel.is_empty(),
+    "the accented clue has to reach the renderer whole at {w}x{h}"
+);
+```
+
+The `||` names the panel, so the author knew perfectly well which widget the
+claim was about. The assertion just never restricted itself to that widget:
+`any(|s| s.contains(..))` searches every string in the frame, and one of the
+other strings in the frame is the same clue drawn by a different code path.
+
+**A second test in the same file had the mirror-image weakness.**
+`a_clue_is_handed_to_the_renderer_whole_and_bounded_by_width` built each clue's
+expected text, looked it up with `.find(..)`, and `continue`d when it was not
+there -- so a clue the panel had cut passed the test *by being absent*. A
+lookup that skips what it cannot find asserts nothing about the missing case,
+which is the only case the test exists for.
+
+**The repair is to assert over the set of strings the widget emits, not the
+presence of one of them.** A panel row is exactly `<number><A|D>. <text>`, and
+the banner's format is `"{} {} ({}): {}"`, so the two are distinguishable by
+shape. Both tests now enumerate every painted string of the row shape and
+require each to be some clue of this puzzle *whole* -- with a guard that at
+least one such row was drawn, since an enumeration over nothing is vacuous.
+
+**Where else to look.** Any test whose assertion is `contains`,
+`any(|s| s.contains(..))`, `find(..).is_some()`, or that `continue`s past items
+it could not find. Two questions: *which widget is this claim about*, and *does
+anything else in the frame draw the same text?* In a GUI the answer to the
+second is very often yes, because showing the same fact in two places is a
+feature -- a banner and a list, a title bar and a tab, a status line and the
+thing whose status it reports, a tooltip and its label. A search finds the copy
+the *other* widget drew. An enumeration of one widget's output cannot.
+
+This is adjacent to lesson 90 but distinct from it. There the fixture never
+enters the regime the rule governs; here the fixture is in exactly the right
+regime, and the assertion is satisfied by evidence from somewhere else in the
+picture.

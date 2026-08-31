@@ -2875,7 +2875,12 @@ pub const SYS_FS_RMDIR: u64 = 605;
 ///
 /// `arg0`: pointer to path string.
 /// `arg1`: path length (bytes).
-/// `arg2`: pointer to output `FsStatResult` buffer (16 bytes).
+/// `arg2`: pointer to output `FsStatResult` buffer (80 bytes — the record
+/// `encode_fs_stat_result` produces, carrying size, type, timestamps, uid,
+/// gid, mode, attributes, and the link/block/inode fields `struct stat`
+/// needs).  The doc here read "16 bytes" until 2026-08-31; that was the
+/// record's size long before the timestamp and identity fields were added,
+/// and no caller ever sized a buffer from it.
 ///
 /// Returns: 0 on success, or negative error code.
 pub const SYS_FS_STAT: u64 = 606;
@@ -3332,10 +3337,21 @@ pub const SYS_FS_UNLINKAT_PINNED: u64 = 662;
 /// `InvalidHandle` (§648).
 /// `arg1`: name pointer.  `arg2`: name length.
 /// `arg3`: flags — [`AT_SYMLINK_NOFOLLOW_PINNED`] selects `lstat`.
-/// `arg4`: output buffer, [`FS_META_SIZE`] bytes, in the same layout
-/// [`SYS_FS_METADATA`] writes.  Deliberately the same record: one decoder
-/// should serve both, and a second layout would be a second thing to keep
-/// in step.
+/// `arg4`: output buffer, 80 bytes, in the same layout [`SYS_FS_STAT`] and
+/// [`SYS_FS_LSTAT`] write.
+///
+/// This originally wrote the 64-byte [`FS_META_SIZE`] record that
+/// [`SYS_FS_METADATA`] writes, on the reasoning that one decoder should serve
+/// both.  That was wrong: the whole point of this call is to back a race-free
+/// `fstatat`, which fills a `struct stat`, and the 64-byte record has no field
+/// for the **inode number** — nor for the hard-link or block counts.  A missing
+/// `st_ino` fails loudly nowhere; it is a *plausible* value, so `cp src dst`
+/// refuses legitimate copies (its same-file check is `st_dev`/`st_ino`
+/// equality), `find -samefile` matches everything, `du` and `tar` coalesce an
+/// entire tree into one file, and `ls -i` prints a column of zeros.  Changed
+/// while this number still had no callers, which is the only moment it is
+/// free — widening a live record costs a second syscall number forever.
+/// See §653.
 ///
 /// Returns: 0 on success; `ESTALE` as above; otherwise a negative error code.
 pub const SYS_FS_FSTATAT_PINNED: u64 = 663;

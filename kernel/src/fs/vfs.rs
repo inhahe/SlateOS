@@ -6818,8 +6818,8 @@ pub fn self_test() -> KernelResult<()> {
             // unconditionally would satisfy every assertion further down --
             // the swap assertions only prove a refusal happens, not that it
             // happens for the right reason.
-            match Vfs::metadata_at_pinned(&pin, b"victim", false) {
-                Ok(m) if m.size == 8 => {}
+            let pinned_meta = match Vfs::metadata_at_pinned(&pin, b"victim", false) {
+                Ok(m) if m.size == 8 => m,
                 other => {
                     serial_println!(
                         "[vfs]   FAIL: metadata_at_pinned through a live pin = {:?}, want size 8",
@@ -6827,6 +6827,51 @@ pub fn self_test() -> KernelResult<()> {
                     );
                     return Err(KernelError::InvalidArgument);
                 }
+            };
+
+            // The pinned lookup must carry the *identity* fields, not just the
+            // size.  `SYS_FS_FSTATAT_PINNED` (663) exists to back a race-free
+            // `fstatat`, which fills a `struct stat`; if this path returned a
+            // `FileMeta` whose `ino` were zero, widening 663's record to the
+            // 80-byte stat layout (§653) would have bought nothing, and the
+            // failure would be silent -- a zero inode is a plausible value, so
+            // `cp` refuses legitimate copies and `find -samefile` matches
+            // everything, with no error anywhere.  Compared against the
+            // path-based answer rather than merely checked non-zero, because
+            // the two routes reaching *different* inodes for one file is the
+            // same bug wearing a different mask.
+            let path_meta = match Vfs::metadata("/tmp/_pin/real/victim") {
+                Ok(m) => m,
+                Err(e) => {
+                    serial_println!(
+                        "[vfs]   FAIL: path-based metadata on the file the pin just described = \
+                         {e:?} -- the comparison below has nothing to compare against"
+                    );
+                    return Err(e);
+                }
+            };
+            if pinned_meta.ino == 0 {
+                serial_println!(
+                    "[vfs]   FAIL: metadata_at_pinned returned ino 0 on a filesystem that \
+                     assigns inodes -- 663's stat record would report st_ino == 0"
+                );
+                return Err(KernelError::InvalidArgument);
+            }
+            if pinned_meta.ino != path_meta.ino {
+                serial_println!(
+                    "[vfs]   FAIL: metadata_at_pinned ino {} != path-based stat ino {} for one file",
+                    pinned_meta.ino,
+                    path_meta.ino
+                );
+                return Err(KernelError::InvalidArgument);
+            }
+            if pinned_meta.nlinks != path_meta.nlinks {
+                serial_println!(
+                    "[vfs]   FAIL: metadata_at_pinned nlinks {} != path-based stat nlinks {}",
+                    pinned_meta.nlinks,
+                    path_meta.nlinks
+                );
+                return Err(KernelError::InvalidArgument);
             }
             match Vfs::readdir_pinned(&pin) {
                 Ok(v) if v.iter().any(|e| e.name.as_bytes() == b"victim") => {}

@@ -134,11 +134,11 @@
 //!
 //! # Options this implementation does not have
 //!
-//! Everything except `-r`/`-R`/`--recursive`, `-t`/`--target-directory` and
-//! `-T`/`--no-target-directory`. The rest are recognised and rejected with a
-//! message saying they are not implemented, rather than ignored, and they are
-//! listed in [`LONG_OPTIONS`] anyway because the table is what decides whether
-//! an abbreviation is ambiguous.
+//! Everything except `-r`/`-R`/`--recursive`, `-t`/`--target-directory`,
+//! `-T`/`--no-target-directory` and `-v`/`--verbose`. The rest are recognised
+//! and rejected with a message saying they are not implemented, rather than
+//! ignored, and they are listed in [`LONG_OPTIONS`] anyway because the table is
+//! what decides whether an abbreviation is ambiguous.
 //!
 //! Ignoring them would be worse than refusing in almost every case: `-n` asks
 //! for an existing file to be left alone, `-p` asks for ownership and timestamps
@@ -250,6 +250,9 @@ struct CpFlags {
     /// replace, never a directory to copy *into*. `cp -T a d` overwrites `d`
     /// rather than writing `d/a` — or refuses to, when `d` is a directory.
     no_target_directory: bool,
+    /// `-v` / `--verbose`: name every copy as it is made. See [`announce`] for
+    /// where those lines come out and why they are not diagnostics.
+    verbose: bool,
 }
 
 /// What the command line asked for.
@@ -284,12 +287,25 @@ fn run_main() -> ExitCode {
         Ok(Request::Run(flags, paths)) => {
             // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
             // diagnostic that never arrived has to reach `close_stderr`'s flag.
+            let mut out = Stream::stdout();
             let mut err = Stream::stderr();
-            if copy_all(&flags, &paths, &mut err) {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            }
+            let earned = {
+                let mut job = Job {
+                    flags: &flags,
+                    out: &mut out,
+                    err: &mut err,
+                };
+                if copy_all(&mut job, &paths) {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(1)
+                }
+            };
+            // `--verbose` is the only thing `cp` ever writes to stdout, and a
+            // line of it that never arrived has to change the status the same
+            // way a lost diagnostic does — otherwise `cp -v … | head -1`
+            // reports success for output nobody received.
+            stdfd::close_stdout("cp", out, earned)
         }
         Err(e) => {
             diag!("cp: {e}");
@@ -310,6 +326,7 @@ Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
                         copy all SOURCE arguments into DIRECTORY
   -T, --no-target-directory
                         treat DEST as a normal file
+  -v, --verbose         explain what is being done
       --help            display this help and exit
       --version         output version information and exit
 
@@ -363,6 +380,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Short(b'T', _) | Opt::Long("no-target-directory", _) => {
                 flags.no_target_directory = true;
             }
+            Opt::Short(b'v', _) | Opt::Long("verbose", _) => flags.verbose = true,
             Opt::Long("help", _) => return Ok(Request::Help),
             Opt::Long("version", _) => return Ok(Request::Version),
             // Everything else in the two tables is an option GNU has and this
@@ -397,14 +415,62 @@ fn unimplemented_long(name: &str) -> getopt::Error {
 
 // ---------------------------------------------------------------- copying ---
 
-/// Copy every source onto the destination, reporting failures to `err`.
+/// Everything a copy needs that is not the two paths: what was asked for, and
+/// the two places it can say something.
 ///
-/// Returns `true` if everything asked for was copied. Takes the error sink as a
-/// parameter rather than writing to `stderr` directly so the diagnostics — the
-/// part of `cp` a caller actually sees when something goes wrong — can be
-/// asserted on in tests. The old file had no test of this path at all, which is
-/// how bugs 1–3 and 6 in the module docs survived.
-fn copy_all<W: Write>(flags: &CpFlags, paths: &[OsString], err: &mut W) -> bool {
+/// One value rather than three parameters, because it is the *recursion* that
+/// needs them. [`copy_tree`] and [`copy_entry`] could reach neither the flags
+/// nor stdout, so no option that changes what happens inside a directory could
+/// be written at all — and `--verbose`, `-p`, `-x`, `-L` and `--copy-contents`
+/// are all of them that.
+///
+/// Both sinks are parameters rather than `stdout()`/`stderr()` taken directly,
+/// so that a test can assert on what a copy said. The old file had no test of
+/// that path at all, which is how bugs 1–3 and 6 in the module docs survived.
+struct Job<'a, O: Write, E: Write> {
+    flags: &'a CpFlags,
+    /// Where `--verbose` announces. Measured: GNU's `emit_verbose` uses
+    /// `printf`, so the line is on stdout and is *not* a diagnostic.
+    out: &'a mut O,
+    err: &'a mut E,
+}
+
+/// `--verbose`'s one line about one copy: `'src' -> 'dst'`.
+///
+/// Three measured facts are packed into four lines of code, and each of them is
+/// a way the obvious implementation would be wrong:
+///
+/// * **It goes to stdout, not stderr.** GNU's `emit_verbose` (`copy.c:2082`) is
+///   a `printf`. So `cp -v a b > log` captures the line and `cp -v a b
+///   2>/dev/null` does not silence it — the reverse of what a diagnostic does.
+///   That is also why `run_main` has to route stdout through
+///   [`stdfd::close_stdout`]: with `-v` this utility finally *has* stdout
+///   output whose loss must change the exit status.
+/// * **Both names are quoted, in the same style as a diagnostic's.** GNU writes
+///   `quoteaf_n (0, src)` and `quoteaf_n (1, dst)` — two slots of one style, not
+///   two styles — so `cp -v 'a b' c` prints `'a b' -> c` and the reader can tell
+///   a space in a name from a space between names.
+/// * **There is no flush here.** The line is buffered like any other stdout
+///   write and lands in order with respect to nothing else, because `cp` writes
+///   nothing else to stdout. Interleaving with stderr is not a property GNU has
+///   either — piping the two together reorders them there too.
+///
+/// *When* it is called is the part that is not local to this function, and is
+/// documented at each of the four call sites: after every refusal and before the
+/// copy for a non-directory, and only on the `mkdir` actually happening for a
+/// directory.
+fn announce<O: Write, E: Write>(job: &mut Job<'_, O, E>, src: &Path, dst: &Path) {
+    if !job.flags.verbose {
+        return;
+    }
+    let _ = writeln!(job.out, "{} -> {}", quoteaf_os(src), quoteaf_os(dst));
+}
+
+/// Copy every source onto the destination.
+///
+/// Returns `true` if everything asked for was copied.
+fn copy_all<O: Write, E: Write>(job: &mut Job<'_, O, E>, paths: &[OsString]) -> bool {
+    let flags = job.flags;
     // GNU's `n_files <= !target_directory`. With `-t` the destination came from
     // the option, so one operand is enough; without it the last operand *is* the
     // destination and two are needed. Zero and one are distinct diagnostics —
@@ -418,7 +484,7 @@ fn copy_all<W: Write>(flags: &CpFlags, paths: &[OsString], err: &mut W) -> bool 
                 quoteaf_os(first)
             ),
         };
-        let _ = writeln!(err, "cp: {}", CP.usage_referring(message));
+        let _ = writeln!(job.err, "cp: {}", CP.usage_referring(message));
         return false;
     }
 
@@ -428,7 +494,7 @@ fn copy_all<W: Write>(flags: &CpFlags, paths: &[OsString], err: &mut W) -> bool 
     if flags.no_target_directory {
         if flags.target_directory.is_some() {
             let _ = writeln!(
-                err,
+                job.err,
                 "cp: cannot combine --target-directory (-t) and --no-target-directory (-T)"
             );
             return false;
@@ -438,7 +504,7 @@ fn copy_all<W: Write>(flags: &CpFlags, paths: &[OsString], err: &mut W) -> bool 
         // to go at all.
         if let Some(extra) = paths.get(2) {
             let _ = writeln!(
-                err,
+                job.err,
                 "cp: {}",
                 CP.usage_referring(format!("extra operand {}", quoteaf_os(extra)))
             );
@@ -453,7 +519,7 @@ fn copy_all<W: Write>(flags: &CpFlags, paths: &[OsString], err: &mut W) -> bool 
         Some(dir) => {
             if let Some(e) = dest_directory_error(Path::new(dir)) {
                 let why = strerror(&e);
-                let _ = writeln!(err, "cp: target directory {}: {why}", quoteaf_os(dir));
+                let _ = writeln!(job.err, "cp: target directory {}: {why}", quoteaf_os(dir));
                 return false;
             }
             (paths, dir, true)
@@ -484,7 +550,7 @@ fn copy_all<W: Write>(flags: &CpFlags, paths: &[OsString], err: &mut W) -> bool 
                     && let Some(e) = not_a_dir
                 {
                     let why = strerror(&e);
-                    let _ = writeln!(err, "cp: target {}: {why}", quoteaf_os(dest));
+                    let _ = writeln!(job.err, "cp: target {}: {why}", quoteaf_os(dest));
                     return false;
                 }
                 (sources, dest, not_a_dir.is_none())
@@ -502,7 +568,7 @@ fn copy_all<W: Write>(flags: &CpFlags, paths: &[OsString], err: &mut W) -> bool 
 
     let mut ok = true;
     for src in sources {
-        if !copy_one(flags, src, dest_path, dest_is_dir, seen.as_mut(), err) {
+        if !copy_one(src, dest_path, dest_is_dir, seen.as_mut(), job) {
             ok = false;
         }
     }
@@ -584,14 +650,14 @@ impl Seen {
 }
 
 /// Copy one source. Returns `false` if it should count against the exit status.
-fn copy_one<W: Write>(
-    flags: &CpFlags,
+fn copy_one<O: Write, E: Write>(
     src: &OsString,
     dest: &Path,
     dest_is_dir: bool,
     mut seen: Option<&mut Seen>,
-    err: &mut W,
+    job: &mut Job<'_, O, E>,
 ) -> bool {
+    let flags = job.flags;
     let src_path = Path::new(src);
 
     // Whether a symlink *operand* is followed depends on `-r`, and this matches
@@ -613,7 +679,7 @@ fn copy_one<W: Write>(
             // 2)`, which is neither POSIX's wording nor what this utility prints
             // on the target it ships on.
             let why = strerror(&e);
-            let _ = writeln!(err, "cp: cannot stat {}: {why}", quoteaf_os(src));
+            let _ = writeln!(job.err, "cp: cannot stat {}: {why}", quoteaf_os(src));
             return false;
         }
     };
@@ -623,7 +689,7 @@ fn copy_one<W: Write>(
     // makes `cp tree/.. dst` say which of its two problems came first.
     if metadata.is_dir() && !flags.recursive {
         let _ = writeln!(
-            err,
+            job.err,
             "cp: -r not specified; omitting directory {}",
             quoteaf_os(src)
         );
@@ -647,7 +713,7 @@ fn copy_one<W: Write>(
         && seen.saw_source(id, entry)
     {
         let _ = writeln!(
-            err,
+            job.err,
             "cp: warning: source file {} specified more than once",
             quoteaf_os(src)
         );
@@ -658,7 +724,7 @@ fn copy_one<W: Write>(
         Ok(t) => t,
         Err(reason) => {
             let _ = writeln!(
-                err,
+                job.err,
                 "cp: cannot copy {} into {}: {reason}",
                 quoteaf_os(src),
                 quoteaf_os(dest)
@@ -689,7 +755,7 @@ fn copy_one<W: Write>(
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => {
             let why = strerror(&e);
-            let _ = writeln!(err, "cp: cannot stat {}: {why}", quoteaf_os(&target));
+            let _ = writeln!(job.err, "cp: cannot stat {}: {why}", quoteaf_os(&target));
             return false;
         }
     };
@@ -701,7 +767,7 @@ fn copy_one<W: Write>(
         // when the destination exists, again as GNU asks it.
         if is_same_file(src_path, &target, flags.recursive) {
             let _ = writeln!(
-                err,
+                job.err,
                 "cp: {} and {} are the same file",
                 quoteaf_os(src),
                 quoteaf_os(&target)
@@ -715,7 +781,7 @@ fn copy_one<W: Write>(
         // name that is not a directory at all.
         if metadata.is_dir() && !dest_meta.is_dir() {
             let _ = writeln!(
-                err,
+                job.err,
                 "cp: cannot overwrite non-directory {} with directory {}",
                 quoteaf_os(&target),
                 quoteaf_os(src)
@@ -735,7 +801,7 @@ fn copy_one<W: Write>(
             && seen.made(&target, id)
         {
             let _ = writeln!(
-                err,
+                job.err,
                 "cp: will not overwrite just-created {} with {}",
                 quoteaf_os(&target),
                 quoteaf_os(src)
@@ -745,7 +811,7 @@ fn copy_one<W: Write>(
 
         if !metadata.is_dir() && dest_meta.is_dir() {
             let _ = writeln!(
-                err,
+                job.err,
                 "cp: cannot overwrite directory {} with non-directory",
                 quoteaf_os(&target)
             );
@@ -766,7 +832,7 @@ fn copy_one<W: Write>(
         && seen.made(&target, id)
     {
         let _ = writeln!(
-            err,
+            job.err,
             "cp: will not copy {} through just-created symlink {}",
             quoteaf_os(src),
             quoteaf_os(&target)
@@ -791,7 +857,7 @@ fn copy_one<W: Write>(
         match seen.dirs.get(&id) {
             Some(earlier) if *earlier == entry => {
                 let _ = writeln!(
-                    err,
+                    job.err,
                     "cp: warning: source directory {} specified more than once",
                     quoteaf_os(src)
                 );
@@ -804,7 +870,7 @@ fn copy_one<W: Write>(
         }
     }
 
-    let ok = place_source(src, src_path, &metadata, &target, dest_meta.is_some(), err);
+    let ok = place_source(src, src_path, &metadata, &target, dest_meta.is_some(), job);
 
     // One recording site, reached however the copy was done, and only on
     // success — a destination that was never written is not one a later
@@ -819,13 +885,13 @@ fn copy_one<W: Write>(
 /// Make the copy, now that the destination path is settled and every refusal
 /// has been made. Split out of [`copy_one`] so that it has one place to record
 /// what it created rather than one per kind of source.
-fn place_source<W: Write>(
+fn place_source<O: Write, E: Write>(
     src: &OsString,
     src_path: &Path,
     metadata: &fs::Metadata,
     target: &Path,
     dest_exists: bool,
-    err: &mut W,
+    job: &mut Job<'_, O, E>,
 ) -> bool {
     if metadata.file_type().is_symlink() {
         // Only reachable under `-r`; see the stat in [`copy_one`].
@@ -840,15 +906,21 @@ fn place_source<W: Write>(
             && e.kind() != io::ErrorKind::NotFound
         {
             let why = strerror(&e);
-            let _ = writeln!(err, "cp: cannot remove {}: {why}", quoteaf_os(target));
+            let _ = writeln!(job.err, "cp: cannot remove {}: {why}", quoteaf_os(target));
             return false;
         }
+        // *After* the removal above, which is GNU's order: its `unlink` of the
+        // destination (`copy.c:2582`) comes before `emit_verbose`
+        // (`copy.c:2630`), so a `cp -v` that cannot clear the way announces
+        // nothing. And before the link is made, so a failure to create it is
+        // still announced — `-v` reports what was attempted, not what worked.
+        announce(job, src_path, target);
         return match clone_symlink(src_path, target) {
             Ok(()) => true,
             Err(e) => {
                 let why = strerror(&e);
                 let _ = writeln!(
-                    err,
+                    job.err,
                     "cp: cannot create symbolic link {}: {why}",
                     quoteaf_os(target)
                 );
@@ -858,14 +930,14 @@ fn place_source<W: Write>(
     }
 
     if !metadata.is_dir() {
-        return copy_regular_file(src_path, metadata, target, err);
+        return copy_regular_file(src_path, metadata, target, job);
     }
 
     // Module docs, bug 2: without this, `cp -r a a` and `cp -r a .` copy what
     // they have just written, for ever.
     if is_inside(target, src_path) {
         let _ = writeln!(
-            err,
+            job.err,
             "cp: cannot copy a directory, {}, into itself, {}",
             quoteaf_os(src),
             quoteaf_os(target)
@@ -873,7 +945,7 @@ fn place_source<W: Write>(
         return false;
     }
 
-    copy_tree(src_path, permission_bits(metadata), target, err)
+    copy_tree(src_path, permission_bits(metadata), target, job)
 }
 
 /// Would copying `src` to `dst` write over `src` itself?
@@ -1121,7 +1193,12 @@ fn resolve_as_far_as_exists(path: &Path) -> Option<PathBuf> {
 ///
 /// The mode is taken as an argument rather than re-stat'd because the caller
 /// has already stat'd `src` and a second look could see a different directory.
-fn copy_tree<W: Write>(src: &Path, src_mode: u32, dest: &Path, err: &mut W) -> bool {
+fn copy_tree<O: Write, E: Write>(
+    src: &Path,
+    src_mode: u32,
+    dest: &Path,
+    job: &mut Job<'_, O, E>,
+) -> bool {
     let mut ok = true;
 
     // Group- and other-write are *withheld* at `mkdir` and put back at the end,
@@ -1140,13 +1217,22 @@ fn copy_tree<W: Write>(src: &Path, src_mode: u32, dest: &Path, err: &mut W) -> b
     match make_dir(dest, src_mode & !omitted) {
         Ok(true) => match permission_bits_of(dest) {
             Ok(made) => {
+                // A directory is announced *here* and nowhere else, and GNU
+                // says why in a comment of its own (`copy.c`, above the
+                // `emit_verbose` at 2991): "we don't always create the
+                // destination directory, so --verbose should not announce
+                // anything until we're sure we'll create a directory." So
+                // `cp -rv a b` where `b/a` already exists announces the files
+                // it refreshes and says nothing about the directory holding
+                // them — the directory was not copied, it was reused.
+                announce(job, src, dest);
                 if made & 0o700 != 0o700 {
                     dst_mode = made;
                     restore = true;
                     if let Err(e) = set_mode(dest, made | 0o700) {
                         let why = strerror(&e);
                         let _ = writeln!(
-                            err,
+                            job.err,
                             "cp: setting permissions for {}: {why}",
                             quoteaf_os(dest)
                         );
@@ -1156,7 +1242,7 @@ fn copy_tree<W: Write>(src: &Path, src_mode: u32, dest: &Path, err: &mut W) -> b
             }
             Err(e) => {
                 let why = strerror(&e);
-                let _ = writeln!(err, "cp: cannot stat {}: {why}", quoteaf_os(dest));
+                let _ = writeln!(job.err, "cp: cannot stat {}: {why}", quoteaf_os(dest));
                 return false;
             }
         },
@@ -1169,7 +1255,7 @@ fn copy_tree<W: Write>(src: &Path, src_mode: u32, dest: &Path, err: &mut W) -> b
         Err(e) => {
             let why = strerror(&e);
             let _ = writeln!(
-                err,
+                job.err,
                 "cp: cannot create directory {}: {why}",
                 quoteaf_os(dest)
             );
@@ -1185,7 +1271,7 @@ fn copy_tree<W: Write>(src: &Path, src_mode: u32, dest: &Path, err: &mut W) -> b
     match fs::read_dir(src) {
         Ok(entries) => {
             for entry in entries {
-                if !copy_entry(&entry, src, dest, err) {
+                if !copy_entry(&entry, src, dest, job) {
                     ok = false;
                 }
             }
@@ -1198,7 +1284,7 @@ fn copy_tree<W: Write>(src: &Path, src_mode: u32, dest: &Path, err: &mut W) -> b
             // utility that differs from GNU only in the words of a diagnostic
             // is still a utility whose output a script cannot match on.
             let why = strerror(&e);
-            let _ = writeln!(err, "cp: cannot access {}: {why}", quoteaf_os(src));
+            let _ = writeln!(job.err, "cp: cannot access {}: {why}", quoteaf_os(src));
             ok = false;
         }
     }
@@ -1222,7 +1308,7 @@ fn copy_tree<W: Write>(src: &Path, src_mode: u32, dest: &Path, err: &mut W) -> b
             }
             Err(e) => {
                 let why = strerror(&e);
-                let _ = writeln!(err, "cp: cannot stat {}: {why}", quoteaf_os(dest));
+                let _ = writeln!(job.err, "cp: cannot stat {}: {why}", quoteaf_os(dest));
                 ok = false;
             }
         }
@@ -1230,7 +1316,7 @@ fn copy_tree<W: Write>(src: &Path, src_mode: u32, dest: &Path, err: &mut W) -> b
     if restore && let Err(e) = set_mode(dest, dst_mode | omitted) {
         let why = strerror(&e);
         let _ = writeln!(
-            err,
+            job.err,
             "cp: preserving permissions for {}: {why}",
             quoteaf_os(dest)
         );
@@ -1241,11 +1327,11 @@ fn copy_tree<W: Write>(src: &Path, src_mode: u32, dest: &Path, err: &mut W) -> b
 
 /// One entry of a directory being walked. Split out of [`copy_tree`] only to
 /// keep the mode bookkeeping either side of the walk readable in one screen.
-fn copy_entry<W: Write>(
+fn copy_entry<O: Write, E: Write>(
     entry: &io::Result<fs::DirEntry>,
     src: &Path,
     dest: &Path,
-    err: &mut W,
+    job: &mut Job<'_, O, E>,
 ) -> bool {
     let entry = match entry {
         Ok(e) => e,
@@ -1257,7 +1343,7 @@ fn copy_entry<W: Write>(
             // [`copy_tree`]: GNU reads a directory in one go, so it has no
             // separate wording for giving up part-way through.
             let why = strerror(e);
-            let _ = writeln!(err, "cp: cannot access {}: {why}", quoteaf_os(src));
+            let _ = writeln!(job.err, "cp: cannot access {}: {why}", quoteaf_os(src));
             return false;
         }
     };
@@ -1271,18 +1357,22 @@ fn copy_entry<W: Write>(
         Ok(m) => m,
         Err(e) => {
             let why = strerror(&e);
-            let _ = writeln!(err, "cp: cannot stat {}: {why}", quoteaf_os(&from));
+            let _ = writeln!(job.err, "cp: cannot stat {}: {why}", quoteaf_os(&from));
             return false;
         }
     };
 
     if meta.file_type().is_symlink() {
+        // The recursive twin of the announcement in [`place_source`]: GNU
+        // reaches this through the same `copy_internal`, so a link found inside
+        // a tree is named exactly as a link named on the command line is.
+        announce(job, &from, &to);
         return match clone_symlink(&from, &to) {
             Ok(()) => true,
             Err(e) => {
                 let why = strerror(&e);
                 let _ = writeln!(
-                    err,
+                    job.err,
                     "cp: cannot create symbolic link {}: {why}",
                     quoteaf_os(&to)
                 );
@@ -1291,9 +1381,9 @@ fn copy_entry<W: Write>(
         };
     }
     if meta.is_dir() {
-        return copy_tree(&from, permission_bits(&meta), &to, err);
+        return copy_tree(&from, permission_bits(&meta), &to, job);
     }
-    copy_regular_file(&from, &meta, &to, err)
+    copy_regular_file(&from, &meta, &to, job)
 }
 
 /// Create `dest` as a directory with mode `mode`, before the umask is applied.
@@ -1336,18 +1426,25 @@ fn make_dir(dest: &Path, mode: u32) -> io::Result<bool> {
 ///   so a 0777 source lands as 0777 where GNU lands it as 0755; and it
 ///   overwrites the mode of a destination that *already existed*, so copying a
 ///   0777 file over somebody's 0600 one published it. See module docs, bug 8.
-fn copy_regular_file<W: Write>(
+fn copy_regular_file<O: Write, E: Write>(
     src: &Path,
     src_meta: &fs::Metadata,
     dst: &Path,
-    err: &mut W,
+    job: &mut Job<'_, O, E>,
 ) -> bool {
+    // Before the source is even opened, which is GNU's order: `emit_verbose`
+    // (`copy.c:2630`) runs before `copy_reg`, so an unreadable source is
+    // announced and *then* complained about. One site here rather than one in
+    // each caller, because both of them — a file named on the command line and
+    // a file found inside a tree — go through GNU's one `copy_internal` too.
+    announce(job, src, dst);
+
     let mut input = match fs::File::open(src) {
         Ok(f) => f,
         Err(e) => {
             let why = strerror(&e);
             let _ = writeln!(
-                err,
+                job.err,
                 "cp: cannot open {} for reading: {why}",
                 quoteaf_os(src)
             );
@@ -1359,7 +1456,7 @@ fn copy_regular_file<W: Write>(
         Ok(f) => f,
         Err(DestError::Dangling) => {
             let _ = writeln!(
-                err,
+                job.err,
                 "cp: not writing through dangling symlink {}",
                 quoteaf_os(dst)
             );
@@ -1368,7 +1465,7 @@ fn copy_regular_file<W: Write>(
         Err(DestError::Io(e)) => {
             let why = strerror(&e);
             let _ = writeln!(
-                err,
+                job.err,
                 "cp: cannot create regular file {}: {why}",
                 quoteaf_os(dst)
             );
@@ -1386,7 +1483,7 @@ fn copy_regular_file<W: Write>(
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => {
                 let why = strerror(&e);
-                let _ = writeln!(err, "cp: error reading {}: {why}", quoteaf_os(src));
+                let _ = writeln!(job.err, "cp: error reading {}: {why}", quoteaf_os(src));
                 return false;
             }
         };
@@ -1398,7 +1495,7 @@ fn copy_regular_file<W: Write>(
         };
         if let Err(e) = output.write_all(chunk) {
             let why = strerror(&e);
-            let _ = writeln!(err, "cp: error writing {}: {why}", quoteaf_os(dst));
+            let _ = writeln!(job.err, "cp: error writing {}: {why}", quoteaf_os(dst));
             return false;
         }
     }
@@ -1803,7 +1900,7 @@ mod tests {
             // bare `-S` would swallow the operand after it and this would be an
             // arity test rather than a rejection test.
             "-a", "-b", "-d", "-f", "-H", "-i", "-l", "-L", "-n", "-p", "-P", "-s", "-S.bak", "-u",
-            "-v", "-x", "-Z",
+            "-x", "-Z",
         ] {
             let e = fail(&[flag, "a", "b"]);
             assert!(
@@ -1834,7 +1931,6 @@ mod tests {
             "--strip-trailing-slashes",
             "--symbolic-link",
             "--update",
-            "--verbose",
             // Given values inline so the option cannot swallow an operand and
             // turn a rejection test into an arity test.
             "--sparse=always",
@@ -2029,11 +2125,13 @@ mod tests {
         recursive: false,
         target_directory: None,
         no_target_directory: false,
+        verbose: false,
     };
     const RECURSIVE: CpFlags = CpFlags {
         recursive: true,
         target_directory: None,
         no_target_directory: false,
+        verbose: false,
     };
     /// `-T`, which the two above never set. Named for what it does rather than
     /// for the letter: the destination is a name, not a directory to fill.
@@ -2041,14 +2139,54 @@ mod tests {
         recursive: false,
         target_directory: None,
         no_target_directory: true,
+        verbose: false,
+    };
+    const VERBOSE: CpFlags = CpFlags {
+        recursive: false,
+        target_directory: None,
+        no_target_directory: false,
+        verbose: true,
+    };
+    const VERBOSE_RECURSIVE: CpFlags = CpFlags {
+        recursive: true,
+        target_directory: None,
+        no_target_directory: false,
+        verbose: true,
     };
 
     /// `copy_all` plus whatever it wrote to its error sink.
+    ///
+    /// The stdout half is dropped here rather than returned, because all but a
+    /// handful of these tests do not set `-v` and so could only ever assert
+    /// that it was empty. [`cp_out`] is the same call for the ones that care.
     fn cp(flags: &CpFlags, paths: &[&Path]) -> (bool, String) {
+        let (ok, _out, err) = cp_out(flags, paths);
+        (ok, err)
+    }
+
+    /// `copy_all` plus *both* of the things it wrote: `(ok, stdout, stderr)`.
+    ///
+    /// The two sinks are separate `Vec`s and not one, which is the point: a
+    /// test that asserted on their concatenation could not tell a `--verbose`
+    /// line on stdout from the same text misdirected to stderr, and getting
+    /// that wrong is exactly the bug worth catching — GNU's is a `printf`.
+    fn cp_out(flags: &CpFlags, paths: &[&Path]) -> (bool, String, String) {
         let owned: Vec<OsString> = paths.iter().map(|p| p.as_os_str().to_owned()).collect();
+        let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
-        let ok = copy_all(flags, &owned, &mut err);
-        (ok, String::from_utf8_lossy(&err).into_owned())
+        let ok = {
+            let mut job = Job {
+                flags,
+                out: &mut out,
+                err: &mut err,
+            };
+            copy_all(&mut job, &owned)
+        };
+        (
+            ok,
+            String::from_utf8_lossy(&out).into_owned(),
+            String::from_utf8_lossy(&err).into_owned(),
+        )
     }
 
     #[test]
@@ -2311,6 +2449,7 @@ mod tests {
             target_directory: Some(OsString::from("nosuch")),
             no_target_directory: true,
             recursive: false,
+            verbose: false,
         };
         let (ok, e) = cp(&flags, &[Path::new("a"), Path::new("b")]);
         assert!(!ok);
@@ -2411,6 +2550,158 @@ mod tests {
         let (ok, e) = cp(&flags, &[&f, &dotted]);
         assert!(ok, "{e}");
         assert!(e.contains("specified more than once"), "{e}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ----------------------------------------------------- --verbose says --
+
+    /// The whole of `-v` on one file: the arrow line, on **stdout**, and
+    /// nothing on stderr. Both halves are asserted, because the sink is the
+    /// half that is easy to get wrong and impossible to see once the two are
+    /// merged into a terminal.
+    #[test]
+    fn verbose_names_the_copy_on_stdout() {
+        let dir = scratch("v_one");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::write(&a, b"hello").unwrap();
+
+        let (ok, out, err) = cp_out(&VERBOSE, &[&a, &b]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "", "a report of work done is not a diagnostic");
+        assert_eq!(out, format!("{} -> {}\n", quoteaf_os(&a), quoteaf_os(&b)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// And without it, silence — so the test above is pinning the option and
+    /// not merely observing that `cp` talks.
+    #[test]
+    fn without_verbose_a_copy_says_nothing() {
+        let dir = scratch("v_off");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::write(&a, b"hello").unwrap();
+
+        let (ok, out, err) = cp_out(&PLAIN, &[&a, &b]);
+        assert!(ok, "{err}");
+        assert_eq!(out, "");
+        assert_eq!(err, "");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// GNU announces *before* it opens the source, so a copy that fails is
+    /// still announced. This is the case that decides whether `-v` reports
+    /// attempts or successes, and upstream's answer is attempts.
+    #[test]
+    fn verbose_announces_a_copy_that_then_fails() {
+        let dir = scratch("v_fail");
+        let missing = dir.join("nosuch").join("a");
+        let b = dir.join("b");
+
+        // The failure is `cannot stat`, from before the announcement — so this
+        // one is *not* announced, which is the other half of the rule.
+        let (ok, out, err) = cp_out(&VERBOSE, &[&missing, &b]);
+        assert!(!ok);
+        assert!(err.contains("cannot stat"), "{err}");
+        assert_eq!(out, "", "a source that could not be stat'd is not a copy");
+
+        // Whereas a source that stats and then cannot be *written* is: the
+        // destination here is a directory that `cp` without `-r` will not
+        // overwrite, and the refusal comes from `copy_one`, still before the
+        // announcement.
+        let a = dir.join("a");
+        fs::write(&a, b"x").unwrap();
+        let d = dir.join("d");
+        fs::create_dir(&d).unwrap();
+        let onto = d.join("a");
+        fs::create_dir(&onto).unwrap();
+        let (ok, out, err) = cp_out(&VERBOSE, &[&a, &d]);
+        assert!(!ok);
+        assert!(err.contains("cannot overwrite directory"), "{err}");
+        assert_eq!(out, "");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A tree names the directory and then everything in it, and the directory
+    /// line comes first because the `mkdir` does.
+    #[test]
+    fn verbose_names_a_created_directory_and_then_its_contents() {
+        let dir = scratch("v_tree");
+        let src = dir.join("src");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("f"), b"F").unwrap();
+        let dst = dir.join("dst");
+
+        let (ok, out, err) = cp_out(&VERBOSE_RECURSIVE, &[&src, &dst]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                format!("{} -> {}", quoteaf_os(&src), quoteaf_os(&dst)),
+                format!(
+                    "{} -> {}",
+                    quoteaf_os(src.join("f")),
+                    quoteaf_os(dst.join("f"))
+                ),
+            ],
+            "{out}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The rule GNU wrote a comment to explain: a directory is announced only
+    /// when it is *created*. Copying the same tree a second time refreshes the
+    /// files and reuses the directory, so the second run names the files alone.
+    #[test]
+    fn verbose_is_silent_about_a_directory_that_was_already_there() {
+        let dir = scratch("v_again");
+        let src = dir.join("src");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("f"), b"F").unwrap();
+        let dst = dir.join("dst");
+        fs::create_dir(&dst).unwrap();
+        fs::create_dir(dst.join("src")).unwrap();
+
+        let (ok, out, err) = cp_out(&VERBOSE_RECURSIVE, &[&src, &dst]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert_eq!(
+            out,
+            format!(
+                "{} -> {}\n",
+                quoteaf_os(src.join("f")),
+                quoteaf_os(dst.join("src").join("f"))
+            ),
+            "the directory was reused, so only the file was copied"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A name with a space in it is quoted, which is the reason the line uses
+    /// the diagnostic quoting style at all: without it, `a b -> c` could be one
+    /// copy or the tail of a different one.
+    ///
+    /// Asserted by splitting the line on its arrow rather than by rebuilding it
+    /// with [`quoteaf_os`], which is what the two tests above do: rebuilding it
+    /// would agree with any style at all, including one that never quotes. The
+    /// question here is whether the space in the source's name reached the
+    /// reader as a quoted name or as two words, and only reading the halves
+    /// apart can answer it.
+    #[test]
+    fn verbose_quotes_a_name_that_needs_it() {
+        let dir = scratch("v_quote");
+        let a = dir.join("a b");
+        let c = dir.join("c");
+        fs::write(&a, b"x").unwrap();
+
+        let (ok, out, err) = cp_out(&VERBOSE, &[&a, &c]);
+        assert!(ok, "{err}");
+        let line = out.strip_suffix('\n').unwrap_or(&out);
+        let (rendered_src, _) = line.rsplit_once(" -> ").unwrap_or((line, ""));
+        assert!(rendered_src.starts_with('\''), "{rendered_src}");
+        assert!(rendered_src.ends_with("a b'"), "{rendered_src}");
         let _ = fs::remove_dir_all(&dir);
     }
 

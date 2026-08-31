@@ -733,7 +733,73 @@ run_case -t dir file.txt tree/a.txt tree/sub/b.txt
 run_case -t tree file.txt tree/a.txt
 
 # =============================================================================
-# 14. Options GNU has and this cp has not
+# 14. What --verbose says, and when
+# =============================================================================
+# The first option in this program whose whole effect is on *stdout*, which is
+# why every case here is worth having even though the tree it leaves is
+# identical to the same case without `-v`. Three separable facts:
+#
+#   * the line goes to stdout, not stderr, so a case that got the sink wrong
+#     would still pass a harness comparing only their concatenation. These
+#     compare them apart;
+#   * a copy is announced *before* it is attempted, so a failure that happens
+#     after the announcement is announced anyway and one that happens before it
+#     is not -- and the boundary between "before" and "after" is a fact about
+#     GNU's order that has to be measured rather than reasoned about;
+#   * a directory is announced only when it is *created*, which is the one rule
+#     upstream wrote a comment to explain.
+
+# The plain line, and the exit status it does not change.
+run_case -v file.txt new.txt
+run_case --verbose file.txt new.txt
+run_case -v file.txt dir
+run_case -v file.txt tree/a.txt
+
+# Quoting. The same `quoteaf` a diagnostic uses -- so a name with a space in it
+# is quoted and a name without one is not, in the same line.
+TREE='mktree; printf x > "a b"'
+run_case -v 'a b' new.txt
+TREE='mktree; printf x > "a b"'
+run_case -v 'a b' dir
+TREE="mktree; printf x > \"it's\""
+run_case -v "it's" new.txt
+
+# Which failures are announced first. A source that cannot be stat'd never
+# reaches the announcement; a destination that cannot be written does.
+run_case -v nosuch new.txt
+run_case -v tree new.txt
+run_case -v file.txt nosuch/new.txt
+run_case -v dir file.txt
+run_case -v file.txt file.txt
+run_case -v file.txt ./file.txt
+
+# Several operands: one line each, in operand order, and the warning about a
+# repeat still goes to stderr while the lines go to stdout.
+run_case -v file.txt tree/a.txt dir
+run_case -v file.txt file.txt dir
+run_case -v -t dir file.txt tree/a.txt
+run_case -v -T file.txt new.txt
+
+# Directories. Only `tree/sub`, which holds exactly one entry: with more than
+# one, the order of the lines is the order the directory was *read* in, and
+# that is a thing the two programs decide separately. Measured on `tree`, whose
+# three entries GNU names in the order sub, a.txt, link and ours names in the
+# order a.txt, link, sub. Until that is settled the wider tree cannot be
+# compared here without certifying an accident.
+run_case -rv tree/sub dst
+run_case -rv tree/sub dir
+TREE='mktree; mkdir -p dst/sub'
+run_case -rv tree/sub dst
+TREE='mktree; mkdir -p dst/sub; printf old > dst/sub/b.txt'
+run_case -rv tree/sub dst
+
+# A symlink is announced like anything else that is not a directory, and the
+# line names the link rather than what it points at.
+run_case -rv tree/link dst
+run_case -v tree/link dst
+
+# =============================================================================
+# 15. Options GNU has and this cp has not
 # =============================================================================
 # An inventory, one line per option, kept as `xfail` so that the count is
 # visible in the summary and so that `xpass` fires the moment one is
@@ -780,14 +846,12 @@ missing --suffix=.bak -b file.txt tree/a.txt
 missing --strip-trailing-slashes tree/ dst
 missing -u file.txt tree/a.txt
 missing --update file.txt tree/a.txt
-missing -v file.txt new.txt
-missing --verbose -r tree dst
 missing -x -r tree dst
 missing -Z file.txt new.txt
 missing --context file.txt new.txt
 
 # =============================================================================
-# 15. --help and --version
+# 16. --help and --version
 # =============================================================================
 
 xfail_case 'help omits GNU bug-report block' --help

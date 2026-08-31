@@ -3291,6 +3291,14 @@ impl Vfs {
     /// one you opened" apart from "this filesystem cannot answer that".
     pub fn pin_dir(path: impl AsRef<Path>) -> KernelResult<PinnedDir> {
         let path = path.as_ref();
+        // `Metadata`, because that is exactly what this reads. The caller is
+        // usually `allocate_dir_handle`, which has already gated the open --
+        // but "my caller checked" is the assumption the gate exists to refuse,
+        // and `pin_dir` is `pub`, reachable from `pinned_dir_arg` for a cwd
+        // that was never opened through this path at all. Without it, the
+        // entry-type and inode of any path are readable by a caller who may
+        // not stat it, which is a disclosure however small.
+        check_path_access(path, PathAccess::Metadata)?;
         let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
         let meta = fs.lock().lmetadata(&relative)?;
         if meta.entry_type != EntryType::Directory {

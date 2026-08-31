@@ -2693,6 +2693,188 @@ pub(crate) fn resolve_dirfd_path(
     total
 }
 
+// ---------------------------------------------------------------------------
+// The pinned `*at` fast path
+// ---------------------------------------------------------------------------
+//
+// `resolve_dirfd_path` above is a textual join: it takes the path `dirfd` had
+// when it was opened and glues the caller's relative name onto it, then hands
+// the result to a path-based syscall.  Everything the descriptor was for is
+// lost in that step.  If any component of the remembered path is replaced
+// between the open and the call — classically, a directory swapped for a
+// symlink pointing somewhere the caller has no business writing — the
+// operation lands there, and the descriptor the caller held to prevent exactly
+// that never came into it.  It also breaks with no attacker at all: rename the
+// directory and the descriptor names a path that no longer exists.
+//
+// `SYS_FS_UNLINKAT_PINNED` (662) resolves the handle instead.  Where the
+// arguments fit its shape — a real directory fd and a single-component name —
+// it is used, and the join is not reached at all.  Everything else still goes
+// through `resolve_dirfd_path`, because a multi-component name is a walk and
+// the call deliberately refuses to walk.
+//
+// The fallback is narrow on purpose.  A pinned call that answers `ESTALE`, or
+// `EACCES`, or anything else, has *answered*; retrying it by path would
+// reintroduce the very race the call exists to close, and would do it silently
+// on the failure path where nobody is looking.  Only "this kernel does not
+// have the call" falls back.
+//
+// `SYS_FS_FSTATAT_PINNED` (663) is deliberately *not* used here.  It writes the
+// 64-byte `FS_META_SIZE` record, which carries no inode number, no link count
+// and no block count; [`Stat`] needs all three, and the 80-byte record that
+// `SYS_FS_STAT` writes has them.  A pinned `fstatat` built on 663 as it stands
+// would report `st_ino == 0`, which silently breaks every same-file test in
+// userspace — `cp`'s refusal to copy a file onto itself, `ls -i`, hardlink
+// coalescing in `du` and `tar`, `find -samefile`.  A slower `fstatat` that
+// answers correctly beats a faster one that does not, so this waits on a
+// request to lane A for the wider record.
+
+/// The `AT_REMOVEDIR` bit as syscall 662 spells it.
+///
+/// Deliberately the same value Linux uses, so this is a re-export rather than
+/// a remapping — but it is a *different constant* from [`AT_REMOVEDIR`]
+/// because the two are different ABIs that merely agree today.  Unknown bits
+/// are `EINVAL` on the kernel side, so a divergence would fail on the first
+/// call rather than quietly mean something else.
+const AT_REMOVEDIR_PINNED: u64 = 0x200;
+
+/// Longest single component the pinned calls accept.
+const PINNED_NAME_MAX: usize = 255;
+
+/// Whether `name` is the one-component form the pinned `*at` calls accept.
+///
+/// Non-empty, at most 255 bytes, containing no `/`, and not `.` or `..`.
+/// The last two are excluded by the kernel and not merely by convention: a
+/// check that the handle still denotes its directory is ornamental if the
+/// name is then allowed to climb out of it.
+///
+/// A pure function over bytes so it can be tested on the host, where the
+/// syscalls themselves return `ENOSYS` and cannot be.
+#[must_use]
+pub(crate) fn is_pinnable_component(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name.len() <= PINNED_NAME_MAX
+        && !name.contains(&b'/')
+        && name != b"."
+        && name != b".."
+}
+
+/// Have we ever seen syscall 662 answer as something other than "no such
+/// syscall"?
+///
+/// `false` until the first pinned call comes back with anything but
+/// `NotSupported`/[`HOST_ENOSYS`], then `true` forever. On a host build it is
+/// never set, because the raw `SYSCALL` instruction is compiled out there and
+/// every attempt reports `HOST_ENOSYS` — which is what keeps the host test
+/// suite meaningful: `unlinkat` under `cargo test` behaves exactly as it did
+/// before this fast path existed.
+///
+/// This exists because `NotSupported` (-2) is ambiguous, and dangerously so.
+/// `dispatch.rs` returns it for an *unregistered slot* — a kernel predating
+/// lane A's 662 — but a registered handler may also return it for a
+/// *filesystem* that cannot perform the operation. Treating every -2 as
+/// "kernel too old" would mean a filesystem-level refusal silently downgrades
+/// the call to the racy path-based route, which is the one outcome this whole
+/// fast path exists to prevent, and it would do it on the failure path where
+/// nobody looks.
+///
+/// The flag disambiguates by observation rather than by guessing. On a kernel
+/// that *has* 662, the first call returns success or a real error, this flips,
+/// and every later -2 is honoured as the real answer it is. On a kernel that
+/// lacks it, every call returns -2, the flag never flips, and the fallback
+/// stays available — which is exactly the transitional behaviour wanted.
+///
+/// Racy only in the benign direction: two threads may both observe `false` and
+/// both fall back once. There is no ordering requirement, hence `Relaxed`.
+static PINNED_UNLINKAT_ANSWERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The kernel handle a libc directory fd stands for, if it is a file handle.
+///
+/// Deliberately sets **no** errno. `None` means only "the fast path does not
+/// apply", and the caller then runs [`resolve_dirfd_path`], which produces the
+/// `EBADF`/`ENOTDIR` diagnosis itself. Duplicating that judgement here would
+/// create two places that must agree about what a bad `dirfd` is; leaving it
+/// in one place means the fast path cannot be observed in the diagnostics
+/// even if it is wrong about which fds it can handle.
+///
+/// Rejects handle 0 because the native ABI spends that value on "the process
+/// working directory" — and the kernel's working directory is not this libc's
+/// (see [`openat2_forward`]). Real file handles are never 0, so this can only
+/// fire on a corrupt fd table, where falling back is the safe answer.
+fn pinned_base(dirfd: i32) -> Option<u64> {
+    let entry = crate::fdtable::get_fd(dirfd)?;
+    if entry.kind != HandleKind::File || entry.handle == 0 {
+        return None;
+    }
+    Some(entry.handle)
+}
+
+/// The caller's name as a byte slice, if it is a shape 662 accepts.
+///
+/// # Safety
+///
+/// `path` must be null or a valid C string.
+unsafe fn pinnable_name<'a>(path: *const u8) -> Option<&'a [u8]> {
+    if path.is_null() {
+        return None;
+    }
+    // SAFETY: the caller guarantees `path` is a valid C string.
+    let len = unsafe { crate::string::strlen(path) };
+    if len == 0 || len > PINNED_NAME_MAX {
+        return None;
+    }
+    // SAFETY: `strlen` just measured `len` readable bytes at `path`.
+    let name = unsafe { core::slice::from_raw_parts(path, len) };
+    is_pinnable_component(name).then_some(name)
+}
+
+/// Remove `path` under `dirfd` through syscall 662, if that is possible here.
+///
+/// `Some(ret)` is the call's answer and is final — including its errors.
+/// `None` means the fast path did not apply and the caller must fall back;
+/// errno is untouched in that case.
+///
+/// Only the POSIX `AT_REMOVEDIR` bit is forwarded, and it is forwarded as 662's
+/// own constant rather than passed through. The two agree today, but 662
+/// rejects unknown bits with `EINVAL` while [`unlinkat`]'s path-based route
+/// ignores them, so handing the caller's word over unfiltered would make the
+/// treatment of a junk flag depend on which route ran — a difference no caller
+/// could predict and no test would reliably catch.
+///
+/// # Safety
+///
+/// `path` must be null or a valid C string.
+unsafe fn try_pinned_unlinkat(dirfd: i32, path: *const u8, flags: i32) -> Option<i32> {
+    // SAFETY: forwarded from this function's own contract.
+    let name = unsafe { pinnable_name(path) }?;
+    let base = pinned_base(dirfd)?;
+
+    let pinned_flags = if flags & AT_REMOVEDIR != 0 {
+        AT_REMOVEDIR_PINNED
+    } else {
+        0
+    };
+    let ret = syscall4(
+        SYS_FS_UNLINKAT_PINNED,
+        base,
+        name.as_ptr() as u64,
+        name.len() as u64,
+        pinned_flags,
+    );
+
+    use core::sync::atomic::Ordering;
+    if ret == crate::errno::native::NOT_SUPPORTED || ret == crate::syscall::HOST_ENOSYS {
+        if !PINNED_UNLINKAT_ANSWERED.load(Ordering::Relaxed) {
+            return None;
+        }
+    } else {
+        PINNED_UNLINKAT_ANSWERED.store(true, Ordering::Relaxed);
+    }
+
+    Some(errno::translate(ret) as i32)
+}
+
 /// AT_FDCWD: use the current working directory.
 pub const AT_FDCWD: i32 = -100;
 /// AT_SYMLINK_NOFOLLOW: do not follow symlinks.
@@ -2762,6 +2944,11 @@ pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i3
 /// Otherwise acts like unlink.
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
+///
+/// For the common shape — a real directory fd and a single-component name —
+/// this goes through [`try_pinned_unlinkat`], which has the kernel resolve the
+/// descriptor rather than the remembered path. See "The pinned `*at` fast
+/// path" above for why that matters and when it does not apply.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32 {
     if dirfd == AT_FDCWD || is_absolute_path(path) {
@@ -2770,6 +2957,11 @@ pub extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32 {
         } else {
             unlink(path)
         };
+    }
+    // SAFETY: `path` is this function's own `*const u8` contract — null or a
+    // valid C string — which is what `try_pinned_unlinkat` requires.
+    if let Some(ret) = unsafe { try_pinned_unlinkat(dirfd, path, flags) } {
+        return ret;
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
@@ -13441,6 +13633,171 @@ mod tests {
                 assert!(!crate::sys_capability::has_capability(CAP_CHOWN));
             }
             assert!(crate::sys_capability::has_capability(CAP_CHOWN));
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // The pinned `*at` fast path
+    // -----------------------------------------------------------------
+    //
+    // The syscalls themselves cannot be exercised on the host — `syscallN`
+    // has no `SYSCALL` instruction there and returns `HOST_ENOSYS` — so what
+    // is testable is the gate that decides whether to issue one. That gate is
+    // where a mistake is dangerous in the same direction as the bug the fast
+    // path exists to fix: accepting a name the kernel would have to walk means
+    // asking a call that refuses to walk to walk anyway, and accepting `..`
+    // would make the kernel's identity check ornamental.
+
+    mod pinned_at {
+        use super::super::{
+            is_pinnable_component, pinned_base, try_pinned_unlinkat, unlinkat, AT_REMOVEDIR,
+        };
+        use crate::fdtable::{self, HandleKind};
+
+        #[test]
+        fn plain_names_are_pinnable() {
+            for name in [
+                &b"a"[..],
+                b"file.txt",
+                b"...",         // three dots is an ordinary name
+                b".hidden",     // so is a leading dot
+                b"..a",         // and a name that merely starts with two
+                b"a..",
+                b"with space",
+                b"\xff\xfe",    // paths are bytes, not UTF-8
+                b"-",
+            ] {
+                assert!(
+                    is_pinnable_component(name),
+                    "{name:?} should be a pinnable single component"
+                );
+            }
+        }
+
+        #[test]
+        fn dot_and_dotdot_are_refused() {
+            // Not style: the kernel verifies that the handle still denotes the
+            // directory it was opened on, and a name allowed to climb out of
+            // that directory makes the verification prove nothing.
+            assert!(!is_pinnable_component(b"."));
+            assert!(!is_pinnable_component(b".."));
+        }
+
+        #[test]
+        fn anything_with_a_slash_is_refused() {
+            for name in [
+                &b"a/b"[..],
+                b"/abs",
+                b"trailing/",
+                b"../escape",
+                b"a/../b",
+                b"/",
+            ] {
+                assert!(
+                    !is_pinnable_component(name),
+                    "{name:?} is a walk, not a component"
+                );
+            }
+        }
+
+        #[test]
+        fn empty_is_refused() {
+            assert!(!is_pinnable_component(b""));
+        }
+
+        #[test]
+        fn the_length_limit_is_255_inclusive() {
+            let at_limit = [b'x'; 255];
+            let over = [b'x'; 256];
+            assert!(is_pinnable_component(&at_limit));
+            assert!(!is_pinnable_component(&over));
+        }
+
+        /// `pinned_base` accepts a `File` fd and declines every other kind —
+        /// and declines all of them *silently*.
+        ///
+        /// The silence is the point. `resolve_dirfd_path` is the single author
+        /// of `EBADF`/`ENOTDIR` for a bad `dirfd`; if this gate started
+        /// answering them too, the two would have to be kept in agreement
+        /// forever, and the first divergence would show up as a `dirfd` that
+        /// diagnoses differently depending on whether its name happened to
+        /// contain a slash.
+        #[test]
+        fn pinned_base_accepts_only_file_handles_and_sets_no_errno() {
+            let file_fd = fdtable::alloc_fd(HandleKind::File, 0x1234).expect("fd table full");
+            let pipe_fd = fdtable::alloc_fd(HandleKind::Pipe, 0x1234).expect("fd table full");
+
+            crate::errno::set_errno(0);
+            assert_eq!(pinned_base(file_fd), Some(0x1234));
+            assert_eq!(pinned_base(pipe_fd), None);
+            // A fd that was never opened.
+            assert_eq!(pinned_base(4242), None);
+            assert_eq!(
+                crate::errno::get_errno(),
+                0,
+                "the gate must leave errno to resolve_dirfd_path"
+            );
+
+            assert!(fdtable::close_fd(file_fd).is_some());
+            assert!(fdtable::close_fd(pipe_fd).is_some());
+        }
+
+        /// Handle 0 is refused, because the native ABI spends that value on
+        /// "the kernel's working directory" — which is not this libc's.
+        ///
+        /// Only reachable through a corrupt fd table, but the consequence of
+        /// getting it wrong is an unlink in a directory the caller never named,
+        /// so it is checked rather than assumed impossible.
+        #[test]
+        fn pinned_base_refuses_handle_zero() {
+            let zero_fd = fdtable::alloc_fd(HandleKind::File, 0).expect("fd table full");
+            assert_eq!(pinned_base(zero_fd), None);
+            assert!(fdtable::close_fd(zero_fd).is_some());
+        }
+
+        /// On a host build every pinned attempt must decline, so that the whole
+        /// suite exercises the path-based route it always did.
+        ///
+        /// This is the test that fails if the `HOST_ENOSYS` recognition breaks:
+        /// `try_pinned_unlinkat` would then return `Some(-1)` — a failure
+        /// manufactured from a syscall that never ran — and `unlinkat` would
+        /// report it as the final answer instead of falling back.
+        #[test]
+        fn every_pinned_attempt_declines_on_the_host() {
+            let dir_fd = fdtable::alloc_fd(HandleKind::File, 0x1234).expect("fd table full");
+
+            // SAFETY: both are valid C strings.
+            unsafe {
+                assert_eq!(try_pinned_unlinkat(dir_fd, b"victim\0".as_ptr(), 0), None);
+                assert_eq!(
+                    try_pinned_unlinkat(dir_fd, b"victim\0".as_ptr(), AT_REMOVEDIR),
+                    None
+                );
+                // Shapes the fast path never accepts in the first place.
+                assert_eq!(try_pinned_unlinkat(dir_fd, b"a/b\0".as_ptr(), 0), None);
+                assert_eq!(try_pinned_unlinkat(dir_fd, b"..\0".as_ptr(), 0), None);
+                assert_eq!(try_pinned_unlinkat(dir_fd, b"\0".as_ptr(), 0), None);
+                assert_eq!(try_pinned_unlinkat(dir_fd, core::ptr::null(), 0), None);
+            }
+
+            assert!(fdtable::close_fd(dir_fd).is_some());
+        }
+
+        /// A bad `dirfd` reaches the same `EBADF` whether or not the name was
+        /// one the fast path would have taken.
+        #[test]
+        fn a_bad_dirfd_still_reports_ebadf() {
+            for name in [&b"victim\0"[..], b"sub/victim\0"] {
+                for flags in [0, AT_REMOVEDIR] {
+                    crate::errno::set_errno(0);
+                    assert_eq!(unlinkat(4242, name.as_ptr(), flags), -1);
+                    assert_eq!(
+                        crate::errno::get_errno(),
+                        crate::errno::EBADF,
+                        "{name:?} flags={flags:#x}"
+                    );
+                }
+            }
         }
     }
 }

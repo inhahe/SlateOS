@@ -1952,13 +1952,60 @@ mod tests {
 
     #[test]
     fn every_square_is_drawn_at_every_window_size() {
+        // The first draft asked only whether each square had a recorded hit
+        // box, which is known-issues.md lesson 81: the drawing pass fills the
+        // rectangle *and* hands it to `f.hit`, so deleting the fill leaves
+        // every box in place and every `is_some()` still answering yes. It
+        // cannot be repaired by asking whether some fill covers the square's
+        // centre either -- lesson 83 -- because the window's own background
+        // fill covers every point in the app. The claim has to run the other
+        // way: a fill in one of the board's own shades, at the square.
         for size in SIZES {
             let app = app();
+            let f = app.draw(size);
+            let shades: Vec<(f32, f32, f32, f32)> = f
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if *color == LIGHT_SQUARE
+                        || *color == DARK_SQUARE
+                        || *color == LAST_MOVE_HIGHLIGHT =>
+                    {
+                        Some((*x, *y, *width, *height))
+                    }
+                    _ => None,
+                })
+                .collect();
             for row in 0..8i8 {
                 for col in 0..8i8 {
-                    assert!(
-                        probe::rect_of_sized(&app, Target::Square(row, col), size).is_some(),
-                        "square ({row}, {col}) was not drawn at {size:?}"
+                    let square = box_at(&app, Target::Square(row, col), size);
+                    // Exactly one, not at least one. A count over the whole
+                    // frame cannot say this: `SURFACE2` and `DARK_SQUARE` are
+                    // both 0x585B70, so every panel drawn in the one answers
+                    // to a test looking for the other, and "64 shaded fills"
+                    // came back 65. Matching on the square's own box is the
+                    // claim that does not care what else the window paints in
+                    // the same colour.
+                    let painted = shades
+                        .iter()
+                        .filter(|&&(x, y, w, h)| {
+                            (x - square.x).abs() < 0.01
+                                && (y - square.y).abs() < 0.01
+                                && (w - square.w).abs() < 0.01
+                                && (h - square.h).abs() < 0.01
+                        })
+                        .count();
+                    assert_eq!(
+                        painted, 1,
+                        "square ({row}, {col}) at {square:?} was painted {painted} \
+                         time(s) at {size:?}, want exactly one"
                     );
                 }
             }

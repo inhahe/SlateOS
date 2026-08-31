@@ -4568,9 +4568,39 @@ mod tests {
         app.store.create_note(10.0, 10.0);
         let frame = app.draw((120.0, 90.0));
         assert!(frame.is_balanced());
+        let chip = frame
+            .rect_of(|t| *t == Target::NewNote)
+            .expect("the one control that is always available must survive the smallest window");
+        // "Draws its controls" is a claim about paint, and a hit box is not
+        // paint (lesson 81): `draw_chip` pushes its background under an `if
+        // let Some(bg)` and its label as a third statement, so a hit box can
+        // outlive both. Name the two things a reader would actually see, and
+        // require them *inside* the box rather than merely overlapping it, so
+        // the window's own full-bleed background cannot stand in for the chip
+        // (lesson 83).
         assert!(
-            frame.rect_of(|t| *t == Target::NewNote).is_some(),
-            "the one control that is always available must survive the smallest window"
+            frame.commands().iter().any(|c| matches!(
+                c,
+                RenderCommand::FillRect { x, y, width, height, .. }
+                    if *width > 0.0
+                        && *height > 0.0
+                        && *x >= chip.x - 0.01
+                        && *y >= chip.y - 0.01
+                        && x + width <= chip.right() + 0.01
+                        && y + height <= chip.bottom() + 0.01
+            )),
+            "the New Note chip is clickable at 120x90 but its body was not painted"
+        );
+        assert!(
+            frame.commands().iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { x, y, text, .. }
+                    if text == "+ New"
+                        && *x >= chip.x - 0.01
+                        && *y >= chip.y - 0.01
+                        && *x <= chip.right() + 0.01
+            )),
+            "the New Note chip was painted at 120x90 with no label on it"
         );
     }
 

@@ -1075,6 +1075,35 @@ pub struct FileId {
     pub ino: u64,
 }
 
+/// A directory handle's identity, captured when the handle was opened.
+///
+/// `path` is what the handle was opened **as**; `id` is what it opened
+/// **onto**.  Carrying both is the entire point.  A path alone can be
+/// re-pointed at a different object between the open and the use — that is
+/// the defect lane B reported in `requests/b-a-the-at-family-resolves-by-\
+/// path-so-no-toctou-fix-is-possible.md`, where every `*at` syscall recovers
+/// the dirfd's *name* and concatenates.  An id alone is useless here, because
+/// every method on [`FileSystem`] takes a name and none takes an inode.
+///
+/// Holding the pair lets an fd-relative operation walk the name and then
+/// *check* that the walk arrived where the handle was opened, refusing with
+/// [`KernelError::StaleHandle`] when it did not.
+#[derive(Debug, Clone)]
+pub struct PinnedDir {
+    /// Absolute, already-resolved VFS path the handle was opened under.
+    pub path: PathBuf,
+    /// Identity of the directory at open time, or `None` when the filesystem
+    /// has no stable per-object identity to pin (`ino == 0` — FAT, ISO9660,
+    /// and the synthetic trees).
+    ///
+    /// `None` means *unverifiable*, and is never quietly read as *verified*.
+    /// Callers that need the guarantee ask
+    /// [`Vfs::pinned_dir_is_verifiable`] and refuse; callers that only want
+    /// the containment (a single component, no `..`, no `/`) proceed knowing
+    /// what they did not get.
+    pub id: Option<FileId>,
+}
+
 /// The global VFS state.
 static VFS: Mutex<VfsInner> = Mutex::new(VfsInner { mounts: Vec::new() });
 
@@ -3242,6 +3271,198 @@ impl Vfs {
         Ok(Some(FileId { fs_id, ino }))
     }
 
+    // -------------------------------------------------------------------
+    // Fd-relative primitives that verify a pinned directory identity
+    //
+    // These exist because the `*at` family cannot be made correct on top of
+    // the path-based entry points above.  `openat`/`unlinkat`/`fstatat` and
+    // the rest currently recover the *text* of the dirfd and concatenate, so
+    // whatever the name leads to at the moment of the call is what gets
+    // operated on -- a renamed or symlink-swapped directory redirects the
+    // operation silently.  See design-decisions.md §647.
+    // -------------------------------------------------------------------
+
+    /// Capture the identity of an already-resolved directory path, for
+    /// storing in a handle.
+    ///
+    /// Returns a [`PinnedDir`] whose `id` is `None` when the filesystem has
+    /// no stable per-object identity (`ino == 0`).  That is reported rather
+    /// than faked, so a later operation can tell "this directory is still the
+    /// one you opened" apart from "this filesystem cannot answer that".
+    pub fn pin_dir(path: impl AsRef<Path>) -> KernelResult<PinnedDir> {
+        let path = path.as_ref();
+        // `Metadata`, because that is exactly what this reads. The caller is
+        // usually `allocate_dir_handle`, which has already gated the open --
+        // but "my caller checked" is the assumption the gate exists to refuse,
+        // and `pin_dir` is `pub`, reachable from `pinned_dir_arg` for a cwd
+        // that was never opened through this path at all. Without it, the
+        // entry-type and inode of any path are readable by a caller who may
+        // not stat it, which is a disclosure however small.
+        check_path_access(path, PathAccess::Metadata)?;
+        let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
+        let meta = fs.lock().lmetadata(&relative)?;
+        if meta.entry_type != EntryType::Directory {
+            return Err(KernelError::NotADirectory);
+        }
+        let id = if meta.ino == 0 {
+            None
+        } else {
+            Some(FileId {
+                fs_id,
+                ino: meta.ino,
+            })
+        };
+        Ok(PinnedDir {
+            path: path.to_path_buf(),
+            id,
+        })
+    }
+
+    /// Whether `dir` carries an identity that can actually be checked.
+    ///
+    /// `false` means the filesystem behind the handle has no stable inode
+    /// numbers, so the anti-TOCTOU guarantee is unavailable there — not that
+    /// it failed.  A caller that requires the guarantee must ask this and
+    /// refuse; one that does not may proceed with the single-component
+    /// containment alone.
+    #[must_use]
+    pub fn pinned_dir_is_verifiable(dir: &PinnedDir) -> bool {
+        dir.id.is_some()
+    }
+
+    /// Remove `name` from the directory `dir` denotes, refusing if `dir` no
+    /// longer denotes the directory it was opened on.
+    ///
+    /// `remove_dir` selects `rmdir` semantics (`AT_REMOVEDIR`) over `unlink`.
+    /// `name` must be a single component: see [`check_at_name`].
+    ///
+    /// The identity check and the removal happen under **one** hold of the
+    /// filesystem lock, so no rename can slip between them.  A prior check
+    /// runs before the policy checks as well, so that a handle already stale
+    /// on entry cannot induce a side effect (notably the auto-version
+    /// snapshot, which reads file content) on a file the caller never named.
+    pub fn unlink_at_pinned(dir: &PinnedDir, name: &[u8], remove_dir: bool) -> KernelResult<()> {
+        check_at_name(name)?;
+
+        // Pass 1: refuse an already-stale handle *before* anything with a
+        // side effect runs.  Pass 2 below is what makes the removal atomic;
+        // this one is what keeps the steps in between honest.
+        {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
+        }
+
+        // From here the path is known to have denoted the pinned directory a
+        // moment ago, and `name` is known to be a single component, so the
+        // join names the object the caller meant.  The policy checks below
+        // are the same ones `remove`/`rmdir` run, in the same order.
+        let child = dir.path.join(name);
+        crate::ipc::namespace::check_writable(&child)?;
+        check_path_access(&child, PathAccess::Write)?;
+        check_writable(&child)?;
+        super::intercept::pre_delete(&child)?;
+
+        let file_size = if remove_dir {
+            0
+        } else {
+            Self::stat(&child).map(|s| s.size).unwrap_or(0)
+        };
+        if !remove_dir {
+            super::history::try_auto_record(&child);
+        }
+
+        let cache_inval = {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
+            let mut guard = fs.lock();
+            // Pass 2, under the same guard as the removal itself.  Anything
+            // that moved the directory since pass 1 is caught here, and
+            // nothing can move it between here and the `remove` below.
+            verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
+            let child_rel = dir_rel.join(name);
+            if remove_dir {
+                guard.rmdir(&child_rel)?;
+                None
+            } else {
+                // `unlink` never follows a trailing symlink, and must not
+                // silently swallow a directory: without this, `unlinkat`
+                // without `AT_REMOVEDIR` would delegate the decision to
+                // whatever each filesystem's `remove` happens to do.
+                if guard.lstat(&child_rel)?.entry_type == EntryType::Directory {
+                    return Err(KernelError::IsADirectory);
+                }
+                let id = cache_identity(&mut guard, fs_id, &child_rel);
+                guard.remove(&child_rel)?;
+                id
+            }
+        };
+
+        if let Some((fs_id, ino)) = cache_inval {
+            crate::mm::page_cache::invalidate_identity(fs_id, ino);
+        }
+        if file_size > 0 {
+            super::quota::release_bytes(0, 0, file_size);
+        }
+        super::quota::release_inode(0, 0);
+        VFS_DCACHE.lock().invalidate_prefix(&child);
+        if remove_dir {
+            super::notify::emit_deleted_dir(&child);
+        } else {
+            super::notify::emit_deleted(&child);
+        }
+        super::index::on_file_deleted(&child);
+        super::journal::record(super::journal::JournalEventType::Deleted, &child);
+        super::audit::log_ok(
+            if remove_dir {
+                super::audit::AuditOp::Rmdir
+            } else {
+                super::audit::AuditOp::Delete
+            },
+            0,
+            &child,
+        );
+        Ok(())
+    }
+
+    /// Stat `name` within the directory `dir` denotes, refusing if `dir` no
+    /// longer denotes the directory it was opened on.
+    ///
+    /// `no_follow` selects `lstat` semantics (`AT_SYMLINK_NOFOLLOW`).
+    /// As with [`unlink_at_pinned`](Self::unlink_at_pinned), the check and
+    /// the read share one hold of the filesystem lock.
+    pub fn metadata_at_pinned(
+        dir: &PinnedDir,
+        name: &[u8],
+        no_follow: bool,
+    ) -> KernelResult<FileMeta> {
+        check_at_name(name)?;
+        let child = dir.path.join(name);
+        check_path_access(&child, PathAccess::Metadata)?;
+        let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
+        let mut guard = fs.lock();
+        verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
+        let child_rel = dir_rel.join(name);
+        if no_follow {
+            guard.lmetadata(&child_rel)
+        } else {
+            guard.metadata(&child_rel)
+        }
+    }
+
+    /// List the directory `dir` denotes, refusing if it no longer denotes the
+    /// directory it was opened on.
+    ///
+    /// This is the entry point `getdents64` needs: it resolves *the handle*,
+    /// so a directory renamed out from under an open descriptor is reported
+    /// as stale rather than listed from whatever now answers to the old name.
+    pub fn readdir_pinned(dir: &PinnedDir) -> KernelResult<Vec<DirEntry>> {
+        check_path_access(&dir.path, PathAccess::Read)?;
+        let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
+        let mut guard = fs.lock();
+        verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
+        guard.readdir(&dir_rel)
+    }
+
     /// Compute the SHA-256 content hash of a file.
     ///
     /// Reads the file and returns the 32-byte SHA-256 digest.
@@ -4733,6 +4954,74 @@ fn cache_identity(fs: &mut Box<dyn FileSystem>, fs_id: u64, relative: &Path) -> 
         return None;
     }
     Some((fs_id, ino))
+}
+
+/// Longest single path component an fd-relative operation will accept.
+///
+/// Matches the `NAME_MAX` every filesystem we mount agrees on; the check
+/// exists so a caller cannot use the `name` argument to smuggle in a whole
+/// path's worth of bytes and blow a fixed buffer deeper in a driver.
+const AT_NAME_MAX: usize = 255;
+
+/// Validate the single trailing component of an fd-relative operation.
+///
+/// The containment guarantee of the `*at` primitives rests entirely on this:
+/// `name` must be exactly one component, so that joining it to a directory
+/// whose identity has been verified cannot reach outside that directory.  A
+/// `/` would make the argument a path (and re-open the multi-hop resolution
+/// the primitives exist to avoid); `..` would climb out of the verified
+/// directory, making the verification meaningless; `.` would denote the
+/// directory itself, which is not a thing you can unlink.
+fn check_at_name(name: &[u8]) -> KernelResult<()> {
+    if name.is_empty() || name.len() > AT_NAME_MAX {
+        return Err(KernelError::InvalidArgument);
+    }
+    if name.contains(&b'/') || name.contains(&0) {
+        return Err(KernelError::InvalidArgument);
+    }
+    if name == b"." || name == b".." {
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(())
+}
+
+/// Check that `dir` still denotes the object it was pinned to, using a
+/// filesystem guard the caller already holds.
+///
+/// Taking the guard rather than a path is what makes the check worth
+/// anything: every operation on a given filesystem serialises on that one
+/// mutex (see [`resolve_mount`], which clones the `Arc` and drops the VFS
+/// lock), so a verify and an act performed under a *single* hold cannot be
+/// interleaved by a rename.  Verifying through a `Vfs::` entry point instead
+/// would take and release the lock, leaving exactly the check-then-use window
+/// the whole design is here to close.
+fn verify_pinned(
+    fs: &mut Box<dyn FileSystem>,
+    fs_id: u64,
+    relative: &Path,
+    dir: &PinnedDir,
+) -> KernelResult<()> {
+    let Some(want) = dir.id else {
+        // Nothing to check against.  Not an error here: whether an
+        // unverifiable handle is acceptable was decided by the caller before
+        // it got this far, and answering "verified" for a filesystem that
+        // cannot be verified would be the invented value this whole family
+        // of primitives exists to stop producing.
+        return Ok(());
+    };
+    if fs_id != want.fs_id {
+        return Err(KernelError::StaleHandle);
+    }
+    // `lmetadata`, not `metadata`: if the name now leads to a *symlink* where
+    // a directory used to be, following it would report the target's inode --
+    // and an attacker who can plant the symlink can point it at a directory
+    // whose inode is whatever they like, including the pinned one.  The link's
+    // own inode cannot be forged into a match.
+    let now = fs.lmetadata(relative)?.ino;
+    if now == 0 || now != want.ino {
+        return Err(KernelError::StaleHandle);
+    }
+    Ok(())
 }
 
 fn find_mount<'a, 'p>(
@@ -6482,6 +6771,203 @@ pub fn self_test() -> KernelResult<()> {
             "RESOLVE_BENEATH end-to-end symlink walk",
             "/tmp not mounted",
         );
+    }
+
+    // --- Fd-relative primitives verify a pinned directory identity ---
+    //
+    // The case that matters is the one a path-based `unlinkat` gets wrong and
+    // cannot be made to get right: the directory the handle was opened on is
+    // moved aside and a *different* directory takes its name.  A primitive
+    // that re-resolves the name deletes out of the impostor and reports
+    // success.  This section builds exactly that situation and requires the
+    // removal to be refused, then requires the impostor's file to still be
+    // there -- because "refused" and "deleted the wrong file but returned an
+    // error" are indistinguishable from the return value alone.
+    if has_tmp {
+        let cleanup = || {
+            for p in ["/tmp/_pin/real/victim", "/tmp/_pin/decoy/victim"] {
+                let _ = Vfs::remove(p);
+            }
+            for d in ["/tmp/_pin/real", "/tmp/_pin/decoy", "/tmp/_pin"] {
+                let _ = Vfs::rmdir(d);
+            }
+        };
+        cleanup();
+
+        let run = || -> KernelResult<()> {
+            Vfs::mkdir("/tmp/_pin")?;
+            Vfs::mkdir("/tmp/_pin/real")?;
+            Vfs::write_file("/tmp/_pin/real/victim", b"original")?;
+
+            let pin = Vfs::pin_dir("/tmp/_pin/real")?;
+            if !Vfs::pinned_dir_is_verifiable(&pin) {
+                // memfs assigns synthetic inodes, so /tmp must be pinnable.
+                // If this ever fires, every assertion below is vacuous and
+                // saying so is more useful than passing.
+                serial_println!(
+                    "[vfs]   FAIL: /tmp/_pin/real has no pinnable identity — the \
+                     stale-handle assertions below would all pass vacuously"
+                );
+                return Err(KernelError::InvalidArgument);
+            }
+
+            // The two read primitives answer *correctly* through a live pin.
+            // Without this pair, an implementation that returned StaleHandle
+            // unconditionally would satisfy every assertion further down --
+            // the swap assertions only prove a refusal happens, not that it
+            // happens for the right reason.
+            match Vfs::metadata_at_pinned(&pin, b"victim", false) {
+                Ok(m) if m.size == 8 => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: metadata_at_pinned through a live pin = {:?}, want size 8",
+                        other.map(|m| m.size)
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            match Vfs::readdir_pinned(&pin) {
+                Ok(v) if v.iter().any(|e| e.name.as_bytes() == b"victim") => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: readdir_pinned through a live pin did not list `victim` \
+                         ({:?} entries)",
+                        other.map(|v| v.len())
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // A single component in the directory it was opened on: works.
+            Vfs::unlink_at_pinned(&pin, b"victim", false)?;
+            if Vfs::stat("/tmp/_pin/real/victim").is_ok() {
+                serial_println!("[vfs]   FAIL: unlink_at_pinned did not remove the file");
+                return Err(KernelError::InvalidArgument);
+            }
+
+            // Anything that is not one component is refused, because the
+            // containment rests on it. `..` is the load-bearing one: it would
+            // climb out of the directory whose identity was just verified.
+            for bad in [&b".."[..], b".", b"a/b", b"", b"/etc"] {
+                match Vfs::unlink_at_pinned(&pin, bad, false) {
+                    Err(KernelError::InvalidArgument) => {}
+                    other => {
+                        serial_println!(
+                            "[vfs]   FAIL: unlink_at_pinned(.., {:?}) = {:?}, want InvalidArgument",
+                            core::str::from_utf8(bad).unwrap_or("<non-utf8>"),
+                            other
+                        );
+                        return Err(KernelError::InvalidArgument);
+                    }
+                }
+            }
+
+            // Now the swap. The pinned directory moves aside; a fresh, empty
+            // directory takes its name and is given a file of the same name.
+            // `pin.path` is unchanged and still resolves -- to the impostor.
+            Vfs::rename("/tmp/_pin/real", "/tmp/_pin/decoy")?;
+            Vfs::mkdir("/tmp/_pin/real")?;
+            Vfs::write_file("/tmp/_pin/real/victim", b"must survive")?;
+
+            match Vfs::unlink_at_pinned(&pin, b"victim", false) {
+                Err(KernelError::StaleHandle) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: unlink_at_pinned through a swapped directory = {:?}, \
+                         want StaleHandle",
+                        other
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            // The refusal has to mean nothing happened, not merely that
+            // something was reported.
+            match Vfs::read_file("/tmp/_pin/real/victim") {
+                Ok(b) if b == b"must survive" => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: the stale unlink still touched the impostor's file ({:?})",
+                        other.map(|b| b.len())
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // The other two primitives answer the same way, so a caller
+            // cannot read through a handle it may not delete through.
+            match Vfs::metadata_at_pinned(&pin, b"victim", false) {
+                Err(KernelError::StaleHandle) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: metadata_at_pinned through a swapped directory = {:?}, \
+                         want StaleHandle",
+                        other.map(|m| m.size)
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            match Vfs::readdir_pinned(&pin) {
+                Err(KernelError::StaleHandle) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: readdir_pinned through a swapped directory = {:?}, \
+                         want StaleHandle",
+                        other.map(|v| v.len())
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // A pin taken on the impostor is live again, and unlink without
+            // AT_REMOVEDIR still refuses a directory rather than leaving the
+            // choice to whatever the filesystem's `remove` happens to do.
+            let fresh = Vfs::pin_dir("/tmp/_pin/real")?;
+            Vfs::mkdir("/tmp/_pin/real/sub")?;
+            match Vfs::unlink_at_pinned(&fresh, b"sub", false) {
+                Err(KernelError::IsADirectory) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: unlink_at_pinned on a directory without AT_REMOVEDIR = \
+                         {:?}, want IsADirectory",
+                        other
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            Vfs::unlink_at_pinned(&fresh, b"sub", true)?;
+            if Vfs::stat("/tmp/_pin/real/sub").is_ok() {
+                serial_println!("[vfs]   FAIL: unlink_at_pinned(AT_REMOVEDIR) did not rmdir");
+                return Err(KernelError::InvalidArgument);
+            }
+
+            // And a pin on a plain file is not a directory pin.
+            Vfs::write_file("/tmp/_pin/real/plain", b"x")?;
+            match Vfs::pin_dir("/tmp/_pin/real/plain") {
+                Err(KernelError::NotADirectory) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: pin_dir on a file = {:?}, want NotADirectory",
+                        other.map(|p| p.id.is_some())
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            let _ = Vfs::remove("/tmp/_pin/real/plain");
+            Ok(())
+        };
+
+        let result = run();
+        let _ = Vfs::rmdir("/tmp/_pin/real/sub");
+        cleanup();
+        result?;
+
+        serial_println!(
+            "[vfs]   pinned fd-relative primitives: OK (a directory swapped out \
+             from under the pin is refused with StaleHandle and the impostor's \
+             file is untouched; `..`, `.`, `a/b` and an empty name are refused)"
+        );
+    } else {
+        skips.record("pinned fd-relative primitives", "/tmp not mounted");
     }
 
     skips.report("[vfs]");

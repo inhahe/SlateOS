@@ -4293,16 +4293,29 @@ mod tests {
         // the ones past the bottom fall off it. There was no cursor to follow
         // because there was no pointer and no scroll.
         let mut g = game();
+        // "Was drawn", asked of the drawing. A hit box is recorded next to the
+        // row's label but by a separate call, so its presence is no evidence
+        // that the label went anywhere (lesson 81); the claim here is that the
+        // user can see the row, so it is the glyphs that have to be found.
+        let row_is_visible = |g: &Sokoban, index: usize| -> bool {
+            let Some(r) = probe::rect_of(g, Target::Level(index)) else {
+                return false;
+            };
+            let name = format!("Level {}", index.saturating_add(1));
+            text_commands(&g.draw(SIZE))
+                .into_iter()
+                .any(|(t, x, y, ..)| t == name && r.contains(x, y))
+        };
         probe::key(&mut g, &probe::press(Key::End));
         let last = LEVELS.len().saturating_sub(1);
         assert_eq!(g.cursor(), last, "End did not reach the last level");
         assert!(
-            probe::rect_of(&g, Target::Level(last)).is_some(),
+            row_is_visible(&g, last),
             "the row the cursor is on was not drawn"
         );
         probe::key(&mut g, &probe::press(Key::Home));
         assert!(
-            probe::rect_of(&g, Target::Level(0)).is_some(),
+            row_is_visible(&g, 0),
             "Home did not scroll the first row back into view"
         );
     }

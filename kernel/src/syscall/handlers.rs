@@ -9309,6 +9309,223 @@ pub fn sys_fs_openat2(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// Bytes one `SYS_FS_GETDENTS_PINNED` record occupies for a name of this
+/// length: `[u8 type][u32 name_len][name bytes][u64 size]`.
+///
+/// Shared by the size computation and the packing loop so the two cannot
+/// disagree — a requirement reported from one formula and satisfied by
+/// another is a buffer overrun waiting for the day they drift apart.
+fn entry_record_len(name_len: usize) -> usize {
+    1usize
+        .saturating_add(4)
+        .saturating_add(name_len)
+        .saturating_add(8)
+}
+
+/// Recover the caller's `dirfd` argument as a [`crate::fs::PinnedDir`].
+///
+/// `0` means the process working directory, matching `SYS_FS_OPENAT2`'s use
+/// of the same value (native file handles are never 0, so this is not an
+/// in-band sentinel taken from a valid handle).
+///
+/// The cwd is pinned *here*, at the moment of the call, rather than carrying
+/// an identity from some earlier point — there is no earlier point for it to
+/// come from. That makes a cwd-relative call no worse than the path-based one
+/// it replaces, while a handle-relative call gets the full guarantee. The
+/// difference is real and is not papered over: a caller that needs the
+/// guarantee passes a handle.
+fn pinned_dir_arg(dirfd: u64) -> KernelResult<crate::fs::PinnedDir> {
+    if dirfd == 0 {
+        let Some(pid) = caller_pid() else {
+            // A bare kernel task has no cwd to resolve against; it can still
+            // use these calls by passing an explicit handle.
+            return Err(KernelError::InvalidArgument);
+        };
+        let cwd = pcb::get_cwd(pid).ok_or(KernelError::NotFound)?;
+        return crate::fs::Vfs::pin_dir(crate::fs::path::PathBuf::from(cwd));
+    }
+    require_file_handle_owner(dirfd)?;
+    crate::fs::handle::pinned_dir(dirfd)
+}
+
+/// `SYS_FS_UNLINKAT_PINNED` — remove `name` from the directory a handle was
+/// opened on, refusing if the handle no longer denotes that directory.
+///
+/// `arg0`: directory handle (0 = cwd).  `arg1`: name pointer.
+/// `arg2`: name length.  `arg3`: flags (`AT_REMOVEDIR_PINNED`).
+pub fn sys_fs_unlinkat_pinned(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+
+    // Unknown flag bits are refused rather than ignored, for the reason
+    // `sys_fs_openat2` refuses unknown `resolve` bits: a caller that
+    // mistranslated a Linux `AT_*` constant should fail on its first call
+    // instead of silently getting a different operation.
+    let flags = args.arg3;
+    if flags & !crate::syscall::number::AT_REMOVEDIR_PINNED != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let remove_dir = flags & crate::syscall::number::AT_REMOVEDIR_PINNED != 0;
+
+    let name = match read_user_path(args.arg1, args.arg2 as usize) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let dir = match pinned_dir_arg(args.arg0) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    match crate::fs::Vfs::unlink_at_pinned(&dir, name.as_bytes(), remove_dir) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_FSTATAT_PINNED` — stat `name` within the directory a handle was
+/// opened on, refusing if the handle no longer denotes that directory.
+///
+/// `arg0`: directory handle (0 = cwd).  `arg1`: name pointer.
+/// `arg2`: name length.  `arg3`: flags (`AT_SYMLINK_NOFOLLOW_PINNED`).
+/// `arg4`: output buffer of `FS_META_SIZE` bytes.
+pub fn sys_fs_fstatat_pinned(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
+        return SyscallResult::err(e);
+    }
+
+    let flags = args.arg3;
+    if flags & !crate::syscall::number::AT_SYMLINK_NOFOLLOW_PINNED != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let no_follow = flags & crate::syscall::number::AT_SYMLINK_NOFOLLOW_PINNED != 0;
+
+    if args.arg4 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // Validated before anything is read, so a bad output pointer cannot be
+    // used to learn whether a name exists.
+    if let Err(e) =
+        crate::mm::user::validate_user_write(args.arg4, crate::syscall::number::FS_META_SIZE)
+    {
+        return SyscallResult::err(e);
+    }
+
+    let name = match read_user_path(args.arg1, args.arg2 as usize) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let dir = match pinned_dir_arg(args.arg0) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    let meta = match crate::fs::Vfs::metadata_at_pinned(&dir, name.as_bytes(), no_follow) {
+        Ok(m) => m,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    match pack_fs_meta_to_user(&meta, args.arg4) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_GETDENTS_PINNED` — list the directory a handle was opened on,
+/// resolving the handle rather than its name.
+///
+/// `arg0`: directory handle (0 = cwd).  `arg1`: output buffer.
+/// `arg2`: output buffer capacity.
+pub fn sys_fs_getdents_pinned(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
+
+    let out_cap = args.arg2 as usize;
+    if args.arg1 == 0 || out_cap == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let dir = match pinned_dir_arg(args.arg0) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Read into kernel memory first: `readdir_pinned` reaches the block layer
+    // and can block, and the caller's buffer could be remapped while this
+    // thread sleeps.  Same reasoning as `sys_fs_readdir_at`.
+    let entries = match crate::fs::Vfs::readdir_pinned(&dir) {
+        Ok(e) => e,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Bytes the *complete* listing would occupy, computed before anything is
+    // written. This is what the call returns, not the number of bytes it
+    // managed to write — because a caller handed back "1024 bytes" with a
+    // 1024-byte buffer otherwise cannot tell a directory that exactly filled
+    // it from one that overflowed it, and this call has no offset argument
+    // with which to ask for the rest. Returning the requirement makes the
+    // truncated case self-announcing (`ret > cap`) and doubles as the size to
+    // re-issue with. `SYS_FS_READDIR_AT` solves the same problem by returning
+    // a total entry count alongside the written count; it is paginated, so a
+    // count is the useful unit there and a byte requirement is the useful one
+    // here.
+    let needed = entries.iter().fold(0usize, |acc, entry| {
+        acc.saturating_add(entry_record_len(entry.name.as_bytes().len()))
+    });
+
+    let copied =
+        match crate::mm::user::with_user_out_buf(args.arg1, out_cap, READDIR_BUF_MAX, |out_slice| {
+            let mut pos = 0usize;
+            for entry in &entries {
+                let name_bytes = entry.name.as_bytes();
+                let entry_size = entry_record_len(name_bytes.len());
+                if pos.saturating_add(entry_size) > out_cap {
+                    // Buffer full — write whole entries only and stop. A
+                    // partial record would be indistinguishable from a corrupt
+                    // one to a decoder that trusts its own length field.
+                    break;
+                }
+                let type_byte = match entry.entry_type {
+                    crate::fs::EntryType::File => 0u8,
+                    crate::fs::EntryType::Directory => 1,
+                    crate::fs::EntryType::VolumeLabel => 2,
+                    crate::fs::EntryType::Symlink => 3,
+                    crate::fs::EntryType::CharDevice => 4,
+                    crate::fs::EntryType::BlockDevice => 5,
+                };
+                // The `break` above proves the room exists, but a bounds-
+                // checked write that drops an entry beats a panic if the two
+                // ever disagree.
+                let Some(dst) = out_slice.get_mut(pos..pos.saturating_add(entry_size)) else {
+                    break;
+                };
+                let mut w = 0usize;
+                let mut put = |bytes: &[u8]| {
+                    if let Some(d) = dst.get_mut(w..w.saturating_add(bytes.len())) {
+                        d.copy_from_slice(bytes);
+                        w = w.saturating_add(bytes.len());
+                    }
+                };
+                put(&[type_byte]);
+                #[allow(clippy::cast_possible_truncation)]
+                put(&(name_bytes.len() as u32).to_le_bytes());
+                put(name_bytes);
+                put(&entry.size.to_le_bytes());
+                pos = pos.saturating_add(entry_size);
+            }
+            Ok(pos)
+        }) {
+            Ok(n) => n,
+            Err(e) => return SyscallResult::err(e),
+        };
+    debug_assert!(copied <= out_cap);
+    debug_assert!(copied <= needed);
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(needed as i64)
+}
+
 /// `SYS_FS_CLOSE` — close a file handle.
 pub fn sys_fs_close(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
@@ -10231,14 +10448,28 @@ pub fn sys_fs_metadata(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    // Packed in the kernel, then delivered as one copy.  The fields used to be
-    // stored one at a time through `args.arg2 as *mut u8`, which was wrong on
-    // three counts: the address is userspace, so the stores need SMAP
-    // bracketing and a re-validating copy; it carries no alignment guarantee;
-    // and `attributes` lives at offset 58, two bytes past a `u16`, so a typed
-    // `*mut u32` store there is misaligned *by construction* — undefined
-    // behaviour even for a perfectly well-behaved caller.  Byte-wise packing
-    // is alignment-agnostic, so the odd offsets in the ABI cost nothing.
+    match pack_fs_meta_to_user(&meta, args.arg2) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// Pack a [`crate::fs::FileMeta`] into the `FS_META_SIZE` wire record and
+/// deliver it to `dst` in userspace.
+///
+/// Shared by `SYS_FS_METADATA` and `SYS_FS_FSTATAT_PINNED` so the two cannot
+/// drift: one decoder in userspace should serve both, and that is only true
+/// if one encoder in the kernel produces both.
+///
+/// Packed in the kernel, then delivered as one copy.  The fields used to be
+/// stored one at a time through `dst as *mut u8`, which was wrong on three
+/// counts: the address is userspace, so the stores need SMAP bracketing and a
+/// re-validating copy; it carries no alignment guarantee; and `attributes`
+/// lives at offset 58, two bytes past a `u16`, so a typed `*mut u32` store
+/// there is misaligned *by construction* — undefined behaviour even for a
+/// perfectly well-behaved caller.  Byte-wise packing is alignment-agnostic,
+/// so the odd offsets in the ABI cost nothing.
+fn pack_fs_meta_to_user(meta: &crate::fs::FileMeta, dst: u64) -> KernelResult<()> {
     let mut rec = [0u8; crate::syscall::number::FS_META_SIZE];
     {
         // Every offset below is a compile-time constant inside a 64-byte
@@ -10276,11 +10507,7 @@ pub fn sys_fs_metadata(args: &SyscallArgs) -> SyscallResult {
     // SAFETY: `rec` is a live kernel stack array of exactly `FS_META_SIZE`
     // bytes; `copy_to_user` re-validates the destination and brackets the
     // store with STAC/CLAC.
-    if let Err(e) = unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), args.arg2, rec.len()) } {
-        return SyscallResult::err(e);
-    }
-
-    SyscallResult::ok(0)
+    unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), dst, rec.len()) }
 }
 
 /// `SYS_FS_SET_ATTR` — set file attributes.

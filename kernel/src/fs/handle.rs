@@ -178,6 +178,21 @@ struct OpenFile {
     /// with `IsADirectory`.  The `offset` field doubles as the directory
     /// cursor (entry index) for these handles.
     is_directory: bool,
+    /// For a directory handle: the identity of the directory *at open time*.
+    ///
+    /// `path` records what the handle was opened **as**; this records what it
+    /// opened **onto**.  Without it, an fd-relative operation has only a name
+    /// to work from, and a name can be re-pointed at another object between
+    /// the open and the use — which is the whole of lane B's report in
+    /// `requests/b-a-the-at-family-resolves-by-path-so-no-toctou-fix-is-\
+    /// possible.md`.  With it, [`crate::fs::Vfs::unlink_at_pinned`] and its
+    /// siblings can walk the name and then check where they landed.
+    ///
+    /// `None` for file handles (nothing resolves relative to them), and for
+    /// directories on a filesystem with no stable inode numbers, where the
+    /// question cannot be answered at all.  The two cases are distinguished
+    /// by `is_directory`, and neither is ever read as "verified".
+    dir_pin: Option<crate::fs::FileId>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1231,6 +1246,32 @@ pub fn file_identity(handle: u64) -> KernelResult<Option<crate::fs::vfs::FileId>
     crate::fs::Vfs::file_identity_resolved(&path)
 }
 
+/// Recover a directory handle as a [`PinnedDir`](crate::fs::PinnedDir) — the
+/// path it was opened under *together with* the identity it opened onto.
+///
+/// This is what every fd-relative operation should take instead of
+/// [`handle_path`].  The difference is the whole of the fix: `handle_path`
+/// hands back a name, and a name is a question the filesystem re-answers
+/// every time it is asked, so an `unlinkat` built on it deletes whatever
+/// answers *now*.  A `PinnedDir` carries what the answer was at open time, so
+/// [`crate::fs::Vfs::unlink_at_pinned`] can refuse when it has changed.
+///
+/// Fails with [`KernelError::NotADirectory`] for a handle that is not a
+/// directory: nothing resolves relative to a file, and returning a
+/// never-verifiable `PinnedDir` for one would quietly hand the caller the
+/// weaker guarantee under the stronger name.
+pub fn pinned_dir(handle: u64) -> KernelResult<crate::fs::PinnedDir> {
+    let table = OPEN_FILES.lock();
+    let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+    if !file.is_directory {
+        return Err(KernelError::NotADirectory);
+    }
+    Ok(crate::fs::PinnedDir {
+        path: file.path.clone(),
+        id: file.dir_pin,
+    })
+}
+
 /// Get the current number of open file handles (for diagnostics).
 pub fn open_count() -> usize {
     OPEN_FILES.lock().len()
@@ -1291,6 +1332,7 @@ fn allocate_handle(path: PathBuf, offset: u64, size: u64, flags: OpenFlags) -> K
             flags,
             refcount: 1,
             is_directory: false,
+            dir_pin: None,
         },
     );
 
@@ -1303,6 +1345,21 @@ fn allocate_handle(path: PathBuf, offset: u64, size: u64, flags: OpenFlags) -> K
 /// (the underlying VFS doesn't track a stable entry count cheaply, so
 /// we don't cache one — `read_dir_at` queries the VFS each time).
 fn allocate_dir_handle(path: PathBuf, flags: OpenFlags) -> KernelResult<u64> {
+    // Pin the directory's identity *before* taking the table lock: capturing
+    // it needs the filesystem lock, and taking the two in this order here
+    // while `close` takes only the table lock keeps the pair one-directional.
+    //
+    // Doing it at open rather than on first use is the point of the exercise.
+    // An identity read later could only tell us what the name means *then*,
+    // which is exactly the question that has no useful answer; read now, it
+    // records what the caller actually opened, and every later operation has
+    // something to be checked against.
+    //
+    // A failure to read it is not a failure to open: filesystems with no
+    // inode numbers answer 0 here, and are recorded as unpinnable rather than
+    // refused, so opening a directory on a FAT stick still works.
+    let dir_pin = crate::fs::Vfs::pin_dir(&path).ok().and_then(|p| p.id);
+
     let mut table = OPEN_FILES.lock();
 
     if table.len() >= MAX_OPEN_FILES {
@@ -1320,6 +1377,7 @@ fn allocate_dir_handle(path: PathBuf, flags: OpenFlags) -> KernelResult<u64> {
             flags,
             refcount: 1,
             is_directory: true,
+            dir_pin,
         },
     );
 

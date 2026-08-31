@@ -2044,7 +2044,17 @@ pub extern "C" fn unlink(path: *const u8) -> i32 {
 
 /// Rename a file.
 ///
-/// Our kernel's `SYS_FS_RENAME` takes (old_path, old_len, new_path, new_len).
+/// Our kernel's `SYS_FS_RENAME` takes
+/// (old_path, old_len, new_path, new_len, flags).
+///
+/// The flags word is passed explicitly as zero even though today's kernel
+/// ignores it, because the register it travels in is not zeroed by anyone
+/// else. `syscall4` leaves `r8` holding whatever the last call left there, so
+/// the day the kernel starts reading `arg4` — which
+/// `requests/b-a-rename-cannot-be-told-to-refuse-an-existing-target.md` asks
+/// it to, so that `RENAME_NOREPLACE` becomes reachable — a `syscall4` here
+/// would begin handing it garbage. Sending the zero now makes that landing
+/// safe in either order, and costs one register write.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn rename(oldpath: *const u8, newpath: *const u8) -> i32 {
     if oldpath.is_null() || newpath.is_null() {
@@ -2061,15 +2071,23 @@ pub extern "C" fn rename(oldpath: *const u8, newpath: *const u8) -> i32 {
         return -1;
     };
 
-    let ret = syscall4(
+    let ret = syscall5(
         SYS_FS_RENAME,
         old_resolved.as_ptr() as u64,
         old_len as u64,
         new_resolved.as_ptr() as u64,
         new_len as u64,
+        NO_RENAME_FLAGS,
     );
     errno::translate(ret) as i32
 }
+
+/// The flags word `rename(2)` sends: none of them.
+///
+/// Named rather than written as a bare trailing `0` because that is the one
+/// argument of the five whose value is not obvious from the call site, and
+/// because it is the argument that will stop being zero — see [`renameat2`].
+const NO_RENAME_FLAGS: u64 = 0;
 
 /// Create a hard link.
 ///
@@ -3463,8 +3481,22 @@ pub extern "C" fn renameat(
 /// Rename a file with flags (Linux extension).
 ///
 /// `flags` can include `RENAME_NOREPLACE` (1), `RENAME_EXCHANGE` (2).
-/// Our kernel doesn't support these flags yet, so non-zero flags
-/// return EINVAL.  Zero flags delegates to `renameat`.
+/// Non-zero flags return `EINVAL`; zero delegates to `renameat`.
+///
+/// The refusal is a *syscall* gap, not a kernel one, and the distinction is
+/// worth keeping straight because it decides how much work closing it is. The
+/// kernel implements both operations already — `Vfs::rename_noreplace` and
+/// `Vfs::rename_exchange` — and the first of them performs its
+/// destination-existence check under the same lock as the rename, which is the
+/// hard part and the whole point. What is missing is a way to *ask* for them:
+/// `sys_fs_rename` reads four arguments and always calls `Vfs::rename`. See
+/// `requests/b-a-rename-cannot-be-told-to-refuse-an-existing-target.md`.
+///
+/// Until that lands, refusing is the only honest answer. Quietly performing a
+/// replacing rename for a caller that asked for `RENAME_NOREPLACE` would turn
+/// a request not to destroy a file into destroying it — `EINVAL` at least lets
+/// the caller fall back to a check-then-rename and know it is racy, which is
+/// what `coreutils`'s `backup` module does.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn renameat2(
     olddirfd: i32,

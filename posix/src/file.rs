@@ -2883,10 +2883,31 @@ pub const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
 pub const AT_REMOVEDIR: i32 = 0x200;
 /// AT_SYMLINK_FOLLOW: follow symlinks (e.g., in `linkat`).
 pub const AT_SYMLINK_FOLLOW: i32 = 0x400;
+/// AT_NO_AUTOMOUNT: do not trigger an automount on the terminal component.
+///
+/// Accepted and ignored: we have no automounter, so there is nothing to
+/// suppress. Linux ignores it too on a path with nothing to automount —
+/// what matters is that it is *accepted*, because callers pass it
+/// unconditionally and rejecting it would be a spurious `EINVAL`.
+pub const AT_NO_AUTOMOUNT: i32 = 0x800;
 /// AT_EMPTY_PATH: operate on the fd itself (Linux 2.6.39+).
 pub const AT_EMPTY_PATH: i32 = 0x1000;
 /// AT_EACCESS: check using effective IDs in faccessat.
 pub const AT_EACCESS: i32 = 0x200;
+/// AT_STATX_FORCE_SYNC: force a writeback before reporting attributes.
+///
+/// Accepted and ignored, like [`AT_NO_AUTOMOUNT`]: our filesystems do not
+/// serve attributes from a cache that could be stale relative to a server.
+pub const AT_STATX_FORCE_SYNC: i32 = 0x2000;
+/// AT_STATX_DONT_SYNC: accept possibly-stale attributes without syncing.
+pub const AT_STATX_DONT_SYNC: i32 = 0x4000;
+/// The two-bit field [`AT_STATX_FORCE_SYNC`] and [`AT_STATX_DONT_SYNC`] share.
+///
+/// Setting *both* asks for a sync and for no sync at once. `statx` rejects
+/// that with `EINVAL`; `fstatat` does not, which is a real asymmetry and not
+/// an oversight in this file — measured against Linux 6.6, where
+/// `newfstatat` accepts `0x6000` and `statx` refuses it.
+pub const AT_STATX_SYNC_TYPE: i32 = 0x6000;
 
 /// Open a file relative to a directory fd.
 ///
@@ -2919,6 +2940,15 @@ pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -
 /// not follow symlinks).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i32) -> i32 {
+    // Linux validates flags in `vfs_statx`, ahead of everything: measured on
+    // 6.6, a bad flag bit outranks a NULL `buf` (EFAULT), a NULL or missing
+    // path (EFAULT/ENOENT) and a closed `dirfd` (EBADF).  The two
+    // `AT_STATX_*` bits are accepted here and refused by `statx` only when
+    // both are set — that asymmetry is Linux's, and was measured, not assumed.
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH | AT_STATX_SYNC_TYPE) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return if flags & AT_SYMLINK_NOFOLLOW != 0 {
             lstat(path, buf)
@@ -2951,6 +2981,15 @@ pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i3
 /// path" above for why that matters and when it does not apply.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32 {
+    // `AT_REMOVEDIR` is the only bit Linux's `do_unlinkat` accepts — not even
+    // `AT_SYMLINK_NOFOLLOW`, which `unlink` implies unconditionally.  The check
+    // outranks a NULL path (EFAULT) and a closed `dirfd` (EBADF); measured on
+    // Linux 6.6 rather than read off the source, because the accepted set is
+    // narrower than the family's other members and easy to over-guess.
+    if flags & !AT_REMOVEDIR != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return if flags & AT_REMOVEDIR != 0 {
             rmdir(path)
@@ -6117,6 +6156,13 @@ pub const STATX_BASIC_STATS: u32 = 0x07FF;
 pub const STATX_ALL: u32 = 0x0FFF;
 /// `statx` mask flags — block size.
 pub const STATX_BTIME: u32 = 0x0800;
+/// `statx` reserved mask bit — must never be set by a caller.
+///
+/// Linux refuses it with `EINVAL` so that the bit stays available for a future
+/// meaning: a kernel that silently ignored it could not later start honouring
+/// it without changing the behaviour of programs already setting it by
+/// accident. Refusing it here for the same reason.
+pub const STATX_RESERVED: u32 = 0x8000_0000;
 
 /// Timestamp for `statx`.
 #[repr(C)]
@@ -6216,6 +6262,24 @@ pub extern "C" fn statx(
     mask: u32,
     buf: *mut Statx,
 ) -> i32 {
+    // Both checks precede the `buf` test, and that order is Linux's, measured:
+    // `statx` with a bad flag bit and a NULL buffer reports EINVAL, while the
+    // same call with valid flags reports EFAULT.  `do_statx` runs the mask and
+    // flag tests before it touches the buffer at all.
+    if mask & STATX_RESERVED != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH | AT_STATX_SYNC_TYPE) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Asking to sync and not to sync at once. Unlike `fstatat`, which accepts
+    // this combination, `statx` refuses it — measured on Linux 6.6.
+    if flags & AT_STATX_SYNC_TYPE == AT_STATX_SYNC_TYPE {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if buf.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -13650,7 +13714,7 @@ mod tests {
 
     mod pinned_at {
         use super::super::{
-            is_pinnable_component, pinned_base, try_pinned_unlinkat, unlinkat, AT_REMOVEDIR,
+            AT_REMOVEDIR, is_pinnable_component, pinned_base, try_pinned_unlinkat, unlinkat,
         };
         use crate::fdtable::{self, HandleKind};
 
@@ -13659,12 +13723,12 @@ mod tests {
             for name in [
                 &b"a"[..],
                 b"file.txt",
-                b"...",         // three dots is an ordinary name
-                b".hidden",     // so is a leading dot
-                b"..a",         // and a name that merely starts with two
+                b"...",     // three dots is an ordinary name
+                b".hidden", // so is a leading dot
+                b"..a",     // and a name that merely starts with two
                 b"a..",
                 b"with space",
-                b"\xff\xfe",    // paths are bytes, not UTF-8
+                b"\xff\xfe", // paths are bytes, not UTF-8
                 b"-",
             ] {
                 assert!(
@@ -13797,6 +13861,211 @@ mod tests {
                         "{name:?} flags={flags:#x}"
                     );
                 }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // `*at` flag validation
+    // -----------------------------------------------------------------
+    //
+    // Six of the nine `*at` calls in this file validated their `flags`
+    // argument and three — `unlinkat`, `fstatat`, `statx` — did not, so a
+    // junk bit was silently ignored by exactly the calls where Linux is
+    // strictest. The accepted sets below were *measured* against Linux 6.6
+    // (a C program issuing each syscall directly, one flag bit at a time)
+    // rather than read off the kernel source, because two of the answers are
+    // not what the source reads like: `unlinkat` refuses even
+    // `AT_SYMLINK_NOFOLLOW`, and `fstatat` accepts both `AT_STATX_*` sync
+    // bits together where `statx` refuses that exact combination.
+
+    mod at_flag_validation {
+        use super::super::{
+            AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_REMOVEDIR, AT_STATX_DONT_SYNC,
+            AT_STATX_FORCE_SYNC, AT_STATX_SYNC_TYPE, AT_SYMLINK_FOLLOW, AT_SYMLINK_NOFOLLOW,
+            STATX_BASIC_STATS, STATX_RESERVED, Stat, Statx, fstatat, statx, unlinkat,
+        };
+
+        /// Every bit Linux rejects, and only those. The `ok` rows are not
+        /// asserted to *succeed* — there is no filesystem under a host test —
+        /// only to get past the flag gate, which is what `!= EINVAL` shows.
+        const REJECTED_BY_UNLINKAT: &[i32] = &[
+            AT_SYMLINK_NOFOLLOW,
+            AT_SYMLINK_FOLLOW,
+            AT_NO_AUTOMOUNT,
+            AT_EMPTY_PATH,
+            AT_STATX_FORCE_SYNC,
+            AT_STATX_DONT_SYNC,
+            0x8000,
+            0x1,
+            -1,
+        ];
+
+        const REJECTED_BY_STAT_FAMILY: &[i32] = &[AT_REMOVEDIR, AT_SYMLINK_FOLLOW, 0x8000, 0x1, -1];
+
+        const ACCEPTED_BY_STAT_FAMILY: &[i32] = &[
+            0,
+            AT_SYMLINK_NOFOLLOW,
+            AT_NO_AUTOMOUNT,
+            AT_EMPTY_PATH,
+            AT_STATX_FORCE_SYNC,
+            AT_STATX_DONT_SYNC,
+        ];
+
+        #[test]
+        fn unlinkat_accepts_only_at_removedir() {
+            for &f in REJECTED_BY_UNLINKAT {
+                crate::errno::set_errno(0);
+                assert_eq!(unlinkat(AT_FDCWD, b"/nonexistent\0".as_ptr(), f), -1);
+                assert_eq!(
+                    crate::errno::get_errno(),
+                    crate::errno::EINVAL,
+                    "flags={f:#x} should be EINVAL"
+                );
+            }
+            // The two it does accept must get past the gate.
+            for f in [0, AT_REMOVEDIR] {
+                crate::errno::set_errno(0);
+                unlinkat(AT_FDCWD, b"/nonexistent\0".as_ptr(), f);
+                assert_ne!(
+                    crate::errno::get_errno(),
+                    crate::errno::EINVAL,
+                    "flags={f:#x} should pass the gate"
+                );
+            }
+        }
+
+        /// The flag gate outranks every other diagnosis — a NULL buffer, a
+        /// NULL path, a missing file, a closed `dirfd`.
+        ///
+        /// Measured, and worth pinning: a caller that passes a junk flag
+        /// *and* a bad pointer must be told about the flag, because that is
+        /// the bug it can fix.
+        #[test]
+        fn the_flag_gate_outranks_efault_and_ebadf() {
+            crate::errno::set_errno(0);
+            assert_eq!(unlinkat(4242, core::ptr::null(), 0x1), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+            let mut st = Stat::default();
+            crate::errno::set_errno(0);
+            assert_eq!(fstatat(4242, core::ptr::null(), &raw mut st, 0x1), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+            crate::errno::set_errno(0);
+            assert_eq!(
+                fstatat(AT_FDCWD, b"/x\0".as_ptr(), core::ptr::null_mut(), 0x1),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+            crate::errno::set_errno(0);
+            assert_eq!(
+                statx(
+                    AT_FDCWD,
+                    b"/x\0".as_ptr(),
+                    0x1,
+                    STATX_BASIC_STATS,
+                    core::ptr::null_mut()
+                ),
+                -1
+            );
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "a bad flag outranks the NULL buffer"
+            );
+
+            // …and with *good* flags the NULL buffer is what is reported.
+            crate::errno::set_errno(0);
+            assert_eq!(
+                statx(
+                    AT_FDCWD,
+                    b"/x\0".as_ptr(),
+                    0,
+                    STATX_BASIC_STATS,
+                    core::ptr::null_mut()
+                ),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        }
+
+        #[test]
+        fn fstatat_accepts_the_statx_sync_bits_and_rejects_the_rest() {
+            let mut st = Stat::default();
+            for &f in REJECTED_BY_STAT_FAMILY {
+                crate::errno::set_errno(0);
+                assert_eq!(
+                    fstatat(AT_FDCWD, b"/nonexistent\0".as_ptr(), &raw mut st, f),
+                    -1
+                );
+                assert_eq!(
+                    crate::errno::get_errno(),
+                    crate::errno::EINVAL,
+                    "flags={f:#x} should be EINVAL"
+                );
+            }
+            for &f in ACCEPTED_BY_STAT_FAMILY {
+                crate::errno::set_errno(0);
+                fstatat(AT_FDCWD, b"/nonexistent\0".as_ptr(), &raw mut st, f);
+                assert_ne!(
+                    crate::errno::get_errno(),
+                    crate::errno::EINVAL,
+                    "flags={f:#x} should pass the gate"
+                );
+            }
+            // Both sync bits at once: fstatat allows it, statx does not.
+            // This asymmetry is Linux's, measured on 6.6.
+            crate::errno::set_errno(0);
+            fstatat(
+                AT_FDCWD,
+                b"/nonexistent\0".as_ptr(),
+                &raw mut st,
+                AT_STATX_SYNC_TYPE,
+            );
+            assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        #[test]
+        fn statx_rejects_both_sync_bits_and_the_reserved_mask() {
+            let mut sx = Statx::default();
+            let p = b"/nonexistent\0".as_ptr();
+
+            crate::errno::set_errno(0);
+            assert_eq!(
+                statx(
+                    AT_FDCWD,
+                    p,
+                    AT_STATX_SYNC_TYPE,
+                    STATX_BASIC_STATS,
+                    &raw mut sx
+                ),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+            crate::errno::set_errno(0);
+            assert_eq!(statx(AT_FDCWD, p, 0, STATX_RESERVED, &raw mut sx), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+            // The reserved-mask check also outranks the NULL buffer.
+            crate::errno::set_errno(0);
+            assert_eq!(
+                statx(AT_FDCWD, p, 0, STATX_RESERVED, core::ptr::null_mut()),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+            // Each sync bit *alone* is fine.
+            for f in [AT_STATX_FORCE_SYNC, AT_STATX_DONT_SYNC] {
+                crate::errno::set_errno(0);
+                statx(AT_FDCWD, p, f, STATX_BASIC_STATS, &raw mut sx);
+                assert_ne!(
+                    crate::errno::get_errno(),
+                    crate::errno::EINVAL,
+                    "flags={f:#x} alone should pass the gate"
+                );
             }
         }
     }

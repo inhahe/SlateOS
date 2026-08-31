@@ -181,20 +181,28 @@ syscall unregistered. Trading a compile error for either is a regression.
 (`get_mut` is also not usable in a `const fn` today, so the helper would have
 to abandon compile-time construction to exist at all.)
 
-The right disposition is a scoped `#[allow(clippy::indexing_slicing)]` on
-`build_v1_table` with that reasoning as the comment — the same
-"an `allow` with a justification beats N mechanical edits" judgement the
-paragraph above reserves for `arithmetic_side_effects`, except here the
-justification is unusually strong: the compiler already proves the property
-the lint is asking for. **Doing that would also cut the measured backlog by
-~17% without touching a line of logic, which is worth knowing before anyone
-sizes the remaining sweep**: the real `indexing_slicing` debt in this repo is
-nearer 1590 than 1919.
+**Done 2026-08-30 (lane A):** a scoped `#[allow(clippy::indexing_slicing)]` on
+`build_v1_table`, carrying that reasoning as its comment — the same "an `allow`
+with a justification beats N mechanical edits" judgement the paragraph above
+reserves for `arithmetic_side_effects`, except the justification here is
+unusually strong: the compiler already proves the property the lint asks for.
 
-This is also why adding a syscall currently *raises* the warning count by one
-per number registered — three, for `SYS_FS_UNLINKAT_PINNED` /
-`_FSTATAT_PINNED` / `_GETDENTS_PINNED` in §647. Those three follow the
-surrounding convention deliberately, and correctly.
+Measured before and after: kernel warnings **17999 → 17670**, a drop of exactly
+329, with **0** `indexing may panic` findings left anywhere in `dispatch.rs`.
+That residual zero is worth more than the count: the allow is scoped to the one
+function, so it could not have covered `dispatch()` — which indexes with a
+number that *came from userspace*. Zero there means that path was already
+bounds-checked (`if idx >= MAX_SYSCALL_NR`, dispatch.rs:705) rather than
+quietly suppressed. Deliberately not a module-level allow, for exactly that
+reason.
+
+**So the repo-wide `indexing_slicing` figure quoted above is stale in the
+useful direction: the real debt is ~1590, not 1919.** Anyone sizing the
+remaining per-crate sweep off 1919 is overestimating it by ~17%.
+
+This was also why adding a syscall *raised* the warning count by one per number
+registered — three, for `SYS_FS_UNLINKAT_PINNED` / `_FSTATAT_PINNED` /
+`_GETDENTS_PINNED` in §647. It no longer does.
 
 ### Sweep progress: `editor` 500 → 80, `indexing_slicing` 0 (2026-08-16)
 

@@ -225,6 +225,27 @@ struct SyscallTable {
 /// `usize` is 64-bit, so truncation cannot happen.  We allow the
 /// lint because the const context requires `as usize`.
 #[allow(clippy::cast_possible_truncation)]
+// `indexing_slicing` fires once per registration below -- 329 of the ~1919
+// findings in the whole repo, which is why it is answered here rather than
+// left to inflate the burn-down.  It is a false positive in the only sense
+// that matters: this is a `const fn` whose sole caller is the initialiser of
+// `static V1_TABLE`, so every one of these stores is evaluated by `rustc`.
+// A syscall number at or above `MAX_SYSCALL_NR` is a *compile* error, not a
+// runtime panic -- there is no run time in which the panic the lint predicts
+// could happen.
+//
+// Deliberately not "fixed": the natural rewrite, a `register()` helper storing
+// through `get_mut()`, would move that check from build time to boot time,
+// where the only choices are to panic during early init or to silently leave a
+// syscall unregistered.  Both are worse than a build failure.  (`get_mut` is
+// not const-callable today either, so the helper could not exist without
+// giving up compile-time construction of the table altogether.)
+//
+// The scope is deliberately this function and not the module: a genuine
+// unchecked index somewhere else in `dispatch.rs` -- in `dispatch()` itself,
+// which indexes with a number that came from userspace -- must still be
+// reported.  See known-issues.md, the `indexing_slicing` burn-down section.
+#[allow(clippy::indexing_slicing)]
 const fn build_v1_table() -> SyscallTable {
     let mut handlers: [Option<SyscallHandler>; MAX_SYSCALL_NR] = [None; MAX_SYSCALL_NR];
 

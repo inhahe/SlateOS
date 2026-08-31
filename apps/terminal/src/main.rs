@@ -685,7 +685,8 @@ impl TerminalState {
     /// Feed a byte stream from the child process into the terminal.
     ///
     /// Parses escape sequences and updates the internal state. Any response
-    /// data (e.g., device status reports) is appended to `self.output_buffer`.
+    /// data (e.g., device status reports) leaves by the same route as a
+    /// keystroke -- [`Self::to_child`], flushed by [`Self::flush_to_child`].
     pub fn feed(&mut self, data: &[u8]) {
         for &byte in data {
             self.process_byte(byte);
@@ -1437,7 +1438,7 @@ impl TerminalState {
                 match mode {
                     5 => {
                         // Status report — report OK
-                        self.output_buffer.extend_from_slice(b"\x1b[0n");
+                        self.to_child(b"\x1b[0n");
                     }
                     6 => {
                         // Cursor position report
@@ -1446,7 +1447,7 @@ impl TerminalState {
                             self.cursor_row.saturating_add(1),
                             self.cursor_col.saturating_add(1)
                         );
-                        self.output_buffer.extend_from_slice(report.as_bytes());
+                        self.to_child(report.as_bytes());
                     }
                     _ => {}
                 }
@@ -1494,7 +1495,7 @@ impl TerminalState {
             // DA — Device Attributes
             (b'c', None) | (b'c', Some(b'>')) => {
                 // Report as VT220
-                self.output_buffer.extend_from_slice(b"\x1b[?62;c");
+                self.to_child(b"\x1b[?62;c");
             }
 
             _ => {
@@ -3001,8 +3002,8 @@ mod tests {
     )]
 
     use super::{
-        BAR_W, BELL_MS, BLINK_MS, CursorStyle, Layout, Rect, RenderCommand, Target, TerminalConfig,
-        TerminalState, cells_that_fit, ratio, scale, text, u32_f32,
+        BAR_W, BELL_MS, BLINK_MS, Color, CursorStyle, Layout, Rect, RenderCommand, Target,
+        TerminalConfig, TerminalState, cells_that_fit, ratio, scale, u32_f32,
     };
     use guitk::event::{Event, Key, MouseButton, MouseEvent, MouseEventKind};
     use guitk::probe::{Probe, press, rect_of_sized, typing};
@@ -3339,6 +3340,14 @@ mod tests {
         // -- which is what the compositor falls back to when the monospace
         // face is missing -- cannot walk a row's characters off the right edge
         // one accumulated pixel at a time.
+        //
+        // The bound has to be the one the command *declares*. This test used to
+        // fall back to measuring the glyph when a command declared no bound at
+        // all, which made it blind to the only fault it exists to catch: a
+        // measurement of a single character is about one cell wide by
+        // definition, so an unbounded glyph measured that way looks bounded.
+        // The compositor does no such measurement -- it draws until the string
+        // ends.
         for (name, term) in states() {
             for (w, h) in sizes() {
                 for c in term.frame(w, h).commands() {
@@ -3346,15 +3355,17 @@ mod tests {
                         text: glyph_text,
                         x,
                         max_width,
-                        font_size,
-                        font_weight,
                         ..
                     } = c
                     else {
                         continue;
                     };
-                    let bound = max_width
-                        .unwrap_or_else(|| text::measure(glyph_text, *font_size, *font_weight));
+                    let Some(bound) = *max_width else {
+                        panic!(
+                            "{name}: {glyph_text:?} is drawn unbounded in a {w}x{h} window, so a \
+                             wide face paints it over its neighbour"
+                        );
+                    };
                     assert!(
                         *x >= -0.01,
                         "{name}: {glyph_text:?} starts at {x} in a {w}x{h} window"
@@ -3634,6 +3645,53 @@ mod tests {
     }
 
     #[test]
+    fn the_highlight_is_painted_on_the_row_the_pointer_landed_on() {
+        // The test above asks `is_selected` the question itself, so it cannot
+        // see which row the *drawing pass* asks about. Making the pass ask
+        // about the screen row instead of the buffer row -- the original fault,
+        // in the one place it was not fixed -- leaves every assertion above
+        // true and the highlight painted on a different line, or, once the view
+        // is scrolled far enough back that no screen row is also a buffer row,
+        // on no line at all. This one reads the picture.
+        let mut term = fed_terminal(60);
+        term.resize_to_window(AIM.0, AIM.1);
+        term.scroll_viewport_up(15);
+        let aimed_y = 18.0 * 2.0;
+        term.selection_start(0.0, aimed_y);
+        term.selection_extend(8.4 * 6.0, aimed_y);
+
+        let sel_bg = term.config.colors.selection_bg;
+        let mut highlights = Vec::new();
+        for c in term.frame(AIM.0, AIM.1).commands() {
+            if let RenderCommand::FillRect { x, y, color, .. } = c
+                && *color == sel_bg
+            {
+                highlights.push((*x, *y));
+            }
+        }
+
+        assert!(
+            !highlights.is_empty(),
+            "the selection is painted nowhere in the frame"
+        );
+        for (x, y) in &highlights {
+            assert!(
+                (y - aimed_y).abs() < 0.01,
+                "a highlight at y {y}, not on the row at y {aimed_y} the pointer landed on"
+            );
+            assert!(
+                *x <= 8.4 * 6.0 + 0.01,
+                "a highlight at x {x}, past the column the drag ended on"
+            );
+        }
+        assert_eq!(
+            highlights.len(),
+            7,
+            "the seven cells from column 0 to column 6 inclusive"
+        );
+    }
+
+    #[test]
     fn a_press_in_the_bar_pages_towards_where_it_landed() {
         // The bar is the only sign a terminal has that there *is* scrollback.
         // A press in it that did nothing would be indistinguishable from a bar
@@ -3781,6 +3839,22 @@ mod tests {
                 .collect::<String>()
         };
         let live = top_row(&term);
+        // Which end the view starts at, as well as that it returns to it. A
+        // round trip on its own is satisfied by any offset that maps rows one
+        // to one -- including one counted forward from the oldest line, which
+        // shows the top of the session's history at the live end and scrolls
+        // the wrong way from there.
+        let oldest = term
+            .line_at(0)
+            .expect("the oldest line")
+            .cells
+            .iter()
+            .map(|c| c.ch)
+            .collect::<String>();
+        assert_ne!(
+            live, oldest,
+            "the live view starts at the oldest line rather than the newest screenful"
+        );
         term.scroll_viewport_up(7);
         assert_ne!(top_row(&term), live, "scrolling back showed the same rows");
         term.scroll_viewport_down(7);
@@ -3914,6 +3988,57 @@ mod tests {
         let mut buf = [0_u8; 16];
         let n = pair.slave.read(&mut buf).expect("the slave side reads");
         assert_eq!(String::from_utf8_lossy(&buf[..n]), "x\n");
+    }
+
+    #[test]
+    fn what_the_child_could_not_take_yet_is_kept_rather_than_dropped() {
+        // A write to a child that is not reading is a *short* write, not a
+        // failed one: the channel takes what it has room for and reports how
+        // much. Dropping the rest is how a paste into a busy program loses its
+        // middle -- and nothing else in this suite fills the channel, so the
+        // buffer is never anything but empty after a flush.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        {
+            let pair = term.pty.as_ref().expect("a PTY was opened");
+            // Raw mode: the line discipline would hold an unterminated line in
+            // its own buffer instead of pressing it against a full channel.
+            pair.slave.set_raw_mode();
+        }
+        let flood = vec![b'x'; 100 * 1024];
+        term.to_child(&flood);
+        term.flush_to_child();
+        let kept = term.output_buffer.len();
+        assert!(
+            kept > 0,
+            "a 100 KiB write to a child reading nothing was accepted whole"
+        );
+
+        // Read the child's end empty, which frees the room the rest needs.
+        let mut sink = vec![0_u8; 64 * 1024];
+        let mut taken = 0_usize;
+        {
+            let pair = term.pty.as_ref().expect("a PTY was opened");
+            while let Ok(n) = pair.slave.read(&mut sink) {
+                if n == 0 {
+                    break;
+                }
+                taken = taken.saturating_add(n);
+            }
+        }
+        term.flush_to_child();
+        assert!(
+            term.output_buffer.len() < kept,
+            "the bytes the channel could not take were never offered again"
+        );
+        assert_eq!(
+            taken + term.output_buffer.len() + {
+                let pair = term.pty.as_ref().expect("a PTY was opened");
+                let mut rest = vec![0_u8; 100 * 1024];
+                pair.slave.read(&mut rest).unwrap_or(0)
+            },
+            flood.len(),
+            "bytes went missing between the terminal and the child"
+        );
     }
 
     #[test]
@@ -4055,6 +4180,45 @@ mod tests {
         assert!(!slow.blink_on, "one interval did not put the cursor out");
         slow.tick(BLINK_MS);
         assert!(slow.blink_on, "and the second did not bring it back");
+    }
+
+    /// Is the block cursor's own ink anywhere in the frame?
+    ///
+    /// The block cursor is the only thing painted in the cursor colour at that
+    /// alpha, so matching the fill exactly is enough to say whether the user
+    /// can see a cursor.
+    fn cursor_is_painted(term: &TerminalState) -> bool {
+        let c = term.config.colors.cursor;
+        term.frame(AIM.0, AIM.1).commands().iter().any(|cmd| {
+            matches!(
+                cmd,
+                RenderCommand::FillRect { color, .. }
+                    if *color == Color::rgba(c.r, c.g, c.b, 180)
+            )
+        })
+    }
+
+    #[test]
+    fn the_cursor_leaves_the_picture_in_the_dark_half_of_the_blink() {
+        // `config.cursor_blink` was a setting nothing read: the drawing pass
+        // painted the cursor on every frame. Every test above reads `blink_on`,
+        // which the clock has always kept correctly -- so all of them passed
+        // against a terminal whose cursor sat there solid. The question the
+        // user actually asks is whether the cursor is on the screen.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        assert!(term.blink_on, "a fresh terminal starts in the lit half");
+        assert!(cursor_is_painted(&term), "the lit half painted no cursor");
+        term.tick(BLINK_MS);
+        assert!(!term.blink_on, "one interval did not put the cursor out");
+        assert!(
+            !cursor_is_painted(&term),
+            "the dark half of the blink painted a cursor anyway"
+        );
+        term.tick(BLINK_MS);
+        assert!(
+            cursor_is_painted(&term),
+            "the second interval did not bring it back"
+        );
     }
 
     #[test]

@@ -102591,6 +102591,112 @@ most of the list-shaped ones: `filemanager`, `logviewer`, `procexplorer`,
 passing through the clamp?* The third is the one that bites, because the state
 change and the clamp are usually in different files.
 
+### Lesson 102: test the entry point the platform calls, not the one underneath it (lane C, 2026-08-31)
+
+**In short:** the `terminal` had a test saying *a tick is what reads the child*
+-- the thing that makes a shell's prompt appear. It passed, and the terminal was
+still write-only under a real window. The test called `handle_event`, the
+terminal's own dispatcher. The compositor calls `App::on_event`, which is a
+layer above it, and that layer answered a tick itself and returned before
+`handle_event` was ever reached.
+
+The reason `on_event` did that was not laziness. It has to return a `Response`
+-- `Redraw` or `Idle` -- and a tick that changed nothing must not ask for a
+frame, or the terminal redraws twenty-five times a second at an idle prompt. So
+it needed the answer `tick` returns. Reaching for it directly was the obvious
+way to get it, and it silently bypassed everything else the tick did.
+
+| Layer | Who calls it | What the suite called |
+|---|---|---|
+| `TerminalState::handle_event` | the app's own `on_event`, and every test | ✓ eleven tests |
+| `App::on_event` | the compositor, and nothing else | ✗ nothing, until this one |
+
+**The rule.** *For each trait a type implements for a platform, at least one
+test must enter through the trait.* An `impl App` is not documentation; it is
+the only code the compositor runs. A suite that tests the inherent methods and
+trusts the impl to forward to them is testing a program the user never runs. The
+same holds for `impl Probe`, for `Iterator`, for `Drop` -- any impl whose caller
+is not in your own crate.
+
+**The shape of the bug, generally: a wrapper that needs one fact from the body,
+and takes it by calling a part of the body directly.** The fix is to let the
+body run in full and have it *report* the fact -- here `on_tick` does the ageing
+and the read and leaves the answer in `tick_changed`, which `on_event` then
+reads. The wrapper is no longer allowed to choose which half of the body runs.
+
+**Where else to look.** Every app in the wiring campaign: each has an `impl App`
+with `on_event` and `render`, and the suites overwhelmingly call the inherent
+`click`/`key`/`frame` beneath them. Two questions per app: *does any test call
+`on_event` or `render` by those names*, and *does `on_event` have an early
+return above the call to the real dispatcher?* An early return for
+`CloseRequested` is fine -- there is nothing below it to skip. An early return
+that computes something first is the fault.
+
+A second instance of the same family was in the terminal's other direction, and
+is worth recording because it looks nothing like the first: `output_buffer` had
+**two writers and one dead end**. Keystrokes were written straight to the PTY by
+`to_child`, while the parser's own replies -- the cursor position report, the
+device attributes answer -- were appended to `output_buffer`, which nothing ever
+drained. A full-screen program that asked the terminal where its cursor was
+waited for an answer sitting in a `Vec`. Two ways *out* of a subsystem, one of
+which was never finished, is the same mistake as two ways *in*, one of which is
+never tested. The repair is lesson 101's funnel: `to_child` only queues, and
+`flush_to_child` is the one route out, reached from every arm of the dispatch.
+
+---
+
+### Lesson 103: a test that asks the predicate cannot see which argument the drawing pass gave it (lane C, 2026-08-31)
+
+**In short:** the terminal highlights the text you drag over, and paints its
+cursor only in the lit half of the blink. Two tests said so, both passed, and
+the mutation sweep broke each feature outright without either test noticing.
+Both asked the thing that *decides* -- `is_selected(...)`, and the `blink_on`
+field -- instead of looking at the picture. The drawing pass was left free to
+call that decider with the wrong row, or never call it at all, and every
+assertion stayed true.
+
+| What the user sees | What the test asked | What it could not see |
+|---|---|---|
+| the highlight is on the line you dragged over | `term.is_selected(buffer_row, 0)` | which row `draw_cells` passes it -- the screen row or the buffer row |
+| the cursor blinks | `term.blink_on` after a tick | whether `draw_cursor` consults `blink_on` at all |
+
+Both faults were in the *call*, not in the function: `is_selected(screen_row,
+col)` where the buffer row was meant, and a `draw_cursor` that painted
+regardless. A predicate test pins the predicate, which is worth having -- but
+the call site is where the argument is chosen, and no amount of predicate
+testing reaches it.
+
+**The rule.** *For any state that reaches the user only through the picture, at
+least one test must read the frame.* Concretely: scan
+`frame(w, h).commands()` for the ink -- the selection-coloured `FillRect`, the
+cursor-coloured one -- and assert where it is, or that it is absent.
+
+**How to tell which kind of test you are writing.** Ask what would still be true
+if the drawing pass never called this function at all. If the answer is
+"everything this test asserts", the test is about a helper, not about a feature.
+
+**A third survivor in the same sweep is this blindness in a different costume,**
+and is worth naming because it looks like a *whole-frame* test, which is the
+strong kind: `no_glyph_runs_off_the_window_it_is_drawn_in` bounded every `Text`
+command by `max_width.unwrap_or_else(|| text::measure(glyph, ..))`. Deleting the
+bound from the production code left the test computing a plausible one on its
+behalf -- and one character measured is about one cell wide by definition, so
+an unbounded glyph looked perfectly bounded. When an invariant is about what a
+command *declares*, a computed stand-in for the missing declaration is not a
+convenience, it is the hole (lesson 100's dilution, arriving through a
+`unwrap_or_else` instead of through a weakened assertion). The fix was to fail
+on the `None`.
+
+**Where else to look.** Every app in the wiring campaign: any `is_*`/`should_*`
+predicate the drawing pass consults per item (selected, highlighted, hovered,
+disabled, checked, filtered, expanded) and any field whose only effect is
+whether something is painted (blink, flash, focus ring, unread badge). Grep the
+suite for the predicate's name: if every use is `assert!(x.is_selected(..))` and
+none is a scan of `frame(..).commands()`, the picture is untested. And grep the
+whole-frame tests for `unwrap_or`/`unwrap_or_else`/`unwrap_or_default` on a
+field read out of a `RenderCommand` -- each one is a declaration the test has
+agreed to supply for the code.
+
 ---
 
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)

@@ -53,6 +53,33 @@ pub enum KernelError {
     ///
     /// Maps to `ERANGE`.
     BufferTooSmall = -9,
+    /// The syscall number has no handler registered in the dispatch table.
+    ///
+    /// Returned **only** by `syscall::dispatch::dispatch`, for a number that is
+    /// in range but whose slot is `None`.  It is the kernel saying "I have
+    /// never heard of this call", which is a different fact from a registered
+    /// handler saying "I heard you, and the thing you asked for cannot be done
+    /// here".
+    ///
+    /// Both used to be [`Self::NotSupported`], and the ambiguity was not
+    /// academic: a caller probing for a newer syscall and falling back to an
+    /// older route cannot tell "this kernel predates the call" from "this
+    /// *filesystem* cannot do it", so it either downgrades a genuine refusal
+    /// into a silent fallback, or honours a missing syscall as a real answer.
+    /// The POSIX layer's pinned `*at` fast path had to carry a per-syscall
+    /// latch — "fall back only until the first non-`-2` answer" — purely to
+    /// guess between the two, and a latch is a guess: it is wrong for exactly
+    /// as long as the first answer has not arrived yet.
+    ///
+    /// With a distinct code there is nothing to guess.  `-10` means the call
+    /// does not exist and falling back is correct; `-2` from a registered
+    /// handler is a real answer and must be honoured.
+    ///
+    /// Maps to `ENOSYS`, as `NotSupported` also does — Linux spends one errno
+    /// on both, so the Linux ABI is unchanged by this variant existing.  The
+    /// distinction lives on the *native* ABI, where the raw code is what the
+    /// caller sees.
+    NoSuchSyscall = -10,
 
     // --- Memory (100 - 199) ---
     /// No physical memory available to satisfy the allocation.
@@ -187,6 +214,7 @@ impl KernelError {
             Self::Deadlock => "operation would deadlock",
             Self::Interrupted => "interrupted by signal",
             Self::BufferTooSmall => "output buffer too small for the whole answer",
+            Self::NoSuchSyscall => "no such syscall (no handler registered)",
             Self::OutOfMemory => "out of memory",
             Self::InvalidAddress => "invalid address",
             Self::PageFault => "unresolvable page fault",

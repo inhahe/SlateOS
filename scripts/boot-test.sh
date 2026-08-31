@@ -3667,8 +3667,29 @@ check_shellcheck() {
     printf '%s\n' "$out" >&2
     echo "" >&2
     echo "ERROR: refusing to build.  A script above has a shellcheck finding" >&2
-    echo "at severity *warning* or worse -- the tree was at zero of these, so" >&2
-    echo "this one is newly introduced by the change in hand." >&2
+    echo "at severity *warning* or worse." >&2
+    echo "" >&2
+    # Do NOT tell the reader the finding is theirs.  This message used to end
+    # "the tree was at zero of these, so this one is newly introduced by the
+    # change in hand", and on 2026-08-31 that sentence was simply false: the
+    # two findings then failing lane A's boot test arrived from *another lane*
+    # through a merge of `main`, and `main` itself was already red.  The reader
+    # spent the run reading their own diff, which was clean, because the gate
+    # had told them with total confidence where to look.
+    #
+    # A gate may not assert authorship it has not checked.  It sees a finding;
+    # it does not see who wrote it.  So say what is known, and point at the one
+    # command that settles it -- the merge-base comparison below distinguishes
+    # "you introduced this" from "you inherited a red trunk", which are
+    # different problems with different owners and different fixes.
+    echo "This does NOT necessarily mean your change introduced it: a finding" >&2
+    echo "can arrive from another lane through a merge of 'main', in which case" >&2
+    echo "'main' is red and every lane's boot test is blocked, not just yours." >&2
+    echo "Check which case you are in before reading your own diff:" >&2
+    echo "    git fetch origin && git merge-base --is-ancestor origin/main HEAD" >&2
+    echo "    git stash list  # then compare against origin/main:<script>" >&2
+    echo "If the finding reproduces on origin/main, it is inherited -- repair it" >&2
+    echo "(or file requests/<you>-<owner>-<slug>.md) and say so in the commit." >&2
     echo "" >&2
     echo "'warning' is not a style level: it is where the unquoted expansion" >&2
     echo "that word-splits on a space lives (SC2086), which is the class that" >&2

@@ -102343,3 +102343,44 @@ like defensive code, it is never executed by the suite, and nobody finds out
 which way it fails until a user resizes a window. Prefer a swept grid for any
 claim that is a pure function of the window; keep `SIZES` for claims that need
 a *game* as well as a window, where building the fixture is the expensive part.
+
+---
+
+## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)
+
+**Status:** OPEN 2026-08-31
+
+`execute_sqe` in `kernel/src/ipc/io_ring.rs` (~line 851) ends its opcode match
+with
+
+```rust
+_ => KernelError::NotSupported.code() as i64,
+```
+
+so an SQE naming an opcode this kernel has never heard of completes with `-2` —
+the same CQE result a *registered* opcode's handler gives when it ran and could
+not do the thing. That is exactly the ambiguity design-decisions.md §656 removed
+from the syscall dispatch table, wearing a different hat: a caller probing
+whether this kernel supports, say, `IO_OP_FH_PWRITE` cannot tell "no such
+opcode, fall back to the synchronous route" from "the opcode exists and this
+file refused", and the two demand opposite responses.
+
+**Why it was not swept into §656.** The syscall change had two callers asking
+for it, a promise outstanding to lane B, and a boot self-test to pin it. This
+has none of those, and it is a different return contract with different
+callers — the CQE `res` field, not a syscall return value. Changing it in the
+same commit would have been a behavioural change nobody requested, decided by
+analogy rather than on its own evidence, and buried inside a commit about
+something else.
+
+**Proper fix.** Return `KernelError::NoSuchSyscall` from that arm (the variant
+is about an unregistered *entry point*, and an io_uring opcode is one, though
+the name reads as syscall-specific and may deserve widening if this lands), and
+add an assertion to `io_ring`'s self-test in the shape of
+`test_dispatch_unimplemented`: an unknown opcode gives -10, -10 is not -2, and
+the Linux-ABI mapping is unchanged. Check first whether any caller in
+`userspace/` or `posix/` probes CQE `res == -2`; if one does, it needs the same
+two-lines treatment lane B is getting for the syscall half.
+
+**Trigger:** a caller that needs to feature-probe io_uring opcodes, or the next
+time someone writes a fallback path around a CQE result.

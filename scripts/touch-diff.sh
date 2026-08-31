@@ -108,6 +108,11 @@ mktree() {
   # `./` because `readonly` is also a shell builtin, and a redirection whose
   # target is spelled like one is how `foo > kill` gets written when a pipe was
   # meant (SC2238). The prefix names the same file and cannot be misread.
+  #
+  # Lane A quoted it instead, on `main`, to un-red the trunk while this branch
+  # was unmerged (`requests/a-b-i-edited-two-of-your-diff-harnesses-…`). Same
+  # file, same fixture; this resolution keeps the `./` form and the comment,
+  # because the comment is what stops the next reader from unquoting it again.
   printf 'ro\n' > ./readonly
 
   /usr/bin/touch -a -d '2001-02-03 04:05:06.111111111' file

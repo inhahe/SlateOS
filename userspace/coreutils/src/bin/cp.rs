@@ -175,9 +175,9 @@
 //! `-P`/`--no-dereference`, `-H` and `-L`/`--dereference`, the four
 //! overwrite policies `-f`/`--force`, `-n`/`--no-clobber`,
 //! `-i`/`--interactive` and `--remove-destination`,
-//! `-p`/`--preserve`/`--no-preserve` for the three attributes POSIX names plus
-//! `links`, and `-d`, which is the last two together.
-//! The rest are recognised and rejected with a message
+//! `-p`/`--preserve`/`--no-preserve` for the five attributes this `cp` can
+//! carry, `-d`, which is two of them together, and `-a`/`--archive`, which is
+//! all of them and `-dR`. The rest are recognised and rejected with a message
 //! saying they are not implemented, rather than ignored, and they are listed in
 //! [`LONG_OPTIONS`] anyway because the table is what decides whether an
 //! abbreviation is ambiguous.
@@ -185,18 +185,23 @@
 //! Ignoring them would be worse than refusing in almost every case: `-l` and
 //! `-s` ask for a link rather than a copy, and `--sparse=always` asks for a
 //! file whose holes survive. Every one of those, ignored, produces a
-//! destination that looks right and is not. `-a` is `-dR --preserve=all`, and
-//! so waits on `all` — honouring the `-dR` half alone would silently drop the
-//! attributes the option's whole point is to carry.
+//! destination that looks right and is not.
 //!
 //! `--preserve` is the one option that is *partly* here, so it is refused a
-//! word at a time rather than whole: `--preserve=mode,timestamps,ownership`
-//! and `--preserve=links` work, `--preserve=xattr` and `--preserve=context`
-//! and `--preserve=all` do not. A whole-option refusal would send a user who
-//! asked for the four attributes that exist to look for another `cp`.
-//! `--no-preserve=` takes every word, including the three above: refusing to
-//! *stop* doing something this `cp` never does would be a refusal with no
-//! meaning behind it.
+//! word at a time rather than whole: six of GNU's seven words work, and
+//! `--preserve=context` does not. There are no security contexts on this
+//! system to carry, and a `--preserve` that silently carried nothing would
+//! report success for a copy that dropped the one thing it was told to keep.
+//! A whole-option refusal would instead send a user who asked for the six
+//! attributes that do exist to look for another `cp`.
+//! `--no-preserve=context` is taken rather than refused: refusing to *stop*
+//! doing something this `cp` never does would be a refusal with no meaning
+//! behind it.
+//!
+//! Note that `--preserve=all` is among the six. That is not this port
+//! rounding up — GNU's own `PRESERVE_ALL` guards the security-context line
+//! with `if (selinux_enabled)`, so on a machine without SELinux `all` does not
+//! ask for a context either.
 //!
 //! # The four overwrite policies are four different options
 //!
@@ -244,7 +249,7 @@ use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fsattr::{self, Link, On, Owner, When};
 use coreutils::getopt::{self, Opt, Program, Takes};
-use coreutils::quote::{os_bytes, quoteaf_os, quotef_os};
+use coreutils::quote::{os_bytes, quoteaf, quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
 use coreutils::yesno::{Answers, StdinAnswers, yesno};
 use std::collections::{HashMap, HashSet};
@@ -420,13 +425,14 @@ const PRESERVE_WORDS: &[(&str, Attribute)] = &[
 
 /// Which of a source's attributes are put back onto the copy.
 ///
-/// Four of GNU's seven words: the three POSIX names as the attributes `cp -p`
+/// Five of GNU's seven words: the three POSIX names as the attributes `cp -p`
 /// must restore — permission bits with the set-user-ID, set-group-ID and sticky
-/// bits, the owner and group, and the two timestamps — and `links`, which is
-/// not one of them and is the only one of the four that changes what ends up on
-/// disk rather than what is attached to it. The remaining three are refused at
-/// parse time rather than represented here — see [`decode_preserve`] — so no
-/// code downstream has to ask what to do about an attribute it cannot write.
+/// bits, the owner and group, and the two timestamps — plus `links`, which is
+/// not one of them and is the only one that changes what ends up on disk rather
+/// than what is attached to it, and `xattr`. Of the two that are not here,
+/// `all` is not an attribute but the other six at once, and `context` is
+/// refused at parse time rather than represented — see [`decode_preserve`] — so
+/// no code downstream has to ask what to do about an attribute it cannot write.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
 struct Preserve {
@@ -450,6 +456,16 @@ struct Preserve {
     /// is the one word whose effect is visible in `ls -i` rather than in
     /// `ls -l`.
     links: bool,
+    /// `--preserve=xattr`: the extended attributes — *except* the two that are
+    /// the file's permissions rather than data about it.
+    ///
+    /// Those two, `system.posix_acl_access` and `system.posix_acl_default`, go
+    /// with [`Self::mode`] instead, which is not a tidying but gnulib's own
+    /// split: `qcopy_acl` chmods and then copies the permission-class names,
+    /// while `copy_attr` copies everything else. See [`fsattr::Xattrs`].
+    /// Carrying ACLs here would make `--preserve=xattr` change a file's
+    /// permissions, which is not what its name says it does.
+    xattr: bool,
 }
 
 impl Preserve {
@@ -464,19 +480,37 @@ impl Preserve {
         timestamps: false,
         ownership: false,
         links: false,
+        xattr: false,
+    };
+
+    /// Every attribute this `cp` can carry: what `--preserve=all` and `-a` ask
+    /// for.
+    ///
+    /// All five and not GNU's seven, which is GNU's own arithmetic rather than
+    /// a shortfall — see the `Attribute::All` arm of [`decode_preserve`] for
+    /// why `context` is not among them on a machine without SELinux, and
+    /// [`Preserve`] for why the seventh word is not an attribute at all.
+    const ALL: Self = Preserve {
+        mode: true,
+        timestamps: true,
+        ownership: true,
+        links: true,
+        xattr: true,
     };
 
     /// What `-p`, and a bare `--preserve` with no list, ask for (`cp.c:1092`).
     ///
-    /// `links: false` is not an omission. GNU's `-p` is `preserve_mode`,
+    /// The two `false`s are not omissions. GNU's `-p` is `preserve_mode`,
     /// `preserve_timestamps` and `preserve_ownership`, and `--preserve=links`
-    /// has to be asked for by name or through `-d`/`-a`.
+    /// and `--preserve=xattr` have to be asked for by name or through
+    /// `-d`/`-a`.
     const fn posix() -> Self {
         Preserve {
             mode: true,
             timestamps: true,
             ownership: true,
             links: false,
+            xattr: false,
         }
     }
 
@@ -500,6 +534,7 @@ impl Preserve {
         self.timestamps |= p.timestamps;
         self.ownership |= p.ownership;
         self.links |= p.links;
+        self.xattr |= p.xattr;
     }
 }
 
@@ -559,6 +594,25 @@ struct CpFlags {
     /// the times could not be set and `cp --no-preserve=xattr a b` exiting 0,
     /// and it is why this is a flag rather than a constant `true`.
     require_preserve: bool,
+    /// GNU's `require_preserve_xattr`: whether a failure to carry an *extended
+    /// attribute* is an error rather than a warning.
+    ///
+    /// A second flag beside [`Self::require_preserve`] because GNU sets them in
+    /// different places. `--preserve=xattr` sets this one inside
+    /// `decode_preserve_arg` (`cp.c:PRESERVE_XATTR`); `--preserve=all` and `-a`
+    /// turn extended attributes *on* without setting it, so they carry them
+    /// best-effort. That is the whole difference between `cp --preserve=xattr`
+    /// on a destination filesystem with no attribute support — which fails —
+    /// and `cp -a` onto the same place, which succeeds.
+    require_preserve_xattr: bool,
+    /// GNU's `reduce_diagnostics`: say nothing at all about an extended
+    /// attribute that could not be carried.
+    ///
+    /// Set only by `-a`, whose own comment in GNU is "like `-dR --preserve=all`
+    /// with reduced failure diagnostics" (`cp.c:1063`). `cp -a` onto a FAT
+    /// stick would otherwise print a line per file about attributes the user
+    /// never mentioned, on a copy that succeeded.
+    reduce_diagnostics: bool,
 }
 
 impl CpFlags {
@@ -841,6 +895,25 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 };
                 decode_preserve(&list, false, &mut flags)?;
             }
+            // `-a` is not a synonym for `-dR --preserve=all` — GNU's own
+            // comment calls it "like" that, and the difference is the word
+            // *like*. `case 'a'` (`cp.c:1063`) sets the same seven fields and
+            // one more: `reduce_diagnostics`, which nothing else in `cp` sets.
+            // So `cp -a` and `cp -dR --preserve=all` copy the same bytes with
+            // the same attributes and differ in what they say when an extended
+            // attribute cannot be carried — the first says nothing, the second
+            // complains. See [`CpFlags::reduce_diagnostics`].
+            //
+            // [`Preserve::ALL`] rather than [`Preserve::add_posix`]: this sets
+            // five where `-p` sets three, and `require_preserve` is the `-p`
+            // half of it.
+            Opt::Short(b'a', _) | Opt::Long("archive", _) => {
+                flags.dereference = Deref::Never;
+                flags.recursive = true;
+                flags.preserve = Preserve::ALL;
+                flags.require_preserve = true;
+                flags.reduce_diagnostics = true;
+            }
             Opt::Long("help", _) => return Ok(Request::Help),
             Opt::Long("version", _) => return Ok(Request::Version),
             // Everything else in the two tables is an option GNU has and this
@@ -898,10 +971,10 @@ fn unimplemented_attribute(word: &str, because: &str) -> getopt::Error {
 /// The asymmetry between the two directions is deliberate and is the module
 /// docs' point about refusing a word at a time. Switching an attribute **on**
 /// can be refused, because this `cp` might not be able to do it. Switching one
-/// **off** never can: `--no-preserve=xattr` asks this `cp` to stop doing
+/// **off** never can: `--no-preserve=context` asks this `cp` to stop doing
 /// something it has never done, and answering "not implemented" to that would
-/// be refusing to obey an instruction that has already been obeyed. So the four
-/// words below are accepted, and ignored, in the `off` direction only.
+/// be refusing to obey an instruction that has already been obeyed. `context`
+/// is the one word left that this applies to.
 ///
 /// # Errors
 ///
@@ -928,41 +1001,47 @@ fn decode_preserve(list: &OsString, on: bool, flags: &mut CpFlags) -> Result<(),
             Attribute::Timestamps => flags.preserve.timestamps = on,
             Attribute::Ownership => flags.preserve.ownership = on,
             Attribute::Links => flags.preserve.links = on,
-            // Extended attributes and the SELinux security context. This `cp`
-            // reads neither, and GNU's own `--preserve=xattr` sets
-            // `require_preserve_xattr`, so silently dropping them would turn an
-            // option whose whole purpose is to *fail* when it cannot into one
-            // that always succeeds.
-            Attribute::Context | Attribute::Xattr if on => {
+            // GNU's `PRESERVE_XATTR` sets *two* fields, and the second is why
+            // `--preserve=xattr` is not just `--preserve=all` narrowed: naming
+            // the word promises to fail if the attributes cannot be carried,
+            // where `all` carries them best-effort. See
+            // [`CpFlags::require_preserve_xattr`].
+            Attribute::Xattr => {
+                flags.preserve.xattr = on;
+                flags.require_preserve_xattr = on;
+            }
+            // The SELinux security context. Alone among the seven in still
+            // being refused, and for the reason the module docs give: this
+            // kernel has no security contexts to read, and a `--preserve` that
+            // silently carried nothing would report success for a copy that
+            // dropped the thing it was asked to keep.
+            Attribute::Context if on => {
                 return Err(unimplemented_attribute(&spelling, ""));
             }
-            // `all` is the other six words at once (`cp.c`'s `PRESERVE_ALL`),
-            // and four of them now work. It stays refused for `xattr`, which
-            // does not — and *not* for `context`, which GNU itself only sets
-            // when the system has SELinux enabled.
+            // `all` is the other six words at once (`cp.c`'s `PRESERVE_ALL`).
+            // It is *not* `context` as well on this system, and that is GNU's
+            // own rule rather than a shortcut: its `PRESERVE_ALL` arm guards
+            // the security-context line with `if (selinux_enabled)`, so on a
+            // machine without SELinux `--preserve=all` does not ask for one
+            // either. That is what makes `all` implementable while `context`
+            // by name is not.
             //
-            // The refusal is a harder call than it was, because `--preserve=all`
-            // does not set `require_preserve_xattr` the way `--preserve=xattr`
-            // does: under `all`, GNU copies extended attributes best-effort and
-            // succeeds either way. So an `all` that ignored them would agree
-            // with GNU on every source that has none, and differ in silence on
-            // one that has some. Silence is what makes it worth refusing: a
-            // dropped ACL is a permission change that nothing reports.
-            Attribute::All if on => {
-                return Err(unimplemented_attribute(
-                    &spelling,
-                    ": it includes 'xattr', which is not",
-                ));
-            }
-            // The `off` direction, for the two words above and for `all`.
-            // `--no-preserve=all` does have an effect beyond the four fields:
-            // it is also `--no-preserve=mode`, whose `explicit_no_preserve_mode`
-            // is a behaviour of its own rather than the absence of one.
-            Attribute::Context | Attribute::Xattr => {}
+            // An assignment rather than a delegation to [`Preserve::add_posix`]
+            // because this arm is the `off` direction too, and `add_posix` only
+            // turns things on. `all` and `no-preserve=all` are the two ends of
+            // the range, so they are the two constants.
             Attribute::All => {
-                flags.preserve = Preserve::NONE;
-                flags.explicit_no_preserve_mode = true;
+                flags.preserve = if on { Preserve::ALL } else { Preserve::NONE };
+                flags.explicit_no_preserve_mode = !on;
+                // Deliberately not `require_preserve_xattr`: GNU's
+                // `PRESERVE_ALL` sets `preserve_xattr` and stops there.
             }
+            // The `off` direction for `context`, which is the one word left
+            // that this `cp` cannot do. Accepted rather than refused —
+            // `--no-preserve=context` asks it to stop doing something it has
+            // never done, and answering "not implemented" to that would be
+            // refusing an instruction that is already obeyed.
+            Attribute::Context => {}
         }
     }
     Ok(())
@@ -2362,10 +2441,11 @@ fn place_bytes<O: Write, E: Write>(
         // Unconditional where the tail's is guarded by "the owner differs":
         // the link was made a line ago, so it is new by construction, and GNU's
         // guard is `new_dst || …` in the first place.
+        let src = Source::new(On::Path(src_path, Link::NoFollow), src_path, metadata);
         if job.flags.preserve.ownership
             && chown_to_source(
+                src,
                 On::Path(target, Link::NoFollow),
-                metadata,
                 target,
                 Made::Symlink,
                 true,
@@ -2375,8 +2455,8 @@ fn place_bytes<O: Write, E: Write>(
             return false;
         }
         return preserve_attributes(
+            src,
             On::Path(target, Link::NoFollow),
-            metadata,
             target,
             Made::Symlink,
             true,
@@ -2396,8 +2476,8 @@ fn place_bytes<O: Write, E: Write>(
         // the times before filling it would stamp them with a value the next
         // `mkdir` inside overwrites.
         let stamped = preserve_attributes(
+            Source::new(On::Path(src_path, Link::Follow), src_path, metadata),
             On::Path(target, Link::Follow),
-            metadata,
             target,
             Made::Directory,
             new,
@@ -3155,8 +3235,8 @@ fn copy_regular_file<O: Write, E: Write>(
     // `copy_internal`, whose tail is skipped for a regular file
     // (`copy.c:3233`, `if (copied_as_regular) return delayed_ok;`).
     preserve_attributes(
+        Source::new(On::File(&input), src, src_meta),
         On::File(&output),
-        src_meta,
         dst,
         Made::Regular,
         new_dst,
@@ -3167,41 +3247,86 @@ fn copy_regular_file<O: Write, E: Write>(
 
 // ------------------------------------------------------------ preserving ---
 
+/// The source of a copy, as the tail that puts its attributes back needs it.
+///
+/// Four things that always travel together and always describe the same file:
+/// what to read its attributes *through*, what to call it in a diagnostic that
+/// blames it, the `stat` the copy has already taken of it, and the mode the
+/// destination is meant to end with.
+///
+/// The last is here rather than as a parameter beside it because it starts as
+/// the source's mode and is then narrowed in one place — a `chown` that could
+/// not be done takes the set-user-ID, set-group-ID and sticky bits off it, see
+/// [`Chowned`] — and every step after that must see the narrowed value. GNU
+/// keeps it in one `src_mode` local through the same run of steps, for the same
+/// reason.
+#[derive(Clone, Copy)]
+struct Source<'a> {
+    /// A **descriptor** for a regular file — the one its bytes were read
+    /// through — and a *path* for a directory or a symlink, which have none
+    /// here. See [`fsattr::On`].
+    on: On<'a>,
+    /// What to call it in a diagnostic. Only the extended-attribute steps blame
+    /// the source by name; every other sentence in the tail names the
+    /// destination, because every other step writes to it.
+    name: &'a Path,
+    /// The `stat` the copy already took. Its timestamps and owner are what the
+    /// tail writes; its mode seeded [`Self::mode`].
+    meta: &'a fs::Metadata,
+    /// The permission bits the destination is to end with — the source's, less
+    /// whatever an impossible `chown` has since taken off them.
+    mode: u32,
+}
+
+impl<'a> Source<'a> {
+    /// A source about to have its attributes copied, before anything has
+    /// narrowed the mode.
+    fn new(on: On<'a>, name: &'a Path, meta: &'a fs::Metadata) -> Self {
+        Source {
+            on,
+            name,
+            meta,
+            mode: permission_bits(meta),
+        }
+    }
+}
+
 /// Put back onto the finished destination whatever `-p` asked to keep: the
-/// timestamps, then the ownership, then the mode.
+/// timestamps, then the ownership, then the extended attributes, then the mode.
 ///
-/// **The order is correctness, not arrangement**, and GNU leaves the reason in
-/// one line above it (`copy.c:3245`): "chown turns off set[ug]id bits for
-/// non-root, so do the chmod last". A `chmod` written before the `chown`
-/// compiles, runs, and quietly drops the set-user-ID bit off every copy a
-/// non-root user makes.
+/// **The order is correctness, not arrangement**, and GNU leaves the reason for
+/// each step in a line above it. Two reasons, and they point the same way:
 ///
-/// `on` is a **descriptor** for a regular file — the one its bytes were just
-/// written through — and a *path* for a directory or a symlink, which have none
-/// here. That is GNU's own split, and it is a security property rather than a
-/// saved syscall; see [`fsattr::On`].
+/// * `copy.c:3211` — "chown turns off set[ug]id bits for non-root, so do the
+///   chmod last". A `chmod` written before the `chown` compiles, runs, and
+///   quietly drops the set-user-ID bit off every copy a non-root user makes.
+/// * `copy.c:3244` — "Set xattrs after ownership as changing owners will clear
+///   capabilities". A `setxattr` written before the `chown` loses
+///   `security.capability`, which the kernel strips when a file changes hands.
+///
+/// `on` is the destination in the matching form: a descriptor for a regular
+/// file, a path for a directory or a symlink. That is GNU's own split, and it
+/// is a security property rather than a saved syscall; see [`fsattr::On`].
 ///
 /// Returns `false` only for a failure that is fatal, which is what
-/// [`CpFlags::require_preserve`] decides: the diagnostic is printed either way,
-/// but only an attribute the user asked for *by name* turns a copy that
-/// happened into an exit status of 1.
+/// [`CpFlags::require_preserve`] and [`CpFlags::require_preserve_xattr`] decide:
+/// the diagnostic is printed either way, but only an attribute the user asked
+/// for *by name* turns a copy that happened into an exit status of 1.
 fn preserve_attributes<O: Write, E: Write>(
+    mut src: Source<'_>,
     on: On<'_>,
-    src_meta: &fs::Metadata,
     dst: &Path,
     made: Made,
     new_dst: bool,
     debt: &mut ModeDebt,
     job: &mut Job<'_, O, E>,
 ) -> bool {
-    let mut src_mode = permission_bits(src_meta);
-
     if job.flags.preserve.timestamps {
         // `and_then` because a source whose timestamps cannot even be read is
         // the same failure to the user as one whose copy cannot be stamped:
         // the destination has the wrong times either way, and `preserving
         // times for` is the sentence for that.
-        if let Err(e) = source_times(src_meta).and_then(|times| fsattr::set_times(on, times)) {
+        if let Err(e) = source_times(src.meta).and_then(|times| fsattr::set_times(on, times)) {
             let why = strerror(&e);
             let _ = writeln!(
                 job.err,
@@ -3214,29 +3339,159 @@ fn preserve_attributes<O: Write, E: Write>(
         }
     }
 
-    // A symlink's owner was set where the link was made, and nothing portable
-    // can set a symlink's mode — Linux has no working `lchmod` at all. GNU
-    // stops in the same two places: its ownership step is guarded by
-    // `!dest_is_symlink`, and `if (dest_is_symlink) return delayed_ok;`
-    // (`copy.c:3285`) sits above the mode block under the comment "The
-    // operations beyond this point may dereference a symlink."
-    if made == Made::Symlink {
-        return true;
-    }
-
-    if job.flags.preserve.ownership && (new_dst || owner_differs(on, src_meta)) {
-        match chown_to_source(on, src_meta, dst, made, new_dst, job) {
+    // A symlink's owner was set where the link was made, so GNU's ownership
+    // step is guarded by `!dest_is_symlink` and this one is guarded the same
+    // way. Note that the guard is *here* rather than an early return above:
+    // the extended-attribute step below applies to a symlink destination and
+    // GNU runs it for one.
+    if made != Made::Symlink
+        && job.flags.preserve.ownership
+        && (new_dst || owner_differs(on, src.meta))
+    {
+        match chown_to_source(src, on, dst, made, new_dst, job) {
             Chowned::Done => {}
             // GNU's `case 0`: the copy continues, but *narrower* than its
             // source. A user who could not be given the file cannot be handed
             // its set-user-ID bit either — that would be a privilege nobody
             // granted, on a file that is now theirs.
-            Chowned::Disowned => src_mode &= !0o7000,
+            Chowned::Disowned => src.mode &= !0o7000,
             Chowned::Failed => return false,
         }
     }
 
-    settle_mode(on, src_mode, dst, made, new_dst, debt, job)
+    // A failure here is only *fatal* if the user named `xattr` — GNU's two call
+    // sites both write `! copy_attr (…) && x->require_preserve_xattr`
+    // (`copy.c:1657` and `copy.c:3246`). Under `--preserve=all` the diagnostic
+    // is printed and the copy still succeeds, which is the whole difference
+    // between asking for everything and asking for this.
+    let fatal = job.flags.preserve.xattr
+        && !copy_xattrs(src, on, dst, fsattr::Xattrs::Ordinary, job)
+        && job.flags.require_preserve_xattr;
+
+    // Where the two call sites *do* differ is what a fatal one does next, and
+    // this reproduces the difference rather than tidying it. `copy_internal`
+    // returns out of the function, so a directory whose attributes could not be
+    // carried does not get its mode preserved either; `copy_reg` sets
+    // `return_val = false` and carries on to the mode step, so a regular file
+    // does. That is observable in `ls -l`, and matching only one of the two
+    // would change what one of the kinds comes out as.
+    if fatal && made != Made::Regular {
+        return false;
+    }
+
+    // "The operations beyond this point may dereference a symlink"
+    // (`copy.c:3251`), and nothing portable can set a symlink's mode in any
+    // case — Linux has no working `lchmod` at all.
+    if made == Made::Symlink {
+        return true;
+    }
+
+    settle_mode(src, on, dst, made, new_dst, debt, job) && !fatal
+}
+
+/// Carry the extended attributes of one class from the source to the copy, and
+/// say as much about the ones that would not go as the options asked for.
+///
+/// gnulib decides how loud to be by picking one of three error callbacks
+/// (`copy.c:3700`), which reads as two booleans and is three behaviours:
+///
+/// | Asked for | Printed | Exit status |
+/// |---|---|---|
+/// | `--preserve=xattr` | every failure | 1 |
+/// | `--preserve=all` | all but "this filesystem has none" | 0 |
+/// | `-a` | nothing at all | 0 |
+///
+/// The middle row's exception is gnulib's `errno_unsupported`, `ENOTSUP ||
+/// ENODATA` — not the same test as [`fsattr`]'s, which decides whether there is
+/// a failure at all rather than whether to mention one.
+///
+/// Returns `false` if anything at all failed, printed or not, which is what
+/// gnulib's `copy_attr` returns; the caller turns that into an exit status only
+/// under `--preserve=xattr`.
+fn copy_xattrs<O: Write, E: Write>(
+    src: Source<'_>,
+    on: On<'_>,
+    dst: &Path,
+    which: fsattr::Xattrs,
+    job: &mut Job<'_, O, E>,
+) -> bool {
+    // libattr's path form is `l*` throughout, so the source and the destination
+    // are both named without following a link. Handed to [`fsattr`] explicitly
+    // rather than left to the caller: for a symlink destination the difference
+    // is the whole meaning of the call, and for the two other kinds the two
+    // forms name the same file, so nothing else in the tail has had to care.
+    let failures = fsattr::copy_xattrs(nofollow(src.on), nofollow(on), which);
+    if failures.is_empty() {
+        return true;
+    }
+
+    let all_errors = job.flags.require_preserve_xattr;
+    let some_errors = !all_errors && !job.flags.reduce_diagnostics;
+    for failure in &failures {
+        if all_errors || (some_errors && !errno_unsupported(&failure.err)) {
+            let why = strerror(&failure.err);
+            let what = xattr_sentence(&failure.at, src.name, dst);
+            let _ = writeln!(job.err, "cp: {what}: {why}");
+        }
+    }
+    false
+}
+
+/// Name a file without following it, whatever form the rest of the tail is
+/// using. A descriptor already names one file and cannot be redirected.
+fn nofollow(on: On<'_>) -> On<'_> {
+    match on {
+        On::Path(path, _) => On::Path(path, Link::NoFollow),
+        On::File(file) => On::File(file),
+    }
+}
+
+/// libattr's four sentences, filled in. They are not interchangeable: two name
+/// the attribute and two do not, and two blame the source while two blame the
+/// destination.
+fn xattr_sentence(at: &fsattr::XattrStep, src: &Path, dst: &Path) -> String {
+    // The attribute name goes through `quoteaf` for the same reason the file
+    // names do — coreutils gives libattr `copy_attr_quote`, which is `quoteaf`,
+    // and libattr quotes the name with it as well as the path.
+    match at {
+        fsattr::XattrStep::List => format!("listing attributes of {}", quoteaf_os(src)),
+        fsattr::XattrStep::Get(name) => format!(
+            "getting attribute {} of {}",
+            quoteaf(name),
+            quoteaf_os(src)
+        ),
+        fsattr::XattrStep::Set(name) => format!(
+            "setting attribute {} for {}",
+            quoteaf(name),
+            quoteaf_os(dst)
+        ),
+        fsattr::XattrStep::SetAll => format!("setting attributes for {}", quoteaf_os(dst)),
+    }
+}
+
+/// gnulib's `errno_unsupported` (`copy.c:700`): the two errors that mean the
+/// filesystem has nothing to say rather than that something went wrong.
+///
+/// `ENODATA` is in it and is not in [`fsattr`]'s equivalent, which is the
+/// difference between the two tests. It cannot come from the initial
+/// `listxattr` — a filesystem does not answer "no such attribute" to a request
+/// for the list — but it can come from a `getxattr` for a name that was removed
+/// between the listing and the read, and a copy losing a race with `setfattr -x`
+/// is not a failure worth a diagnostic.
+fn errno_unsupported(e: &io::Error) -> bool {
+    e.raw_os_error()
+        .is_some_and(|n| n == libc_enotsup() || n == libc_enodata())
+}
+
+/// `ENOTSUP` (== `EOPNOTSUPP`) on Linux. Named here rather than pulled from a
+/// `libc` crate for the same reason [`libc_eloop`] is.
+const fn libc_enotsup() -> i32 {
+    95
+}
+
+/// `ENODATA` on Linux — "the attribute you named is not there".
+const fn libc_enodata() -> i32 {
+    61
 }
 
 /// The source's two timestamps, in the form [`fsattr::set_times`] takes.
@@ -3281,8 +3536,8 @@ enum Chowned {
 
 /// Give `on` the source's owner and group. See [`Chowned`] for the outcomes.
 fn chown_to_source<O: Write, E: Write>(
+    src: Source<'_>,
     on: On<'_>,
-    src_meta: &fs::Metadata,
     dst: &Path,
     made: Made,
     new_dst: bool,
@@ -3298,11 +3553,11 @@ fn chown_to_source<O: Write, E: Write>(
     // while it still wears its old mode is a window in which the new owner
     // holds permissions the copy will never have. GNU calls it exactly that —
     // "a window of vulnerability" — and closes it here (`copy.c:900`).
-    if !new_dst && job.flags.preserve.mode && !narrow_before_chown(on, src_meta, dst, job) {
+    if !new_dst && job.flags.preserve.mode && !narrow_before_chown(src, on, dst, job) {
         return fatal;
     }
 
-    let want = owner_of(src_meta);
+    let want = owner_of(src.meta);
     let Err(e) = fsattr::set_owner(on, want) else {
         return Chowned::Done;
     };
@@ -3358,8 +3613,8 @@ fn chown_to_source<O: Write, E: Write>(
 /// Returns `false` when the narrowing failed, in which case the caller must not
 /// chown at all.
 fn narrow_before_chown<O: Write, E: Write>(
+    src: Source<'_>,
     on: On<'_>,
-    src_meta: &fs::Metadata,
     dst: &Path,
     job: &mut Job<'_, O, E>,
 ) -> bool {
@@ -3371,12 +3626,21 @@ fn narrow_before_chown<O: Write, E: Write>(
             return false;
         }
     };
-    let new = permission_bits(src_meta);
+    let new = src.mode;
     // GNU's condition, less its `USE_ACL ||` half: with access-control lists
     // compiled in it narrows unconditionally, because an ACL can grant what no
     // mode bit shows. This `cp` copies no ACLs, so the bits are the whole
     // story and there is nothing to be careful about when the old mode already
     // grants no more than the new one and carries no special bit.
+    //
+    // The `USE_ACL` half is not only about the window, and whoever adds ACL
+    // support here must restore it rather than reason about the window again:
+    // GNU narrows with `qset_acl`, which *replaces* the destination's access
+    // ACL with the minimal one its mode implies and deletes a directory's
+    // default ACL. That call is the only thing that takes an existing
+    // destination's ACL entries off, so without it a `cp -p` onto a file
+    // somebody had granted a named user access to would leave that grant on
+    // the copy.
     if old & 0o7777 & (!new | 0o7000) == 0 {
         return true;
     }
@@ -3420,8 +3684,8 @@ fn narrow_before_chown<O: Write, E: Write>(
 /// file's is predictable, and `copy_reg`, holding a descriptor, simply writes
 /// `src_mode & 0o777 & ~umask` without a stat. The two agree on the answer.
 fn settle_mode<O: Write, E: Write>(
+    src: Source<'_>,
     on: On<'_>,
-    src_mode: u32,
     dst: &Path,
     made: Made,
     new_dst: bool,
@@ -3434,7 +3698,7 @@ fn settle_mode<O: Write, E: Write>(
         // the *unquoted* style, `quotef`, for a name. Matched rather than
         // tidied: a utility that differs from GNU only in the punctuation of a
         // diagnostic is still one whose output a script cannot match on.
-        if let Err(e) = fsattr::set_mode(on, src_mode) {
+        if let Err(e) = fsattr::set_mode(on, src.mode) {
             let why = strerror(&e);
             let _ = writeln!(
                 job.err,
@@ -3486,7 +3750,7 @@ fn settle_mode<O: Write, E: Write>(
         if debt.omitted == 0 {
             return true;
         }
-        return chmod_settling(on, src_mode & 0o777 & !cached_umask(), dst, job);
+        return chmod_settling(on, src.mode & 0o777 & !cached_umask(), dst, job);
     }
 
     // The stat is what a *debt* needs; the chmod below is what a *forced* mode
@@ -4089,15 +4353,16 @@ mod tests {
     }
 
     /// Ignoring any of these would produce a destination that looks right and is
-    /// not — `-i` silently overwrites, `-l` and `-s` silently copy instead of
-    /// linking, `-a` silently drops the hard links it promised to keep.
+    /// not — `-b` silently overwrites the backup it promised, `-l` and `-s`
+    /// silently copy instead of linking, `-u` silently copies a file it was
+    /// told to leave alone.
     #[test]
     fn unimplemented_short_options_are_rejected_by_name() {
         for flag in [
             // `-S` is here with a value attached: it takes a required one, so
             // bare `-S` would swallow the operand after it and this would be an
             // arity test rather than a rejection test.
-            "-a", "-b", "-l", "-s", "-S.bak", "-u", "-x", "-Z",
+            "-b", "-l", "-s", "-S.bak", "-u", "-x", "-Z",
         ] {
             let e = fail(&[flag, "a", "b"]);
             assert!(
@@ -4111,7 +4376,6 @@ mod tests {
     #[test]
     fn unimplemented_long_options_are_rejected_by_name() {
         for name in [
-            "--archive",
             "--attributes-only",
             "--backup",
             "--copy-contents",
@@ -4221,8 +4485,7 @@ mod tests {
             Preserve {
                 mode: true,
                 timestamps: true,
-                ownership: false,
-                links: false
+                ..Preserve::NONE
             }
         );
         let (g, _) = run_parse(&["--preserve=m,t,o", "a", "b"]);
@@ -4263,35 +4526,92 @@ mod tests {
         );
     }
 
-    /// `--no-preserve=all` turns off the three that exist and sets the mode
-    /// flag, which is `decode_preserve_arg`'s `PRESERVE_ALL` arm.
+    /// `--no-preserve=all` turns off all five and sets the mode flag, which is
+    /// `decode_preserve_arg`'s `PRESERVE_ALL` arm in its `off` direction.
     #[test]
     fn no_preserve_all_turns_everything_off() {
-        let (f, _) = run_parse(&["-p", "--no-preserve=all", "a", "b"]);
+        let (f, _) = run_parse(&["-a", "--no-preserve=all", "a", "b"]);
         assert_eq!(f.preserve, Preserve::NONE);
         assert!(f.explicit_no_preserve_mode);
     }
 
-    /// The attributes this `cp` cannot write are refused **on `--preserve` and
-    /// accepted on `--no-preserve`**, which is not an inconsistency:
-    /// `--no-preserve=xattr` asks for something already true.
+    /// `--preserve=all` is every attribute at once, and `-a` is that plus
+    /// `-dR`. The one thing `all` is *not* is `context`: GNU's `PRESERVE_ALL`
+    /// guards the security-context line with `if (selinux_enabled)`, so on a
+    /// machine without SELinux it does not ask for one either.
     #[test]
-    fn the_unwritable_attributes_are_refused_one_way_only() {
-        for word in ["context", "xattr", "all"] {
-            let e = fail(&[&format!("--preserve={word}"), "a", "b"]);
-            assert!(
-                e.sentence.contains("not implemented"),
-                "--preserve={word}: {:?}",
-                e.sentence
-            );
-            assert!(
-                e.sentence.contains(word),
-                "the diagnostic names the word, not the option: {:?}",
-                e.sentence
-            );
-            let (f, _) = run_parse(&[&format!("--no-preserve={word}"), "a", "b"]);
-            assert!(!f.require_preserve, "--no-preserve={word}");
+    fn preserve_all_is_every_attribute_this_cp_has() {
+        let (f, _) = run_parse(&["--preserve=all", "a", "b"]);
+        assert_eq!(f.preserve, Preserve::ALL);
+        assert!(f.require_preserve);
+        assert!(!f.explicit_no_preserve_mode);
+    }
+
+    /// `-a` is "like `-dR --preserve=all`", and the difference is the word
+    /// *like*: it sets `reduce_diagnostics`, which nothing else in `cp` sets.
+    #[test]
+    fn archive_is_dash_d_dash_r_preserve_all_and_one_thing_more() {
+        for spelling in ["-a", "--archive"] {
+            let (f, _) = run_parse(&[spelling, "a", "b"]);
+            assert_eq!(f.preserve, Preserve::ALL, "{spelling}");
+            assert!(f.recursive, "{spelling}");
+            assert_eq!(f.dereference, Deref::Never, "{spelling}");
+            assert!(f.require_preserve, "{spelling}");
+            assert!(f.reduce_diagnostics, "{spelling}");
         }
+
+        let (g, _) = run_parse(&["-dR", "--preserve=all", "a", "b"]);
+        assert!(
+            !g.reduce_diagnostics,
+            "the spelled-out form complains about an attribute it could not \
+             carry; `-a` says nothing"
+        );
+    }
+
+    /// Naming `xattr` promises to *fail* if the extended attributes cannot be
+    /// carried; getting it through `all` or `-a` does not. That is GNU's
+    /// `require_preserve_xattr`, which `PRESERVE_XATTR` sets and `PRESERVE_ALL`
+    /// deliberately does not.
+    #[test]
+    fn only_the_xattr_word_by_name_makes_a_failure_fatal() {
+        let (f, _) = run_parse(&["--preserve=xattr", "a", "b"]);
+        assert!(f.preserve.xattr && f.require_preserve_xattr);
+        assert!(!f.reduce_diagnostics, "and it is the loudest of the three");
+
+        for asked in ["--preserve=all", "-a"] {
+            let (g, _) = run_parse(&[asked, "a", "b"]);
+            assert!(g.preserve.xattr, "{asked} asks for them");
+            assert!(
+                !g.require_preserve_xattr,
+                "{asked} does not insist on them"
+            );
+        }
+
+        let (h, _) = run_parse(&["--preserve=xattr", "--no-preserve=xattr", "a", "b"]);
+        assert!(
+            !h.preserve.xattr && !h.require_preserve_xattr,
+            "the off direction clears both, as GNU's `!on` does"
+        );
+    }
+
+    /// The one attribute this `cp` cannot write is refused **on `--preserve`
+    /// and accepted on `--no-preserve`**, which is not an inconsistency:
+    /// `--no-preserve=context` asks for something already true.
+    #[test]
+    fn the_unwritable_attribute_is_refused_one_way_only() {
+        let e = fail(&["--preserve=context", "a", "b"]);
+        assert!(
+            e.sentence.contains("not implemented"),
+            "{:?}",
+            e.sentence
+        );
+        assert!(
+            e.sentence.contains("context"),
+            "the diagnostic names the word, not the option: {:?}",
+            e.sentence
+        );
+        let (f, _) = run_parse(&["--no-preserve=context", "a", "b"]);
+        assert!(!f.require_preserve, "--no-preserve=context");
     }
 
     /// `links` is spelled like the other `--preserve` words and abbreviates like
@@ -4358,15 +4678,6 @@ mod tests {
         assert!(!h.preserve.links);
         let (i, _) = run_parse(&["-L", "-d", "a", "b"]);
         assert_eq!(i.dereference, Deref::Never, "the last one wins");
-    }
-
-    /// `--preserve=all` is refused for `xattr` specifically — the only one of
-    /// its words this `cp` still cannot write that GNU would write silently —
-    /// and says so.
-    #[test]
-    fn preserve_all_says_which_word_it_cannot_do() {
-        let e = fail(&["--preserve=all", "a", "b"]);
-        assert!(e.sentence.contains("'xattr'"), "{:?}", e.sentence);
     }
 
     /// A word the table does not have, and the empty word, which is a prefix of
@@ -4792,6 +5103,8 @@ mod tests {
         preserve: Preserve::NONE,
         explicit_no_preserve_mode: false,
         require_preserve: false,
+        require_preserve_xattr: false,
+        reduce_diagnostics: false,
     };
     const PLAIN: CpFlags = OFF;
     const RECURSIVE: CpFlags = CpFlags {
@@ -7151,6 +7464,54 @@ mod tests {
         require_preserve: true,
         ..OFF
     };
+    /// `--preserve=xattr`: the one spelling that insists.
+    #[cfg(unix)]
+    const XATTR_ONLY: CpFlags = CpFlags {
+        preserve: Preserve {
+            xattr: true,
+            ..Preserve::NONE
+        },
+        require_preserve: true,
+        require_preserve_xattr: true,
+        ..OFF
+    };
+    /// `--preserve=all`: everything, best-effort about the attributes.
+    #[cfg(unix)]
+    const PRESERVE_ALL: CpFlags = CpFlags {
+        preserve: Preserve::ALL,
+        require_preserve: true,
+        ..OFF
+    };
+    /// `-a`: `PRESERVE_ALL` plus `-dR`, and silent about an attribute it could
+    /// not carry.
+    #[cfg(unix)]
+    const ARCHIVE: CpFlags = CpFlags {
+        recursive: true,
+        dereference: Deref::Never,
+        preserve: Preserve::ALL,
+        require_preserve: true,
+        reduce_diagnostics: true,
+        ..OFF
+    };
+    /// The three above with `-RT`, for the tests whose destination has to be an
+    /// existing directory *itself* rather than a directory to copy into.
+    #[cfg(unix)]
+    const XATTR_ONLY_RT: CpFlags = CpFlags {
+        recursive: true,
+        no_target_directory: true,
+        ..XATTR_ONLY
+    };
+    #[cfg(unix)]
+    const PRESERVE_ALL_RT: CpFlags = CpFlags {
+        recursive: true,
+        no_target_directory: true,
+        ..PRESERVE_ALL
+    };
+    #[cfg(unix)]
+    const ARCHIVE_T: CpFlags = CpFlags {
+        no_target_directory: true,
+        ..ARCHIVE
+    };
 
     #[cfg(unix)]
     fn mtime_of(p: &Path) -> std::time::SystemTime {
@@ -7297,6 +7658,128 @@ mod tests {
             fs::remove_dir(&d).unwrap();
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ------------------------------------------------ extended attributes --
+
+    /// Put a `user.` attribute on a file, or say the filesystem underneath the
+    /// scratch directory has none. `/tmp` is usually ext4 and usually does; a
+    /// tmpfs built without `CONFIG_TMPFS_XATTR` does not, and a test that
+    /// failed there would be reporting the kernel's build options rather than
+    /// this `cp`.
+    #[cfg(unix)]
+    fn seed_xattr(path: &Path, name: &[u8], value: &[u8]) -> bool {
+        fsattr::set_xattr(On::Path(path, Link::NoFollow), name, value).is_ok()
+    }
+
+    /// What `path` has under `name`, or `None` if it has nothing.
+    #[cfg(unix)]
+    fn xattr_of(path: &Path, name: &[u8]) -> Option<Vec<u8>> {
+        fsattr::get_xattr(On::Path(path, Link::NoFollow), name).ok()
+    }
+
+    /// The whole point of the option, on all three spellings that ask for it —
+    /// and the byte string is deliberately not text: an attribute's value is
+    /// arbitrary bytes, and a copy that round-tripped it through UTF-8 would
+    /// corrupt exactly this.
+    #[cfg(unix)]
+    #[test]
+    fn an_extended_attribute_crosses_under_every_option_that_asks() {
+        const VALUE: &[u8] = b"\x00\xff\x80not text";
+        let asked = [
+            ("--preserve=xattr", XATTR_ONLY),
+            ("--preserve=all", PRESERVE_ALL),
+            ("-a", ARCHIVE),
+        ];
+        for (spelling, flags) in asked {
+            let dir = scratch("x_cross");
+            let (a, b) = (dir.join("a"), dir.join("b"));
+            fs::write(&a, b"body").unwrap();
+            if !seed_xattr(&a, b"user.tag", VALUE) {
+                let _ = fs::remove_dir_all(&dir);
+                return;
+            }
+
+            let (ok, err) = cp(&flags, &[&a, &b]);
+            assert!(ok, "{spelling}: {err}");
+            assert_eq!(err, "", "{spelling}");
+            assert_eq!(
+                xattr_of(&b, b"user.tag").as_deref(),
+                Some(VALUE),
+                "{spelling} did not carry the attribute"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// And it does not cross otherwise. `-p` is three attributes and extended
+    /// ones are not among them, so a `cp -p` that carried them would be doing
+    /// something the user did not ask for — on every copy, at the cost of a
+    /// `listxattr` per file.
+    #[cfg(unix)]
+    #[test]
+    fn an_extended_attribute_stays_behind_when_it_was_not_asked_for() {
+        let dir = scratch("x_nocross");
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        fs::write(&a, b"body").unwrap();
+        if !seed_xattr(&a, b"user.tag", b"v") {
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let (ok, err) = cp(&PRESERVE, &[&a, &b]);
+        assert!(ok, "{err}");
+        assert_eq!(xattr_of(&b, b"user.tag"), None, "-p is not --preserve=xattr");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The three levels of loudness, on a failure that is neither hypothetical
+    /// nor racy: an existing destination directory the user may read and search
+    /// but not write. `setxattr` wants write permission on the file, so the
+    /// attribute cannot be set — while the copy itself, which writes nothing
+    /// into an empty tree, succeeds.
+    ///
+    /// | Asked for | Says | Exits |
+    /// |---|---|---|
+    /// | `--preserve=xattr` | the failure | 1 |
+    /// | `--preserve=all` | the failure (`EACCES` is not "unsupported") | 0 |
+    /// | `-a` | nothing | 0 |
+    #[cfg(unix)]
+    #[test]
+    fn how_loudly_a_failed_attribute_is_reported_is_the_option_that_asked() {
+        if chown_privileges() {
+            return; // root may write to a directory whose mode forbids it.
+        }
+        let rows: [(&str, CpFlags, bool, bool); 3] = [
+            ("--preserve=xattr", XATTR_ONLY_RT, true, false),
+            ("--preserve=all", PRESERVE_ALL_RT, true, true),
+            ("-a", ARCHIVE_T, false, true),
+        ];
+        for (spelling, flags, speaks, succeeds) in rows {
+            let dir = scratch("x_loud");
+            let (a, b) = (dir.join("a"), dir.join("b"));
+            fs::create_dir(&a).unwrap();
+            fs::create_dir(&b).unwrap();
+            if !seed_xattr(&a, b"user.tag", b"v") {
+                let _ = fs::remove_dir_all(&dir);
+                return;
+            }
+            set_test_mode(&b, 0o555);
+
+            let (ok, err) = cp(&flags, &[&a, &b]);
+            // Restored before the assertions so a failure still cleans up.
+            set_test_mode(&b, 0o755);
+            assert_eq!(ok, succeeds, "{spelling}: {err}");
+            if speaks {
+                assert!(
+                    err.contains("setting attribute 'user.tag' for"),
+                    "{spelling}: {err:?}"
+                );
+            } else {
+                assert_eq!(err, "", "{spelling} is the quiet one");
+            }
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     /// `--preserve=ownership` is the one option that makes a *regular* file

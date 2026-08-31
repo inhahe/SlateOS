@@ -56397,6 +56397,7 @@ made the same choice for the same reason, so the two agree.
 ## 735. `cp --preserve=links` reproduces GNU's "a linked destination was never created" gap, and the harness grew a column that can see hard links at all
 
 **Date:** 2026-08-30
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** `cp --preserve=links a b d` notices that `a` and `b` are two

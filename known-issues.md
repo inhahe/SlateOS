@@ -96352,7 +96352,27 @@ they are listed so the count is honest rather than because they are urgent.
 
 ---
 
-## `A-THE-SHELLCHECK-GATE-DOES-NOT-CATCH-THE-BUG-CLASS-IT-WAS-BUILT-FOR` (lane A, 2026-08-29) — **open**, coverage gap with a named remedy
+## `A-THE-SHELLCHECK-GATE-DOES-NOT-CATCH-THE-BUG-CLASS-IT-WAS-BUILT-FOR` (lane A, 2026-08-29) — **FIXED 2026-08-29**, verified still closed 2026-08-31
+
+**Status: closed.** The gate reads `bash "$PROJECT_ROOT/scripts/shellcheck-all.sh"
+warning` at `scripts/boot-test.sh:3666`, and the tree clears it: 85 script(s), 0
+with findings at severity `warning`, 0 findings total (re-measured 2026-08-31).
+Both halves of "How to close this" below are done — lane B cleared all 44
+findings and quoted the template at `diff-wsl.sh:99` so the count does not
+regrow, and lane A made the one-word change. See
+`requests/a-b-shellcheck-floor-the-remaining-findings-are-all-yours.md` and
+`requests/b-a-shellcheck-is-clean-at-warning-raise-the-floor.md`.
+
+**Why this heading said "open" for two days.** The remedy landed the same day it
+was filed, in a different file, by a different lane; nothing then came back to
+this entry. That is the ordinary failure mode of a tracking file — an entry
+whose *fix* is recorded elsewhere stays open by default, and an open entry that
+is actually closed is worse than no entry, because it costs a reader the time to
+rediscover the fix before they can trust the file again. The remainder of this
+entry is kept verbatim for the reasoning, which is still the argument for why
+the floor belongs at `warning` rather than `error`.
+
+### Original entry (2026-08-29), unedited
 
 **What it is.** `check_shellcheck` in `scripts/boot-test.sh` refuses to build
 when `scripts/shellcheck-all.sh` reports a finding — but it asks for findings

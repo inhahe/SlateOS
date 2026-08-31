@@ -48,10 +48,28 @@ leaves a `__pycache__` directory that cargo reads as a crate.
 """
 
 import difflib
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+
+def cargo_env():
+    """The environment a sweep hands to cargo, with incremental compilation off.
+
+    A sweep recompiles one crate eighty-odd times from eighty-odd *different*
+    sources, which is the exact workload incremental compilation is worst at: it
+    can reuse almost nothing across mutants, and it writes a fresh session
+    directory for each one.  `crossword`'s sweeps left 24,762 session directories
+    under `target/.../debug/incremental`, and rustc then wedged -- twice, for
+    seven minutes each, at 0.3 seconds of CPU, i.e. blocked rather than slow.
+    Turning it off costs a sweep nothing it could have used and stops the pile
+    forming.
+    """
+    env = dict(os.environ)
+    env["CARGO_INCREMENTAL"] = "0"
+    return env
 
 # The repository root, from `scripts/mutation_harness.py`.
 #
@@ -100,6 +118,7 @@ def build_tests(crate, timeout=1800):
             "--no-run",
         ],
         cwd=REPO,
+        env=cargo_env(),
     )
 
 
@@ -134,6 +153,7 @@ def run_tests(crate, timeout):
         encoding="utf-8",
         errors="replace",
         cwd=REPO,
+        env=cargo_env(),
     )
     failed = set(re.findall(r"^    tests::(\S+)$", out.stdout, re.M))
     compiled = "could not compile" not in out.stdout + out.stderr

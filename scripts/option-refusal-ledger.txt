@@ -50,9 +50,7 @@ cmd_applaunch 1
 cmd_apppermissions 1
 cmd_appstore 1
 cmd_assoc 1
-cmd_audiomux 1
 cmd_authbroker 1
-cmd_autostart 1
 cmd_bluetooth 1
 cmd_bootcfg 1
 cmd_cliphistory 1
@@ -73,7 +71,6 @@ cmd_fscache 1
 cmd_fswatch 1
 cmd_ftrace 1
 cmd_futexstat 1
-cmd_fwsettings 1
 cmd_head_input 1
 cmd_hwmonitor 1
 cmd_ime 1
@@ -89,14 +86,12 @@ cmd_memtest 1
 cmd_migstat 1
 cmd_mobilelink 1
 cmd_multiclip 1
-cmd_namespace 1
 cmd_nc 1
 cmd_netsettings 1
 cmd_nightlight 1
 cmd_notifcenter 1
 cmd_pacct 1
 cmd_pgtable 1
-cmd_pidns 1
 cmd_pidstat 1
 cmd_powerstat 1
 cmd_printqueue 1
@@ -113,13 +108,11 @@ cmd_secureerase 1
 cmd_sharesheet 1
 cmd_slabstat 1
 cmd_snaplayout 1
-cmd_sshd 1
 cmd_swapcfg 1
 cmd_sysanimations 1
 cmd_syslog 1
 cmd_systemimage 1
 cmd_tail_input 1
-cmd_taskmon 1
 cmd_tasksched 1
 cmd_taskstats 1
 cmd_telemetry 1

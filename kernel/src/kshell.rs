@@ -21699,6 +21699,169 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "and a false comparison is still false");
     }
 
+    serial_println!(
+        "  kshell::self_test 112: the guessed value was the *widest* value its \
+         space has -- the firewall's any-port wildcard, uid 0 (root) and the \
+         root of two namespace trees -- so a mistyped word opened the thing it \
+         named instead of narrowing it"
+    );
+    {
+        // Rung 112 -- batch 44 of the design-decisions.md §600 burn-down:
+        // `cmd_fwsettings`, `cmd_namespace`, `cmd_autostart`, `cmd_pidns`,
+        // `cmd_taskmon`, `cmd_audiomux` and `cmd_sshd`, taking the ledger from
+        // 91 sites across 91 functions to 84 across 84.
+        //
+        // What picks these seven out of the remaining backlog is that `0` is
+        // not an arbitrary placeholder in any of their spaces. It is the value
+        // that means *all of it*, or *the top of the tree*:
+        //
+        //   * firewall: the `list` arm renders `r.port == 0` as `*`, so
+        //     `firewall add web in tcp 8O allow` did not add a rule for the
+        //     wrong port -- it added an allow rule for **every** port, and
+        //     printed "port 0" as the confirmation.
+        //   * autostart: uid 0 is root, so a mistyped `[uid]` filed the command
+        //     to run as the most privileged account on the machine, at boot.
+        //   * namespace / pidns: 0 and `ROOT_NAMESPACE` are the roots of their
+        //     trees, so a mistyped parent parented the new namespace *outside*
+        //     whatever it was meant to be nested inside -- and `pidns` then
+        //     printed the guess back as "(parent: 0)".
+        //   * tmon: ppid 0 re-roots the registered task the same way.
+        //   * amux: pid 0 is a real and important process -- rung 98's harm.
+        //
+        // `cmd_fwsettings` also carried three §645 word catch-alls in the same
+        // arm, every one of them widening: `_ => Both`, `_ => Any`, and the one
+        // that matters, `_ => Allow`. They are fixed here rather than deferred
+        // to a word-shaped batch because leaving `blcok` meaning **allow** in a
+        // firewall while repairing the port operand beside it would not be a
+        // smaller change, it would be a worse one.
+        //
+        // As in rungs 98, 100 and 110, every assertion below is a refusal
+        // emitted before the subsystem is reached, so none depends on state a
+        // fresh boot may not have initialised -- the §604 trap -- and none of
+        // them leaves a rule, a namespace, a task or a stream behind.
+
+        // The any-port wildcard.
+        let out = capture_command("firewall add zzrungrule in tcp 8O allow");
+        assert_output_contains(
+            "an unreadable firewall port is named, not read as the any-port wildcard",
+            &out,
+            b"`8O' is not a port number",
+        );
+        assert_eq!(last_exit(), 1, "`firewall add ... 8O allow` errors");
+        assert_output_lacks("and no rule is reported added", &out, b"Rule #");
+
+        // The catch-all that failed open. One letter transposed in `block`
+        // used to produce an Allow rule that said "allow" in its success line.
+        let out = capture_command("firewall add zzrungrule in tcp 80 blcok");
+        assert_output_contains(
+            "a misspelled rule action is refused rather than read as allow",
+            &out,
+            b"`blcok' is not a rule action",
+        );
+        assert_eq!(last_exit(), 1, "`firewall add ... blcok` errors");
+        assert_output_lacks("and no rule is reported added", &out, b"Rule #");
+
+        // The guess that runs a program as root.
+        let out = capture_command("autostart add zzrungitem /bin/true system 1OOO");
+        assert_output_contains(
+            "an unreadable uid is named, not read as root",
+            &out,
+            b"`1OOO' is not a user id",
+        );
+        assert_eq!(last_exit(), 1, "`autostart add ... 1OOO` errors");
+        assert_output_lacks(
+            "and nothing was added to the startup list",
+            &out,
+            b"Added autostart item",
+        );
+
+        // The two namespace trees, whose guessed parent was the root.
+        let out = capture_command("namespace create zzrungns 1O");
+        assert_output_contains(
+            "an unreadable mount-namespace parent is named, not read as the root",
+            &out,
+            b"`1O' is not a parent namespace id",
+        );
+        assert_eq!(last_exit(), 1, "`namespace create zzrungns 1O` errors");
+        assert_output_lacks("and no namespace was created", &out, b"created (id=");
+
+        let out = capture_command("pidns create 1O");
+        assert_output_contains(
+            "an unreadable PID-namespace parent is named, not read as the root",
+            &out,
+            b"`1O' is not a parent namespace id",
+        );
+        assert_eq!(last_exit(), 1, "`pidns create 1O` errors");
+        assert_output_lacks(
+            "and no namespace was created",
+            &out,
+            b"Created PID namespace",
+        );
+
+        // The task tree.
+        let out = capture_command("tmon register zzrungtask 1O");
+        assert_output_contains(
+            "an unreadable parent pid is named, not read as the top of the tree",
+            &out,
+            b"`1O' is not a parent pid",
+        );
+        assert_eq!(last_exit(), 1, "`tmon register zzrungtask 1O` errors");
+        assert_output_lacks("and no task was registered", &out, b"Registered '");
+
+        // pid 0, and beside it the *other* shape: an `and_then(…ok())` whose
+        // unreadable word was indistinguishable from an omitted one, so the
+        // stream went to the default output rather than the one asked for.
+        let out = capture_command("amux stream zzrungapp 1O");
+        assert_output_contains(
+            "an unreadable stream pid is named, not attributed to pid 0",
+            &out,
+            b"`1O' is not a pid",
+        );
+        assert_eq!(last_exit(), 1, "`amux stream zzrungapp 1O` errors");
+        assert_output_lacks("and no stream was created", &out, b"Created stream");
+
+        let out = capture_command("amux stream zzrungapp 5 1O");
+        assert_output_contains(
+            "an unreadable output id is refused, not silently dropped",
+            &out,
+            b"`1O' is not an output id",
+        );
+        assert_eq!(last_exit(), 1, "`amux stream zzrungapp 5 1O` errors");
+        assert_output_lacks("and no stream was created", &out, b"Created stream");
+
+        // The one site whose guess was already being caught downstream: 0 is
+        // not a listening port and the range check rejected it, so what was
+        // missing was only the ability to say *which word* was wrong. The old
+        // message was the same "Invalid port" for `sshd port 0` as for a typo.
+        let out = capture_command("sshd port 8O22");
+        assert_output_contains(
+            "an unreadable listening port is named rather than called invalid",
+            &out,
+            b"`8O22' is not a port number",
+        );
+        assert_eq!(last_exit(), 1, "`sshd port 8O22` errors");
+        assert_output_lacks("and the port is not reported changed", &out, b"Port set to");
+
+        // The rung must also show the helpers still let a *readable* word
+        // through, or an implementation that refused every operand would pass
+        // every assertion above. `pidns create 99` is the case that proves it
+        // without leaving anything behind: 99 is past `MAX_NAMESPACES`, so the
+        // word reaches `pidns::create` and is rejected *there* -- a different
+        // message, from the subsystem rather than from the operand check.
+        let out = capture_command("pidns create 99");
+        assert_output_contains(
+            "a readable parent id reaches the subsystem",
+            &out,
+            b"Error:",
+        );
+        assert_output_lacks(
+            "and is not refused as unreadable",
+            &out,
+            b"is not a parent namespace id",
+        );
+        assert_eq!(last_exit(), 1, "`pidns create 99` still errors, from pidns");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -28350,10 +28513,22 @@ fn cmd_namespace(args: &str) {
                 return;
             }
             let name = parts[1];
-            let parent = if parts.len() > 2 {
-                parts[2].parse::<u64>().unwrap_or(mount_ns::ROOT_NAMESPACE)
-            } else {
-                mount_ns::ROOT_NAMESPACE
+            // The guessed value *is* the root of the tree being nested into:
+            // an unreadable `PARENT_ID` used to mean `ROOT_NAMESPACE`, so
+            // `namespace create sandbox 1O` built the namespace directly under
+            // the root -- outside the container it was meant to be inside --
+            // and printed the same success line as the nesting that was asked
+            // for. Absence still means root, which is documented; a word that
+            // could not be read no longer does.
+            let Some(parent) = optional_num::<u64>(
+                &parts,
+                2,
+                "namespace",
+                "create",
+                "parent namespace id",
+                mount_ns::ROOT_NAMESPACE,
+            ) else {
+                return;
             };
             match mount_ns::create(parent, name) {
                 Ok(id) => shell_println!("Namespace '{}' created (id={})", name, id),
@@ -49466,7 +49641,15 @@ fn cmd_autostart(args: &str) {
                     return;
                 }
             };
-            let uid: u64 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+            // uid 0 is root. An unreadable `[uid]` therefore did not fall back
+            // to "no particular user" -- it registered the command to run as
+            // the most privileged account on the machine, at boot, and said
+            // "Added autostart item". The absent case keeps that default
+            // because a system autostart item genuinely is root's; the
+            // misspelled case must not silently join it.
+            let Some(uid) = optional_num::<u64>(&parts, 4, "autostart", sub, "user id", 0) else {
+                return;
+            };
             match autostart::add_item(name, cmd, phase, uid) {
                 Ok(id) => shell_println!("Added autostart item {} (id={}).", name, id),
                 Err(e) => {
@@ -59428,22 +59611,63 @@ fn cmd_fwsettings(args: &str) {
             // firewall add <name> <in|out|both> <tcp|udp|icmp|any> <port> <allow|block>
             if parts.len() >= 6 {
                 let name = parts[1];
+                // Every operand of `firewall add` is required -- the arm is
+                // gated on `parts.len() >= 6` -- so none of these catch-alls
+                // was ever standing in for an *absent* word. Each existed
+                // solely to absorb a misspelled one, and each absorbed it in
+                // the widening direction: `_ => Both`, `_ => Any`, `_ =>
+                // Allow`. Spelling `block` as `blcok` therefore produced an
+                // **allow** rule and printed "allow" in the success line, which
+                // reads as confirmation of what was asked for. See
+                // design-decisions.md §645.
                 let dir = match parts[2] {
                     "in" => fwsettings::Direction::Inbound,
                     "out" => fwsettings::Direction::Outbound,
-                    _ => fwsettings::Direction::Both,
+                    "both" => fwsettings::Direction::Both,
+                    other => {
+                        refuse_operand(
+                            "firewall",
+                            sub,
+                            format_args!("`{}' is not a direction (in, out, both)", other),
+                        );
+                        return;
+                    }
                 };
                 let proto = match parts[3] {
                     "tcp" => fwsettings::Protocol::Tcp,
                     "udp" => fwsettings::Protocol::Udp,
                     "icmp" => fwsettings::Protocol::Icmp,
-                    _ => fwsettings::Protocol::Any,
+                    "any" => fwsettings::Protocol::Any,
+                    other => {
+                        refuse_operand(
+                            "firewall",
+                            sub,
+                            format_args!("`{}' is not a protocol (tcp, udp, icmp, any)", other),
+                        );
+                        return;
+                    }
                 };
-                let port: u16 = parts[4].parse().unwrap_or(0);
+                // `0` is this table's wildcard: the `list` arm forty lines up
+                // renders `r.port == 0` as `*`. So the guessed value did not
+                // merely mislabel the rule, it widened it to every port --
+                // `firewall add web in tcp 8O allow` opened all 65536 of them
+                // and reported "port 0" as success.
+                let Some(port) = required_num::<u16>(&parts, 4, "firewall", sub, "port number")
+                else {
+                    return;
+                };
                 let action = match parts[5] {
+                    "allow" => fwsettings::RuleAction::Allow,
                     "block" => fwsettings::RuleAction::Block,
                     "log" => fwsettings::RuleAction::Log,
-                    _ => fwsettings::RuleAction::Allow,
+                    other => {
+                        refuse_operand(
+                            "firewall",
+                            sub,
+                            format_args!("`{}' is not a rule action (allow, block, log)", other),
+                        );
+                        return;
+                    }
                 };
                 match fwsettings::add_rule(name, dir, proto, port, action) {
                     Ok(id) => shell_println!(
@@ -69598,10 +69822,23 @@ fn cmd_sshd(args: &str) {
             if port_str.is_empty() {
                 shell_println!("SSH listening port: {}", ssh::get_port());
             } else {
-                let port: u16 = port_str.parse().unwrap_or(0);
+                // The one site in this batch where the guess was already being
+                // caught: 0 is not a listening port, and the range check below
+                // rejected it. What survived was the *message* -- "Invalid
+                // port" cannot say which word was invalid, and answered
+                // `sshd port 0` and `sshd port 8O22` identically, so an
+                // operator who mistyped had nothing to compare against what
+                // they meant to type. Naming the word is the whole remaining
+                // fix; the refusal itself was never missing.
+                let Some(port) = readable_num::<u16>(port_str, "sshd", sub, "port number") else {
+                    return;
+                };
                 if port == 0 {
-                    shell_println!("Invalid port");
-                    set_exit(1);
+                    refuse_operand(
+                        "sshd",
+                        sub,
+                        format_args!("`{}' is not a port number (1-65535)", port_str),
+                    );
                 } else {
                     ssh::set_port(port);
                     shell_println!("Port set to {} (restart server to apply)", port);
@@ -74480,10 +74717,14 @@ fn cmd_taskmon(args: &str) {
                 shell_println!("Usage: tmon register <name> [parent_pid]");
                 set_exit(1);
             } else {
-                let ppid = parts
-                    .get(2)
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(0);
+                // 0 is the top of the task tree here, so a mistyped
+                // `[parent_pid]` re-rooted the task rather than nesting it, and
+                // the only visible difference is a column in `tmon list` that
+                // nobody re-reads after the "Registered" line.
+                let Some(ppid) = optional_num::<u32>(&parts, 2, "tmon", sub, "parent pid", 0)
+                else {
+                    return;
+                };
                 match taskmon::register_task(name, taskmon::TaskPriority::Normal, ppid, "user") {
                     Ok(pid) => shell_println!("Registered '{}' as PID {}", name, pid),
                     Err(e) => {
@@ -75840,13 +76081,30 @@ fn cmd_audiomux(args: &str) {
         }
         "stream" | "play" => {
             let app = parts.get(1).copied().unwrap_or("");
-            let pid_str = parts.get(2).copied().unwrap_or("0");
             if app.is_empty() {
                 shell_println!("Usage: amux stream <app_name> [pid] [output_id]");
                 set_exit(1);
             } else {
-                let pid = pid_str.parse::<u32>().unwrap_or(0);
-                let out = parts.get(3).and_then(|s| s.parse::<u32>().ok());
+                // The stream is filed against this pid and `amux list` shows it,
+                // so a guessed 0 attributes audio to pid 0 -- a real and
+                // important process, which is the harm rung 98 was written for.
+                let Some(pid) = optional_num::<u32>(&parts, 2, "amux", sub, "pid", 0) else {
+                    return;
+                };
+                // `[output_id]` is the *other* shape: `and_then(…ok())` on an
+                // Option, where an unreadable word is indistinguishable from an
+                // omitted one, so `amux stream foo 5 1O` routed the stream to
+                // the default output instead of output 10 and reported success.
+                // Absent is still `None`; unreadable is now refused.
+                let out = match parts.get(3) {
+                    Some(word) => {
+                        let Some(id) = readable_num::<u32>(word, "amux", sub, "output id") else {
+                            return;
+                        };
+                        Some(id)
+                    }
+                    None => None,
+                };
                 match audiomux::create_stream(app, pid, out) {
                     Ok(id) => shell_println!("Created stream {} for '{}'", id, app),
                     Err(e) => {
@@ -116074,7 +116332,16 @@ fn cmd_pidns(args: &str) {
             }
         }
         "create" => {
-            let parent: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            // Namespace 0 is the root PID namespace, so this is `cmd_namespace`'s
+            // defect in the other namespace tree: `pidns create 1O` parented the
+            // new namespace to the root instead of to namespace 10, and the
+            // success line then *printed* "(parent: 0)" -- the guess, echoed back
+            // in a sentence that reads as a report rather than as a correction.
+            let Some(parent) =
+                optional_num::<u32>(&parts, 1, "pidns", "create", "parent namespace id", 0)
+            else {
+                return;
+            };
             match pidns::create(parent) {
                 Ok(id) => {
                     shell_println!("Created PID namespace {} (parent: {})", id, parent)

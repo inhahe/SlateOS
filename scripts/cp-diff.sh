@@ -944,7 +944,225 @@ run_case --dere -v tree/link dst
 run_case --d -v tree/link dst
 
 # =============================================================================
-# 16. Options GNU has and this cp has not
+# 16. The three overwrite policies: -f, --remove-destination, -n
+# =============================================================================
+# Three options that all sound like "about overwriting" and are not variants of
+# one another. They set three different fields, act at three different points,
+# and only one of them is ever reached on the ordinary path where the
+# destination opens for writing without complaint:
+#
+#   * `-f` acts *after* an open for writing has already failed, and only then.
+#     On an ordinary destination it changes nothing at all, which is why the
+#     first case below is `-fv` on a plain file and is expected to look exactly
+#     like plain `-v`.
+#   * `--remove-destination` acts *before* any open is attempted, so it changes
+#     the ordinary path too -- it unlinks a perfectly writable destination and
+#     makes a new one.
+#   * `-n` is neither: it refuses, on stderr, and exits 1.
+#
+# The order the two verbose lines come out in is the sharpest way to tell the
+# first two apart, and is why every case here is `-v`: `-f` prints the arrow
+# first and `removed` second (the removal is a recovery from a failure already
+# in progress), `--remove-destination` prints `removed` first (the removal is
+# the first thing it does). A harness comparing only exit status would call
+# them the same option.
+#
+# The destinations are chosen for *how the open fails*, since that is what
+# `-f` keys on:
+#
+#   | destination        | plain `cp`                | what `-f` does        |
+#   |--------------------|---------------------------|-----------------------|
+#   | writable file      | truncates it              | nothing; open worked  |
+#   | mode 400 file      | EACCES                    | unlink, create new    |
+#   | dangling symlink   | refuses to write through  | nothing; see below    |
+#   | good symlink       | writes through to target  | nothing; open worked  |
+#   | self-loop symlink  | cannot stat: ELOOP        | unlink, create new    |
+#
+# The dangling-symlink row is the one worth stating outright, because "force"
+# suggests otherwise: `-f` does not rescue it. The refusal comes from the
+# create-new arm, which `-f` never re-enters -- it retries by creating, and
+# creating is what already failed. The self-loop row is the opposite surprise:
+# there the *stat* fails, not the open, and `-f` is consulted about that too.
+#
+# See `design-decisions.md` 727 and `cp.rs`'s "The three overwrite policies are
+# three different options".
+
+# --- -f, and what it does not do ---------------------------------------------
+# On a destination that opens, `-f` is dead weight; the pair is here so that a
+# future change which makes `-f` unlink unconditionally is caught.
+TREE='mktree; printf old > old.txt'
+run_case -fv file.txt old.txt
+TREE='mktree; printf old > old.txt'
+run_case -v file.txt old.txt
+TREE='mktree; printf old > old.txt'
+run_case --force -v file.txt old.txt
+run_case -f file.txt new.txt
+run_case -fv file.txt tree/a.txt
+
+# --- --remove-destination, which acts on that same destination ---------------
+# Same fixture, different answer: the destination is replaced rather than
+# truncated, and `removed` is printed before the arrow rather than after.
+TREE='mktree; printf old > old.txt'
+run_case --remove-destination -v file.txt old.txt
+TREE='mktree; printf old > old.txt'
+run_case --rem -v file.txt old.txt
+run_case --remove-destination -v file.txt new.txt
+# A destination that does exist, reached through a directory operand.
+run_case --remove-destination -v file.txt tree
+
+# --- -n, which refuses -------------------------------------------------------
+# The diagnostic is on stderr and the status is 1, both of which Ubuntu's
+# `cp-n.diff` changes -- see "The reference is built, not found" at the top.
+TREE='mktree; printf old > old.txt'
+run_case -n file.txt old.txt
+TREE='mktree; printf old > old.txt'
+run_case -nv file.txt old.txt
+TREE='mktree; printf old > old.txt'
+run_case --no-clobber file.txt old.txt
+TREE='mktree; printf old > old.txt'
+run_case --no-c -v file.txt old.txt
+# Nothing there to refuse, so it copies and the status is 0.
+run_case -nv file.txt new.txt
+# Several sources, one of which exists: the refusal must not stop the rest, and
+# the status must still be 1.
+TREE='mktree; printf 1 > s1; printf 2 > s2; printf 3 > s3; printf x > dir/s2'
+run_case -nv s1 s2 s3 dir
+# Into a directory, where the destination name is derived rather than given.
+run_case -nv file.txt dir
+TREE='mktree; printf x > dir/file.txt'
+run_case -nv file.txt dir
+
+# --- the same three against a destination that will not open -----------------
+# Mode 400 denies only for a non-root copier, so these are guarded exactly as
+# section 11's are.
+if [ "$(id -u)" -ne 0 ]; then
+  TREE='mktree; printf old > ro.txt; chmod 400 ro.txt'
+  run_case -v file.txt ro.txt
+  TREE='mktree; printf old > ro.txt; chmod 400 ro.txt'
+  run_case -fv file.txt ro.txt
+  TREE='mktree; printf old > ro.txt; chmod 400 ro.txt'
+  run_case --remove-destination -v file.txt ro.txt
+  TREE='mktree; printf old > ro.txt; chmod 400 ro.txt'
+  run_case -nv file.txt ro.txt
+  # The mode of what `-f` leaves behind is the source's, not the destination's,
+  # because the destination is gone -- the snapshot is where that shows.
+  TREE='mktree; chmod 750 file.txt; printf old > ro.txt; chmod 400 ro.txt'
+  run_case -fv file.txt ro.txt
+  # Reported and carried on, with a good destination either side of the bad one.
+  TREE='mktree; printf 1 > 1; printf 2 > 2; printf 3 > 3
+        printf x > dir/1; printf x > dir/2; chmod 400 dir/2; printf x > dir/3'
+  run_case -v 1 2 3 dir
+  TREE='mktree; printf 1 > 1; printf 2 > 2; printf 3 > 3
+        printf x > dir/1; printf x > dir/2; chmod 400 dir/2; printf x > dir/3'
+  run_case -fv 1 2 3 dir
+fi
+
+# --- against a symlink destination -------------------------------------------
+# A link that resolves: the open follows it, so `-f` is not consulted and the
+# *target* is what changes. `--remove-destination` replaces the link itself,
+# which is the whole difference between the two options stated in one case.
+TREE='mktree; printf B > b.txt; ln -s b.txt lnk'
+run_case -v file.txt lnk
+TREE='mktree; printf B > b.txt; ln -s b.txt lnk'
+run_case -fv file.txt lnk
+TREE='mktree; printf B > b.txt; ln -s b.txt lnk'
+run_case --remove-destination -v file.txt lnk
+TREE='mktree; printf B > b.txt; ln -s b.txt lnk'
+run_case -nv file.txt lnk
+
+# A link that resolves to nothing. `-f` does not help; `--remove-destination`
+# does, because it never asks whether the link resolves.
+TREE='mktree; ln -s nowhere dang'
+run_case -v file.txt dang
+TREE='mktree; ln -s nowhere dang'
+run_case -fv file.txt dang
+TREE='mktree; ln -s nowhere dang'
+run_case --remove-destination -v file.txt dang
+TREE='mktree; ln -s nowhere dang'
+run_case -nv file.txt dang
+
+# A link to the source. Plain `cp` calls it the same file;
+# `--remove-destination` is excused from that check, because after the unlink
+# it would not be the same file -- and so it is the one case where "same file"
+# is not an error.
+TREE='mktree; ln -s file.txt self'
+run_case -v file.txt self
+TREE='mktree; ln -s file.txt self'
+run_case -fv file.txt self
+TREE='mktree; ln -s file.txt self'
+run_case --remove-destination -v file.txt self
+TREE='mktree; ln -s file.txt self'
+run_case -nv file.txt self
+
+# A link to itself, where it is the stat that fails rather than the open.
+TREE='mktree; ln -s loop loop'
+run_case -v file.txt loop
+TREE='mktree; ln -s loop loop'
+run_case -fv file.txt loop
+TREE='mktree; ln -s loop loop'
+run_case --remove-destination -v file.txt loop
+TREE='mktree; ln -s loop loop'
+run_case -nv file.txt loop
+
+# --- against a directory destination, which none of the three removes --------
+# `-T` is what makes the destination a name to be replaced rather than a place
+# to copy into, so it is the only way to aim these at a directory at all. None
+# of them unlinks it: `-f` and `--remove-destination` both stop at "is a
+# directory", and `-n` refuses first.
+run_case -Tv file.txt dir
+run_case -Tfv file.txt dir
+run_case -T --remove-destination -v file.txt dir
+run_case -Tnv file.txt dir
+
+# --- inside a recursive copy -------------------------------------------------
+# The walked entries go through the same three policies as the operands, which
+# is only visible when the destination tree already has the names in it. The
+# pre-made `dst/tree` carries a symlink, and replacing an existing symlink is a
+# thing this `cp` used to fail at outright -- `known-issues.md` ->
+# `B-CP-R-COULD-NOT-REPLACE-AN-EXISTING-SYMLINK`.
+PRE='mkdir -p dst/tree/sub; printf x > dst/tree/a.txt
+     printf y > dst/tree/sub/b.txt; ln -s elsewhere dst/tree/link'
+TREE="mktree; $PRE"
+run_case -rv tree dst
+TREE="mktree; $PRE"
+run_case -rvn tree dst
+TREE="mktree; $PRE"
+run_case -rfv tree dst
+TREE="mktree; $PRE"
+run_case -rv --remove-destination tree dst
+# The second copy of the same tree, which is the shape the symlink bug was
+# found in: everything already exists and every entry takes the overwrite path.
+TREE='mktree; mkdir -p dst2/tree/sub; printf a > dst2/tree/a.txt
+      printf bb > dst2/tree/sub/b.txt; ln -s a.txt dst2/tree/link'
+run_case -rv tree dst2
+# A kind mismatch under the walk: a directory landing where a file is, and a
+# file landing where a directory is. Both are refusals, and the wording is not
+# the one the underlying `mkdir`/`open` would give.
+TREE='mktree; mkdir -p dst/tree; printf x > dst/tree/sub'
+run_case -rv tree dst
+TREE='mktree; mkdir -p dst/tree/a.txt'
+run_case -rv tree dst
+TREE='mktree; mkdir -p dst/tree; printf x > dst/tree/sub'
+run_case -rfv tree dst
+TREE='mktree; mkdir -p dst/tree; printf x > dst/tree/sub'
+run_case -rv --remove-destination tree dst
+
+# --- the three together ------------------------------------------------------
+# They are not mutually exclusive and GNU does not reject any pairing; what it
+# does with each is measured rather than reasoned about.
+TREE='mktree; printf old > old.txt'
+run_case -fnv file.txt old.txt
+TREE='mktree; printf old > old.txt'
+run_case -nfv file.txt old.txt
+TREE='mktree; printf old > old.txt'
+run_case -f --remove-destination -v file.txt old.txt
+TREE='mktree; printf old > old.txt'
+run_case -n --remove-destination -v file.txt old.txt
+TREE='mktree; printf old > old.txt'
+run_case --remove-destination -nv file.txt old.txt
+
+# =============================================================================
+# 17. Options GNU has and this cp has not
 # =============================================================================
 # An inventory, one line per option, kept as `xfail` so that the count is
 # visible in the summary and so that `xpass` fires the moment one is
@@ -964,14 +1182,10 @@ missing --debug file.txt new.txt
 # *and* `--preserve=links`, and honouring only the half that exists would turn
 # two hard-linked sources into two independent copies with nothing said.
 missing -d tree/link dst
-missing -f file.txt new.txt
-missing --force file.txt new.txt
 missing -i file.txt tree/a.txt
 missing --interactive file.txt tree/a.txt
 missing -l file.txt new.txt
 missing --link file.txt new.txt
-missing -n file.txt tree/a.txt
-missing --no-clobber file.txt tree/a.txt
 missing --no-preserve=mode file.txt new.txt
 missing --one-file-system -r tree dst
 missing -p file.txt new.txt
@@ -980,7 +1194,6 @@ missing --preserve=mode,timestamps file.txt new.txt
 missing --parents tree/a.txt dir
 missing --path tree/a.txt dir
 missing --reflink=auto file.txt new.txt
-missing --remove-destination file.txt tree/a.txt
 missing -s file.txt new.txt
 missing --symbolic-link file.txt new.txt
 missing --sparse=auto file.txt new.txt
@@ -994,7 +1207,7 @@ missing -Z file.txt new.txt
 missing --context file.txt new.txt
 
 # =============================================================================
-# 17. --help and --version
+# 18. --help and --version
 # =============================================================================
 
 xfail_case 'help omits GNU bug-report block' --help

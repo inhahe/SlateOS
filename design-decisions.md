@@ -55037,6 +55037,7 @@ Ours treats everything that is not a plain success as "not write-protected".
 ## 724. `cp -r` refuses a copy into itself before it writes anything, where GNU discovers it mid-walk and leaves whatever it had already written
 
 **Date:** 2026-08-30
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** `cp -r tree tree` asks for a directory to be copied inside
@@ -55133,7 +55134,7 @@ first directory is created and the trip happens on the first entry.
 
 ## 725. `cp -r` reads a directory in one go and walks it in inode order, because that is what GNU's `savedir` does and `-v` made the difference visible
 
-**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous) · **Lane:** B
 
 **In short:** Copying a folder means listing what is in it and copying each
 thing. Until now our `cp` listed them in whatever order the filesystem handed
@@ -55455,6 +55456,7 @@ run against 9.4 at all.
 ## 727. `cp`'s three overwrite options are reproduced as three separate mechanisms, acting at three different points, because that is what makes them observably different
 
 **Date:** 2026-08-30
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** `cp` has three options that all sound like "what to do about a
@@ -55556,6 +55558,7 @@ handful of large ones.
 ## 728. The umask is read from `/proc/self/status` rather than by POSIX's set-and-restore, and the read lives in one shared module
 
 **Date:** 2026-08-30
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** Every program that creates files needs to know the *file-creation
@@ -55649,6 +55652,7 @@ one that denies everything, take the one that does not deny.
 ## 729. One kernel-error → errno table, and a test that reads the kernel's enum, rather than two hand-maintained mirrors and a comment saying they must agree
 
 **Date:** 2026-08-30
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** the kernel numbers its errors (-500 is "not found", -700 is
@@ -56203,6 +56207,7 @@ can produce it.
 ## 734. `yesno` is one shared module with the answer source as a trait, rather than a third private copy — and `cp` carries it as `dyn` in the job
 
 **Date:** 2026-08-30
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** Several of these utilities stop and ask a yes/no question — `rm -i`

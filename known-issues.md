@@ -159,22 +159,42 @@ those to `checked_*` buys correctness theatre rather than correctness. Take
 `indexing_slicing` to zero first; then judge `arithmetic_side_effects` on
 whether a per-crate `allow` with a justification beats 3161 mechanical edits.
 
-**The single largest cluster is one line repeated: `kernel/src/syscall/dispatch.rs`
-accounts for 329 of the `indexing may panic` findings** (measured 2026-08-30,
-lane A), essentially all of them the syscall-table registration
-`handlers[SYS_FOO as usize] = Some(handlers::sys_foo);`. That is ~17% of the
-whole `indexing_slicing` backlog behind *one* refactor: a
-`register(&mut handlers, SYS_FOO, handlers::sys_foo)` helper that does the
-store through `get_mut()` and reports an out-of-range syscall number instead of
-panicking. Worth doing as its own task, and worth doing before the per-crate
-sweeps, because it is the cheapest ratio in the file by a wide margin.
+**The single largest cluster is one line repeated, and it is a false positive —
+do not "fix" it.** `kernel/src/syscall/dispatch.rs` accounts for **329** of the
+`indexing may panic` findings (measured 2026-08-30, lane A), ~17% of the whole
+`indexing_slicing` backlog. Every one of them is the syscall-table registration
+`handlers[SYS_FOO as usize] = Some(handlers::sys_foo);` inside
+`build_v1_table()`.
 
-It is also why adding a syscall currently *raises* the warning count by one per
-number registered — three, for `SYS_FS_UNLINKAT_PINNED` / `_FSTATAT_PINNED` /
-`_GETDENTS_PINNED` in §647. Those three follow the surrounding convention
-deliberately: making 3 lines out of 329 use a different idiom would leave the
-table inconsistent and make the eventual bulk fix harder to verify, not easier.
-When the helper lands, all 329 go at once.
+That function is a **`const fn`**, and its only caller is
+`static V1_TABLE: SyscallTable = build_v1_table();` — so the whole table is
+evaluated **at compile time**. An out-of-range syscall number there is a
+*build error*, not a runtime panic. The lint is reporting a panic that cannot
+occur, because there is no run time in which it could.
+
+**The obvious refactor would make the kernel less safe, not more.** A
+`register(&mut handlers, SYS_FOO, f)` helper storing through `get_mut()` — the
+shape the three patterns above would suggest — converts a condition currently
+caught by `rustc` before the image is linked into one handled at run time,
+where the honest options are to panic in early boot or to silently leave a
+syscall unregistered. Trading a compile error for either is a regression.
+(`get_mut` is also not usable in a `const fn` today, so the helper would have
+to abandon compile-time construction to exist at all.)
+
+The right disposition is a scoped `#[allow(clippy::indexing_slicing)]` on
+`build_v1_table` with that reasoning as the comment — the same
+"an `allow` with a justification beats N mechanical edits" judgement the
+paragraph above reserves for `arithmetic_side_effects`, except here the
+justification is unusually strong: the compiler already proves the property
+the lint is asking for. **Doing that would also cut the measured backlog by
+~17% without touching a line of logic, which is worth knowing before anyone
+sizes the remaining sweep**: the real `indexing_slicing` debt in this repo is
+nearer 1590 than 1919.
+
+This is also why adding a syscall currently *raises* the warning count by one
+per number registered — three, for `SYS_FS_UNLINKAT_PINNED` /
+`_FSTATAT_PINNED` / `_GETDENTS_PINNED` in §647. Those three follow the
+surrounding convention deliberately, and correctly.
 
 ### Sweep progress: `editor` 500 → 80, `indexing_slicing` 0 (2026-08-16)
 

@@ -23,27 +23,38 @@
 # as an ordinary failure.  A status a caller cannot know about is a status the
 # caller cannot handle.
 #
-# IF YOU WRAP THIS IN scripts/run-timeout.py, GIVE IT AT LEAST 1500 SECONDS:
+# IF YOU WRAP THIS IN scripts/run-timeout.py, GIVE IT AT LEAST 7200 SECONDS:
 #
-#   python scripts/run-timeout.py --poll 30 1500 ./scripts/boot-test.sh
+#   python scripts/run-timeout.py --poll 60 7200 ./scripts/boot-test.sh
 #
-# This script runs QEMU under its *own* timeout, 900s by default (--timeout).
+# This script runs QEMU under its *own* timeout, 2400s by default (--timeout).
 # An outer budget also has to cover the pre-build gates and the kernel build,
-# so an outer 900 is strictly the smaller window and the inner timeout can
-# never fire.  That is not a harmless duplication: the inner timeout is the
-# diagnostic one -- it reports SYSTEM HANG, dumps the guest's state, and reads
-# the faulting RIP back over the HMP monitor.  run-timeout's expiry gives exit
-# 124 and a killed process tree: no RIP, no task table, no marker saying where
-# it stopped.  So an outer budget at or below the inner one silently turns
-# every genuine boot hang into an anonymous kill, on exactly the runs where the
-# instrumentation matters most.
+# so an outer budget below inner+gates+build is strictly the smaller window and
+# the inner timeout can never fire.  That is not a harmless duplication: the
+# inner timeout is the diagnostic one -- it reports SYSTEM HANG, dumps the
+# guest's state, and reads the faulting RIP back over the HMP monitor.
+# run-timeout's expiry gives exit 124 and a killed process tree: no RIP, no
+# task table, no marker saying where it stopped.  So an outer budget at or
+# below the inner one silently turns every genuine boot hang into an anonymous
+# kill, on exactly the runs where the instrumentation matters most.
 #
 # Measured 2026-08-25: gates + a cold-cache clippy recompile + build took 530s,
 # leaving 370s of a 900s outer budget for a boot that reaches BOOT_OK at
-# 370-405s.  A healthy guest was killed mid-diagnostics.  1500 = 900 inner +
-# 600 headroom.  Being generous costs nothing here: run-timeout's real job is
-# tearing down the whole process tree, grandchildren included, and that is
-# independent of the budget.  See known-issues.md -> Lesson 50.
+# 370-405s.  A healthy guest was killed mid-diagnostics.
+#
+# Re-measured 2026-08-31, and the gate half has grown far more than the boot
+# half: with another lane building concurrently, gates + clippy + build took
+# ~3000s before QEMU was even started, and BOOT_OK then landed at 1043s.  So
+# the pre-QEMU phase is now the *larger* of the two and swings widely with host
+# load -- an outer budget derived from the boot time alone will be wrong.
+#
+# Budget the outer as gates+build+inner, then round up: 7200 = ~3000 observed
+# pre-QEMU + 2400 inner + headroom.  Being generous costs nothing here:
+# run-timeout's real job is tearing down the whole process tree, grandchildren
+# included, and that is independent of the budget.  An outer budget that is too
+# tight does not merely delay the answer, it destroys the diagnostic -- which is
+# what happened twice on 2026-08-31 before this comment was rewritten.
+# See known-issues.md -> Lesson 50.
 #
 # Usage:
 #   ./scripts/boot-test.sh              # full build + test (waits for BOOT_OK)
@@ -1195,10 +1206,26 @@ kill_qemu() {
 # --stall-secs=N, which watches for the serial log going silent and does not
 # care how long a healthy boot takes.
 #
-# Measured: BOOT_OK at ~456s (2026-08-14, TCG, qemu64).  Re-measure and raise
-# this when the self-test suite grows; override with --timeout= for slower
-# hosts.
-TIMEOUT=900
+# Measured: BOOT_OK at ~456s (2026-08-14, TCG, qemu64), which is where the old
+# 900 came from.  Re-measured 2026-08-31: BOOT_OK at 1043s on a host where
+# another lane was building concurrently -- i.e. the suite outgrew the budget,
+# and 900 had stopped being 2x anything.  It was killing healthy boots: two
+# runs that day died at exactly 900s, both reported by the harness as
+# "STILL PRODUCING OUTPUT ... a budget that was too small, not a hang".
+#
+# Sized against the *tail*, not the median, because the tail is what trips the
+# gate.  `--boot-history` over 368 debug/none TCG boots gives median 438s with
+# a range of 18-1175s: the median is unchanged since 2026-08-14, so this is not
+# a boot that got uniformly slower, it is one whose spread now crosses 900.
+# 2x the observed maximum, per the rule above, is ~2350.
+#
+# Erring high is the cheap direction.  Too low kills a healthy kernel and
+# reports it as a hang -- and because this gate runs before anything is built,
+# a false red here blocks every lane, not just the one that tripped it.  Too
+# high only delays the verdict on a genuine hang, which is not this knob's job
+# anyway (see --stall-secs above, and the in-kernel liveness detector, both of
+# which catch a real wedge without waiting for this clock).
+TIMEOUT=2400
 # Did the caller pass --timeout= explicitly?  Only used to decide whether
 # --bench may raise the default (see BENCH_TIMEOUT below); an explicit
 # --timeout= always wins.

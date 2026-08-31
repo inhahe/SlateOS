@@ -315,6 +315,7 @@ pub mod errmsg;
 pub mod extfloat;
 pub mod filekind;
 pub mod fnmatch;
+pub mod fsattr;
 pub mod getopt;
 pub mod human;
 pub mod pathname;

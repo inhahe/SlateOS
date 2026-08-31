@@ -109,9 +109,15 @@
 //! Four of those five cannot be opened *at all*, in any mode — a mode-000 file
 //! refuses `O_RDONLY` as firmly as `O_WRONLY`, and a socket refuses `open`
 //! outright. A handle-based `touch` fails all four where GNU exits 0. So
-//! [`stamp_path`] calls `utimensat` directly on the target, the same call
-//! gnulib makes, which our own libc already exports (`posix/src/file.rs`, over
-//! `SYS_FS_SET_TIMES`).
+//! [`fsattr::set_times`] calls `utimensat` directly on the target, the same
+//! call gnulib makes, which our own libc already exports (`posix/src/file.rs`,
+//! over `SYS_FS_SET_TIMES`).
+//!
+//! That call, the `timespec` conversion behind it and the Windows arm below all
+//! live in [`coreutils::fsattr`] rather than here. `cp -p` needs the same
+//! three, and a second `extern "C"` block declaring `timespec` is a second
+//! chance to get its field widths wrong — silently, because a wrong layout
+//! writes a wrong time rather than failing to compile.
 //!
 //! The same run also confirms the two properties the rest of the file leans on:
 //! `UTIME_OMIT` genuinely leaves the other timestamp untouched (`-a` does not
@@ -160,11 +166,12 @@
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
+use coreutils::fsattr::{self, Times, When};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quoteaf_os};
 use coreutils::stdfd::{self, Stream};
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File, FileTimes, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::mem::ManuallyDrop;
 use std::path::Path;
@@ -263,12 +270,12 @@ impl TouchFlags {
     /// modification time. Reading the old value and writing it back would not:
     /// it rounds to whatever the two clocks agree on, and it races anyone else
     /// writing the file.
-    fn times(&self, reference: Option<Stamp>) -> Stamps {
+    fn times(&self, reference: Option<Stamp>) -> Times {
         // No `-r` means "now", read per file rather than once for the whole
         // run, because GNU passes `UTIME_NOW` and lets the kernel stamp each
         // call separately.
         let stamp = reference.unwrap_or_else(Stamp::now);
-        Stamps {
+        Times {
             accessed: if self.change_access {
                 When::Set(stamp.accessed)
             } else {
@@ -297,45 +304,6 @@ impl Stamp {
             accessed: now,
             modified: now,
         }
-    }
-}
-
-/// What to do with one of the two timestamps.
-#[derive(Clone, Copy)]
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-enum When {
-    /// Leave it exactly as it is. Not "write back what is there" — see
-    /// [`TouchFlags::times`] for why those are different.
-    Omit,
-    /// Overwrite it with this instant.
-    Set(SystemTime),
-}
-
-/// What to write to a file's two timestamps.
-///
-/// This exists rather than a bare [`FileTimes`] because `FileTimes` is opaque —
-/// it can be built but not read back — and the unix stamping path needs to read
-/// the request in order to translate it into a `timespec` pair. So the request
-/// is carried in a form this program owns, and converted at the last moment by
-/// whichever of the two [`stamp_path`] arms is compiled in.
-#[derive(Clone, Copy)]
-struct Stamps {
-    accessed: When,
-    modified: When,
-}
-
-impl Stamps {
-    /// The `std` spelling, for the paths that go through a [`File`] handle:
-    /// every stamp on Windows, and `touch -` on both.
-    fn to_file_times(self) -> FileTimes {
-        let mut times = FileTimes::new();
-        if let When::Set(t) = self.accessed {
-            times = times.set_accessed(t);
-        }
-        if let When::Set(t) = self.modified {
-            times = times.set_modified(t);
-        }
-        times
     }
 }
 
@@ -618,7 +586,7 @@ fn touch_one(flags: &TouchFlags, file: &OsStr, reference: Option<Stamp>) -> Resu
         }
     }
 
-    match stamp_path(path, times) {
+    match fsattr::set_times(path, times) {
         Ok(()) => Ok(()),
         Err(e) => match open_error {
             Some(open) => Err(Failure::CannotTouch(open)),
@@ -682,189 +650,6 @@ fn create_open(path: &Path) -> io::Result<File> {
 
 /// Write `times` to the file `path` names, without opening it for I/O.
 ///
-/// This is the operation `touch` actually performs, and the two arms are not
-/// equivalent — which is the whole reason the split is here and not hidden
-/// behind [`File::set_times`]:
-///
-/// - **unix** — `utimensat(AT_FDCWD, path, times, 0)`, the same call gnulib
-///   makes. It stamps a *path*, so it works on everything a path can name:
-///   a directory, a file whose permissions forbid every kind of open, a
-///   unix-domain socket, a device node. That is what makes the two "exit 0"
-///   rows in the module docs true rather than approximately true.
-/// - **windows** — there is no path-based equivalent; `SetFileTime` takes a
-///   handle. So this arm opens one asking for the least access that permits a
-///   stamp, and the cases a handle cannot reach stay unreachable. See
-///   `known-issues.md` → `TD-B-TOUCH-CANNOT-STAMP-A-PATH-IT-CANNOT-OPEN`.
-///
-/// The Windows arm is what the host test suite exercises, so the shared logic
-/// around it — the order in [`touch_one`], which error is reported, `-c`, `-a`,
-/// `-m`, `-r` — is covered on every host. What is *not* covered there is the
-/// unix arm's translation of a [`Stamps`] into a `timespec` pair, so that lives
-/// in [`to_timespecs`], which is ordinary portable code and is unit-tested on
-/// both.
-///
-/// # Errors
-///
-/// Whatever the platform said. On unix the `errno` is recovered through
-/// [`io::Error::last_os_error`], which is correct here because `utimensat`
-/// promises to set it on a `-1` return.
-#[cfg(unix)]
-fn stamp_path(path: &Path, times: Stamps) -> io::Result<()> {
-    /// `AT_FDCWD` — resolve a relative path against the working directory.
-    /// Matches `posix/src/file.rs`.
-    const AT_FDCWD: i32 = -100;
-
-    unsafe extern "C" {
-        fn utimensat(dirfd: i32, path: *const u8, times: *const CTimespec, flags: i32) -> i32;
-    }
-
-    let Some(cpath) = c_path(path) else {
-        // A NUL inside the path. `utimensat` would silently stamp the prefix
-        // before it, so refuse instead — the same error `std` raises for this.
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path contains a NUL byte",
-        ));
-    };
-    let spec = to_timespecs(times);
-
-    // SAFETY: `cpath` is NUL-terminated and lives until the end of this
-    // statement; `spec` is exactly the two-element array `utimensat` reads;
-    // `AT_FDCWD` and a zero flag word are both valid. The call does not retain
-    // either pointer.
-    let rc = unsafe { utimensat(AT_FDCWD, cpath.as_ptr(), spec.as_ptr(), 0) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(unix))]
-fn stamp_path(path: &Path, times: Stamps) -> io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    /// `FILE_WRITE_ATTRIBUTES` — the one right `SetFileTime` checks for.
-    /// `File::open` asks for `GENERIC_READ`, which does not include it, so the
-    /// obvious spelling fails with "Access is denied" on a file that is right
-    /// there and writable.
-    const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
-    /// `FILE_FLAG_BACKUP_SEMANTICS` — without it a *directory* cannot be opened
-    /// as a handle at all, and `touch somedir` could not work on this host even
-    /// though it does on the target.
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-
-    OpenOptions::new()
-        .access_mode(FILE_WRITE_ATTRIBUTES)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?
-        .set_times(times.to_file_times())
-}
-
-/// A path as C wants it: the bytes, then a NUL.
-///
-/// `None` if the path already contains a NUL, which is not a path this OS can
-/// name (`design.txt`: every byte but `/` and NUL) and which C could not
-/// express anyway — `utimensat` would stamp the prefix and report success.
-///
-/// This deliberately does not go through `str`. A path here is bytes, and the
-/// point of the whole argv conversion is that it stays bytes down to the
-/// syscall; `CString::new(path.to_str()?)` would reintroduce precisely the
-/// UTF-8 assumption being removed.
-#[cfg(unix)]
-fn c_path(path: &Path) -> Option<Vec<u8>> {
-    let bytes = os_bytes(path.as_os_str());
-    if bytes.contains(&0) {
-        return None;
-    }
-    let mut buf = Vec::with_capacity(bytes.len().saturating_add(1));
-    buf.extend_from_slice(&bytes);
-    buf.push(0);
-    Some(buf)
-}
-
-/// `struct timespec`, in the layout `posix/src/stat.rs` declares.
-///
-/// Declared here rather than taken from a crate because `coreutils` depends on
-/// no libc binding — every bin that needs one of these declares the shape it
-/// uses, next to the `extern` block that uses it, where the two can be checked
-/// against each other by eye.
-///
-/// It is *not* behind `#[cfg(unix)]`, even though only the unix arm passes one
-/// to a syscall, so that [`to_timespec`] and its tests compile and run on the
-/// development host as well. A type that exists only where it cannot be tested
-/// is how a conversion bug reaches the target unnoticed.
-#[repr(C)]
-#[derive(Clone, Copy)]
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-#[cfg_attr(not(unix), allow(dead_code))]
-struct CTimespec {
-    tv_sec: i64,
-    tv_nsec: i64,
-}
-
-/// `UTIME_OMIT` — the `tv_nsec` sentinel meaning "leave this one alone".
-///
-/// Defined by POSIX as `(1 << 30) - 2`, and matching `posix/src/file.rs`. This
-/// is the mechanism behind [`When::Omit`], and behind `-a` being able to move
-/// the access time without touching the modification time.
-const UTIME_OMIT: i64 = (1 << 30) - 2;
-
-/// Translate a [`Stamps`] into the pair `utimensat` reads.
-///
-/// Kept separate from [`stamp_path`], and free of any `cfg`, because it is the
-/// only part of the unix path with arithmetic in it — and the unix path never
-/// runs on the development host. A conversion that is wrong here is wrong on
-/// the only operating system this program is for, so it is tested everywhere
-/// even though it is called nowhere on Windows.
-///
-/// Times before 1970 are the case worth stating: [`SystemTime::duration_since`]
-/// reports them as an `Err` carrying the *absolute* distance back from the
-/// epoch, so the sign has to be reapplied by hand, and a non-zero nanosecond
-/// part has to borrow a second — `timespec` requires `tv_nsec` in `0..1e9` even
-/// when `tv_sec` is negative. `touch -r` on a file dated 1969 is the way in.
-#[cfg_attr(not(unix), allow(dead_code))]
-fn to_timespecs(times: Stamps) -> [CTimespec; 2] {
-    [to_timespec(times.accessed), to_timespec(times.modified)]
-}
-
-/// One timestamp, as `utimensat` wants it.
-#[cfg_attr(not(unix), allow(dead_code))]
-fn to_timespec(when: When) -> CTimespec {
-    let When::Set(at) = when else {
-        // `tv_sec` is ignored when `tv_nsec` is a sentinel, but zero is what
-        // gnulib passes and it keeps the value reproducible for the tests.
-        return CTimespec {
-            tv_sec: 0,
-            tv_nsec: UTIME_OMIT,
-        };
-    };
-    match at.duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(since) => CTimespec {
-            tv_sec: i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
-            tv_nsec: i64::from(since.subsec_nanos()),
-        },
-        Err(before) => {
-            let back = before.duration();
-            let secs = i64::try_from(back.as_secs()).unwrap_or(i64::MAX);
-            let nanos = i64::from(back.subsec_nanos());
-            if nanos == 0 {
-                CTimespec {
-                    tv_sec: secs.checked_neg().unwrap_or(i64::MIN),
-                    tv_nsec: 0,
-                }
-            } else {
-                // Borrow a second so `tv_nsec` stays non-negative: 0.5 s before
-                // the epoch is (-1 s, +500_000_000 ns), not (0 s, -500_000_000).
-                CTimespec {
-                    tv_sec: secs.saturating_add(1).checked_neg().unwrap_or(i64::MIN),
-                    tv_nsec: 1_000_000_000 - nanos,
-                }
-            }
-        }
-    }
-}
-
 /// Standard output as a [`File`] that will not be closed.
 ///
 /// [`File::set_times`] is the only route from `std` to `futimens`, and it is a
@@ -1311,7 +1096,7 @@ mod tests {
             .write(true)
             .open(path)
             .unwrap()
-            .set_times(FileTimes::new().set_accessed(old).set_modified(old))
+            .set_times(Times::both(old).to_file_times())
             .unwrap();
         old
     }
@@ -1322,181 +1107,6 @@ mod tests {
 
     fn atime(path: &Path) -> SystemTime {
         fs::metadata(path).unwrap().accessed().unwrap()
-    }
-
-    // ---- the `timespec` conversion --------------------------------------
-    //
-    // These are the only tests in this file that cover code the development
-    // host never *runs*: `to_timespec` feeds `utimensat` and `utimensat` is the
-    // unix arm. They compile and run everywhere on purpose — a conversion
-    // tested only where it is used is a conversion tested nowhere, which is
-    // how defect 4 in the module docs survived for as long as it did.
-
-    fn at_epoch_plus(secs: u64, nanos: u32) -> SystemTime {
-        SystemTime::UNIX_EPOCH + Duration::new(secs, nanos)
-    }
-
-    fn before_epoch(secs: u64, nanos: u32) -> SystemTime {
-        SystemTime::UNIX_EPOCH - Duration::new(secs, nanos)
-    }
-
-    /// An omitted time is the `UTIME_OMIT` sentinel, which is what makes `-a`
-    /// leave the modification time untouched rather than rewriting it.
-    #[test]
-    fn an_omitted_time_is_the_omit_sentinel() {
-        assert_eq!(
-            to_timespec(When::Omit),
-            CTimespec {
-                tv_sec: 0,
-                tv_nsec: UTIME_OMIT,
-            }
-        );
-        // POSIX fixes the value; a "cleaner" -1 or 0 would mean the epoch.
-        assert_eq!(UTIME_OMIT, 1_073_741_822);
-    }
-
-    /// The ordinary case, and the one that proves nanoseconds are not being
-    /// rounded away: a stamp that lost its sub-second part would make
-    /// `find -newer` and `make` compare two files that differ by 999 ms as
-    /// equal.
-    ///
-    /// The fraction is a multiple of 100 ns because the *development host*
-    /// cannot hold anything finer — a Windows `SystemTime` is a `FILETIME`,
-    /// which counts 100 ns ticks, so `…_789` is already `…_700` before this
-    /// function is called and the test would be measuring Windows rather than
-    /// the conversion. SlateOS keeps all nine digits; the conversion is the
-    /// same code either way.
-    #[test]
-    fn a_time_after_the_epoch_is_seconds_and_nanoseconds() {
-        assert_eq!(
-            to_timespec(When::Set(at_epoch_plus(1_700_000_000, 123_456_700))),
-            CTimespec {
-                tv_sec: 1_700_000_000,
-                tv_nsec: 123_456_700,
-            }
-        );
-        assert_eq!(
-            to_timespec(When::Set(SystemTime::UNIX_EPOCH)),
-            CTimespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            }
-        );
-    }
-
-    /// A whole number of seconds before 1970 just changes sign.
-    ///
-    /// `SystemTime::duration_since` reports a time before the epoch as an
-    /// `Err` holding the *absolute* distance, so the sign is ours to reapply —
-    /// forget it and `touch -r` on a 1969 file stamps 1970-plus-that-much.
-    #[test]
-    fn a_whole_second_before_the_epoch_is_negative() {
-        assert_eq!(
-            to_timespec(When::Set(before_epoch(1, 0))),
-            CTimespec {
-                tv_sec: -1,
-                tv_nsec: 0,
-            }
-        );
-    }
-
-    /// Half a second before the epoch is `(-1, +500_000_000)`, not
-    /// `(0, -500_000_000)`.
-    ///
-    /// `timespec` requires `tv_nsec` in `0..1_000_000_000` *even when `tv_sec`
-    /// is negative* — the pair is read as `tv_sec + tv_nsec`, so the fraction
-    /// always counts forward and a second has to be borrowed. Our own
-    /// `utimensat` enforces this: `posix/src/file.rs`'s `timespec_nsec_valid`
-    /// rejects a negative `tv_nsec` with `EINVAL`, so getting this wrong would
-    /// not be a silently wrong timestamp but an outright failure.
-    ///
-    /// Measured on Linux 6.6 rather than reasoned about: `utimensat` with
-    /// `(-1, +500_000_000)` returns 0 and the file reads back as
-    /// `-1.500000000`; the same instant written the other way,
-    /// `(0, -500_000_000)`, returns -1.
-    #[test]
-    fn a_fraction_before_the_epoch_borrows_a_second() {
-        assert_eq!(
-            to_timespec(When::Set(before_epoch(0, 500_000_000))),
-            CTimespec {
-                tv_sec: -1,
-                tv_nsec: 500_000_000,
-            }
-        );
-        assert_eq!(
-            to_timespec(When::Set(before_epoch(1, 500_000_000))),
-            CTimespec {
-                tv_sec: -2,
-                tv_nsec: 500_000_000,
-            }
-        );
-    }
-
-    /// Every value the conversion can produce is one our `utimensat` accepts.
-    /// The predicate is `posix/src/file.rs`'s `timespec_nsec_valid`, restated.
-    #[test]
-    fn every_conversion_is_a_timespec_the_libc_accepts() {
-        let cases = [
-            When::Omit,
-            When::Set(SystemTime::UNIX_EPOCH),
-            When::Set(at_epoch_plus(1, 1)),
-            When::Set(at_epoch_plus(1_700_000_000, 999_999_999)),
-            When::Set(before_epoch(0, 1)),
-            When::Set(before_epoch(0, 999_999_999)),
-            When::Set(before_epoch(86_400 * 365 * 100, 1)),
-        ];
-        for case in cases {
-            let ts = to_timespec(case);
-            assert!(
-                (0..=999_999_999).contains(&ts.tv_nsec) || ts.tv_nsec == UTIME_OMIT,
-                "tv_nsec {} is out of range for {case:?}",
-                ts.tv_nsec
-            );
-        }
-    }
-
-    /// The pair keeps its order: access first, modification second, as
-    /// `utimensat`'s `times[2]` is defined. Swapping them would make `-a`
-    /// silently set the modification time — a bug no error message could catch.
-    #[test]
-    fn the_pair_is_access_then_modify() {
-        let ts = to_timespecs(Stamps {
-            accessed: When::Set(at_epoch_plus(11, 0)),
-            modified: When::Set(at_epoch_plus(22, 0)),
-        });
-        assert_eq!(ts[0].tv_sec, 11);
-        assert_eq!(ts[1].tv_sec, 22);
-
-        // And the flags map onto that order the same way.
-        let only_access = to_timespecs(
-            TouchFlags {
-                change_access: true,
-                ..TouchFlags::default()
-            }
-            .times(Some(Stamp {
-                accessed: at_epoch_plus(11, 0),
-                modified: at_epoch_plus(22, 0),
-            })),
-        );
-        assert_eq!(only_access[0].tv_sec, 11);
-        assert_eq!(only_access[1].tv_nsec, UTIME_OMIT);
-    }
-
-    /// A path with a NUL in it is refused rather than truncated. C has no way
-    /// to express one, so `utimensat` would stamp the prefix and report
-    /// success — `touch "a\0b"` would silently stamp `a`.
-    #[test]
-    #[cfg(unix)]
-    fn a_path_with_a_nul_is_refused_not_truncated() {
-        use std::os::unix::ffi::OsStrExt;
-        assert_eq!(c_path(Path::new("ab")), Some(vec![b'a', b'b', 0]));
-        assert_eq!(c_path(Path::new(OsStr::from_bytes(b"a\0b"))), None);
-        // And a non-UTF-8 path survives the trip, which `CString::new(to_str())`
-        // would not.
-        assert_eq!(
-            c_path(Path::new(OsStr::from_bytes(b"a\xffb"))),
-            Some(vec![b'a', 0xff, b'b', 0])
-        );
     }
 
     #[test]
@@ -1555,7 +1165,9 @@ mod tests {
     ///
     /// Measured: GNU `touch /tmp` exits 0 and moves `/tmp`'s mtime.
     ///
-    /// This test is what pins [`stamp_path`]'s Windows arm in place. The obvious
+    /// This test is what pins [`fsattr::set_times`]'s Windows arm in place. It
+    /// lives here rather than beside that function because a directory is a
+    /// `touch` behaviour before it is an `fsattr` one. The obvious
     /// `File::open` spelling fails it twice over on the host — a directory will
     /// not open without `FILE_FLAG_BACKUP_SEMANTICS`, and a `GENERIC_READ`
     /// handle has no `FILE_WRITE_ATTRIBUTES` for `SetFileTime`.
@@ -1570,9 +1182,9 @@ mod tests {
             .unwrap();
         // Backdate the directory itself, through the same door the program uses,
         // so "it moved forward" cannot pass on clock granularity.
-        stamp_path(
+        fsattr::set_times(
             &sub,
-            Stamps {
+            Times {
                 accessed: When::Set(old),
                 modified: When::Set(old),
             },

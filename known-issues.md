@@ -100828,6 +100828,45 @@ sweep: for each such test, find the rule's threshold, find the fixture's
 value, and confirm the fixture is on the far side. Where it is not, the test
 is green today for a reason unrelated to the rule it names.
 
+**Postscript (lane C, 2026-08-31): the fixture is often a *list*, and a list
+is no safer than the single size it replaced.** `hangman`'s wiring sized its
+keyboard `by_width.min(by_height)` -- the key is the smaller of what the
+width can pay for and what the height can. The mutation sweep replaced that
+with `by_width` alone and *nothing failed*, in a suite with nine window
+sizes, a containment test that checks every band is inside the window, and
+an overlap test that checks no two bands touch.
+
+The nine sizes were 320x240, 640x480, 740x560, 1280x800 and five more, and
+every one of them is roughly four-by-three. The height term only binds when
+the window is much wider than it is tall, so across the whole list
+`min(by_width, by_height)` *is* `by_width` -- the mutation changed no
+arithmetic that any fixture performed. Worse, the two tests that look like
+they would catch it cannot: a keyboard that has eaten the window is still
+*inside* the window, and its keys still do not overlap each other. In a
+1200x200 window the width offers 116-pixel keys and the height offers 18,
+so the unmutated program draws an 18-pixel keyboard and the mutant draws one
+five times the height of the window it is in -- and every assertion in the
+suite is about the parts being contained and disjoint, which a keyboard that
+has eaten everything else satisfies perfectly.
+
+Two things generalise from it:
+
+- **A list of fixtures samples one axis of variation, usually the one whose
+  name is in the variable.** `SIZES` varies *size* -- and a rule about aspect
+  ratio is invisible to every entry in it, because they were all chosen to
+  look like windows people use. The question from the main lesson still
+  applies, but it has to be asked of the *quantity the rule turns on*: here
+  `w/h`, which ranged over 1.25-1.6 in a fixture that needed 6.0. When a
+  rule is a `min` or a `max` of two terms, the threshold is the crossover,
+  and a fixture on one side of it tests one term.
+- **"Contained and disjoint" is not "laid out".** Those two properties are
+  what a layout test naturally asserts and they are jointly satisfied by
+  degenerate layouts -- one band taking everything, bands stacked
+  left-aligned, a band pushed to zero. Each needs its own assertion about
+  *proportion*: `hangman` now asserts the keyboard takes at most 36% of the
+  window height, that each key row's left margin equals its right, and that
+  the word row ends above the keys.
+
 ### Lesson 91: a needle the frame says twice cannot tell you which band said it (lane C, 2026-08-30)
 
 **In short:** `gomoku` draws the phrase "White is thinking" in two places --

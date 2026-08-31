@@ -100966,7 +100966,56 @@ because each was wrong in the same way and it is not a way that looks wrong:
 | `[io_ring] File handle read/write` | **false positive** | `[io_ring]   File handle read/write (1 entry): OK` — 1045 lines later in the same boot |
 | `[io_ring] Positioned I/O (pread/pwrite)` | **false positive** | `[io_ring]   Positioned I/O (pread/pwrite preserve the cursor): OK` |
 | `[mm] Zero-on-free` | **false positive** | `[mm]   Zero-on-free: OK (counter=2, settled=false)` — 46,883 lines later |
-| `[mm] Zeroed frame allocation` | **genuine** | nothing; it really never runs |
+| `[mm] Zeroed frame allocation` | **genuine** | nothing; it really never runs — **FIXED 2026-08-31, see below** |
+
+#### The one genuine finding, fixed (lane A, 2026-08-31)
+
+`test_zeroed_alloc`'s only caller was `mm::frame::self_test()`, which runs at
+`main.rs:654`; `page_table::init` is at `main.rs:774`. So its `hhdm()` guard
+was not "sometimes false" but false on **every** boot, and the case had never
+executed once.
+
+**What was untested is not a formality.** `alloc_frame_zeroed` is the primitive
+that stops a new owner reading the previous owner's bytes — `virtio/gpu.rs`
+states it outright ("anything but `alloc_frame_zeroed` leaks"). Nothing else in
+a booting kernel asserted that it returns zeros. `test_zero_on_free` is *not*
+that assertion: it exercises zeroing at **free** time, behind a sysctl it
+toggles on and back off — a different mechanism on a different code path. So an
+information-disclosure boundary had no live test at all.
+
+**The comment is why nobody looked.** The skip said the case "will be exercised
+indirectly by the demand paging self-test". There is no such assertion; no
+demand-paging test checks the contents of a freshly allocated frame. A skip
+carrying a plausible coverage claim reads as a *decision* rather than a hole,
+so it survives every review that a bare skip would not. The claim had evidently
+never been checked against the tree. **Treat an unverified coverage claim in a
+comment as the more dangerous half of a skip** — the skip is visible in the
+log, the claim is not.
+
+**What was done.**
+
+| | |
+|---|---|
+| Post-init entry point | `pub fn test_zeroed_alloc()`, called from `main.rs` in the same block as `test_zero_on_free` |
+| Shared body | `test_zeroed_alloc_inner(&mut skips)` — still called early, still skips, kept **as the tripwire** (`partition_skips` marks it *covered* while the real call happens, *uncovered* if that call is ever deleted) |
+| The guard became an assertion | new `require_hhdm_post_init()`: before `page_table::init` an absent HHDM is a boot stage and a SKIP is honest; after it, it is a defect |
+| Diagnostics | the failure now names the **offset and value** of the first non-zero byte, not just "not zero" |
+
+**A second instance of the same hole, four lines away.** `test_zero_on_free`'s
+post-init wrapper reused its shared body unchanged, so it too could record a
+silent SKIP for the one reason a post-init entry point cannot legitimately
+have. It now asserts the HHDM first. The lesson generalises: **splitting a test
+into an early and a late entry point is only half the fix — the late one must
+also stop treating the prerequisite as optional**, or it inherits exactly the
+hole the split was meant to close.
+
+**Why the failure message contains the words "self-test failed".** The harness's
+`check_selftest_failures` greps case-insensitively for that wrapper phrase, and
+it is the only thing that catches a self-test which reports failure and lets
+the boot continue to `BOOT_OK`. It deliberately does not grep raw
+`FAIL:`/`WARNING:`, because passing logs contain both legitimately
+(`[drm-atomic] check FAIL: CRTC 9999 not found`). A failure message without the
+phrase would print on a red boot and still let the run be recorded PASSED.
 
 **The `io_ring` pair is a deliberate tripwire, and the source says so.** The
 comment above the pre-mount calls (`kernel/src/ipc/io_ring.rs:1290`):
@@ -102576,9 +102625,175 @@ is about an unregistered *entry point*, and an io_uring opcode is one, though
 the name reads as syscall-specific and may deserve widening if this lands), and
 add an assertion to `io_ring`'s self-test in the shape of
 `test_dispatch_unimplemented`: an unknown opcode gives -10, -10 is not -2, and
-the Linux-ABI mapping is unchanged. Check first whether any caller in
-`userspace/` or `posix/` probes CQE `res == -2`; if one does, it needs the same
-two-lines treatment lane B is getting for the syscall half.
+the Linux-ABI mapping is unchanged.
+
+**The blast-radius question is already answered — 2026-08-31, lane A.** The fix
+step above used to open with "check first whether any caller in `userspace/` or
+`posix/` probes CQE `res == -2`; if one does, it needs the same two-line
+treatment lane B is getting for the syscall half." That check has now been run,
+so whoever picks this up does not have to re-derive it:
+
+**No caller anywhere in the tree reads a CQE `res` and compares it to `-2`.**
+The only consumers of io_uring results outside the kernel are
+`posix/src/linux_io_uring.rs`, `posix/src/aio.rs` and
+`posix/src/linux_aio_abi.rs`, and the sole `ENOSYS`-shaped reasoning in them
+(`linux_io_uring.rs` lines 578, 1372, 1542) is about **`io_uring_setup` itself**
+returning `-1`/`ENOSYS` because no real ring exists yet — it is not a probe of a
+completion result. So this is a kernel-local change: one match arm plus the
+self-test assertion, **no `requests/` file and no cross-lane coordination**.
+
+That has a cost consequence worth stating plainly: the reason this stayed
+deferred was never the risk, it was the absence of evidence that anyone needs
+the distinction. Re-verify cheaply before acting — `rg -n 'cqe.*res|\.res\b'
+posix/ userspace/ services/` and look for a comparison against a negative
+literal — because the answer above is a fact about the tree on a date, not a
+property of the design.
 
 **Trigger:** a caller that needs to feature-probe io_uring opcodes, or the next
 time someone writes a fallback path around a CQE result.
+
+## A-THE-WIRING-GATE-ASKS-A-QUESTION-IT-COULD-ANSWER-ITSELF (lane A)
+
+**Status:** OPEN 2026-08-31
+
+`scripts/check-self-tests-wired.py` ends every run with a NOTE:
+
+> 6 self-test call site(s) in main.rs sit inside a conditional, so whether they
+> run depends on the boot path. Being reachable from main.rs is not the same as
+> being reached: a suite behind a condition that is false in CI has never run,
+> however green the boot test looks. **Check each against the serial log before
+> citing it as coverage.**
+
+The reasoning is exactly right, and it is the reasoning that catches the bug
+class that put `[mm] Zeroed frame allocation` in this file — a call site that
+exists, type-checks, and is reachable, but whose guard is false on every boot.
+The defect is that the gate **stops one step short**: it asks the reader to do
+the correlation by hand, on every boot, forever, and never does it itself.
+
+**The manual check is error-prone, and I have the failure to prove it.** Doing
+this by hand on 2026-08-31 I first concluded that two of the six —
+`self_test_userspace_netstack` and `self_test_netstack_dns_ipc` — had never run,
+because grepping the serial log for their names near the word "self-test"
+returned nothing. That was a **false negative**: both run, and print
+`[spawn] Running userspace netstack daemon (ring 3) integration test...` and
+`[spawn]   netstack DNS-over-IPC ...: OK` (serial lines 2786 and 2816). They say
+*integration test*, not *self-test*. The hand check fails on a phrasing mismatch
+between the function's name and the words it prints — which is precisely the
+kind of thing a script does not get wrong and a reader does.
+
+**Verified result, 2026-08-31 — all six do run.** Recorded so the next reader
+does not repeat the search:
+
+| Call site | Guard | Runs in CI? | Evidence in serial |
+|---|---|---|---|
+| `main.rs:1138` / `:1150` `acpi::self_test` | `if let Some(rsdp) = …` / `else` | yes — **cannot not** run | `[acpi] Self-test PASSED` (1727) |
+| `main.rs:1400` `mm::swap::self_test_disk` | `init_disk(...).is_ok()` | yes | `[swap] Disk backend self-test PASSED` (2006) |
+| `main.rs:1512` `fs::fat::self_test` | `if fat_ok` | yes | `[fat] Running mkfs/format self-test...` (2564) |
+| `main.rs:2043` `self_test_userspace_netstack` | `!net.userspace` | yes | `…integration test...` (2786) |
+| `main.rs:2054` `self_test_netstack_dns_ipc` | `!net.userspace` | yes | `…: OK — 104.20.23.154` (2816) |
+
+Two of those deserve a note. The `acpi` pair is reported as gated but is an
+`if`/`else` over the same test, so one arm always runs — the gate's nesting
+model does not know that two branches of one conditional are exhaustive, and
+counts both. And the netstack pair's guard is `!userspace_enabled()`, which
+reads as fragile but is presently safe because the `net.userspace` cutover
+switch defaults **off** (`[spawn]   net.userspace cutover switch: off`, 2842).
+That is a default, not an invariant: **the day the cutover flips on, those two
+self-tests silently stop running** and nothing says so. The code comment at
+`main.rs:2036` documents the skip as deliberate (they would contend for the
+exclusive raw-NIC claim, §64) — which makes it a correct decision with no
+tripwire, not an accident.
+
+**Proper fix.** Do the correlation in the harness rather than in the reader's
+head. The wiring gate runs *pre*-build so it has no serial log at that point;
+the natural home is a post-boot check beside `check-boot-skips.py`, which
+already reads the serial log for exactly this kind of question. Have
+`check-self-tests-wired.py` emit its gated-site list as machine-readable output
+(it already computes it for `--list-gated`), and have the post-boot step assert
+each gated site produced *some* output in the log. Keying that on a per-site
+declared marker — not on the function's name — is the whole point, since the
+name-to-output mismatch above is the failure mode.
+
+**Until then, the netstack pair is the one to watch**, because its guard is a
+flag someone will eventually flip on purpose.
+
+## A-THE-LOAD-CANARY-COUNTED-ITS-OWN-STARTUP-AS-LOAD (lane A) — FIXED 2026-08-31
+
+**Status:** FIXED 2026-08-31, same day as found.
+
+`scripts/canary-load.py`'s `host_occupancy` is labelled in its own record as
+"the direct measurement, and the one to believe". It was measuring each
+spinner's **Python interpreter startup** as though it were load applied inside
+the window.
+
+**How it surfaced.** A boot test failed at 1555 s — *before building anything* —
+on the harness self-test `and does not exceed what wall time allows:
+occupancy 2.036`. Two single-threaded spinners cannot occupy 2.036 cores; that
+is not a flaky threshold but an impossibility, and the run had been declared
+red on the strength of it.
+
+**Root cause, in two parts.**
+
+1. `_spin`'s pre-`go` wait loop called `publish()` *only on its way out*:
+
+   ```python
+   while not go.is_set():
+       if should_quit():
+           publish()      # only when quitting
+           return
+       go.wait(1.0)
+   ```
+
+   So the slot held its initial `0.0` for the whole wait. The controller
+   snapshots the opening balance *before* setting `go` — deliberately, so no
+   in-window burn lands in it — and therefore read `0.0`, while the closing
+   snapshot read a real `process_time()` that included the entire interpreter
+   startup. The difference was charged to the window.
+
+2. Fixing that alone left a residual (1.82 → 1.14, still impossible), because
+   `Process.start()` returns when a process is **spawned**, not when its
+   interpreter has booted and reached `_spin`. Under the spawn start method the
+   child re-imports the module — hundreds of milliseconds — after `start()` has
+   returned. A spinner that had not yet published still contributed a `0.0`
+   opening balance.
+
+**The comment asserted the very property that did not hold.** Above the
+readiness announcement stood:
+
+> Announce readiness only once every interpreter is up … Announcing earlier
+> would move the interpreter startup cost back inside the measurement window,
+> **which is the whole thing this program exists to avoid.**
+
+`start()` cannot promise that, and nothing else was enforcing it. This is the
+third instance in one day of the same defect shape — a claim in a comment that
+reads as a guarantee, is checked by nobody, and is false (cf.
+`A-THE-WIRING-GATE-ASKS-A-QUESTION-IT-COULD-ANSWER-ITSELF`, and the
+"exercised indirectly by the demand paging self-test" skip in `mm/frame.rs`).
+
+**Why it hid for so long.** The assertion it had to clear was a hardcoded
+`occupancy <= 2.0`. A systematic upward bias that happened to land near 1.8
+sailed under a bar of 2.0 on every quiet run, and only tipped over when host
+load stretched startup. A constant tolerance did not just fail to catch the
+bug — it is *why* the bug was invisible.
+
+**What was done.**
+
+| Change | Effect |
+|---|---|
+| `_spin` publishes before the wait loop and on every wakeup | opening balance reflects real startup CPU, not `0.0` |
+| New `ready_count` barrier; controller waits for every spinner to publish before announcing readiness | closes the spawn race; makes the existing comment true |
+| Snapshots stamped (`cpu_fire_at`/`cpu_release_at`); `span_s` recorded | the numerator's interval is measured, not assumed equal to the window |
+| New `occupancy_measured` = burn ÷ (spinners × span) | a ratio with a real physical ceiling of 1.0 |
+| `occupancy_ceiling(span)` = `1 + 15.6 ms / span` | ceiling derived from clock granularity and the span, replacing the constant `2.0` |
+| Test asserts `occupancy_measured <= occupancy_ceiling` | tighter on long spans, honest on short ones |
+
+`occupancy` (÷ the *requested* window) is kept unchanged and still backs the
+floor check: window is the **intent**, span is the **measurement**, and the two
+answer different questions. Only the span-based ratio has a physical ceiling.
+
+**Consequence for existing data.** Every `host_occupancy` figure recorded before
+this date is biased upward by roughly one interpreter startup per spinner
+divided by the window — negligible for multi-second benchmark windows, large
+for short ones. Historical readings near 0.98 were *under*-stating a
+correctly-applied load, not over-stating it, so no past grading verdict flips;
+but do not mine pre-2026-08-31 occupancy figures for precision.

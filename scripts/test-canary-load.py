@@ -799,12 +799,36 @@ with tempfile.TemporaryDirectory() as tmpdir:
         check_true("occupancy clears the floor",
                    occ["occupancy"] >= cl.OCCUPANCY_FLOOR,
                    f"occupancy {occ['occupancy']}")
-        # Upper bound too: a spinner cannot burn more CPU than wall time, so
-        # a figure far above 1.0 would mean the window or the clocks are
-        # wrong.  The slack absorbs the ~15.6 ms granularity of the Windows
-        # CPU clock against a window of well under a second.
-        check_true("and does not exceed what wall time allows",
-                   occ["occupancy"] <= 2.0, f"occupancy {occ['occupancy']}")
+        # Upper bound too -- but on `occupancy_measured`, not `occupancy`.
+        #
+        # This assertion used to read `occupancy <= 2.0`, and on 2026-08-31 it
+        # failed a whole boot test at `occupancy 2.036` before anything was
+        # built.  The run was fine; the check was wrong twice over.
+        #
+        # `occupancy` divides by the *requested* window, while the CPU
+        # snapshots straddle a strictly wider interval by design (opened before
+        # `go`, closed after `stop`, and the spinners keep burning until they
+        # next observe `stop`).  So it has no physical ceiling at all: under
+        # host load the excess is unbounded, and 2.0 was not a principle but a
+        # number that happened to hold while the host stayed quiet.
+        #
+        # `occupancy_measured` divides by the interval actually measured, so
+        # 1.0 *is* a physical ceiling -- no process burns more CPU than the
+        # span it was measured over, times its cores.  The only legitimate
+        # overshoot is the CPU clock's ~15.6 ms grid, which `occupancy_ceiling`
+        # derives from the span rather than assuming.  That makes this bound
+        # tighter than the old one on a long span and looser on a short one,
+        # which is the right way round: a constant tolerance is exactly what
+        # let a systematically-biased ratio pass unnoticed.
+        check_true("and does not exceed what the measured span allows",
+                   occ["occupancy_measured"] <= occ["occupancy_ceiling"],
+                   f"occupancy_measured {occ['occupancy_measured']} "
+                   f"> ceiling {occ['occupancy_ceiling']} "
+                   f"(span {occ['span_s']}s, window {occ['window_s']}s)")
+        # The span must actually have been measured; falling back to the window
+        # would silently restore the bug this check exists to catch.
+        check_true("the measured span is recorded, not assumed",
+                   occ["span_s"] is not None, occ)
     check_true("a correctly-loaded run is not flagged as unapplied",
                record.get("problem") is None, record.get("problem"))
     check_true("the summary states the occupancy in words",

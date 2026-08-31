@@ -3006,7 +3006,10 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[mm]   Double-free detection: OK");
 
     // -- Test 5: Zeroed frame allocation (every byte zero) ------------------
-    test_zeroed_alloc(&mut skips)?;
+    // Always skips here (the HHDM arrives ~120 lines later in main.rs); kept
+    // as the tripwire for the real call in main.rs.  See
+    // `test_zeroed_alloc_inner`.
+    test_zeroed_alloc_inner(&mut skips)?;
 
     // -- Test 6: Per-CPU cache (alloc/free pattern after enabling) ----------
     test_pcpu_cache()?;
@@ -3019,17 +3022,54 @@ pub fn self_test() -> KernelResult<()> {
     Ok(())
 }
 
-/// Verify `alloc_frame_zeroed` returns a completely zero-filled frame.
+/// Verify `alloc_frame_zeroed` returns a completely zero-filled frame, from a
+/// call site late enough for the HHDM to exist.
 ///
-/// Requires page_table::hhdm() to be available (page_table::init must
-/// have been called).  Skips gracefully if called too early in boot.
-fn test_zeroed_alloc(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
+/// **This is the entry point that actually runs.**  The copy called from
+/// `self_test()` has never once executed: that runs at `main.rs:654` and
+/// `page_table::init` is at `main.rs:774`, so its HHDM guard is not
+/// "sometimes false" but false on every boot, always.  `check-boot-skips.py`
+/// found it — it was the one genuine finding out of that gate's first four,
+/// the other three being sections that do run later under a different call.
+///
+/// **What was untested is not a formality.**  `alloc_frame_zeroed` is the
+/// primitive that stops a new owner reading the previous owner's bytes;
+/// `virtio/gpu.rs` says so outright ("anything but `alloc_frame_zeroed`
+/// leaks").  Nothing else in a booting kernel asserts it returns zeros.
+/// [`test_zero_on_free`] is not that assertion — it exercises zeroing at
+/// *free* time, behind a sysctl it switches on and back off, which is a
+/// different mechanism and a different code path.
+///
+/// The old skip claimed the case "will be exercised indirectly by the demand
+/// paging self-test".  That was not true, and it is the reason nobody looked:
+/// a skip carrying a plausible coverage claim reads as a decision rather than
+/// a hole.  There is no demand-paging assertion on the contents of a freshly
+/// allocated frame — the claim was never checked against the tree, and a
+/// coverage claim in a comment is worth exactly what it can be shown to be.
+pub fn test_zeroed_alloc() -> KernelResult<()> {
+    require_hhdm_post_init("Zeroed frame allocation")?;
+    let mut skips = crate::fs::selftest::Skips::new();
+    let r = test_zeroed_alloc_inner(&mut skips);
+    skips.report("[mm]");
+    r
+}
+
+/// Shared body.  Records a skip when the HHDM is absent, which is honest for
+/// the early `self_test()` caller and impossible for the post-init one, whose
+/// wrapper has already asserted it.
+///
+/// The early call is kept rather than deleted, deliberately, and it is the
+/// same reasoning `io_ring`'s two file-handle sections are kept on: the skip
+/// is a tripwire.  `partition_skips` in `scripts/boot-history.py` classifies a
+/// skip as *covered* when the same section reports elsewhere in the same boot,
+/// and only *uncovered* skips reach `check-boot-skips.py`.  So while the
+/// post-init call happens this line is silent — and if that call were ever
+/// removed, the skip would become uncovered and the gate would say so.  Delete
+/// the early call and you delete the thing that notices.
+fn test_zeroed_alloc_inner(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
     let hhdm = match crate::mm::page_table::hhdm() {
         Some(h) => h,
         None => {
-            // Page table module not initialized yet — alloc_frame_zeroed
-            // won't work either.  Skip this test at early boot; it will
-            // be exercised indirectly by the demand paging self-test.
             skips.record(
                 "Zeroed frame allocation",
                 "HHDM is not mapped yet (running before page_table::init)",
@@ -3042,10 +3082,28 @@ fn test_zeroed_alloc(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()>
     let ptr = frame.to_virt(hhdm) as *const u8;
 
     // Check every byte in the 16 KiB frame is zero.
+    //
+    // Report the *offset and value* of the first survivor rather than a bare
+    // "not zero".  A failure here means one owner's bytes reached another, and
+    // the two questions that follow are always "how far in did the zeroing
+    // stop" and "what did it leave" — an offset that lands on a page or
+    // cache-line boundary says the memset was short, whereas scattered
+    // survivors say something wrote *after* it.  Recomputing that from a
+    // yes/no answer means reproducing a failure that may not repeat.
+    //
+    // `enumerate().find()` rather than `position()` plus a second read at that
+    // offset: the offset and the byte then come from one pass over one slice, so
+    // there is no way for the reported value to be a *later* write than the one
+    // that was detected.  It also keeps the whole scan inside the single
+    // `unsafe` block and needs no indexing.
+    //
     // SAFETY: frame is allocated, HHDM mapping is valid.
-    let all_zero = unsafe {
-        let slice = core::slice::from_raw_parts(ptr, FRAME_SIZE);
-        slice.iter().all(|&b| b == 0)
+    let first_nonzero = unsafe {
+        core::slice::from_raw_parts(ptr, FRAME_SIZE)
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|&(_, b)| b != 0)
     };
 
     // SAFETY: sole owner.
@@ -3053,8 +3111,12 @@ fn test_zeroed_alloc(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()>
         free_frame(frame)?;
     }
 
-    if !all_zero {
-        serial_println!("[mm]   FAIL: alloc_frame_zeroed returned non-zero frame!");
+    if let Some((off, byte)) = first_nonzero {
+        serial_println!(
+            "[mm]   FAIL: alloc_frame_zeroed returned a frame that is not zero: \
+             byte {off} of {FRAME_SIZE} is {byte:#04x}. This is an information \
+             leak -- the previous owner's contents are reaching the next one."
+        );
         return Err(KernelError::InternalError);
     }
     serial_println!("[mm]   Zeroed frame allocation: OK");
@@ -3134,6 +3196,42 @@ fn selftest_cgroup(section: &str) -> KernelResult<crate::cgroup::CgroupId> {
     })
 }
 
+/// Assert the HHDM is mapped, for a self-test entry point that runs *after*
+/// `page_table::init`.
+///
+/// The distinction this draws is the whole reason the post-init entry points
+/// exist.  Before `page_table::init`, "the HHDM is not mapped" is a fact about
+/// how far the boot has got, and recording a SKIP is honest.  After it, the
+/// same condition is a **defect** — something un-mapped the HHDM, or the call
+/// was wired into the wrong phase — and answering a defect with a SKIP is
+/// exactly how six other self-test cases came to spend their entire lives
+/// unrun while printing nothing red (known-issues.md
+/// A-SIX-SELF-TESTS-SKIP-ON-EVERY-BOOT-AND-HAVE-NEVER-ONCE-RUN).
+///
+/// The message deliberately contains the phrase "self-test failed": the boot
+/// harness's `check_selftest_failures` greps case-insensitively for exactly
+/// that wrapper phrase, and it is the *only* thing that catches a self-test
+/// which reports a failure and lets the boot continue to BOOT_OK.  It does not
+/// grep raw "FAIL:"/"WARNING:", because passing logs legitimately contain both.
+/// A failure message without this phrase would print on a red boot and still
+/// let the run be recorded as PASSED.
+fn require_hhdm_post_init(section: &str) -> KernelResult<()> {
+    match crate::mm::page_table::hhdm() {
+        // The value is deliberately not returned: the shared body re-fetches
+        // it, and handing back a mapping the caller then ignores invites a
+        // future reader to thread it through and quietly create two sources
+        // for one fact.  This function answers a yes/no question.
+        Some(_) => Ok(()),
+        None => {
+            serial_println!(
+                "[mm]   FAIL: {section} self-test failed: the HHDM is not mapped, but this \
+                 entry point runs after page_table::init -- it must be"
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test zero-on-free mode: frames zeroed during free are correctly
 /// pre-zeroed when allocated via `alloc_frame_zeroed()`.
 ///
@@ -3152,8 +3250,15 @@ fn selftest_cgroup(section: &str) -> KernelResult<crate::cgroup::CgroupId> {
 /// main.rs call site still cannot print a bare success line over a skipped
 /// section.
 ///
+/// It also asserts the HHDM *before* delegating, rather than letting the
+/// shared body record a skip.  Reusing the body unchanged left this entry
+/// point able to skip silently for the one reason it is the entry point that
+/// cannot legitimately have: it runs after `page_table::init`, so an absent
+/// HHDM here is a defect, not a boot stage.  See [`require_hhdm_post_init`].
+///
 /// [`Skips`]: crate::fs::selftest::Skips
 pub fn test_zero_on_free() -> KernelResult<()> {
+    require_hhdm_post_init("Zero-on-free")?;
     let mut skips = crate::fs::selftest::Skips::new();
     let r = test_zero_on_free_inner(&mut skips);
     skips.report("[mm]");

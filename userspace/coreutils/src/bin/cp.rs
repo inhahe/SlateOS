@@ -150,8 +150,8 @@
 //! `-P`/`--no-dereference`, `-H` and `-L`/`--dereference`, the four
 //! overwrite policies `-f`/`--force`, `-n`/`--no-clobber`,
 //! `-i`/`--interactive` and `--remove-destination`, and
-//! `-p`/`--preserve`/`--no-preserve` for the three attributes POSIX names.
-//! The rest are recognised and rejected with a message
+//! `-p`/`--preserve`/`--no-preserve` for the three attributes POSIX names plus
+//! `links`. The rest are recognised and rejected with a message
 //! saying they are not implemented, rather than ignored, and they are listed in
 //! [`LONG_OPTIONS`] anyway because the table is what decides whether an
 //! abbreviation is ambiguous.
@@ -161,16 +161,17 @@
 //! file whose holes survive. Every one of those, ignored, produces a
 //! destination that looks right and is not. `-d` is refused for a subtler
 //! version of the same reason: it is `-P` *plus* `--preserve=links`, and
-//! honouring only the half that exists would turn two hard-linked sources into
-//! two independent copies without saying so. `-a` is refused for exactly that
-//! reason too — it is `-dR --preserve=all`, and `all` includes `links`.
+//! honouring only one half would turn two hard-linked sources into two
+//! independent copies without saying so. Both halves exist now, so `-d` is
+//! refused only until the letter is wired to them. `-a` is `-dR
+//! --preserve=all`, and so waits on `all`.
 //!
 //! `--preserve` is the one option that is *partly* here, so it is refused a
 //! word at a time rather than whole: `--preserve=mode,timestamps,ownership`
-//! works, `--preserve=links` and `--preserve=xattr` and `--preserve=context`
+//! and `--preserve=links` work, `--preserve=xattr` and `--preserve=context`
 //! and `--preserve=all` do not. A whole-option refusal would send a user who
-//! asked for the three attributes that exist to look for another `cp`.
-//! `--no-preserve=` takes every word, including the four above: refusing to
+//! asked for the four attributes that exist to look for another `cp`.
+//! `--no-preserve=` takes every word, including the three above: refusing to
 //! *stop* doing something this `cp` never does would be a refusal with no
 //! meaning behind it.
 //!
@@ -396,12 +397,13 @@ const PRESERVE_WORDS: &[(&str, Attribute)] = &[
 
 /// Which of a source's attributes are put back onto the copy.
 ///
-/// Three of GNU's seven words, and they are the three POSIX names as the
-/// attributes `cp -p` must restore: permission bits with the set-user-ID,
-/// set-group-ID and sticky bits, the owner and group, and the two timestamps.
-/// The other four are refused at parse time rather than represented here — see
-/// [`decode_preserve`] — so no code downstream has to ask what to do about an
-/// attribute it cannot write.
+/// Four of GNU's seven words: the three POSIX names as the attributes `cp -p`
+/// must restore — permission bits with the set-user-ID, set-group-ID and sticky
+/// bits, the owner and group, and the two timestamps — and `links`, which is
+/// not one of them and is the only one of the four that changes what ends up on
+/// disk rather than what is attached to it. The remaining three are refused at
+/// parse time rather than represented here — see [`decode_preserve`] — so no
+/// code downstream has to ask what to do about an attribute it cannot write.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
 struct Preserve {
@@ -415,6 +417,16 @@ struct Preserve {
     /// `--preserve=ownership`: the owner and the group. Almost always fails for
     /// a non-root user, and that failure is *silent* — see [`chown_privileges`].
     ownership: bool,
+    /// `--preserve=links`: when two sources turn out to be one inode, make the
+    /// second destination a **hard link** to the first rather than a second
+    /// copy of the bytes. See [`Links`].
+    ///
+    /// The odd one out, and in two ways. It is not part of `-p` — GNU's `-p` is
+    /// the three POSIX attributes and nothing else — and it is not an attribute
+    /// of a file at all but a relationship between two of them, which is why it
+    /// is the one word whose effect is visible in `ls -i` rather than in
+    /// `ls -l`.
+    links: bool,
 }
 
 impl Preserve {
@@ -428,14 +440,20 @@ impl Preserve {
         mode: false,
         timestamps: false,
         ownership: false,
+        links: false,
     };
 
     /// What `-p`, and a bare `--preserve` with no list, ask for (`cp.c:1092`).
+    ///
+    /// `links: false` is not an omission. GNU's `-p` is `preserve_mode`,
+    /// `preserve_timestamps` and `preserve_ownership`, and `--preserve=links`
+    /// has to be asked for by name or through `-d`/`-a`.
     const fn posix() -> Self {
         Preserve {
             mode: true,
             timestamps: true,
             ownership: true,
+            links: false,
         }
     }
 }
@@ -541,6 +559,23 @@ impl CpFlags {
     fn follow_walked(&self) -> bool {
         self.resolved_deref() == Deref::Always
     }
+
+    /// GNU's `should_dereference` (`copy.c:2148`), which is the same question
+    /// as the two above asked once with the *place* as a parameter rather than
+    /// baked into the name.
+    ///
+    /// `follow_operand()` is this with `true` and `follow_walked()` is this
+    /// with `false`; they stay as they are because their call sites read better
+    /// for it, and because each is asked where only one answer is possible.
+    /// This one exists for [`place_entity`], which is reached from both places
+    /// and so has to carry the distinction as data.
+    fn should_dereference(&self, command_line_arg: bool) -> bool {
+        match self.resolved_deref() {
+            Deref::Always => true,
+            Deref::CommandLine => command_line_arg,
+            Deref::Never | Deref::Undefined => false,
+        }
+    }
 }
 
 /// What the command line asked for.
@@ -580,9 +615,13 @@ fn run_main() -> ExitCode {
             // Held for the whole run, not opened per prompt: `cp -i a b c d`
             // asks three questions and reads three lines of one stream.
             let mut answers = StdinAnswers::new();
+            // One table for the whole command, which is what `--preserve=links`
+            // means by "the same inode twice". See [`Links`].
+            let mut links = Links::default();
             let earned = {
                 let mut job = Job {
                     flags: &flags,
+                    links: &mut links,
                     out: &mut out,
                     err: &mut err,
                     answers: &mut answers,
@@ -638,9 +677,10 @@ Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
 
 ATTR_LIST is a comma-separated list of attributes: 'mode' for the
 permission bits together with any setuid, setgid and sticky bits,
-'ownership' for the owner and group, and 'timestamps' for the access
-and modification times.  GNU's other three words -- 'links', 'context'
-and 'xattr' -- and 'all', which includes them, are accepted only by
+'ownership' for the owner and group, 'timestamps' for the access and
+modification times, and 'links' to make a hard link where two sources
+turn out to be one file.  GNU's other two words -- 'context' and
+'xattr' -- and 'all', which includes them, are accepted only by
 --no-preserve.
 
 To copy a file whose name starts with a '-', for example '-foo',
@@ -700,11 +740,11 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // `-t`, where a repeat is an error.
             //
             // `-d` is deliberately *not* here. It is `--no-dereference` and
-            // `--preserve=links` together (`cp.c:1044`), and the second half —
-            // recreating a hard link between two sources that share an inode
-            // rather than copying the file twice — is not implemented. Half of
-            // `-d` would be the silent wrong answer the module docs are about,
-            // so it stays refused until `--preserve=links` exists.
+            // `--preserve=links` together (`cp.c:1044`), and half of `-d` would
+            // be the silent wrong answer the module docs are about: two
+            // hard-linked sources would arrive as two independent copies with
+            // nothing said. Both halves exist now; the letter is wired to them
+            // in its own change, not by being quietly folded into this arm.
             Opt::Short(b'P', _) | Opt::Long("no-dereference", _) => {
                 flags.dereference = Deref::Never;
             }
@@ -833,12 +873,7 @@ fn decode_preserve(list: &OsString, on: bool, flags: &mut CpFlags) -> Result<(),
             }
             Attribute::Timestamps => flags.preserve.timestamps = on,
             Attribute::Ownership => flags.preserve.ownership = on,
-            // Recreating a hard link between two sources that share an inode,
-            // rather than copying the file twice. Nothing in this `cp` records
-            // the source inodes it has already copied *to* a destination, which
-            // is what the feature is made of. `-d` and `-a` are refused for
-            // this same missing half.
-            Attribute::Links if on => return Err(unimplemented_attribute(&spelling, "")),
+            Attribute::Links => flags.preserve.links = on,
             // Extended attributes and the SELinux security context. This `cp`
             // reads neither, and GNU's own `--preserve=xattr` sets
             // `require_preserve_xattr`, so silently dropping them would turn an
@@ -847,17 +882,29 @@ fn decode_preserve(list: &OsString, on: bool, flags: &mut CpFlags) -> Result<(),
             Attribute::Context | Attribute::Xattr if on => {
                 return Err(unimplemented_attribute(&spelling, ""));
             }
+            // `all` is the other six words at once (`cp.c`'s `PRESERVE_ALL`),
+            // and four of them now work. It stays refused for `xattr`, which
+            // does not — and *not* for `context`, which GNU itself only sets
+            // when the system has SELinux enabled.
+            //
+            // The refusal is a harder call than it was, because `--preserve=all`
+            // does not set `require_preserve_xattr` the way `--preserve=xattr`
+            // does: under `all`, GNU copies extended attributes best-effort and
+            // succeeds either way. So an `all` that ignored them would agree
+            // with GNU on every source that has none, and differ in silence on
+            // one that has some. Silence is what makes it worth refusing: a
+            // dropped ACL is a permission change that nothing reports.
             Attribute::All if on => {
                 return Err(unimplemented_attribute(
                     &spelling,
-                    ": it includes 'links', which is not",
+                    ": it includes 'xattr', which is not",
                 ));
             }
-            // The `off` direction, for the four words above and for `all`.
-            // `--no-preserve=all` does have an effect beyond the three fields:
+            // The `off` direction, for the two words above and for `all`.
+            // `--no-preserve=all` does have an effect beyond the four fields:
             // it is also `--no-preserve=mode`, whose `explicit_no_preserve_mode`
             // is a behaviour of its own rather than the absence of one.
-            Attribute::Links | Attribute::Context | Attribute::Xattr => {}
+            Attribute::Context | Attribute::Xattr => {}
             Attribute::All => {
                 flags.preserve = Preserve::NONE;
                 flags.explicit_no_preserve_mode = true;
@@ -884,6 +931,13 @@ fn decode_preserve(list: &OsString, on: bool, flags: &mut CpFlags) -> Result<(),
 /// that path at all, which is how bugs 1–3 and 6 in the module docs survived.
 struct Job<'a, O: Write, E: Write> {
     flags: &'a CpFlags,
+    /// `--preserve=links`' record of which inode went where. Empty and unread
+    /// when the option was not given.
+    ///
+    /// On `Job` and not on [`Seen`] because the walk needs it: two hard-linked
+    /// files *inside* one source directory must come out linked too (measured),
+    /// and [`copy_entry`] can reach `Job` and cannot reach `Seen`.
+    links: &'a mut Links,
     /// Where `--verbose` announces. Measured: GNU's `emit_verbose` uses
     /// `printf`, so the line is on stdout and is *not* a diagnostic.
     out: &'a mut O,
@@ -1111,6 +1165,55 @@ impl Seen {
         {
             self.dests.insert((target.to_path_buf(), id));
         }
+    }
+}
+
+/// `--preserve=links`' answer to "have I copied this inode already, and where
+/// to?" — GNU's `remember_copied`/`src_to_dest` table (`copy.c:1997`).
+///
+/// One table for the whole command, not one per operand, because that is what
+/// the feature is for: `cp --preserve=links a b d` has to notice at `b` that it
+/// already wrote `a`'s inode to `d/a`. GNU's `hash_init` is likewise called once
+/// in `main` (`cp.c:1284`), and its comment "in this command line argument" is
+/// about which *arguments can share* an inode, not about the table's lifetime.
+///
+/// A [`PathBuf`] value, not a [`FileId`]: the destination is what gets linked
+/// *from*, so it has to be nameable. GNU stores `dst_relname` for the same
+/// reason.
+///
+/// Kept separate from [`Seen`]'s `dirs`, where GNU uses one table for both.
+/// They can never collide — a directory and a non-directory are different
+/// inodes — and the two lookups ask genuinely different questions, so a shared
+/// table would only make each one's rule harder to read.
+#[derive(Default)]
+struct Links(HashMap<FileId, PathBuf>);
+
+impl Links {
+    /// GNU's `remember_copied`: note that `id` is being copied to `target`, and
+    /// answer with where it went *last* time if there was a last time.
+    ///
+    /// Recording and looking up in one call is GNU's shape and not a
+    /// convenience: the two must not be separable, because a source that was
+    /// looked up and then not recorded would let a third operand link to a
+    /// destination the second one never made.
+    fn remember(&mut self, id: FileId, target: &Path) -> Option<PathBuf> {
+        if let Some(earlier) = self.0.get(&id) {
+            return Some(earlier.clone());
+        }
+        self.0.insert(id, target.to_path_buf());
+        None
+    }
+
+    /// GNU's `forget_created`, called from its `un_backup` label
+    /// (`copy.c:3362`) when a copy that had just been recorded failed.
+    ///
+    /// Without it a later hard link would be made to a destination that does
+    /// not exist, and the second operand would report `cannot create hard link`
+    /// instead of the failure the first one actually had. Measured: GNU's
+    /// `cp --preserve=links a b d` with `a` unreadable reports the *same*
+    /// `cannot open … for reading` twice.
+    fn forget(&mut self, id: FileId) {
+        self.0.remove(&id);
     }
 }
 
@@ -1710,16 +1813,23 @@ fn copy_one<O: Write, E: Write>(
         }
     }
 
-    let ok = place_source(src, src_path, &metadata, &target, &dest_state, job);
+    let placed = place_source(src, src_path, &metadata, &target, &dest_state, job);
 
     // One recording site, reached however the copy was done, and only on
     // success — a destination that was never written is not one a later
     // operand can be accused of overwriting. GNU records in the same single
     // place and under the same condition.
-    if ok && let Some(seen) = seen {
+    //
+    // [`Placed::Linked`] is the exception, and it is GNU's: the hard-link path
+    // returns before `record_file` ever runs, so the `will not overwrite
+    // just-created` refusal does not protect a destination that was linked
+    // rather than copied. See [`Placed`] for the measurement.
+    if placed == Placed::Copied
+        && let Some(seen) = seen
+    {
         seen.record_dest(&target);
     }
-    ok
+    placed.is_ok()
 }
 
 /// Make the copy, now that the destination path is settled and every refusal
@@ -1735,7 +1845,7 @@ fn place_source<O: Write, E: Write>(
     target: &Path,
     dest: &Dest,
     job: &mut Job<'_, O, E>,
-) -> bool {
+) -> Placed {
     // Module docs, bug 2: without this, `cp -r a a` and `cp -r a .` copy what
     // they have just written, for ever. Not in [`place_entity`], because a
     // directory reached by walking is by construction not an ancestor of the
@@ -1747,10 +1857,12 @@ fn place_source<O: Write, E: Write>(
             quoteaf_os(src),
             quoteaf_os(target)
         );
-        return false;
+        return Placed::Failed;
     }
 
-    place_entity(src_path, metadata, target, dest, job)
+    // `true`: this is the operand path, which is the whole of what
+    // `command_line_arg` means to `-H` and to `--preserve=links`.
+    place_entity(src_path, metadata, target, dest, true, job)
 }
 
 /// The part of a destination's permission bits that is deliberately not on it
@@ -1842,6 +1954,178 @@ enum TreeResult {
     Unmade,
 }
 
+/// What [`place_entity`] did with one source.
+///
+/// `Linked` is not a variety of `Copied` that the caller may round off, and the
+/// reason is a measured GNU behaviour rather than a tidiness argument: a
+/// destination reached by hard-linking is **not** recorded in GNU's `dest_info`,
+/// because its `earlier_file` branch returns at `copy.c:2748`, well before the
+/// `record_file` at `copy.c:3217`. The consequence is visible —
+///
+/// ```text
+/// $ cp --preserve=links a b o/b d      # a and b hard-linked, o/b unrelated
+/// $ echo $?
+/// 0                                    # d/b is now o/b; the link is gone
+/// $ cp a b o/b d                       # the same command without the option
+/// cp: will not overwrite just-created 'd/b' with 'o/b'
+/// ```
+///
+/// — and it is faithfully reproduced by [`copy_one`] declining to
+/// [`Seen::record_dest`] a `Linked` destination. A `bool` return could not
+/// express that, which is the whole reason this enum exists.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+enum Placed {
+    /// Nothing usable is at the destination, and the failure has been reported.
+    Failed,
+    /// The destination was written.
+    Copied,
+    /// The destination was made a hard link to an earlier one, under
+    /// `--preserve=links`. Nothing was copied and nothing was recorded.
+    Linked,
+}
+
+impl Placed {
+    /// Whether the operand succeeded, for the exit status. Both kinds of
+    /// success count; only [`Seen`] cares which.
+    fn is_ok(self) -> bool {
+        self != Placed::Failed
+    }
+}
+
+/// How many names the file has. GNU's `st_nlink`.
+#[cfg(unix)]
+fn hard_links(meta: &fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.nlink()
+}
+
+/// A host without hard links answers 1 to everything, which switches
+/// `--preserve=links` off by exactly the amount that host cannot honour it: the
+/// `st_nlink > 1` half of the condition never fires, and the dereference half
+/// still does, so `cp --preserve=links -L la lb d` is the only spelling that
+/// reaches [`create_hard_link`] — and there it fails with whatever the platform
+/// says about [`fs::hard_link`], which is the honest answer.
+#[cfg(not(unix))]
+fn hard_links(_meta: &fs::Metadata) -> u64 {
+    1
+}
+
+/// Link `earlier` to `target`, replacing whatever is at `target`. GNU's
+/// `create_hard_link` (`copy.c:2122`) over gnulib's `force_linkat`.
+///
+/// "Replacing" is why this is not one `fs::hard_link` call. `link(2)` fails with
+/// `EEXIST` and has no force flag, so gnulib links to a fresh name in the
+/// destination's own directory and `rename`s that over the destination — which
+/// is atomic, and is what makes `cp --preserve=links a b d` work when `d/b` was
+/// already something else. The temporary must be in the *same* directory or the
+/// rename would cross a filesystem and fail.
+///
+/// The unlink of the temporary is unconditional in gnulib, and its comment says
+/// why: if `dsttmp` and `target` were already the same link, `renameat` is a
+/// no-op that leaves both names, so the cleanup cannot be skipped on success.
+///
+/// `-v` prints `removed 'target'` *here*, after the arrow line rather than
+/// before it, because this replacement happens after `emit_verbose` rather than
+/// in the pre-copy unlink. Measured, with `d/b` a dangling symlink:
+///
+/// ```text
+/// 'a' -> 'd/a'
+/// 'b' -> 'd/b'
+/// removed 'd/b'
+/// ```
+///
+/// # Following
+///
+/// GNU passes `AT_SYMLINK_FOLLOW` when `should_dereference`; [`fs::hard_link`]
+/// is `linkat` with no flags and cannot. The difference is unreachable rather
+/// than unimplemented: the thing being linked *from* is a destination this same
+/// command created, and a command that dereferences creates no symlinks — under
+/// `-L`, and under `-H` for an operand, every source is stat'd through, so every
+/// destination is a regular file. The reachable case is the opposite one and
+/// needs the flag *off*: `cp -P --preserve=links l1 l2 d`, where `l1` and `l2`
+/// are two hard links to one symlink, must give `d/l1` and `d/l2` one inode that
+/// is still a symlink — measured, and what this produces.
+fn create_hard_link<O: Write, E: Write>(
+    earlier: &Path,
+    target: &Path,
+    job: &mut Job<'_, O, E>,
+) -> bool {
+    let existed = match fs::hard_link(earlier, target) {
+        Ok(()) => false,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => match link_over(earlier, target) {
+            Ok(()) => true,
+            Err(e) => return report_link_failure(&e, earlier, target, job),
+        },
+        Err(e) => return report_link_failure(&e, earlier, target, job),
+    };
+    if existed && job.flags.verbose {
+        let _ = writeln!(job.out, "removed {}", quoteaf_os(target));
+    }
+    true
+}
+
+/// gnulib's `cannot create hard link %s to %s`, destination first.
+fn report_link_failure<O: Write, E: Write>(
+    e: &io::Error,
+    earlier: &Path,
+    target: &Path,
+    job: &mut Job<'_, O, E>,
+) -> bool {
+    let why = strerror(e);
+    let _ = writeln!(
+        job.err,
+        "cp: cannot create hard link {} to {}: {why}",
+        quoteaf_os(target),
+        quoteaf_os(earlier)
+    );
+    false
+}
+
+/// The replace half of `force_linkat`: link into a temporary name beside
+/// `target`, rename it over, and remove the temporary either way.
+///
+/// The name is gnulib's `CuXXXXXX` pattern with the random part supplied by the
+/// only two things available without a dependency — the process id and a
+/// counter — and retried, because a collision must not be reported as the
+/// caller's failure. `O_EXCL` semantics come free: `link(2)` fails with
+/// `EEXIST` rather than clobbering, so a name that loses the race is simply
+/// tried again.
+fn link_over(earlier: &Path, target: &Path) -> io::Result<()> {
+    let (dir, base) = split_entry(target);
+    for attempt in 0..PLACE_TEMP_TRIES {
+        let mut name = OsString::from("Cu");
+        name.push(format!("{:x}{attempt:x}", std::process::id()));
+        // Beside the destination and not in `/tmp`: `rename` cannot cross a
+        // filesystem, and the destination's directory is the only place
+        // guaranteed to be on the same one.
+        let tmp = dir.join(&name);
+        match fs::hard_link(earlier, &tmp) {
+            Ok(()) => {
+                let result = fs::rename(&tmp, target);
+                // Even when the rename worked: if `tmp` and `target` were
+                // already one link, the rename was a no-op and left both names
+                // (gnulib's own comment at `force-link.c:117`).
+                let _ = fs::remove_file(&tmp);
+                return result;
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    // Every candidate name was taken, which needs `PLACE_TEMP_TRIES`
+    // simultaneous `cp`s in one directory. Reported as the errno the last
+    // attempt earned rather than as a panic.
+    let _ = base;
+    Err(io::Error::from(io::ErrorKind::AlreadyExists))
+}
+
+/// How many temporary names [`link_over`] tries before giving up. gnulib's
+/// `try_tempname_len` uses six random characters and the whole space; this
+/// walks a counter instead, and the bound is what stops an unlucky directory
+/// from spinning.
+const PLACE_TEMP_TRIES: u32 = 64;
+
 /// Copy one source of a known kind onto a settled destination path: the symlink,
 /// the directory and the regular file, and nothing else.
 ///
@@ -1860,14 +2144,15 @@ fn place_entity<O: Write, E: Write>(
     metadata: &fs::Metadata,
     target: &Path,
     dest: &Dest,
+    command_line_arg: bool,
     job: &mut Job<'_, O, E>,
-) -> bool {
+) -> Placed {
     let src_mode = permission_bits(metadata);
     // Computed here, before the kind is dispatched, because GNU computes it
     // here — one expression covering all three kinds (`copy.c:2899`), read by
     // whichever of them creates the destination and settled by the tail they
     // share. See [`ModeDebt`].
-    let mut debt = ModeDebt::new(job.flags, src_mode, metadata.is_dir());
+    let debt = ModeDebt::new(job.flags, src_mode, metadata.is_dir());
     let mut dest_exists = dest.exists();
 
     // Clearing the way, before anything is said or written. GNU's one unlink
@@ -1875,15 +2160,25 @@ fn place_entity<O: Write, E: Write>(
     // be written through, and reaching it before `emit_verbose` (`copy.c:2630`)
     // is what makes a `cp -v` that cannot clear the way announce nothing.
     //
-    // The reason here is the symlink one: `symlinkat` has no "replace", and
-    // refusing instead would leave `cp -r` unable to update a tree it had
-    // already copied once. GNU's condition is `dereference == DEREF_NEVER &&
-    // ! S_ISREG (src_mode)`, which for this `cp` is exactly a symlink source
-    // that was not followed — reachable for an operand under `-P`, or under
-    // `-r` with none of `-P`/`-H`/`-L`, and never under `-H`.
-    if dest_exists && metadata.file_type().is_symlink() {
+    // Two of GNU's reasons apply to this `cp`, and they are `||`-ed there too:
+    //
+    // * **The source is a symlink that is not being followed.** `symlinkat` has
+    //   no "replace", and refusing instead would leave `cp -r` unable to update
+    //   a tree it had already copied once. GNU writes this as `dereference ==
+    //   DEREF_NEVER && ! S_ISREG (src_mode)`, which for this `cp` is exactly a
+    //   symlink source that survived the stat as one — reachable for an operand
+    //   under `-P`, or under `-r` with none of `-P`/`-H`/`-L`, never under `-H`.
+    // * **`--preserve=links`, and the destination has more than one link.**
+    //   Writing *through* it would change every other name for that inode, and
+    //   `--preserve=links` is the one option whose user is demonstrably paying
+    //   attention to link counts. Measured: `cp -v --preserve=links a b o/b d`
+    //   with `a` and `b` hard-linked prints `removed 'd/b'` before the third
+    //   operand's arrow line, and `d/a` keeps the bytes of `a`.
+    let dest_multiply_linked =
+        job.flags.preserve.links && dest.metadata().is_some_and(|m| hard_links(m) > 1);
+    if dest_exists && (metadata.file_type().is_symlink() || dest_multiply_linked) {
         if !remove_before_writing(target, job) {
-            return false;
+            return Placed::Failed;
         }
         dest_exists = false;
     }
@@ -1897,6 +2192,63 @@ fn place_entity<O: Write, E: Write>(
         announce(job, src_path, target);
     }
 
+    // `--preserve=links`: the second name for an inode is a hard link to where
+    // the first one landed, not a second copy of its bytes. GNU's `earlier_file`
+    // block (`copy.c:2683`), whose condition this is:
+    //
+    // * **`1 < st_nlink`** — the source is *already* multiply linked, so a
+    //   second operand naming it is possible. This is the ordinary case.
+    // * **or the source is being dereferenced** — under `-L`, or `-H` for an
+    //   operand, two *different* symlinks resolve to one inode whose link count
+    //   is 1, and `cp --preserve=links -L la lb d` is measurably expected to
+    //   link `d/la` and `d/lb` even so.
+    //
+    // Directories are excluded: their branch of `earlier_file` is the
+    // hard-linked-directory refusal, which lives in [`copy_one`] because only
+    // an operand can reach it.
+    let mut recorded = None;
+    if !metadata.is_dir()
+        && job.flags.preserve.links
+        && (hard_links(metadata) > 1 || job.flags.should_dereference(command_line_arg))
+        && let Some(id) = file_id(src_path, metadata)
+    {
+        if let Some(earlier) = job.links.remember(id, target) {
+            return if create_hard_link(&earlier, target, job) {
+                Placed::Linked
+            } else {
+                Placed::Failed
+            };
+        }
+        recorded = Some(id);
+    }
+
+    let ok = place_bytes(src_path, metadata, src_mode, target, dest_exists, debt, job);
+
+    // GNU's `un_backup` label: a source recorded a moment ago whose copy then
+    // failed must be un-recorded, or a later operand naming the same inode
+    // would try to hard-link to a destination that does not exist and would
+    // report `cannot create hard link` in place of the failure that actually
+    // happened. The guard there is `earlier_file == nullptr`, which is this
+    // `recorded.is_some()` — the linking path above never reaches here.
+    if !ok && let Some(id) = recorded {
+        job.links.forget(id);
+    }
+
+    if ok { Placed::Copied } else { Placed::Failed }
+}
+
+/// The three kinds, dispatched. Split from [`place_entity`] only so that the
+/// preamble it shares — the unlink, the announcement and the link bookkeeping —
+/// has one exit to attach the `un_backup` step to rather than one per arm.
+fn place_bytes<O: Write, E: Write>(
+    src_path: &Path,
+    metadata: &fs::Metadata,
+    src_mode: u32,
+    target: &Path,
+    dest_exists: bool,
+    mut debt: ModeDebt,
+    job: &mut Job<'_, O, E>,
+) -> bool {
     if metadata.file_type().is_symlink() {
         if let Err(e) = clone_symlink(src_path, target) {
             let why = strerror(&e);
@@ -2528,7 +2880,11 @@ fn copy_entry<O: Write, E: Write>(
     // GNU reaches both through one `copy_internal`, so a link found inside a
     // tree is named exactly as a link named on the command line is, and every
     // attribute `-p` restores is restored in both. See [`place_entity`].
-    place_entity(&from, &meta, &to, &dest_state, job)
+    // `false`: an entry found by walking is not a command-line argument, which
+    // is what makes `-H` follow operands only and what keeps
+    // `--preserve=links` from consulting its table for a singly-linked file
+    // inside a tree.
+    place_entity(&from, &meta, &to, &dest_state, false, job).is_ok()
 }
 
 /// Create `dest` as a directory with mode `mode`, before the umask is applied.
@@ -3602,8 +3958,8 @@ mod tests {
             // bare `-S` would swallow the operand after it and this would be an
             // arity test rather than a rejection test.
             // `-d` is here and `-P` is not, though the two set the same
-            // dereference policy: `-d` is also `--preserve=links`, which does
-            // not exist yet. See the parse arm.
+            // dereference policy: `-d` is also `--preserve=links`, and the
+            // letter is not yet wired to both halves. See the parse arm.
             "-a", "-b", "-d", "-l", "-s", "-S.bak", "-u", "-x", "-Z",
         ] {
             let e = fail(&[flag, "a", "b"]);
@@ -3704,7 +4060,8 @@ mod tests {
             Preserve {
                 mode: true,
                 timestamps: true,
-                ownership: false
+                ownership: false,
+                links: false
             }
         );
         let (g, _) = run_parse(&["--preserve=m,t,o", "a", "b"]);
@@ -3754,12 +4111,12 @@ mod tests {
         assert!(f.explicit_no_preserve_mode);
     }
 
-    /// The four attributes this `cp` cannot write are refused **on
-    /// `--preserve` and accepted on `--no-preserve`**, which is not an
-    /// inconsistency: `--no-preserve=xattr` asks for something already true.
+    /// The attributes this `cp` cannot write are refused **on `--preserve` and
+    /// accepted on `--no-preserve`**, which is not an inconsistency:
+    /// `--no-preserve=xattr` asks for something already true.
     #[test]
     fn the_unwritable_attributes_are_refused_one_way_only() {
-        for word in ["links", "context", "xattr", "all"] {
+        for word in ["context", "xattr", "all"] {
             let e = fail(&[&format!("--preserve={word}"), "a", "b"]);
             assert!(
                 e.sentence.contains("not implemented"),
@@ -3776,13 +4133,43 @@ mod tests {
         }
     }
 
-    /// `--preserve=all` is refused for `links` specifically — the only one of
-    /// the four that changes what ends up on disk rather than what is attached
-    /// to it — and says so.
+    /// `links` is spelled like the other `--preserve` words and abbreviates like
+    /// them, but it is not one of `-p`'s three: asking for it by name is the
+    /// only way to get it.
+    #[test]
+    fn links_is_a_preserve_word_of_its_own() {
+        let (f, _) = run_parse(&["--preserve=links", "a", "b"]);
+        assert!(f.preserve.links);
+        assert_eq!(
+            Preserve {
+                links: false,
+                ..f.preserve
+            },
+            Preserve::NONE,
+            "--preserve=links turns on that and nothing else"
+        );
+        assert!(f.require_preserve);
+
+        let (g, _) = run_parse(&["-p", "a", "b"]);
+        assert!(
+            !g.preserve.links,
+            "GNU's `-p` is mode,ownership,timestamps -- links is not in it"
+        );
+
+        let (h, _) = run_parse(&["--preserve=li", "a", "b"]);
+        assert!(h.preserve.links, "argmatch accepts any unambiguous prefix");
+
+        let (i, _) = run_parse(&["--preserve=links", "--no-preserve=links", "a", "b"]);
+        assert!(!i.preserve.links, "the last word wins, as for every other");
+    }
+
+    /// `--preserve=all` is refused for `xattr` specifically — the only one of
+    /// its words this `cp` still cannot write that GNU would write silently —
+    /// and says so.
     #[test]
     fn preserve_all_says_which_word_it_cannot_do() {
         let e = fail(&["--preserve=all", "a", "b"]);
-        assert!(e.sentence.contains("'links'"), "{:?}", e.sentence);
+        assert!(e.sentence.contains("'xattr'"), "{:?}", e.sentence);
     }
 
     /// A word the table does not have, and the empty word, which is a prefix of
@@ -4323,9 +4710,11 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
         let mut canned = Canned::new(answers);
+        let mut links = Links::default();
         let ok = {
             let mut job = Job {
                 flags,
+                links: &mut links,
                 out: &mut out,
                 err: &mut err,
                 answers: &mut canned,
@@ -5906,6 +6295,365 @@ mod tests {
         let (ok, e) = cp(&PLAIN, &[&f, &dest]);
         assert!(ok, "{e}");
         assert_eq!(e, "");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ----------------------------------------------------- --preserve=links --
+    //
+    // Every one of these is `#[cfg(unix)]`. The option is about hard links, and
+    // a host that has none has nothing here to assert — [`Links`] is still
+    // built there, but no source can ever have a second link and no
+    // `should_dereference` case can fire without symlinks either, so the table
+    // is unreachable rather than wrong. `scripts/cp-diff.sh` section 18
+    // certifies the same behaviour against GNU itself; these exist so that
+    // `cargo test` catches a regression without a GNU userland to compare
+    // against.
+
+    /// `--preserve=links` and nothing else. Not folded into the `..OFF` family
+    /// near [`PLAIN`] because it and its two variants are `#[cfg(unix)]`, and an
+    /// unused constant is a warning on the development host.
+    #[cfg(unix)]
+    const LINKS: CpFlags = CpFlags {
+        preserve: Preserve {
+            links: true,
+            ..Preserve::NONE
+        },
+        ..OFF
+    };
+    /// `-v --preserve=links`. Most of these tests want it: the option's two
+    /// orderings — whether `removed` comes before or after the arrow — are
+    /// visible only in the verbose output, and getting them backwards is the
+    /// mistake the obvious implementation makes.
+    #[cfg(unix)]
+    const LINKS_V: CpFlags = CpFlags {
+        verbose: true,
+        ..LINKS
+    };
+    /// `-rv --preserve=links`.
+    #[cfg(unix)]
+    const LINKS_RV: CpFlags = CpFlags {
+        recursive: true,
+        ..LINKS_V
+    };
+
+    /// `p`'s inode number, for asserting that two names are one file.
+    ///
+    /// Comparing inode numbers is sound here in a way it is not in
+    /// [`linked_destination`]'s case: both files exist at the moment of the
+    /// comparison, so neither number can be the other's recycled.
+    ///
+    /// `symlink_metadata`, so that a test about two *symlinks* being linked
+    /// together compares the links and not what they point at.
+    #[cfg(unix)]
+    fn ino(p: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt as _;
+        fs::symlink_metadata(p)
+            .unwrap_or_else(|e| panic!("stat {}: {e}", p.display()))
+            .ino()
+    }
+
+    /// The whole option in one case: two operands that turn out to be one file
+    /// land as one file, and are announced as two copies while doing it.
+    #[cfg(unix)]
+    #[test]
+    fn preserve_links_makes_the_second_destination_a_link() {
+        let dir = scratch("links_pair");
+        let d = dir.join("d");
+        fs::create_dir(&d).unwrap();
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        fs::write(&a, b"body").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+
+        let (ok, out, err) = cp_out(&LINKS_V, &[&a, &b, &d]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert_eq!(
+            out,
+            format!(
+                "{} -> {}\n{} -> {}\n",
+                quoteaf_os(&a),
+                quoteaf_os(d.join("a")),
+                quoteaf_os(&b),
+                quoteaf_os(d.join("b"))
+            ),
+            "the second is announced as a copy, not as a link -- GNU's \
+             `emit_verbose` runs before the `earlier_file` branch"
+        );
+        assert_eq!(ino(&d.join("a")), ino(&d.join("b")));
+        assert_eq!(fs::read(d.join("b")).unwrap(), b"body");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// And without the option, two files — so the test above pins the option
+    /// rather than observing that a filesystem deduplicates, which none does.
+    #[cfg(unix)]
+    #[test]
+    fn without_it_one_source_named_twice_lands_twice() {
+        let dir = scratch("links_off");
+        let d = dir.join("d");
+        fs::create_dir(&d).unwrap();
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        fs::write(&a, b"body").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+
+        let (ok, err) = cp(&PLAIN, &[&a, &b, &d]);
+        assert!(ok, "{err}");
+        assert_ne!(ino(&d.join("a")), ino(&d.join("b")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The table spans the whole invocation, not one operand: a pair found by
+    /// *walking* a tree is linked the same way. This is the case a first
+    /// implementation gets wrong by consulting the table only for command-line
+    /// arguments, which is what GNU's `src_to_dest_lookup` looks like it does.
+    #[cfg(unix)]
+    #[test]
+    fn preserve_links_spans_a_recursive_walk() {
+        let dir = scratch("links_walk");
+        let s = dir.join("s");
+        fs::create_dir(&s).unwrap();
+        fs::write(s.join("x"), b"body").unwrap();
+        fs::hard_link(s.join("x"), s.join("y")).unwrap();
+        let d = dir.join("d");
+        fs::create_dir(&d).unwrap();
+
+        let (ok, err) = cp(&LINKS_RV, &[&s, &d]);
+        assert!(ok, "{err}");
+        let out = d.join("s");
+        assert_eq!(ino(&out.join("x")), ino(&out.join("y")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A destination that already exists and has a second link of its own is
+    /// unlinked *before* the copy is announced, so that the other link keeps
+    /// the old bytes. This is GNU's pre-copy unlink at `copy.c:2570`, whose
+    /// `preserve_links && 1 < dst_sb.st_nlink` clause exists for exactly this.
+    ///
+    /// The ordering is the assertion: `removed` first, then the arrow. The
+    /// test below has the same two lines the other way round.
+    #[cfg(unix)]
+    #[test]
+    fn a_multiply_linked_destination_is_removed_before_the_announce() {
+        let dir = scratch("links_dst_nlink");
+        let d = dir.join("d");
+        fs::create_dir(&d).unwrap();
+        let a = dir.join("a");
+        fs::write(&a, b"new").unwrap();
+        let (dst, witness) = (d.join("a"), dir.join("witness"));
+        fs::write(&dst, b"OLD").unwrap();
+        fs::hard_link(&dst, &witness).unwrap();
+
+        let (ok, out, err) = cp_out(&LINKS_V, &[&a, &d]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "{out}");
+        assert!(lines[0].starts_with("removed "), "{out}");
+        assert!(lines[1].contains(" -> "), "{out}");
+        assert_eq!(fs::read(&dst).unwrap(), b"new");
+        assert_eq!(
+            fs::read(&witness).unwrap(),
+            b"OLD",
+            "the other link was left alone, which is the point of unlinking"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The other ordering. When the destination has only its own link, nothing
+    /// is unlinked up front; the `removed` line comes from `force_linkat`
+    /// renaming a fresh link over the destination, and so lands *after* the
+    /// arrow line the copy already printed.
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_destination_is_removed_after_the_announce() {
+        let dir = scratch("links_replace");
+        let d = dir.join("d");
+        fs::create_dir(&d).unwrap();
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        fs::write(&a, b"body").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+        fs::write(d.join("b"), b"OLD").unwrap();
+
+        let (ok, out, err) = cp_out(&LINKS_V, &[&a, &b, &d]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "{out}");
+        assert!(lines[1].contains(" -> "), "{out}");
+        assert!(lines[2].starts_with("removed "), "{out}");
+        assert!(lines[2].contains("b'"), "{out}");
+        assert_eq!(ino(&d.join("a")), ino(&d.join("b")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Two *symlinks* to one file, followed. Neither the links nor the file
+    /// they point at has a second hard link, so `st_nlink` is 1 throughout and
+    /// the table is consulted only because the command dereferences —
+    /// `should_dereference`'s other half. Both destinations are one file.
+    #[cfg(unix)]
+    #[test]
+    fn dereferencing_links_two_symlinks_to_one_file() {
+        for flags in [
+            CpFlags {
+                dereference: Deref::Always,
+                ..LINKS
+            },
+            CpFlags {
+                dereference: Deref::CommandLine,
+                ..LINKS
+            },
+        ] {
+            let dir = scratch("links_deref");
+            let d = dir.join("d");
+            fs::create_dir(&d).unwrap();
+            fs::write(dir.join("real"), b"body").unwrap();
+            let (la, lb) = (dir.join("la"), dir.join("lb"));
+            std::os::unix::fs::symlink("real", &la).unwrap();
+            std::os::unix::fs::symlink("real", &lb).unwrap();
+
+            let (ok, err) = cp(&flags, &[&la, &lb, &d]);
+            assert!(ok, "{err}");
+            assert_eq!(ino(&d.join("la")), ino(&d.join("lb")), "{flags:?}");
+            assert!(!d.join("lb").symlink_metadata().unwrap().is_symlink());
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// And with `-P` the same two symlinks are two symlinks: nothing is
+    /// dereferenced, so the operands are the links, and two links with one
+    /// target are still two files.
+    #[cfg(unix)]
+    #[test]
+    fn no_dereference_does_not_link_two_separate_symlinks() {
+        let dir = scratch("links_P_two");
+        let d = dir.join("d");
+        fs::create_dir(&d).unwrap();
+        fs::write(dir.join("real"), b"body").unwrap();
+        let (la, lb) = (dir.join("la"), dir.join("lb"));
+        std::os::unix::fs::symlink("real", &la).unwrap();
+        std::os::unix::fs::symlink("real", &lb).unwrap();
+
+        let flags = CpFlags {
+            dereference: Deref::Never,
+            ..LINKS
+        };
+        let (ok, err) = cp(&flags, &[&la, &lb, &d]);
+        assert!(ok, "{err}");
+        assert_ne!(ino(&d.join("la")), ino(&d.join("lb")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Two hard links to one *symlink*, with `-P`. The operands are one file
+    /// with `st_nlink == 2`, so the table fires — and what it must produce is a
+    /// second hard link to the copied **symlink**, not to the symlink's target.
+    /// That is `linkat` with flags `0`, which is what [`fs::hard_link`] gives;
+    /// `AT_SYMLINK_FOLLOW` here would silently write a link to `real` instead.
+    #[cfg(unix)]
+    #[test]
+    fn no_dereference_links_two_names_for_one_symlink() {
+        let dir = scratch("links_P_one");
+        let d = dir.join("d");
+        fs::create_dir(&d).unwrap();
+        fs::write(dir.join("real"), b"body").unwrap();
+        let (la, lb) = (dir.join("la"), dir.join("lb"));
+        std::os::unix::fs::symlink("real", &la).unwrap();
+        fs::hard_link(&la, &lb).unwrap();
+
+        let flags = CpFlags {
+            dereference: Deref::Never,
+            ..LINKS
+        };
+        let (ok, err) = cp(&flags, &[&la, &lb, &d]);
+        assert!(ok, "{err}");
+        assert_eq!(ino(&d.join("la")), ino(&d.join("lb")));
+        assert!(
+            d.join("lb").symlink_metadata().unwrap().is_symlink(),
+            "the link is to the symlink, not through it"
+        );
+        assert_eq!(hard_links(&fs::symlink_metadata(d.join("la")).unwrap()), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A source that fails to copy is *forgotten*, so the next name for it is
+    /// tried on its own merits rather than linked to a destination that was
+    /// never written. GNU does this at its `un_backup:` label, which calls
+    /// `forget_created` when the file was not an `earlier_file`.
+    ///
+    /// The observable difference is the second diagnostic: forgotten, it is
+    /// the same "cannot open for reading" again; remembered, it would be
+    /// "cannot create hard link" naming a destination that does not exist.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_that_failed_to_copy_is_forgotten() {
+        if root() {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = scratch("links_forget");
+        let d = dir.join("d");
+        fs::create_dir(&d).unwrap();
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        fs::write(&a, b"body").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+        fs::set_permissions(&a, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let (ok, out, err) = cp_out(&LINKS_V, &[&a, &b, &d]);
+        assert!(!ok, "an unreadable source is a failure");
+        assert_eq!(out.lines().count(), 2, "both were announced: {out}");
+        assert_eq!(
+            err.matches("for reading").count(),
+            2,
+            "the second failure is its own, not a link failure: {err}"
+        );
+        assert!(!d.join("a").exists() && !d.join("b").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A destination reached by *linking* is not recorded as one this command
+    /// created, so a later operand overwrites it silently where the same
+    /// command without the option would refuse.
+    ///
+    /// This is a gap in GNU rather than a design: the non-directory
+    /// `earlier_file` branch returns before `record_file` is reached, so the
+    /// linked destination never enters `dest_info`. Measured, not inferred —
+    /// `cp --preserve=links a b o/b d` exits 0 and `d/b` holds `o/b`'s bytes.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_destination_is_not_recorded_as_created() {
+        let dir = scratch("links_dest_info");
+        let d = dir.join("d");
+        let o = dir.join("o");
+        fs::create_dir(&d).unwrap();
+        fs::create_dir(&o).unwrap();
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        fs::write(&a, b"body").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+        fs::write(o.join("b"), b"other").unwrap();
+        let other = o.join("b");
+
+        let (ok, err) = cp(&LINKS, &[&a, &b, &other, &d]);
+        assert!(ok, "no refusal, because `d/b` was never recorded: {err}");
+        assert_eq!(err, "");
+        assert_eq!(fs::read(d.join("b")).unwrap(), b"other");
+
+        // Without the option, `d/b` *is* recorded, and the third operand is
+        // refused. The two halves are the same command but for the option.
+        let dir = scratch("links_dest_info_off");
+        let d = dir.join("d");
+        let o = dir.join("o");
+        fs::create_dir(&d).unwrap();
+        fs::create_dir(&o).unwrap();
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        fs::write(&a, b"body").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+        fs::write(o.join("b"), b"other").unwrap();
+        let other = o.join("b");
+
+        let (ok, err) = cp(&PLAIN, &[&a, &b, &other, &d]);
+        assert!(!ok);
+        assert!(err.contains("will not overwrite just-created"), "{err}");
+        assert_eq!(fs::read(d.join("b")).unwrap(), b"body");
         let _ = fs::remove_dir_all(&dir);
     }
 

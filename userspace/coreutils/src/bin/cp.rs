@@ -1710,7 +1710,7 @@ fn copy_one<O: Write, E: Write>(
         }
     }
 
-    let ok = place_source(src, src_path, &metadata, &target, dest_state.exists(), job);
+    let ok = place_source(src, src_path, &metadata, &target, &dest_state, job);
 
     // One recording site, reached however the copy was done, and only on
     // success — a destination that was never written is not one a later
@@ -1733,7 +1733,7 @@ fn place_source<O: Write, E: Write>(
     src_path: &Path,
     metadata: &fs::Metadata,
     target: &Path,
-    dest_exists: bool,
+    dest: &Dest,
     job: &mut Job<'_, O, E>,
 ) -> bool {
     // Module docs, bug 2: without this, `cp -r a a` and `cp -r a .` copy what
@@ -1750,7 +1750,7 @@ fn place_source<O: Write, E: Write>(
         return false;
     }
 
-    place_entity(src_path, metadata, target, dest_exists, job)
+    place_entity(src_path, metadata, target, dest, job)
 }
 
 /// The part of a destination's permission bits that is deliberately not on it
@@ -1859,7 +1859,7 @@ fn place_entity<O: Write, E: Write>(
     src_path: &Path,
     metadata: &fs::Metadata,
     target: &Path,
-    dest_exists: bool,
+    dest: &Dest,
     job: &mut Job<'_, O, E>,
 ) -> bool {
     let src_mode = permission_bits(metadata);
@@ -1868,46 +1868,36 @@ fn place_entity<O: Write, E: Write>(
     // whichever of them creates the destination and settled by the tail they
     // share. See [`ModeDebt`].
     let mut debt = ModeDebt::new(job.flags, src_mode, metadata.is_dir());
+    let mut dest_exists = dest.exists();
+
+    // Clearing the way, before anything is said or written. GNU's one unlink
+    // (`copy.c:2570`) covers every reason a destination has to *go* rather than
+    // be written through, and reaching it before `emit_verbose` (`copy.c:2630`)
+    // is what makes a `cp -v` that cannot clear the way announce nothing.
+    //
+    // The reason here is the symlink one: `symlinkat` has no "replace", and
+    // refusing instead would leave `cp -r` unable to update a tree it had
+    // already copied once. GNU's condition is `dereference == DEREF_NEVER &&
+    // ! S_ISREG (src_mode)`, which for this `cp` is exactly a symlink source
+    // that was not followed — reachable for an operand under `-P`, or under
+    // `-r` with none of `-P`/`-H`/`-L`, and never under `-H`.
+    if dest_exists && metadata.file_type().is_symlink() {
+        if !remove_before_writing(target, job) {
+            return false;
+        }
+        dest_exists = false;
+    }
+
+    // *After* the removal above and before anything is created, so that a
+    // failure to make the copy is still announced — `-v` reports what was
+    // attempted, not what worked. Directories are the exception and announce
+    // themselves, from inside [`copy_tree`], because GNU will not say it made
+    // one until the `mkdir` has actually happened (`copy.c:2625`).
+    if !metadata.is_dir() {
+        announce(job, src_path, target);
+    }
 
     if metadata.file_type().is_symlink() {
-        // Reachable for an operand exactly when the stat in [`copy_one`] did not
-        // follow — `-P`, or `-r` with none of `-P`/`-H`/`-L` given — and never
-        // under `-H`, which follows an operand and not a walked entry.
-        //
-        // An existing destination is removed first. `symlinkat` has no
-        // "replace", and refusing instead would leave `cp -r` unable to update
-        // a tree it had already copied once — so GNU unlinks, under exactly
-        // this condition (`copy.c`: `dereference == DEREF_NEVER` and the source
-        // is not a regular file).
-        if dest_exists {
-            if let Err(e) = fs::remove_file(target)
-                && e.kind() != io::ErrorKind::NotFound
-            {
-                let why = strerror(&e);
-                let _ = writeln!(job.err, "cp: cannot remove {}: {why}", quoteaf_os(target));
-                return false;
-            }
-            // `-v` names the removal too, on stdout, in its own sentence and
-            // before the arrow line (`copy.c:2586`). Only here: this is the one
-            // place anything is unlinked, because replacing a *regular* file is
-            // done by truncating it rather than by removing it.
-            //
-            // Reached on "it was already gone" as well as on success, which is
-            // GNU's control flow rather than an oversight — its condition is
-            // `unlinkat (…) != 0 && errno != ENOENT`, so a destination that
-            // vanished between the stat and the unlink is still announced as
-            // removed. Only a race can produce that, and agreeing about it
-            // costs nothing.
-            if job.flags.verbose {
-                let _ = writeln!(job.out, "removed {}", quoteaf_os(target));
-            }
-        }
-        // *After* the removal above, which is GNU's order: its `unlink` of the
-        // destination (`copy.c:2582`) comes before `emit_verbose`
-        // (`copy.c:2630`), so a `cp -v` that cannot clear the way announces
-        // nothing. And before the link is made, so a failure to create it is
-        // still announced — `-v` reports what was attempted, not what worked.
-        announce(job, src_path, target);
         if let Err(e) = clone_symlink(src_path, target) {
             let why = strerror(&e);
             let _ = writeln!(
@@ -1973,6 +1963,31 @@ fn place_entity<O: Write, E: Write>(
     }
 
     copy_regular_file(src_path, metadata, target, dest_exists, debt, job)
+}
+
+/// Unlink a destination that has to go before the copy can be made, and say so
+/// under `-v`. GNU's `unlinkat` at `copy.c:2580` with the `removed %s` that
+/// follows it.
+///
+/// The announcement is reached on "it was already gone" as well as on success,
+/// which is GNU's control flow rather than an oversight — its condition is
+/// `unlinkat (…) != 0 && errno != ENOENT`, so a destination that vanished
+/// between the stat and the unlink is still announced as removed. Only a race
+/// can produce that, and agreeing about it costs nothing.
+fn remove_before_writing<O: Write, E: Write>(target: &Path, job: &mut Job<'_, O, E>) -> bool {
+    if let Err(e) = fs::remove_file(target)
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        let why = strerror(&e);
+        let _ = writeln!(job.err, "cp: cannot remove {}: {why}", quoteaf_os(target));
+        return false;
+    }
+    // On stdout, in its own sentence and before the arrow line
+    // (`copy.c:2586`).
+    if job.flags.verbose {
+        let _ = writeln!(job.out, "removed {}", quoteaf_os(target));
+    }
+    true
 }
 
 /// Would copying `src` to `dst` write over `src` itself?
@@ -2513,7 +2528,7 @@ fn copy_entry<O: Write, E: Write>(
     // GNU reaches both through one `copy_internal`, so a link found inside a
     // tree is named exactly as a link named on the command line is, and every
     // attribute `-p` restores is restored in both. See [`place_entity`].
-    place_entity(&from, &meta, &to, dest_state.exists(), job)
+    place_entity(&from, &meta, &to, &dest_state, job)
 }
 
 /// Create `dest` as a directory with mode `mode`, before the umask is applied.
@@ -2564,13 +2579,9 @@ fn copy_regular_file<O: Write, E: Write>(
     mut debt: ModeDebt,
     job: &mut Job<'_, O, E>,
 ) -> bool {
-    // Before the source is even opened, which is GNU's order: `emit_verbose`
-    // (`copy.c:2630`) runs before `copy_reg`, so an unreadable source is
-    // announced and *then* complained about. One site here rather than one in
-    // each caller, because both of them — a file named on the command line and
-    // a file found inside a tree — go through GNU's one `copy_internal` too.
-    announce(job, src, dst);
-
+    // The announcement is [`place_entity`]'s and has already happened, which is
+    // GNU's order: `emit_verbose` (`copy.c:2630`) runs before `copy_reg`, so an
+    // unreadable source is announced and *then* complained about.
     let mut input = match fs::File::open(src) {
         Ok(f) => f,
         Err(e) => {

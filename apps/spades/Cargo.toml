@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window itself. Spades used to be a simulation with no window at all:
+# `main` built a game and dropped it, so nothing was ever drawn or clicked.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

@@ -946,10 +946,19 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
                 }
                 if let Some(expr_bytes) = bytes.get(start..i) {
                     if let Ok(expr) = core::str::from_utf8(expr_bytes) {
-                        // Expand variables within the expression first.
-                        let expanded_expr = expand_vars(expr);
-                        let val = eval_arithmetic(&expanded_expr);
-                        result.extend_from_slice(alloc::format!("{}", val).as_bytes());
+                        // `eval_arith_stmt` does its own variable expansion and
+                        // also handles `$((i = i + 1))`, which this site
+                        // previously evaluated but never assigned.
+                        match eval_arith_stmt(expr) {
+                            Ok(val) => {
+                                result.extend_from_slice(alloc::format!("{}", val).as_bytes());
+                            }
+                            // Substitute nothing: an expression that could not
+                            // be evaluated has no value, and putting `0` in the
+                            // command line is how `rm -rf /tmp/x$((n))` became
+                            // `rm -rf /tmp/x0`.
+                            Err(e) => report_arith("$((", &e, 1),
+                        }
                     }
                 }
                 // Skip past `))`.
@@ -1828,7 +1837,21 @@ fn expand_substring(val: &str, spec: &str, result: &mut String) {
     // one that is merely unreachable.
     let char_len = i64::try_from(val.chars().count()).unwrap_or(i64::MAX);
 
-    let raw_offset = eval_arithmetic(offset_expr);
+    // An unevaluable offset used to be `0`, i.e. "from the beginning" — so
+    // `${path:$n}` with a mistyped `n` expanded to the *whole* string rather
+    // than to a suffix of it, which is the one wrong answer that still looks
+    // like a plausible path.
+    // Prefixed with the offending expression rather than with a command name,
+    // matching the `substring expression < 0` diagnostic below: there is no
+    // command here to name -- `${x:$n}` is an expansion, and the expression is
+    // the only part of it the operator can look at and correct.
+    let raw_offset = match eval_arithmetic(offset_expr) {
+        Ok(v) => v,
+        Err(e) => {
+            report_arith(offset_expr.trim(), &e, 1);
+            return;
+        }
+    };
     let start = if raw_offset < 0 {
         raw_offset.saturating_add(char_len)
     } else {
@@ -1843,7 +1866,13 @@ fn expand_substring(val: &str, spec: &str, result: &mut String) {
     let end = match length_expr {
         None => char_len,
         Some(expr) => {
-            let raw_len = eval_arithmetic(expr);
+            let raw_len = match eval_arithmetic(expr) {
+                Ok(v) => v,
+                Err(e) => {
+                    report_arith(expr.trim(), &e, 1);
+                    return;
+                }
+            };
             if raw_len < 0 {
                 let end = raw_len.saturating_add(char_len);
                 // `start` is non-negative here, so this one comparison covers
@@ -3175,9 +3204,14 @@ fn execute_for_loop(variable: &str, words_raw: &str, body: &[String]) {
 fn execute_cfor_loop(init: &str, cond: &str, step: &str, body: &[String]) {
     const MAX_ITERATIONS: u32 = 10_000;
 
-    // Execute init expression.
+    // Execute init expression. A loop whose initialiser could not be evaluated
+    // must not run: `for ((i=1O; i<10; i=i+1))` used to set `i` to 0 and then
+    // iterate ten times over a variable the operator never successfully set.
     if !init.is_empty() {
-        eval_cfor_expr(init);
+        if let Err(e) = eval_arith_stmt(init) {
+            report_arith("for", &e, 1);
+            return;
+        }
     }
 
     LOOP_BREAK.store(false, core::sync::atomic::Ordering::Relaxed);
@@ -3197,9 +3231,17 @@ fn execute_cfor_loop(init: &str, cond: &str, step: &str, body: &[String]) {
         // Evaluate condition — if empty, treat as infinite (true).
         if !cond.is_empty() {
             let cond_expanded = expand_vars(cond);
-            let val = eval_arithmetic(&cond_expanded);
-            if val == 0 {
-                break;
+            // An unevaluable condition used to come back `0`, which reads as
+            // "the loop finished" — the one outcome indistinguishable from
+            // success, and the reason a mistyped bound produced a loop body
+            // that never ran and no diagnostic at all.
+            match eval_arithmetic(&cond_expanded) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) => {
+                    report_arith("for", &e, 1);
+                    break;
+                }
             }
         }
 
@@ -3223,9 +3265,13 @@ fn execute_cfor_loop(init: &str, cond: &str, step: &str, body: &[String]) {
             break;
         }
 
-        // Execute step expression.
+        // Execute step expression. Refusing here rather than continuing is what
+        // stops a bad step from spinning to the 10,000-iteration limit.
         if !step.is_empty() {
-            eval_cfor_expr(step);
+            if let Err(e) = eval_arith_stmt(step) {
+                report_arith("for", &e, 1);
+                break;
+            }
         }
     }
 
@@ -3233,11 +3279,24 @@ fn execute_cfor_loop(init: &str, cond: &str, step: &str, body: &[String]) {
     LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
 }
 
-/// Evaluate a C-style for loop expression.
+/// Evaluate an arithmetic *statement* — an assignment or a bare expression.
 ///
-/// Supports simple assignment (`VAR=EXPR`) and bare arithmetic.
-/// The arithmetic evaluator handles variable references.
-fn eval_cfor_expr(expr: &str) {
+/// Supports simple assignment (`VAR=EXPR`) and bare arithmetic, and returns the
+/// value in both cases: for `VAR=EXPR` that is the value assigned, which is what
+/// bash uses for the exit status of `(( x = 5 ))`.
+///
+/// **Returning the value is what lets `((…))` stop evaluating twice.** That
+/// caller used to run this for the assignment's side effect and then call
+/// `eval_arithmetic` on the *same* string again to get a status — which worked
+/// only because the tokenizer silently dropped the `=`, leaving two numbers
+/// whose first happened to be the value just assigned. Now that a stray `=` is
+/// an error and trailing operands are refused, that accident would have become a
+/// spurious diagnostic; evaluating once is both the fix and the simpler code.
+///
+/// Named for what it does rather than for the one caller it used to have: the
+/// `$((…))` expansion routes through it now too, so `$((i = i + 1))` assigns
+/// instead of merely printing.
+fn eval_arith_stmt(expr: &str) -> Result<i64, ArithError> {
     let expanded = expand_vars(expr);
     let trimmed = expanded.trim();
 
@@ -3258,16 +3317,16 @@ fn eval_cfor_expr(expr: &str) {
                 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                 && !name.starts_with(|c: char| c.is_ascii_digit())
             {
-                let val = eval_arithmetic(rhs);
+                let val = eval_arithmetic(rhs)?;
                 env_set(name, &alloc::format!("{}", val));
-                return;
+                return Ok(val);
             }
         }
     }
 
-    // Bare expression — just evaluate for side effects (none in our model,
-    // but future ++ operator support could use this).
-    eval_arithmetic(trimmed);
+    // Bare expression — evaluate for its value (and, once `++` exists, for its
+    // side effects).
+    eval_arithmetic(trimmed)
 }
 
 /// Split a string into words, respecting single and double quotes.
@@ -6367,10 +6426,12 @@ fn execute_single_inner(line: &str) -> Handled {
             .unwrap_or("")
             .trim();
         if !inner.is_empty() {
-            // Check for assignment: VAR = EXPR.
-            eval_cfor_expr(inner);
-            let val = eval_arithmetic(inner);
-            set_exit(if val == 0 { 1 } else { 0 });
+            // One evaluation, not two: `eval_arith_stmt` performs any
+            // assignment *and* yields the value the status is derived from.
+            match eval_arith_stmt(inner) {
+                Ok(val) => set_exit(if val == 0 { 1 } else { 0 }),
+                Err(e) => report_arith("((", &e, 1),
+            }
         }
         return Handled::Here;
     }
@@ -21536,6 +21597,106 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             &out,
             b"not found or inactive",
         );
+    }
+
+    serial_println!(
+        "  kshell::self_test 111: the expression evaluator has an error channel -- \
+         a word that is not a number, a division by zero, an unclosed paren and a \
+         stray operator are refused instead of all four answering `0'"
+    );
+    {
+        // Rung 111 -- batch 43b of the design-decisions.md §600 burn-down, and
+        // the first rung this shell has ever had for `expr`, `let`, `test`,
+        // `$((...))` or C-style `for`. That absence is why the defect survived
+        // so long: `eval_arithmetic` returned a bare `i64`, so *every* way of
+        // failing produced `0` and returned it as an answer, and no test could
+        // have told the difference because there was nothing to observe.
+        //
+        // The four cases below are deliberately the four that used to be
+        // indistinguishable from a real result. `expr 1/0` is the sharpest --
+        // `0` is a number the operator has no way to question, and it is
+        // exactly what a *correct* division would give for a zero numerator.
+
+        // `test`: the guess made `[ "$n" -eq 0 ]` true for every non-numeric
+        // value of `$n`, so an unset or misspelled variable took the zero
+        // branch and reported success. Status 2 (not 1) is what separates
+        // "malformed" from "false"; asserting it is the point of the rung.
+        let out = capture_command("test 1O -eq 5");
+        assert_output_contains(
+            "a non-numeric operand of -eq is named, not read as 0",
+            &out,
+            b"`1O' is not a number",
+        );
+        assert_eq!(last_exit(), 2, "a malformed `test' exits 2, not 1");
+
+        // Division by zero. `expr` follows GNU and exits 2 here.
+        let out = capture_command("expr 1 / 0");
+        assert_output_contains("division by zero is refused", &out, b"division by zero");
+        assert_eq!(last_exit(), 2, "`expr 1 / 0` errors");
+
+        // That the guessed `0` is not merely unprinted but never *stored* is
+        // the sharper claim, and it is checkable where the printed value is
+        // not: `cmd_expr` emits its result through a bare `{}`, which
+        // `scripts/check-selftest-wording.py` rightly refuses to let a rung
+        // assert against -- a needle wholly inside a format hole is anchored to
+        // no literal and so could be claimed of any output at all. Exit status
+        // and a follow-up `test -v` carry the same proof with nothing to
+        // exempt. `let` is the form that matters here anyway: its guess used to
+        // *overwrite* the variable, so a mistyped `$x` destroyed whatever the
+        // operator had accumulated in `n`.
+        capture_command("unset zzrungn");
+        capture_command("let zzrungn = 1 / 0");
+        assert_eq!(last_exit(), 1, "`let zzrungn = 1 / 0` errors");
+        capture_command("test -v zzrungn");
+        assert_eq!(
+            last_exit(),
+            1,
+            "and the refusal left `zzrungn' unset, not 0"
+        );
+
+        // An unclosed paren used to be treated as though it had been closed,
+        // so `expr 2*(3+4` answered `14` -- the shell supplying the paren the
+        // operator forgot and presenting the result as complete.
+        let out = capture_command("expr 2 * (3 + 4");
+        assert_output_contains("an unclosed paren is refused", &out, b"missing `)'");
+        assert_eq!(last_exit(), 2, "`expr 2 * (3 + 4` errors");
+
+        // A character outside the arithmetic language used to be skipped, so
+        // `2 $ 3` evaluated to `2`: a typo silently deleted an operator and the
+        // shell answered an expression nobody wrote.
+        let out = capture_command("let 6 & 3");
+        assert_output_contains(
+            "an unsupported operator is named rather than skipped",
+            &out,
+            b"is not an arithmetic operator",
+        );
+        assert_eq!(last_exit(), 1, "`let 6 & 3` errors");
+
+        // A variable holding something unreadable. bash answers 0 here; dash
+        // refuses, and dash is right -- see `tokenize_arith`. The refusal names
+        // the variable as well as the value, because `$((zzrungvar))` shows the
+        // operator a word they never typed.
+        capture_command("export zzrungvar=abc");
+        let out = capture_command("expr zzrungvar + 1");
+        assert_output_contains(
+            "the variable is named alongside its unreadable value",
+            &out,
+            b"(the value of `zzrungvar')",
+        );
+        assert_eq!(last_exit(), 2, "`expr zzrungvar + 1` errors");
+
+        // The evaluator still evaluates. A rung that only proves refusals would
+        // pass just as well against an evaluator that refused *everything*,
+        // which is the failure mode a burn-down batch is most likely to
+        // introduce -- and the `((...))` form states the claim as a status
+        // rather than as printed text, so it needs no needle. Asserting both
+        // arms is what makes it a test of the arithmetic rather than of the
+        // parser: an evaluator that answered `1` to every comparison would pass
+        // the first line and fail the second.
+        capture_command("((2 * (3 + 4) == 14))");
+        assert_eq!(last_exit(), 0, "a well-formed expression still evaluates");
+        capture_command("((2 * (3 + 4) == 13))");
+        assert_eq!(last_exit(), 1, "and a false comparison is still false");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -124798,7 +124959,8 @@ fn cmd_sleep(args: &str) {
 ///   Integer tests: N -eq N, N -ne N, N -lt N, N -le N, N -gt N, N -ge N
 ///   Logical:       ! EXPR (negation)
 ///
-/// Sets exit status: 0 (true) or 1 (false).
+/// Sets exit status: 0 (true), 1 (false), or 2 (the expression was malformed —
+/// see [`report_arith`] for why that must not collapse into 1).
 fn cmd_test(args: &str) {
     // Strip trailing `]` if invoked as `[`.
     let args = if args.ends_with(']') {
@@ -124815,22 +124977,30 @@ fn cmd_test(args: &str) {
         return;
     }
 
-    let result = eval_test(args);
-    set_exit(if result { 0 } else { 1 });
+    match eval_test(args) {
+        Ok(result) => set_exit(if result { 0 } else { 1 }),
+        Err(e) => report_arith("test", &e, 2),
+    }
 }
 
 /// Evaluate a test expression, returning true or false.
-fn eval_test(args: &str) -> bool {
+///
+/// Returns `Err` only for an integer comparison whose operand is not an
+/// integer; every other malformed shape is false, as POSIX requires.
+fn eval_test(args: &str) -> Result<bool, ArithError> {
     let parts: Vec<&str> = args.split_whitespace().collect();
 
     if parts.is_empty() {
-        return false;
+        return Ok(false);
     }
 
     // Negation: `! EXPR`
     if parts[0] == "!" {
         let rest = parts.get(1..).unwrap_or(&[]).join(" ");
-        return !eval_test(&rest);
+        // `?` rather than negating through the error: `! [ x -eq 1 ]` is
+        // malformed whichever side of the `!` it sits on, and "not malformed"
+        // is not a truth value.
+        return Ok(!eval_test(&rest)?);
     }
 
     // Unary file/string tests.
@@ -124842,68 +125012,68 @@ fn eval_test(args: &str) -> bool {
             "-e" => {
                 // File exists.
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::stat(&path).is_ok();
+                return Ok(crate::fs::Vfs::stat(&path).is_ok());
             }
             "-f" => {
                 // Is regular file.
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::stat(&path)
+                return Ok(crate::fs::Vfs::stat(&path)
                     .map(|m| m.entry_type == crate::fs::EntryType::File)
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
             "-d" => {
                 // Is directory.
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::stat(&path)
+                return Ok(crate::fs::Vfs::stat(&path)
                     .map(|m| m.entry_type == crate::fs::EntryType::Directory)
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
             "-s" => {
                 // File exists and is non-empty.
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::stat(&path)
+                return Ok(crate::fs::Vfs::stat(&path)
                     .map(|m| m.size > 0)
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
             "-L" | "-h" => {
                 // Is symbolic link.
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::lstat(&path)
+                return Ok(crate::fs::Vfs::lstat(&path)
                     .map(|m| m.entry_type == crate::fs::EntryType::Symlink)
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
             "-r" => {
                 // File is readable (exists with read permission).
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::metadata(&path)
+                return Ok(crate::fs::Vfs::metadata(&path)
                     .map(|m| m.permissions & 0o400 != 0)
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
             "-w" => {
                 // File is writable (exists with write permission).
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::metadata(&path)
+                return Ok(crate::fs::Vfs::metadata(&path)
                     .map(|m| m.permissions & 0o200 != 0)
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
             "-x" => {
                 // File is executable (exists with execute permission).
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::metadata(&path)
+                return Ok(crate::fs::Vfs::metadata(&path)
                     .map(|m| m.permissions & 0o100 != 0)
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
             "-v" => {
                 // Variable is set (non-empty).
-                return env_get(operand).is_some_and(|v| !v.is_empty()) || is_array(operand);
+                return Ok(env_get(operand).is_some_and(|v| !v.is_empty()) || is_array(operand));
             }
             "-z" => {
                 // String is empty.
-                return operand.is_empty();
+                return Ok(operand.is_empty());
             }
             "-n" => {
                 // String is non-empty.
-                return !operand.is_empty();
+                return Ok(!operand.is_empty());
             }
             _ => {}
         }
@@ -124916,14 +125086,24 @@ fn eval_test(args: &str) -> bool {
         let right = parts[2];
 
         match op {
-            "=" | "==" => return left == right,
-            "!=" => return left != right,
-            "<" => return left < right, // Lexicographic string comparison.
-            ">" => return left > right,
+            "=" | "==" => return Ok(left == right),
+            "!=" => return Ok(left != right),
+            "<" => return Ok(left < right), // Lexicographic string comparison.
+            ">" => return Ok(left > right),
             "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => {
-                let l = left.parse::<i64>().unwrap_or(0);
-                let r = right.parse::<i64>().unwrap_or(0);
-                return match op {
+                // Both words used to become `0` when unreadable, which made
+                // `[ "$n" -eq 0 ]` *true* for every non-numeric `$n` — an unset
+                // or misspelled variable taking the zero branch and reporting
+                // success. bash and dash both refuse, with status 2.
+                let l = left.parse::<i64>().map_err(|_| ArithError::NotNumeric {
+                    word: String::from(left),
+                    from_var: None,
+                })?;
+                let r = right.parse::<i64>().map_err(|_| ArithError::NotNumeric {
+                    word: String::from(right),
+                    from_var: None,
+                })?;
+                return Ok(match op {
                     "-eq" => l == r,
                     "-ne" => l != r,
                     "-lt" => l < r,
@@ -124931,7 +125111,7 @@ fn eval_test(args: &str) -> bool {
                     "-gt" => l > r,
                     "-ge" => l >= r,
                     _ => false,
-                };
+                });
             }
             _ => {}
         }
@@ -124939,11 +125119,11 @@ fn eval_test(args: &str) -> bool {
 
     // Single argument: true if non-empty string.
     if parts.len() == 1 {
-        return !parts[0].is_empty();
+        return Ok(!parts[0].is_empty());
     }
 
     // Unrecognized expression — treat as false.
-    false
+    Ok(false)
 }
 
 /// Evaluate and print an arithmetic expression.
@@ -124957,24 +125137,126 @@ fn cmd_expr(args: &str) {
         set_exit(1);
         return;
     }
-    let result = eval_arithmetic(args);
-    shell_println!("{}", result);
+    // GNU `expr` exits 2 on a malformed expression, distinct from the 1 it uses
+    // for "the value is null or zero" — the same split as `test`, and for the
+    // same reason: `expr` is normally read through `$(…)`, where a printed `0`
+    // and a real `0` are indistinguishable unless the status separates them.
+    match eval_arithmetic(args) {
+        Ok(result) => shell_println!("{}", result),
+        Err(e) => report_arith("expr", &e, 2),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Arithmetic evaluation for $((...))
 // ---------------------------------------------------------------------------
 
+/// Why an arithmetic expression could not be evaluated.
+///
+/// The evaluator used to have no error channel at all: every one of these cases
+/// produced `0` and returned it as if it were an answer, which is
+/// design-decisions.md §600's prohibited shape sitting under the shell's entire
+/// expression language rather than under one option. `expr 1O + 1` printed `1`,
+/// `expr 1/0` printed `0`, and `x=abc; echo $((x * 100))` printed `0` — three
+/// different failures wearing the same face as a real result, and none of them
+/// distinguishable by a script, because the exit status was `0` too.
+///
+/// Every variant carries the word it could not read, because the operator's next
+/// question is always *which* one — an expression has several operands and the
+/// diagnostic that does not name one sends them to re-read the whole line.
+enum ArithError {
+    /// A word that must be a number is not one.
+    ///
+    /// `from_var` names the variable when the word came from an expansion
+    /// rather than from the command line: `$((x))` shows the operator a word
+    /// they never typed, so `` `abc' is not a number `` alone would leave them
+    /// hunting for an `abc` that appears nowhere in the expression.
+    NotNumeric {
+        /// The unreadable word itself.
+        word: String,
+        /// The variable it was the value of, if it came from one.
+        from_var: Option<String>,
+    },
+    /// A numeric literal too large for `i64`.
+    Overflow(String),
+    /// `/ 0` or `% 0`.
+    DivideByZero,
+    /// A character that is not part of the arithmetic language.
+    BadChar(char),
+    /// A number or `(` was expected and something else (or nothing) was there.
+    ExpectedValue,
+    /// A `(` with no matching `)`.
+    UnclosedParen,
+    /// A complete expression, then more tokens.
+    TrailingTokens,
+}
+
+/// Print one arithmetic refusal and set the exit status.
+///
+/// Separate from [`refuse_operand`] for one reason only: the status differs.
+/// `test` must exit **2**, because bash and dash both reserve `1` for "the
+/// condition was false" — a script that writes `if [ "$n" -gt 5 ]` has to be
+/// able to tell *no* from *you handed me a word*, and collapsing them is how a
+/// typo in `$n` becomes a silently-skipped branch. `expr` exits 2 for the same
+/// reason GNU `expr` does. The `$((…))`, `((…))` and `let` forms exit 1, which
+/// is what bash gives them.
+///
+/// Every message literal lives here rather than in a `Display` impl or a
+/// `message() -> String`, deliberately: `scripts/check-selftest-wording.py`
+/// verifies a rung's assertions against the literals it can reach by walking
+/// calls within this file, and a free function called straight from
+/// `cmd_test`/`cmd_expr`/`cmd_let` is reachable to that walk where a trait
+/// method on an enum is not. Keeping the strings here buys the rung its
+/// coverage instead of buying an entry in the checker's `ALLOWED` table.
+fn report_arith(cmd: &str, err: &ArithError, status: u8) {
+    match err {
+        ArithError::NotNumeric { word, from_var } => match from_var {
+            Some(name) => shell_println!(
+                "{}: `{}' is not a number (the value of `{}')",
+                cmd,
+                word,
+                name
+            ),
+            None => shell_println!("{}: `{}' is not a number", cmd, word),
+        },
+        ArithError::Overflow(word) => {
+            shell_println!("{}: `{}' does not fit in a 64-bit integer", cmd, word);
+        }
+        ArithError::DivideByZero => shell_println!("{}: division by zero", cmd),
+        ArithError::BadChar(c) => {
+            shell_println!("{}: `{}' is not an arithmetic operator", cmd, c);
+        }
+        ArithError::ExpectedValue => shell_println!("{}: expected a number", cmd),
+        ArithError::UnclosedParen => shell_println!("{}: missing `)'", cmd),
+        ArithError::TrailingTokens => shell_println!("{}: unexpected trailing operand", cmd),
+    }
+    set_exit(status);
+}
+
 /// Evaluate a simple arithmetic expression.
 ///
 /// Supports: integer literals, `+`, `-`, `*`, `/`, `%`, unary `-`,
 /// parentheses `(...)`, and whitespace.
 ///
-/// All arithmetic is done in i64.  Division by zero returns 0.
-fn eval_arithmetic(expr: &str) -> i64 {
-    let tokens = tokenize_arith(expr);
+/// All arithmetic is done in i64.  Every way of failing to produce a number is
+/// reported as an [`ArithError`] rather than as `0`; see that type for why the
+/// old `0` was worse than no answer at all.
+fn eval_arithmetic(expr: &str) -> Result<i64, ArithError> {
+    let tokens = tokenize_arith(expr)?;
+    // An *empty* expression is not a malformed one: bash and dash both make
+    // `$(( ))` zero, and `${x::3}` reaches here with an empty offset, where `0`
+    // is the correct offset rather than a guess at one.
+    if tokens.is_empty() {
+        return Ok(0);
+    }
     let mut pos = 0;
-    parse_expr(&tokens, &mut pos)
+    let val = parse_expr(&tokens, &mut pos)?;
+    // `1 2` and `2=3` parse a complete expression and then find more. Returning
+    // the prefix's value would be the guess this batch exists to remove.
+    if pos != tokens.len() {
+        return Err(ArithError::TrailingTokens);
+    }
+    Ok(val)
 }
 
 /// Arithmetic token.
@@ -125012,7 +125294,15 @@ enum ArithToken {
 ///
 /// Supports: numbers, +, -, *, /, %, (, ), <, <=, >, >=, ==, !=, &&, ||, !
 /// Also recognizes bare variable names (resolved to their integer value).
-fn tokenize_arith(s: &str) -> Vec<ArithToken> {
+///
+/// An unset variable is `0` — that is not a guess but the documented rule in
+/// every shell, and `$((count + 1))` on a fresh variable has to mean `1`. A
+/// variable that is *set to something unreadable* is a different matter and is
+/// refused: bash answers `x=abc; echo $((x))` with `0`, dash with
+/// `Illegal number: abc`, and dash is right for this shell — bash's `0` is
+/// precisely the invented value §600 prohibits, and it is the one that turns a
+/// misspelled configuration value into a plausible-looking measurement.
+fn tokenize_arith(s: &str) -> Result<Vec<ArithToken>, ArithError> {
     let bytes = s.as_bytes();
     let len = bytes.len();
     let mut tokens = Vec::new();
@@ -125075,9 +125365,11 @@ fn tokenize_arith(s: &str) -> Vec<ArithToken> {
                     tokens.push(ArithToken::Eq);
                     i = i.saturating_add(2);
                 } else {
-                    // Lone `=` in arithmetic context — skip (assignment handled
-                    // separately in eval_cfor_expr).
-                    i = i.saturating_add(1);
+                    // Assignment is split off by `eval_arith_stmt` before the
+                    // tokenizer ever sees it, so a `=` that reaches here is in
+                    // a position where no assignment is possible — `2=3`, or
+                    // `let "1 = 2"`. Skipping it made `2=3` evaluate to `2`.
+                    return Err(ArithError::BadChar('='));
                 }
             }
             b'!' => {
@@ -125094,7 +125386,10 @@ fn tokenize_arith(s: &str) -> Vec<ArithToken> {
                     tokens.push(ArithToken::And);
                     i = i.saturating_add(2);
                 } else {
-                    i = i.saturating_add(1); // Skip lone &.
+                    // Bitwise `&` is not implemented. Skipping it made `6 & 3`
+                    // evaluate to `6`, which is not merely unsupported but
+                    // *wrong* — bash answers `2` — and looks like a result.
+                    return Err(ArithError::BadChar('&'));
                 }
             }
             b'|' => {
@@ -125102,7 +125397,9 @@ fn tokenize_arith(s: &str) -> Vec<ArithToken> {
                     tokens.push(ArithToken::Or);
                     i = i.saturating_add(2);
                 } else {
-                    i = i.saturating_add(1); // Skip lone |.
+                    // As for lone `&`: bitwise `|` is unimplemented, and
+                    // skipping it made `6 | 3` answer `6` where bash says `7`.
+                    return Err(ArithError::BadChar('|'));
                 }
             }
             b'0'..=b'9' => {
@@ -125110,12 +125407,18 @@ fn tokenize_arith(s: &str) -> Vec<ArithToken> {
                 while i < len && bytes[i].is_ascii_digit() {
                     i = i.saturating_add(1);
                 }
-                if let Some(num_bytes) = bytes.get(start..i) {
-                    if let Ok(num_str) = core::str::from_utf8(num_bytes) {
-                        let val = num_str.parse::<i64>().unwrap_or(0);
-                        tokens.push(ArithToken::Num(val));
-                    }
-                }
+                // A literal too big for `i64` used to become `0` — the largest
+                // number the operator can write turning into the smallest.
+                // Neither reference shell produces `0` here and the two do not
+                // agree with each other (bash wraps to 7766279631452241919,
+                // dash saturates to i64::MAX), which is the clearest possible
+                // sign that there is no right answer to substitute.
+                let num_bytes = bytes.get(start..i).unwrap_or(&[]);
+                let num_str = core::str::from_utf8(num_bytes).unwrap_or("");
+                let val = num_str
+                    .parse::<i64>()
+                    .map_err(|_| ArithError::Overflow(String::from(num_str)))?;
+                tokens.push(ArithToken::Num(val));
             }
             c if c.is_ascii_alphabetic() || c == b'_' => {
                 // Variable name — resolve to integer value.
@@ -125123,167 +125426,195 @@ fn tokenize_arith(s: &str) -> Vec<ArithToken> {
                 while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i = i.saturating_add(1);
                 }
-                if let Some(name_bytes) = bytes.get(start..i) {
-                    if let Ok(name) = core::str::from_utf8(name_bytes) {
-                        let val = env_get(name)
-                            .and_then(|v| v.parse::<i64>().ok())
-                            .unwrap_or(0);
-                        tokens.push(ArithToken::Num(val));
-                    }
-                }
+                let name_bytes = bytes.get(start..i).unwrap_or(&[]);
+                let name = core::str::from_utf8(name_bytes).unwrap_or("");
+                let val = match env_get(name) {
+                    // Unset, or set to nothing, is zero in every shell.
+                    None => 0,
+                    Some(raw) if raw.trim().is_empty() => 0,
+                    Some(raw) => raw
+                        .trim()
+                        .parse::<i64>()
+                        .map_err(|_| ArithError::NotNumeric {
+                            word: raw.trim().into(),
+                            from_var: Some(String::from(name)),
+                        })?,
+                };
+                tokens.push(ArithToken::Num(val));
             }
             _ => {
-                // Unknown character — skip.
-                i = i.saturating_add(1);
+                // Silently skipping the character meant `2 $ 3` evaluated to
+                // `2` and `1 @@ 2` to `1`: a typo removed an operator and the
+                // shell answered with an expression the operator did not write.
+                let c = s
+                    .get(i..)
+                    .and_then(|rest| rest.chars().next())
+                    .unwrap_or('?');
+                return Err(ArithError::BadChar(c));
             }
         }
     }
 
-    tokens
+    Ok(tokens)
 }
 
 /// Parse a logical OR expression: and_expr ('||' and_expr)*
-fn parse_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
-    let mut val = parse_and_expr(tokens, pos);
+fn parse_expr(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ArithError> {
+    let mut val = parse_and_expr(tokens, pos)?;
     while let Some(ArithToken::Or) = tokens.get(*pos) {
         *pos = pos.saturating_add(1);
-        let rhs = parse_and_expr(tokens, pos);
-        val = if val != 0 || rhs != 0 { 1 } else { 0 };
+        let rhs = parse_and_expr(tokens, pos)?;
+        val = i64::from(val != 0 || rhs != 0);
     }
-    val
+    Ok(val)
 }
 
 /// Parse a logical AND expression: cmp_expr ('&&' cmp_expr)*
-fn parse_and_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
-    let mut val = parse_cmp_expr(tokens, pos);
+fn parse_and_expr(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ArithError> {
+    let mut val = parse_cmp_expr(tokens, pos)?;
     while let Some(ArithToken::And) = tokens.get(*pos) {
         *pos = pos.saturating_add(1);
-        let rhs = parse_cmp_expr(tokens, pos);
-        val = if val != 0 && rhs != 0 { 1 } else { 0 };
+        let rhs = parse_cmp_expr(tokens, pos)?;
+        val = i64::from(val != 0 && rhs != 0);
     }
-    val
+    Ok(val)
 }
 
 /// Parse a comparison expression: add_expr (('<' | '<=' | '>' | '>=' | '==' | '!=') add_expr)*
-fn parse_cmp_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
-    let mut val = parse_add_expr(tokens, pos);
+fn parse_cmp_expr(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ArithError> {
+    let mut val = parse_add_expr(tokens, pos)?;
     loop {
         match tokens.get(*pos) {
             Some(ArithToken::Lt) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_add_expr(tokens, pos);
-                val = if val < rhs { 1 } else { 0 };
+                let rhs = parse_add_expr(tokens, pos)?;
+                val = i64::from(val < rhs);
             }
             Some(ArithToken::Le) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_add_expr(tokens, pos);
-                val = if val <= rhs { 1 } else { 0 };
+                let rhs = parse_add_expr(tokens, pos)?;
+                val = i64::from(val <= rhs);
             }
             Some(ArithToken::Gt) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_add_expr(tokens, pos);
-                val = if val > rhs { 1 } else { 0 };
+                let rhs = parse_add_expr(tokens, pos)?;
+                val = i64::from(val > rhs);
             }
             Some(ArithToken::Ge) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_add_expr(tokens, pos);
-                val = if val >= rhs { 1 } else { 0 };
+                let rhs = parse_add_expr(tokens, pos)?;
+                val = i64::from(val >= rhs);
             }
             Some(ArithToken::Eq) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_add_expr(tokens, pos);
-                val = if val == rhs { 1 } else { 0 };
+                let rhs = parse_add_expr(tokens, pos)?;
+                val = i64::from(val == rhs);
             }
             Some(ArithToken::Ne) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_add_expr(tokens, pos);
-                val = if val != rhs { 1 } else { 0 };
+                let rhs = parse_add_expr(tokens, pos)?;
+                val = i64::from(val != rhs);
             }
             _ => break,
         }
     }
-    val
+    Ok(val)
 }
 
 /// Parse an additive expression: term (('+' | '-') term)*
-fn parse_add_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
-    let mut val = parse_term(tokens, pos);
+fn parse_add_expr(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ArithError> {
+    let mut val = parse_term(tokens, pos)?;
     loop {
         match tokens.get(*pos) {
             Some(ArithToken::Plus) => {
                 *pos = pos.saturating_add(1);
-                val = val.wrapping_add(parse_term(tokens, pos));
+                val = val.wrapping_add(parse_term(tokens, pos)?);
             }
             Some(ArithToken::Minus) => {
                 *pos = pos.saturating_add(1);
-                val = val.wrapping_sub(parse_term(tokens, pos));
+                val = val.wrapping_sub(parse_term(tokens, pos)?);
             }
             _ => break,
         }
     }
-    val
+    Ok(val)
 }
 
 /// Parse a multiplicative expression: unary (('*' | '/' | '%') unary)*
-fn parse_term(tokens: &[ArithToken], pos: &mut usize) -> i64 {
-    let mut val = parse_unary(tokens, pos);
+fn parse_term(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ArithError> {
+    let mut val = parse_unary(tokens, pos)?;
     loop {
         match tokens.get(*pos) {
             Some(ArithToken::Star) => {
                 *pos = pos.saturating_add(1);
-                val = val.wrapping_mul(parse_unary(tokens, pos));
+                val = val.wrapping_mul(parse_unary(tokens, pos)?);
             }
             Some(ArithToken::Slash) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_unary(tokens, pos);
-                val = if rhs == 0 { 0 } else { val.wrapping_div(rhs) };
+                let rhs = parse_unary(tokens, pos)?;
+                // `x / 0` answered `0`, which is a number the operator has no
+                // way to distinguish from a real quotient -- and `0` is exactly
+                // what a divisor that was itself mistakenly zero would produce
+                // for a numerator of zero, so the wrong answer looks right in
+                // the one case most likely to arise. bash and dash both refuse.
+                if rhs == 0 {
+                    return Err(ArithError::DivideByZero);
+                }
+                val = val.wrapping_div(rhs);
             }
             Some(ArithToken::Percent) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_unary(tokens, pos);
-                val = if rhs == 0 { 0 } else { val.wrapping_rem(rhs) };
+                let rhs = parse_unary(tokens, pos)?;
+                if rhs == 0 {
+                    return Err(ArithError::DivideByZero);
+                }
+                val = val.wrapping_rem(rhs);
             }
             _ => break,
         }
     }
-    val
+    Ok(val)
 }
 
 /// Parse a unary expression: '-' unary | '!' unary | atom
-fn parse_unary(tokens: &[ArithToken], pos: &mut usize) -> i64 {
+fn parse_unary(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ArithError> {
     if let Some(ArithToken::Minus) = tokens.get(*pos) {
         *pos = pos.saturating_add(1);
-        return parse_unary(tokens, pos).wrapping_neg();
+        return Ok(parse_unary(tokens, pos)?.wrapping_neg());
     }
     if let Some(ArithToken::Not) = tokens.get(*pos) {
         *pos = pos.saturating_add(1);
-        let val = parse_unary(tokens, pos);
-        return if val == 0 { 1 } else { 0 };
+        let val = parse_unary(tokens, pos)?;
+        return Ok(i64::from(val == 0));
     }
     parse_atom(tokens, pos)
 }
 
 /// Parse an atom: number | '(' expr ')'
-fn parse_atom(tokens: &[ArithToken], pos: &mut usize) -> i64 {
+fn parse_atom(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ArithError> {
     match tokens.get(*pos) {
         Some(ArithToken::Num(n)) => {
             let val = *n;
             *pos = pos.saturating_add(1);
-            val
+            Ok(val)
         }
         Some(ArithToken::LParen) => {
             *pos = pos.saturating_add(1);
-            let val = parse_expr(tokens, pos);
-            // Consume matching ')'.
+            let val = parse_expr(tokens, pos)?;
+            // An unclosed `(` used to be consumed as if it had been closed, so
+            // `expr (1+2` printed `3` and `expr 2*(3+4` printed `14` -- the
+            // shell inventing the paren the operator forgot and answering as
+            // though the expression were complete.
             if let Some(ArithToken::RParen) = tokens.get(*pos) {
                 *pos = pos.saturating_add(1);
+            } else {
+                return Err(ArithError::UnclosedParen);
             }
-            val
+            Ok(val)
         }
-        _ => {
-            // Unexpected token — return 0.
-            0
-        }
+        // `1 +` and `expr '*' 3` land here. The old `0` made the first answer
+        // `1` and the second `0`.
+        _ => Err(ArithError::ExpectedValue),
     }
 }
 
@@ -125644,16 +125975,25 @@ fn cmd_let(args: &str) {
             && left.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             && !left.starts_with(|c: char| c.is_ascii_digit())
         {
-            let val = eval_arithmetic(right);
-            env_set(left, &alloc::format!("{}", val));
-            set_exit(if val == 0 { 1 } else { 0 });
+            // Refusing leaves the variable at its previous value rather than
+            // overwriting it with the old `0`: `let "n = $x + 1"` with an
+            // unreadable `$x` used to *destroy* whatever `n` held.
+            match eval_arithmetic(right) {
+                Ok(val) => {
+                    env_set(left, &alloc::format!("{}", val));
+                    set_exit(if val == 0 { 1 } else { 0 });
+                }
+                Err(e) => report_arith("let", &e, 1),
+            }
             return;
         }
     }
 
     // No assignment — just evaluate.
-    let val = eval_arithmetic(expr);
-    set_exit(if val == 0 { 1 } else { 0 });
+    match eval_arithmetic(expr) {
+        Ok(val) => set_exit(if val == 0 { 1 } else { 0 }),
+        Err(e) => report_arith("let", &e, 1),
+    }
 }
 
 /// `trap 'COMMAND' SIGNAL` — set a handler for a shell event.

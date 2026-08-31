@@ -100493,6 +100493,46 @@ Two things generalise from it:
   window height, that each key row's left margin equals its right, and that
   the word row ends above the keys.
 
+**Second postscript (lane C, 2026-08-31): a clamp has two flat ends, and a
+fixture pair can sit on one of them without either value looking extreme.**
+`dots`' very first wiring test -- `the_layout_follows_the_window_rather_than_
+a_constant`, whose whole job is to prove the board is no longer drawn from a
+constant -- solved the layout at 400x400 and at 1200x1200 and asserted the
+second board was wider. It failed, and the failure message was the lesson in
+one line: *"a window three times as wide drew a board 291.6 wide against
+291.6."* The dot spacing is `min(fit, MAX_SPACING)` with `MAX_SPACING = 90`,
+and both windows are far above the crossover, so tripling the window changed
+nothing the rule computed. Retrying with 200 against 400 failed the same way
+-- 400 still saturates.
+
+Two things about it are worth keeping, and neither is in the main lesson:
+
+- **The saturated end does not announce itself.** 400x400 is an unremarkable
+  window; nothing about writing it down suggests "this is the flat part of a
+  clamp." The only way to know is to compute the threshold and compare. The
+  fix was to make the test say so out loud: the pair is 150x150 against
+  300x300 now, and the test *asserts* both spacings are strictly below
+  `MAX_SPACING` before it compares them. A fixture that has to prove it is in
+  the regime cannot silently leave it when a constant is retuned later.
+- **Two clamps in one layout can have disjoint interiors, and then one pair
+  cannot serve both.** The same test also wanted to prove the font follows
+  the window, but the font is clamped to `9..18` and is *already at its
+  ceiling* by the time a window is big enough to be below the spacing cap --
+  the interiors do not overlap. The test is two explicitly-guarded pairs now,
+  150x150/300x300 for the board and 400x340/400x600 for the font, with a
+  comment recording that no single pair can exercise both. When a layout has
+  several clamped quantities, "one representative window" is not a fixture;
+  it is a coincidence about which clamp happens to be loose.
+
+The same trap bit a second dots fixture the same hour, in its milder form:
+`a_window_too_small_for_a_board_draws_none_and_offers_no_lines` listed 900x60
+among its "too small" windows. The program draws a real 8.65-pixel lattice
+there with 1.6x1.07 hit boxes -- 900x60 is *small*, not *absent*, and the
+threshold the test was named after does not exist at that size. The fixture
+is 30x30, 10x10 and 0x0 now, and a comment records that 900x60 was removed
+because asserting emptiness there would be asserting a threshold the program
+does not have.
+
 ### Lesson 91: a needle the frame says twice cannot tell you which band said it (lane C, 2026-08-30)
 
 **In short:** `gomoku` draws the phrase "White is thinking" in two places --

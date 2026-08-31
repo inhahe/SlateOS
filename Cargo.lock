@@ -3162,6 +3162,7 @@ name = "dots"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]

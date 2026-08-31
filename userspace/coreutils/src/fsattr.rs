@@ -442,6 +442,129 @@ pub fn set_mode(on: On<'_>, _mode: u32) -> io::Result<()> {
     }
 }
 
+/// Give a file exactly this mode, and no access-control list that could grant
+/// more than it says.
+///
+/// gnulib's `qset_acl`, whose comment is the reason this is not [`set_mode`]:
+/// *"Set the access control lists of a file to match **exactly** MODE (this
+/// might remove inherited ACLs). Note chmod() tends to honor inherited/default
+/// ACLs."* A chmod does not take an access ACL off — the kernel rewrites the
+/// list's owner, mask and other entries to match the new bits and **keeps every
+/// named-user and named-group entry**. So `chmod 0700` on a file somebody had
+/// granted a named user access to leaves that grant standing, and a mode of
+/// `0700` that reads as "only the owner" is not what the kernel will enforce.
+///
+/// gnulib reaches the same state by writing a three-entry ACL built from the
+/// mode; Linux stores such a list as plain mode bits and drops the attribute, so
+/// writing the minimal list and deleting the attribute are the same operation.
+/// Deleting it is the one this OS can express without an ACL encoder.
+///
+/// The **default** ACL is deliberately left alone: it decides what a directory
+/// hands to files created inside it later, not who may use the directory now,
+/// and gnulib does not touch it here either. (Its `S_ISDIR (ctx->mode)` test
+/// cannot fire from `cp`, which passes permission bits with no file-type bits
+/// in them.) [`copy_permissions`] is where the default ACL does change.
+///
+/// A filesystem with no extended attributes at all answers the removal with
+/// `ENOTSUP`, which is success: a file that cannot have an ACL does not have
+/// one. That is gnulib's `acl_errno_valid` arm, which clears the error when the
+/// list being written came from the mode.
+///
+/// # Errors
+///
+/// Whatever the `chmod` said, or whatever the removal said other than "there was
+/// no such attribute" and "this filesystem has no attributes".
+#[cfg(unix)]
+pub fn set_mode_exactly(on: On<'_>, mode: u32) -> io::Result<()> {
+    set_mode(on, mode)?;
+    clear_acl(on, b"system.posix_acl_access")
+}
+
+/// Give a file exactly this mode.
+///
+/// # Errors
+///
+/// As [`set_mode`]; this platform has no access-control lists to remove.
+#[cfg(not(unix))]
+pub fn set_mode_exactly(on: On<'_>, mode: u32) -> io::Result<()> {
+    set_mode(on, mode)
+}
+
+/// Make one file's permissions another's — the mode and the access-control
+/// lists together.
+///
+/// gnulib's `qcopy_acl`, in the shape it takes when libattr is present
+/// (`USE_XATTR`): chmod first, then carry the permission-class attributes
+/// across. The order is gnulib's and its comment says why — *"we chmod before
+/// setting ACLs as doing it after could overwrite them"*. Writing an access ACL
+/// rewrites the file's mode bits from the list's own entries, so a chmod
+/// afterwards would undo it.
+///
+/// **The clearing step in the middle is not in that branch of gnulib, and is
+/// deliberate.** `attr_copy_file` copies the names the *source* has; a name the
+/// source lacks and the destination has is left standing. Copy a file with no
+/// ACL over one that grants a named user access, and under `--preserve=mode`
+/// that grant survives on a file whose permissions the user just asked to be
+/// made identical to the source's. gnulib's own non-libattr branch does not
+/// have that hole — it goes through `set_permissions`, which replaces the
+/// destination's access ACL and deletes its default one — so this follows the
+/// branch that is right rather than the branch that is faster. See
+/// `design-decisions.md` §738.
+///
+/// Both names are cleared unconditionally, including on a regular file, which
+/// cannot have a default ACL: the removal of a name that is not there costs one
+/// syscall and returns success, and a caller that had to know whether its
+/// destination was a directory would be a caller that could get it wrong.
+///
+/// The two sides are not symmetric about symbolic links, and are not meant to
+/// be: `from` may be [`Link::NoFollow`], because reading a link's own
+/// attributes is meaningful and is what `cp` asks for, while `to` may not,
+/// because [`set_mode`] refuses a link — a symbolic link has no permissions of
+/// its own to write. `cp` never reaches here with a link destination, which is
+/// also why GNU returns before its `copy_acl` when `dest_is_symlink`
+/// (`copy.c:3286`).
+///
+/// # Errors
+///
+/// The first thing that failed: the chmod, a clearing step, or the copy. `cp`
+/// reports all three with the same sentence, which is also gnulib's behaviour
+/// under `USE_XATTR` — its `-2` "the source is at fault" code is reachable only
+/// from the other branch.
+#[cfg(unix)]
+pub fn copy_permissions(from: On<'_>, to: On<'_>, mode: u32) -> io::Result<()> {
+    set_mode(to, mode)?;
+    for name in PERMISSION_XATTRS {
+        clear_acl(to, name)?;
+    }
+    match copy_xattrs(from, to, Xattrs::Permissions)
+        .into_iter()
+        .next()
+    {
+        Some(failure) => Err(failure.err),
+        None => Ok(()),
+    }
+}
+
+/// Make one file's permissions another's.
+///
+/// # Errors
+///
+/// As [`set_mode`]; this platform has no access-control lists to carry.
+#[cfg(not(unix))]
+pub fn copy_permissions(_from: On<'_>, to: On<'_>, mode: u32) -> io::Result<()> {
+    set_mode(to, mode)
+}
+
+/// Take an access-control list off, treating a filesystem that has no extended
+/// attributes as one that had no list. See [`set_mode_exactly`].
+#[cfg(unix)]
+fn clear_acl(on: On<'_>, name: &[u8]) -> io::Result<()> {
+    match remove_xattr(on, name) {
+        Err(e) if !absent_everywhere(&e) => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// Which of a file's extended attributes a copy carries.
 ///
 /// The split has to exist because `system.posix_acl_access` is *both* an
@@ -1743,6 +1866,206 @@ mod tests {
         assert!(list_xattrs(On::File(&file)).unwrap().is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A POSIX access ACL in the on-disk form Linux and this kernel both store
+    /// (`kernel/src/fs/acl.rs`): a four-byte version 2, then five-byte-aligned
+    /// eight-byte entries of `(tag: u16, perm: u16, id: u32)`, all
+    /// little-endian, in ascending tag order.
+    ///
+    /// The entry that matters is the `ACL_USER` one in the middle: a grant to a
+    /// named user, which is what a chmod cannot take away and what every test
+    /// below is about. Built by hand because the development host has no
+    /// `setfacl` and this crate has no ACL encoder — it needs none, since the
+    /// only thing it ever does to an ACL is delete it.
+    #[cfg(unix)]
+    fn acl_granting_a_named_user(uid: u32) -> Vec<u8> {
+        const VERSION: u32 = 2;
+        const USER_OBJ: u16 = 0x01;
+        const USER: u16 = 0x02;
+        const GROUP_OBJ: u16 = 0x04;
+        const MASK: u16 = 0x10;
+        const OTHER: u16 = 0x20;
+        const UNDEFINED: u32 = u32::MAX;
+
+        let mut acl = VERSION.to_le_bytes().to_vec();
+        for (tag, perm, id) in [
+            (USER_OBJ, 6u16, UNDEFINED),
+            (USER, 6, uid),
+            (GROUP_OBJ, 0, UNDEFINED),
+            (MASK, 6, UNDEFINED),
+            (OTHER, 0, UNDEFINED),
+        ] {
+            acl.extend_from_slice(&tag.to_le_bytes());
+            acl.extend_from_slice(&perm.to_le_bytes());
+            acl.extend_from_slice(&id.to_le_bytes());
+        }
+        acl
+    }
+
+    /// Put an access ACL on a file, and say whether the filesystem took it.
+    ///
+    /// A host kernel built without POSIX ACLs, or a filesystem mounted without
+    /// them, refuses — and that is a fact about the test environment, not about
+    /// the code, so it reports rather than fails. The target OS has them.
+    #[cfg(unix)]
+    fn seed_acl(path: &std::path::Path) -> bool {
+        use super::{Link, On, get_xattr, set_xattr};
+        let acl = acl_granting_a_named_user(1234);
+        if set_xattr(
+            On::Path(path, Link::NoFollow),
+            b"system.posix_acl_access",
+            &acl,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        // The kernel may normalise what it stored; all these tests need is that
+        // the name is now present, so that its absence afterwards means something.
+        get_xattr(On::Path(path, Link::NoFollow), b"system.posix_acl_access").is_ok()
+    }
+
+    /// The point of [`super::set_mode_exactly`]: a mode of 0600 has to mean
+    /// 0600, and a chmod alone does not deliver that. The kernel rewrites an
+    /// access ACL's owner, mask and other entries to match a new mode and keeps
+    /// every named entry, so a `chmod 0600` over `user:1234:rw` leaves 1234
+    /// still able to write — which is the window `cp -p` opens just before it
+    /// hands the file to a new owner.
+    #[test]
+    #[cfg(unix)]
+    fn an_exact_mode_takes_the_access_list_off_where_a_chmod_would_not() {
+        use super::{Link, On, list_xattrs, set_mode, set_mode_exactly};
+
+        let dir = scratch("exactmode");
+        let (chmodded, exact) = (dir.join("chmodded"), dir.join("exact"));
+        std::fs::write(&chmodded, b"body").unwrap();
+        std::fs::write(&exact, b"body").unwrap();
+
+        if !seed_acl(&chmodded) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return; // No POSIX ACLs here; the target OS has them.
+        }
+        assert!(seed_acl(&exact));
+
+        // The control: a plain chmod leaves the list — and so the grant — on.
+        set_mode(On::Path(&chmodded, Link::Follow), 0o600).unwrap();
+        assert!(
+            list_xattrs(On::Path(&chmodded, Link::NoFollow))
+                .unwrap()
+                .contains(&b"system.posix_acl_access".to_vec()),
+            "the host kernel dropped the ACL on chmod, so this test proves nothing"
+        );
+
+        set_mode_exactly(On::Path(&exact, Link::Follow), 0o600).unwrap();
+        assert!(
+            !list_xattrs(On::Path(&exact, Link::NoFollow))
+                .unwrap()
+                .contains(&b"system.posix_acl_access".to_vec()),
+            "an exact mode left an access list that can grant more than it says"
+        );
+        assert_eq!(mode_of(&exact) & 0o7777, 0o600);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An exact mode on a file that never had a list is the ordinary case — the
+    /// one `cp -p` runs on almost every file — and must succeed silently rather
+    /// than report the attribute it did not find.
+    #[test]
+    #[cfg(unix)]
+    fn an_exact_mode_on_a_file_with_no_list_is_a_success() {
+        use super::{Link, On, set_mode_exactly};
+
+        let dir = scratch("exactplain");
+        let f = dir.join("f");
+        std::fs::write(&f, b"body").unwrap();
+
+        set_mode_exactly(On::Path(&f, Link::Follow), 0o640).unwrap();
+        assert_eq!(mode_of(&f) & 0o7777, 0o640);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A copy of permissions is a *replacement*: the destination ends with the
+    /// source's access list and no other, so a grant the destination carried and
+    /// the source did not comes off. Copying only what the source has — which is
+    /// what gnulib's libattr branch does — would leave it standing on a file the
+    /// user just asked to be given the source's permissions.
+    #[test]
+    #[cfg(unix)]
+    fn copied_permissions_replace_the_destination_list_rather_than_merge() {
+        use super::{Link, On, copy_permissions, list_xattrs};
+
+        let dir = scratch("copyperm");
+        let (src, dst) = (dir.join("src"), dir.join("dst"));
+        std::fs::write(&src, b"body").unwrap();
+        std::fs::write(&dst, b"body").unwrap();
+
+        if !seed_acl(&dst) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        // The source has an ordinary attribute and no list. The ordinary one is
+        // here to prove the permission copy does not carry it.
+        assert!(seed(&src, b"user.one", b"v"));
+
+        copy_permissions(
+            On::Path(&src, Link::NoFollow),
+            On::Path(&dst, Link::Follow),
+            0o644,
+        )
+        .unwrap();
+
+        assert!(
+            list_xattrs(On::Path(&dst, Link::NoFollow))
+                .unwrap()
+                .is_empty(),
+            "a permission copy from a source with no list left one behind"
+        );
+        assert_eq!(mode_of(&dst) & 0o7777, 0o644);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other direction: a list the *source* has is carried, and the mode
+    /// goes on first so that writing the list is the last word on the bits.
+    #[test]
+    #[cfg(unix)]
+    fn copied_permissions_carry_the_source_list() {
+        use super::{Link, On, copy_permissions, list_xattrs};
+
+        let dir = scratch("copyperm2");
+        let (src, dst) = (dir.join("src"), dir.join("dst"));
+        std::fs::write(&src, b"body").unwrap();
+        std::fs::write(&dst, b"body").unwrap();
+
+        if !seed_acl(&src) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        copy_permissions(
+            On::Path(&src, Link::NoFollow),
+            On::Path(&dst, Link::Follow),
+            0o644,
+        )
+        .unwrap();
+
+        assert_eq!(
+            list_xattrs(On::Path(&dst, Link::NoFollow)).unwrap(),
+            vec![b"system.posix_acl_access".to_vec()],
+            "a permission copy dropped the source's access list"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The mode of a file, for the tests above.
+    #[cfg(unix)]
+    fn mode_of(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).unwrap().mode()
     }
 
     /// A name with a NUL is refused before it reaches the kernel, exactly as in

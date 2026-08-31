@@ -3622,24 +3622,20 @@ fn narrow_before_chown<O: Write, E: Write>(
         }
     };
     let new = src.mode;
-    // GNU's condition, less its `USE_ACL ||` half: with access-control lists
-    // compiled in it narrows unconditionally, because an ACL can grant what no
-    // mode bit shows. This `cp` copies no ACLs, so the bits are the whole
-    // story and there is nothing to be careful about when the old mode already
-    // grants no more than the new one and carries no special bit.
+    // GNU's condition is `USE_ACL || (old & CHMOD_MODE_BITS & (~new | special))`
+    // (`copy.c:917`), and this kernel has access-control lists, so the first
+    // half is true and the second is never consulted. Narrowing unconditionally
+    // is not belt-and-braces: the mode-bit test asks "does the old mode grant
+    // anything the new one does not?", and an ACL can grant what no mode bit
+    // shows. A destination at 0600 that also carries `user:mallory:rw` passes
+    // the test against a 0600 source and would be handed to the new owner with
+    // mallory's entry intact.
     //
-    // The `USE_ACL` half is not only about the window, and whoever adds ACL
-    // support here must restore it rather than reason about the window again:
-    // GNU narrows with `qset_acl`, which *replaces* the destination's access
-    // ACL with the minimal one its mode implies and deletes a directory's
-    // default ACL. That call is the only thing that takes an existing
-    // destination's ACL entries off, so without it a `cp -p` onto a file
-    // somebody had granted a named user access to would leave that grant on
-    // the copy.
-    if old & 0o7777 & (!new | 0o7000) == 0 {
-        return true;
-    }
-    let Err(e) = fsattr::set_mode(on, old & new & 0o700) else {
+    // The narrowing is `qset_acl`, not a chmod, for the same reason — see
+    // `fsattr::set_mode_exactly`, which is that call: a chmod leaves named
+    // entries standing, so a chmod-only narrowing closes the mode-bit half of
+    // the window and leaves the ACL half open.
+    let Err(e) = fsattr::set_mode_exactly(on, old & new & 0o700) else {
         return true;
     };
     // GNU's `owner_failure_ok`, which is `chown_failure_ok` for this step: a
@@ -3688,12 +3684,17 @@ fn settle_mode<O: Write, E: Write>(
     job: &mut Job<'_, O, E>,
 ) -> bool {
     if job.flags.preserve.mode {
-        // GNU's `copy_acl (…, src_mode)`, which without ACL support is exactly
-        // this chmod — and whose diagnostic is the one place in `cp` that uses
-        // the *unquoted* style, `quotef`, for a name. Matched rather than
-        // tidied: a utility that differs from GNU only in the punctuation of a
-        // diagnostic is still one whose output a script cannot match on.
-        if let Err(e) = fsattr::set_mode(on, src.mode) {
+        // GNU's `copy_acl (…, src_mode)` — the mode *and* the access-control
+        // lists, because on this kernel the two are one thing: an ACL entry
+        // grants access no mode bit shows, so a `--preserve=mode` that copied
+        // only the bits would produce a copy the kernel treats differently from
+        // its source. See `fsattr::copy_permissions`, which is that call.
+        //
+        // Its diagnostic is the one place in `cp` that uses the *unquoted*
+        // style, `quotef`, for a name. Matched rather than tidied: a utility
+        // that differs from GNU only in the punctuation of a diagnostic is
+        // still one whose output a script cannot match on.
+        if let Err(e) = fsattr::copy_permissions(src.on, on, src.mode) {
             let why = strerror(&e);
             let _ = writeln!(
                 job.err,
@@ -3715,7 +3716,16 @@ fn settle_mode<O: Write, E: Write>(
         } else {
             0o666
         };
-        if let Err(e) = fsattr::set_mode(on, default & !cached_umask()) {
+        // `set_acl`, not a chmod: GNU's line here is `set_acl (dst_name,
+        // dest_desc, MODE_RW_UGO & ~cached_umask ())` (`copy.c:1685`). The
+        // destination is one this run created, so it has no access ACL of its
+        // own — but it may have *inherited* one from a parent directory's
+        // default ACL, and `--no-preserve=mode` asking for 0666 & ~umask means
+        // 0666 & ~umask and not "plus whatever the parent grants". The
+        // inherited *default* ACL on a new directory is left alone, which is
+        // also GNU's behaviour: it is the parent's policy for what comes next,
+        // and this option says nothing about it.
+        if let Err(e) = fsattr::set_mode_exactly(on, default & !cached_umask()) {
             let why = strerror(&e);
             let _ = writeln!(
                 job.err,

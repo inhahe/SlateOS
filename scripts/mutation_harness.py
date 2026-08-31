@@ -124,6 +124,15 @@ def run_tests(crate, timeout):
         ],
         capture_output=True,
         text=True,
+        # A test that fails prints the text the program drew, and a program may
+        # legitimately draw a character the console's code page cannot spell:
+        # gomoku's score panel reads "* Black" with U+25CF, and decoding cargo's
+        # UTF-8 output as Windows cp1252 raised UnicodeDecodeError *inside*
+        # `subprocess.run`, so `out.stdout` came back None and the sweep died on
+        # the next line with a TypeError rather than reporting the mutant.  The
+        # harness must be able to read output it cannot render.
+        encoding="utf-8",
+        errors="replace",
         cwd=REPO,
     )
     failed = set(re.findall(r"^    tests::(\S+)$", out.stdout, re.M))

@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window. Without it `main` was `let _app = ChessApp::new();` -- it built
+# the opening position, dropped it and exited, so no piece ever reached a
+# screen and no click ever arrived at the game that reads clicks.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

@@ -82372,8 +82372,59 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **91 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **84 of 800 remain**
 
+> **Burn-down log.** 2026-08-30 (forty-fourth batch): **the guesses whose value
+> was the widest one its space has.** 91 → 84 across 91 → 84 functions;
+> `cmd_fwsettings`, `cmd_namespace`, `cmd_autostart`, `cmd_pidns`,
+> `cmd_taskmon`, `cmd_audiomux` and `cmd_sshd` left the ledger. Pinned by
+> self-test rung 112.
+>
+> Every entry left in the ledger is a single site, so from here on a batch is
+> chosen by what the guess *means* rather than by how many of them a function
+> has. This one is the set where the substituted number is not an arbitrary
+> placeholder but the value that means *all of it* or *the top of the tree* — so
+> the guess did not narrow the thing the operand named, it **opened** it:
+>
+> | Command | Guessed | What that value means there |
+> |---|---|---|
+> | `firewall add … <port> …` | `0` | the `list` arm renders port `0` as `*` — **every port** |
+> | `autostart add … [uid]` | `0` | root, and the item runs at boot |
+> | `namespace create … [PARENT_ID]` | `ROOT_NAMESPACE` | outside the container it was to nest in |
+> | `pidns create [parent]` | `0` | the root PID namespace, then printed back as `(parent: 0)` |
+> | `tmon register … [parent_pid]` | `0` | the top of the task tree |
+> | `amux stream … [pid]` | `0` | a real and important process (batch 34's harm) |
+>
+> `firewall add web in tcp 8O allow` is the one to remember: it did not add a
+> rule for the wrong port, it added an **allow rule for all 65536**, and printed
+> `port 0` in a success line that reads as confirmation.
+>
+> **Three more §645 word catch-alls went with it, all in that same arm**, and
+> all three widening: `_ => Both`, `_ => Any`, `_ => Allow`. Because the arm is
+> gated on `parts.len() >= 6`, every operand is required — so none of the three
+> was ever standing in for an *absent* word; each existed solely to absorb a
+> misspelled one. `blcok` produced an **allow** rule and said "allow". As in
+> batch 43a these were invisible to the gate (no `.parse()` in a `match` on a
+> `&str`) and were found by reading around a flagged site.
+>
+> **`cmd_sshd` is the batch's counter-example and was included for it.** Its
+> guess was already being caught — `0` is not a listening port and the range
+> check below rejected it — so the fix is not a refusal that was missing but a
+> *message* that could not say which word was wrong: `Invalid port` answered
+> `sshd port 0` and `sshd port 8O22` identically. Worth recording because it is
+> the shape a burn-down is most likely to skip as "already fine".
+>
+> **`cmd_audiomux` also carried the D2 shape next door**: `[output_id]` was
+> `and_then(|s| s.parse().ok())` into an `Option`, where an unreadable word is
+> indistinguishable from an omitted one, so `amux stream foo 5 1O` routed the
+> stream to the default output and reported success.
+>
+> Rung 112 asserts the converse as well as the refusals — `pidns create 99`
+> reaches `pidns::create` and is rejected *there*, by a different message —
+> because a rung made only of refusals would pass just as well against a helper
+> that refused everything, which is the failure mode a burn-down batch is most
+> likely to introduce.
+>
 > **Burn-down log.** 2026-08-30 (forty-third batch, part b): **the expression
 > evaluator**. 95 → 91 across 93 → 91 functions; `eval_test` and
 > `tokenize_arith` left the ledger, and **every entry that remains is now a

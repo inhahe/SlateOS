@@ -6729,68 +6729,30 @@ pub extern "C" fn endprotoent() {
 // Error translation
 // ---------------------------------------------------------------------------
 
-/// Translate kernel network error codes to POSIX errno values.
+/// Translate a kernel error code (a negative `i64` syscall return) to the
+/// POSIX errno a socket call should report.
 ///
-/// The kernel returns negative error codes; this converts them to
-/// the appropriate socket-specific errno.
-/// Translate a kernel error code (negative i64 from syscall return) to
-/// a POSIX errno value.
+/// This is [`errno::errno_for`] with exactly one socket-specific override,
+/// and it used to be a second full copy of that table.  The copy had drifted:
+/// it was missing eighteen of the kernel's codes, among them the entire
+/// `-700` range, which exists for sockets and for nothing else.  Every one of
+/// those arrived here as `EIO` via the catch-all -- so a non-blocking
+/// `connect` still handshaking reported a dead socket instead of
+/// `EINPROGRESS`, and a `bind` to a taken port reported an I/O failure
+/// instead of `EADDRINUSE`.  A table that answers plausibly for codes it has
+/// never heard of cannot report its own staleness, which is why there is now
+/// one of them and a test that reads the kernel enum.
 ///
-/// Kernel error codes are the discriminant values of `KernelError`:
-///
-/// | Code | KernelError       | POSIX errno     |
-/// |------|-------------------|-----------------|
-/// | -1   | InternalError     | EIO             |
-/// | -2   | NotSupported      | ENOTSUP         |
-/// | -3   | InvalidArgument   | EINVAL          |
-/// | -4   | WouldBlock        | EAGAIN          |
-/// | -5   | Cancelled         | ECANCELED       |
-/// | -6   | TimedOut          | ETIMEDOUT       |
-/// | -100 | OutOfMemory       | ENOMEM          |
-/// | -200 | NoSuchProcess     | ESRCH           |
-/// | -300 | ChannelClosed     | ECONNRESET      |
-/// | -301 | ChannelFull       | EAGAIN          |
-/// | -304 | ResourceExhausted | ENOMEM          |
-/// | -400 | PermissionDenied  | EACCES          |
-/// | -500 | NotFound          | ENOENT          |
-/// | -501 | AlreadyExists     | EADDRINUSE      |
-/// | -505 | InvalidHandle     | EBADF           |
-/// | -600 | IoError           | EIO             |
-/// | -601 | NoSuchDevice      | ENODEV          |
+/// **The override.** `AlreadyExists` (-501) is `EEXIST` for a filesystem call
+/// and `EADDRINUSE` for a socket one: the only thing a socket call creates by
+/// name is a local address binding, so the generic answer is never the right
+/// one here.  It stays a special case rather than being pushed into the
+/// shared table because the shared table has no way to know which call it is
+/// answering for.
 pub(crate) fn translate_net_error(code: i64) -> i32 {
     match code {
-        // General.
-        -1 => errno::EIO,       // InternalError
-        -2 => errno::ENOTSUP,   // NotSupported
-        -3 => errno::EINVAL,    // InvalidArgument
-        -4 => errno::EAGAIN,    // WouldBlock
-        -5 => errno::ECANCELED, // Cancelled
-        -6 => errno::ETIMEDOUT, // TimedOut
-
-        // Memory.
-        -100 => errno::ENOMEM, // OutOfMemory
-
-        // Process.
-        -200 => errno::ESRCH, // NoSuchProcess
-
-        // IPC.
-        -300 => errno::ECONNRESET, // ChannelClosed
-        -301 => errno::EAGAIN,     // ChannelFull
-        -304 => errno::ENOMEM,     // ResourceExhausted
-
-        // Capability / permission.
-        -400 | -401 => errno::EACCES, // PermissionDenied / InvalidCapability
-
-        // Filesystem / not-found.
-        -500 => errno::ENOENT,     // NotFound  (also ECONNREFUSED for connect)
-        -501 => errno::EADDRINUSE, // AlreadyExists
-        -505 => errno::EBADF,      // InvalidHandle
-
-        // Device / I/O.
-        -600 => errno::EIO,    // IoError
-        -601 => errno::ENODEV, // NoSuchDevice
-
-        _ => errno::EIO, // Unknown → generic I/O error
+        errno::native::ALREADY_EXISTS => errno::EADDRINUSE,
+        other => errno::errno_for(other),
     }
 }
 

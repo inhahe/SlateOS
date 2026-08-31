@@ -118,13 +118,14 @@ ALLOWED: dict[str, str] = {
         "regression rather than a fix."
     ),
     "[pcid] live alloc_pcid tests": (
-        "Needs PCID enabled on the running CPU. QEMU's default TCG CPU model "
-        "does not expose it; stops firing on bare metal, under WHPX with a "
-        "host CPU model, or if `-cpu` gains `+pcid`."
-    ),
-    "[smep_smap] STAC/CLAC, with_user_access and the access counter": (
-        "Needs SMAP on the running CPU, for the same reason and with the same "
-        "escape as the PCID entry above."
+        "Needs PCID (CPUID.01H:ECX bit 17) on the running CPU. The harness "
+        "boots `-cpu qemu64,+smep,+smap,+umip`, which does not add PCID; stops "
+        "firing on bare metal, under WHPX with a host CPU model, or if `-cpu` "
+        "gains `+pcid`. Verified 2026-08-31 that this is a real CPU-model fact "
+        "and not the register-handling bug that made SMEP and SMAP look absent "
+        "on the same boots -- pcid.rs reads ECX and EBX through named "
+        "registers, so it was never exposed to it (design-decisions.md "
+        "sec 652)."
     ),
     "[hotplug] offline/online cycle": (
         "Needs a second CPU to take offline. The boot test runs single-CPU; "

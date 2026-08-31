@@ -468,59 +468,20 @@ fn cpuid_leaf6_eax() -> u32 {
     if max_leaf < 6 {
         return 0;
     }
-    let eax: u32;
-    // SAFETY: Leaf 6 is valid (max_leaf >= 6).
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 6",
-            "cpuid",
-            "pop rbx",
-            lateout("eax") eax,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-    }
-    eax
+    // Leaf 6 is valid (max_leaf >= 6).
+    core::arch::x86_64::__cpuid(6).eax
 }
 
 /// CPUID leaf 1 ECX (feature flags).
 fn cpuid_leaf1_ecx() -> u32 {
-    let ecx: u32;
-    // SAFETY: CPUID leaf 1 always valid.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 1",
-            "cpuid",
-            "pop rbx",
-            lateout("eax") _,
-            lateout("ecx") ecx,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-    }
-    ecx
+    // CPUID leaf 1 always valid.
+    core::arch::x86_64::__cpuid(1).ecx
 }
 
 /// CPUID leaf 0: max standard leaf.
 fn cpuid_max_leaf() -> u32 {
-    let eax: u32;
-    // SAFETY: CPUID leaf 0 always valid.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "xor eax, eax",
-            "cpuid",
-            "pop rbx",
-            lateout("eax") eax,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-    }
-    eax
+    // CPUID leaf 0 always valid.
+    core::arch::x86_64::__cpuid(0).eax
 }
 
 // ---------------------------------------------------------------------------

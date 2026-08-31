@@ -498,7 +498,13 @@ impl Xattrs {
 /// interchangeable: two name the attribute and two do not, and two blame the
 /// source while two blame the destination. A caller that had only an `io::Error`
 /// could not reconstruct which.
-#[derive(Clone, Copy, PartialEq, Eq)]
+///
+/// The two that name an attribute carry it, rather than the whole error carrying
+/// an `Option<Vec<u8>>` beside the step. Both spellings hold the same
+/// information for the four states that can happen; only this one refuses to
+/// hold the four that cannot, and so leaves the caller's `match` with no arm
+/// for a `Get` with no name to be mislabelled in.
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
 pub enum XattrStep {
     /// Reading the source's list of attribute names — libattr's
@@ -506,10 +512,10 @@ pub enum XattrStep {
     List,
     /// Reading one attribute's value from the source — `getting attribute %s of
     /// %s`, about the source.
-    Get,
+    Get(Vec<u8>),
     /// Writing one attribute to the destination — `setting attribute %s for %s`,
     /// about the *destination*.
-    Set,
+    Set(Vec<u8>),
     /// Writing attributes to the destination failed in a way that is about the
     /// destination as a whole rather than about one name — `setting attributes
     /// for %s`. Two things reach it: `ENOSYS`, where libattr gives up on the
@@ -529,8 +535,6 @@ pub enum XattrStep {
 pub struct XattrError {
     /// Which step failed, and so which wording applies.
     pub at: XattrStep,
-    /// The attribute, for the two steps that name one.
-    pub name: Option<Vec<u8>>,
     /// What the kernel said.
     pub err: io::Error,
 }
@@ -572,7 +576,6 @@ pub fn copy_xattrs(from: On<'_>, to: On<'_>, which: Xattrs) -> Vec<XattrError> {
             if !absent_everywhere(&err) {
                 failures.push(XattrError {
                     at: XattrStep::List,
-                    name: None,
                     err,
                 });
             }
@@ -594,8 +597,7 @@ pub fn copy_xattrs(from: On<'_>, to: On<'_>, which: Xattrs) -> Vec<XattrError> {
             Ok(value) => value,
             Err(err) => {
                 failures.push(XattrError {
-                    at: XattrStep::Get,
-                    name: Some(name),
+                    at: XattrStep::Get(name),
                     err,
                 });
                 continue;
@@ -612,14 +614,12 @@ pub fn copy_xattrs(from: On<'_>, to: On<'_>, which: Xattrs) -> Vec<XattrError> {
             Some(ENOSYS) => {
                 failures.push(XattrError {
                     at: XattrStep::SetAll,
-                    name: None,
                     err,
                 });
                 break;
             }
             _ => failures.push(XattrError {
-                at: XattrStep::Set,
-                name: Some(name),
+                at: XattrStep::Set(name),
                 err,
             }),
         }
@@ -628,7 +628,6 @@ pub fn copy_xattrs(from: On<'_>, to: On<'_>, which: Xattrs) -> Vec<XattrError> {
     if unsupported {
         failures.push(XattrError {
             at: XattrStep::SetAll,
-            name: None,
             err: io::Error::from_raw_os_error(ENOTSUP),
         });
     }
@@ -1511,8 +1510,7 @@ mod tests {
             Xattrs::Ordinary,
         );
         assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].at, XattrStep::Set);
-        assert_eq!(failures[0].name.as_deref(), Some(&b"user.one"[..]));
+        assert_eq!(failures[0].at, XattrStep::Set(b"user.one".to_vec()));
         assert_eq!(failures[0].err.kind(), std::io::ErrorKind::NotFound);
 
         let _ = std::fs::remove_dir_all(&dir);

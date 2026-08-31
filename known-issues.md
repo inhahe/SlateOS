@@ -99888,3 +99888,224 @@ of re-reading would have — see the `nice` entry above, where the defect was a
 tests in `cp.rs` — one of which asserts the *bytes* of the source afterwards
 rather than the diagnostic, because the defect reported success and said
 nothing, and a test that checked only the message would have passed against it.
+
+## B-THE-DIFFERENTIAL-ORACLE-IS-DEBIAN-PATCHED (lane B, 2026-08-30) — MITIGATED, and an inventory
+
+**In short:** The `scripts/*-diff.sh` harnesses are how this project knows its
+utilities behave like GNU's: each runs our program and "GNU's" side by side and
+compares. The GNU side was whatever the machine had installed, and that binary
+is **not** GNU's — WSL ships Ubuntu's `coreutils 9.4-3ubuntu6.1`, which carries
+Debian and Ubuntu patches that change behaviour. Two of those patches are known
+to reach a harness here, and the changelog names four more that could. The
+mitigation is `DIFF_GNU_SOURCE` (`design-decisions.md` §726): a harness can now
+be compared against the GNU release tarball, built from source. It is opt-in,
+so **this entry stays open until every affected harness is converted**, and it
+is the place to record patches as they are found.
+
+### Why this is not a theoretical concern
+
+A harness compares against a patched binary and reports green. That green means
+"we match Ubuntu", which is what the harness *says* only if someone remembers
+the distinction. Both known instances were found by accident, in the middle of
+unrelated work, and in both the first hypothesis was that our program was
+wrong:
+
+- **`df`** (2026-08-29, `design-decisions.md` §700). Ubuntu adds `devtmpfs` and
+  `squashfs` to gnulib's `ME_DUMMY_0`, so the reference omits `/dev` from every
+  whole-table listing and ours prints it — 37 cases. Establishing which side
+  was upstream needed `LD_PRELOAD` interposition of `stat` to prove the row was
+  gone *before* the stat, plus `strings -a /usr/bin/df`.
+- **`cp -n`** (2026-08-30, this entry, `design-decisions.md` §726). Debian
+  9.4-3 reverted `-n` to its pre-9.3 meaning and added a deprecation warning:
+
+  | | `cp -n a b`, `b` exists |
+  |---|---|
+  | upstream 9.4 (`cp.c:1070` → `I_ALWAYS_NO`; `copy.c:2437`) | `cp: not replacing 'b'` on stderr, exit **1** |
+  | installed `9.4-3ubuntu6.1` | nothing on stderr but a warning, exit **0**, `b` untouched |
+
+  The warning is `cp: warning: behavior of -n is non-portable and may change in
+  future; use --update=none instead`, printed at option-parse time — even
+  `cp -n a newfile`, which overwrites nothing, prints it. It appears in no
+  upstream file at `v9.4`, `v9.5`, `v9.6` or `master`, nor anywhere in the 9.4
+  tarball; `strings /usr/bin/cp` has it. The Debian changelog is explicit:
+  `revert cp -n behavior to debian 12 & prior (Closes: #1058752)` and
+  `add deprecation/compatibility warning for above`.
+
+  The patched `-n` is `I_ALWAYS_SKIP`, i.e. exactly `--update=none`:
+  `cp -n --debug a b` prints `skipped 'b'`, which is `I_ALWAYS_SKIP`'s
+  diagnostic and not `I_ALWAYS_NO`'s.
+
+### The inventory — patches named in the changelog, and the harness each reaches
+
+Read from `/usr/share/doc/coreutils/changelog.Debian.gz` on the dev machine.
+"Reached?" is whether a harness in `scripts/` exists that could see it, not
+whether it has been checked.
+
+| Patch | Effect | Harness | Reached? |
+|---|---|---|---|
+| `cp-n.diff` (Debian #1058752) | `cp -n` skips silently, exit 0, plus a parse-time warning | `cp-diff.sh` | **yes** — see above |
+| `treat-devtmpfs-and-squashfs-as-dummy-filesystems.patch` | `df`/`du` hide `/dev` and `/snap/*` rows | `df-diff.sh`, `du-diff.sh` | **yes** — §700 |
+| `80_fedora_sysinfo.patch` | `uname -i -p` print the real processor rather than `unknown` | none | no harness yet |
+| `tail-fix-tailing-sysfs-files-where-PAGE_SIZE-BUFSIZ.patch` | `tail` on sysfs files with a 64 K page | `tail-diff.sh` | unchecked; the fixture is ordinary files, so probably not |
+| `CVE-2024-0684.patch` | `split --line-bytes` heap overflow fix (also upstream in 9.5) | `split-diff.sh` | unchecked; a fix, so the patched binary is the *more* correct one |
+| `suppress-permission-denied-errors-on-nfs.patch` | `ls -l` does not report EACCES reading attributes over NFS | `ls-diff.sh` | **no** — that harness builds 9.5 from the tarball |
+| `99_float_endian_detection.patch` | floating-point endianness detection at configure time | `printf-diff.sh`, `extfloat-diff.sh` | unchecked; a build-configuration fix, so likely a no-op on x86-64 |
+
+`ls-diff.sh`'s immunity is accidental — it built its own reference since §366
+for an unrelated reason (9.4 and 9.5 lay columns out differently). That is
+what made the general mechanism cheap enough to adopt.
+
+### What has been done, and what remains
+
+Done: `scripts/diff-wsl.sh` grows `DIFF_GNU_SOURCE=<version>`, which fetches
+`coreutils-<version>.tar.xz` from `ftp.gnu.org`, configures it once under
+`$HOME/.cache/slateos-diff-gnu`, `make`s only the binaries a harness names, and
+verifies `--version` before comparing anything. It skips rather than falling
+back if it cannot build, and treats a version mismatch as fatal. `ls-diff.sh`
+is converted and its bespoke copy of that sequence is deleted.
+
+Remaining, in the order they matter:
+
+1. **`cp-diff.sh` → `DIFF_GNU_SOURCE=9.4`**, which is what unblocks `cp -n`.
+   Expect the conversion to move some counts: 244 cases are currently certified
+   against the patched binary, and any place they agreed *because* of a patch
+   will now differ.
+2. **`df-diff.sh` and `du-diff.sh` → 9.4**, after which §700's `drop_hidden`
+   subtraction and its `!Ubuntu hides devtmpfs …` xfail can both be deleted —
+   the pristine `df` prints the `/dev` row, so there is nothing to subtract.
+3. **The rest of the coreutils harnesses**, one at a time. A conversion that
+   changes no count is still worth committing: it converts an unexamined
+   assumption into a checked one.
+4. **`printf`, `split` and `tail`** carry a specific hypothesis each from the
+   table above; converting them tests it.
+
+Harnesses whose reference is *not* coreutils are out of scope and always were:
+`awk`, `bc`, `cmp` (diffutils), `ed`, `find` and `xargs` (findutils), `grep`,
+`more` (util-linux), `osh`/`sh` (bash), `sed`, `tar`.
+
+### A second, smaller gap: the built reference is upstream's source, not its build
+
+`configure` on this machine turns three features off, because their development
+headers are absent and `sudo` here needs a password:
+
+```text
+configure: WARNING: GNU coreutils will be built without ACL support.
+configure: WARNING: GNU coreutils will be built without xattr support.
+configure: WARNING: GNU coreutils will be built without capability support.
+```
+
+Ubuntu's binary has all three. Three things could show it: the `+` after
+`ls -l`'s mode string (ACL), `cp --preserve=xattr`, and `--color`'s `ca` slot
+(file capabilities). **None is reachable today** — no fixture in `scripts/`
+creates an ACL, an xattr or a capability, and no subject program implements any
+of them — so this is a note for whoever writes the first such case, not a live
+defect. The fix is `apt install libacl1-dev libattr1-dev libcap-dev`, which
+needs the operator; after it, wipe `$HOME/.cache/slateos-diff-gnu` so the
+reference is rebuilt with them.
+
+### How to check a suspected patch, cheaply
+
+The sequence that settled both, in increasing order of cost:
+
+1. `dpkg -s coreutils | grep Version` — is the binary a distribution build?
+2. `zcat /usr/share/doc/coreutils/changelog.Debian.gz | grep -i <utility>` —
+   distributions document their patches, and Debian's changelog names the
+   patch file. This is the step that should be *first* and was last both times.
+3. `curl -sfL "https://git.savannah.gnu.org/cgit/coreutils.git/plain/src/<f>.c?h=v9.4"`
+   — the `?h=` tag pin works; check it does by diffing two tags' line counts.
+4. `strings -a /usr/bin/<utility> | grep <string>` — a message in the binary
+   and in no source tree is a patch, conclusively.
+5. Only then the expensive tools: `LD_PRELOAD` interposition, a Python
+   reimplementation of the algorithm, a bisect over versions.
+
+## B-LS-DIFF-HAS-BEEN-SKIPPING (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+**In short:** `scripts/ls-diff.sh` is the harness that certifies our `ls`
+against GNU's. It builds its own reference from the GNU tarball, and the
+`make` command it used was wrong in a way that could never succeed. So on
+every run it printed "coreutils 9.5 did not build; SKIPPED — a C compiler and
+make are needed", **on a host that has both**, and exited 0. Our `ls` has been
+uncertified for as long as that line existed. Found while generalising the
+build block into `diff-wsl.sh` for an unrelated reason.
+
+### The bug
+
+`ls-diff.sh` ran, from §366 onward:
+
+```sh
+./configure --quiet --disable-nls \
+  && make -s -j"$(nproc)" src/ls
+```
+
+Automake's generated `all` rule is
+
+```make
+all: $(BUILT_SOURCES)
+	$(MAKE) $(AM_MAKEFLAGS) all-am
+```
+
+— that is, `BUILT_SOURCES` are a prerequisite of **the default target only**.
+Naming `src/ls` on the command line skips them. In coreutils the built sources
+are gnulib's replacement headers: `lib/fcntl.h`, `lib/stdckdint.h`,
+`lib/wchar.h`, `lib/stdio.h` and some forty more, generated at build time from
+`.in.h` templates by rules in `lib/Makefile.am`. Without them gnulib compiles
+against the system headers it exists to shield itself from:
+
+```text
+lib/binary-io.h:54:10: error: 'O_BINARY' undeclared
+lib/backupfile.c:28:10: fatal error: stdckdint.h: No such file or directory
+lib/openat-proc.c:82:17: error: 'O_SEARCH' undeclared
+lib/mcel.h:184:13: error: unknown type name 'wint_t'
+```
+
+Not one of those messages says "you named the wrong target". They read exactly
+like a host with a broken libc, which is what the harness's own diagnostic
+then concluded and reported.
+
+### Why it went unnoticed
+
+Three layers each hid a bit of it:
+
+1. **The harness exits 0 on a skip**, which is the right policy — a machine
+   with no compiler should not fail the suite — but makes a permanent skip
+   indistinguishable from a transient one at the exit-status level.
+2. **`all-diff.sh` prints each harness's last line**, and the last line here is
+   the parenthetical hint `(a C compiler and make are needed; or set
+   GNU=/path/to/a/9.5/ls)`, not a count. In a column of "N passed, 0 differed"
+   rows it reads as a note rather than an absence. (`all-diff.sh` *did* score
+   it red — no `0 differed` in it — so the aggregate exit status was right;
+   what failed was the human scan.)
+3. **The diagnostic blamed the host.** "A C compiler and make are needed" sends
+   the reader to check for gcc, find it, and shrug.
+
+### The fix
+
+`design-decisions.md` §726 moved the build into `diff-wsl.sh` as
+`DIFF_GNU_SOURCE`, and it builds the whole package (`make -s -jN`, ~90 s at
+`-j8`) rather than one target. The full build is now the *correct* thing as
+well as the shared thing, and the header comment above the block records why,
+so the economy cannot be reintroduced by someone who sees only a slow build.
+
+Two further hardenings came out of the same investigation:
+
+- **A failed build is wiped.** A tree left half-built by the broken `make
+  src/ls` does not recover when a correct `make` is run over it: the stale
+  objects were compiled against the wrong headers and the link fails with
+  `undefined reference to rpl_mbrtoc32`, a third message naming neither cause.
+  Every failure path now `rm -rf`s the tree.
+- **Completion is marked, not inferred.** The cache is considered built when a
+  `.slateos-built` marker exists, written only after a whole `make` returned 0
+  — because "the binary exists" is exactly what a half-built tree can also be
+  true of.
+
+### The general lesson
+
+This is the second harness-level failure in a week whose symptom was *silence*
+rather than a wrong answer — see `B-CP-COPYING-A-FILE-ONTO-ITSELF-EMPTIED-IT`
+for the first, where the bug reported success. A differential harness's whole
+value is that it fails loudly; a skip path is the one branch where it does not,
+and it therefore deserves the same suspicion as an `unwrap`.
+
+Worth doing, and not yet done: make `all-diff.sh` report a *skipped* harness as
+its own state rather than by whatever its last line happened to be, so a
+permanent skip is visible as a skip. Tracked in `todo.txt`.

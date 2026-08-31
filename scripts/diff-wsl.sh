@@ -126,6 +126,9 @@
 # | `DIFF_EXAMPLES`  | (none) | `--example` names to build, for a harness whose subject is a test instrument rather than a shipped utility. `extfloat-probe` is one: it exposes a *library* to a C reference, and a `src/bin/*.rs` would be installed into the image |
 # | `DIFF_FORWARD`   | (none) | extra environment variable names to carry across the re-exec, beyond `OURS` and `VERBOSE` |
 # | `DIFF_REF`       | (none) | candidate paths for the reference, tried in order, instead of looking on `PATH`. `echo` needs this: `command -v echo` finds the shell builtin, which is not what is being compared. Single-binary harnesses only |
+# | `DIFF_GNU_SOURCE`| (none) | a coreutils version (`9.4`) to fetch, build and compare against, *instead of* the installed binary. See "Why a built reference" below |
+# | `DIFF_GNU_DIR`   | (none) | an already-built `coreutils-N/src` to use instead of building one. The escape hatch for `DIFF_GNU_SOURCE`; ignored without it |
+# | `DIFF_GNU_CACHE` | `$HOME/.cache/slateos-diff-gnu` | where the tarball is downloaded and unpacked |
 # | `DIFF_NEED`      | (none) | other commands that must exist inside WSL, or the run is skipped rather than run without them |
 # | `DIFF_NO_REF`    | (unset) | do not look for a reference; the harness finds its own |
 # | `DIFF_NO_BINDIR` | (unset) | do not build the `PATH` directories; the harness makes its own. See below — this is almost never what a harness wants |
@@ -138,6 +141,7 @@
 # | `target_dir` | the shared Linux target directory |
 # | `OURS`       | our binary, absolute (a single `DIFF_BINS`, or a single `DIFF_EXAMPLES` and no `DIFF_BINS`) |
 # | `gnu_real`   | the reference binary, absolute (single `DIFF_BINS`, unless `DIFF_NO_REF`) |
+# | `gnu_dir`    | the built reference's `src` directory, or empty without `DIFF_GNU_SOURCE` |
 # | `DIFF_TMP`   | a scratch directory, removed on exit |
 # | `bindir`     | `$DIFF_TMP/bin`, holding `ours/NAME` and `gnu/NAME` for each of `DIFF_BINS` |
 # | `DIFF_SKIPPED` | the `DIFF_BINS` entries with no reference on this host (multi-binary only) |
@@ -155,7 +159,70 @@
 # harness `OURS` names the directory instead — `/usr/bin` — since there is no
 # single subject for it to name.
 #
-# ## `DIFF_NO_BINDIR` is for three situations, and none is "I have a family"
+# ## Why a built reference: the installed binary is evidence, not authority
+#
+# `DIFF_GNU_SOURCE=9.4` makes a harness compare against coreutils 9.4 *built
+# from the GNU tarball*, rather than against `/usr/bin/<prog>`. It is opt-in
+# per harness, because most of them are still on the installed binary and
+# converting one may surface real differences that want fixing one at a time.
+#
+# The installed binary is not GNU. WSL's `coreutils` is Ubuntu's
+# `9.4-3ubuntu6.1`, and Debian/Ubuntu carry behavioural patches on top of the
+# release. Two are known to reach these harnesses:
+#
+# * **`df`/`du`**: `devtmpfs` and `squashfs` are added to gnulib's dummy-file
+#   system list, so the reference omits the `/dev` row that upstream prints.
+#   Found 2026-08-29; `design-decisions.md` §700 has the whole elimination.
+# * **`cp -n`**: Debian 9.4-3 "revert cp -n behavior to debian 12 & prior"
+#   (Debian #1058752) plus "add deprecation/compatibility warning for above".
+#   Upstream's `-n` is `I_ALWAYS_NO` -- `cp: not replacing 'b'`, exit 1. The
+#   installed one is `I_ALWAYS_SKIP` -- silent, exit 0 -- and prints
+#   `cp: warning: behavior of -n is non-portable and may change in future; use
+#   --update=none instead`, a string that appears nowhere in the 9.4, 9.5, 9.6
+#   or master source trees. Found 2026-08-30.
+#
+# The changelog names four more patches whose blast radius includes a harness
+# here -- `uname -i -p` (no harness yet), `tail` on sysfs, `split`'s
+# CVE-2024-0684 fix, `ls -l` on NFS -- so the two above are a lower bound, not
+# a list.
+#
+# §700 decided the policy on the first one: **our source follows upstream, and
+# the harness removes the divergence from the comparison rather than from the
+# subject.** It also named the trigger for revisiting *how*: "if a second
+# distribution patch is ever found, [building a pristine reference] becomes the
+# right answer and should be revisited for all the harnesses at once." `cp -n`
+# is that second patch, so this is the mechanism it asked for.
+#
+# The cost §700 rejected it on has already been paid, twice over: `ls-diff.sh`
+# had been building coreutils 9.5 from source since §366 for an unrelated
+# reason, so the fetch-configure-make-cache-verify sequence existed and worked
+# -- it was simply written inside one harness where the other 49 could not
+# reach it. This is that block, moved here and generalised. `ls-diff.sh` is now
+# a caller of it rather than the sole owner, which also retires the "two copies
+# of one judgement" hazard the `DIFF_NO_BINDIR` section below warns about.
+#
+# Three rules the block keeps from `ls-diff.sh`, all of which matter:
+#
+# * **Skip rather than fall back.** If the tarball cannot be fetched or built,
+#   the harness exits 0 saying so. Quietly comparing against the installed
+#   binary instead would be the exact failure the knob exists to prevent, and
+#   it would look green.
+# * **Verify the version.** A reference of the wrong version fails cases that
+#   are right and passes cases that are wrong, in one run. `--version` is
+#   checked against `DIFF_GNU_SOURCE` and a mismatch is fatal, not a skip.
+# * **The whole package is built, once.** Not `make src/cp`: automake makes
+#   `BUILT_SOURCES` for the default target only, and gnulib's replacement
+#   headers are built sources, so naming a target directly fails in a way that
+#   reads like a broken host. That mistake is why `ls-diff.sh` had been
+#   skipping every run. The block below has the detail.
+#
+# ## `DIFF_NO_BINDIR` is for two situations, and neither is "I have a family"
+#
+# It was three until `DIFF_GNU_SOURCE` above absorbed the middle one. The
+# retired entry read: "the reference is not known yet when this file runs --
+# `ls-diff.sh` builds GNU coreutils 9.5 from source, so the symlinks cannot be
+# made until that build has finished." That is no longer true of any harness,
+# because the build now happens *here*, before the symlinks are made.
 #
 # Three harnesses set it and then rebuilt this file's multi-binary `$bindir`
 # by hand, name for name (`interleave-diff.sh`, `digest-diff.sh`,
@@ -170,9 +237,6 @@
 # * **The subject has no same-named counterpart to symlink beside.**
 #   `extfloat-diff.sh`: its subject is a `--example`, and its reference is a C
 #   program it compiles itself.
-# * **The reference is not known yet when this file runs.** `ls-diff.sh` builds
-#   GNU coreutils 9.5 from source, because the 9.4 WSL ships lays out columns
-#   differently; the symlinks cannot be made until that build has finished.
 # * **The two sides must keep their own distinct names.** `osh-diff.sh`
 #   compares `osh` against `bash`, and its harness strips each shell's *own*
 #   name from that shell's diagnostics before comparing them, so that it
@@ -200,6 +264,7 @@ else
 fi
 : "${DIFF_FORWARD:=}"
 : "${DIFF_REF:=}"
+: "${DIFF_GNU_SOURCE:=}"
 : "${DIFF_NEED:=}"
 
 # MSYS would rewrite an argument that looks like a path on its way to `wsl`.
@@ -234,7 +299,11 @@ if ! command -v wslpath >/dev/null 2>&1; then
   # options -- `--cases`, `--flip`, `--keep` -- would otherwise lose them at the
   # WSL boundary and silently run its defaults.
   diff_argc=$#
-  for diff_v in OURS VERBOSE $DIFF_FORWARD; do
+  # `DIFF_GNU_DIR` and `DIFF_GNU_CACHE` are carried unconditionally, unlike
+  # `DIFF_GNU_SOURCE`: the version is written *in* the harness and so is set
+  # again on the far side, while these two are the operator's overrides and
+  # exist only in the environment this side of the boundary.
+  for diff_v in OURS VERBOSE DIFF_GNU_DIR DIFF_GNU_CACHE $DIFF_FORWARD; do
     eval "set -- \"\$@\" \"$diff_v=\${$diff_v:-}\""
   done
   set -- "$@" bash "$diff_inside/$(basename "$0")"
@@ -267,9 +336,120 @@ for diff_cmd in $DIFF_NEED; do
   fi
 done
 
+# A pristine GNU, fetched and built, for the harnesses that ask for one. The
+# header section "Why a built reference" says why they do; this is the how.
+#
+# ## `make`, and not `make src/cp`
+#
+# The obvious economy -- build only the binaries this harness names -- does not
+# work, and its failure is silent enough to be worth spelling out. Automake
+# guarantees `BUILT_SOURCES` are made before the *default* target only:
+#
+#     all: $(BUILT_SOURCES)
+#             $(MAKE) $(AM_MAKEFLAGS) all-am
+#
+# Naming a target directly skips that prerequisite. In coreutils the built
+# sources are gnulib's replacement headers -- `lib/fcntl.h`, `lib/stdckdint.h`,
+# `lib/wchar.h` and forty more -- so `make src/ls` compiles gnulib against the
+# *system* headers it was meant to be shielded from, and dies on `O_BINARY
+# undeclared`, `stdckdint.h: No such file or directory`, `O_SEARCH undeclared`,
+# `unknown type name 'wint_t'`. Nothing in that output says "you named the
+# wrong target"; it reads like a host missing its C library.
+#
+# This is not hypothetical either. `ls-diff.sh` had `make -s -jN src/ls` from
+# §366 onward, so on this machine it had been **skipping every run** -- exiting
+# 0 with "a C compiler and make are needed", on a host that has both. In the
+# aggregate sweep that shows up as the harness's last line, which is the
+# parenthetical hint rather than a count, and is easy to read past. So `ls` was
+# uncertified for as long as that line existed. See `known-issues.md`,
+# `B-LS-DIFF-HAS-BEEN-SKIPPING`.
+#
+# A whole build is also not the cost it looks like: about 90 seconds at `-j8`,
+# once per version per machine, after which every other harness on that version
+# pays nothing at all.
+#
+# ## A failed build is wiped, not kept
+#
+# Also measured: a tree left half-built by the broken `make src/ls` above does
+# not recover when the right `make` is run over it. The stale objects were
+# compiled against the wrong headers, and the link fails with `undefined
+# reference to rpl_mbrtoc32` -- a third error message that names neither cause.
+# Every failure path below therefore removes the tree, so the next run starts
+# from the tarball rather than inheriting a wreck.
+gnu_dir=${DIFF_GNU_DIR:-}
+if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "$gnu_dir" ]; then
+  diff_gnu_cache=${DIFF_GNU_CACHE:-$HOME/.cache/slateos-diff-gnu}
+  diff_gnu_src=$diff_gnu_cache/coreutils-$DIFF_GNU_SOURCE
+  diff_gnu_tar=coreutils-$DIFF_GNU_SOURCE.tar.xz
+  diff_gnu_hint="  (or set DIFF_GNU_DIR=/path/to/coreutils-$DIFF_GNU_SOURCE/src)"
+  # The marker, not `src/$DIFF_PROG`: it is written only after a whole `make`
+  # returned 0, so it distinguishes "built" from "a binary happens to exist",
+  # which is exactly the distinction the half-built tree above destroys.
+  if [ ! -f "$diff_gnu_src/.slateos-built" ]; then
+    mkdir -p "$diff_gnu_cache" || exit 1
+    if [ ! -f "$diff_gnu_cache/$diff_gnu_tar" ]; then
+      diff_gnu_url=https://ftp.gnu.org/gnu/coreutils/$diff_gnu_tar
+      # Downloaded to `.part` and renamed, so an interrupted fetch cannot be
+      # mistaken for a complete tarball on the next run.
+      if command -v curl >/dev/null 2>&1; then
+        curl -fsSL -o "$diff_gnu_cache/$diff_gnu_tar.part" "$diff_gnu_url" \
+          && mv "$diff_gnu_cache/$diff_gnu_tar.part" "$diff_gnu_cache/$diff_gnu_tar"
+      elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$diff_gnu_cache/$diff_gnu_tar.part" "$diff_gnu_url" \
+          && mv "$diff_gnu_cache/$diff_gnu_tar.part" "$diff_gnu_cache/$diff_gnu_tar"
+      fi
+    fi
+    if [ ! -f "$diff_gnu_cache/$diff_gnu_tar" ]; then
+      echo "$DIFF_PROG-diff: could not fetch $diff_gnu_tar; SKIPPED"
+      echo "  (put it in $diff_gnu_cache/)"
+      echo "$diff_gnu_hint"
+      exit 0
+    fi
+    rm -rf "$diff_gnu_src"
+    ( cd "$diff_gnu_cache" \
+      && tar xf "$diff_gnu_tar" \
+      && cd "coreutils-$DIFF_GNU_SOURCE" \
+      && ./configure --quiet --disable-nls \
+      && make -s -j"$(nproc 2>/dev/null || echo 4)" ) >&2 || {
+      rm -rf "$diff_gnu_src"
+      echo "$DIFF_PROG-diff: coreutils $DIFF_GNU_SOURCE did not build; SKIPPED"
+      echo "  (a C compiler, make and ~90s are needed)"
+      echo "$diff_gnu_hint"
+      exit 0
+    }
+    : > "$diff_gnu_src/.slateos-built"
+  fi
+  gnu_dir=$diff_gnu_src/src
+fi
+
+# A reference of the wrong version is worse than none: it fails cases that are
+# right and passes cases that are wrong, in the same run. Fatal rather than a
+# skip, because unlike a missing compiler this cannot be an accident of the
+# host -- something has handed us the wrong binary, and running on would report
+# the mismatch as differences in our own program.
+diff_gnu_verify() {
+  [ -n "$DIFF_GNU_SOURCE" ] || return 0
+  case $("$1" --version 2>/dev/null | head -1) in
+    *" $DIFF_GNU_SOURCE") return 0 ;;
+  esac
+  echo "$DIFF_PROG-diff: $1 is not coreutils $DIFF_GNU_SOURCE" >&2
+  echo "  (it says: $("$1" --version 2>/dev/null | head -1))" >&2
+  exit 1
+}
+
 gnu_real=
 if [ -z "${DIFF_NO_REF:-}" ]; then
-  if [ -n "$DIFF_REF" ]; then
+  if [ -n "$DIFF_GNU_SOURCE" ]; then
+    # No fallback to `PATH` here, on purpose: a harness that asked for 9.4 and
+    # silently got Ubuntu's is the one outcome this knob exists to prevent, and
+    # it would look green.
+    gnu_real=$gnu_dir/$DIFF_PROG
+    if [ ! -x "$gnu_real" ]; then
+      echo "$DIFF_PROG-diff: coreutils $DIFF_GNU_SOURCE has no $DIFF_PROG at $gnu_real" >&2
+      exit 1
+    fi
+    diff_gnu_verify "$gnu_real"
+  elif [ -n "$DIFF_REF" ]; then
     for diff_cand in $DIFF_REF; do
       [ -x "$diff_cand" ] && { gnu_real=$diff_cand; break; }
     done
@@ -637,9 +817,20 @@ if [ -z "${DIFF_NO_BINDIR:-}" ]; then
       # diagnostics. `write-error-diff.sh` carries all three in `DIFF_BINS`.
       for diff_b in $DIFF_BINS; do
         diff_gnu=
-        for diff_cand in "/usr/bin/$diff_b" "/bin/$diff_b"; do
-          [ -x "$diff_cand" ] && { diff_gnu=$diff_cand; break; }
-        done
+        if [ -n "$DIFF_GNU_SOURCE" ]; then
+          # The built tree is the only candidate, for the reason at
+          # `gnu_real` above -- except that a *family* member missing from it
+          # is a skip rather than fatal, matching the rule for the rest of
+          # this arm.
+          [ -x "$gnu_dir/$diff_b" ] && {
+            diff_gnu=$gnu_dir/$diff_b
+            diff_gnu_verify "$diff_gnu"
+          }
+        else
+          for diff_cand in "/usr/bin/$diff_b" "/bin/$diff_b"; do
+            [ -x "$diff_cand" ] && { diff_gnu=$diff_cand; break; }
+          done
+        fi
         # `OURS` names a *directory* for a multi-binary harness, since there is
         # no single subject for it to name.
         if [ -n "$OURS" ] && [ -d "$OURS" ]; then

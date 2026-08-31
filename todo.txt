@@ -55182,3 +55182,38 @@ all four rows (`--help --frobnicate` -> help/0; `--frobnicate --help` ->
 unrecognized/64; `-c --help` -> help/0; `--file --help` -> `--help` is the
 archive name, then no-mode/2), which falls out of returning a `Request` from
 inside the parse loop. Shape differential vs GNU: 19 cases, 0 differences.
+
+================================================================================
+`all-diff.sh` has no "skipped" state, so a harness that never runs looks like a
+note rather than an absence (lane B, 2026-08-30)
+================================================================================
+
+`scripts/all-diff.sh` prints each harness's *last output line* and scores it
+green if that line contains " 0 differed", " 0 failed" or is "no differences".
+A harness that skipped has none of those, so the aggregate exit status is
+correctly 1 -- but what the reader sees in the column is whatever the last line
+was. For `ls-diff.sh` that was:
+
+    ls             (a C compiler and make are needed; or set GNU=/path/to/a/9.5/ls)
+
+a parenthetical hint, sitting in a column of "N passed, 0 differed" rows. It
+reads as a footnote, and it went unread across many sweeps while our `ls` was
+in fact uncertified (`known-issues.md`, `B-LS-DIFF-HAS-BEEN-SKIPPING`; the
+underlying build bug is fixed, this entry is only about the reporting).
+
+FIX: give the runner an explicit skipped state. The harnesses already agree on
+a word -- every skip path in `diff-wsl.sh` and in the harnesses prints
+"SKIPPED" or "skipping" on the *first* line of the skip, so grepping the whole
+output rather than the tail is enough to detect one. Print it as
+
+    ls           SKIPPED: coreutils 9.5 did not build
+
+and count skips separately in the final status, so a sweep ends with something
+like "48 green, 1 skipped, 0 red" instead of a bare exit code. A skip should
+stay non-zero for the exit status -- it is not a pass -- but it should be
+visibly a different thing from a difference.
+
+TRIGGER: none; independent of any other work. Worth doing before the
+`DIFF_GNU_SOURCE` conversion reaches many harnesses, since a host without a C
+compiler will then make several of them skip at once and the column needs to
+say so clearly.

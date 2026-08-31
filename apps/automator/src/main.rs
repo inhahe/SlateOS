@@ -2851,6 +2851,18 @@ impl AutomatorApp {
         match event {
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
+            // `tick_interval` asks the window for this event, and until now the
+            // wildcard below threw it away -- so the clock the app requested
+            // arrived every 16ms and advanced nothing. `tick`'s bool is
+            // "something moved, so repaint", which is exactly the distinction
+            // `on_event` maps onto `Redraw`/`Idle`.
+            Event::Tick { elapsed_ms } => {
+                if self.tick(*elapsed_ms) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -5444,6 +5456,61 @@ mod tests {
             }
         }
         assert!(moved, "a playing macro never advanced on the clock");
+    }
+
+    #[test]
+    fn the_clock_reaches_playback_through_handle_event() {
+        // The test above drives `tick` directly, so it passes whether or not
+        // `handle_event` routes `Event::Tick` anywhere -- and for a while it
+        // did not, which is how a half-wired Automator shipped green. The
+        // window delivers an `Event`, so the assertion has to start from one.
+        let mut app = demo_app();
+        app.press(Button::Play);
+        assert!(
+            app.playback_state.is_playing(),
+            "Play did not start playback"
+        );
+        let mut moved = false;
+        for _ in 0..2000 {
+            app.handle_event(&Event::Tick {
+                elapsed_ms: TICK_MS,
+            });
+            if let PlaybackState::Playing { action_idx, .. } = app.playback_state
+                && action_idx > 0
+            {
+                moved = true;
+                break;
+            }
+            if !app.playback_state.is_playing() {
+                moved = true;
+                break;
+            }
+        }
+        assert!(
+            moved,
+            "the window's tick never reached playback -- `handle_event` is dropping `Event::Tick`"
+        );
+
+        // And the answer has to distinguish "repaint" from "nothing happened",
+        // or the compositor either drops frames or redraws an idle desktop for
+        // ever.
+        let mut idle = demo_app();
+        assert_eq!(
+            idle.handle_event(&Event::Tick {
+                elapsed_ms: TICK_MS
+            }),
+            EventResult::Ignored,
+            "an idle Automator asked for a repaint"
+        );
+        let mut playing = demo_app();
+        playing.press(Button::Play);
+        assert_eq!(
+            playing.handle_event(&Event::Tick {
+                elapsed_ms: TICK_MS
+            }),
+            EventResult::Consumed,
+            "a playing macro asked for no repaint"
+        );
     }
 
     #[test]

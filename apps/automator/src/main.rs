@@ -330,10 +330,15 @@ impl Layout {
         } else {
             Rect::EMPTY
         };
+        // The list takes what the panels *actually* took, not what they asked
+        // for. A panel dropped for want of height still has a width, and
+        // subtracting that width would leave a strip of window belonging to
+        // nothing -- which is how a pane goes missing without any pane being
+        // told to go missing.
         let list = Rect::new(
-            sidebar_w,
+            sidebar.w,
             content_y,
-            (w - sidebar_w - props_w).max(0.0),
+            (w - sidebar.w - props.w).max(0.0),
             content_h,
         );
 
@@ -2370,9 +2375,33 @@ impl AutomatorApp {
             // literals that between them assume a particular font at a
             // particular size in a particular panel width.
             let ty = rect.y + (rect.h - l.small) / 2.0;
-            let num = format!("{:>3}", i.saturating_add(1));
-            let num_w = text::measure("000", l.small, FontWeightHint::Regular);
             let mut cx = rect.x + l.pad * 0.6;
+
+            // The right-hand column is placed first, because it is what tells
+            // the left-hand columns where they must stop. Marching left to
+            // right and only bounding the last column is how the number and
+            // the badge came to be painted past the row's own right edge in a
+            // narrow window: each of them was given the width it wanted.
+            let mut right = rect.right() - l.pad * 0.6;
+            if timed.delay_ms > 0 {
+                let delay = format_duration_ms(timed.delay_ms);
+                let delay_w = text::measure(&delay, l.small, FontWeightHint::Regular)
+                    .min((right - cx).max(0.0));
+                bounded(
+                    f,
+                    (right - delay_w, ty),
+                    delay_w,
+                    &delay,
+                    YELLOW,
+                    l.small,
+                    FontWeightHint::Regular,
+                );
+                right -= delay_w + l.pad * 0.5;
+            }
+
+            let num = format!("{:>3}", i.saturating_add(1));
+            let num_w =
+                text::measure("000", l.small, FontWeightHint::Regular).min((right - cx).max(0.0));
             bounded(
                 f,
                 (cx, ty),
@@ -2389,37 +2418,25 @@ impl AutomatorApp {
                 l.pad * 0.8,
                 l.small,
                 FontWeightHint::Bold,
-            );
+            )
+            .min((right - cx).max(0.0));
             let badge_h = (rect.h - 4.0).max(0.0);
-            let badge = Rect::new(cx, rect.y + 2.0, badge_w, badge_h);
-            fill(f, badge, timed.action.badge_color(), CornerRadii::all(3.0));
-            centred(
-                f,
-                badge.x,
-                badge.w,
-                ty,
-                timed.action.icon(),
-                CRUST,
-                l.small,
-                FontWeightHint::Bold,
-            );
+            if badge_w > 0.0 && badge_h > 0.0 {
+                let badge = Rect::new(cx, rect.y + 2.0, badge_w, badge_h);
+                fill(f, badge, timed.action.badge_color(), CornerRadii::all(3.0));
+                centred(
+                    f,
+                    badge.x,
+                    badge.w,
+                    ty,
+                    timed.action.icon(),
+                    CRUST,
+                    l.small,
+                    FontWeightHint::Bold,
+                );
+            }
             cx += badge_w + l.pad * 0.6;
 
-            let mut right = rect.right() - l.pad * 0.6;
-            if timed.delay_ms > 0 {
-                let delay = format_duration_ms(timed.delay_ms);
-                let delay_w = text::measure(&delay, l.small, FontWeightHint::Regular);
-                bounded(
-                    f,
-                    (right - delay_w, ty),
-                    delay_w,
-                    &delay,
-                    YELLOW,
-                    l.small,
-                    FontWeightHint::Regular,
-                );
-                right -= delay_w + l.pad * 0.5;
-            }
             bounded(
                 f,
                 (cx, rect.y + (rect.h - l.font) / 2.0),
@@ -2455,7 +2472,12 @@ impl AutomatorApp {
         fill(f, text_area, MANTLE, CornerRadii::all(CORNER_RADIUS));
 
         let line_h = l.font * 1.35;
-        let gutter = text::measure("000", l.small, FontWeightHint::Regular) + l.pad;
+        // The gutter is bounded by the text area, not merely by how wide three
+        // digits happen to be: in a window narrower than the line numbers, an
+        // unbounded gutter puts the numbers past the right-hand edge and
+        // leaves the lines themselves nowhere at all.
+        let gutter = (text::measure("000", l.small, FontWeightHint::Regular) + l.pad)
+            .min((text_area.w - l.pad).max(0.0));
         for (i, line) in self.script_text.lines().enumerate() {
             let ly = line_h.mul_add(usize_f32(i), text_area.y + l.pad * 0.4);
             if ly + line_h > text_area.bottom() + 0.01 {
@@ -4567,5 +4589,352 @@ mod tests {
         app.set_script_text("wait 100\nclick 50 60");
         let frame = app.frame(1000.0, 700.0);
         assert!(!frame.commands().is_empty());
+    }
+
+    // =======================================================================
+    // The program in a window
+    // =======================================================================
+    //
+    // Everything below is about Automator being a window rather than a
+    // simulation: that the picture is drawn at the size it is given, that what
+    // the pointer reaches is what the painter painted, that a button and its
+    // key do the same thing, and that a running macro advances on a clock
+    // rather than only when a test calls `tick_playback` by hand.
+
+    /// The window widths every layout claim is checked at.
+    ///
+    /// A rule about `Layout::solve` is a rule at *every* size, so a handful of
+    /// sampled sizes tests a handful of points and nothing else. The sizes that
+    /// break a layout rule are the ones nobody would think to sample: 20 wide,
+    /// where neither side panel can be afforded; 260 wide, where the sidebar
+    /// fits and the properties panel does not; 1400 wide, where both are
+    /// capped and the list takes the rest.
+    const GRID_W: [f32; 8] = [0.0, 20.0, 60.0, 130.0, 260.0, 520.0, 1000.0, 1400.0];
+    /// The window heights every layout claim is checked at.
+    const GRID_H: [f32; 6] = [0.0, 18.0, 55.0, 140.0, 700.0, 1100.0];
+
+    /// Every window size the layout claims sweep.
+    fn sizes() -> impl Iterator<Item = (f32, f32)> {
+        GRID_W.into_iter().flat_map(|w| GRID_H.map(move |h| (w, h)))
+    }
+
+    /// Is `inner` within `outer`, allowing for a pixel of rounding?
+    ///
+    /// A rectangle with no area is "inside" anything: it is the answer the
+    /// layout gives when a panel does not fit and is left out, and a panel that
+    /// was left out cannot hang off an edge.
+    fn inside(outer: Rect, inner: Rect) -> bool {
+        inner.is_empty()
+            || (inner.x >= outer.x - 0.01
+                && inner.y >= outer.y - 0.01
+                && inner.right() <= outer.right() + 0.01
+                && inner.bottom() <= outer.bottom() + 0.01)
+    }
+
+    /// Do these two rectangles share any area?
+    fn overlaps(a: Rect, b: Rect) -> bool {
+        a.intersect(b).is_some_and(|r| r.w > 0.01 && r.h > 0.01)
+    }
+
+    #[test]
+    fn every_pane_stays_inside_the_window() {
+        // The old layout was eight compile-time literals. The centre panel was
+        // `width - 240.0 - 260.0`, which is negative below five hundred wide,
+        // and the properties panel began at `width - 260.0`, which is off the
+        // left edge of anything narrower than that.
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let at = format!("{w}x{h}");
+            for (name, r) in [
+                ("header", l.header),
+                ("toolbar", l.toolbar),
+                ("sidebar", l.sidebar),
+                ("list", l.list),
+                ("props", l.props),
+                ("status", l.status),
+            ] {
+                assert!(inside(l.window, r), "{name} escapes the window at {at}");
+                assert!(r.w >= -0.01 && r.h >= -0.01, "{name} is negative at {at}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_panes_are_stacked_and_do_not_overlap() {
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let at = format!("{w}x{h}");
+            assert!(
+                l.header.bottom() <= l.toolbar.y + 0.01,
+                "header/toolbar {at}"
+            );
+            assert!(l.toolbar.bottom() <= l.list.y + 0.01, "toolbar/list {at}");
+            assert!(l.list.bottom() <= l.status.y + 0.01, "list/status {at}");
+            assert!(l.status.bottom() <= h + 0.01, "status/window {at}");
+            for (a, an, b, bn) in [
+                (l.sidebar, "sidebar", l.list, "list"),
+                (l.list, "list", l.props, "props"),
+                (l.sidebar, "sidebar", l.props, "props"),
+                (l.sidebar, "sidebar", l.status, "status"),
+                (l.props, "props", l.status, "status"),
+                (l.sidebar, "sidebar", l.toolbar, "toolbar"),
+                (l.props, "props", l.toolbar, "toolbar"),
+            ] {
+                assert!(!overlaps(a, b), "{an} overlaps {bn} at {at}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_list_is_never_given_up_for_a_side_panel() {
+        // The list is what is doing the work, so a side panel is taken only if
+        // it leaves the list wide enough to read. A window that can pay for
+        // neither gets all of its width as list.
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let at = format!("{w}x{h}");
+            if !l.sidebar.is_empty() || !l.props.is_empty() {
+                assert!(
+                    l.list.w >= MIN_LIST_W - 0.01,
+                    "list squeezed to {} at {at}",
+                    l.list.w
+                );
+            }
+            for (name, r) in [("sidebar", l.sidebar), ("props", l.props)] {
+                assert!(
+                    r.is_empty() || r.w >= MIN_PANEL_W - 0.01,
+                    "{name} squeezed to {} at {at}",
+                    r.w
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_panels_and_the_list_fill_the_width_between_them() {
+        // Whatever the side panels do not take, the list takes: a gap between
+        // them would be felt-coloured nothing, and an overlap would be one
+        // panel painted over another.
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let at = format!("{w}x{h}");
+            let sidebar_w = if l.sidebar.is_empty() {
+                0.0
+            } else {
+                l.sidebar.w
+            };
+            let props_w = if l.props.is_empty() { 0.0 } else { l.props.w };
+            assert!(
+                (sidebar_w + l.list.w + props_w - w).abs() < 0.01,
+                "widths sum to {} not {w} at {at}",
+                sidebar_w + l.list.w + props_w
+            );
+        }
+    }
+
+    #[test]
+    fn a_footer_never_eats_the_body_it_is_the_foot_of() {
+        // The old sidebar drew its New/Delete bar at `content_y + content_h -
+        // 36.0` unconditionally, and the action list drew its Up/Down/Delete
+        // bar the same way. In a short window the bar was not under the list,
+        // it was on top of it -- and the rows it covered were drawn all the
+        // same, under a bar that hid them.
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let at = format!("{w}x{h}");
+            for panel in [l.sidebar, l.list, l.props] {
+                let (head, body, foot) = Layout::split(panel, l.row, l.button + l.pad);
+                assert!(inside(panel, head), "head escapes at {at}");
+                assert!(inside(panel, body), "body escapes at {at}");
+                assert!(inside(panel, foot), "foot escapes at {at}");
+                assert!(!overlaps(head, body), "head over body at {at}");
+                assert!(!overlaps(body, foot), "body over foot at {at}");
+                assert!(head.bottom() <= body.y + 0.01, "head below body at {at}");
+                assert!(body.bottom() <= foot.y + 0.01, "body below foot at {at}");
+                assert!(body.h >= -0.01, "body is negative at {at}");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The states the picture is drawn in
+    // -----------------------------------------------------------------------
+    //
+    // A whole-frame invariant is only as wide as the states you draw. Half of
+    // this program's picture -- the script tab, the help card, the empty-list
+    // message, the recording indicator -- is drawn in states the demo library
+    // is not in, and the strings those states centre are exactly the ones a
+    // single fixture cannot see.
+
+    /// A library with nothing in it: every list is empty and every read-out
+    /// has nothing to read out.
+    fn empty_app() -> AutomatorApp {
+        AutomatorApp::new()
+    }
+
+    /// The demo library `main` used to build and throw away.
+    fn demo_app() -> AutomatorApp {
+        AutomatorApp::with_demo_library()
+    }
+
+    /// Recording, so the header's dot and "REC" are painted.
+    fn recording_app() -> AutomatorApp {
+        let mut app = demo_app();
+        app.press(Button::Record);
+        app
+    }
+
+    /// Playing, so the header's playing read-out is painted.
+    fn playing_app() -> AutomatorApp {
+        let mut app = demo_app();
+        app.press(Button::Play);
+        app
+    }
+
+    /// The script tab, whose body is a different drawing pass entirely.
+    fn script_app() -> AutomatorApp {
+        let mut app = demo_app();
+        app.active_tab = ActiveTab::Script;
+        app.set_script_text("wait 100\nclick 50 60\ntype hello world\nkey Enter\n");
+        app
+    }
+
+    /// The script tab after a script that does not parse, so the error line is
+    /// painted.
+    fn error_app() -> AutomatorApp {
+        let mut app = demo_app();
+        app.active_tab = ActiveTab::Script;
+        app.set_script_text("wait\nclick oops");
+        app.press(Button::ApplyScript);
+        app
+    }
+
+    /// The help card, which covers the picture and is drawn nowhere else.
+    fn helping_app() -> AutomatorApp {
+        let mut app = demo_app();
+        app.press(Button::Help);
+        app
+    }
+
+    /// Names and a status longer than any window is wide.
+    fn wordy_app() -> AutomatorApp {
+        let mut app = demo_app();
+        app.new_macro(&"A macro with a preposterously long name ".repeat(3));
+        app.add_action(
+            MacroAction::TypeText {
+                text: "the quick brown fox jumps over the lazy dog ".repeat(4),
+            },
+            0,
+        );
+        app.select_action(0);
+        app.status_message = "Recorded a mouse move to a point far off the right edge ".repeat(3);
+        app
+    }
+
+    /// Every state the picture is drawn in.
+    fn states() -> Vec<(&'static str, AutomatorApp)> {
+        vec![
+            ("empty", empty_app()),
+            ("demo", demo_app()),
+            ("recording", recording_app()),
+            ("playing", playing_app()),
+            ("script", script_app()),
+            ("error", error_app()),
+            ("helping", helping_app()),
+            ("wordy", wordy_app()),
+        ]
+    }
+
+    #[test]
+    fn no_text_runs_off_the_window_it_is_drawn_in() {
+        // Every text the old program drew was `max_width: None`. A macro name,
+        // an action's summary, the status message and the header's playing
+        // read-out all ran straight off a narrow window, and the panel they
+        // were nominally in did not bound them at all.
+        for (name, app) in states() {
+            for (w, h) in sizes() {
+                for c in app.frame(w, h).commands() {
+                    let RenderCommand::Text {
+                        text,
+                        x,
+                        max_width,
+                        font_size,
+                        font_weight,
+                        ..
+                    } = c
+                    else {
+                        continue;
+                    };
+                    let bound =
+                        max_width.unwrap_or_else(|| text::measure(text, *font_size, *font_weight));
+                    assert!(
+                        *x >= -0.01,
+                        "{name}: {text:?} starts at {x} in a {w}x{h} window"
+                    );
+                    assert!(
+                        x + bound <= w + 0.01,
+                        "{name}: {text:?} runs off a {w}x{h} window: x {x} + {bound}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_painted_outside_the_window() {
+        // A rectangle drawn past the edge is a rectangle the compositor pays
+        // to clip. More to the point it means the layout believed in room the
+        // window does not have.
+        for (name, app) in states() {
+            for (w, h) in sizes() {
+                let window = Rect::new(0.0, 0.0, w, h);
+                for c in app.frame(w, h).commands() {
+                    let (x, y, width, height) = match c {
+                        RenderCommand::FillRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            ..
+                        }
+                        | RenderCommand::StrokeRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            ..
+                        } => (*x, *y, *width, *height),
+                        _ => continue,
+                    };
+                    let r = Rect::new(x, y, width, height);
+                    assert!(
+                        inside(window, r),
+                        "{name}: a rect at ({x},{y}) {width}x{height} escapes a {w}x{h} window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_hit_box_is_inside_the_window_and_has_area() {
+        // A hit box outside the window can never be clicked, and a hit box
+        // with no area is a control that is painted and unreachable -- which
+        // is what every control in this program was.
+        for (name, app) in states() {
+            for (w, h) in sizes() {
+                let window = Rect::new(0.0, 0.0, w, h);
+                for (target, rect) in app.frame(w, h).hits() {
+                    assert!(
+                        rect.w > 0.0 && rect.h > 0.0,
+                        "{name}: {target:?} has no area at {w}x{h}"
+                    );
+                    assert!(
+                        inside(window, *rect),
+                        "{name}: {target:?} is hit-boxed outside a {w}x{h} window"
+                    );
+                }
+            }
+        }
     }
 }

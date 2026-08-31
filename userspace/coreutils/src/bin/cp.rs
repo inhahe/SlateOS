@@ -42,14 +42,25 @@
 //!    `unknown option: --`, so a file whose name begins with a dash could not be
 //!    copied at all.
 //!
-//! 5. **A source ending in `..` or `/` copied into the wrong place.** The target
-//!    was `dest.join(src.file_name().unwrap_or_default())`, and `Path::file_name`
-//!    is `None` for such a path — so `unwrap_or_default()` gave an *empty* name
-//!    and `dest.join("")` collapsed back to `dest` itself. `cp -r a/.. dst` then
-//!    emptied `a`'s parent *into* `dst` rather than into `dst/<name>`, silently
-//!    merging it with whatever was already there. The old test suite asserted
-//!    this behaviour (`target_source_with_no_filename_into_dir`), which is how it
-//!    lasted; that test now asserts the refusal.
+//! 5. **A source ending in `.`, `..` or `/` copied into the wrong place.** The
+//!    target was `dest.join(src.file_name().unwrap_or_default())`, and
+//!    `Path::file_name` answers a *normalised* question rather than a textual
+//!    one. It is `None` for `a/..`, so `unwrap_or_default()` gave an empty name
+//!    and `dest.join("")` collapsed back to `dest` itself; and it is
+//!    `Some("a")` for `a/.`, so `cp -r a/. dst` created `dst/a` instead of
+//!    filling `dst`. GNU's last component is the bytes after the last slash,
+//!    kept verbatim — `.` stays `.`.
+//!
+//!    This one was fixed twice, and the first fix was itself a divergence. It
+//!    refused every such source with an invented diagnostic, on the reasoning
+//!    that a path naming no new entry names nowhere to create one. Measurement
+//!    says otherwise: `cp -r a/. dst` is the ordinary idiom for "copy `a`'s
+//!    *contents* into `dst`", GNU performs it, and the refusal broke a working
+//!    command. The rule GNU actually applies is four lines of `do_copy`
+//!    (`cp.c:734`) and is now [`compute_target`]'s whole body — including its
+//!    one special case, `arg_base += STREQ (arg_base, "..")`, which turns a
+//!    trailing `..` into `.` so that `cp -r a/.. dst` writes into `dst` and
+//!    never into the destination's *parent*.
 //!
 //! 6. **One unreadable file abandoned the rest of the copy.** `copy_dir_recursive`
 //!    propagated the first error with `?`, so a single permission denial part-way
@@ -1513,18 +1524,7 @@ fn copy_one<O: Write, E: Write>(
         return true;
     }
 
-    let target = match compute_target(src_path, dest, dest_is_dir) {
-        Ok(t) => t,
-        Err(reason) => {
-            let _ = writeln!(
-                job.err,
-                "cp: cannot copy {} into {}: {reason}",
-                quoteaf_os(src),
-                quoteaf_os(dest)
-            );
-            return false;
-        }
-    };
+    let target = compute_target(src_path, dest, dest_is_dir);
 
     // GNU stats the destination here, and a failure that is *not* "it isn't
     // there" ends this operand rather than being rediscovered later while
@@ -2009,23 +2009,47 @@ fn is_same_file(src: &Path, dst: &Path, _nofollow: bool) -> bool {
     }
 }
 
-/// Where one source lands.
+/// Where one source lands: GNU's `do_copy` (`cp.c:734`), whose four lines are
+/// the entire rule.
 ///
-/// # Errors
+/// ```c
+/// ASSIGN_STRDUPA (arg_base, last_component (arg));
+/// strip_trailing_slashes (arg_base);
+/// /* For 'cp -R source/.. dest', don't copy into 'dest/..'. */
+/// arg_base += STREQ (arg_base, "..");
+/// dst_name = file_name_concat (target_directory, arg_base, &arg_in_concat);
+/// ```
 ///
-/// The source having no file-name component while the destination is a
-/// directory — `cp a/.. dst`. See module docs, bug 5: the previous code turned
-/// this into a request to merge `a`'s parent *into* `dst`.
-fn compute_target(src: &Path, dest: &Path, dest_is_dir: bool) -> Result<PathBuf, &'static str> {
+/// Three things in it are not guessable, and module docs bug 5 is what happened
+/// when they were guessed at:
+///
+/// * **The component is bytes, not a normalised path component.**
+///   [`split_entry`] is `last_component` followed by `strip_trailing_slashes`
+///   already, and it keeps what it finds: `a/.` ends in the component `.`,
+///   where `Path::file_name` reports `a`.
+/// * **`.` is a perfectly good component to append.** `cp -r a/. dst` targets
+///   `dst/.`, which *is* `dst` — which is exactly why that idiom copies `a`'s
+///   contents into `dst` instead of creating `dst/a`.
+/// * **A last component of `..`, and only `..`, becomes `.`.** The `+= STREQ`
+///   is a pointer bump past the first dot of `".."`, and the comment above it
+///   says what it is for: without it `cp -r a/.. dst` would write into the
+///   destination's *parent*, which is nobody's request. Note it is the
+///   *component* that is compared, so `a/..x` and `a/...` are untouched.
+///
+/// A source whose last component is empty — `/`, or `//` — appends nothing, and
+/// `dest.join("")` yields `dest/` exactly as `file_name_concat` does.
+///
+/// Infallible, unlike the version this replaced: every source names somewhere,
+/// because `.` and the empty string both name the destination itself.
+fn compute_target(src: &Path, dest: &Path, dest_is_dir: bool) -> PathBuf {
     if !dest_is_dir {
-        return Ok(dest.to_path_buf());
+        return dest.to_path_buf();
     }
-    match src.file_name() {
-        Some(name) => Ok(dest.join(name)),
-        None => {
-            Err("the source path ends in '.', '..' or '/', so it names nothing to create there")
-        }
+    let (_, base) = split_entry(src);
+    if base == ".." {
+        return dest.join(".");
     }
+    dest.join(base)
 }
 
 /// Would writing at `target` write inside `root`?
@@ -4027,37 +4051,81 @@ mod tests {
 
     #[test]
     fn target_file_to_file() {
-        let t = compute_target(Path::new("a.txt"), Path::new("b.txt"), false).unwrap();
+        let t = compute_target(Path::new("a.txt"), Path::new("b.txt"), false);
         assert_eq!(t, PathBuf::from("b.txt"));
     }
 
     #[test]
     fn target_file_into_dir() {
-        let t = compute_target(Path::new("src/a.txt"), Path::new("dst"), true).unwrap();
+        let t = compute_target(Path::new("src/a.txt"), Path::new("dst"), true);
         assert_eq!(t, PathBuf::from("dst").join("a.txt"));
     }
 
     #[test]
     fn target_dir_into_dir_appends_basename() {
-        let t = compute_target(Path::new("src/sub"), Path::new("dst"), true).unwrap();
+        let t = compute_target(Path::new("src/sub"), Path::new("dst"), true);
         assert_eq!(t, PathBuf::from("dst").join("sub"));
     }
 
-    /// Bug 5 in the module docs. The old test here asserted the *broken*
-    /// behaviour — that `dst.join("")`, i.e. `dst` itself, was the right answer —
-    /// which is why the bug lasted. Merging `a`'s parent into `dst` is not what
-    /// `cp -r a/.. dst` asks for.
+    /// Trailing slashes are decoration on the component, not part of it —
+    /// `strip_trailing_slashes (arg_base)`.
     #[test]
-    fn a_source_with_no_file_name_is_refused_not_collapsed() {
-        for src in ["/", "..", "a/..", "."] {
-            let e = compute_target(Path::new(src), Path::new("dst"), true).unwrap_err();
-            assert!(e.contains("names nothing"), "{src}: {e}");
+    fn trailing_slashes_do_not_change_the_name() {
+        for src in ["src/sub/", "src/sub///"] {
+            let t = compute_target(Path::new(src), Path::new("dst"), true);
+            assert_eq!(t, PathBuf::from("dst").join("sub"), "{src}");
         }
+    }
+
+    /// Module docs, bug 5, and the case the first fix broke. `.` is a component
+    /// like any other, and appending it names the destination itself — which is
+    /// what makes `cp -r a/. dst` the idiom for filling `dst` with `a`'s
+    /// contents. `Path::file_name` answers `a` here, which is how the target
+    /// came to be `dst/a`.
+    #[test]
+    fn a_dot_component_names_the_destination_itself() {
+        for src in ["a/.", "a/./", ".", "./"] {
+            let t = compute_target(Path::new(src), Path::new("dst"), true);
+            assert_eq!(t, PathBuf::from("dst").join("."), "{src}");
+        }
+        assert_eq!(
+            Path::new("a/.").file_name(),
+            Some(std::ffi::OsStr::new("a")),
+            "the normalising answer this rule must not use"
+        );
+    }
+
+    /// `arg_base += STREQ (arg_base, "..")`: a last component of exactly `..`
+    /// becomes `.`, so the copy never reaches the destination's parent.
+    #[test]
+    fn a_dotdot_component_becomes_a_dot() {
+        for src in ["a/..", "..", "a/../"] {
+            let t = compute_target(Path::new(src), Path::new("dst"), true);
+            assert_eq!(t, PathBuf::from("dst").join("."), "{src}");
+        }
+    }
+
+    /// The comparison is against the whole component, so a name that merely
+    /// *begins* with two dots is an ordinary name.
+    #[test]
+    fn only_dotdot_itself_is_special() {
+        for (src, base) in [("a/..x", "..x"), ("a/...", "..."), ("a/..", ".")] {
+            let t = compute_target(Path::new(src), Path::new("dst"), true);
+            assert_eq!(t, PathBuf::from("dst").join(base), "{src}");
+        }
+    }
+
+    /// A root has no last component at all. `file_name_concat` appends the
+    /// empty string, which is a separator and nothing else.
+    #[test]
+    fn a_root_source_appends_nothing() {
+        let t = compute_target(Path::new("/"), Path::new("dst"), true);
+        assert_eq!(t, PathBuf::from("dst").join(""));
     }
 
     #[test]
     fn a_source_with_no_file_name_is_fine_when_dest_is_not_a_dir() {
-        let t = compute_target(Path::new("a/.."), Path::new("dst"), false).unwrap();
+        let t = compute_target(Path::new("a/.."), Path::new("dst"), false);
         assert_eq!(t, PathBuf::from("dst"));
     }
 
@@ -6390,10 +6458,13 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Bug 5, end to end: the source resolves to no name, so there is nothing to
-    /// create inside the destination and the copy is refused rather than merged.
+    /// Bug 5, end to end. `inner/..` is the scratch directory itself and the
+    /// destination is inside it, so the copy is refused — but by the
+    /// *into-itself* rule, on a target of `dst/.`, and not by a refusal to name
+    /// the source at all. Measured against GNU, which says
+    /// `cannot copy a directory, '<dir>/inner/..', into itself, '<dir>/dst/.'`.
     #[test]
-    fn a_dotdot_source_is_refused_rather_than_merged() {
+    fn a_dotdot_source_targets_the_destination_and_not_its_parent() {
         let dir = scratch("dotdot");
         let inner = dir.join("inner");
         let dst = dir.join("dst");
@@ -6403,10 +6474,35 @@ mod tests {
 
         let (ok, err) = cp(&RECURSIVE, &[&inner.join(".."), &dst]);
         assert!(!ok);
-        assert!(err.contains("names nothing"), "{err}");
+        assert!(err.contains("into itself"), "{err}");
         assert!(
-            !dst.join("sibling").exists(),
-            "the parent's contents must not be merged into the destination"
+            err.contains(&format!("{}", dst.join(".").display())),
+            "the target is the destination itself, not its parent: {err}"
+        );
+        assert!(
+            !dir.parent().unwrap().join("sibling").exists(),
+            "nothing may be written beside the destination's parent"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The idiom the first fix for bug 5 broke: `cp -r a/. dst` fills `dst`
+    /// with `a`'s contents rather than creating `dst/a`.
+    #[test]
+    fn a_dot_source_copies_the_contents_into_the_destination() {
+        let dir = scratch("dotsrc");
+        let src = dir.join("src");
+        let dst = dir.join("dst");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::create_dir(&dst).unwrap();
+        fs::write(src.join("sub").join("f"), b"x").unwrap();
+
+        let (ok, err) = cp(&RECURSIVE, &[&src.join("."), &dst]);
+        assert!(ok, "{err}");
+        assert!(dst.join("sub").join("f").is_file(), "{err}");
+        assert!(
+            !dst.join("src").exists(),
+            "the source's own name must not appear inside the destination"
         );
         let _ = fs::remove_dir_all(&dir);
     }

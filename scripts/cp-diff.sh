@@ -33,9 +33,10 @@
 # sources ending in `..` below are always written `tree/..`, which resolves to
 # the case directory itself — so the worst a regression can do is fill that one
 # directory, and the `timeout` in [`run_one`] bounds even that. Both programs
-# are expected to refuse these outright, ours in `compute_target` and GNU in
-# its `src_info`/`dest_info` cycle check; the case exists to certify that they
-# still do.
+# are expected to refuse these outright, through the same check on both sides —
+# the destination resolves to a directory the walk is already inside, which
+# GNU catches in `src_info`/`dest_info` and ours in `Seen`; the case exists to
+# certify that they still do.
 #
 # **No case copies a FIFO or a device.** Reading a FIFO that nothing writes to
 # blocks until the timeout fires, which would cost thirty seconds per side and
@@ -1621,7 +1622,48 @@ missing -Z file.txt new.txt
 missing --context file.txt new.txt
 
 # =============================================================================
-# 19. --help and --version
+# 19. Where a source's last component lands
+# =============================================================================
+# Which name a source arrives under, when the destination is a directory and so
+# one has to be chosen. GNU chooses in four lines (`do_copy`, `cp.c:734`): take
+# the bytes after the source's last slash, strip any trailing slashes, and
+# append that to the destination verbatim — except that a component of exactly
+# `..` is replaced by `.`, so that `cp -r a/.. d` writes into `d` and never into
+# `d`'s *parent*.
+#
+# "Verbatim" is the whole of it. `.` is a component like any other, so `tree/.`
+# names `dir/.`, which is `dir` — the ordinary idiom for "copy the contents".
+# Ours reached for `Path::file_name`, which answers a *normalised* question:
+# `Some("tree")` for `tree/.` and `None` for `tree/..`. The first sent the
+# contents to `dir/tree`, the second collapsed to the destination by accident.
+# Module docs, bug 5.
+#
+# Every case here uses `dir`, which exists. That is not incidental: the appended
+# component is chosen only when the destination is a directory, so section 9's
+# `tree/. dst` variants — `dst` does not exist — take the whole-destination path
+# instead and passed throughout while this was wrong.
+
+run_case -r tree/. dir
+run_case -r tree/./ dir
+run_case -r tree/. dir/
+run_case -r tree/sub/. dir
+run_case -r tree/sub/.. dir
+run_case -r tree/// dir
+run_case -r tree/ dir
+# Only a component of exactly `..` is special; two that merely begin with it
+# are ordinary names and must arrive under them.
+TREE='mktree; mkdir tree/..x; printf x > tree/..x/f'
+run_case -r tree/..x dir
+TREE='mktree; mkdir "tree/..."; printf x > "tree/.../f"'
+run_case -r tree/... dir
+# The `..` rule turns these into copies of the case directory into `dir`, which
+# is inside it: refused by both, with the residue difference of section 9.
+xfail_case "$SELF_RESIDUE" -r tree/.. dir
+xfail_case "$SELF_RESIDUE" -r . dir
+xfail_case "$SELF_RESIDUE" -r ./ dir
+
+# =============================================================================
+# 20. --help and --version
 # =============================================================================
 
 xfail_case 'help omits GNU bug-report block' --help

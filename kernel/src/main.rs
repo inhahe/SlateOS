@@ -1135,6 +1135,7 @@ extern "C" fn kernel_main() -> ! {
                     acpi::init(rsdp, boot_info.hhdm_offset, boot_info.memory_map);
                 }
 
+                // RAN-IF: "[acpi] Running self-test..."
                 if let Err(e) = acpi::self_test() {
                     serial_println!("WARNING: ACPI self-test failed: {} — using defaults", e);
                 }
@@ -1147,6 +1148,7 @@ extern "C" fn kernel_main() -> ! {
                     acpi::init(0, boot_info.hhdm_offset, boot_info.memory_map);
                 }
 
+                // RAN-IF: "[acpi] Running self-test..."
                 if let Err(e) = acpi::self_test() {
                     serial_println!("WARNING: ACPI self-test failed: {} — using defaults", e);
                 }
@@ -1397,6 +1399,7 @@ extern "C" fn kernel_main() -> ! {
                     );
                     // Run the disk-specific self-test now that a disk backend
                     // is active.
+                    // RAN-IF: "[swap] Running disk backend self-test..."
                     mm::swap::self_test_disk();
                     break;
                 }
@@ -1509,6 +1512,7 @@ extern "C" fn kernel_main() -> ! {
             // left here is the one call the gate was ever right about, plus the
             // cache flush that pairs with its writes.
             if fat_ok {
+                // RAN-IF: "[fat] Running mkfs/format self-test..."
                 if let Err(e) = fs::fat::self_test() {
                     serial_println!("WARNING: FAT self-test failed: {:?}", e);
                 }
@@ -2040,6 +2044,7 @@ extern "C" fn kernel_main() -> ! {
                 // claims the NIC via the capability-gated SYS_NET_RAW_* syscalls and
                 // proves the raw-frame TX/RX path end-to-end with an ARP round-trip.
                 // Skips gracefully when there's no network.
+                // RAN-IF: "[spawn] Running userspace netstack daemon (ring 3) integration test..."
                 if let Err(e) = proc::spawn::self_test_userspace_netstack() {
                     serial_println!(
                         "WARNING: userspace netstack daemon (ring 3) self-test failed: {:?}",
@@ -2051,6 +2056,7 @@ extern "C" fn kernel_main() -> ! {
                 // `netstack` daemon over the Service Registry (`net.stack`), proving the
                 // socket-syscall → IPC path end-to-end. Bounded self-test (the daemon
                 // owns the NIC only briefly); skips gracefully with no network.
+                // RAN-IF: "[spawn] Running netstack DNS-over-IPC (ring 3) integration test..."
                 if let Err(e) = proc::spawn::self_test_netstack_dns_ipc() {
                     serial_println!(
                         "WARNING: netstack DNS-over-IPC (ring 3) self-test failed: {:?}",

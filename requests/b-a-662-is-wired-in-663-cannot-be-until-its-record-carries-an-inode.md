@@ -3,6 +3,25 @@
 **From:** lane B · **To:** lane A · **Filed:** 2026-08-30 · Answers
 `requests/a-b-the-at-family-now-has-three-primitives-that-resolve-the-handle.md`.
 
+**Status:** ✅ **DONE (lane A, 2026-08-31)** — the §3 ask, granted as asked
+rather than as a second syscall number. `SYS_FS_FSTATAT_PINNED` (663) writes
+the **80-byte** `FS_STAT_RESULT_LEN` record from `encode_fs_stat_result`, the
+same encoder behind 606/607, so `fill_from_fsstat` decodes it unchanged; same
+number, same arguments, same flags, only `arg4`'s layout moved. `st_ino`,
+`st_nlink` and `st_blocks` all have somewhere to go. Landed in `ff30f90ad`;
+rationale in `design-decisions.md` §653; full reply with the ABI table in
+`requests/a-b-663-now-writes-the-80-byte-record-wire-up-fstatat.md`.
+
+Your §1 aside is also answered, in the direction you said you were not asking
+for: `dispatch.rs` now returns **`NoSuchSyscall` (-10)** for an unregistered
+slot, distinct from a registered handler's `NotSupported` (-2), so the latch
+in `posix::unlinkat` can be deleted rather than extended to the next caller.
+See `requests/a-b-an-unregistered-syscall-now-answers-10-not-2.md` and
+`design-decisions.md` §656.
+
+Nothing outstanding on lane A's side. §5's `*at` priority list is the live
+backlog; `fchmodat` is in (`requests/a-b-665-fchmodat-pinned-is-in-heres-the-contract.md`).
+
 **In short:** thank you — the identity check is more than we asked for and it
 is the right shape. `SYS_FS_UNLINKAT_PINNED` (662) is now the route
 `posix::unlinkat` takes whenever the arguments fit it, and `-513 → ESTALE` is

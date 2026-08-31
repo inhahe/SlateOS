@@ -1143,6 +1143,15 @@ ESP_DIR="$PROJECT_ROOT/build/esp"
 # QEMU's virtual FAT.  See the --usb-image case in the arg parser.
 USB_IMG="$PROJECT_ROOT/build/slateos-usb.img"
 SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
+# The serial line each conditionally-called self-test declares it prints, from
+# `check-self-tests-wired.py --emit-markers` in the pre-build gates; read by
+# boot-history.py at the end of the run.  Gitignored build output, not a
+# checked-in fact: it is derived from main.rs and would go stale the moment a
+# gated call site moved.
+GATED_MARKERS="$PROJECT_ROOT/build/gated-markers.json"
+# Set to 1 by check_self_tests_wired once it has regenerated the file above.
+# Only then may the recorder be pointed at it; see record_boot_history.
+GATED_MARKERS_FRESH=0
 # QEMU writes its OS-level PID here so we can reap it reliably.  Under MSYS,
 # `kill "$!"` uses the Cygwin PID and does NOT reliably TerminateProcess a
 # native (non-Cygwin) qemu-system-x86_64.exe: the emulator survives as an
@@ -2152,6 +2161,24 @@ record_boot_outcome() {
     if [ -n "${BT_SRC_DIGEST:-}" ]; then
         args+=(--src-digest "$BT_SRC_DIGEST")
     fi
+    # Passed only when *this* run's pre-build gate produced the file.  A run
+    # with no python, or one that skipped the gates, would otherwise hand the
+    # recorder a leftover from some earlier run and describe a main.rs that is
+    # not the one that booted.
+    #
+    # The test is a flag set by the gate, not a timestamp comparison, because
+    # there is no timestamp ordering that distinguishes the two cases: the
+    # markers are emitted before the build and the serial log is written after
+    # it, so a fresh markers file is *older* than the serial log -- exactly like
+    # a stale one.  Whether the gate ran is a fact this script knows directly;
+    # inferring it from mtimes would be guessing at something already known.
+    if [ "${GATED_MARKERS_FRESH:-0}" = 1 ]; then
+        args+=(--gated-markers "$GATED_MARKERS")
+    elif [ -f "$GATED_MARKERS" ]; then
+        echo "[boot-history] this run did not regenerate gated-markers.json --"
+        echo "               omitting gated_ran rather than recording an older"
+        echo "               main.rs's markers against this boot."
+    fi
     if [ "${BT_DIRTY:-0}" = 1 ]; then
         args+=(--dirty)
     fi
@@ -2530,7 +2557,20 @@ check_self_tests_wired() {
     fi
 
     echo "=== Checking that every self-test is reachable ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-self-tests-wired.py"; then
+    # --emit-markers writes the serial line each conditionally-called self-test
+    # declares it prints (`// RAN-IF: "..."` in main.rs).  boot-history.py reads
+    # the file at the end of this run and records which ones actually appeared,
+    # turning "is it wired" -- a question about source -- into "did it run",
+    # which only the log can answer.
+    #
+    # Generated here rather than at recording time so it describes the tree that
+    # was *built*: this runs before the build, and HEAD moves during a run
+    # (committing while a boot test runs is normal here), so re-deriving the
+    # markers twenty minutes later could describe a main.rs that never booted.
+    mkdir -p "$PROJECT_ROOT/build"
+    if "$py" "$PROJECT_ROOT/scripts/check-self-tests-wired.py" \
+            --emit-markers "$GATED_MARKERS"; then
+        GATED_MARKERS_FRESH=1
         return 0
     fi
 
@@ -3935,6 +3975,57 @@ check_boot_skips() {
 }
 
 check_boot_skips
+
+# Refuse to build when a *conditionally called* self-test has never once been
+# observed to run.
+#
+# The sibling gate above reads `skips`, and a skip is a statement: the suite ran
+# far enough to say so. A suite behind `if fat_ok` says nothing at all when the
+# condition is false -- no SKIP line, no section name, a log region byte-
+# identical to one where the suite was never written. `check-boot-skips.py`
+# cannot see that class at all, which is why it gets its own gate rather than
+# another branch of that one.
+#
+# The evidence is the `gated_ran` field, written by boot-history.py from the
+# `RAN-IF` markers that check-self-tests-wired.py emits earlier in this script.
+# So this is again about *previous* runs, and belongs before the build for the
+# same two reasons: it is history, and it fails in seconds.
+check_gated_selftests() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Never-ran gated self-test check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking for gated self-tests that have never announced themselves ==="
+    local out rc
+    out="$("$py" -u "$PROJECT_ROOT/scripts/check-gated-selftests.py" 2>&1)" \
+        && rc=0 || rc=$?
+    printf '%s\n' "$out"
+    [ "$rc" -eq 0 ] && return 0
+
+    echo "" >&2
+    if [ "$rc" -eq 2 ]; then
+        echo "ERROR: refusing to build.  The never-ran gated self-test checker" >&2
+        echo "could not read bench/boot-history.jsonl (exit 2) -- a broken" >&2
+        echo "checker, not a broken tree.  Fix the checker first." >&2
+    else
+        echo "ERROR: refusing to build.  A self-test that is called from inside" >&2
+        echo "a conditional in kernel/src/main.rs has never once printed the" >&2
+        echo "line it declares with RAN-IF, so it has never run -- while every" >&2
+        echo "summary above it counts it as coverage.  The lines above name" >&2
+        echo "each one and the three ways to resolve it; run" >&2
+        echo "    python scripts/check-gated-selftests.py --list" >&2
+        echo "for the full per-marker standing." >&2
+    fi
+    exit 1
+}
+
+check_gated_selftests
 
 # Resolved once, here, because two things now need it: the clippy gate below
 # and the build after it.  Hoisted out of the build block rather than

@@ -9506,6 +9506,195 @@ pub fn sys_fs_fchmodat_pinned(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_FS_MKDIRAT_PINNED` — create a directory inside the directory a handle
+/// was opened on, refusing if the handle no longer denotes that directory.
+///
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).  `arg1`: name pointer.  `arg2`: name length.
+/// `arg3`: mode (nine bits, already umask-masked by the caller).
+/// `arg4`: flags — must be `0`.
+///
+/// Nine bits, not the twelve `sys_fs_fchmodat_pinned` takes. That is not an
+/// inconsistency: `SYS_FS_MKDIR_MODE` masks to nine, and a *creation* mode is
+/// the one place the extra three are least defensible — a directory that is
+/// setgid or sticky from the instant it exists is a policy decision, and the
+/// caller can still make it one with a following `fchmodat`, where the request
+/// is explicit and separately auditable.
+pub fn sys_fs_mkdirat_pinned(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+
+    // `mkdirat(2)` defines no flags, so every bit here is unknown, and unknown
+    // bits are refused rather than ignored for the reason
+    // `sys_fs_unlinkat_pinned` gives. Refusing now is also what keeps the
+    // argument usable later: a caller that passed junk today and was tolerated
+    // would break on the day the bit acquires a meaning.
+    if args.arg4 != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let mode = (args.arg3 as u16) & 0o777;
+
+    let name = match read_user_path(args.arg1, args.arg2 as usize) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let dir = match pinned_dir_arg(args.arg0) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    match crate::fs::Vfs::mkdir_at_pinned(&dir, name.as_bytes(), mode) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_SYMLINKAT_PINNED` — create a symbolic link inside the directory a
+/// handle was opened on, refusing if the handle no longer denotes that
+/// directory.
+///
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).  `arg1`: link-name pointer.  `arg2`: its length.
+/// `arg3`: target pointer.  `arg4`: its length.
+///
+/// The link name is read before the target, and both before the handle is
+/// resolved, so that a malformed argument is reported the same way regardless
+/// of whether the handle happens to be valid — an ordering that keeps this
+/// call from being usable as an oracle for which handles exist.
+pub fn sys_fs_symlinkat_pinned(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+
+    let name = match read_user_path(args.arg1, args.arg2 as usize) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // The target is read with the same helper as the name, which bounds it at
+    // `PATH_MAX`, but it is *not* passed through `check_at_name`: a symlink
+    // target is arbitrary stored text, resolved only when something later
+    // traverses the link. See `SYS_FS_SYMLINKAT_PINNED`'s doc for why
+    // constraining it would be both useless and breaking.
+    let target = match read_user_path(args.arg3, args.arg4 as usize) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // An empty target is refused here rather than stored: a zero-length symlink
+    // is not a link to anything, and every filesystem we can write to would
+    // either reject it later or store a link that can never resolve.
+    if target.as_bytes().is_empty() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let dir = match pinned_dir_arg(args.arg0) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    match crate::fs::Vfs::symlink_at_pinned(&dir, name.as_bytes(), &target) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_LINKAT_PINNED` — hard-link a name in one pinned directory to a name
+/// in another, refusing if either handle no longer denotes the directory it was
+/// opened on.
+///
+/// `arg0`: source directory handle.  `arg1`: source name pointer.
+/// `arg2`: source name length.  `arg3`: destination directory handle.
+/// `arg4`: destination name pointer.  `arg5`: destination name length.
+///
+/// All six registers are spent, which is why there is no flags argument and
+/// therefore no `AT_SYMLINK_FOLLOW`. The unfollowed form is `link(2)`'s
+/// behaviour and `linkat`'s default, and it is also the only form the pin can
+/// actually protect — following is a request to leave the pinned directory.
+pub fn sys_fs_linkat_pinned(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+
+    let old_name = match read_user_path(args.arg1, args.arg2 as usize) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let new_name = match read_user_path(args.arg4, args.arg5 as usize) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let old_dir = match pinned_dir_arg(args.arg0) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // Resolved separately even when it is the same handle: `pinned_dir_arg`
+    // captures a snapshot, and two snapshots of one directory are two equal
+    // values, not an aliasing problem. Special-casing equality here would only
+    // add a branch that must stay correct.
+    let new_dir = match pinned_dir_arg(args.arg3) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    match crate::fs::Vfs::link_at_pinned(
+        &old_dir,
+        old_name.as_bytes(),
+        &new_dir,
+        new_name.as_bytes(),
+        false,
+    ) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_UTIMENSAT_PINNED` — set the timestamps of `name` within the
+/// directory a handle was opened on, refusing if the handle no longer denotes
+/// that directory.
+///
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).  `arg1`: name pointer.  `arg2`: name length.
+/// `arg3`: access time in nanoseconds (`0` = leave unchanged).
+/// `arg4`: modification time, likewise.
+/// `arg5`: flags (`AT_SYMLINK_NOFOLLOW_PINNED`).
+///
+/// Requires `Rights::WRITE`. Stamping a timestamp is a write to the object's
+/// metadata, and the ability to backdate a file is not something a
+/// metadata-*reading* handle should confer — antivirus and build systems both
+/// decide what to re-examine from mtime.
+pub fn sys_fs_utimensat_pinned(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+
+    let flags = args.arg5;
+    if flags & !crate::syscall::number::AT_SYMLINK_NOFOLLOW_PINNED != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let no_follow = flags & crate::syscall::number::AT_SYMLINK_NOFOLLOW_PINNED != 0;
+
+    let name = match read_user_path(args.arg1, args.arg2 as usize) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let dir = match pinned_dir_arg(args.arg0) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    match crate::fs::Vfs::set_times_at_pinned(
+        &dir,
+        name.as_bytes(),
+        args.arg3,
+        args.arg4,
+        no_follow,
+    ) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_FS_GETDENTS_PINNED` — list the directory a handle was opened on,
 /// resolving the handle rather than its name.
 ///

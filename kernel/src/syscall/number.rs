@@ -3409,6 +3409,140 @@ pub const SYS_FS_GETDENTS_PINNED: u64 = 664;
 /// directory it was opened on; otherwise a negative error code.
 pub const SYS_FS_FCHMODAT_PINNED: u64 = 665;
 
+// ---------------------------------------------------------------------------
+// The pinned set `cp -r` needs (666–669)
+//
+// Lane B named these, in priority order, in
+// `requests/b-a-662-is-wired-in-663-cannot-be-until-its-record-carries-an-inode.md`
+// §5: "the set `cp -r` needs to rebuild a tree. Right now every one of them
+// re-derives the destination directory by name on every entry, so a deep copy
+// re-walks the whole destination path once per file, which is both the race
+// and a real cost."
+//
+// The race is worth stating precisely, because it is not the same one
+// `fchmodat` has. A recursive copy's *destination* is where new objects get
+// created, so redirecting it is a write primitive, not a disclosure: swap the
+// destination directory for a symlink partway through the walk and every
+// remaining file in the tree is created somewhere the caller never named.
+// Pinning it once removes both the redirect and the repeated full-path walk.
+// ---------------------------------------------------------------------------
+
+/// [`SYS_FS_LINKAT_PINNED`] flag: dereference a trailing symbolic link in the
+/// *source* name, hard-linking the object it names rather than the link itself.
+///
+/// Same value as Linux's `AT_SYMLINK_FOLLOW`, for the same reason the other two
+/// share their values: a caller translating `linkat(2)` should not have to
+/// remap it. Note this is the inverse default from the rest of the family —
+/// `link(2)` and `linkat` without this flag do *not* follow — which is why the
+/// flag spells "follow" rather than "nofollow".
+pub const AT_SYMLINK_FOLLOW_PINNED: u64 = 0x400;
+
+/// Create a directory named `name` inside the directory a handle was opened on,
+/// resolving *the handle* rather than its name.
+///
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).
+/// `arg1`: name pointer.  `arg2`: name length.
+/// `arg3`: mode — the low nine permission bits, **already umask-masked by the
+/// caller**, since the umask lives in the userspace POSIX layer. Bits above the
+/// nine are masked off rather than rejected, matching [`SYS_FS_MKDIR_MODE`].
+/// `arg4`: flags — must be `0`. `mkdirat(2)` defines none, and refusing unknown
+/// bits now keeps the argument free for a later one.
+///
+/// `name` must be exactly one component: no `/`, and neither `.` nor `..`.
+///
+/// Unlike the path route, the new directory's permission bits are stamped under
+/// the same filesystem lock that created it, so it is never briefly visible
+/// carrying the filesystem's 0o755 default while a narrower requested mode is
+/// still on its way.
+///
+/// Returns: 0 on success; `ESTALE` if the handle no longer denotes the
+/// directory it was opened on; otherwise a negative error code.
+pub const SYS_FS_MKDIRAT_PINNED: u64 = 666;
+
+/// Create a symbolic link named `name` inside the directory a handle was opened
+/// on, resolving *the handle* rather than its name.
+///
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).
+/// `arg1`: name pointer — the **link** name.  `arg2`: its length.
+/// `arg3`: target pointer — the text the link will contain.  `arg4`: its length.
+///
+/// Note the asymmetry, which is deliberate: `name` must be exactly one
+/// component, and `target` must not be constrained at all. The single-component
+/// rule is what makes the pin's containment mean something, and it applies to
+/// the name being *created inside* the pinned directory. A symlink target is
+/// arbitrary text stored verbatim and resolved only when something later
+/// traverses the link; it may be relative, absolute, or dangling. Refusing
+/// those would not make anything safer — the traversal-time checks are what
+/// govern a target — and would leave `symlinkat` unable to reproduce the links
+/// a recursive copy is copying.
+///
+/// There is no flags argument. `symlinkat(2)` defines none, and unlike
+/// `mkdirat` above there is no plausible future one: the operation has no
+/// variant that could be selected, since neither name is ever followed.
+///
+/// Returns: 0 on success; `ESTALE` if the handle no longer denotes the
+/// directory it was opened on; otherwise a negative error code.
+pub const SYS_FS_SYMLINKAT_PINNED: u64 = 667;
+
+/// Hard-link a name in one pinned directory to a name in another, resolving
+/// *both handles* rather than their names.
+///
+/// `arg0`: source directory handle.  `arg1`: source name pointer.
+/// `arg2`: source name length.
+/// `arg3`: destination directory handle.  `arg4`: destination name pointer.
+/// `arg5`: destination name length.
+///
+/// Both handles follow the §648 rule: `0` is not the cwd and is rejected as
+/// `InvalidHandle`. Both names must be exactly one component. The two handles
+/// may be the same.
+///
+/// **There is no register left for flags**, which is why `AT_SYMLINK_FOLLOW`
+/// is not accepted here: six arguments are spent on two handles and two
+/// counted names. That is not a loss worth adding a struct argument for — the
+/// flag's effect is to hard-link a symlink's *target* instead of the symlink,
+/// and following is a request to leave the pinned directory, which is exactly
+/// the guarantee this call exists to provide. A caller that genuinely wants
+/// the followed form wants the path-based route, where the pin was buying it
+/// nothing anyway. [`AT_SYMLINK_FOLLOW_PINNED`] is defined for the VFS
+/// primitive beneath this and for a future caller that needs it.
+///
+/// Returns: 0 on success; `ESTALE` if either handle no longer denotes the
+/// directory it was opened on; `InvalidArgument` if the two names resolve to
+/// different mounts, since hard links cannot cross one — this matches the
+/// path-based `link`, which reports the same code for the same reason, rather
+/// than the `EXDEV` a POSIX caller expects; translating it is the POSIX layer's
+/// job and is not made harder by the pinned route agreeing with the path one;
+/// otherwise a negative error code.
+pub const SYS_FS_LINKAT_PINNED: u64 = 668;
+
+/// Set the timestamps of `name` within the directory a handle was opened on,
+/// resolving *the handle* rather than its name.
+///
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).
+/// `arg1`: name pointer.  `arg2`: name length.
+/// `arg3`: access time, nanoseconds since the epoch; `0` leaves it unchanged.
+/// `arg4`: modification time, likewise.
+/// `arg5`: flags — [`AT_SYMLINK_NOFOLLOW_PINNED`] stamps the link inode itself.
+/// Unknown bits are `InvalidArgument`.
+///
+/// `name` must be exactly one component: no `/`, and neither `.` nor `..`.
+///
+/// Zero-means-unchanged is this kernel's existing convention (`SYS_FS_SET_TIMES`),
+/// not `utimensat(2)`'s `UTIME_OMIT`/`UTIME_NOW` sentinels. Translating those is
+/// the POSIX layer's job, and it already does it for the path-based call; making
+/// the pinned variant differ would mean two conventions for one operation.
+///
+/// This is the member of the set that runs on *every* copied entry rather than
+/// once per directory, since restoring mtime is the last thing `cp -p` and every
+/// archive extractor do to each file.
+///
+/// Returns: 0 on success; `ESTALE` if the handle no longer denotes the
+/// directory it was opened on; otherwise a negative error code.
+pub const SYS_FS_UTIMENSAT_PINNED: u64 = 669;
+
 /// Close an open file handle.
 ///
 /// `arg0`: file handle.
